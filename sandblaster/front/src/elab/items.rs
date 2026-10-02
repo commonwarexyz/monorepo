@@ -507,12 +507,20 @@ impl<'a> Elab<'a> {
     /// relevant hypotheses for lemmas).
     pub fn fn_requires(&mut self, f: &'a FnDef, binders: &mut Vec<TBinder>, rel: Rel) -> R<()> {
         let ghost_req = super::invariant::ghost_requires(f);
+        // a function read from MIR: its declared contract's clauses, one for one
+        let declared = f.declared.as_ref().map(|d| &d.0);
+        if let Some(d) = declared.filter(|d| d.len() != f.requires.len()) {
+            return unsupported(f.sig_span, format!("it has {} `requires` clause(s), its declared contract {} (lift::MirContract)", f.requires.len(), d.len()));
+        }
         for (i, r) in f.requires.iter().enumerate() {
             // a `requires` over `#[ghost]` parameters is in the ghost bundle
             if ghost_req.contains(&i) {
                 continue;
             }
             let p = self.prop(r)?;
+            if let Some(d) = declared {
+                self.as_declared(Some(&p), |s| s.prop(&d[i]).map(Some), &format!("precondition {i}"), r.span)?;
+            }
             let name = format!("h_req{i}");
             let lvl = self.push(&name, rel, &p, None)?;
             self.f.scope.facts.push(crate::prover::FactRef { lvl: sandblaster_kernel::term::Lvl(lvl), origin: if rel == Rel::Irr { FactOrigin::Requires } else { FactOrigin::LemmaHyp }, span: r.span });
@@ -520,6 +528,29 @@ impl<'a> Elab<'a> {
             binders.push(TBinder { name, rel, ty: p });
         }
         Ok(())
+    }
+
+    /// `#[decreases(e, max = C)]`'s hypothesis `e <= C` (`h_depth`), if any.
+    fn depth_prop(&mut self, d: &'a Option<Decreases>) -> R<Option<Tm>> {
+        let Some((d, max)) = d.as_ref().and_then(|d| Some((d, d.max?))) else { return Ok(None) };
+        let (m, w) = (self.pure_expr(&d.measure)?, self.width_of(&d.measure.ty, d.measure.span)?);
+        Ok(Some(self.holds(mk::prim(PrimOp::Le(w), vec![m, mk::lit(w, max)], vec![]))))
+    }
+
+    /// TRUSTED (`mir::gate`): `p`, a precondition of a function read from
+    /// MIR (or its absence), is α-equal to `declared`, the elaboration of the
+    /// same clause of its declared contract at the same depth (the
+    /// obligations that second elaboration raises are dropped; `p`'s stay).
+    fn as_declared(&mut self, p: Option<&Tm>, declared: impl FnOnce(&mut Self) -> R<Option<Tm>>, what: &str, span: Span) -> R<()> {
+        let n = self.obligations.len();
+        let q = declared(self);
+        self.obligations.truncate(n);
+        let q = q?;
+        if p.zip(q.as_ref()).map_or(p.is_none() && q.is_none(), |(p, q)| self.env.alpha_eq_relevant(p, q, &|a, b| a == b)) {
+            return Ok(());
+        }
+        let show = |t: Option<&Tm>| t.map_or("none".to_string(), |t| self.show_tm(t));
+        unsupported(span, format!("its {what} `{}` is not its declared contract's `{}` (lift::MirContract)", show(p), show(q.as_ref())))
     }
 
     /// An expression without binders (measures, loop bounds): its value.
@@ -548,12 +579,11 @@ impl<'a> Elab<'a> {
         let (mut binders, pending) = self.fn_params(f, span)?;
         self.fn_requires(f, &mut binders, Rel::Irr)?;
         let mut info = FnInfo::default();
-        if let Some(dec) = &f.decreases
-            && let Some(max) = dec.max
-        {
-            let m = self.pure_expr(&dec.measure)?;
-            let w = self.width_of(&dec.measure.ty, dec.measure.span)?;
-            let p = self.holds(mk::prim(PrimOp::Le(w), vec![m, mk::lit(w, max)], vec![]));
+        let depth = self.depth_prop(&f.decreases)?;
+        if let Some((_, d)) = &f.declared {
+            self.as_declared(depth.as_ref(), |s| s.depth_prop(d), "depth bound", f.sig_span)?;
+        }
+        if let (Some(dec), Some(p)) = (&f.decreases, depth) {
             let lvl = self.push("h_depth", Rel::Irr, &p, None)?;
             self.f.scope.facts.push(crate::prover::FactRef { lvl: sandblaster_kernel::term::Lvl(lvl), origin: FactOrigin::Requires, span: dec.measure.span });
             self.f.scope.fact_tys.insert(lvl, p.clone());

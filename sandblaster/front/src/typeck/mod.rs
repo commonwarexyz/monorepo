@@ -56,9 +56,14 @@ pub struct Contracts {
     pub requires: Vec<syn::Expr>,
     /// `#[ensures(..)]` payload.
     pub ensures: Option<syn::Expr>,
-    pub decreases: Option<(syn::Expr, Option<u64>)>,
+    pub decreases: Option<DecreasesAttr>,
     pub implements: Option<syn::Path>,
+    /// `#[mir_contract(requires(..).., decreases(..))]` (`hir::FnDef::declared`).
+    pub declared: Option<(Vec<syn::Expr>, Option<DecreasesAttr>)>,
 }
+
+/// `#[decreases(e)]` / `#[decreases(e, max = C)]`.
+pub type DecreasesAttr = (syn::Expr, Option<u64>);
 
 /// A lowered function signature.
 #[derive(Clone)]
@@ -1060,7 +1065,7 @@ impl<'a> Checker<'a> {
         // lift puts it for an attachment's `opaque();` (crate::lift)
         let lifted_mod = self.res.mods[m.0 as usize].lifted;
         let allowed: &[&str] = match kind {
-            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern", "opaque"],
+            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract"],
             FnKind::Exec => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern"],
             FnKind::Spec => &["spec", "requires", "decreases", "inline", "must_use", "example", "examples", "mirrors_impl", "assumption", "opaque"],
             // `#[rewrite]` on a lemma: an optimization lemma (`f(x̄) == g(x̄)`,
@@ -1197,6 +1202,17 @@ impl<'a> Checker<'a> {
                 });
             } else if path.is_ident("must_use") {
                 must_use = true;
+            } else if path.is_ident("mir_contract") {
+                // a lifted function's declared contract, carried apart (crate::lift)
+                let d = contracts.declared.insert(Default::default());
+                for meta in a.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated).map_or_else(|_| vec![syn::parse_quote!(malformed)], |m| m.into_iter().collect()) {
+                    let at = syn::Attribute { meta, ..a.clone() };
+                    match (at.path().get_ident().map(|i| i.to_string()).as_deref(), at.parse_args(), parse_decreases(&at)) {
+                        (Some("requires"), Ok(e), _) => d.0.push(e),
+                        (Some("decreases"), _, Ok(x)) => d.1 = Some(x),
+                        _ => self.err(DiagKind::Contract, span, "malformed `#[mir_contract]`"),
+                    }
+                }
             } else if path.is_ident("target_feature") {
                 match a.parse_args::<syn::MetaNameValue>() {
                     Ok(nv) if nv.path.is_ident("enable") => match &nv.value {

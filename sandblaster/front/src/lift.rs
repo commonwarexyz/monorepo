@@ -236,20 +236,19 @@ pub struct MirModule {
     pub loaded: std::sync::Arc<crate::mir::Loaded>,
 }
 
-/// The contract a lifted function declares in its skeleton and its
-/// attachments (what a human or agent wrote and a reviewer reads): the
-/// only source of the preconditions of its theorem (`crate::mir::stmt`).
+/// A lifted function whose body was read from MIR. Its declared contract
+/// (the `requires(..)` clauses and depth bound of its skeleton and its
+/// attachments: what a human or agent wrote and a reviewer reads) is carried
+/// to the elaborator as `#[mir_contract(..)]` (`hir::FnDef::declared`), which
+/// refuses the function unless its preconditions are the elaboration of
+/// exactly those clauses: the theorem's preconditions (`crate::mir::stmt`)
+/// are `S_f`'s.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MirContract {
     /// The lifted function's kernel name (`crate::varint::Decoder__u32::feed`).
     pub global: String,
     /// Its MIR instance.
     pub key: String,
-    /// Its `requires(..)` clauses, in order (token text).
-    pub requires: Vec<String>,
-    /// It declares a depth bound (`decreases(e, max = C)`: one more
-    /// precondition, `e <= C`).
-    pub depth_bound: bool,
 }
 
 /// How the original function takes one parameter (receiver included), for
@@ -343,9 +342,14 @@ pub mod test_hook {
         /// back from that copy, losing the pushes.
         WritebackSnapshot,
         /// A structured reading that adds a precondition (`requires(true)`)
-        /// to every private free function it reads: the theorem's statement
-        /// must refuse it, the declared contract not stating it (amendment (b)).
+        /// to every private free function it reads: the elaborator must
+        /// refuse it, the declared contract not stating it (amendment (b)).
         ExtraRequires,
+        /// The first precondition of every function read from MIR replaced
+        /// by `requires(true)` after its declared contract was carried: the
+        /// same number of clauses (the same binder names), another clause;
+        /// the elaborator must refuse it.
+        ChangedRequires,
     }
 
     thread_local! {
@@ -1982,17 +1986,23 @@ impl Ctx {
             }
         }
         // the declared contract (skeleton and attachments: the reading of
-        // the body adds no attribute), for the theorem's preconditions
+        // the body adds no attribute), carried apart (`hir::FnDef::declared`):
+        // the elaborator refuses the function unless its preconditions are it
         if let Some(key) = mir_key {
-            let declared: Vec<&syn::Attribute> = f.attrs[..n_skeleton].iter().chain(&f.attrs[n_read..]).collect();
-            let requires: Vec<String> = declared.iter().filter(|a| a.path().is_ident("requires")).map(|a| a.meta.to_token_stream().to_string()).collect();
-            let depth_bound = declared.iter().any(|a| a.path().is_ident("decreases") && a.meta.to_token_stream().to_string().contains("max"));
+            let declared: Vec<syn::Meta> = f.attrs[..n_skeleton].iter().chain(&f.attrs[n_read..]).filter(|a| a.path().is_ident("requires") || a.path().is_ident("decreases")).map(|a| a.meta.clone()).collect();
+            f.attrs.push(syn::parse_quote!(#[mir_contract(#(#declared),*)]));
+            // (`test_hook`: a precondition changed after its declaration was carried)
+            if test_hook::get() == Some(test_hook::WrongRule::ChangedRequires)
+                && let Some(a) = f.attrs.iter_mut().find(|a| a.path().is_ident("requires"))
+            {
+                *a = syn::parse_quote!(#[requires(true)]);
+            }
             let mp = self.conform_module_path();
             let global = match self_ty.as_ref().and_then(type_name) {
                 Some(st) if !is_prim(&st) => format!("{mp}::{st}::{}", f.sig.ident),
                 _ => format!("{mp}::{}", f.sig.ident),
             };
-            self.mir_contracts.push(MirContract { global, key, requires, depth_bound });
+            self.mir_contracts.push(MirContract { global, key });
         }
         if !ghost {
             // loop helpers have no original: they are compared through the

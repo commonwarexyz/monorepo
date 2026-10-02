@@ -244,25 +244,42 @@ green, speed of the result and the human review load.
      bodies already lowered by the compiler) read **literally**, one kernel
      definition per MIR instance with one arm per basic block and no
      structuring, by a table-driven translation of a fixed set of MIR
-     constructs: the generator `mir/literal.rs` (1,474 code lines) and its
+     constructs: the generator `mir/literal.rs` (1,217 code lines) and its
      library `mir/literal.core` (139); the statement of each lifted
-     function's theorem `mir/stmt.rs` (225: the telescope, `init`, `erase`,
-     and the rule that preconditions come from the declared contract only);
+     function's theorem `mir/stmt.rs` (210: the telescope, `init`,
+     `erase`);
      the parse L reads, `mir/ir.rs` (482) and `mir/sexp.rs` (131); the
-     names and load checks of `mir/mod.rs` (480); the printer
+     names and load checks of `mir/mod.rs` (491); the printer
      `sandblaster/mirx` (1,131: a rustc driver on the pinned nightly of the
      stable release, whose output is checked in with the sources'
-     SHA-256) — **4,062 code lines**; the gate's bookkeeping (≈ 0.65k:
-     `driver::gates::theorem_gate` and its report, `mir::checked`'s
-     planning, cache keys and acceptance of `L::thm::<f>` with the trusted
-     statement, the lifted round trip's requirement of the shipped
-     theorems in `driver::lowered`); and its glue in `lift.rs` (≈ 0.26k:
+     SHA-256) — **3,801 code lines**; the gate's trusted check
+     `mir/gate.rs` (164: the literal reading enters the kernel only
+     through it, and a listed function is accepted only when its MIR
+     instance is that function — the lift finds instances by unqualified
+     lifted names, `ModuleNames::instance_global` — and the kernel holds
+     `L::thm::<f>` with a type α-equal to `stmt.rs`'s statement,
+     generated afresh, reaching only definitions of the elaboration, of
+     L's library or of its own extraction's literal reading, and every
+     module type its MIR reaches is declared alike by
+     the MIR and the subset — variants and fields by name and in order,
+     discriminants `0, 1, ..` — since kernel field names are positional;
+     the same for the round trip's `L::shipped::<f>`)
+     and its call sites (≈ 25: the gate's errors in `driver::gates`, the
+     shipped copy's MIR instance and the requirement in `driver::lowered`);
+     the elaborator's precondition check (≈ 39: `elab/items.rs`, `typeck`,
+     `hir::FnDef::declared`: a function read from MIR is elaborated only
+     when each precondition is α-equal to the elaboration of its declared
+     contract's clause, which the lift carries apart as
+     `#[mir_contract(..)]`, and its depth bound likewise);
+     and its glue in `lift.rs` (≈ 0.26k:
      loading the extraction, the signature checks, the loop attachments
      read with the MIR's locals typed, the declared contracts). The
      structured reading S that the laws and proofs are about is
-     **untrusted**: `mir/read.rs` (2,433) proposes it, `mir/cfg.rs` (235)
-     steers it, and every verified build checks, per lifted function, the
-     kernel theorem `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0
+     **untrusted**: `mir/read.rs` (2,433) proposes it, `mir/cfg.rs` (298;
+     it also gives L its ranks, loop headers and panicking blocks, which
+     only place fuel, every decrease being kernel-checked, or read a block
+     as `None`) steers it, and every verified build checks, per lifted
+     function, the kernel theorem `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0
      (Some init(x̄)) = Some(erase(S_f x̄))` (total correctness, including the
      final `&mut` referents), proven by the untrusted walker
      (`mir/simproof.rs`, 4,565, and the rest of `mir/checked.rs`) and
@@ -270,7 +287,7 @@ green, speed of the result and the human review load.
      gate; varint 63 of 63, the MMR 76 of 76, the verifier's set 1 69 of
      69). Before this step the structurer was trusted: `read.rs` 2,417 +
      `mod.rs` 434 + `mirx` 1,131 = 3,982, with the parse counted
-     untrusted. The count is about the same; its kind changed — local,
+     untrusted. The count is a little lower; its kind changed — local,
      construct-by-construct translations, each checkable against the MIR
      reference, replace 2.4k lines of symbolic structuring (joins, loop
      forms, carried values, write-backs), where both bugs ever found in the
@@ -325,9 +342,12 @@ green, speed of the result and the human review load.
    `lift_open.rs` 1,138, prelude 108, model 59), down from 7,443 before
    the source's reading of bodies was deleted (`docs/mir-lift.md` §6 step
    3: `lift.rs` 4,443, `lift_open.rs` 2,665, the combinator templates 131,
-   prelude 145, model 59); the bodies' trusted reading is 4,062 (the
+   prelude 145, model 59); the bodies' trusted reading is 3,801 (the
    literal reading, its statement and parse, the names, the printer) plus
-   the gate's bookkeeping (≈ 650) and the glue (≈ 260). The skeleton's next
+   the gate's trusted check (≈ 189 with its call sites), the elaborator's
+   precondition check (39) and the glue (≈ 260): ≈ 4.29k in all, on the
+   same counting ≈ 4.78k with the structurer trusted and ≈ 4.97k when it
+   was first replaced (`docs/checked-structuring.md`, stage tcb-review). The skeleton's next
    step is to come from the MIR too (`docs/mir-lift.md` §6 step 4); the
    reading's trust was shrunk to a literal reading checked against the
    structured one (§6 step 5, done). commonware-codec's varint is verified this
@@ -387,8 +407,9 @@ the kernel requires the proof slot; this backstop does not cover the
 *statements* of §15 items, hence item 6), automation, scripts, optimizer,
 codegen printer, the front end's reference evaluator, diagnostics, the
 structured reading of MIR bodies (`mir/read.rs`, `mir/cfg.rs`) and the
-walker that proves its theorems (`mir/simproof.rs`, `mir/checked.rs` but
-for the gate's bookkeeping: item 8), the lift
+walker that proves its theorems and its driver (`mir/simproof.rs`,
+`mir/checked.rs`: planning, order, the verdict cache, whose entries the
+kernel re-checks, and reports; item 8), the lift
 conformance check (a mitigation: it can only fail a build; its shims
 decide what it compares against, so a wrong shim could hide a misreading,
 never create one).

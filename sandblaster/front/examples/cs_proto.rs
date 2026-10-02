@@ -9,7 +9,7 @@
 //! * the theorems of `CS_THM` (`fn:<key>=<global>;helper:<key>=<global>|<header>|<slot>=p<k>|code,..`),
 //!   in order (`while:<key>=<helper>`: a `while` loop's lemma). `CS_FAULT=<key substring>|<old>|<new>` changes integer
 //!   constants of the MIR first (a negative test), `CS_DUMP=<dir>` writes
-//!   the reading and the statements, `CS_TRACE` traces the walker
+//!   the reading (one `<module>.core` per MIR module) and the statements, `CS_TRACE` traces the walker
 //!   (`CS_TRACE_CALLS`, `CS_TRACE_SPLIT`, `CS_TRACE_LSPLIT`, `CS_TRACE_TAIL`
 //!   for more), `CS_CHECK` checks every proof node as it is built,
 //!   `CS_PROFILE` reports where a proof's nodes are, `CS_FULL` prints
@@ -95,7 +95,7 @@ fn main() {
             // `CS_CACHE=<dir>`: the theorems' verdict cache in `dir`
             let vc = std::env::var("CS_CACHE").ok().map(|d| sandblaster_front::driver::cache::VerdictCache::new(sandblaster_front::driver::cache::Store::open(d.into(), sandblaster_front::surface::sha256(b"cs_proto")), "cs_proto"));
             opts.cache = vc.as_ref();
-            let reps = checked::prove_lifted(&mut out, &c.lift_facts, &opts);
+            let reps = checked::prove_and_check(&mut out, k, &c.lift_facts, &opts);
             for r in &reps {
                 eprintln!("{}: literal reading of {} functions ({} items) in {:.2}s", r.dsl, r.literal_fns, r.literal_items, r.literal_secs);
                 for o in &r.outcomes {
@@ -127,7 +127,7 @@ fn main() {
             if !keys.is_empty() && ks.is_empty() {
                 continue;
             }
-            let lit = match checked::load_literal(&mut out.env, &m, &mm.loaded.names, &ks, dump.as_ref().map(|d| d.join("literal.core")).as_deref()) {
+            let lit = match checked::load_literal(&mut out.env, &m, &mm.loaded.names, &ks, dump.as_ref().map(|d| d.join(format!("{}.core", m.module.replace("::", "_")))).as_deref()) {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!("{}: {e}", mm.dsl);

@@ -905,6 +905,11 @@ pub struct FnDef {
     pub requires: Vec<Expr>,
     pub ensures: Option<Ensures>,
     pub decreases: Option<Decreases>,
+    /// A lifted function read from MIR: its declared contract (`requires`
+    /// clauses and depth bound, `lift::MirContract`), carried by the lift
+    /// apart from the attributes above; the elaborator refuses the function
+    /// unless its preconditions are the elaboration of exactly these.
+    pub declared: Option<(Vec<Expr>, Option<Decreases>)>,
     pub body: FnBody,
     /// `#[target_feature(enable = "..")]` features as written.
     pub target_features: Vec<String>,

@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use sandblaster_kernel::api::Env;
-use sandblaster_kernel::term::{Arm, AxiomId, BigInt, GlobalId, Idx, IndId, PrimOp, Rat, Rel, Sort, Term, Tm, Width};
+use sandblaster_kernel::term::{Arm, AxiomId, BigInt, DefDecl, DefKind, GlobalId, Idx, IndId, PrimOp, Rat, Recursion, Rel, Sort, Term, Tm, Width};
 
 /// Bumped whenever the entry format or the proofs' shape changes.
 const VERSION: &str = "sandblaster-opt-cache 2";
@@ -428,6 +428,11 @@ impl Writer {
         self.u32(s.len() as u32);
         self.b.extend_from_slice(s.as_bytes());
     }
+    /// A length-prefixed byte string.
+    fn bytes(&mut self, b: &[u8]) {
+        self.u32(b.len() as u32);
+        self.b.extend_from_slice(b);
+    }
     fn int(&mut self, n: &BigInt) {
         let bytes = n.to_signed_bytes_le();
         self.u32(bytes.len() as u32);
@@ -459,10 +464,93 @@ impl Reader<'_> {
         let n = self.u32()? as usize;
         String::from_utf8(self.take(n)?.to_vec()).ok()
     }
+    /// A term encoded by [`Writer::bytes`] of [`encode`].
+    fn term(&mut self, env: &Env) -> Option<Tm> {
+        let n = self.u32()? as usize;
+        decode(env, &mut Reader { b: self.take(n)?, i: 0 })
+    }
     fn int(&mut self) -> Option<BigInt> {
         let n = self.u32()? as usize;
         Some(BigInt::from_signed_bytes_le(self.take(n)?))
     }
+}
+
+/// Declarations as the theorem gate's verdict-cache entries hold them
+/// (`mir::checked`): name, arity, recursion, and the DAG encodings of the
+/// measure, the type and the body. Never trusted: [`replay_decls`] adds
+/// each through `add_def`, so the kernel checks it again.
+pub(crate) fn encode_decls(env: &Env, ds: &[DefDecl]) -> Vec<u8> {
+    let mut w = Writer::default();
+    w.u32(ds.len() as u32);
+    for d in ds {
+        w.str(&d.name);
+        // the globals and inductives it names (to say which is missing)
+        let mut names = std::collections::BTreeSet::new();
+        for t in [&d.ty, &d.body].into_iter().chain(match &d.recursion {
+            Recursion::Measure { measure } => Some(measure),
+            _ => None,
+        }) {
+            crate::elab::tm::any_node(t, &mut |n| {
+                match n {
+                    Term::Global(g) | Term::Delta { def: g, .. } | Term::Unfold { def: g, .. } => names.insert(format!("g{}", env.global_name(*g).unwrap_or_default())),
+                    Term::Ind { ind, .. } | Term::Ctor { ind, .. } | Term::Match { ind, .. } => names.insert(format!("i{}", env.inductive_decl(*ind).map(|d| d.name.to_string()).unwrap_or_default())),
+                    _ => false,
+                };
+                false
+            });
+        }
+        w.u32(names.len() as u32);
+        for n in &names {
+            w.str(n);
+        }
+        w.u32(d.arity);
+        match &d.recursion {
+            Recursion::None => w.u8(0),
+            Recursion::Structural { param } => {
+                w.u8(1);
+                w.u32(*param);
+            }
+            Recursion::Measure { measure } => {
+                w.u8(2);
+                w.bytes(&encode(env, measure));
+            }
+        }
+        w.bytes(&encode(env, &d.ty));
+        w.bytes(&encode(env, &d.body));
+    }
+    w.b
+}
+
+/// Adds the declarations of [`encode_decls`] in order, as lemmas (each
+/// decoded once the ones before it are defined, its globals by name).
+pub(crate) fn replay_decls(env: &mut Env, b: &[u8]) -> Result<(), String> {
+    let mut r = Reader { b, i: 0 };
+    let bad = || "a malformed entry".to_string();
+    for _ in 0..r.u32().ok_or_else(bad)? {
+        let name = r.str().ok_or_else(bad)?;
+        for _ in 0..r.u32().ok_or_else(bad)? {
+            let n = r.str().ok_or_else(bad)?;
+            let defined = match n.split_at(1.min(n.len())) {
+                ("g", g) => env.lookup_global(g).is_some(),
+                (_, i) => env.lookup_ind(i).is_some(),
+            };
+            if !defined {
+                return Err(format!("`{name}` names `{}`, which is not defined", &n[1.min(n.len())..]));
+            }
+        }
+        let arity = r.u32().ok_or_else(bad)?;
+        let recursion = match r.u8().ok_or_else(bad)? {
+            0 => Recursion::None,
+            1 => Recursion::Structural { param: r.u32().ok_or_else(bad)? },
+            2 => Recursion::Measure { measure: r.term(env).ok_or_else(bad)? },
+            _ => return Err(bad()),
+        };
+        let ty = r.term(env).ok_or_else(bad)?;
+        let body = r.term(env).ok_or_else(bad)?;
+        let d = DefDecl { name: Rc::from(name.as_str()), kind: DefKind::Lemma, ty, body, recursion, arity, opaque: false };
+        env.add_def(d, &mut sandblaster_kernel::value::Budget { steps: 40_000_000_000 }).map_err(|e| format!("the kernel rejected `{name}`: {}", e.to_string().chars().take(600).collect::<String>()))?;
+    }
+    Ok(())
 }
 
 fn encode(env: &Env, t: &Tm) -> Vec<u8> {

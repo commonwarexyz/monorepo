@@ -21,6 +21,13 @@
 //! unprovable, never false. Every construct read as `None` is recorded in
 //! [`LFn::faults`], named by its MIR construct. The reading never structures
 //! (no joins, loops or carried values).
+//!
+//! Not trusted (`cfg.rs`, see there): the blocks' ranks and loop headers
+//! (where fuel is consumed: the kernel checks every decrease), the blocks
+//! from which every path panics (read as `None`), which types a code can
+//! reach inside which (pruning: `None`), and the rendering of fault messages.
+//! Within this file, text is written with `@RC@` for the function's code
+//! type and replaced where each definition is emitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -28,6 +35,7 @@ use std::fmt::Write as _;
 use sandblaster_kernel::api::Env;
 use sandblaster_kernel::term::Rel;
 
+use super::cfg::{dfs_order, occurs, panic_blocks, show};
 use super::ir::*;
 use super::ModuleNames;
 
@@ -37,10 +45,7 @@ const LEAVES: &str = "-- LEAVES";
 const RANK_MULT: i64 = 65536;
 
 /// The library's base (every definition but the leaves), templates expanded.
-pub fn library() -> String {
-    let base = LIBRARY.split(LEAVES).next().unwrap_or("");
-    sandblaster_kernel::expand_templates(base).expect("literal.core templates")
-}
+pub fn library() -> String { sandblaster_kernel::expand_templates(LIBRARY.split(LEAVES).next().unwrap_or("")).expect("literal.core templates") }
 
 /// A leaf's definition in `literal.core` (`leaf::vec_push`): its paragraph.
 fn leaf_text(name: &str) -> Option<String> {
@@ -73,9 +78,16 @@ const LIB_ADTS: &[(&str, &str)] = &[
 /// Whether the MIR path `path` is the library path `p` of a table: `p`
 /// under `std` or `core` exactly (a crate or module that merely ends in
 /// `ops::Range` is not core's), a `bytes::` path as written.
-fn lib_path(p: &str, path: &str) -> bool {
-    if p.starts_with("bytes::") { path == p } else { path.strip_prefix("std::").or_else(|| path.strip_prefix("core::")) == Some(p) }
-}
+fn lib_path(p: &str, path: &str) -> bool { if p.starts_with("bytes::") { path == p } else { path.strip_prefix("std::").or_else(|| path.strip_prefix("core::")) == Some(p) } }
+
+/// The integer types, `(signed, bits)` (bits 0: `usize`/`isize`) → the word
+/// holding their bits and, when signed, the lift's bit model (`""`: `i8` and
+/// `isize` are their bits). `u128`/`i128` are not modeled: no kernel word
+/// holds them.
+const INTS: &[(bool, u32, &str, &str)] = &[
+    (false, 8, "u8", ""), (false, 16, "u16", ""), (false, 32, "u32", ""), (false, 64, "u64", ""), (false, 0, "usize", ""),
+    (true, 8, "u8", ""), (true, 16, "u16", "crate::__lift::I16"), (true, 32, "u32", "crate::__lift::I32"), (true, 64, "u64", "crate::__lift::I64"), (true, 0, "u64", ""),
+];
 
 /// One generated function.
 #[derive(Clone, Debug)]
@@ -92,7 +104,6 @@ pub struct LFn {
     /// L types of the locals (slot payloads; `@RC@` is this function's code type).
     pub local_tys: Vec<String>,
     pub cells: Vec<Cell>,
-    pub nblocks: usize,
     /// Loop headers (a jump to one consumes fuel).
     pub headers: Vec<usize>,
     /// Constructs read as `None` that are not panics: undefined behaviour
@@ -131,61 +142,56 @@ pub struct AdtL {
     pub opaque: bool,
 }
 
+/// What a [`Gen`] has generated (to continue in a later environment, after
+/// its text was loaded).
+#[derive(Clone, Debug, Default)]
+pub struct GenState {
+    emitted: BTreeSet<String>,
+    pub fns: BTreeMap<String, LFn>,
+    ids: BTreeMap<String, String>,
+    adts: BTreeMap<String, Result<AdtL, String>>,
+}
+
+impl GenState {
+    /// The L type an ADT instance was read as.
+    pub fn adt_ty(&self, key: &str) -> Option<String> { self.adts.get(key)?.as_ref().ok().map(|a| a.ty.clone()) }
+}
+
 /// The reading of one module's MIR (the instances it generates, in order).
 pub struct Gen<'a> {
     pub m: &'a Sbmir,
     pub k: &'a KNames<'a>,
     pub out: String,
-    emitted: BTreeSet<String>,
-    pub fns: BTreeMap<String, LFn>,
-    ids: BTreeMap<String, String>,
-    adts: BTreeMap<String, Result<AdtL, String>>,
+    s: GenState,
     busy: BTreeSet<String>,
-    /// The functions generated, callees first.
-    pub order: Vec<String>,
 }
 
 type R<T> = Result<T, String>;
 
 // ----- text ------------------------------------------------------------------
 
-fn bind(a: &str, b: &str, v: &str, x: &str, body: &str) -> String {
-    format!("mir::bind {a} {b} ({v}) (fun ({x} : {a}) => {body})")
-}
-fn map(a: &str, b: &str, v: &str, x: &str, body: &str) -> String {
-    format!("mir::map {a} {b} ({v}) (fun ({x} : {a}) => {body})")
-}
-fn some(t: &str, v: &str) -> String {
-    format!("Some[{t}]({v})")
-}
-fn none(t: &str) -> String {
-    format!("None[{t}]")
-}
-/// `match x : T as _ return Option(R) with arms end`.
-fn mat(x: &str, t: &str, r: &str, arms: &str) -> String {
-    format!("match {x} : {t} as _ return {r} with {arms} end")
-}
+fn bind(a: &str, b: &str, v: &str, x: &str, body: &str) -> String { format!("mir::bind {a} {b} ({v}) (fun ({x} : {a}) => {body})") }
+fn map(a: &str, b: &str, v: &str, x: &str, body: &str) -> String { format!("mir::map {a} {b} ({v}) (fun ({x} : {a}) => {body})") }
+fn some(t: &str, v: &str) -> String { format!("Some[{t}]({v})") }
+fn none(t: &str) -> String { format!("None[{t}]") }
+/// `match x : T as _ return R with arms end`.
+fn mat(x: &str, t: &str, r: &str, arms: &str) -> String { format!("match {x} : {t} as _ return {r} with {arms} end") }
 /// The selection `if i == k0 { e0 } else if ..` over `(k, e)`, else `dflt`.
 fn select(i: &str, cases: &[(usize, String)], r: &str, dflt: &str) -> String {
-    cases.iter().rev().fold(dflt.to_string(), |acc, (k, e)| format!("match #eq_usize({i}, {k}usize) : Bool as _ return {r} with | false => {acc} | true => {e} end"))
+    cases.iter().rev().fold(dflt.to_string(), |acc, (k, e)| mat(&format!("#eq_usize({i}, {k}usize)"), "Bool", r, &format!("| false => {acc} | true => {e}")))
 }
-fn sanitize(s: &str) -> String {
-    s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+/// The reference code `(r, path)` at the root type `root`.
+fn code(root: &str, r: &str, path: &str) -> String { format!("tuple2[{root}, List(mir::Proj)]({r}, {path})") }
+/// The code `q` extended by the path `ps`.
+fn code_app(root: &str, q: &str, ps: &str) -> String { code(root, &format!("rc::fst {root} {q}"), &format!("seq::append mir::Proj (rc::snd {root} {q}) ({ps})")) }
+fn sanitize(s: &str) -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect() }
+fn fxhash(s: &str) -> u64 { s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3)) }
+/// A short, unique name tag (hashed beyond `max` characters).
+fn tag(s: &str, max: usize) -> String {
+    let s = sanitize(s);
+    if s.len() > max { format!("h{}", fxhash(&s)) } else { s }
 }
-fn fxhash(s: &str) -> u64 {
-    s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
-}
-/// A short, unique name tag for a type.
-fn tag(t: &Ty) -> String {
-    let s = sanitize(&format!("{t:?}"));
-    if s.len() > 60 { format!("h{}", fxhash(&s)) } else { s }
-}
-fn mask(bits: u32) -> u128 {
-    if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 }
-}
-fn short(c: &str) -> String {
-    c.rsplit("::").next().unwrap_or(c).split('[').next().unwrap_or(c).to_string()
-}
+fn short(c: &str) -> String { c.rsplit("::").next().unwrap_or(c).split('[').next().unwrap_or(c).to_string() }
 /// The tuple type and constructor of `n` components (`Unit`, `mir::Tuple1`, `TupleN`).
 fn tuple(tys: &[String], vals: &[String]) -> (String, String) {
     match tys.len() {
@@ -195,48 +201,24 @@ fn tuple(tys: &[String], vals: &[String]) -> (String, String) {
     }
 }
 /// An output (one component is itself, else the tuple).
-fn out_tuple(tys: &[String], vals: &[String]) -> (String, String) {
-    if tys.len() == 1 { (tys[0].clone(), vals[0].clone()) } else { tuple(tys, vals) }
-}
-fn tuple_pat(n: usize) -> &'static str {
-    ["", "tuple1", "tuple2", "tuple3", "tuple4", "tuple5", "tuple6", "tuple7", "tuple8"].get(n).copied().unwrap_or("tupleN")
-}
+fn out_tuple(tys: &[String], vals: &[String]) -> (String, String) { if tys.len() == 1 { (tys[0].clone(), vals[0].clone()) } else { tuple(tys, vals) } }
+fn tuple_pat(n: usize) -> &'static str { ["", "tuple1", "tuple2", "tuple3", "tuple4", "tuple5", "tuple6", "tuple7", "tuple8"].get(n).copied().unwrap_or("tupleN") }
+/// Slot `i` of a frame with `nl` locals: the local's name `{l}<i>`, else the cell's `{c}<j>`.
+fn slot(i: usize, nl: usize, l: &str, c: &str) -> String { if i < nl { format!("{l}{i}") } else { format!("{c}{}", i - nl) } }
 
 // ----- MIR words --------------------------------------------------------------
 
-/// An integer type: its bits' width (`u8`..`usize`) and, when signed, the
-/// lift's bit model (`i16`..`i64` are `crate::__lift::I<n>(u<n>)`; `i8` and
-/// `isize` are their bits: `""`).
+/// An integer type: its bits' width and, when signed, its model ([`INTS`]).
 fn int(t: &Ty) -> Option<(&'static str, Option<&'static str>)> {
     let Ty::Int(s, b) = t else { return None };
-    // (`u128`/`i128` are not modeled: no kernel word holds them)
-    let w = match (s, b) {
-        (_, 8) => "u8",
-        (_, 16) => "u16",
-        (_, 32) => "u32",
-        (_, 64) | (true, 0) => "u64",
-        (false, 0) => "usize",
-        _ => return None,
-    };
-    Some((w, s.then(|| match b {
-        16 => "crate::__lift::I16",
-        32 => "crate::__lift::I32",
-        64 => "crate::__lift::I64",
-        _ => "",
-    })))
+    INTS.iter().find(|r| (r.0, r.1) == (*s, *b)).map(|r| (r.2, s.then_some(r.3)))
 }
-pub(super) fn width(t: &Ty) -> Option<&'static str> {
-    int(t).filter(|i| i.1.is_none()).map(|i| i.0)
-}
-fn signed(t: &Ty) -> bool {
-    int(t).is_some_and(|i| i.1.is_some())
-}
-fn wty(w: &str) -> String {
-    if w == "usize" { "Usize".into() } else { w.to_uppercase() }
-}
-fn bits_of(w: &str) -> u32 {
-    w.trim_start_matches('u').parse().unwrap_or(64)
-}
+pub(super) fn width(t: &Ty) -> Option<&'static str> { int(t).filter(|i| i.1.is_none()).map(|i| i.0) }
+fn signed(t: &Ty) -> bool { int(t).is_some_and(|i| i.1.is_some()) }
+fn wty(w: &str) -> String { if w == "usize" { "Usize".into() } else { w.to_uppercase() } }
+fn bits_of(w: &str) -> u32 { w.trim_start_matches('u').parse().unwrap_or(64) }
+/// The literal of the low bits of `v` at the word `w` (`255u8`).
+fn word_lit(v: u128, w: &str) -> String { format!("{}{w}", v & (u128::MAX >> (128 - bits_of(w)))) }
 /// The bits of `x` of an integer type `t`: (their width, the term).
 fn bits(t: &Ty, x: &str) -> Option<(&'static str, String)> {
     Some(match int(t)? {
@@ -246,14 +228,9 @@ fn bits(t: &Ty, x: &str) -> Option<(&'static str, String)> {
 }
 /// The value of type `t` with bits `b`.
 fn of_bits(t: &Ty, b: &str) -> String {
-    match int(t) {
-        Some((_, Some(st))) if !st.is_empty() => format!("{st}::{}({b})", short(st)),
-        _ => b.to_string(),
-    }
+    if let Some((_, Some(st))) = int(t) && !st.is_empty() { format!("{st}::{}({b})", short(st)) } else { b.to_string() }
 }
-fn is_unit(t: &Ty) -> bool {
-    matches!(t, Ty::Unit) || matches!(t, Ty::Tuple(v) if v.is_empty())
-}
+fn is_unit(t: &Ty) -> bool { matches!(t, Ty::Unit) || matches!(t, Ty::Tuple(v) if v.is_empty()) }
 /// `Option<&mut T>`: `T`.
 fn opt_mut(m: &Sbmir, t: &Ty) -> Option<Ty> {
     let Ty::Adt(k) = t else { return None };
@@ -264,15 +241,12 @@ fn opt_mut(m: &Sbmir, t: &Ty) -> Option<Ty> {
     }
 }
 /// The buffer model's referent (`&[u8]`/`&mut [u8]` behind a `&mut`, SEMANTICS.md §19.1).
-fn is_buffer(t: &Ty) -> bool {
-    matches!(t, Ty::Ref(_, s) if matches!(&**s, Ty::Slice(e) if **e == Ty::Int(false, 8)))
-}
-pub fn place_ty(f: &Fn, p: &Place) -> R<Ty> {
-    let mut t = f.locals.get(p.local).map(|l| l.0.clone()).ok_or("a place's local out of range")?;
-    for pr in &p.proj {
-        t = proj_ty(&t, pr)?;
-    }
-    Ok(t)
+fn is_buffer(t: &Ty) -> bool { matches!(t, Ty::Ref(_, s) if matches!(&**s, Ty::Slice(e) if **e == Ty::Int(false, 8))) }
+/// A reference to a cell or a nested `Option<&mut T>` (a referent holding a code).
+fn holds_ref(m: &Sbmir, t: &Ty) -> bool { matches!(t, Ty::Ref(true, _)) || opt_mut(m, t).is_some() }
+fn place_ty(f: &Fn, p: &Place) -> R<Ty> {
+    let t = f.locals.get(p.local).map(|l| l.0.clone()).ok_or("a place's local out of range")?;
+    p.proj.iter().try_fold(t, |t, pr| proj_ty(&t, pr))
 }
 fn proj_ty(t: &Ty, pr: &Proj) -> R<Ty> {
     Ok(match (pr, t) {
@@ -303,106 +277,17 @@ fn op_ty(f: &Fn, o: &Operand) -> R<Ty> {
     }
 }
 
-/// Depth-first post-order numbers of the blocks and the targets of the back
-/// edges (the loop headers). The rank (`2 post + 2`) decreases along every
-/// other edge, which the kernel checks for every jump.
-/// A terminator's successors (the unwind edges are not followed: an unwind is `None`).
-fn succs(t: &Term) -> Vec<usize> {
-    match t {
-        Term::Goto(b) | Term::Drop(_, _, b) | Term::Assert(_, _, _, b) | Term::Call(_, _, _, Some(b)) => vec![*b],
-        Term::Switch(_, arms, o) => arms.iter().map(|a| a.1).chain([*o]).collect(),
-        _ => vec![],
-    }
-}
-
-fn dfs_order(f: &Fn) -> (Vec<usize>, Vec<usize>) {
-    struct D {
-        succ: Vec<Vec<usize>>,
-        state: Vec<u8>,
-        post: Vec<usize>,
-        headers: Vec<usize>,
-        n: usize,
-    }
-    fn go(d: &mut D, b: usize) {
-        d.state[b] = 1;
-        for t in d.succ[b].clone() {
-            match d.state.get(t) {
-                Some(0) => go(d, t),
-                Some(1) if !d.headers.contains(&t) => d.headers.push(t),
-                _ => {}
-            }
-        }
-        (d.post[b], d.n, d.state[b]) = (d.n, d.n + 1, 2);
-    }
-    let nb = f.blocks.len();
-    let mut d = D { succ: f.blocks.iter().map(|bl| succs(&bl.term)).collect(), state: vec![0; nb], post: vec![0; nb], headers: vec![], n: 0 };
-    for root in 0..nb {
-        if d.state[root] == 0 {
-            go(&mut d, root);
-        }
-    }
-    d.headers.sort();
-    (d.post, d.headers)
-}
-
-/// Whether every path from block `b` ends in a diverging call,
-/// `unreachable`, an abort or an unwind without returning or looping: the
-/// block is `None` (nothing on it can reach a return).
-fn must_diverge(f: &Fn, b: usize, visiting: &mut Vec<usize>) -> bool {
-    let Some(bl) = f.blocks.get(b) else { return false };
-    if visiting.contains(&b) {
-        return false;
-    }
-    match &bl.term {
-        Term::Unreachable | Term::Abort | Term::Resume | Term::Call(Callee::Diverge(_), ..) | Term::Call(_, _, _, None) => true,
-        Term::Return | Term::Unsupported(_) => false,
-        t => {
-            visiting.push(b);
-            let ss = succs(t);
-            let r = !ss.is_empty() && ss.iter().all(|x| must_diverge(f, *x, visiting));
-            visiting.pop();
-            r
-        }
-    }
-}
-
 // ----- types ------------------------------------------------------------------
 
-/// What a [`Gen`] has generated (to continue in a later environment, after
-/// its text was loaded).
-#[derive(Clone, Debug, Default)]
-pub struct GenState {
-    emitted: BTreeSet<String>,
-    pub fns: BTreeMap<String, LFn>,
-    ids: BTreeMap<String, String>,
-    adts: BTreeMap<String, Result<AdtL, String>>,
-}
-
-impl GenState {
-    /// The L type an ADT instance was read as.
-    pub fn adt_ty(&self, key: &str) -> Option<String> {
-        self.adts.get(key)?.as_ref().ok().map(|a| a.ty.clone())
-    }
-}
-
 impl<'a> Gen<'a> {
-    pub fn new(m: &'a Sbmir, k: &'a KNames<'a>) -> Self {
-        Gen { m, k, out: String::new(), emitted: BTreeSet::new(), fns: BTreeMap::new(), ids: BTreeMap::new(), adts: BTreeMap::new(), busy: BTreeSet::new(), order: Vec::new() }
-    }
+    /// Continues from `s` (its text is loaded: only new definitions are emitted).
+    pub fn resume(m: &'a Sbmir, k: &'a KNames<'a>, s: GenState) -> Self { Gen { m, k, out: String::new(), s, busy: BTreeSet::new() } }
 
-    /// Continues from `st` (its text is loaded: only new definitions are emitted).
-    pub fn resume(m: &'a Sbmir, k: &'a KNames<'a>, st: GenState) -> Self {
-        Gen { emitted: st.emitted, fns: st.fns, ids: st.ids, adts: st.adts, ..Gen::new(m, k) }
-    }
-
-    pub fn state(&self) -> GenState {
-        GenState { emitted: self.emitted.clone(), fns: self.fns.clone(), ids: self.ids.clone(), adts: self.adts.clone() }
-    }
+    pub fn state(&self) -> GenState { self.s.clone() }
 
     fn emit(&mut self, name: &str, text: String) {
-        if self.emitted.insert(name.to_string()) {
-            self.out.push_str(&text);
-            self.out.push('\n');
+        if self.s.emitted.insert(name.to_string()) {
+            let _ = writeln!(self.out, "{text}");
         }
     }
 
@@ -450,11 +335,11 @@ impl<'a> Gen<'a> {
 
     /// The kernel view of an ADT instance (§20.4 "Types").
     pub fn adt(&mut self, key: &str) -> R<AdtL> {
-        if let Some(a) = self.adts.get(key) {
+        if let Some(a) = self.s.adts.get(key) {
             return a.clone();
         }
         let r = self.adt_new(key);
-        self.adts.insert(key.to_string(), r.clone());
+        self.s.adts.insert(key.to_string(), r.clone());
         r
     }
 
@@ -478,8 +363,7 @@ impl<'a> Gen<'a> {
             let a: Vec<String> = args.into_iter().collect::<R<_>>()?;
             let ty = a.iter().enumerate().fold(tmpl.to_string(), |s, (i, x)| s.replace(&format!("${i}"), x));
             let base = ty.split('(').next().unwrap_or(&ty).to_string();
-            let prelude = base == "Option";
-            return Ok(AdtL { kctors: self.kctors(&base, &d, !prelude)?, params: if ty.contains('(') { a } else { vec![] }, ..plain(ty) });
+            return Ok(AdtL { kctors: self.kctors(&base, &d, base != "Option")?, params: if ty.contains('(') { a } else { vec![] }, ..plain(ty) });
         }
         // module types, host enums, host instances: the subset's declaration,
         // unless it carries invariant proofs (then L's own mirror below)
@@ -502,8 +386,7 @@ impl<'a> Gen<'a> {
             let _ = if fs.is_empty() { write!(decl, " | {c}") } else { write!(decl, " | {c}({})", fs.join(", ")) };
             kctors.push((format!("{name}::{c}"), vi));
         }
-        decl.push_str(" }");
-        self.emit(&name, decl);
+        self.emit(&name, decl + " }");
         Ok(AdtL { kctors, ..plain(name) })
     }
 
@@ -520,71 +403,51 @@ impl<'a> Gen<'a> {
     }
 
     /// Field `i` of variant `v` of `x : t`: an `Option(F)` term (`None` on
-    /// another variant).
-    fn field_of(&mut self, rc: &str, t: &Ty, v: usize, i: usize, x: &str) -> R<String> {
+    /// another variant); with `set = Some(z)`, `x` with that field replaced
+    /// by `z`: an `Option(T)` term.
+    fn field(&mut self, t: &Ty, v: usize, i: usize, x: &str, set: Option<&str>) -> R<String> {
         // a closure's fields are its captures
         if let Ty::Closure(_, caps) = t {
-            return self.field_of(rc, caps, v, i, x);
+            return self.field(caps, v, i, x, set);
         }
-        let tt = self.ty(t)?.replace("@RC@", rc);
+        let tt = self.ty(t)?;
+        let bx = format!("{x}{}", if set.is_some() { "w" } else { "f" });
         match t {
             Ty::Tuple(ts) => {
-                let ft = self.ty(ts.get(i).ok_or("a field out of range")?)?.replace("@RC@", rc);
-                let bs: Vec<String> = (0..ts.len()).map(|j| format!("{x}f{j}")).collect();
-                Ok(mat(x, &tt, &format!("Option({ft})"), &format!("| {}({}) => {}", tuple_pat(ts.len()), bs.join(", "), some(&ft, &bs[i]))))
-            }
-            Ty::Adt(k) => {
-                let d = self.m.adts.get(k).cloned().ok_or("no ADT")?;
-                let a = self.adt(k)?;
-                let ft = self.ty(&d.variants.get(v).and_then(|vd| vd.fields.get(i)).ok_or("a field out of range")?.1)?.replace("@RC@", rc);
-                if a.newtype {
-                    return Ok(some(&ft, x));
-                }
-                if a.opaque {
-                    return Err(format!("a field of the model type `{}`", d.path));
-                }
-                let arms = self.arms(k, &format!("{x}f"), |_, vi, bs| Ok(if vi == v { some(&ft, &bs[i]) } else { none(&ft) }))?;
-                Ok(mat(x, &tt, &format!("Option({ft})"), &arms))
-            }
-            other => Err(format!("a field of {other:?}")),
-        }
-    }
-
-    /// `x` with field `i` of variant `v` replaced by `z`: an `Option(T)` term.
-    fn with_field(&mut self, rc: &str, t: &Ty, v: usize, i: usize, x: &str, z: &str) -> R<String> {
-        if let Ty::Closure(_, caps) = t {
-            return self.with_field(rc, caps, v, i, x, z);
-        }
-        let tt = self.ty(t)?.replace("@RC@", rc);
-        let ot = format!("Option({tt})");
-        match t {
-            Ty::Tuple(ts) => {
-                let tys: Vec<String> = ts.iter().map(|y| Ok(self.ty(y)?.replace("@RC@", rc))).collect::<R<_>>()?;
-                let bs: Vec<String> = (0..ts.len()).map(|j| format!("{x}w{j}")).collect();
-                let mut nb = bs.clone();
-                nb[i] = z.to_string();
-                Ok(mat(x, &tt, &ot, &format!("| {}({}) => {}", tuple_pat(ts.len()), bs.join(", "), some(&tt, &tuple(&tys, &nb).1))))
-            }
-            Ty::Adt(k) => {
-                let d = self.m.adts.get(k).cloned().ok_or("no ADT")?;
-                let a = self.adt(k)?;
-                if a.newtype {
-                    return Ok(some(&tt, z));
-                }
-                if a.opaque {
-                    return Err(format!("a field of the model type `{}`", d.path));
-                }
-                let arms = self.arms(k, &format!("{x}w"), |g, vi, bs| {
-                    if vi != v {
-                        return Ok(none(&tt));
+                let tys: Vec<String> = ts.iter().map(|y| self.ty(y)).collect::<R<_>>()?;
+                let ft = tys.get(i).ok_or("a field out of range")?.clone();
+                let mut bs: Vec<String> = (0..ts.len()).map(|j| format!("{bx}{j}")).collect();
+                let pat = format!("| {}({}) => ", tuple_pat(ts.len()), bs.join(", "));
+                Ok(match set {
+                    None => mat(x, &tt, &format!("Option({ft})"), &(pat + &some(&ft, &bs[i]))),
+                    Some(z) => {
+                        bs[i] = z.to_string();
+                        mat(x, &tt, &format!("Option({tt})"), &(pat + &some(&tt, &tuple(&tys, &bs).1)))
                     }
-                    let mut nb = bs.to_vec();
-                    nb[i] = z.to_string();
-                    Ok(some(&tt, &g.ctor(k, vi, &nb)?))
-                })?;
-                Ok(mat(x, &tt, &ot, &arms))
+                })
             }
-            other => Err(format!("a field update of {other:?}")),
+            Ty::Adt(k) => {
+                let (d, a) = (self.m.adts.get(k).cloned().ok_or("no ADT")?, self.adt(k)?);
+                // the result's payload: the field's type, or the updated value's
+                let rt = if set.is_some() { tt.clone() } else { self.ty(&d.variants.get(v).and_then(|vd| vd.fields.get(i)).ok_or("a field out of range")?.1)? };
+                if a.newtype {
+                    return Ok(some(&rt, set.unwrap_or(x)));
+                }
+                if a.opaque {
+                    return Err(format!("a field of the model type `{}`", d.path));
+                }
+                let arms = self.arms(k, &bx, |g, vi, bs| match set {
+                    _ if vi != v => Ok(none(&rt)),
+                    None => Ok(some(&rt, &bs[i])),
+                    Some(z) => {
+                        let mut nb = bs.to_vec();
+                        nb[i] = z.to_string();
+                        Ok(some(&rt, &g.ctor(k, vi, &nb)?))
+                    }
+                })?;
+                Ok(mat(x, &tt, &format!("Option({rt})"), &arms))
+            }
+            other => Err(format!("{} {other:?}", if set.is_some() { "a field update of" } else { "a field of" })),
         }
     }
 
@@ -616,6 +479,8 @@ struct FnCx {
     nl: usize,
     cells: Vec<Cell>,
     out_ty: String,
+    /// The output's components ([`LFn::out_parts`]).
+    outs: Vec<String>,
     post: Vec<usize>,
     headers: Vec<usize>,
     /// Targets reached through codes (their `deref`/`write` functions).
@@ -640,25 +505,27 @@ enum PlaceC {
 }
 
 impl FnCx {
-    fn st(&self) -> String {
-        format!("{}::St", self.p)
-    }
-    fn root(&self) -> String {
-        format!("{}::Root", self.p)
-    }
-    fn rank(&self, b: usize) -> i64 {
-        2 * self.post[b] as i64 + 2
-    }
-    fn none_out(&self) -> String {
-        none(&self.out_ty)
+    fn st(&self) -> String { format!("{}::St", self.p) }
+    fn root(&self) -> String { format!("{}::Root", self.p) }
+    fn rank(&self, b: usize) -> i64 { 2 * self.post[b] as i64 + 2 }
+    fn none_out(&self) -> String { none(&self.out_ty) }
+    /// Slot `i` of the state `s`.
+    fn get(&self, i: usize) -> String { format!("{}::g{i} s", self.p) }
+    /// `deref__<n>` / `write__<n>` (`f`) of the state `s` through the code `q`.
+    fn through(&self, f: &str, n: &str, q: &str) -> String { format!("{p}::{f}__{n} s (rc::fst {r} {q}) (rc::snd {r} {q})", p = self.p, r = self.root()) }
+    fn live(&self, l: usize) -> R<()> { if self.unmodeled.contains(&l) { Err(format!("local {l}, whose type is not modeled")) } else { Ok(()) } }
+    /// The name of the `deref`/`write` functions to a target (generated after the blocks).
+    fn need(&mut self, t: Target) -> String {
+        let name = match &t {
+            Target::Buf => "buf".to_string(),
+            Target::Ty(ty) => tag(&format!("{ty:?}"), 60),
+        };
+        self.targets.insert(name.clone(), t);
+        name
     }
 }
 
 impl<'a> Gen<'a> {
-    fn ty_rc(&mut self, t: &Ty, rc: &str) -> R<String> {
-        Ok(self.ty(t)?.replace("@RC@", rc))
-    }
-
     /// The cells of parameter `param` of MIR type `t` (§20.4 "References"):
     /// a `&mut T` parameter's referent, an `Option<&mut T>`'s when present,
     /// and a referent's own `&mut U` / `Option<&mut U>` (a nested cell).
@@ -671,9 +538,8 @@ impl<'a> Gen<'a> {
         let buffer = is_buffer(&inner);
         let ty = if buffer { "List(U8)".to_string() } else { self.ty(&inner)? };
         cells.push(Cell { ty, mir_ty: inner.clone(), optional, param, parent });
-        let j = cells.len() - 1;
-        if !buffer && parent.is_none() && (matches!(inner, Ty::Ref(true, _)) || opt_mut(self.m, &inner).is_some()) {
-            self.cells_of(&inner, param, Some(j), cells)?;
+        if !buffer && parent.is_none() && holds_ref(self.m, &inner) {
+            self.cells_of(&inner, param, Some(cells.len() - 1), cells)?;
         }
         Ok(())
     }
@@ -681,7 +547,7 @@ impl<'a> Gen<'a> {
     /// The literal reading of `key` and of every function it calls (callees
     /// first).
     pub fn function(&mut self, key: &str) -> R<LFn> {
-        if let Some(f) = self.fns.get(key) {
+        if let Some(f) = self.s.fns.get(key) {
             return Ok(f.clone());
         }
         let f = self.m.fns.get(key).ok_or_else(|| format!("no MIR for `{key}`"))?.clone();
@@ -691,6 +557,12 @@ impl<'a> Gen<'a> {
         if !self.busy.insert(key.to_string()) {
             return Err(format!("`{key}` is mutually recursive with its caller (not read)"));
         }
+        let r = self.read_fn(key, f);
+        self.busy.remove(key);
+        r
+    }
+
+    fn read_fn(&mut self, key: &str, f: Fn) -> R<LFn> {
         // callees first (a self-call is `rec`; a failing callee is `None` at its calls)
         for b in &f.blocks {
             if let Term::Call(Callee::Fn(k2), ..) = &b.term
@@ -700,32 +572,21 @@ impl<'a> Gen<'a> {
                 let _ = self.function(k2);
             }
         }
-        let id = format!("f{}", self.ids.len());
-        self.ids.insert(key.to_string(), id.clone());
-        let p = format!("L::{id}");
+        let id = format!("f{}", self.s.ids.len());
+        self.s.ids.insert(key.to_string(), id.clone());
+        let (p, nl) = (format!("L::{id}"), f.locals.len());
         let rc = format!("Tuple2({p}::Root, List(mir::Proj))");
         let mut cells = Vec::new();
-        for i in 1..=f.argc.min(f.locals.len().saturating_sub(1)) {
-            let t = f.locals[i].0.clone();
-            if let Err(e) = self.cells_of(&t, i, None, &mut cells) {
-                self.busy.remove(key);
-                return Err(format!("the referent of parameter {i}: {e}"));
-            }
+        for i in 1..=f.argc.min(nl.saturating_sub(1)) {
+            self.cells_of(&f.locals[i].0, i, None, &mut cells).map_err(|e| format!("the referent of parameter {i}: {e}"))?;
         }
-        let nl = f.locals.len();
-        let mut unmodeled = BTreeSet::new();
-        let mut slot_tys = Vec::new();
-        for (i, (t, _)) in f.locals.iter().enumerate() {
-            slot_tys.push(self.ty_rc(t, &rc).unwrap_or_else(|_| {
-                unmodeled.insert(i);
-                "mir::Unmodeled".into()
-            }));
-        }
-        let local_tys: Vec<String> = f.locals.iter().map(|(t, _)| self.ty(t).unwrap_or_else(|_| "mir::Unmodeled".into())).collect();
-        slot_tys.extend(cells.iter().map(|c| c.ty.replace("@RC@", &rc)));
+        let tys: Vec<R<String>> = f.locals.iter().map(|(t, _)| self.ty(t)).collect();
+        let unmodeled: BTreeSet<usize> = (0..nl).filter(|i| tys[*i].is_err()).collect();
+        let local_tys: Vec<String> = tys.into_iter().map(|t| t.unwrap_or_else(|_| "mir::Unmodeled".into())).collect();
+        let slot_tys: Vec<String> = local_tys.iter().chain(cells.iter().map(|c| &c.ty)).map(|t| t.replace("@RC@", &rc)).collect();
         let st = format!("{p}::St");
-        let fields: Vec<String> = slot_tys.iter().enumerate().map(|(i, t)| if i < nl { format!("l{i} : Option({t})") } else { format!("c{} : Option({t})", i - nl) }).collect();
-        let roots: String = (0..nl).map(|i| format!(" | r{i}")).chain((0..cells.len()).map(|j| format!(" | rc{j}"))).collect();
+        let fields: Vec<String> = slot_tys.iter().enumerate().map(|(i, t)| format!("{} : Option({t})", slot(i, nl, "l", "c"))).collect();
+        let roots: String = (0..slot_tys.len()).map(|i| format!(" | {}", slot(i, nl, "r", "rc"))).collect();
         self.emit(&format!("{p}::__key"), format!("-- {p}: {key}"));
         self.emit(&format!("{p}::Root"), format!("inductive {p}::Root {{{roots} }}"));
         self.emit(&format!("{p}::St"), format!("inductive {p}::St {{ | st({}) }}", fields.join(", ")));
@@ -740,7 +601,6 @@ impl<'a> Gen<'a> {
         // blocks, their dispatchers and ranks
         let nb = f.blocks.len();
         if 2 * nb as i64 + 2 >= RANK_MULT {
-            self.busy.remove(key);
             return Err("too many blocks".into());
         }
         let (post, headers) = dfs_order(&f);
@@ -750,20 +610,19 @@ impl<'a> Gen<'a> {
         self.emit(&format!("{p}::rank"), format!("def[prelude] {p}::rank : (b : {p}::Blk) -> Int := fun (b : {p}::Blk) => match b : {p}::Blk as _ return Int with{ranks} end"));
         // the output: every cell's final value (an optional one as an
         // `Option`), then the return place unless it is `()`
-        let mut outs: Vec<String> = cells.iter().map(|c| if c.optional { format!("Option({})", c.ty.replace("@RC@", &rc)) } else { c.ty.replace("@RC@", &rc) }).collect();
+        let mut outs: Vec<String> = cells.iter().zip(&slot_tys[nl..]).map(|(c, t)| if c.optional { format!("Option({t})") } else { t.clone() }).collect();
         if !is_unit(&f.locals[0].0) {
             outs.push(slot_tys[0].clone());
         }
         let out_ty = out_tuple(&outs, &outs).0;
-        let lf = LFn { key: key.to_string(), id: id.clone(), run: format!("{p}::run"), st: st.clone(), blk: format!("{p}::Blk"), out_ty: out_ty.clone(), out_parts: outs.clone(), local_tys, cells: cells.clone(), nblocks: nb, headers: headers.clone(), faults: vec![], panics: vec![] };
-        self.fns.insert(key.to_string(), lf.clone());
-        let mut fx = FnCx { p: p.clone(), rc, f: f.clone(), key: key.to_string(), slot_tys, unmodeled, nl, cells, out_ty: out_ty.clone(), post, headers, targets: BTreeMap::new(), cur: String::new() };
-        let mut arms = Vec::new();
-        let mut faults = Vec::new();
-        let panics: Vec<usize> = (0..nb).filter(|b| must_diverge(&f, *b, &mut Vec::new())).collect();
+        let lf = LFn { key: key.to_string(), id, run: format!("{p}::run"), st: st.clone(), blk: format!("{p}::Blk"), out_ty: out_ty.clone(), out_parts: outs.clone(), local_tys, cells: cells.clone(), headers: headers.clone(), faults: vec![], panics: vec![] };
+        self.s.fns.insert(key.to_string(), lf.clone());
+        let mut fx = FnCx { p: p.clone(), rc, f: f.clone(), key: key.to_string(), slot_tys, unmodeled, nl, cells, out_ty: out_ty.clone(), outs, post, headers, targets: BTreeMap::new(), cur: String::new() };
+        let (mut arms, mut faults, panics) = (Vec::new(), Vec::new(), panic_blocks(&f));
         for b in 0..nb {
-            for (pre, code) in [("b", self.block(&mut fx, b)), ("d", self.dispatcher(&mut fx, b))] {
-                let code = if panics.contains(&b) { Ok(code.unwrap_or_else(|_| fx.none_out())) } else { code };
+            // a block from which every path panics (or is unreachable) is `None`
+            let codes = if panics.contains(&b) { [Ok(fx.none_out()), Ok(fx.none_out())] } else { [self.block(&mut fx, b), self.dispatcher(&mut fx, b)] };
+            for (pre, code) in ["b", "d"].into_iter().zip(codes) {
                 let code = code.unwrap_or_else(|e| {
                     faults.push(format!("bb{b}{}: {e}", if pre == "d" { " (switch)" } else { "" }));
                     fx.none_out()
@@ -778,47 +637,32 @@ impl<'a> Gen<'a> {
             "def[exec] {p}::run : (fuel : List(Unit)) -> (b : {p}::Blk) -> (os : Option({st})) -> Option({out_ty}) :=\n  fun (fuel : List(Unit)) (b : {p}::Blk) (os : Option({st})) =>\n    match os : Option({st}) as _ return Option({out_ty}) with\n    | None => None[{out_ty}]\n    | Some(s) => match b : {p}::Blk as yb return Option({out_ty}) using .eb with\n      {}\n      end\n    end\n  measure (#iadd(#imul(seq::len Unit fuel, {RANK_MULT}int), {p}::rank b))",
             arms.join("\n      ")
         );
-        let run = run.replace("@RC@", &fx.rc);
-        self.emit(&format!("{p}::run"), run);
+        self.emit(&format!("{p}::run"), run.replace("@RC@", &fx.rc));
         let lf = LFn { faults, panics, ..lf };
-        self.fns.insert(key.to_string(), lf.clone());
-        self.order.push(key.to_string());
-        self.busy.remove(key);
+        self.s.fns.insert(key.to_string(), lf.clone());
         Ok(lf)
     }
 
-    /// Block `b`: its statements' bind chain, then its terminator; a block
-    /// from which every path diverges is `None`.
+    /// Block `b`: its statements' bind chain, then its terminator.
     fn block(&mut self, fx: &mut FnCx, b: usize) -> R<String> {
         fx.cur = format!("b{b}");
-        if must_diverge(&fx.f, b, &mut Vec::new()) {
-            return Err("every path from here panics or is unreachable".into());
-        }
-        let st = fx.st();
-        let bl = fx.f.blocks[b].clone();
-        let mut code = String::new();
-        let mut cur = some(&st, "s");
+        let (st, bl) = (fx.st(), fx.f.blocks[b].clone());
+        let (mut code, mut cur) = (String::new(), some(&st, "s"));
         for (i, s) in bl.stmts.iter().enumerate() {
-            let step = self.stmt(fx, s).map_err(|e| format!("statement {i} `{}`: {e}", show(s)))?;
-            if let Some(step) = step {
+            if let Some(step) = self.stmt(fx, s).map_err(|e| format!("statement {i} `{}`: {e}", show(s)))? {
                 let _ = write!(code, "let os{i} : Option({st}) = {}; ", bind(&st, &st, &cur, "s", &step));
                 cur = format!("os{i}");
             }
         }
         let term = self.terminator(fx, b, &cur).map_err(|e| format!("terminator `{}`: {e}", show(&bl.term)))?;
-        Ok((code + &term).replace("@RC@", &fx.rc))
+        Ok(code + &term)
     }
 
     /// A jump to block `to` with state `os`: free when the rank decreases,
     /// else (a loop header) it consumes one unit of fuel.
-    fn jump(&mut self, fx: &FnCx, from_rank: i64, to: usize, os: &str) -> String {
-        let (p, tr) = (&fx.p, fx.rank(to));
-        if tr < from_rank && !fx.headers.contains(&to) {
-            format!("rec(fuel, {p}::Blk::b{to}, {os}; {})", decrease(p, &fx.cur, tr, from_rank, false))
-        } else {
-            let o = &fx.out_ty;
-            format!("match fuel : List(Unit) as yf return Option({o}) using .ef with | Nil => None[{o}] | Cons(u, f1) => rec(f1, {p}::Blk::b{to}, {os}; {}) end", decrease(p, &fx.cur, tr, from_rank, true))
-        }
+    fn jump(&self, fx: &FnCx, from_rank: i64, to: usize, os: &str) -> String {
+        let tr = fx.rank(to);
+        if tr < from_rank && !fx.headers.contains(&to) { format!("rec(fuel, {}::Blk::b{to}, {os}; {})", fx.p, decrease(&fx.p, &fx.cur, tr, from_rank, false)) } else { fuel_jump(fx, from_rank, to, os) }
     }
 
     /// `Goto`, `Return`, `Assert`, `SwitchInt` (to its dispatcher), `Drop`,
@@ -826,24 +670,20 @@ impl<'a> Gen<'a> {
     fn terminator(&mut self, fx: &mut FnCx, b: usize, os: &str) -> R<String> {
         let (st, rb) = (fx.st(), fx.rank(b));
         Ok(match &fx.f.blocks[b].term.clone() {
-            Term::Goto(t) => self.jump(fx, rb, *t, os),
+            // (a drop without glue does nothing)
+            Term::Goto(t) | Term::Drop(_, false, t) => self.jump(fx, rb, *t, os),
             Term::Return => {
-                // (cells.., return place)
-                let mut parts: Vec<(String, String)> = Vec::new();
-                for (j, c) in fx.cells.iter().enumerate() {
-                    let (slot, t) = (fx.nl + j, fx.slot_tys[fx.nl + j].clone());
-                    parts.push(if c.optional { (some(&format!("Option({t})"), &format!("{}::g{slot} s", fx.p)), format!("Option({t})")) } else { (format!("{}::g{slot} s", fx.p), t) });
-                }
+                // `Some((cells.., return place))`: each read (an optional cell
+                // as an `Option`), `None` when one is uninitialized
+                let mut gets: Vec<String> = fx.cells.iter().enumerate().map(|(j, c)| if c.optional { some(&fx.outs[j], &fx.get(fx.nl + j)) } else { fx.get(fx.nl + j) }).collect();
                 if !is_unit(&fx.f.locals[0].0) {
-                    self.live(fx, 0)?;
-                    parts.push((format!("{}::g0 s", fx.p), fx.slot_tys[0].clone()));
+                    fx.live(0)?;
+                    gets.push(fx.get(0));
                 }
-                let (tys, vars): (Vec<String>, Vec<String>) = parts.iter().enumerate().map(|(i, (_, t))| (t.clone(), format!("o{i}"))).unzip();
-                let body = parts.iter().enumerate().rev().fold(some(&fx.out_ty, &out_tuple(&tys, &vars).1), |acc, (i, (g, t))| bind(t, &fx.out_ty, g, &format!("o{i}"), &acc));
-                bind(&st, &fx.out_ty, os, "s", &body)
+                let vars: Vec<String> = (0..gets.len()).map(|i| format!("o{i}")).collect();
+                bind(&st, &fx.out_ty, os, "s", &binds(&gets, &fx.outs, &fx.out_ty, "o", some(&fx.out_ty, &out_tuple(&fx.outs, &vars).1)))
             }
             Term::Unreachable | Term::Resume | Term::Abort => return Err("unreachable, an unwind or an abort".into()),
-            Term::Drop(_, false, t) => self.jump(fx, rb, *t, os),
             // a drop with glue: nothing for a variant without glue (`no-glue`), else not read
             Term::Drop(pl, true, t) => {
                 let pt = place_ty(&fx.f, pl)?;
@@ -852,7 +692,7 @@ impl<'a> Gen<'a> {
                 if a.newtype || a.opaque || !d.variants.iter().any(|v| v.no_glue) {
                     return Err(format!("a drop of `{}` with drop glue", d.path));
                 }
-                let ptt = self.ty_rc(&pt, &fx.rc)?;
+                let ptt = self.ty(&pt)?;
                 let arms = self.arms(k, "y", |_, vi, _| Ok(if d.variants[vi].no_glue { some(&st, "s") } else { none(&st) }))?;
                 let v = self.read(fx, pl)?;
                 let dropped = bind(&st, &st, os, "s", &bind(&ptt, &st, &v, "x", &format!("match x : {ptt} as _ return Option({st}) with{arms} end")));
@@ -875,28 +715,17 @@ impl<'a> Gen<'a> {
     fn dispatcher(&mut self, fx: &mut FnCx, b: usize) -> R<String> {
         fx.cur = format!("d{b}");
         let Term::Switch(op, arms, otherwise) = fx.f.blocks[b].term.clone() else { return Ok(fx.none_out()) };
-        if must_diverge(&fx.f, b, &mut Vec::new()) {
-            return Ok(fx.none_out());
-        }
-        let (out, rd) = (fx.out_ty.clone(), fx.rank(b) - 1);
-        let t = op_ty(&fx.f, &op)?;
+        let (ro, rd, t) = (format!("Option({})", fx.out_ty), fx.rank(b) - 1, op_ty(&fx.f, &op)?);
         let v = self.operand(fx, &op)?;
-        let os = some(&fx.st(), "s");
-        let mut jumps: BTreeMap<usize, String> = BTreeMap::new();
-        for tg in arms.iter().map(|a| a.1).chain([otherwise]) {
-            let j = self.jump(fx, rd, tg, &os);
-            jumps.entry(tg).or_insert(j);
-        }
-        let ro = format!("Option({out})");
+        let jump = |tg: usize| self.jump(fx, rd, tg, &some(&fx.st(), "s"));
         let body = if t == Ty::Bool {
             let pick = |k: u128| arms.iter().find(|a| a.0 == k).map(|a| a.1).unwrap_or(otherwise);
-            mat("x", "Bool", &ro, &format!("| false => {} | true => {}", jumps[&pick(0)], jumps[&pick(1)]))
+            mat("x", "Bool", &ro, &format!("| false => {} | true => {}", jump(pick(0)), jump(pick(1))))
         } else {
             let (w, xb) = bits(&t, "x").ok_or_else(|| format!("a switch on {t:?}"))?;
-            arms.iter().rev().fold(jumps[&otherwise].clone(), |e, (val, tg)| mat(&format!("#eq_{w}({xb}, {}{w})", val & mask(bits_of(w))), "Bool", &ro, &format!("| false => {e} | true => {}", jumps[tg])))
+            arms.iter().rev().fold(jump(otherwise), |e, (val, tg)| mat(&format!("#eq_{w}({xb}, {})", word_lit(*val, w)), "Bool", &ro, &format!("| false => {e} | true => {}", jump(*tg))))
         };
-        let tt = self.ty_rc(&t, &fx.rc)?;
-        Ok(bind(&tt, &out, &v, "x", &body).replace("@RC@", &fx.rc))
+        Ok(bind(&self.ty(&t)?, &fx.out_ty, &v, "x", &body))
     }
 
     /// A statement as an `Option(St)` term over `s` (`None`: no effect).
@@ -909,15 +738,10 @@ impl<'a> Gen<'a> {
             Stmt::Assign(pl, rv, _) => {
                 let dt = place_ty(&fx.f, pl)?;
                 let v = self.rvalue(fx, rv, &dt)?;
-                let tt = self.ty_rc(&dt, &fx.rc)?;
-                Some(bind(&tt, &st, &v, "v", &self.write(fx, pl, "v")?))
+                Some(bind(&self.ty(&dt)?, &st, &v, "v", &self.write(fx, pl, "v")?))
             }
             Stmt::Unsupported(x) => return Err(format!("the statement {x}")),
         })
-    }
-
-    fn live(&self, fx: &FnCx, l: usize) -> R<()> {
-        if fx.unmodeled.contains(&l) { Err(format!("local {l}, whose type is not modeled")) } else { Ok(()) }
     }
 
     /// An operand as an `Option(T)` term over `s` (`copy`/`move` read the
@@ -925,10 +749,7 @@ impl<'a> Gen<'a> {
     fn operand(&mut self, fx: &mut FnCx, o: &Operand) -> R<String> {
         match o {
             Operand::Copy(p) | Operand::Move(p) => self.read(fx, p),
-            Operand::Const(c) => {
-                let tt = self.ty_rc(&const_ty(c.value())?, &fx.rc)?;
-                Ok(some(&tt, &self.konst(c.value())?))
-            }
+            Operand::Const(c) => Ok(some(&self.ty(&const_ty(c.value())?)?, &self.konst(c.value())?)),
             // the build's overflow checks (on: `load` refuses MIR without them)
             Operand::RuntimeChecks(k) if k == "overflow" => Ok(some("Bool", if self.m.overflow_checks { "true" } else { "false" })),
             Operand::RuntimeChecks(k) if k == "ub" => Ok(some("Bool", "false")),
@@ -941,10 +762,7 @@ impl<'a> Gen<'a> {
     fn konst(&mut self, c: &Const) -> R<String> {
         Ok(match c {
             Const::Int(Ty::Bool, v) => (if *v != 0 { "true" } else { "false" }).into(),
-            Const::Int(t, v) => {
-                let (w, _) = bits(t, "").ok_or_else(|| format!("an integer constant of {t:?}"))?;
-                of_bits(t, &format!("{}{w}", (*v as u128) & mask(bits_of(w))))
-            }
+            Const::Int(t, v) => of_bits(t, &word_lit(*v as u128, bits(t, "").ok_or_else(|| format!("an integer constant of {t:?}"))?.0)),
             Const::Zst(Ty::Unit | Ty::Closure(..) | Ty::FnDef(..)) => "tt".into(),
             // a zero-sized ADT value: the one variant of a type with one variant
             Const::Zst(Ty::Adt(k)) if self.m.adts.get(k).is_some_and(|d| d.variants.len() == 1) => self.ctor(k, 0, &[])?,
@@ -952,10 +770,7 @@ impl<'a> Gen<'a> {
                 let args: Vec<String> = fs.iter().map(|x| self.konst(x.value())).collect::<R<_>>()?;
                 match t {
                     Ty::Adt(k) => self.ctor(k, *v, &args)?,
-                    Ty::Tuple(ts) => {
-                        let tys: Vec<String> = ts.iter().map(|x| self.ty(x)).collect::<R<_>>()?;
-                        tuple(&tys, &args).1
-                    }
+                    Ty::Tuple(ts) => tuple(&ts.iter().map(|x| self.ty(x)).collect::<R<Vec<_>>>()?, &args).1,
                     other => return Err(format!("an aggregate constant of {other:?}")),
                 }
             }
@@ -972,16 +787,13 @@ impl<'a> Gen<'a> {
     /// a `&mut`) the code it holds followed by the rest of the path. The
     /// `Deref` of a shared reference is the snapshot itself.
     fn place(&mut self, fx: &mut FnCx, pl: &Place) -> R<PlaceC> {
-        self.live(fx, pl.local)?;
+        fx.live(pl.local)?;
         let mut t = fx.f.locals[pl.local].0.clone();
         let mut cur = PlaceC::Static(pl.local, vec![]);
         for pr in &pl.proj {
             match (pr, &t) {
                 (Proj::Deref, Ty::Ref(false, inner)) => t = (**inner).clone(),
-                (Proj::Deref, Ty::Ref(true, _)) => {
-                    let code = self.read_c(fx, &cur)?;
-                    cur = PlaceC::Dyn(code, proj_ty(&t, pr)?);
-                }
+                (Proj::Deref, Ty::Ref(true, _)) => cur = PlaceC::Dyn(self.read_c(fx, &cur)?, proj_ty(&t, pr)?),
                 (Proj::Field(..) | Proj::Downcast(_) | Proj::Index(_), _) => {
                     let nt = proj_ty(&t, pr)?;
                     cur = match cur {
@@ -989,11 +801,11 @@ impl<'a> Gen<'a> {
                             ps.push(pr.clone());
                             PlaceC::Static(k, ps)
                         }
-                        PlaceC::Dyn(code, _) => {
-                            let (rc, root) = (fx.rc.clone(), fx.root());
-                            let step = self.proj_code(fx, pr)?;
-                            let ext = format!("Some[{rc}](tuple2[{root}, List(mir::Proj)](rc::fst {root} q, seq::append mir::Proj (rc::snd {root} q) (Cons[mir::Proj]({}, Nil[mir::Proj]))))", step.1);
-                            PlaceC::Dyn(bind(&rc, &rc, &code, "q", &step.0.replace("@K@", &ext)), nt.clone())
+                        // the code extended by the projection
+                        PlaceC::Dyn(c, _) => {
+                            let (wrap, step) = self.proj_code(fx, pr)?;
+                            let ext = some(&fx.rc, &code_app(&fx.root(), "q", &format!("Cons[mir::Proj]({step}, Nil[mir::Proj])")));
+                            PlaceC::Dyn(bind(&fx.rc, &fx.rc, &c, "q", &wrap.replace("@K@", &ext)), nt.clone())
                         }
                     };
                     t = nt;
@@ -1011,37 +823,27 @@ impl<'a> Gen<'a> {
             Proj::Field(i, _) => ("@K@".into(), format!("mir::Proj::PField({i}usize)")),
             Proj::Downcast(v) => ("@K@".into(), format!("mir::Proj::PDown({v}usize)")),
             Proj::Index(l) => {
-                self.live(fx, *l)?;
-                (bind("Usize", &fx.rc, &format!("{}::g{l} s", fx.p), &format!("i{l}"), "@K@"), format!("mir::Proj::PIndex(i{l})"))
+                fx.live(*l)?;
+                (bind("Usize", &fx.rc, &fx.get(*l), &format!("i{l}"), "@K@"), format!("mir::Proj::PIndex(i{l})"))
             }
             other => return Err(format!("the projection {other:?}")),
         })
     }
 
-    fn need(&mut self, fx: &mut FnCx, t: Target) -> String {
-        let name = match &t {
-            Target::Buf => "buf".to_string(),
-            Target::Ty(ty) => tag(ty),
-        };
-        fx.targets.insert(name.clone(), t);
-        name
-    }
-
     /// Reads a compiled place: an `Option(T)` term over `s`.
     fn read_c(&mut self, fx: &mut FnCx, pc: &PlaceC) -> R<String> {
         match pc {
-            PlaceC::Static(k, ps) if ps.is_empty() => Ok(format!("{}::g{k} s", fx.p)),
+            PlaceC::Static(k, ps) if ps.is_empty() => Ok(fx.get(*k)),
             PlaceC::Static(k, ps) => {
                 let lt = fx.f.locals[*k].0.clone();
-                let ltt = self.ty_rc(&lt, &fx.rc)?;
+                let ltt = self.ty(&lt)?;
                 let (get, rt) = self.static_get(fx, &lt, ps, "x")?;
-                let rtt = self.ty_rc(&rt, &fx.rc)?;
-                Ok(bind(&ltt, &rtt, &format!("{}::g{k} s", fx.p), "x", &get))
+                Ok(bind(&ltt, &self.ty(&rt)?, &fx.get(*k), "x", &get))
             }
             PlaceC::Dyn(code, ty) => {
-                let tt = self.ty_rc(ty, &fx.rc)?;
-                let n = self.need(fx, Target::Ty(ty.clone()));
-                Ok(bind(&fx.rc, &tt, code, "q", &format!("{p}::deref__{n} s (rc::fst {r} q) (rc::snd {r} q)", p = fx.p, r = fx.root())))
+                let tt = self.ty(ty)?;
+                let n = fx.need(Target::Ty(ty.clone()));
+                Ok(bind(&fx.rc, &tt, code, "q", &fx.through("deref", &n, "q")))
             }
         }
     }
@@ -1053,30 +855,29 @@ impl<'a> Gen<'a> {
         // without ever assigning it)
         let pt = place_ty(&fx.f, pl)?;
         if is_unit(&pt) || matches!(&pt, Ty::FnDef(..)) || matches!(&pt, Ty::Closure(_, caps) if is_unit(caps)) {
-            self.live(fx, pl.local)?;
+            fx.live(pl.local)?;
             return Ok(some("Unit", "tt"));
         }
         let pc = self.place(fx, pl)?;
-        Ok(self.read_c(fx, &pc)?.replace("@RC@", &fx.rc))
+        self.read_c(fx, &pc)
     }
 
     /// Writes the variable `v` into a place: an `Option(St)` term over `s`.
     fn write(&mut self, fx: &mut FnCx, pl: &Place, v: &str) -> R<String> {
         let (st, p) = (fx.st(), fx.p.clone());
-        let r = match self.place(fx, pl)? {
+        Ok(match self.place(fx, pl)? {
             PlaceC::Static(k, ps) if ps.is_empty() => some(&st, &format!("{p}::s{k} s {v}")),
             PlaceC::Static(k, ps) => {
                 let lt = fx.f.locals[k].0.clone();
-                let ltt = self.ty_rc(&lt, &fx.rc)?;
+                let ltt = self.ty(&lt)?;
                 let set = self.static_set(fx, &lt, &ps, "x", v)?;
-                bind(&ltt, &st, &format!("{p}::g{k} s"), "x", &map(&ltt, &st, &set, "x2", &format!("{p}::s{k} s x2")))
+                bind(&ltt, &st, &fx.get(k), "x", &map(&ltt, &st, &set, "x2", &format!("{p}::s{k} s x2")))
             }
             PlaceC::Dyn(code, ty) => {
-                let n = self.need(fx, Target::Ty(ty));
-                bind(&fx.rc, &st, &code, "q", &format!("{p}::write__{n} s (rc::fst {r} q) (rc::snd {r} q) {v}", r = fx.root()))
+                let n = fx.need(Target::Ty(ty));
+                bind(&fx.rc, &st, &code, "q", &format!("{} {v}", fx.through("write", &n, "q")))
             }
-        };
-        Ok(r.replace("@RC@", &fx.rc))
+        })
     }
 
     /// `x.ps` (static projections): an `Option(T)` term, with `T`.
@@ -1084,51 +885,51 @@ impl<'a> Gen<'a> {
         if let (Ty::Ref(false, inner), Some(_)) = (t, ps.first()) {
             return self.static_get(fx, inner, ps, x);
         }
-        let Some((first, rest)) = ps.split_first() else { return Ok((some(&self.ty_rc(t, &fx.rc)?, x), t.clone())) };
+        let Some((first, rest)) = ps.split_first() else { return Ok((some(&self.ty(t)?, x), t.clone())) };
         let y = format!("{x}y");
         let (fe, ft, rest) = match (first, rest.split_first()) {
-            (Proj::Field(i, ft), _) => (self.field_of(&fx.rc, t, 0, *i, x)?, ft.clone(), rest),
-            (Proj::Downcast(v), Some((Proj::Field(i, ft), rest2))) => (self.field_of(&fx.rc, t, *v, *i, x)?, ft.clone(), rest2),
+            (Proj::Field(i, ft), _) => (self.field(t, 0, *i, x, None)?, ft.clone(), rest),
+            (Proj::Downcast(v), Some((Proj::Field(i, ft), rest2))) => (self.field(t, *v, *i, x, None)?, ft.clone(), rest2),
             (Proj::Index(l), _) => {
-                self.live(fx, *l)?;
+                fx.live(*l)?;
                 let (e, getter) = match t {
-                    Ty::Array(e, n) => ((**e).clone(), format!("mir::array_get {} {n}usize {x} i", self.ty_rc(e, &fx.rc)?)),
-                    Ty::Slice(e) => ((**e).clone(), format!("slice::get {} {x} i", self.ty_rc(e, &fx.rc)?)),
+                    Ty::Array(e, n) => ((**e).clone(), format!("mir::array_get {} {n}usize {x} i", self.ty(e)?)),
+                    Ty::Slice(e) => ((**e).clone(), format!("slice::get {} {x} i", self.ty(e)?)),
                     _ => return Err(format!("an index of {t:?}")),
                 };
                 let (inner, rt) = self.static_get(fx, &e, rest, &y)?;
-                let (et, rtt) = (self.ty_rc(&e, &fx.rc)?, self.ty_rc(&rt, &fx.rc)?);
-                return Ok((bind("Usize", &rtt, &format!("{}::g{l} s", fx.p), "i", &bind(&et, &rtt, &getter, &y, &inner)), rt));
+                let (et, rtt) = (self.ty(&e)?, self.ty(&rt)?);
+                return Ok((bind("Usize", &rtt, &fx.get(*l), "i", &bind(&et, &rtt, &getter, &y, &inner)), rt));
             }
             (pr, _) => return Err(format!("the projection {pr:?} (a downcast must be followed by a field)")),
         };
         let (inner, rt) = self.static_get(fx, &ft, rest, &y)?;
-        let (ftt, rtt) = (self.ty_rc(&ft, &fx.rc)?, self.ty_rc(&rt, &fx.rc)?);
+        let (ftt, rtt) = (self.ty(&ft)?, self.ty(&rt)?);
         Ok((bind(&ftt, &rtt, &fe, &y, &inner), rt))
     }
 
     /// `x.ps = v` (static projections): the updated `x` as an `Option(T)` term.
     fn static_set(&mut self, fx: &mut FnCx, t: &Ty, ps: &[Proj], x: &str, v: &str) -> R<String> {
-        let tt = self.ty_rc(t, &fx.rc)?;
+        let tt = self.ty(t)?;
         let Some((first, rest)) = ps.split_first() else { return Ok(some(&tt, v)) };
         let (y, z) = (format!("{x}y"), format!("{x}z"));
         let (vi, i, ft, rest) = match (first, rest.split_first()) {
             (Proj::Field(i, ft), _) => (0, *i, ft.clone(), rest),
             (Proj::Downcast(vi), Some((Proj::Field(i, ft), rest2))) => (*vi, *i, ft.clone(), rest2),
             (Proj::Index(l), _) => {
-                self.live(fx, *l)?;
+                fx.live(*l)?;
                 let Ty::Array(e, n) = t else { return Err(format!("an index update of {t:?}")) };
-                let et = self.ty_rc(e, &fx.rc)?;
+                let et = self.ty(e)?;
                 let inner = self.static_set(fx, e, rest, &y, v)?;
                 let set = bind(&et, &tt, &format!("mir::array_get {et} {n}usize {x} i"), &y, &bind(&et, &tt, &inner, &z, &format!("mir::array_set {et} {n}usize {x} i {z}")));
-                return Ok(bind("Usize", &tt, &format!("{}::g{l} s", fx.p), "i", &set));
+                return Ok(bind("Usize", &tt, &fx.get(*l), "i", &set));
             }
             (pr, _) => return Err(format!("the projection {pr:?} (a downcast must be followed by a field)")),
         };
-        let fe = self.field_of(&fx.rc, t, vi, i, x)?;
-        let ftt = self.ty_rc(&ft, &fx.rc)?;
+        let fe = self.field(t, vi, i, x, None)?;
+        let ftt = self.ty(&ft)?;
         let inner = self.static_set(fx, &ft, rest, &y, v)?;
-        let rebuilt = self.with_field(&fx.rc, t, vi, i, x, &z)?;
+        let rebuilt = self.field(t, vi, i, x, Some(&z))?;
         Ok(bind(&ftt, &tt, &fe, &y, &bind(&ftt, &tt, &inner, &z, &rebuilt)))
     }
 
@@ -1136,34 +937,30 @@ impl<'a> Gen<'a> {
     /// cell), the path followed in the root's current value. A buffer cell
     /// is read and written whole (`Target::Buf`).
     fn deref_fns(&mut self, fx: &FnCx, n: &str, t: &Target) -> R<()> {
-        let (p, st) = (fx.p.clone(), fx.st());
+        let (p, st, root) = (fx.p.clone(), fx.st(), fx.root());
         let tt = match t {
             Target::Buf => "List(U8)".to_string(),
-            Target::Ty(ty) => self.ty_rc(ty, &fx.rc)?,
+            Target::Ty(ty) => self.ty(ty)?,
         };
         let (mut darms, mut warms) = (String::new(), String::new());
-        for i in 0..fx.slot_tys.len() {
-            let rname = if i < fx.nl { format!("r{i}") } else { format!("rc{}", i - fx.nl) };
-            let rt = fx.slot_tys[i].clone();
+        for (i, rt) in fx.slot_tys.iter().enumerate() {
             let buf_cell = i >= fx.nl && is_buffer(&fx.cells[i - fx.nl].mir_ty);
             let mt = if i < fx.nl { fx.f.locals[i].0.clone() } else { fx.cells[i - fx.nl].mir_ty.clone() };
-            let get = format!("{p}::g{i} s");
             let (d, w) = match t {
                 // a buffer cell: read and written whole
                 Target::Buf if buf_cell => (
-                    bind(&rt, &tt, &get, "x", &mat("path", "List(mir::Proj)", &format!("Option({tt})"), &format!("| Nil => {} | Cons(h, t) => {}", some(&tt, "x"), none(&tt)))),
+                    bind(rt, &tt, &fx.get(i), "x", &mat("path", "List(mir::Proj)", &format!("Option({tt})"), &format!("| Nil => {} | Cons(h, t) => {}", some(&tt, "x"), none(&tt)))),
                     mat("path", "List(mir::Proj)", &format!("Option({st})"), &format!("| Nil => {} | Cons(h, t) => {}", some(&st, &format!("{p}::s{i} s v")), none(&st))),
                 ),
                 Target::Ty(ty) if !buf_cell && !fx.unmodeled.contains(&i) => match self.follow(fx, &mt, ty)? {
-                    Some((f, u)) => (bind(&rt, &tt, &get, "x", &format!("{f} x path")), bind(&rt, &st, &get, "x", &map(&rt, &st, &format!("{u} x path v"), "x2", &format!("{p}::s{i} s x2")))),
+                    Some((f, u)) => (bind(rt, &tt, &fx.get(i), "x", &format!("{f} x path")), bind(rt, &st, &fx.get(i), "x", &map(rt, &st, &format!("{u} x path v"), "x2", &format!("{p}::s{i} s x2")))),
                     None => (none(&tt), none(&st)),
                 },
                 _ => (none(&tt), none(&st)),
             };
-            let _ = write!(darms, " | {rname} => {d}");
-            let _ = write!(warms, " | {rname} => {w}");
+            let _ = write!(darms, " | {} => {d}", slot(i, fx.nl, "r", "rc"));
+            let _ = write!(warms, " | {} => {w}", slot(i, fx.nl, "r", "rc"));
         }
-        let root = fx.root();
         self.emit(&format!("{p}::deref__{n}"), format!("def[prelude] {p}::deref__{n} : (s : {st}) -> (r : {root}) -> (path : List(mir::Proj)) -> Option({tt}) := fun (s : {st}) (r : {root}) (path : List(mir::Proj)) => match r : {root} as _ return Option({tt}) with{darms} end").replace("@RC@", &fx.rc));
         self.emit(&format!("{p}::write__{n}"), format!("def[prelude] {p}::write__{n} : (s : {st}) -> (r : {root}) -> (path : List(mir::Proj)) -> (v : {tt}) -> Option({st}) := fun (s : {st}) (r : {root}) (path : List(mir::Proj)) (v : {tt}) => match r : {root} as _ return Option({st}) with{warms} end").replace("@RC@", &fx.rc));
         Ok(())
@@ -1172,70 +969,65 @@ impl<'a> Gen<'a> {
     /// `follow__A__T : A -> path -> Option(T)` and `update__A__T : A -> path
     /// -> T -> Option(A)` when `T` can occur in `A`: `PField(i)` of a struct
     /// or tuple, `PDown(v)` then `PField(i)` of an enum, `PIndex(i)` of an array.
+    /// (Each is generated as the pair `[follow, update]`.)
     fn follow(&mut self, fx: &FnCx, a: &Ty, t: &Ty) -> R<Option<(String, String)>> {
         if !occurs(self.m, t, a, 0) {
             return Ok(None);
         }
-        let tg = { let s = format!("{}__{}", tag(a), tag(t)); if s.len() > 80 { format!("h{}", fxhash(&s)) } else { s } };
+        let tg = tag(&format!("{}__{}", tag(&format!("{a:?}"), 60), tag(&format!("{t:?}"), 60)), 80);
         let (fname, uname) = (format!("{}::follow__{tg}", fx.p), format!("{}::update__{tg}", fx.p));
-        if self.emitted.contains(&fname) {
+        if !self.s.emitted.insert(fname.clone()) {
             return Ok(Some((fname, uname)));
         }
-        self.emitted.insert(fname.clone());
-        let (att, tt) = (self.ty_rc(a, &fx.rc)?, self.ty_rc(t, &fx.rc)?);
-        let (ot, oa) = (format!("Option({tt})"), format!("Option({att})"));
+        let (att, tt) = (self.ty(a)?, self.ty(t)?);
+        let (r, nn) = ([format!("Option({tt})"), format!("Option({att})")], [none(&tt), none(&att)]);
         // the steps through field `i` of variant `v` (the path's rest is `rest`)
-        let via = |g: &mut Self, v: usize, fields: &[Ty], rest: &str| -> R<(String, String)> {
-            let (mut fc, mut uc) = (Vec::new(), Vec::new());
+        let via = |g: &mut Self, v: usize, fields: &[Ty], rest: &str| -> R<[String; 2]> {
+            let mut cs = [Vec::new(), Vec::new()];
             for (i, ft) in fields.iter().enumerate() {
                 if let Some((f2, u2)) = g.follow(fx, ft, t)? {
-                    let fe = g.field_of(&fx.rc, a, v, i, "x")?;
-                    let ftt = g.ty_rc(ft, &fx.rc)?;
-                    let rebuilt = g.with_field(&fx.rc, a, v, i, "x", "z")?;
-                    fc.push((i, bind(&ftt, &tt, &fe, "y", &format!("{f2} y {rest}"))));
-                    uc.push((i, bind(&ftt, &att, &fe, "y", &bind(&ftt, &att, &format!("{u2} y {rest} v"), "z", &rebuilt))));
+                    let fe = g.field(a, v, i, "x", None)?;
+                    let ftt = g.ty(ft)?;
+                    let rebuilt = g.field(a, v, i, "x", Some("z"))?;
+                    cs[0].push((i, bind(&ftt, &tt, &fe, "y", &format!("{f2} y {rest}"))));
+                    cs[1].push((i, bind(&ftt, &att, &fe, "y", &bind(&ftt, &att, &format!("{u2} y {rest} v"), "z", &rebuilt))));
                 }
             }
-            Ok((select("i", &fc, &ot, &none(&tt)), select("i", &uc, &oa, &none(&att))))
+            Ok([0, 1].map(|j| select("i", &cs[j], &r[j], &nn[j])))
         };
-        // `PDown(v)` then `PField(i)`: the field step under the variant
-        let under = |x: &str, b: &str| mat("rest", "List(mir::Proj)", &format!("Option({x})"), &format!("| Nil => {} | Cons(h2, rest2) => match h2 : mir::Proj as _ return Option({x}) with | PField(i) => {b} | PDown(v1) => {} | PIndex(i1) => {} end", none(x), none(x), none(x)));
-        let (mut fsel, mut usel) = (none(&tt), none(&att));
-        let (mut fdown, mut udown) = (none(&tt), none(&att));
-        let (mut fidx, mut uidx) = (none(&tt), none(&att));
+        let (mut sel, mut down, mut idx) = (nn.clone(), nn.clone(), nn.clone());
         match a {
-            Ty::Tuple(ts) => (fsel, usel) = via(self, 0, ts, "rest")?,
+            Ty::Tuple(ts) => sel = via(self, 0, ts, "rest")?,
             Ty::Adt(k) if !self.adt(k)?.opaque && !self.adt(k)?.newtype => {
                 let d = self.m.adts.get(k).cloned().ok_or("no ADT")?;
                 if d.is_enum {
-                    let (mut fv, mut uv) = (Vec::new(), Vec::new());
+                    // `PDown(v)` then `PField(i)`: the field step under the variant
+                    let mut cs = [Vec::new(), Vec::new()];
                     for (_, vi) in self.adt(k)?.kctors {
                         let fields: Vec<Ty> = d.variants[vi].fields.iter().map(|f| f.1.clone()).collect();
-                        let (f1, u1) = via(self, vi, &fields, "rest2")?;
-                        fv.push((vi, under(&tt, &f1)));
-                        uv.push((vi, under(&att, &u1)));
+                        let fu = via(self, vi, &fields, "rest2")?;
+                        for (j, c) in cs.iter_mut().enumerate() {
+                            c.push((vi, mat("rest", "List(mir::Proj)", &r[j], &format!("| Nil => {} | Cons(h2, rest2) => match h2 : mir::Proj as _ return {} with | PField(i) => {} | PDown(v1) => {} | PIndex(i1) => {} end", nn[j], r[j], fu[j], nn[j], nn[j]))));
+                        }
                     }
-                    (fdown, udown) = (select("v0", &fv, &ot, &none(&tt)), select("v0", &uv, &oa, &none(&att)));
+                    down = [0, 1].map(|j| select("v0", &cs[j], &r[j], &nn[j]));
                 } else if let Some(v) = d.variants.first() {
-                    let fields: Vec<Ty> = v.fields.iter().map(|f| f.1.clone()).collect();
-                    (fsel, usel) = via(self, 0, &fields, "rest")?;
+                    sel = via(self, 0, &v.fields.iter().map(|f| f.1.clone()).collect::<Vec<Ty>>(), "rest")?;
                 }
             }
             Ty::Array(e, n) => {
                 if let Some((f2, u2)) = self.follow(fx, e, t)? {
-                    let et = self.ty_rc(e, &fx.rc)?;
-                    fidx = bind(&et, &tt, &format!("mir::array_get {et} {n}usize x i0"), "y", &format!("{f2} y rest"));
-                    uidx = bind(&et, &att, &format!("mir::array_get {et} {n}usize x i0"), "y", &bind(&et, &att, &format!("{u2} y rest v"), "z", &format!("mir::array_set {et} {n}usize x i0 z")));
+                    let et = self.ty(e)?;
+                    let get = format!("mir::array_get {et} {n}usize x i0");
+                    idx = [bind(&et, &tt, &get, "y", &format!("{f2} y rest")), bind(&et, &att, &get, "y", &bind(&et, &att, &format!("{u2} y rest v"), "z", &format!("mir::array_set {et} {n}usize x i0 z")))];
                 }
             }
             _ => {}
         }
-        let here = a == t;
-        let body = |nil: String, sel: &str, down: &str, idx: &str, r: &str| mat("path", "List(mir::Proj)", r, &format!("| Nil => {nil} | Cons(h, rest) => match h : mir::Proj as _ return {r} with | PField(i) => {sel} | PDown(v0) => {down} | PIndex(i0) => {idx} end"));
-        let fdef = format!("def[prelude] {fname} : (x : {att}) -> (path : List(mir::Proj)) -> {ot} := fun (x : {att}) (path : List(mir::Proj)) => {}", body(if here { some(&tt, "x") } else { none(&tt) }, &fsel, &fdown, &fidx, &ot));
-        let udef = format!("def[prelude] {uname} : (x : {att}) -> (path : List(mir::Proj)) -> (v : {tt}) -> {oa} := fun (x : {att}) (path : List(mir::Proj)) (v : {tt}) => {}", body(if here { some(&att, "v") } else { none(&att) }, &usel, &udown, &uidx, &oa));
-        self.out.push_str(&(fdef.replace("@RC@", &fx.rc) + "\n"));
-        self.emit(&uname, udef.replace("@RC@", &fx.rc));
+        let here = if a == t { [some(&tt, "x"), some(&att, "v")] } else { nn.clone() };
+        let body = |j: usize| mat("path", "List(mir::Proj)", &r[j], &format!("| Nil => {} | Cons(h, rest) => match h : mir::Proj as _ return {} with | PField(i) => {} | PDown(v0) => {} | PIndex(i0) => {} end", here[j], r[j], sel[j], down[j], idx[j]));
+        let _ = writeln!(self.out, "{}", format!("def[prelude] {fname} : (x : {att}) -> (path : List(mir::Proj)) -> {} := fun (x : {att}) (path : List(mir::Proj)) => {}", r[0], body(0)).replace("@RC@", &fx.rc));
+        self.emit(&uname, format!("def[prelude] {uname} : (x : {att}) -> (path : List(mir::Proj)) -> (v : {tt}) -> {} := fun (x : {att}) (path : List(mir::Proj)) (v : {tt}) => {}", r[1], body(1)).replace("@RC@", &fx.rc));
         Ok(Some((fname, uname)))
     }
 }
@@ -1243,51 +1035,34 @@ impl<'a> Gen<'a> {
 // ----- rvalues ----------------------------------------------------------------
 
 /// Binary operators on words (`BinOp`): the L term over the bits `a`, `b`
-/// (`{s}`: a shift amount as a `u32`), the result (`w` the operands' type,
+/// (`{s}`: a shift amount as a `u32`) of unsigned operands, the term over
+/// signed bits (two's complement: `=` the same term; `""`: not read, the
+/// bits' meaning is not the signed one), the result (`w` the operands' type,
 /// `b` `Bool`, `o` `Ordering`), and whether it is total (else `Option`-valued).
-/// Signed operands use the rows marked signed-safe on their bits, `lt`..`ge`
-/// as signed comparisons and `shr` as the arithmetic shift.
-const BINOPS: &[(&str, &str, char, bool)] = &[
-    ("add", "#wadd_{w}({a}, {b})", 'w', true),
-    ("sub", "#wsub_{w}({a}, {b})", 'w', true),
-    ("mul", "#wmul_{w}({a}, {b})", 'w', true),
-    ("add-unchecked", "mir::add_unchecked_{w} {a} {b}", 'w', false),
-    ("sub-unchecked", "mir::sub_unchecked_{w} {a} {b}", 'w', false),
-    ("mul-unchecked", "mir::mul_unchecked_{w} {a} {b}", 'w', false),
-    ("div", "mir::div_{w} {a} {b}", 'w', false),
-    ("rem", "mir::rem_{w} {a} {b}", 'w', false),
-    ("shl", "#wshl_{w}({a}, {s})", 'w', true),
-    ("shr", "#wshr_{w}({a}, {s})", 'w', true),
-    ("shl-unchecked", "mir::shl_unchecked_{w} {a} ({s})", 'w', false),
-    ("shr-unchecked", "mir::shr_unchecked_{w} {a} ({s})", 'w', false),
-    ("and", "#and_{w}({a}, {b})", 'w', true),
-    ("or", "#or_{w}({a}, {b})", 'w', true),
-    ("xor", "#xor_{w}({a}, {b})", 'w', true),
-    ("eq", "#eq_{w}({a}, {b})", 'b', true),
-    ("ne", "#ne_{w}({a}, {b})", 'b', true),
-    ("lt", "#lt_{w}({a}, {b})", 'b', true),
-    ("le", "#le_{w}({a}, {b})", 'b', true),
-    ("gt", "#gt_{w}({a}, {b})", 'b', true),
-    ("ge", "#ge_{w}({a}, {b})", 'b', true),
-    ("cmp", "mir::cmp_{w} {a} {b}", 'o', true),
-];
-/// The same operators on signed bits (two's complement): only those whose
-/// meaning on the bits is the signed one.
-const SIGNED_BINOPS: &[(&str, &str, char, bool)] = &[
-    ("add", "#wadd_{w}({a}, {b})", 'w', true),
-    ("sub", "#wsub_{w}({a}, {b})", 'w', true),
-    ("mul", "#wmul_{w}({a}, {b})", 'w', true),
-    ("shl", "#wshl_{w}({a}, {s})", 'w', true),
-    ("shr", "mir::sar_{w} {a} ({s})", 'w', true),
-    ("and", "#and_{w}({a}, {b})", 'w', true),
-    ("or", "#or_{w}({a}, {b})", 'w', true),
-    ("xor", "#xor_{w}({a}, {b})", 'w', true),
-    ("eq", "#eq_{w}({a}, {b})", 'b', true),
-    ("ne", "#ne_{w}({a}, {b})", 'b', true),
-    ("lt", "mir::slt_{w} {a} {b}", 'b', true),
-    ("le", "mir::sle_{w} {a} {b}", 'b', true),
-    ("gt", "mir::slt_{w} {b} {a}", 'b', true),
-    ("ge", "mir::sle_{w} {b} {a}", 'b', true),
+const BINOPS: &[(&str, &str, &str, char, bool)] = &[
+    ("add", "#wadd_{w}({a}, {b})", "=", 'w', true),
+    ("sub", "#wsub_{w}({a}, {b})", "=", 'w', true),
+    ("mul", "#wmul_{w}({a}, {b})", "=", 'w', true),
+    ("add-unchecked", "mir::add_unchecked_{w} {a} {b}", "", 'w', false),
+    ("sub-unchecked", "mir::sub_unchecked_{w} {a} {b}", "", 'w', false),
+    ("mul-unchecked", "mir::mul_unchecked_{w} {a} {b}", "", 'w', false),
+    ("div", "mir::div_{w} {a} {b}", "", 'w', false),
+    ("rem", "mir::rem_{w} {a} {b}", "", 'w', false),
+    ("shl", "#wshl_{w}({a}, {s})", "=", 'w', true),
+    // (an arithmetic shift on signed bits)
+    ("shr", "#wshr_{w}({a}, {s})", "mir::sar_{w} {a} ({s})", 'w', true),
+    ("shl-unchecked", "mir::shl_unchecked_{w} {a} ({s})", "", 'w', false),
+    ("shr-unchecked", "mir::shr_unchecked_{w} {a} ({s})", "", 'w', false),
+    ("and", "#and_{w}({a}, {b})", "=", 'w', true),
+    ("or", "#or_{w}({a}, {b})", "=", 'w', true),
+    ("xor", "#xor_{w}({a}, {b})", "=", 'w', true),
+    ("eq", "#eq_{w}({a}, {b})", "=", 'b', true),
+    ("ne", "#ne_{w}({a}, {b})", "=", 'b', true),
+    ("lt", "#lt_{w}({a}, {b})", "mir::slt_{w} {a} {b}", 'b', true),
+    ("le", "#le_{w}({a}, {b})", "mir::sle_{w} {a} {b}", 'b', true),
+    ("gt", "#gt_{w}({a}, {b})", "mir::slt_{w} {b} {a}", 'b', true),
+    ("ge", "#ge_{w}({a}, {b})", "mir::sle_{w} {b} {a}", 'b', true),
+    ("cmp", "mir::cmp_{w} {a} {b}", "", 'o', true),
 ];
 /// Intrinsic calls: (name, result: `w` the argument's type, `u` `U32`, `p`
 /// the pair (value, overflow flag)), the L term over `a0`, `a1` at `{w}`.
@@ -1326,7 +1101,7 @@ const INDEX_LEAVES: &[(&str, &str)] = &[
 impl<'a> Gen<'a> {
     /// An rvalue as an `Option(T)` term over `s`.
     fn rvalue(&mut self, fx: &mut FnCx, rv: &Rvalue, dt: &Ty) -> R<String> {
-        let dtt = self.ty_rc(dt, &fx.rc)?;
+        let dtt = self.ty(dt)?;
         Ok(match rv {
             Rvalue::Use(o) => self.operand(fx, o)?,
             Rvalue::Bin(op, a, b) => self.binop(fx, op, a, b)?,
@@ -1338,17 +1113,17 @@ impl<'a> Gen<'a> {
                 let pt = format!("Tuple2({wt}, Bool)");
                 bind(&wt, &pt, &av, "a", &map(&wt, &pt, &bv, "b", &format!("mir::checked_{op}_{w} a b")))
             }
+            // `UnOp`: `Not` of a `bool` or bits, `Neg` of signed bits, the metadata of a slice reference (its length)
             Rvalue::Un(op, a) => {
                 let ta = op_ty(&fx.f, a)?;
-                let (av, tat) = (self.operand(fx, a)?, self.ty_rc(&ta, &fx.rc)?);
+                let (av, tat) = (self.operand(fx, a)?, self.ty(&ta)?);
                 let e = match (op.as_str(), &ta, bits(&ta, "x")) {
                     ("not", Ty::Bool, _) => "bool::not x".to_string(),
                     ("not", _, Some((w, b))) => of_bits(&ta, &format!("#not_{w}({b})")),
                     ("neg", _, Some((w, b))) if signed(&ta) => of_bits(&ta, &format!("#wneg_{w}({b})")),
-                    // the metadata of a slice reference: its length
                     ("ptr-metadata", Ty::Ref(false, inner), _) if matches!(&**inner, Ty::Slice(_)) => {
                         let Ty::Slice(e) = &**inner else { unreachable!() };
-                        format!("slice::len {} x", self.ty_rc(e, &fx.rc)?)
+                        format!("slice::len {} x", self.ty(e)?)
                     }
                     _ => return Err(format!("the unary {op} on {ta:?}")),
                 };
@@ -1360,19 +1135,19 @@ impl<'a> Gen<'a> {
             Rvalue::Discr(q) => {
                 let qt = place_ty(&fx.f, q)?;
                 let Ty::Adt(k) = &qt else { return Err(format!("the discriminant of {qt:?}")) };
-                let (v, qtt) = (self.read(fx, q)?, self.ty_rc(&qt, &fx.rc)?);
+                let (v, qtt) = (self.read(fx, q)?, self.ty(&qt)?);
                 let dfn = self.discr_fn(fx, k, dt)?;
                 map(&qtt, &dtt, &v, "x", &format!("{dfn} x"))
             }
             // `[x; N]`: the array of `N` copies
             Rvalue::Repeat(o, n) => {
-                let ott = self.ty_rc(&op_ty(&fx.f, o)?, &fx.rc)?;
+                let ott = self.ty(&op_ty(&fx.f, o)?)?;
                 map(&ott, &dtt, &self.operand(fx, o)?, "x", &format!("array::repeat {ott} {n}usize x .refl(Int, {n}int)"))
             }
             Rvalue::Agg(kind, ops) => {
                 let (mut vals, mut tys) = (Vec::new(), Vec::new());
                 for o in ops {
-                    tys.push(self.ty_rc(&op_ty(&fx.f, o)?, &fx.rc)?);
+                    tys.push(self.ty(&op_ty(&fx.f, o)?)?);
                     vals.push(self.operand(fx, o)?);
                 }
                 let vars: Vec<String> = (0..vals.len()).map(|i| format!("a{i}")).collect();
@@ -1381,13 +1156,13 @@ impl<'a> Gen<'a> {
                     AggKind::Adt(Ty::Adt(k), v) => self.ctor(k, *v, &vars)?,
                     // `[a0, ..]`: the list of its elements, with its length
                     AggKind::Array(et) => {
-                        let ett = self.ty_rc(et, &fx.rc)?;
+                        let ett = self.ty(et)?;
                         let l = vars.iter().rev().fold(format!("Nil[{ett}]"), |l, v| format!("Cons[{ett}]({v}, {l})"));
                         format!("pair(Array {ett} {}usize, {l}, refl(Int, {}int))", vars.len(), vars.len())
                     }
                     other => return Err(format!("the aggregate {other:?}")),
                 };
-                vals.iter().zip(tys.iter()).enumerate().rev().fold(some(&dtt, &built), |e, (i, (v, t))| bind(t, &dtt, v, &format!("a{i}"), &e))
+                binds(&vals, &tys, &dtt, "a", some(&dtt, &built))
             }
             Rvalue::Ref(k, _) => return Err(format!("a {k} borrow")),
             Rvalue::Len(_) => return Err("`Len`".into()),
@@ -1398,24 +1173,23 @@ impl<'a> Gen<'a> {
     /// `L::discr__<ADT>`: each variant's discriminant at the destination's width.
     fn discr_fn(&mut self, fx: &FnCx, k: &str, dt: &Ty) -> R<String> {
         let (w, _) = bits(dt, "").ok_or_else(|| format!("a discriminant of type {dt:?}"))?;
-        let (d, mut a) = (self.m.adts.get(k).cloned().ok_or("no ADT")?, self.adt(k)?);
+        let (d, a) = (self.m.adts.get(k).cloned().ok_or("no ADT")?, self.adt(k)?);
         // (a type holding a `&mut` holds this function's codes: its own function)
         let owner = if a.ty.contains("@RC@") { format!("{}::", fx.p) } else { "L::".into() };
-        a.ty = a.ty.replace("@RC@", &fx.rc);
+        let at = a.ty.replace("@RC@", &fx.rc);
         let name = format!("{owner}discr__{}__{w}", if k.len() > 60 { format!("h{}", fxhash(k)) } else { sanitize(k) });
         if a.newtype || a.opaque {
             return Err(format!("the discriminant of the model type `{}`", d.path));
         }
-        let arms = self.arms(k, "x", |_, vi, _| Ok(of_bits(dt, &format!("{}{w}", (d.variants[vi].discr as u128) & mask(bits_of(w))))))?;
+        let arms = self.arms(k, "x", |_, vi, _| Ok(of_bits(dt, &word_lit(d.variants[vi].discr as u128, w))))?;
         let dtt = self.ty(dt)?;
-        self.emit(&name, format!("def[prelude] {name} : (x : {}) -> {dtt} := fun (x : {}) => match x : {} as _ return {dtt} with{arms} end", a.ty, a.ty, a.ty));
+        self.emit(&name, format!("def[prelude] {name} : (x : {at}) -> {dtt} := fun (x : {at}) => match x : {at} as _ return {dtt} with{arms} end"));
         Ok(name)
     }
 
     /// `&mut place`: its reference code (an index projection stores the
     /// index's value now); `&mut *r` is the code `r` holds, extended.
     fn borrow(&mut self, fx: &mut FnCx, q: &Place) -> R<String> {
-        let (rc, root) = (fx.rc.clone(), fx.root());
         Ok(match self.place(fx, q)? {
             PlaceC::Static(k, ps) => {
                 let (mut wraps, mut path) = (Vec::new(), "Nil[mir::Proj]".to_string());
@@ -1424,8 +1198,8 @@ impl<'a> Gen<'a> {
                     wraps.push(w);
                     path = format!("Cons[mir::Proj]({c}, {path})");
                 }
-                let code = some(&rc, &format!("tuple2[{root}, List(mir::Proj)]({root}::r{k}, {path})"));
-                wraps.iter().fold(code, |acc, w| w.replace("@K@", &acc))
+                let root = fx.root();
+                wraps.iter().fold(some(&fx.rc, &code(&root, &format!("{root}::r{k}"), &path)), |acc, w| w.replace("@K@", &acc))
             }
             PlaceC::Dyn(code, _) => code,
         })
@@ -1434,15 +1208,15 @@ impl<'a> Gen<'a> {
     fn binop(&mut self, fx: &mut FnCx, op: &str, a: &Operand, b: &Operand) -> R<String> {
         let (ta, tb) = (op_ty(&fx.f, a)?, op_ty(&fx.f, b)?);
         let (av, bv) = (self.operand(fx, a)?, self.operand(fx, b)?);
-        let (tat, tbt) = (self.ty_rc(&ta, &fx.rc)?, self.ty_rc(&tb, &fx.rc)?);
+        let (tat, tbt) = (self.ty(&ta)?, self.ty(&tb)?);
         let (rt, body, total) = if ta == Ty::Bool {
             let e = ["and", "or", "xor", "eq", "ne"].iter().find(|o| **o == op).ok_or_else(|| format!("{op} on booleans"))?;
             ("Bool".to_string(), format!("bool::{e} a b"), true)
         } else {
             let (w, ab) = bits(&ta, "a").ok_or_else(|| format!("{op} on {ta:?}"))?;
             let (_, bb) = bits(&tb, "b").ok_or_else(|| format!("{op} with an operand of {tb:?}"))?;
-            let table = if signed(&ta) { SIGNED_BINOPS } else { BINOPS };
-            let (_, tmpl, res, total) = table.iter().find(|r| r.0 == op).ok_or_else(|| format!("the operator {op} on {ta:?}"))?;
+            let sg = signed(&ta);
+            let (_, ut, stm, res, total) = BINOPS.iter().find(|r| r.0 == op && !(sg && r.2.is_empty())).ok_or_else(|| format!("the operator {op} on {ta:?}"))?;
             // a shift amount as a `u32` (its bits: MIR masks or bounds it)
             let s = match bits(&tb, "b") {
                 Some(("u32", x)) => x,
@@ -1452,7 +1226,7 @@ impl<'a> Gen<'a> {
             if op.starts_with("sh") && s.is_empty() {
                 return Err(format!("{op} on {ta:?}"));
             }
-            let mut e = tmpl.replace("{w}", w).replace("{s}", &s).replace("{a}", &ab).replace("{b}", &bb);
+            let mut e = (if sg && *stm != "=" { stm } else { ut }).replace("{w}", w).replace("{s}", &s).replace("{a}", &ab).replace("{b}", &bb);
             // `ShlUnchecked`/`ShrUnchecked` by an amount of another width: undefined
             // behaviour unless the amount itself (not its low 32 bits) is below the width
             if op.ends_with("-unchecked") && op.starts_with("sh")
@@ -1476,12 +1250,9 @@ impl<'a> Gen<'a> {
     /// of `&[T; N]` to `&[T]`.
     fn cast(&mut self, fx: &mut FnCx, kind: &str, a: &Operand, to: &Ty) -> R<String> {
         let from = op_ty(&fx.f, a)?;
-        let (av, ft, tt) = (self.operand(fx, a)?, self.ty_rc(&from, &fx.rc)?, self.ty_rc(to, &fx.rc)?);
+        let (av, ft, tt) = (self.operand(fx, a)?, self.ty(&from)?, self.ty(to)?);
         let e = match (kind, &from, to) {
-            ("int-to-int", Ty::Bool, _) => {
-                let (w, _) = bits(to, "").ok_or_else(|| format!("a cast of a bool to {to:?}"))?;
-                of_bits(to, &format!("mir::bool_as_{w} x"))
-            }
+            ("int-to-int", Ty::Bool, _) => of_bits(to, &format!("mir::bool_as_{} x", bits(to, "").ok_or_else(|| format!("a cast of a bool to {to:?}"))?.0)),
             ("int-to-int", _, _) => {
                 let ((fw, fb), (tw, _)) = (bits(&from, "x").ok_or("a cast from a non-integer")?, bits(to, "").ok_or("a cast to a non-integer")?);
                 let c = if fw == tw {
@@ -1500,7 +1271,7 @@ impl<'a> Gen<'a> {
             }
             ("unsize", Ty::Ref(false, fa), Ty::Ref(false, tb)) if matches!((&**fa, &**tb), (Ty::Array(..), Ty::Slice(_))) => {
                 let Ty::Array(e, n) = &**fa else { unreachable!() };
-                return Ok(bind(&ft, &tt, &av, "x", &format!("mir::as_slice {} {n}usize x", self.ty_rc(e, &fx.rc)?)));
+                return Ok(bind(&ft, &tt, &av, "x", &format!("mir::as_slice {} {n}usize x", self.ty(e)?)));
             }
             _ => return Err(format!("the cast {kind} {from:?} -> {to:?}")),
         };
@@ -1512,7 +1283,7 @@ impl<'a> Gen<'a> {
     /// `Call`: then the jump to the target.
     #[allow(clippy::too_many_arguments)]
     fn call(&mut self, fx: &mut FnCx, b: usize, callee: &Callee, args: &[Operand], dest: &Place, target: Option<usize>, os: &str) -> R<String> {
-        let (st, rb) = (fx.st(), fx.rank(b));
+        let st = fx.st();
         let t = target.ok_or("a call that does not return")?;
         let after = match callee {
             Callee::Diverge(n) => return Err(format!("a call of the diverging `{n}`")),
@@ -1528,26 +1299,26 @@ impl<'a> Gen<'a> {
                     _ => wt.clone(),
                 };
                 let vals: Vec<String> = args.iter().map(|a| self.operand(fx, a)).collect::<R<_>>()?;
-                let e = vals.iter().enumerate().rev().fold(some(&rt, &tmpl.replace("{w}", w)), |e, (i, v)| bind(&wt, &rt, v, &format!("a{i}"), &e));
-                bind(&st, &st, os, "s", &bind(&rt, &st, &e, "r", &self.write(fx, dest, "r")?))
+                let e = binds(&vals, &vec![wt; vals.len()], &rt, "a", some(&rt, &tmpl.replace("{w}", w)));
+                self.result(fx, dest, os, &rt, &e)?
             }
             Callee::Leaf(path, tys) => self.leaf(fx, path, tys, args, dest, os)?,
             // `Deref::deref` of a library newtype of bytes (its MIR is not exported)
             Callee::Fn(k2) if !self.m.fns.get(k2).is_some_and(|g| g.has_body) => {
                 let at = args.first().map(|a| op_ty(&fx.f, a)).transpose()?;
-                let n = match at.as_ref().map(|t| self.ty_rc(t, &fx.rc)).transpose()?.as_deref() {
+                let n = match at.as_ref().map(|t| self.ty(t)).transpose()?.as_deref() {
                     Some(s) if k2.ends_with("as std::ops::Deref>::deref") => s.strip_prefix("(Array U8 ").and_then(|r| r.strip_suffix("usize)")).map(str::to_string),
                     _ => None,
                 };
                 let n = n.ok_or_else(|| format!("`{k2}`, which has no MIR body"))?;
                 self.leaf_def("leaf::bytes_deref");
                 let e = bind(&format!("(Array U8 {n}usize)"), "(Slice U8)", &self.operand(fx, &args[0])?, "x", &format!("leaf::bytes_deref {n}usize x"));
-                bind(&st, &st, os, "s", &bind("(Slice U8)", &st, &e, "r", &self.write(fx, dest, "r")?))
+                self.result(fx, dest, os, "(Slice U8)", &e)?
             }
             Callee::Fn(k2) => return self.call_fn(fx, b, k2, args, dest, t, os),
             Callee::Unextracted(k) | Callee::Unsupported(k) => return Err(format!("a call of `{k}`, which was not extracted")),
         };
-        Ok(self.jump(fx, rb, t, &after))
+        Ok(self.jump(fx, fx.rank(b), t, &after))
     }
 
     /// A call of a function with MIR (§20.4 "Calls"): the callee's `run` on
@@ -1557,18 +1328,18 @@ impl<'a> Gen<'a> {
     /// cells or its result) are translated back to the caller's codes.
     #[allow(clippy::too_many_arguments)]
     fn call_fn(&mut self, fx: &mut FnCx, b: usize, k2: &str, args: &[Operand], dest: &Place, t: usize, os: &str) -> R<String> {
-        let (st, p, rc, root, rb) = (fx.st(), fx.p.clone(), fx.rc.clone(), fx.root(), fx.rank(b));
+        let (st, p, rc, rb) = (fx.st(), fx.p.clone(), fx.rc.clone(), fx.rank(b));
         let g = self.m.fns.get(k2).cloned().ok_or("no MIR")?;
         let self_call = k2 == fx.key;
-        let gl = if self_call { self.fns.get(k2).cloned().ok_or("self")? } else { self.function(k2).map_err(|e| format!("the callee `{k2}`: {e}"))? };
+        let gl = if self_call { self.s.fns.get(k2).cloned().ok_or("self")? } else { self.function(k2).map_err(|e| format!("the callee `{k2}`: {e}"))? };
         // the arguments (a closure body takes its parameters one by one, its
         // callers pass their tuple; a shim with `spread-arg` keeps the tuple)
         let mut argv: Vec<(String, Ty)> = args.iter().map(|a| Ok((self.operand(fx, a)?, op_ty(&fx.f, a)?))).collect::<R<_>>()?;
         if matches!(g.item, Item::Closure) && let Some((tv, tt)) = argv.pop() {
             let Ty::Tuple(ts) = &tt else { return Err(format!("a closure called with {tt:?}")) };
-            let ttt = self.ty_rc(&tt, &rc)?;
+            let ttt = self.ty(&tt)?;
             for (i, ft) in ts.iter().enumerate() {
-                let (fe, ftt) = (self.field_of(&rc, &tt, 0, i, "tp")?, self.ty_rc(ft, &rc)?);
+                let (fe, ftt) = (self.field(&tt, 0, i, "tp", None)?, self.ty(ft)?);
                 argv.push((bind(&ttt, &ftt, &tv, "tp", &fe), ft.clone()));
             }
         }
@@ -1576,18 +1347,13 @@ impl<'a> Gen<'a> {
             return Err(format!("`{k2}` takes {} arguments, called with {}", g.argc, argv.len()));
         }
         let (gp, grc) = (format!("L::{}", gl.id), format!("Tuple2(L::{}::Root, List(mir::Proj))", gl.id));
-        let groot = format!("{gp}::Root");
-        let gcode = |j: usize| format!("tuple2[{groot}, List(mir::Proj)]({groot}::rc{j}, Nil[mir::Proj])");
-        let orc = format!("Option({rc})");
-        let mut pre = String::new();
-        let mut closers = 0;
-        let mut open = |pre: &mut String, a: &str, v: &str, x: &str| {
-            let _ = write!(pre, "mir::bind {a} {st} ({v}) (fun ({x} : {a}) => ");
-            closers += 1;
-        };
+        let gcode = |j: usize| code(&format!("{gp}::Root"), &format!("{gp}::Root::rc{j}"), "Nil[mir::Proj]");
+        let (orc, ost) = (format!("Option({rc})"), format!("Option({st})"));
+        // around the callee's run: the arguments `a<i>`, then per cell `cc<j>` and `cv<j>`
+        // (`(let, type, value, binder)`)
+        let mut pre: Vec<(String, String, String, String)> = Vec::new();
         for (i, (v, at)) in argv.iter().enumerate() {
-            let att = self.ty_rc(at, &rc)?;
-            open(&mut pre, &att, v, &format!("a{i}"));
+            pre.push((String::new(), self.ty(at)?, v.clone(), format!("a{i}")));
         }
         // each callee cell: the caller's code (`cc<j> : Option(RC)`, `None` for
         // an absent optional referent), its initial value (`cv<j>`, read
@@ -1601,20 +1367,20 @@ impl<'a> Gen<'a> {
         for (j, c) in gl.cells.iter().enumerate() {
             let a = format!("a{}", c.param - 1);
             let buffer = is_buffer(&c.mir_ty);
-            let n = self.need(fx, if buffer { Target::Buf } else { Target::Ty(c.mir_ty.clone()) });
-            let (ct, ctr) = (c.ty.replace("@RC@", &grc), if buffer { "List(U8)".to_string() } else { self.ty_rc(&c.mir_ty, &rc)? });
+            let n = fx.need(if buffer { Target::Buf } else { Target::Ty(c.mir_ty.clone()) });
+            let (ct, ctr) = (c.ty.replace("@RC@", &grc), if buffer { "List(U8)".to_string() } else { self.ty(&c.mir_ty)? });
             let cc = match c.parent {
                 None if c.optional => a.clone(),
                 None => some(&rc, &a),
                 // the parent's referent holds this referent's code
                 Some(k) => {
-                    let (pn, ptt) = (self.need(fx, Target::Ty(gl.cells[k].mir_ty.clone())), self.ty_rc(&gl.cells[k].mir_ty, &rc)?);
+                    let (pn, ptt) = (fx.need(Target::Ty(gl.cells[k].mir_ty.clone())), self.ty(&gl.cells[k].mir_ty)?);
                     let inner = if c.optional { "v".to_string() } else { some(&rc, "v") };
-                    bind(&rc, &rc, &format!("cc{k}"), "q", &bind(&ptt, &rc, &format!("{p}::deref__{pn} s (rc::fst {root} q) (rc::snd {root} q)"), "v", &inner))
+                    bind(&rc, &rc, &format!("cc{k}"), "q", &bind(&ptt, &rc, &fx.through("deref", &pn, "q"), "v", &inner))
                 }
             };
             let child = (j + 1..ncells).find(|x| gl.cells[*x].parent == Some(j));
-            if child.is_none() && !buffer && (matches!(c.mir_ty, Ty::Ref(true, _)) || opt_mut(self.m, &c.mir_ty).is_some()) {
+            if child.is_none() && !buffer && holds_ref(self.m, &c.mir_ty) {
                 return Err(format!("a referent holding a reference of `{k2}` beyond one level"));
             }
             let xin = match child {
@@ -1622,10 +1388,9 @@ impl<'a> Gen<'a> {
                 Some(n2) => gcode(n2),
                 None => "v".to_string(),
             };
-            let (oct, ost) = (format!("Option({ct})"), format!("Option({st})"));
-            let cv = mat(&format!("cc{j}"), &orc, &format!("Option({oct})"), &format!("| None => {} | Some(q) => {}", some(&oct, &none(&ct)), map(&ctr, &oct, &format!("{p}::deref__{n} s (rc::fst {root} q) (rc::snd {root} q)"), "v", &some(&ct, &xin))));
-            let _ = write!(pre, "let cc{j} : {orc} = {cc}; ");
-            open(&mut pre, &oct, &cv, &format!("cv{j}"));
+            let oct = format!("Option({ct})");
+            let cv = mat(&format!("cc{j}"), &orc, &format!("Option({oct})"), &format!("| None => {} | Some(q) => {}", some(&oct, &none(&ct)), map(&ctr, &oct, &fx.through("deref", &n, "q"), "v", &some(&ct, &xin))));
+            pre.push((format!("let cc{j} : {orc} = {cc}; "), oct.clone(), cv, format!("cv{j}")));
             slots[nl + j] = format!("cv{j}");
             if c.parent.is_none() {
                 let pt = gl.local_tys[c.param].replace("@RC@", &grc);
@@ -1633,10 +1398,11 @@ impl<'a> Gen<'a> {
             }
             // the write-back: the final value (`None`: the callee lost it) through the caller's code
             let fin = if c.optional { parts[j].clone() } else { some(&ct, &parts[j]) };
-            let wb = format!("{p}::write__{n} s (rc::fst {root} q) (rc::snd {root} q)");
+            let wb = fx.through("write", &n, "q");
             let back = if buffer { format!("{wb} w") } else { bind(&ctr, &st, &self.xout(&gl, fx, &c.mir_ty, "w")?, "w2", &format!("{wb} w2")) };
             steps.push(mat(&format!("cc{j}"), &orc, &ost, &format!("| None => {} | Some(q) => {}", some(&st, "s"), mat(&fin, &oct, &ost, &format!("| None => {} | Some(w) => {back}", none(&st))))));
         }
+        // the other parameters' slots: their arguments; the other locals: uninitialized
         for (i, s) in slots.iter_mut().enumerate().take(nl) {
             if s.is_empty() {
                 let lt = gl.local_tys[i].replace("@RC@", &grc);
@@ -1647,22 +1413,13 @@ impl<'a> Gen<'a> {
         let init = some(&gst, &format!("{gst}::st({})", slots.join(", ")));
         let run = if self_call { format!("rec(f1, {p}::Blk::b0, {init}; {})", decrease(&p, &fx.cur, fx.rank(0), rb, true)) } else { format!("{gp}::run fuel {gp}::Blk::b0 ({init})") };
         let dt = place_ty(&fx.f, dest)?;
-        if has_ret {
-            let dtt = self.ty_rc(&dt, &rc)?;
-            steps.push(bind(&dtt, &st, &self.xout(&gl, fx, &g.locals[0].0, &parts[nparts - 1])?, "rr", &self.write(fx, dest, "rr")?));
-        } else {
-            steps.push(self.write(fx, dest, "tt")?);
-        }
+        steps.push(if has_ret { bind(&self.ty(&dt)?, &st, &self.xout(&gl, fx, &g.locals[0].0, &parts[nparts - 1])?, "rr", &self.write(fx, dest, "rr")?) } else { self.write(fx, dest, "tt")? });
         let chain = steps.iter().rev().fold(some(&st, "s"), |acc, stp| bind(&st, &st, stp, "s", &acc));
-        let gout = gl.out_ty.clone();
-        let body = if nparts > 1 { mat("res", &gout, &format!("Option({st})"), &format!("| {}({}) => {chain}", tuple_pat(nparts), parts.join(", "))) } else { chain };
-        let full = bind(&st, &st, os, "s", &format!("{pre}{}{}", bind(&gout, &st, &run, "res", &body), ")".repeat(closers)));
-        Ok(if self_call {
-            let o = &fx.out_ty;
-            format!("match fuel : List(Unit) as yf return Option({o}) using .ef with | Nil => None[{o}] | Cons(u, f1) => rec(f1, {p}::Blk::b{t}, {full}; {}) end", decrease(&p, &fx.cur, fx.rank(t), rb, true))
-        } else {
-            self.jump(fx, rb, t, &full)
-        })
+        let body = if nparts > 1 { mat("res", &gl.out_ty, &ost, &format!("| {}({}) => {chain}", tuple_pat(nparts), parts.join(", "))) } else { chain };
+        let called = pre.iter().rev().fold(bind(&gl.out_ty, &st, &run, "res", &body), |acc, (l, a, v, x)| format!("{l}{}", bind(a, &st, v, x, &acc)));
+        let full = bind(&st, &st, os, "s", &called);
+        // (a self-call consumes one unit of fuel)
+        Ok(if self_call { fuel_jump(fx, rb, t, &full) } else { self.jump(fx, rb, t, &full) })
     }
 
     /// A value of MIR type `t` in the callee `gl`'s terms, in the caller's
@@ -1671,15 +1428,15 @@ impl<'a> Gen<'a> {
     /// occur (a dangling reference) and is `None`.
     fn xout(&mut self, gl: &LFn, fx: &FnCx, t: &Ty, v: &str) -> R<String> {
         let (rc, root) = (fx.rc.as_str(), fx.root());
-        let (tt, groot, orc) = (self.ty_rc(t, rc)?, format!("L::{}::Root", gl.id), format!("Option({rc})"));
+        let (tt, groot, orc) = (self.ty(t)?, format!("L::{}::Root", gl.id), format!("Option({rc})"));
         let xlate = |q: &str| {
-            let arms: String = (0..gl.local_tys.len()).map(|i| format!(" | r{i} => {}", none(rc))).chain((0..gl.cells.len()).map(|j| format!(" | rc{j} => {}", bind(rc, rc, &format!("cc{j}"), "c", &some(rc, &format!("tuple2[{root}, List(mir::Proj)](rc::fst {root} c, seq::append mir::Proj (rc::snd {root} c) (rc::snd {groot} {q}))")))))).collect();
+            let arms: String = (0..gl.local_tys.len()).map(|i| format!(" | r{i} => {}", none(rc))).chain((0..gl.cells.len()).map(|j| format!(" | rc{j} => {}", bind(rc, rc, &format!("cc{j}"), "c", &some(rc, &code_app(&root, "c", &format!("rc::snd {groot} {q}"))))))).collect();
             format!("match rc::fst {groot} {q} : {groot} as _ return {orc} with{arms} end")
         };
         Ok(match (t, opt_mut(self.m, t)) {
             (Ty::Ref(true, _), _) => xlate(v),
             (_, Some(_)) => mat(v, &format!("Option(Tuple2({groot}, List(mir::Proj)))"), &format!("Option({tt})"), &format!("| None => {} | Some(q3) => {}", some(&tt, &none(rc)), map(rc, &tt, &xlate("q3"), "c3", &some(rc, "c3")))),
-            _ if self.ty(t)?.contains("@RC@") => return Err("a value holding references returned by a callee".into()),
+            _ if tt.contains("@RC@") => return Err("a value holding references returned by a callee".into()),
             _ => some(&tt, v),
         })
     }
@@ -1693,72 +1450,76 @@ impl<'a> Gen<'a> {
     /// A leaf call (§20.4 "Leaves"): a library function without MIR whose
     /// meaning is a model of `literal.core` or of a host model.
     fn leaf(&mut self, fx: &mut FnCx, path: &str, tys: &[Ty], args: &[Operand], dest: &Place, os: &str) -> R<String> {
-        let (st, rc, root, p) = (fx.st(), fx.rc.clone(), fx.root(), fx.p.clone());
-        let dtt = self.ty_rc(&place_ty(&fx.f, dest)?, &rc)?;
+        let (st, rc) = (fx.st(), fx.rc.clone());
+        let dtt = self.ty(&place_ty(&fx.f, dest)?)?;
         // a leaf with a `&mut` first argument: its referent through the code
         let norm = path.replace("bytes::buf::buf_impl::Buf::", "bytes::Buf::").replace("bytes::buf::buf_mut::BufMut::", "bytes::BufMut::");
         if let Some((_, leaf, buffer)) = STATE_LEAVES.iter().find(|l| norm == l.0) {
             let Some(Ty::Ref(true, pointee)) = args.first().map(|a| op_ty(&fx.f, a)).transpose()? else { return Err(format!("the leaf `{path}` without a `&mut` receiver")) };
-            let (target, sty) = if *buffer { (Target::Buf, "List(U8)".to_string()) } else { (Target::Ty((*pointee).clone()), self.ty_rc(&pointee, &rc)?) };
+            let (target, sty) = if *buffer { (Target::Buf, "List(U8)".to_string()) } else { (Target::Ty((*pointee).clone()), self.ty(&pointee)?) };
             if leaf.ends_with("bytes_iter_next") && sty != "(Slice (Slice U8))" {
                 return Err(format!("`Iterator::next` of {pointee:?} (not the byte-string iterator model)"));
             }
             let tparam = if leaf.ends_with("vec_push") { format!(" {}", sty.strip_prefix("List(").and_then(|x| x.strip_suffix(')')).ok_or("push on a non-`Vec`")?) } else { String::new() };
             self.leaf_def(leaf);
-            let n = self.need(fx, target);
+            let n = fx.need(target);
             let code = self.operand(fx, &args[0])?;
             let mut call = format!("{leaf}{tparam} x0");
             let mut binds = Vec::new();
             for (i, a) in args.iter().enumerate().skip(1) {
-                binds.push((self.ty_rc(&op_ty(&fx.f, a)?, &rc)?, self.operand(fx, a)?, format!("x{i}")));
+                binds.push((self.ty(&op_ty(&fx.f, a)?)?, self.operand(fx, a)?, format!("x{i}")));
                 let _ = write!(call, " x{i}");
             }
-            let rt = format!("Tuple2({sty}, {dtt})");
-            let m = mat(&call, &rt, &format!("Option({st})"), &format!("| tuple2(nx, r) => {}", bind(&st, &st, &format!("{p}::write__{n} s (rc::fst {root} q) (rc::snd {root} q) nx"), "s", &self.write(fx, dest, "r")?)));
+            let m = mat(&call, &format!("Tuple2({sty}, {dtt})"), &format!("Option({st})"), &format!("| tuple2(nx, r) => {}", bind(&st, &st, &format!("{} nx", fx.through("write", &n, "q")), "s", &self.write(fx, dest, "r")?)));
             let inner = binds.iter().rev().fold(m, |e, (t, v, x)| bind(t, &st, v, x, &e));
-            return Ok(bind(&st, &st, os, "s", &bind(&rc, &st, &code, "q", &bind(&sty, &st, &format!("{p}::deref__{n} s (rc::fst {root} q) (rc::snd {root} q)"), "x0", &inner))));
+            return Ok(bind(&st, &st, os, "s", &bind(&rc, &st, &code, "q", &bind(&sty, &st, &fx.through("deref", &n, "q"), "x0", &inner))));
         }
         // a value leaf: a model at the arguments (a range's fields), `Option`-valued or total
         let method = path.rsplit("::").next().unwrap_or("");
         let (f, partial, vals) = match tys {
-            // `<[T; N] as Index<range>>::index(&a, r)`
-            [Ty::Array(e, n), Ty::Adt(rk)] if path.ends_with("ops::Index::index") => {
+            // `<[T; N] as Index<range>>::index(&a, r)` (core's `Index`, by its exact path)
+            [Ty::Array(e, n), Ty::Adt(rk)] if lib_path("ops::Index::index", path) => {
                 let rd = self.m.adts.get(rk).cloned().ok_or("no ADT")?;
                 let (_, leaf) = INDEX_LEAVES.iter().find(|(r, _)| lib_path(r, &rd.path)).ok_or_else(|| format!("an index by `{}`", rd.path))?;
                 self.leaf_def(leaf);
-                let (rty, et) = (Ty::Adt(rk.clone()), self.ty_rc(e, &rc)?);
+                let (rty, et) = (Ty::Adt(rk.clone()), self.ty(e)?);
                 let mut vals = vec![(format!("(Array {et} {n}usize)"), self.operand(fx, &args[0])?)];
                 for (i, (_, ft)) in rd.variants[0].fields.iter().enumerate() {
-                    let (rtt, ftt, rv) = (self.ty_rc(&rty, &rc)?, self.ty_rc(ft, &rc)?, self.operand(fx, &args[1])?);
-                    vals.push((ftt.clone(), bind(&rtt, &ftt, &rv, "xr", &self.field_of(&rc, &rty, 0, i, "xr")?)));
+                    let (rtt, ftt, rv) = (self.ty(&rty)?, self.ty(ft)?, self.operand(fx, &args[1])?);
+                    vals.push((ftt.clone(), bind(&rtt, &ftt, &rv, "xr", &self.field(&rty, 0, i, "xr", None)?)));
                 }
                 (format!("{leaf} {et} {n}usize"), true, vals)
             }
             // a host model's method
             [t, ..] if self.k.names.host_model_method(self.m, t, method).is_some() => {
-                let vals = args.iter().map(|a| Ok((self.ty_rc(&op_ty(&fx.f, a)?, &rc)?, self.operand(fx, a)?))).collect::<R<_>>()?;
+                let vals = args.iter().map(|a| Ok((self.ty(&op_ty(&fx.f, a)?)?, self.operand(fx, a)?))).collect::<R<_>>()?;
                 (self.k.names.host_model_method(self.m, t, method).unwrap(), false, vals)
             }
             _ => return Err(format!("the leaf `{path}` (no model)")),
         };
         let call = (0..vals.len()).fold(f, |c, i| format!("{c} a{i}"));
-        let e = vals.iter().enumerate().rev().fold(if partial { call } else { some(&dtt, &call) }, |e, (i, (t, v))| bind(t, &dtt, v, &format!("a{i}"), &e));
-        Ok(bind(&st, &st, os, "s", &bind(&dtt, &st, &e, "r", &self.write(fx, dest, "r")?)))
+        let (tys, vals): (Vec<String>, Vec<String>) = vals.into_iter().unzip();
+        let e = binds(&vals, &tys, &dtt, "a", if partial { call } else { some(&dtt, &call) });
+        self.result(fx, dest, os, &dtt, &e)
+    }
 
+    /// The state `os`, then the result `r` (the `Option(rt)` term `e`) written to `dest`.
+    fn result(&mut self, fx: &mut FnCx, dest: &Place, os: &str, rt: &str, e: &str) -> R<String> {
+        let st = fx.st();
+        Ok(bind(&st, &st, os, "s", &bind(rt, &st, e, "r", &self.write(fx, dest, "r")?)))
     }
 }
 
-/// Whether `t` can occur inside a value of type `a` (through fields and
-/// array elements; never through a reference).
-fn occurs(m: &Sbmir, t: &Ty, a: &Ty, depth: u32) -> bool {
-    a == t
-        || depth < 8
-            && match a {
-                Ty::Tuple(ts) => ts.iter().any(|x| occurs(m, t, x, depth + 1)),
-                Ty::Array(e, _) => occurs(m, t, e, depth + 1),
-                Ty::Adt(k) => m.adts.get(k).is_some_and(|d| d.variants.iter().any(|v| v.fields.iter().any(|(_, ft)| occurs(m, t, ft, depth + 1)))),
-                _ => false,
-            }
+/// `mir::bind`s of the values `vals` (of types `tys`) to `{x}0, {x}1, ..`
+/// around `body`, at the result type `r`.
+fn binds(vals: &[String], tys: &[String], r: &str, x: &str, body: String) -> String {
+    vals.iter().zip(tys).enumerate().rev().fold(body, |e, (i, (v, t))| bind(t, r, v, &format!("{x}{i}"), &e))
+}
+
+/// A jump to block `to` that consumes one unit of fuel (`None` without it).
+fn fuel_jump(fx: &FnCx, from_rank: i64, to: usize, os: &str) -> String {
+    let o = &fx.out_ty;
+    format!("match fuel : List(Unit) as yf return Option({o}) using .ef with | Nil => None[{o}] | Cons(u, f1) => rec(f1, {}::Blk::b{to}, {os}; {}) end", fx.p, decrease(&fx.p, &fx.cur, fx.rank(to), from_rank, true))
 }
 
 /// The decrease proof of a jump from a block of rank `from` to one of rank
@@ -1774,10 +1535,4 @@ fn decrease(p: &str, cur: &str, to: i64, from: i64, fuel: bool) -> String {
         facts.push_str(", eq::cong (List(Unit)) Int (seq::len Unit) fuel (Cons[Unit](u, f1)) ef : Eq(Int, seq::len Unit fuel, #iadd(1int, seq::len Unit f1))");
     }
     format!("pair(Sigma (_ : Eq(Bool, #le_int(0int, {mt}), true)), Eq(Bool, #lt_int({mt}, {mp}), true), linarith([]; Eq(Bool, #le_int(0int, {mt}), true); []), linarith([{facts}]; Eq(Bool, #lt_int({mt}, {mp}), true); []))")
-}
-
-/// A short rendering of a MIR construct (fault messages name it).
-fn show(x: &impl std::fmt::Debug) -> String {
-    let t = format!("{x:?}");
-    if t.len() > 200 { format!("{}..", &t[..t.char_indices().nth(200).map(|c| c.0).unwrap_or(t.len())]) } else { t }
 }

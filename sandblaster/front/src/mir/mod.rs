@@ -27,18 +27,21 @@
 //! `literal.core`), the statement of each function's theorem (`stmt.rs`),
 //! the parse L reads (`ir.rs`, `sexp.rs`), the names and load checks below
 //! (`load`, `ModuleNames::kernel_adt`, `is_transparent`,
-//! `host_model_method`), the printer `sandblaster-mirx` (it transcribes
-//! rustc's data), and the gate's bookkeeping in `checked.rs` (which
-//! theorems are planned and accepted). Untrusted: the structured reading
+//! `host_model_method`, `instance_global`), the printer `sandblaster-mirx`
+//! (it transcribes rustc's data), and the gate's trusted check `gate.rs` (L
+//! loaded only through it; a function accepted only when the kernel holds
+//! its theorem with the trusted statement). Untrusted: the structured reading
 //! `read.rs` (a proposer of S, checked by the theorems), `cfg.rs`, the
-//! walker `simproof.rs` and the rest of `checked.rs` (they build proof
-//! terms the kernel checks), the matching of lifted functions to MIR
-//! instances (a mismatch is a name or type error). The lift conformance
+//! walker `simproof.rs` and its driver `checked.rs` (they build proof
+//! terms the kernel and `gate.rs` check), the matching of lifted functions to MIR
+//! instances by lifted name (`gate.rs` checks that each listed function's
+//! instance is that function, `instance_global`). The lift conformance
 //! check compares every read function, and the literal reading of it,
 //! with rustc's build of the source.
 
 pub mod cfg;
 pub mod checked;
+pub mod gate;
 pub mod ir;
 pub mod literal;
 pub mod read;
@@ -152,7 +155,7 @@ fn prim_name(t: &Ty) -> Option<String> {
 impl ModuleNames {
     /// A path of the extracted module(s) (`module` may list several,
     /// comma-separated: calls between them are calls by name).
-    fn local(&self, path: &str) -> bool {
+    pub(crate) fn local(&self, path: &str) -> bool {
         self.module.split(", ").any(|m| path.starts_with(&format!("{m}::")))
     }
 
@@ -268,10 +271,7 @@ impl ModuleNames {
     pub fn kernel_adt(&self, m: &Sbmir, key: &str) -> Option<String> {
         let d = m.adts.get(key)?;
         if self.local(&d.path) {
-            let name = self.local_adt_name(m, d).ok()?;
-            let krate = self.module.split("::").next().unwrap_or("");
-            let dsl = self.dsl_modules.iter().filter(|dm| d.path.starts_with(&format!("{krate}{}::", dm.trim_start_matches("crate")))).max_by_key(|dm| dm.len())?;
-            return Some(format!("{dsl}::{name}"));
+            return Some(format!("{}::{}", self.dsl_module(&d.path)?, self.local_adt_name(m, d).ok()?));
         }
         if self.host_enums.contains_key(&self.adt_base(&d.path)) {
             // where the crate's model declares it, under the module the crate
@@ -297,6 +297,13 @@ impl ModuleNames {
         let Ty::Adt(k) = self_ty else { return None };
         let p = self.host_instance(m, k)?;
         self.host.structs.values().any(|s| *s == p).then(|| format!("{p}::{method}"))
+    }
+
+    /// The DSL module of an item of the extracted crate by its crate path
+    /// (`commonware_codec::varint::Decoder` → `crate::varint`).
+    fn dsl_module(&self, path: &str) -> Option<&String> {
+        let krate = self.module.split("::").next().unwrap_or("");
+        self.dsl_modules.iter().filter(|dm| path.starts_with(&format!("{krate}{}::", dm.trim_start_matches("crate")))).max_by_key(|dm| dm.len())
     }
 
     /// The lifted name of a module ADT instance: `Decoder<u16>` →
@@ -390,6 +397,22 @@ impl ModuleNames {
             }
             _ => None,
         }
+    }
+
+    /// TRUSTED (`mir::gate`): the kernel name of the lifted function a module
+    /// instance is, its lifted name in the DSL module of its item — the
+    /// function's own path, its self type's, for a sealed trait's impl on a
+    /// primitive the trait's, for an operator impl on a primitive its module
+    /// type argument's (`crate::varint::UPrim__u16__as_u8`). The lift finds an
+    /// instance by its lifted name alone, which another module may share.
+    pub fn instance_global(&self, m: &Sbmir, f: &Fn) -> Option<String> {
+        let path = match &f.item {
+            Item::Impl(st, tr, ..) if prim_name(st).is_some() && self.sealed.contains(tr) => f.def.split(" as ").nth(1)?.split(['<', '>']).next()?.to_string(),
+            Item::Inherent(Ty::Adt(k), _) | Item::Impl(Ty::Adt(k), ..) => m.adts.get(k)?.path.clone(),
+            Item::Impl(_, _, targs, _) => m.adts.get(match targs.first() { Some(Ty::Adt(k)) => k, _ => return None })?.path.clone(),
+            _ => f.def.clone(),
+        };
+        Some(format!("{}::{}", self.dsl_module(&path)?, self.lifted_name(m, f)?))
     }
 }
 

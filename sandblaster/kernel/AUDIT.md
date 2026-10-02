@@ -1383,20 +1383,25 @@ are about is checked against it by a kernel theorem per lifted function.
 
 **Trusted code** (code lines: no blank lines, comments or tests).
 
-| File | Code lines | Role |
-| --- | --- | --- |
-| `front/src/mir/literal.rs` | 1,474 | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally |
-| `front/src/mir/literal.core` | 139 | L's library: the option monad, checked/unchecked/division operators per width, signed comparisons and sign extension of bits, `bswap`, array get/set under the bound test, the leaves' models |
-| `front/src/mir/stmt.rs` | 225 | the statement `L::thm::f`: `S_f`'s telescope, `init`, `erase`; preconditions only from the declared contract |
-| `front/src/mir/ir.rs`, `sexp.rs` | 482, 131 | the parse L reads; malformed input is an error, never a default |
-| `front/src/mir/mod.rs` | 480 | names (`kernel_adt`, `is_transparent`, `host_model_method`) and the load checks |
-| `sandblaster/mirx` | 1,131 | the printer (rustc's data, transcribed) |
-| the gate's bookkeeping | ≈ 650 | `driver::gates::theorem_gate`; in `mir::checked`, planning every recorded function, accepting a theorem only as `L::thm::<f>` with `stmt`'s statement or from the verdict cache under its full key; `driver::lowered`'s requirement of the shipped theorems |
-| the lift glue | ≈ 260 | loading, signature checks, the declared contracts (`lift::MirContract`: the skeleton's attributes before the body is read and the attachments' after; the body reader sees the signature only) |
+| File | Code lines | Role | Trusts |
+| --- | --- | --- | --- |
+| `front/src/mir/literal.rs` | 1,217 | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally. The post-order, the loop headers, the panicking blocks and type-occurrence pruning come from the untrusted `cfg.rs` as numbers and booleans: they only place fuel (every decrease is kernel-checked) or read a block or path as `None` | the MIR reference (each construct's meaning); `literal.core`; the names of `mod.rs`; the lift's models in the leaves (A5); `cfg.rs` for nothing but fuel placement and `None` |
+| `front/src/mir/literal.core` | 139 | L's library: the option monad, checked/unchecked/division operators per width, signed comparisons and sign extension of bits, `bswap`, array get/set under the bound test, the leaves' models | the kernel's primitives and prelude; the lift's models (`crate::__lift_model`, host models) in the leaves |
+| `front/src/mir/stmt.rs` | 210 | the statement `L::thm::f`: `S_f`'s telescope, `init`, `erase` (its preconditions are `S_f`'s, which the elaborator's check below makes the declared contract's) | `S_f`'s telescope (the elaborator and its precondition check); L's `LFn` record |
+| `front/src/mir/ir.rs`, `sexp.rs` | 482, 131 | the parse L reads; malformed input is an error, never a default | the printer's format |
+| `front/src/mir/mod.rs` | 491 | names (`kernel_adt`, `is_transparent`, `host_model_method`, `instance_global`: the lifted function a module instance is) and the load checks (format version, module, compiler release, overflow checks, the sources' SHA-256) | the lift's names (`ModuleNames`: DSL modules, sealed traits, host models) |
+| `sandblaster/mirx` | 1,131 | the printer (rustc's data, transcribed) | rustc (A4: the build compiles the MIR it printed) |
+| `front/src/mir/gate.rs` and its call sites | 164 + ≈ 25 | the gate's trusted check: the literal reading enters the kernel only through its loader (which records, per extraction, the globals and inductives it loaded and the MIR of each instance it read); a listed function is accepted only when its MIR instance is that function (the lift finds instances by unqualified lifted names), the kernel holds `L::thm::<f>` whose type is α-equal (up to proofs) to `stmt`'s statement generated afresh, read from this MIR, reaching only definitions of the elaboration, of L's library or of its own extraction's literal reading, with no inductive added otherwise, and every module type its MIR instances reach is declared alike by the MIR and the subset (variants and fields by name and in order, discriminants `0, 1, ..`); the same for the round trip's `L::shipped::<f>`. Call sites: the gate's errors (`driver::gates::theorem_gate`), the shipped copy's instance and its requirement (`driver::lowered`) | the kernel (`alpha_eq_relevant`, `refs_closure`); the files above; the lift's list of the functions read from MIR; the elaborator |
+| the precondition check: `front/src/elab/items.rs` (`fn_requires`, `as_declared`, `depth_prop`), `typeck` (`#[mir_contract]`), `hir::FnDef::declared` | 22 + 16 + 1 | a function read from MIR is elaborated only when it has as many `requires` clauses as its declared contract, each precondition α-equal to the elaboration of the declared clause at the same depth, and the depth bound exactly when declared, α-equal to the declared one; the lift carries the declared contract apart from the function's own attributes (`#[mir_contract(..)]`, copied from the skeleton's and the attachments' attributes). Otherwise the function has no definition, so no theorem | typeck and the elaborator (TCB items 2, 6) |
+| the lift glue | ≈ 260 | loading, signature checks, the declared contracts (the skeleton's attributes before the body is read and the attachments' after, carried as `#[mir_contract(..)]`; the body reader sees the signature only), the list of functions read from MIR (`lift::MirContract`) | the lift's skeleton (TCB item 8) |
+| **total** | **≈ 4,289** (≈ 3,676 without the parse) | the literal reading, its statement, parse, names and printer (3,801), the gate's trusted check with its call sites (≈ 189), the precondition check (39), the lift glue (≈ 260); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
 
 **Untrusted**: `front/src/mir/read.rs` (2,433, the structurer), `cfg.rs`
-(235), the walker `simproof.rs` (4,565) and the rest of `checked.rs`. A
-bug there makes a theorem unprovable and the build fail.
+(298, with the literal reading's shape facts), the walker `simproof.rs` (4,565) and its driver `checked.rs`
+(planning, dependency order, loop and model lemmas, the verdict cache —
+whose entries are declarations the kernel re-checks on replay — and the
+reports). A bug there makes a theorem missing or refused and the build
+fail.
 
 **What an auditor checks.** Construct by construct, that L's reading of
 each MIR construct (the tables of `docs/mir-lift.md` §20.4) gives a value
@@ -1411,8 +1416,16 @@ again in borrow-checked MIR), drops with glue only for variants without
 drop code, shared references as snapshots and `&mut` as reference codes
 written back after each call (exclusivity, A3 of the design note). The
 statement: that `init` places each parameter in its slot and `erase` maps
-S's value to L's componentwise, and that an S precondition the declared
-contract lacks is refused.
+S's value to L's componentwise. The precondition check: that the lift's
+`#[mir_contract(..)]` copies exactly the skeleton's and the attachments'
+`requires`/`decreases` attributes, and that the elaborator compares each
+precondition with the declared clause elaborated at the same depth. The
+gate: that a listed function's MIR instance is that function
+(`ModuleNames::instance_global` against the lift's global), that the
+statement is generated afresh and compared with the kernel's declaration
+in every relevant position and every binder's domain, and that every
+global it reaches comes from the elaboration, L's library or the
+function's own extraction's reading.
 
 **Review findings of stage cs-assurance, fixed with tests**
 (`tests/literal.rs` `readings_the_review_found_wrong_are_none_where_rust_differs`,
@@ -1428,21 +1441,71 @@ type and an index leaf's range were recognized by a path *suffix*
 `option` would have had its `Option` read as core's): both now match the
 exact path under `std::`/`core::` (`bytes::TryGetError` as written).
 
+**Review findings of stage tcb-review, fixed with tests**
+(`tests/theorem_gate.rs` `a_function_listed_with_another_functions_instance_is_refused`,
+`a_reading_whose_names_a_later_extraction_took_over_is_refused`;
+`tests/literal.rs` `readings_the_review_found_wrong_are_none_where_rust_differs`):
+the gate did not check that a listed function's MIR instance is that
+function — the lift finds an instance by its unqualified lifted name, so
+two functions of two extracted modules with one lifted name and one
+signature would bind without error, and the theorem be about the other's
+MIR (check 0, `ModuleNames::instance_global`); L's names restart with each
+extraction's reading and a later definition takes over a name, so a second
+extraction's reading could stand in for the first's (check 3 now counts
+only the load of L's library and the function's own extraction's); the index leaf was
+recognized by a path suffix (`..ops::Index::index`: a crate's own
+`myops::Index::index` on an array was read as core's indexing; now core's
+exact path).
+
 **Assumptions recorded, not checked by the theorems**: rustc compiles the
 MIR `mirx` printed (the extraction has overflow checks on, so the build
 must too); `RuntimeChecks(ub)` is read as `false` (where a library
 precondition check would fail, the operation it guards is undefined
-behaviour, which L reads as `None`); a module type's fields are in
-declaration order in both the MIR and the subset's declaration (the
-kernel's field names are positional); the host models and leaves mean the
-host functions (as for S).
+behaviour, which L reads as `None`); the host models and leaves mean the
+host functions (as for S), host enums and host instances included (a host
+model may name fewer variants than the MIR: the check below does not
+cover them).
+
+**Checked since stage tcb-checks (they were assumptions)**:
+
+* *Module types are declared alike in the MIR and in the subset.* The
+  kernel's field names are positional (`f0`, `f1`, ..): L reads field `i`
+  as the MIR numbers it, S as the subset's declaration does, so a theorem
+  cannot see two fields named differently. The gate's trusted check
+  (`gate.rs`, check 4) compares, for every module type a function's MIR
+  instances reach, the MIR's adt-def with the lifted crate's declaration
+  (the HIR item the elaborator declared the inductive from): variants by
+  name and in order, each variant's fields by name and in order, variant
+  `i`'s discriminant `i` (the subset has no explicit discriminants), and
+  refuses the function otherwise, naming both declarations.
+* *Preconditions are the declared contract's, by content.* The rule used
+  to match binder names (`h_req<k>`, `h_depth`), its content argument
+  structural. Now the elaborator checks each precondition of a function
+  read from MIR against the elaboration of the declared contract's clause
+  (above), whatever its binder is named; `stmt.rs` has no rule of its
+  own.
+* *Each listed function's instance is that function* (stage tcb-review):
+  its lifted name in the DSL module of its item (the function's own path,
+  its self type's, a sealed trait's for its impl on a primitive, the module
+  type argument's for an operator impl on a primitive) is the listed
+  function; and its statement rests only on L's library and its own
+  extraction's literal reading.
 
 *Pinned by:* `tests/literal.rs` (each construct evaluated by the kernel
 with negative twins), `tests/theorem_gate.rs` (the gate on varint, the MMR
-and the verifier; wrong rules of the structured reading caught),
+and the verifier; wrong rules of the structured reading caught; the
+trusted check refusing a weaker theorem the kernel accepted, a missing
+theorem, and a stale cache entry for a changed MIR),
 `tests/fault_injection.rs` (a mutated MIR construct of each kind breaks a
 theorem; the two historical structuring bugs re-injected into `read.rs`
-break theorems; a precondition the contract lacks is refused),
+break theorems; a precondition the contract lacks is refused by the
+elaborator), `tests/theorem_gate.rs`
+`a_module_type_declared_with_its_fields_reordered_is_refused`,
+`tests/literal.rs` `a_precondition_other_than_the_declared_clause_is_refused`
+(the same number of clauses, the same binder name, another clause),
+`tests/theorem_gate.rs`
+`a_function_listed_with_another_functions_instance_is_refused` and
+`a_reading_whose_names_a_later_extraction_took_over_is_refused`,
 `tests/lift_conformance.rs` (L compared with rustc in the conformance
 check, module mode and in place), `tests/walker.rs`, `tests/lowered_use.rs`
 (the shipped theorems of the lifted round trip).

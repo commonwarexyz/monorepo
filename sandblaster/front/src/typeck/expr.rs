@@ -332,6 +332,10 @@ pub fn check_fn(ck: &mut Checker, id: ItemId, inputs: &[syn::FnArg], block: &syn
         }
     };
     let implements = sig.contracts.implements.as_ref().and_then(|p| cx.implements_target(p));
+    // the declared contract carried apart (typed last: the body's locals keep their ids)
+    let saved = std::mem::replace(&mut cx.ghost, true);
+    let declared = sig.contracts.declared.as_ref().map(|(r, d)| (r.iter().map(|e| cx.prop(e)).collect(), d.as_ref().map(|(e, max)| Decreases { measure: cx.measure(e), max: *max })));
+    cx.ghost = saved;
     cx.pop_scope();
     let locals = std::mem::take(&mut cx.locals);
     Some(FnDef {
@@ -349,6 +353,7 @@ pub fn check_fn(ck: &mut Checker, id: ItemId, inputs: &[syn::FnArg], block: &syn
         requires,
         ensures,
         decreases,
+        declared,
         body,
         target_features: sig.target_features.clone(),
         feature_set: sig.feature_set.clone(),

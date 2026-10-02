@@ -6,8 +6,8 @@
 //! trusted) returns S's value (`driver::gates::theorem_gate`). A bug here
 //! makes a theorem unprovable and the build fail; it cannot change what a
 //! verified module means. It cannot reach the function's contract either:
-//! it sees the signature only, and the theorem's preconditions are the
-//! declared contract's (`stmt.rs`).
+//! it sees the signature only, and the elaborator checks that the
+//! function's preconditions are its declared contract's (`elab::items`).
 //!
 //! The reading is a walk of the control-flow graph from the entry block
 //! that follows its edges exactly:

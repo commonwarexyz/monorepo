@@ -777,22 +777,24 @@ pub fn theorem_gate(out: &mut elab::Output, krate: &crate::hir::Crate, c: &Check
         }
     }
     let opts = crate::mir::checked::GateOptions { cache: c.cache.as_deref(), keep_keys, ..Default::default() };
-    let reports = crate::mir::checked::prove_lifted(out, &c.lift_facts, &opts);
+    let mut reports = crate::mir::checked::prove_lifted(out, &c.lift_facts, &opts);
+    // the verdict: the trusted check against what the kernel holds
+    // (crate::mir::gate); the walks' reports only explain a refusal
+    let tv = Instant::now();
+    let verdicts = out.mir_gate.ledger.verdicts(&out.env, krate, &c.lift_facts);
+    let trusted_secs = tv.elapsed().as_secs_f64();
+    crate::mir::checked::annotate(&mut reports, &verdicts);
     let mut d = Diagnostics::new();
     let span_of = |g: &str| krate.items.iter().find(|it| format!("crate::{}", it.path.0.join("::")) == g).map(|it| it.span).unwrap_or(crate::span::Span::DUMMY);
-    let (mut total, mut proven, mut cached) = (0, 0, 0);
-    for r in &reports {
-        total += r.functions();
-        proven += r.proven();
-        cached += r.cached();
-        for (g, why) in &r.missing {
-            let key = r.outcomes.iter().find(|o| &o.global == g).map(|o| o.key.clone()).unwrap_or_default();
-            let mut msg = format!("`{g}` has no kernel-checked theorem relating rustc's MIR (`{key}`) to the structured reading its laws and proofs are about: {}", trunc_msg(why, 4000));
-            msg.push_str(" (docs/checked-structuring.md: without it the reading of the body is not checked, and the module is not verified)");
-            d.push(crate::diag::Diagnostic::error(crate::diag::DiagKind::MirTheorem, span_of(g), msg));
-        }
+    for v in &verdicts {
+        let Err(trusted) = &v.result else { continue };
+        let why = reports.iter().flat_map(|r| &r.missing).find(|(g, _)| *g == v.global).map_or(trusted, |(_, w)| w);
+        let mut msg = format!("`{}` has no kernel-checked theorem relating rustc's MIR (`{}`) to the structured reading its laws and proofs are about: {}", v.global, v.key, trunc_msg(why, 4000));
+        msg.push_str(" (docs/checked-structuring.md: without it the reading of the body is not checked, and the module is not verified)");
+        d.push(crate::diag::Diagnostic::error(crate::diag::DiagKind::MirTheorem, span_of(&v.global), msg));
     }
-    let note = format!("{proven} of {total} lifted function(s) read from MIR with a kernel-checked theorem ({cached} from the verdict cache), {:.1}s", t.elapsed().as_secs_f64());
+    let (total, proven, cached) = (verdicts.len(), verdicts.iter().filter(|v| v.result.is_ok()).count(), reports.iter().map(|r| r.cached()).sum::<usize>());
+    let note = format!("{proven} of {total} lifted function(s) read from MIR with a kernel-checked theorem ({cached} from the verdict cache), {:.1}s, the trusted check {trusted_secs:.1}s", t.elapsed().as_secs_f64());
     let warnings = 0;
     rep.results.push(GateResult { gate: "mir-theorems", ran: true, errors: d.error_count(), warnings, note });
     rep.diags.extend(d);

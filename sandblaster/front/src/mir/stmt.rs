@@ -9,11 +9,12 @@
 //!
 //! * `x̄ .h̄` is the telescope of `S_f`, the structured reading's definition.
 //!   Its relevant parameters are the MIR instance's parameters, in order.
-//!   Its preconditions `h̄` must each be a clause of the function's
-//!   **declared contract** (`lift::MirContract`: the skeleton and its
-//!   attachments, never the reading of the body): `S_f` carrying another
-//!   precondition is an error, so an untrusted structurer cannot make the
-//!   theorem vacuous.
+//!   Its preconditions `h̄` are the function's **declared contract** (the
+//!   skeleton's and the attachments' clauses, never the reading of the
+//!   body): the elaborator refuses a function read from MIR unless each of
+//!   them is α-equal to the elaboration of the declared clause, which the
+//!   lift carries apart (`hir::FnDef::declared`, `elab::items`), so an
+//!   untrusted structurer cannot make the theorem vacuous.
 //! * `init(x̄)`: slot `i` of a parameter holds `Some(erase(x_i))`; a `&mut`
 //!   parameter's slot holds the code `(rc<j>, [])` of its cell, and the cell
 //!   `Some(erase(x_i))` (the referent: state passing); an `Option<&mut T>`
@@ -30,7 +31,6 @@ use sandblaster_kernel::term::{Rel, Term};
 
 use super::ir::{self, Ty};
 use super::literal::{Gen, LFn};
-use crate::lift::MirContract;
 
 /// The statement of one function's theorem.
 #[derive(Clone, Debug)]
@@ -91,36 +91,15 @@ impl StmtSpec {
 }
 
 /// The statement of `S_f`'s theorem against the literal reading `lf` of
-/// its MIR instance `f`, with the declared `contract`.
-pub fn statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str, contract: &MirContract) -> Result<StmtSpec, String> {
-    statement_under(env, g, lf, f, s_global, Some(contract))
-}
-
-/// The statement of an UNTRUSTED model lemma: a library function's literal
-/// reading against the lift prelude's model of it (`u64::div_ceil`), which
-/// the walker uses as a callee lemma inside proofs and never as a theorem
-/// (the gate accepts only `L::thm::<f>` of a lifted function, stated by
-/// [`statement`]); the model's preconditions are its own.
-pub fn model_statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str) -> Result<StmtSpec, String> {
-    statement_under(env, g, lf, f, s_global, None)
-}
-
-fn statement_under(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str, contract: Option<&MirContract>) -> Result<StmtSpec, String> {
+/// its MIR instance `f` (also, untrusted, of a model lemma: a library
+/// function's reading against the lift prelude's model, `u64::div_ceil`).
+pub fn statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str) -> Result<StmtSpec, String> {
     let sg = env.lookup_global(s_global).ok_or_else(|| format!("no definition `{s_global}`"))?;
     let (mut cur, arity) = (env.global_type(sg).ok_or("no type")?, env.global_arity(sg).ok_or("no arity")?);
     let mut params: Vec<(String, Rel, String)> = Vec::new();
     let mut names: Vec<sandblaster_kernel::term::Name> = Vec::new();
     for i in 0..arity {
-        let Term::Pi { name, rel, dom, cod } = &*cur else { return Err(format!("`{s_global}`'s type has no binder {i}")) };
-        // a precondition must be a clause of the declared contract
-        if *rel == Rel::Irr
-            && let Some(contract) = contract
-        {
-            let allowed = (0..contract.requires.len()).any(|k| **name == *format!("h_req{k}")) || (contract.depth_bound && **name == *"h_depth");
-            if !allowed {
-                return Err(format!("`{s_global}` carries the precondition `{name}`, which its declared contract (`{}`: {} requires{}) does not state", contract.global, contract.requires.len(), if contract.depth_bound { ", a depth bound" } else { "" }));
-            }
-        }
+        let Term::Pi { rel, dom, cod, .. } = &*cur else { return Err(format!("`{s_global}`'s type has no binder {i}")) };
         params.push((format!("x{i}"), *rel, env.print_term(&names, dom)));
         names.push(std::rc::Rc::from(format!("x{i}").as_str()));
         cur = cod.clone();

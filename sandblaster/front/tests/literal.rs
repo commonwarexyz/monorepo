@@ -13,7 +13,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use sandblaster_front::lift::MirContract;
+use sandblaster_front::diag::DiagKind;
+use sandblaster_front::lift::test_hook::{self, WrongRule};
 use sandblaster_front::loader::MemFs;
 use sandblaster_front::mir::checked::{self, Entry, Prover};
 use sandblaster_front::mir::literal::{Gen, KNames, LFn};
@@ -239,6 +240,10 @@ const REVIEW: &str = r#"(adt-def "std::option::Option<u16>" (path "std::option::
 (fn "k::m::other" (kind root) (def "k::m::other") (args ()) (item fn "other") (argc 1)
   (locals (0 (adt "option::Option<u16>") mut) (1 u16 imm))
   (bb 0 (assign (p 0) (agg (adt (adt "option::Option<u16>") 1) (copy (p 1)))) (return)))
+(fn "k::m::myidx" (kind root) (def "k::m::myidx") (args ()) (item fn "myidx") (argc 2)
+  (locals (0 usize mut) (1 (array u8 4) imm) (2 usize imm) (3 (ref shared (slice u8)) mut) (4 (adt "std::ops::RangeTo<usize>") mut))
+  (bb 0 (assign (p 4) (agg (adt (adt "std::ops::RangeTo<usize>") 0) (copy (p 2)))) (call (leaf "k::myops::Index::index" ((array u8 4) (adt "std::ops::RangeTo<usize>"))) (args (copy (p 1)) (move (p 4))) (p 3) 1))
+  (bb 1 (assign (p 0) (un ptr-metadata (copy (p 3)))) (return)))
 "#;
 
 #[test]
@@ -265,6 +270,11 @@ fn readings_the_review_found_wrong_are_none_where_rust_differs() {
         same(env, &fx.run("mypre", 0, &[a, "2usize"]), "None[Usize]");
         // negative twin: core's `RangeTo`
         same(env, &fx.run("pre", 0, &[a, "2usize"]), "Some[Usize](2usize)");
+        // the same for the index leaf itself (stage tcb-review): a crate's own
+        // `myops::Index::index` on an array (the printer makes any such call a
+        // leaf) was read as core's indexing; its meaning is the crate's impl
+        assert!(fx.lf("myidx").faults.iter().any(|f| f.contains("k::myops::Index::index")), "{:?}", fx.lf("myidx").faults);
+        same(env, &fx.run("myidx", 0, &[a, "2usize"]), "None[Usize]");
         // a crate's own `option::Option` is not the prelude's `Option` (it is
         // read as L's own inductive), while core's is
         assert!(fx.lit.state.adt_ty("option::Option<u16>").is_some_and(|t| t.starts_with("L::")), "{:?}", fx.lit.state.adt_ty("option::Option<u16>"));
@@ -623,39 +633,45 @@ fn an_unmodeled_construct_is_none_on_its_path_only_and_named() {
 }
 
 // ---------------------------------------------------------------------------
-// the statement: preconditions come from the declared contract only
+// the statement's preconditions: the declared contract's, checked by the
+// elaborator (`hir::FnDef::declared`)
 // ---------------------------------------------------------------------------
 
-const PRE: &str = r#"(fn "k::m::half" (kind root) (def "k::m::half") (args ()) (item fn "half") (argc 1)
-  (locals (0 u32 mut) (1 u32 imm))
-  (bb 0 (assign (p 0) (bin shr (copy (p 1)) (int u32 1))) (return)))
-"#;
+/// The lift fixture with a declared precondition of `Counter::chunks` (an
+/// attachment), lifted with `hook`: whether `Counter::chunks` is defined,
+/// and the elaboration's errors.
+fn chunks_elaborated(hook: Option<WrongRule>) -> (bool, Vec<String>) {
+    // (`Counter` is not exported: a boundary function has no precondition)
+    let root = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n#[lift(mir = \"w.sbmir\")]\nmod w;\npub use w::Wrap;\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"pre.rs\"]\nmod pre;\n";
+    let pre = "use sandblaster::prelude::*;\n#[lift_attach(crate::w::Counter::chunks)]\nfn chunks_pre() {\n    requires(bits < 1000usize);\n}\n";
+    let fs = MemFs::from_files([("r/mod.rs", root), ("r/pre.rs", pre), ("r/w.rs", include_str!("mir_fixtures/lift_w/w.rs")), ("r/w.sbmir", include_str!("mir_fixtures/lift_w/w.sbmir"))]);
+    test_hook::set(hook);
+    let c = sandblaster_front::driver::check(Path::new("r/mod.rs"), &fs, &TargetInfo::aarch64_apple_darwin());
+    test_hook::set(None);
+    assert!(c.ok(), "{}", c.render());
+    let k = c.krate.as_ref().unwrap();
+    sandblaster_front::elab::with_big_stack(move || {
+        let out = checked::elaborate_names(k, &["w::Counter::chunks".to_string()]);
+        let errs = out.diags.list.iter().filter(|d| d.kind == DiagKind::Elab).map(|d| d.msg.clone()).collect();
+        (out.env.lookup_global("crate::w::Counter::chunks").is_some(), errs)
+    })
+}
 
-/// `S` for `half`, with a precondition (`h_req0 : x < 100`) or another binder.
-const PRE_S: &str = "def[exec] crate::m::half : (x : U32) -> (.h_req0 : Eq(Bool, #lt_u32(x, 100u32), true)) -> U32 := fun (x : U32) (.h_req0 : Eq(Bool, #lt_u32(x, 100u32), true)) => #wshr_u32(x, 1u32)\n\
-def[exec] crate::m::half2 : (x : U32) -> (.h_extra : Eq(Bool, #lt_u32(x, 100u32), true)) -> U32 := fun (x : U32) (.h_extra : Eq(Bool, #lt_u32(x, 100u32), true)) => #wshr_u32(x, 1u32)\n";
-
+/// `S_f`'s preconditions are the declared contract's: with the declared
+/// `requires(bits < 1000usize)`, `Counter::chunks` is elaborated with that
+/// precondition; the negative twin (`WrongRule::ChangedRequires`): the
+/// function's own clause replaced by `requires(true)` after the declared
+/// contract was carried — one clause as declared, so the binder is still
+/// `h_req0` — and the elaborator refuses it, naming both clauses. (A clause
+/// the contract lacks: `tests/fault_injection.rs`.)
 #[test]
-fn a_precondition_the_declared_contract_does_not_state_is_refused() {
-    with_env(|env| {
-        let fx = load(env, PRE);
-        env.load_core(PRE_S, &mut Budget { steps: 1_000_000 }).expect("S");
-        let f = fx.m.fns.get("k::m::half").unwrap().clone();
-        let lf = fx.lf("half").clone();
-        let k = KNames { names: &fx.names, env };
-        let mut g = Gen::resume(&fx.m, &k, fx.lit.state.clone());
-        let declared = MirContract { global: "crate::m::half".into(), key: "k::m::half".into(), requires: vec!["x < 100u32".into()], depth_bound: false };
-        let st = sandblaster_front::mir::stmt::statement(env, &mut g, &lf, &f, "crate::m::half", &declared).unwrap();
-        let t = st.theorem_ty();
-        assert!(t.starts_with("(x0 : U32) -> (.x1 : ") && t.contains("Sigma (k : Int)") && t.contains("crate::m::half x0 .x1"), "{t}");
-        // negative twins: the contract does not state it, or `S` carries another binder
-        let none = MirContract { requires: vec![], ..declared.clone() };
-        let e = sandblaster_front::mir::stmt::statement(env, &mut g, &lf, &f, "crate::m::half", &none).unwrap_err();
-        assert!(e.contains("carries the precondition `h_req0`"), "{e}");
-        let other = MirContract { global: "crate::m::half2".into(), ..declared };
-        let e = sandblaster_front::mir::stmt::statement(env, &mut g, &lf, &f, "crate::m::half2", &other).unwrap_err();
-        assert!(e.contains("carries the precondition `h_extra`"), "{e}");
-    });
+fn a_precondition_other_than_the_declared_clause_is_refused() {
+    let (defined, errs) = chunks_elaborated(None);
+    assert!(defined && errs.is_empty(), "{errs:?}");
+    let (defined, errs) = chunks_elaborated(Some(WrongRule::ChangedRequires));
+    assert!(!defined, "a precondition other than the declared clause: not elaborated");
+    let e = errs.iter().find(|e| e.starts_with("`crate::w::Counter::chunks` could not be elaborated")).unwrap_or_else(|| panic!("{errs:?}"));
+    assert!(e.contains("its precondition 0 `") && e.contains("is not its declared contract's `") && e.contains("1000"), "{e}");
 }
 
 /// core's `RangeInclusive<u32>` and `Once<(u32, u32)>`, which the

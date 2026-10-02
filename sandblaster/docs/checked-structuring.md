@@ -19,8 +19,27 @@ review of the trusted generator, the final validation) is done: the
 conformance check runs L against rustc, fault injection shows the theorems
 catch a mutated construct of each kind and the two historical bugs, and
 `read.rs` is demoted to untrusted in DESIGN.md §1.1 item 8, AUDIT.md §21.1
-and `docs/mir-lift.md` §5, §6 and §20. The implementation log is the next section; the design follows
-it, updated where the implementation differs. This note does not change
+and `docs/mir-lift.md` §5, §6 and §20. Stage "tcb-gate" is done: the
+gate's trusted part is one module, `mir/gate.rs` (125 code lines), that
+checks what the kernel holds; planning, the walks, the verdict cache
+(whose entries the kernel re-checks) and the reports left the trusted
+count. Stage "tcb-literal" is done: L's generator is 1,217 code lines
+(it was 1,474), and its text is byte-identical on every MIR instance of
+the three modules and every fixture. Stage "tcb-checks" is done: two
+assumptions of AUDIT.md §21.1 are now checks — the gate's trusted check
+compares every module type a theorem's MIR reaches with the subset's
+declaration (kernel field names are positional), and the elaborator
+checks each precondition of a function read from MIR against the
+elaboration of its declared contract's clause (the name rule of
+`stmt.rs` is gone). Stage tcb-review is done: an independent review of the
+trusted part closed three gaps, each with a test and its negative twin —
+the gate checks that a listed function's MIR instance is that function
+(the lift finds instances by unqualified lifted names), and that a
+statement rests only on its own extraction's literal reading (L's names
+restart with each extraction's reading); core's `Index::index` leaf is
+recognized by its exact path — and ran the final validation; the trusted
+part is ≈ 4.29k code lines (≈ 4.97k when this workflow began). The implementation log is the next
+section; the design follows it, updated where the implementation differs. This note does not change
 `SEMANTICS.md`.
 
 ## Amendments (binding)
@@ -846,6 +865,689 @@ review's fix):
 * The verifier's gate (4.4 s cold) is large against its 9.7 s check;
   cached after the first build.
 
+### Stage tcb-gate (shrinking the trusted gate), 2026-10-01
+
+**Goal.** The trusted count had not gone down (≈ 5.0k against ≈ 4.8k
+before, on the same counting), largely because ≈ 650 lines of gate
+bookkeeping were trusted: `gates.rs`'s `theorem_gate` and report (77),
+about 500 lines of `checked.rs` (planning, the cache keys and outcome
+records, accepting `L::thm::<f>` inside the prover, the gate memory, the
+round trip's acceptance and `compose`'s statement) and `lowered.rs`'s
+requirement of the shipped theorems (73). This stage makes the trusted
+part one small module that checks what the kernel holds, and moves the
+rest out of the trusted count. No meaning changed: the same statement,
+the same theorems, the same functions required.
+
+**The trusted check** (`front/src/mir/gate.rs`, **125 code lines**; its
+doc header says what it trusts). `Ledger` is the record of the literal
+readings loaded into one kernel environment:
+
+* `Ledger::load` is the only way L enters the kernel: it runs the
+  generator (continuing the module's reading when there is one), loads the
+  text and its library with `load_core`, and records the range of globals
+  and inductives it loaded, where the environment stood before the first
+  load (the elaboration), and the MIR text of every instance it read.
+* `Ledger::verdicts` gives, for every function the lift lists
+  (`LiftFacts::mir_contracts`), `Ok` only when (1) the instance and every
+  instance its reading runs were read from the MIR given; (2) the kernel
+  holds `L::thm::<id>` whose type is α-equal, up to binder names and
+  proofs (`Env::alpha_eq_relevant`, with globals compared by identity), to
+  `stmt::statement`'s statement generated afresh and parsed; (3) every
+  global the statement reaches (`Env::refs_closure`, not descending into
+  the elaboration's globals) was defined by the elaboration or by a load,
+  and no inductive was added since the first load except by a load. (3)
+  is what keeps a declaration made by untrusted code — a walker's lemma, a
+  replayed cache entry, or a redefinition under an existing name, which
+  the kernel allows (the newest definition of a name wins) — from
+  standing in for `S_f`, L or the prelude.
+* `Ledger::accept_shipped` checks the round trip's `L::shipped::<id>` the
+  same way: the copy's instance of the round trip's MIR against the source
+  function under its declared contract.
+
+**Call sites** (≈ 25 trusted lines outside `gate.rs`): `theorem_gate`
+turns each refused verdict into `error[mir-theorem]` (11 lines; the walks'
+reports only explain a refusal); `driver::lowered` names the shipped
+copy's MIR instance per instance and fails a rewrite whose
+`accept_shipped` fails (≈ 15).
+
+**Untrusted now** (all of `checked.rs`, 1,674 code lines): planning, the
+dependency order, the walks, the loop and model lemmas, the theorems'
+construction (`prove_fn` still builds `L::thm::<id>` from `stmt.rs`'s
+text, but a mistake there is refused), `compose`, the cache keys,
+`GateMemory` (now the ledger, the callee lemmas per module and the
+shipped notes), the reports (`annotate` folds the trusted verdicts into
+them) and `theorems_json`.
+
+**The verdict cache is no longer trusted.** An entry used to be a replayed
+verdict (a hit was believed under its key). It now holds the declarations
+the proof added (the lemma and the theorem, a loop or model lemma; for a
+round-trip function its helpers', its copy's and the shipped one), encoded
+as term DAGs with globals and inductives by name
+(`opt::cache::encode_decls`, the optimizer's proof-cache codec, each term
+length-prefixed). A hit is replayed through `add_def`
+(`opt::cache::replay_decls`), so the kernel checks every declaration
+again, and then the trusted check runs on it like on a fresh proof. A
+wrong key can only replay declarations that are refused. An entry the
+kernel does not accept is recorded (`ModuleTheorems::rejected`) and the
+module is walked again without the cache. The key (format `/2`) adds the
+names L gave the instances (`L::f<k>`), so a reading generated in another
+order misses instead of being rejected. A hit now costs the kernel check
+of the replayed proofs (varint: about the cold kernel time) instead of
+nothing; it still saves the walks.
+
+**Other changes.** `checked::load_literal` and `load_into` go through a
+ledger (a throwaway one for tests and debugging); the conformance check
+loads L through the environment's ledger (`conform/literal.rs`), and the
+gate reuses a reading the conformance check already loaded. The round
+trip's "same MIR in both extractions" check moved from the prover into the
+trusted check (1). `checked::prove_and_check` is `prove_lifted` followed
+by the trusted check (the tests and `cs_proto` use it).
+`GateOptions::key_ignores_mir` is a test hook (a stale entry is served).
+
+**Tests** (`tests/theorem_gate.rs`, negative twins):
+
+* `the_trusted_check_refuses_a_weaker_theorem_the_kernel_accepted`: with
+  `Decoder::<u32>::feed`'s theorem accepted, the kernel accepts three
+  declarations of `L::thm::<feed>` that the trusted check refuses — the
+  equation on the return value only (the final `&mut self`, a component of
+  `erase`, dropped; proven from the original by `eq::cong`), a precondition
+  `false = true`, and the original theorem after `S_f` was redefined under
+  its name outside the elaboration; the original is accepted again
+  between them.
+* `the_trusted_check_refuses_a_function_without_its_theorem`: with only
+  feed proven, `size::<u32>` is refused (`the kernel holds no
+  L::thm::..`), feed accepted.
+* `a_stale_cache_entry_for_a_changed_mir_is_not_accepted`: with keys that
+  leave out the MIR, the entries stored for varint are replayed and
+  accepted for the same MIR (63 of 63 from the cache), and for a changed
+  `Decoder::<u16>::feed` the replayed proof is rejected by the kernel and
+  feed has no theorem.
+
+The existing tests run through the trusted check now (`prove_and_check`
+in `theorem_gate.rs` and `fault_injection.rs`; `theorem_gate` itself in
+the gate tests).
+
+**Trusted lines** (code lines, `loc.py`):
+
+| part | before this stage | after |
+| --- | --- | --- |
+| L's generator `literal.rs` | 1,474 | 1,474 |
+| `literal.core` (non-comment lines) | 139 | 139 |
+| statement `stmt.rs` | 225 | 225 |
+| names and load checks `mod.rs` | 480 | 481 (`pub mod gate`) |
+| parse `ir.rs` + `sexp.rs` | 613 | 613 |
+| printer `mirx` | 1,131 | 1,131 |
+| lift glue | ≈ 260 | ≈ 260 |
+| the gate | ≈ 650 (bookkeeping) | **125** (`gate.rs`) + ≈ 25 (call sites) ≈ 150 |
+| **total** | **≈ 5.0k** | **≈ 4.5k** (≈ 3.9k without the parse, as counted before checked structuring: 4.2k then) |
+
+**Validation** (2026-10-01, release, memguard 6 GB, the host heavily
+shared: load average ≈ 35, so times are noisy):
+
+* `tests/theorem_gate.rs` 10 (the 7 before and the 3 above),
+  `tests/fault_injection.rs` 4 (the 19 per-construct mutations, the two
+  historical bugs and the extra precondition, now through the trusted
+  check), `tests/literal.rs` 24, `tests/walker.rs` 4; also
+  `tests/lowered_use.rs` 11 (the shipped theorems and the `ShippedMir`
+  twin, through `accept_shipped`), `tests/lift_opt.rs` 9 (8 ignored as
+  before; the dispatch's shipped theorems per instance),
+  `tests/lift_conformance.rs` 13 (1 ignored; L loaded through the ledger),
+  `tests/verdict_cache.rs` 8: all pass. Clippy reports nothing in the
+  changed lines.
+* `sandblaster check storage/sandblaster/mmr/mod.rs`: `gate mir-theorems:
+  passed (76 of 76 ..., 15.0s)`, 5,598 obligations, the only error the
+  missing SPEC.lock (as before). `sandblaster check
+  storage/sandblaster/verifier/mod.rs`: `passed (69 of 69 ..., 6.4–7.1s,
+  the trusted check 0.0s)`, its errors the examples, sections and lock
+  findings that predate this work (14 + 56 + 1).
+* `cargo test -p commonware-codec`: 147 + 16 + 5 passed; the varint build
+  is verified, every §15 gate, `63 of 63 lifted function(s) read from MIR
+  with a kernel-checked theorem (0 from the verdict cache), 6.2s, the
+  trusted check 0.1s`, SPEC.lock matching (116 items).
+* The trusted check costs 0.0–0.1 s per module. The gates' wall times
+  above are higher than stage cs-assurance's (MMR 9.4 s, verifier 4.4 s);
+  the walks and kernel checks are unchanged and the host ran other
+  agents' builds, so this is load, not the change, but it was not
+  re-measured on a quiet host.
+
+**Open after this stage.**
+
+* L's generator is still 1,474 code lines against the ≈ 1.0k target (the
+  other lever on the trusted count).
+* A cached theorem now costs its kernel re-check (varint: about the cold
+  kernel time, ≈ 2.5 s, against 0.3 s for the old replayed verdict); the
+  walks are still saved. Not measured on a warm build in this stage.
+* The lowering stage tool (`driver::stage::lower_lifted`, no gate before
+  it) makes its first trusted load after the optimizer ran, so the
+  optimizer's definitions count as the elaboration there; in every build
+  the gate's load comes first.
+* The shipped theorems' cache path has no dedicated test (it now replays
+  declarations that `accept_shipped` checks).
+
+### Stage tcb-literal (shrinking L's generator), 2026-10-01
+
+**Goal.** L's generator `literal.rs` was 1,474 code lines against the
+≈ 1.0k target. Shrink it without changing what L means, keeping each
+construct's reading local, with its one-line MIR reference.
+
+**Result.** `literal.rs` **1,217** code lines (−257, −17%);
+`literal.core` **139**, unchanged. L's text is **byte-identical** before
+and after, for every MIR instance of the three modules and for every
+fixture of `tests/literal.rs`, so no conversion lemma is needed.
+
+**Equivalence evidence.**
+
+* Method: the generator as it stood at the start of this stage (a copy of
+  `literal.rs` and `cfg.rs`) and the new one, each run on the same input.
+  `cs_proto <root> -` with `CS_DUMP=<dir>` generates L of every instance
+  with a body, loads it (the kernel checks it) and writes the text; it
+  now writes one file per MIR module (`<module>.core`), where it used to
+  overwrite one file.
+* varint (168 instances), 1,871,847 bytes, MD5 `3a92e12ccf0d8c832bf2399a852063b5`;
+  the MMR (128), 1,463,701 bytes, `41ad604b11fc044ef116084437e96ce9`; the
+  verifier (116), 1,222,773 bytes, `2915db572729ac5e6935c19e86e72769`:
+  identical (`cmp`) after each of the three passes of this stage.
+* The constructs read as `None`, with their messages (`CS_FAULTS`):
+  identical (varint 0, the MMR 31, the verifier 30).
+* The fixtures of `tests/literal.rs` (8 bodies, 309,707 bytes; they cover
+  signed operations, unchecked shifts by another width, closures, nested
+  cells and returned codes, which the three modules use little or not at
+  all): identical, written through a temporary dump hook in the test,
+  removed afterwards.
+
+**What changed.**
+
+* *Out of the trusted count, into `cfg.rs` (untrusted).* `cfg.rs` returns
+  only numbers and booleans; the trusted generator still writes every
+  piece of text.
+  * `dfs_order`: the post-order numbers behind `rank`, and the loop
+    headers. They only decide where fuel is consumed. A wrong rank, or a
+    missing header, fails the kernel's check of `run` (every decrease is a
+    `linarith` proof). An extra header only consumes more fuel; since
+    running out of fuel is `None`, a `Some` is still the result of a
+    finite run (A2), with the same value.
+  * `panic_blocks` (it was `must_diverge`): the blocks from which every
+    path panics, read as `None`. A wrong entry only turns a value into
+    `None`. A block wrongly left out is read construct by construct, as
+    any other.
+  * `occurs`: whether a code can reach type `T` inside type `A`. It only
+    prunes the `follow`/`update` functions: a wrong `false` makes that
+    path `None`; a wrong `true` generates functions whose arms are `None`.
+  * `show`: the rendering of fault messages.
+  * Literal's copy of the successor function was identical to `cfg.rs`'s
+    `succs` and is gone. These functions are 68 lines in the old generator
+    and 63 in `cfg.rs` (235 → 298 code lines).
+* *Duplication removed.*
+  * `field_of` and `with_field` are one `field(.., set)`.
+  * `BINOPS` and `SIGNED_BINOPS` are one table with a column for signed
+    bits.
+  * The integer types are one table, `INTS`.
+  * `Gen` holds a `GenState` instead of copying its four fields.
+  * The self-call's fuel match was a copy of the jump's; it is now
+    `fuel_jump`.
+  * `Return` reads the output's components from the function's `outs`.
+  * The call protocol's open binds are a list folded around the callee's
+    run, instead of a text prefix with a count of closing parentheses.
+  * Helpers for repeated text: `binds`, `code`, `code_app`, `word_lit`
+    (it replaces `mask` and three copies of the masking), `slot`,
+    `FnCx::{get, through, need, live}`, `result`.
+* *`@RC@`, the function's code type.* Text inside a function's arms keeps
+  `@RC@` and is substituted once, where each definition is emitted (`run`,
+  `deref`/`write`, `follow`/`update`). Before, it was also substituted at
+  every intermediate step: `ty_rc`, and the `rc` parameters of the field
+  functions, are gone. The callee's code type in the call protocol is
+  still substituted explicitly, as before.
+* *Dead code.* `Gen::new`, `Gen::order` and `LFn::nblocks` had no users.
+* *Layout.* 33 helpers whose body is one expression are written on one
+  line, which accounts for 66 of the 257 lines.
+
+The −257 lines, by kind: 68 moved out, 66 of layout, 123 from removed
+duplication and simplification. A measure that layout cannot move,
+non-blank characters outside comments, goes from 57,563 to 52,368 (−9%;
+about 1,570 of these moved to `cfg.rs`).
+
+**What remains** (code lines, by part): the type map (words, MIR types,
+ADTs, constructors, fields) ≈ 220; places and reference codes ≈ 230;
+rvalues, operators and casts with their tables ≈ 180; per function
+(cells, emission of `St`, accessors, `Blk`, `rank`, `run`) ≈ 160; calls
+with the cell protocol ≈ 140; terminators, dispatch and fuel ≈ 70; leaves
+≈ 70; the interface types (`LFn`, `Cell`, `AdtL`, `GenState`) ≈ 65;
+statements, operands, constants ≈ 40; text helpers ≈ 30.
+
+**The other levers of §7, and why they were not used.**
+
+* *Combinators in `literal.core`.* The Rust lines go into per-construct
+  dispatch: picking the reading by type, threading the state, the cell
+  protocol. The template text is already one `format!` per construct. A
+  combinator replaces that one line with another, adds library lines, and
+  changes L's text, and with it every proof term built over it. No
+  candidate saved lines on balance.
+* *Generic accessors.* `g<i>`/`s<i>` take 5 Rust lines. A generic
+  definition over a slot list would need `St` as nested pairs, changing
+  every text and every proof, to save at most those 5 lines.
+* The next real reduction would change L's text, so it needs a kernel
+  conversion check per instance and re-proving every theorem. One
+  candidate: read static projections through the reference-code
+  machinery, which would remove `static_get`/`static_set` (≈ 50 lines);
+  the walker's proofs would then go through the `follow` functions. Not
+  done in this stage.
+
+**Cache key.** `checked::generator_hash` (amendment (g); also the
+conformance cache) now includes `cfg.rs`, since the generator's text
+depends on its ranks and headers. A stale key could only replay
+declarations that the kernel and `gate.rs` check again.
+
+**Validation** (release, memguard 6 GB):
+
+* `tests/literal.rs`: 24 passed.
+* `tests/fault_injection.rs`: 4 passed (the 19 per-construct mutations,
+  the two historical bugs, the extra precondition).
+* `tests/theorem_gate.rs`: 10 passed.
+* The gate (`CS_GATE=1 cs_proto <root> -`: every lifted function walked
+  and then accepted by `gate.rs`): varint 63 of 63 (8.3 s), the MMR 76 of
+  76 (13.8 s), the verifier 69 of 69 (6.6 s), none from the cache.
+* Every test target of `sandblaster-front` builds. Clippy reports
+  nothing in `literal.rs` or `cfg.rs`.
+
+**Open after this stage.**
+
+* 1,217 against the ≈ 1.0k target: see "the other levers" above.
+* Not changed, noted in review: in `place`, after the `Deref` of a `&mut`,
+  the place's type stays the reference type. So `(*r)[i]` is refused
+  (`None`). A downcast followed by a field is still read right, because a
+  field step takes the field's own type. The effect is only ever `None`,
+  never a wrong value; fixing it would change L's text.
+
+### Stage tcb-checks (two assumptions made checks), 2026-10-01
+
+**Goal.** AUDIT.md §21.1 recorded two assumptions the theorems do not
+check:
+
+1. "A module type's fields and variants have the same order and names in
+   the MIR and in the subset declaration (kernel field names are
+   positional)."
+2. "The precondition rule matches binder names (`h_req<k>`, `h_depth`)":
+   the content argument was structural (the reader sees only the
+   signature).
+
+Turn both into checks, small and in the trusted count, each with a test
+and its negative twin, without changing any theorem.
+
+**(1) Module types declared alike** (`mir/gate.rs`, check 4 of its
+header; +33 code lines). For a theorem and for a shipped theorem alike,
+`Ledger::accept` now collects every ADT the function's MIR instances
+reach: the types of the locals of every instance in its closure, through
+tuples, arrays, slices, references, closure captures and function items'
+arguments, and transitively through each ADT's arguments and fields.
+For each one that is a module type (a path of the extracted crate,
+`ModuleNames::local`, with a subset name, `kernel_adt`), it compares the
+MIR's adt-def with the lifted crate's declaration: the HIR item the
+elaborator declared the inductive from, found by the kernel name. It
+compares:
+
+* the kind (struct or enum);
+* a struct's fields by name and in order (a tuple field is named by its
+  index, as the MIR names it);
+* an enum's variants by name and in order, each with its fields by name
+  and in order;
+* each variant's discriminant: variant `i` must have discriminant `i`,
+  because typeck refuses explicit discriminants, so the subset's are
+  `0, 1, ..`.
+
+A mismatch, or a module type with no declaration, refuses the function
+and names both declarations: "the MIR declares
+`commonware_codec::varint::Decoder` as {=0(result, bits_read)} and the
+subset `crate::varint::Decoder__u32` as {=0(bits_read, result)}: kernel
+fields are positional, so L and the structured reading would name
+different fields".
+
+Host enums and host instances are not compared. A host model may name
+fewer variants than the MIR, and that is the host models' own assumption
+(A5). `Ledger::verdicts`, `Ledger::accept_shipped` and
+`checked::prove_and_check` now take the lifted crate (`&hir::Crate`).
+
+The module types compared, as measured on the gate runs: varint 9
+(`Decoder`, `UInt`, `SInt`, each at three widths), the MMR 4 (`Position`,
+`Location`, `Family`, `PeakIterator`), the verifier 6 (those of the MMR
+but `PeakIterator`, plus `Standard`, `Subtree` and the enum
+`ReconstructionError`). All agree.
+
+**(2) Preconditions are the declared contract's, by content** (the
+elaborator; the name rule of `stmt.rs` is removed).
+
+* *The lift* carries the declared contract as one more attribute of the
+  lifted function: `#[mir_contract(requires(..), .., decreases(..))]`.
+  The declared contract is the `requires(..)` and `decreases(..)`
+  attributes of the skeleton and the attachments, never what the reading
+  of the body adds, and the attribute copies them as they are (`lift.rs`,
+  in the block that records `MirContract`).
+* *typeck* reads it into `hir::FnDef::declared` and types it in the
+  function's scope like the `requires`. It is typed after the body, so
+  the body's locals keep their ids.
+* *The elaborator* (`elab::items`: `fn_requires`, `as_declared`,
+  `depth_prop`) elaborates a function that has a declared contract only
+  when:
+  * it has as many `requires` clauses as declared;
+  * the type of each precondition `h_req<k>` is α-equal
+    (`Env::alpha_eq_relevant`, globals by identity) to the elaboration of
+    the declared k-th clause at the same depth;
+  * it has a depth bound exactly when one is declared, and its hypothesis
+    is α-equal to the declared one's.
+
+  Otherwise the function is refused (`could not be elaborated: ..`): it
+  gets no definition, so no `S_f` and no theorem. Binder names play no
+  part. The obligations that the second elaboration raises are dropped,
+  since the first elaboration's obligations stand. Measured on the MMR:
+  each comparison takes under 1 ms, and the obligation count is
+  unchanged (4,449).
+* `S_f` must be defined by the elaboration (check 3 of `gate.rs`), so
+  every theorem the gate accepts has the elaboration of the declared
+  clauses as its preconditions.
+* So the name rule in `stmt::statement` is gone, and with it
+  `model_statement`, which existed only to skip the rule.
+  `stmt::statement` no longer takes a contract. `lift::MirContract` no
+  longer records the clauses' text: it lists the functions read from MIR,
+  `global` and `key` only. The verdict-cache keys no longer have contract
+  lines, because `S_f`'s type, which the key hashes, carries the
+  preconditions.
+* The check sits in the elaborator because an independent elaboration of
+  the declared clause needs the clause typed and elaborated in the
+  function's scope, which only typeck and the elaborator do. Both are
+  trusted already (DESIGN.md §1.1 items 2 and 6).
+
+**Tests** (each with a negative twin):
+
+* `tests/theorem_gate.rs`
+  `a_module_type_declared_with_its_fields_reordered_is_refused`. With
+  `Decoder::<u32>::feed`'s theorem proven, the trusted check accepts it.
+  The twin is the lifted crate's `Decoder__u32` with its two fields
+  reordered: `bits_read` first, the types in place. The kernel
+  environment, whose fields are `f0` and `f1`, and the theorem are
+  exactly the same, so no theorem can see the change. The check refuses
+  the function and names both declarations.
+* `tests/literal.rs` `a_precondition_other_than_the_declared_clause_is_refused`.
+  It uses the lift fixture `lift_w` with an attachment
+  `requires(bits < 1000usize)` on `Counter::chunks` (`Counter` is not
+  exported: a boundary function has no precondition). `Counter::chunks`
+  is elaborated with that precondition. The twin uses the new hook
+  `WrongRule::ChangedRequires`: after the declared contract was carried,
+  the function's first `requires` becomes `requires(true)`. That is the
+  same number of clauses, so the binder is still `h_req0`, which the old
+  name rule accepted. The elaborator refuses it: "`crate::w::Counter::chunks`
+  could not be elaborated: its precondition 0 `Eq(Bool, true, true)` is
+  not its declared contract's `Eq(Bool, #lt_usize(bits, 1000usize), true)`
+  (lift::MirContract)". This test replaces the stmt-level test of the
+  name rule.
+* `tests/fault_injection.rs` `a_precondition_the_declared_contract_lacks_is_refused`
+  (`WrongRule::ExtraRequires`). The elaborator now refuses the four
+  functions ("it has 1 `requires` clause(s), its declared contract 0"),
+  and the gate reports them without a theorem. Feed keeps its theorem.
+
+**Trusted lines** (code lines, `loc.py`):
+
+| part | before this stage | after |
+| --- | --- | --- |
+| the gate's trusted check `gate.rs` | 125 | 158 (+33: check 4) |
+| the statement `stmt.rs` | 225 | 210 (−15: the name rule and `model_statement`) |
+| the elaborator's precondition check | — | 39 (`elab/items.rs` +22, `typeck/mod.rs` +12, `typeck/expr.rs` +4, `hir.rs` +1) |
+| the lift glue | ≈ 260 | ≈ 258 (−2: the contract's text is no longer recorded; +5 lines of the test hook, not counted) |
+| **total trusted** | **≈ 4.22k** | **≈ 4.27k** (+55) |
+
+The stage adds checks, so the count goes up a little: 15 of the
+precondition check's 39 lines are paid back by the rule it replaces.
+
+**Validation** (2026-10-01/02, release, memguard 6 GB; the host was
+heavily shared, load average 40–90, so times are noisy):
+
+* The narrow suites: `tests/theorem_gate.rs` 11 (the 10 before and the
+  reordered declaration), `tests/fault_injection.rs` 4 (the 19
+  per-construct mutations, the two historical bugs, the extra
+  precondition), `tests/literal.rs` 24 (the name-rule test replaced by the
+  changed-clause test), `tests/walker.rs` 4. Also `tests/lowered_use.rs`
+  11 (`accept_shipped` with the crate), `tests/lift_conformance.rs` 13 (1
+  ignored; `stmt::statement` without a contract), `tests/verdict_cache.rs`
+  8 and `tests/lift_opt.rs` 9 (8 ignored). All pass. A first run of
+  `lift_opt` failed once in rustc's build of the conformance harness
+  ("failed to map object file: memory map must have a non-zero length",
+  the shared host's temporary files); it passed when run again.
+* The gate (`CS_GATE=1 cs_proto <root> -`, every lifted function walked
+  and then accepted by `gate.rs` with check 4): varint 63 of 63, the MMR
+  76 of 76, the verifier 69 of 69, none from the cache. The module types
+  compared are the ones listed under (1).
+* `sandblaster check storage/sandblaster/mmr/mod.rs`: `gate mir-theorems:
+  passed (76 of 76 .., the trusted check 0.0s)`, 5,598 obligations as
+  before; the only error is the missing SPEC.lock, as before.
+  `sandblaster check storage/sandblaster/verifier/mod.rs`: `passed (69 of
+  69 ..)`, 1,643 obligations; its errors are the 14 example and
+  spec-dependency findings, the 56 section findings and the one lock
+  finding that predate this work.
+* `cargo test --release -p commonware-codec`: 147 + 16 + 5 passed. The
+  varint build is verified, every §15 gate passes, and SPEC.lock still
+  matches (116 items, root `d2b174be..`), so the carried
+  `#[mir_contract(..)]` changes nothing the lock sees.
+* Clippy reports nothing in the changed lines (a `type_complexity`
+  warning on the new `Contracts` field was fixed with the
+  `DecreasesAttr` alias).
+
+**Open after this stage.**
+
+* The elaborator's check covers every function the lift reads from MIR,
+  the lifted round trip's source functions included. The round trip's
+  copies and helpers are elaborated in generated mode, without a declared
+  contract. Their lemmas are untrusted steps of the shipped theorem's
+  proof, whose statement is the source function's.
+* A `requires` over `#[ghost]` parameters (in the ghost bundle) is
+  compared by count only. No function read from MIR has ghost parameters.
+* Host enums and host instances are not compared with the MIR (see (1)).
+
+### Stage tcb-review (independent review, final validation), 2026-10-02
+
+**Goal.** Read the whole trusted part again, as the stages tcb-gate,
+tcb-literal and tcb-checks left it, construct by construct against
+rustc's MIR semantics: L's generator and library, the statement, the
+trusted gate with its two new checks, `mod.rs`'s names and load checks,
+the parse. Look for a reading that gives a value where rustc's semantics
+differ, and for a way the gate could pass a module whose theorems do not
+cover every lifted function or state less than `stmt.rs` generates. Fix
+each with a test and its negative twin; publish the final counts; run the
+final validation.
+
+**Read, end to end:** `literal.rs` (every rvalue, operator row with its
+signed column, cast, intrinsic, terminator, the call protocol with nested
+cells and returned codes, places static and through codes, the
+`deref`/`write`/`follow`/`update` functions, fuel and ranks),
+`literal.core` (every definition and constant), `stmt.rs`, `gate.rs`,
+the elaborator's precondition check (`elab/items.rs`, `typeck`), the
+names and load checks of `mod.rs`, `ir.rs`, `sexp.rs`, the call sites in
+`driver::gates` and `driver::lowered`, the kernel's `alpha_eq_relevant`
+and `refs_closure` (which the trusted check relies on), and, read only,
+the printer's statement, operand, cast, borrow, constant, drop and leaf
+printing in `mirx` (not changed).
+
+**Findings, fixed** (each with a test and its negative twin):
+
+| finding | effect before | fix |
+| --- | --- | --- |
+| A listed function's MIR instance was not checked to be that function. The lift finds an instance by its lifted name alone (`Decoder__u32::feed`, `foo`: unqualified), and `load`'s index keeps one instance per name. `mod.rs` called this matching untrusted ("a mismatch is a name or type error"), but two functions of two extracted modules with one lifted name and one signature (a free `foo` in two files; two types `Foo`, each with a `bar`), or a function whose own instance was not extracted next to another module's of that name, are bound without any error | the gate would accept a function whose theorem is about another function's MIR: S, read from the same instance, agrees with it, so the theorem holds, and the laws would be about the other function. None of the three extractions has such a pair (no two roots share a lifted name, and check 0 accepts all 208 listed functions) | `gate.rs` check 0: the instance must be the listed function, its lifted name in the DSL module of its item (`ModuleNames::instance_global`: the function's own path, its self type's, a sealed trait's for its impl on a primitive, the module type argument's for an operator impl on a primitive). `tests/theorem_gate.rs` `a_function_listed_with_another_functions_instance_is_refused`: `Decoder__u32::new` with its theorem is accepted; listed with the instance of `<Decoder<u32> as Default>::default`, which calls `new`, so that the theorem of its reading against `new`'s structured reading holds and the kernel accepts it (both proven by evaluation), it is refused, naming the instance's function |
+| A second extraction's reading could stand in for the first's. L's names restart with each extraction's reading (`L::f0`, ..), the kernel lets a later definition take over a name, and check 3 trusted every load alike | in an environment with readings of two extractions (no build has one today: every crate's lifted modules share one extraction), the first's statements would name the second's definitions, so a theorem about the second's instance would be accepted for the first's function; and a later load of the first's reading (the round trip's, after the second's) would bind its callees' names to the second's definitions | the ledger records which extraction each load read, L's library apart, and check 3 counts only the library's load and the function's own extraction's: every global the statement reaches, through L's definitions too, must come from the elaboration, the library or that extraction's reading. `tests/theorem_gate.rs` `a_reading_whose_names_a_later_extraction_took_over_is_refused`: a second reading of varint's MIR under another module name, its feed proven, takes over feed's names; feed is accepted for the second extraction and refused for the first, whose statement reaches the second reading's definitions |
+| An index leaf was recognized by a path suffix, `ends_with("ops::Index::index")` (stage cs-assurance made the range types exact, not the trait). The printer makes any `..::index` call on an array through a trait named `..Index` a leaf, and the structured reading reads every such leaf as core's indexing | a crate's own `myops::Index::index` on an array, by a core range, was read as core's `&a[..j]` whatever the crate's impl does; S agrees, so the theorem holds | core's `Index` by its exact path (`lib_path`). `tests/literal.rs` `readings_the_review_found_wrong_are_none_where_rust_differs`: `k::myops::Index::index` is `None` and named; core's is still the slice. Every leaf of the three extractions and of the fixtures is `std::ops::Index::index`, so L's text is unchanged |
+
+**Checked and found right** (no change):
+
+* *The statement.* `init` puts each relevant parameter of `S_f` in its
+  MIR slot (parameter `i` is local `i`; `&mut` and `Option<&mut T>`
+  parameters through their cells), `erase` maps S's result component by
+  component in `Out`'s order (cells in parameter order, then the return
+  place; a lifted function whose referent holds a reference is refused),
+  and the telescope is pinned by the well-typedness of `S_f x̄ .h̄` inside
+  the kernel's declaration: a precondition type that does not convert with
+  `S_f`'s makes the declaration ill-typed.
+* *The trusted check against the kernel.* `alpha_eq_relevant` compares
+  every binder's domain, irrelevant binders included (the preconditions
+  and the `.hle` fuel premise), and every relevant application argument;
+  `refs_closure` follows binder domains, motives and inductive
+  declarations (a global in the premise is reached). A redefinition of a
+  name used by the statement (`seq::len`, `S_f`, L's `run`) after the
+  first load is refused by check 3. In every build the first load precedes
+  any untrusted definition: the elaboration, then the §15 gates on a
+  read-only environment (`run_gates(&out, ..)`), then the theorem gate.
+* *L's readings.* Aggregates and aggregate constants carry the variant
+  index (`VariantIdx`, the printer's `v.to_index()`), discriminants come
+  from the adt-def; signed `Div`/`Rem`/checked/unchecked operations are
+  not modeled; `Shl`/`Shr` reduce the amount to `u32` (every width divides
+  2^32, so the residue modulo the width is kept, signed amounts included,
+  as `rem_euclid` does), and unchecked shifts compare the amount at its
+  own type; sign extension only from signed types; `RuntimeChecks(ub)` as
+  `false`; a self-call and its continuation run on one unit less; a
+  callee's cells are written back before its result is written (`x =
+  f(&mut x)` ends with the result). The type of a place after the `Deref`
+  of a `&mut` stays the reference type (recorded at stage tcb-literal):
+  a field step takes its own type, an index is refused, and a second
+  `Deref` has a target type that never equals the true one, so `follow`
+  finds nothing: `None`, never a value.
+* *`literal.core`.* The sign-extension masks, the checked flags, the
+  `bswap` masks, the leaves' panics (`&a[..=j]` fails exactly when `j >=
+  N`).
+* *The printer* (read only): the statements it omits have no runtime
+  effect (storage markers, fake reads, place mentions, ascriptions,
+  coverage); a drop whose glue it cannot decide is read as glue; casts,
+  borrows and terminators it does not know are printed `unsupported`.
+* *The round trip's call site.* A rewritten function always has at least
+  one instance, so a lowered function always passed `accept_shipped`.
+
+**Recorded, not changed:**
+
+* *Adt-defs across the gate's and the round trip's extractions.* Check 1
+  compares the instances' bodies; L reads the adt-defs of the extraction
+  the module's reading began with. In the MMR's two extractions 13 of 114
+  adt-defs differ, all only in rustc-internal ids printed inside unmodeled
+  types (`(unsupported "type Pat(Ty { id: 211, ..")`), which L reads alike,
+  as not modeled; comparing the whole text would refuse every shipped
+  theorem whose instances reach a `Vec` (through `RawVec` to `NonNull`).
+  Module types are compared with the subset's declaration on both
+  extractions (check 4), library types come from the same compiler
+  release, and the copy changes function bodies only (`lowered::assemble`).
+* *A fragility, fail closed.* An instance whose text holds such an id
+  differs between the two extractions (the MMR: `Result::<Position,
+  Error>::expect`), so a shipped theorem whose instances ran it would be
+  refused and the function keep its source text. None does today.
+* *Suffix matches that give no value.* `Option<&mut T>` (`opt_mut`) and
+  `Vec`'s allocator `Global` are still recognized by path suffix: a type
+  wrongly taken for `Option<&mut T>` has no reading (a type holding a
+  `&mut` is not modeled, and the statement with it is ill-typed), and a
+  `Vec` with another allocator keeps `Vec`'s meaning as a sequence up to an
+  allocation failure, which aborts.
+* *Unions* parse as structs (`(kind union)`): no union value with more than
+  one field can be built (an aggregate has one operand, the constructor
+  one argument per field: a kernel type error), and a one-field union is a
+  struct. The MMR and the verifier declare `MaybeUninit` and
+  `lazy_lock::Data`, used only in functions no lifted function calls.
+* *Ghost parameters.* A `requires` over `#[ghost]` parameters is compared
+  by count only; no function read from MIR can have one (the lift adds
+  none, and the as-is Rust file cannot declare one).
+* *`argc`* defaults to 0 when malformed: then the parameters read as
+  uninitialized, or a call's argument count is refused; no value follows.
+* *Multi-extraction crates.* After the fix, a crate whose lifted modules
+  have two extractions gets the first's functions refused (their names
+  taken over), as before the fix, but now named; ids unique across
+  readings would make such crates verifiable (not needed by the three).
+
+**Trusted lines** (code lines, `loc.py`):
+
+| part | before this workflow (stage cs-assurance) | after stage tcb-checks | after this stage | what it trusts |
+| --- | --- | --- | --- | --- |
+| L's generator `mir/literal.rs` | 1,474 | 1,217 | 1,217 | the MIR reference, construct by construct; `cfg.rs` only for fuel placement and `None` |
+| L's library `mir/literal.core` | 139 | 139 | 139 | the kernel's primitives; the lift's models (A5) in its leaves |
+| the statement `mir/stmt.rs` | 225 | 210 | 210 | `S_f`'s telescope (the elaborator's check) |
+| names and load checks `mir/mod.rs` | 480 | 481 | 491 (+10: `instance_global`, with the `dsl_module` helper `kernel_adt` now shares) | the lift's names (`ModuleNames`), the source hashes |
+| parse `mir/ir.rs` + `mir/sexp.rs` | 482 + 131 | 482 + 131 | 482 + 131 | the printer's format |
+| printer `mirx` | 1,131 | 1,131 | 1,131 | rustc (A4) |
+| the gate's trusted check `mir/gate.rs` | ≈ 650 of bookkeeping | 158 | 164 (+6: check 0; check 3 per extraction, the library's load recorded apart) | the kernel, the parts above, the lift's list of functions read from MIR |
+| its call sites (`driver::gates`, `driver::lowered`) | (in the ≈ 650) | ≈ 25 | ≈ 25 | — |
+| the elaborator's precondition check | — | 39 | 39 | typeck and the elaborator (TCB items 2, 6) |
+| the lift glue | ≈ 260 | ≈ 260 | ≈ 260 (unchanged) | — |
+| **total** | **≈ 4.97k** | **≈ 4.27k** | **≈ 4.29k** (≈ 3.68k without the parse) | |
+
+Against the start of this workflow, the trusted part is 683 code lines
+smaller (≈ 4.97k → ≈ 4.29k, −14%); against the trusted structurer before
+checked structuring (≈ 4.78k with the parse, ≈ 4.18k without), it is
+smaller by ≈ 0.5k on either counting. This stage adds 16 lines for the
+two checks the review found missing.
+
+**Validation** (2026-10-02, release unless noted, memguard 6 GB, the host
+shared with other agents' builds):
+
+* The negative twins fail without their fixes: with check 0 disabled the
+  misbound `Decoder__u32::new` is accepted, with check 3 counting every
+  load alike the taken-over reading is accepted, and with the index leaf
+  matched by suffix `myidx` reads as core's indexing (no fault).
+* `cargo check --tests` of the eight sandblaster crates: clean but the two
+  `cfg(sandblaster)` warnings of `redteam_fidelity.rs` that predate this
+  work. Clippy reports nothing in the changed files.
+* Front suites: `mir` 38, `literal` 24, `walker` 4, `theorem_gate` 13 (the
+  11 before and the two above; varint's gate 63 of 63, the verifier 69 of
+  69, the MMR 76 of 76, so check 0 refuses none of the 208 functions),
+  `fault_injection` 4 (the 19 per-construct mutations, the two historical
+  bugs, the extra precondition: all caught), `lift` 18, `lift_open` 27,
+  `lift_verifier` 24, `lift_conformance` 13 (1 ignored), `lift_opt` 9 (8
+  ignored), `lowered_use` 11, `verdict_cache` 8, `build_loop` 7,
+  `module_mode` 10 (`lift_probe` and `lift_varint_diff` are ignored scratch
+  tools); the front's unit tests 49; the kernel's tests: 26 targets, 181
+  passed, 1 ignored. `lift_opt` failed twice under two test threads in
+  rustc's build of the conformance harness (an empty object file, then a
+  missing one): its two module-mode tests built the same module `bits`
+  into one `OUT_DIR` at once. Each build now gets its own `OUT_DIR`
+  (`tests/lift_opt.rs`, the only change to that file), and it passes with
+  two threads, as with one.
+* `cargo test -p commonware-codec` (dev profile): 147 + 16 + 5 passed; the
+  varint build is verified: 21,237 obligations, every §15 gate (spec
+  mutants 763 killed of 985), `mir-theorems: 63 of 63 lifted function(s)
+  read from MIR with a kernel-checked theorem (0 from the verdict cache),
+  6.2s, the trusted check 0.1s`, lift conformance 22,070 inputs on 63
+  functions and the literal reading on 3,654 inputs, 0 mismatches,
+  SPEC.lock matching (116 items, root `d2b174be..`).
+* `cargo test -p commonware-storage --lib -- merkle::mmr merkle::position
+  merkle::location merkle::proof merkle::hasher` (dev profile): 129
+  passed. Its build: the MMR 5,598 obligations, `76 of 76 .., 13.2s, the
+  trusted check 0.0s`, `to_nearest_size` still rewritten with its 8
+  shipped theorems (1 against the source function); the verifier 1,643
+  obligations, `69 of 69 .., 6.2s, the trusted check 0.0s`; both
+  development builds report their pending §15 findings as before.
+* `sandblaster check storage/sandblaster/mmr/mod.rs`: `gate mir-theorems:
+  passed (76 of 76 .., 12.6s, the trusted check 0.0s)`, 5,598 obligations,
+  10 laws, 307 s in all; the only error the missing SPEC.lock, as before.
+  `sandblaster check storage/sandblaster/verifier/mod.rs`: `passed (69 of
+  69 .., 6.3s, the trusted check 0.0s)`, 1,643 obligations, 5 laws, 15 s;
+  its errors the 14 example and spec-dependency findings, the 56 section
+  findings and the one lock finding that predate this work.
+* Added check time: the trusted check takes 0.0–0.1 s per module; the two
+  checks this stage adds are a name computation per function and a
+  per-extraction filter of check 3's existing walk, not measurable at that
+  resolution. The gate as a whole: 6.2 s of the varint build (whose
+  elaboration took 847 s and gates 500 s on this host), 12.6–13.2 s for the
+  MMR, 6.2–6.3 s for the verifier, all cold.
+
+**Open after this workflow.**
+
+* L's generator is 1,217 code lines against the ≈ 1.0k target; the next
+  real cut changes L's text (stage tcb-literal: static projections read
+  through the reference-code functions, ≈ 50 lines, with every theorem
+  proven again).
+* Crates whose lifted modules have two extractions: ids unique across
+  readings (and L's own inductives of library types shared between them)
+  would let the second reading leave the first's names alone.
+* The printer's `unsupported` renderings carry rustc-internal ids, so an
+  instance holding an unmodeled type differs between two extractions; a
+  shipped theorem running one would be refused (fail closed). Dropping the
+  ids in the printer or the parse would remove this.
+* Host enums and host instances are compared with the MIR by variant name
+  only; their tuple fields are positional (in module mode rustc checks each
+  modeled variant's payload types in the emitted module's tail, `const _:
+  fn(T..) -> E = E::V;`; in place the models are listed in the record): the
+  host models' assumption (A5).
+* A cached theorem costs its kernel re-check; not measured on a warm build.
+  The shipped theorems' cache path still has no dedicated test.
+
 ## Summary
 
 Today `front/src/mir/read.rs` (2,397 code lines) turns rustc's MIR into the
@@ -1038,7 +1740,10 @@ The decrease proofs are generated `linarith` terms over:
   `len fuel = 1 + len f1`.
 
 The kernel checks them. Fuel only bounds termination, so its placement is
-not trusted: a wrong placement makes `run` fail to typecheck. Entering a
+not trusted: a wrong placement makes `run` fail to typecheck. (Since stage
+tcb-literal the post-order and the loop headers come from `cfg.rs`, which
+is untrusted, as do the blocks from which every path panics, read as
+`None`.) Entering a
 loop consumes one unit as well. That gives the walker a stuck point at
 every loop entry, where the loop lemma applies (§5).
 
@@ -1238,7 +1943,7 @@ sufficient fuel. By A2, the MIR run terminates with that value.
 
 ### Assumptions (the trusted base after this change)
 
-* **A1. L's generator and library mean MIR.** About 1.0k lines (§7). Each
+* **A1. L's generator and library mean MIR.** 1,217 + 139 code lines (§7). Each
   construct's reading is local and checkable against the MIR reference by
   a reader.
 * **A2. Fuel adequacy.**
@@ -1265,11 +1970,37 @@ sufficient fuel. By A2, the MIR run terminates with that value.
   unchanged, and they are the same model functions S uses.
 * **A6. The kernel**, unchanged. No new prelude definitions beyond L's
   library, which is counted in A1.
-* **A7. The statement generator** (`mir/stmt.rs`, 163 code lines). The theorem text, `init` and `erase`,
+* **A7. The statement generator** (`mir/stmt.rs`, 210 code lines). The theorem text, `init` and `erase`,
   about 0.2k lines, decide what the theorem says. They are small and
-  regular, and a reader checks them against §3.
+  regular, and a reader checks them against §3. Its preconditions are
+  `S_f`'s; the elaborator makes them the declared contract's (checked,
+  below).
 * **A8. Targets.** Little-endian, 64-bit `usize`, as today
   (`transmute` to bytes, `isize` as `U64`).
+
+**Checked, not assumed** (stage tcb-checks; both were recorded as
+assumptions before):
+
+* *Module types are declared alike.* L reads field `i` of a module type
+  as the MIR numbers it, S as the subset's declaration does, and the
+  kernel's field names are positional, so a theorem cannot tell two
+  differently named fields apart. The gate's trusted check compares, for
+  every module type the function's MIR instances reach, the MIR's
+  adt-def with the lifted crate's declaration (variants and fields by
+  name and in order, discriminants `0, 1, ..`).
+* *Preconditions are the declared contract's, by content.* The elaborator
+  elaborates a function read from MIR only when each precondition is
+  α-equal to the elaboration of the declared clause, which the lift
+  carries apart (`#[mir_contract(..)]`, `hir::FnDef::declared`), whatever
+  the binders are named.
+* *Each listed function's MIR instance is that function* (stage
+  tcb-review). The lift finds an instance by its unqualified lifted name;
+  the gate requires the instance's lifted name in the DSL module of its
+  item to be the listed function (`ModuleNames::instance_global`).
+* *A statement rests on its own extraction's reading* (stage tcb-review).
+  L's names restart with each extraction's reading, and the kernel lets a
+  later definition take over a name; the gate's check 3 counts only the
+  load of L's library and the function's own extraction's.
 
 **No longer trusted:**
 
@@ -1594,12 +2325,14 @@ not the original alternative).
   production keeps them in `elab::Output::pre_commit`, next to the
   `DefRecord`s (which cross threads and so cannot hold kernel terms).
 * **Verdict cache.** New entries per function, keyed as in §5.5
-  (namespace `theorem`; the walk is not part of the key: it is untrusted,
-  and a stored theorem was kernel-checked). Invalidation follows from the
-  keys.
+  (namespace `theorem`). Since stage tcb-gate an entry holds the proof's
+  declarations, replayed through the kernel and then checked by the
+  trusted check like a fresh proof, so neither the entries nor the keys
+  are trusted.
 * **The gate** (stage cs-integrate): `driver::gates::theorem_gate`, after
   the §15 gates of every verified build and the pending-gates build;
-  `docs/mir-lift.md` §20.6.
+  `docs/mir-lift.md` §20.6. Its verdict is the trusted check `mir/gate.rs`
+  (stage tcb-gate).
 * **Conformance** (`sandblaster conform`, kernel vs rustc). It stays. It
   checks A1/A4/A5, which the theorem cannot. It becomes cheaper to make
   meaningful: running L in the kernel on the same inputs compares L with
@@ -1631,23 +2364,27 @@ comments or tests. The script used reproduces `docs/mir-lift.md` §5 exactly:
 | | before | after (stage cs-assurance: measured, with the review's fixes) |
 | --- | --- | --- |
 | structurer `mir/read.rs` | 2,397 | 2,433, **untrusted** (checked by the theorems) |
-| `mir/cfg.rs` | untrusted | 235, untrusted |
-| walker `mir/simproof.rs`, driver `mir/checked.rs` | — | 4,565 + 1,707, untrusted but for the gate's bookkeeping (below) |
-| `mir/mod.rs`: `load` checks and names (subset type names, host models) | 430 | 480 (L's names: `kernel_adt`, `is_transparent`, `host_model_method`, host enum paths; the read.rs names stay until `read.rs` leaves) |
-| L generator `mir/literal.rs` | — | 1,474 (prototype 1,905; stage cs-storage: + data-free reads; cs-assurance: + the review's fixes) |
+| `mir/cfg.rs` | untrusted | 298, untrusted (stage tcb-literal: + the literal reading's ranks, loop headers, panicking blocks and type-occurrence pruning, 63 lines; 235 before) |
+| walker `mir/simproof.rs`, driver `mir/checked.rs` | — | 4,565 + 1,674, untrusted (stage tcb-gate: the gate's trusted part moved to `mir/gate.rs`) |
+| `mir/mod.rs`: `load` checks and names (subset type names, host models) | 430 | 491 (L's names: `kernel_adt`, `is_transparent`, `host_model_method`, host enum paths; stage tcb-review: + `instance_global`, 10; the read.rs names stay until `read.rs` leaves) |
+| L generator `mir/literal.rs` | — | 1,217 (stage tcb-literal, with byte-identical output; 1,474 before it; prototype 1,905; stage cs-storage: + data-free reads; cs-assurance: + the review's fixes) |
 | L library `mir/literal.core` | — | 139 non-comment lines (stage cs-literal: 141; `mir::nth` removed, `array_get` and the inclusive-range leaf changed) |
-| statement and `erase` `mir/stmt.rs` | — | 225 (stage cs-storage: + core types S models by prelude structs, the model lemmas' statement) |
+| statement and `erase` `mir/stmt.rs` | — | 210 (stage cs-storage: + core types S models by prelude structs, the model lemmas' statement; stage tcb-checks: − the precondition name rule, 225 before) |
 | printer `mirx` | 1,131 | 1,131 (unchanged) |
 | lift glue (`lift.rs`'s `#[lift(mir)]` path) | about 0.2k | about 0.26k (+ the declared contracts, the loaded MIR and the helpers' record in the lift's facts) |
-| the gate's bookkeeping (`gates.rs`'s `theorem_gate` and its report, ≈ 80; `checked.rs`'s planning, `prove_lifted`, the cache keys and outcome records, the model lemmas' plan, the gate memory, `prove_roundtrip`'s acceptance and `compose`'s statement, ≈ 500; `lowered.rs`'s requirement of the shipped theorems, ≈ 70) | — | ≈ 650 |
+| the gate's trusted check `mir/gate.rs` and its call sites in `gates.rs` and `lowered.rs` (stage tcb-gate; before it, ≈ 650 lines of bookkeeping: `theorem_gate` and its report ≈ 80, `checked.rs`'s planning, cache keys, acceptance and round-trip acceptance ≈ 500, `lowered.rs` ≈ 70) | — | 164 + ≈ 25 (stage tcb-review: + check 0, the instance is the function, and check 3 per extraction, 6; stage tcb-checks: + the module types' declarations, 33; 125 before) |
+| the elaborator's precondition check (`elab/items.rs` 22, `typeck` 16, `hir.rs` 1; stage tcb-checks) | — | 39 |
 | `ir.rs` + `sexp.rs` (they feed L: trusted, amendment (d)) | untrusted | 482 + 131 = 613 (cs-assurance: no defaults, order checks) |
-| **total trusted** (`read.rs` before, L after the gate) | **about 4.2k** (`ir.rs`/`sexp.rs` not counted) | **about 5.0k** = 480 + 1,474 + 139 + 225 + 1,131 + ≈ 260 + ≈ 650 + 613; **4.4k** counted as before (without `ir.rs`/`sexp.rs`). The count grows by the gate's plumbing and the shipped theorems' (step 8 replaces the trust in `read.rs`'s reading of the round trip's copy); what changes is its kind: local, construct-by-construct translations replace 2.4k lines of symbolic structuring |
+| **total trusted** (`read.rs` before, L after the gate) | **about 4.2k** (`ir.rs`/`sexp.rs` not counted; ≈ 4.8k with them) | **about 4.3k** = 491 + 1,217 + 139 + 210 + 1,131 + ≈ 260 + ≈ 189 + 39 + 613 = 4,289 (stage tcb-review, two checks the review found missing: +16; stage tcb-checks, two assumptions made checks: +55; ≈ 4.2k after stage tcb-literal, ≈ 4.5k after stage tcb-gate, ≈ 5.0k before it); **≈ 3.7k** counted as before (without `ir.rs`/`sexp.rs`). What changes is also its kind: local, construct-by-construct translations and one check of what the kernel holds replace 2.4k lines of symbolic structuring |
 
-**Why the generator is 1.45k and not 1.0k.** The design's estimate (below)
+**Why the generator is 1.2k and not 1.0k.** Stage tcb-literal took it from
+1,474 to 1,217 with the same output (the log has the breakdown and the
+levers it did not use); what follows explains the 1.45k it started from.
+The design's estimate (below)
 left out the type map (library types, module types, host models, mirrors,
 constructors by name: ≈ 0.2k) and the text helpers (≈ 0.1k); the reference
 model grew by nested cells and returned-code translation (≈ 0.1k), and the
-rvalue tables by signed bits and the leaves (≈ 0.1k). By part, measured:
+rvalue tables by signed bits and the leaves (≈ 0.1k). By part, measured at 1,474:
 type map and helpers ≈ 300; places and reference codes ≈ 300; calls with
 the cell protocol ≈ 200; rvalues, operators, casts and their tables ≈ 270;
 terminators, dispatch, fuel, rank ≈ 180; emission ≈ 130; leaves ≈ 70.
@@ -1667,6 +2404,10 @@ Two levers reduce it further:
 * moving per-construct templates into library combinators (counted, but
   each a few reviewable lines);
 * generating accessors from one generic definition over a slot list.
+
+(Stage tcb-literal looked at both: neither saves lines without changing
+L's text, because each template is already one line of Rust. The log
+says why.)
 
 **Growth.** L grows only with new MIR constructs and leaves, about 10–30
 lines each, never with structuring idioms. A new `read.rs` heuristic costs

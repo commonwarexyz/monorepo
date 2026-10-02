@@ -1792,7 +1792,7 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
             let outs = crate::mir::checked::prove_roundtrip(out, &c.lift_facts, &rt_m.module, &rt_m, &rfs, &opts);
             // (per source function: every instance's theorems)
             let mut per: BTreeMap<String, (usize, usize, usize, String)> = BTreeMap::new();
-            for (o, key) in outs.into_iter().zip(keys) {
+            for (o, key) in outs.into_iter().zip(keys.iter().cloned()) {
                 match o.result {
                     Ok(ps) => {
                         let e = per.entry(key).or_insert((0, 0, 0, o.source.clone()));
@@ -1805,6 +1805,13 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
                         }
                     }
                     Err(e) => fail(&mut verdicts, &key, format!("the shipped code's theorem: {e}")),
+                }
+            }
+            // a function is replaced only when the trusted check finds the
+            // shipped code's theorem in the kernel (crate::mir::gate)
+            for (rf, key) in rfs.iter().zip(&keys) {
+                if let Err(e) = out.mir_gate.ledger.accept_shipped(&out.env, krate, &rt_m, &c.lift_facts, &rf.copy_key, &rf.source) {
+                    fail(&mut verdicts, key, format!("the shipped code's theorem: {e}"));
                 }
             }
             for (key, (n, shipped, cached, source)) in per {

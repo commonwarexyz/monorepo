@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use super::ir::{Fn, Operand, Place, Proj, Rvalue, Stmt, Term};
+use super::ir::{Callee, Fn, Operand, Place, Proj, Rvalue, Sbmir, Stmt, Term, Ty};
 
 /// The normal successors of a block (unwind edges are not printed).
 pub fn succs(t: &Term) -> Vec<usize> {
@@ -267,4 +267,92 @@ impl Cfg {
     pub fn innermost_loop(&self, b: usize) -> Option<usize> {
         self.headers.iter().copied().filter(|h| self.body[*h].contains(&b)).min_by_key(|h| self.body[*h].len())
     }
+}
+
+// ----- the literal reading's shape (`literal.rs`) ---------------------------
+//
+// Facts the literal reading's generator takes from here, outside the trusted
+// count: they only place fuel, prune and read blocks as `None`. A wrong rank
+// or loop header makes `run` fail the kernel's termination check (every
+// decrease is a kernel-checked proof) or consume more fuel (a `Some` is still
+// the result of a finite run); a wrong panicking block, or a type wrongly said
+// not to occur, reads a block or a path as `None`. Neither gives L another
+// value, so a bug here can only make a theorem unprovable.
+
+/// Depth-first post-order numbers of the blocks (from block 0, then from
+/// each block not yet visited) and the targets of the back edges (the loop
+/// headers), sorted.
+pub fn dfs_order(f: &Fn) -> (Vec<usize>, Vec<usize>) {
+    struct D {
+        succ: Vec<Vec<usize>>,
+        state: Vec<u8>,
+        post: Vec<usize>,
+        headers: Vec<usize>,
+        n: usize,
+    }
+    fn go(d: &mut D, b: usize) {
+        d.state[b] = 1;
+        for t in d.succ[b].clone() {
+            match d.state.get(t) {
+                Some(0) => go(d, t),
+                Some(1) if !d.headers.contains(&t) => d.headers.push(t),
+                _ => {}
+            }
+        }
+        (d.post[b], d.n, d.state[b]) = (d.n, d.n + 1, 2);
+    }
+    let nb = f.blocks.len();
+    let mut d = D { succ: f.blocks.iter().map(|bl| succs(&bl.term)).collect(), state: vec![0; nb], post: vec![0; nb], headers: vec![], n: 0 };
+    for root in 0..nb {
+        if d.state[root] == 0 {
+            go(&mut d, root);
+        }
+    }
+    d.headers.sort();
+    (d.post, d.headers)
+}
+
+/// The blocks from which every path ends in a diverging call,
+/// `unreachable`, an abort or an unwind without returning or looping
+/// (nothing on them can reach a return): the reading makes them `None`.
+pub fn panic_blocks(f: &Fn) -> Vec<usize> {
+    fn must_diverge(f: &Fn, b: usize, visiting: &mut Vec<usize>) -> bool {
+        let Some(bl) = f.blocks.get(b) else { return false };
+        if visiting.contains(&b) {
+            return false;
+        }
+        match &bl.term {
+            Term::Unreachable | Term::Abort | Term::Resume | Term::Call(Callee::Diverge(_), ..) | Term::Call(_, _, _, None) => true,
+            Term::Return | Term::Unsupported(_) => false,
+            t => {
+                visiting.push(b);
+                let ss = succs(t);
+                let r = !ss.is_empty() && ss.iter().all(|x| must_diverge(f, *x, visiting));
+                visiting.pop();
+                r
+            }
+        }
+    }
+    (0..f.blocks.len()).filter(|b| must_diverge(f, *b, &mut Vec::new())).collect()
+}
+
+/// Whether `t` can occur inside a value of type `a` (through fields and
+/// array elements, never through a reference; at most 8 levels deep): the
+/// reading follows reference codes only into types where it can.
+pub fn occurs(m: &Sbmir, t: &Ty, a: &Ty, depth: u32) -> bool {
+    a == t
+        || depth < 8
+            && match a {
+                Ty::Tuple(ts) => ts.iter().any(|x| occurs(m, t, x, depth + 1)),
+                Ty::Array(e, _) => occurs(m, t, e, depth + 1),
+                Ty::Adt(k) => m.adts.get(k).is_some_and(|d| d.variants.iter().any(|v| v.fields.iter().any(|(_, ft)| occurs(m, t, ft, depth + 1)))),
+                _ => false,
+            }
+}
+
+/// A short rendering of a MIR construct (the literal reading's fault
+/// messages name it; diagnostics only).
+pub fn show(x: &impl std::fmt::Debug) -> String {
+    let t = format!("{x:?}");
+    if t.len() > 200 { format!("{}..", &t[..t.char_indices().nth(200).map(|c| c.0).unwrap_or(t.len())]) } else { t }
 }

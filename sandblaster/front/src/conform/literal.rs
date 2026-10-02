@@ -75,15 +75,12 @@ pub(super) fn prepare(out: &mut elab::Output, c: &Checked, entries: &[&ConformEn
         if ours.is_empty() {
             continue;
         }
-        let state = match out.mir_gate.modules.get(&m.module) {
-            Some((st, _)) => st.clone(),
+        let state = match out.mir_gate.ledger.state(&m.module) {
+            Some(st) => st.clone(),
             None => {
                 let keys: Vec<String> = ours.iter().map(|(_, k)| k.key.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-                match checked::load_literal(&mut out.env, m, names, &keys, None) {
-                    Ok(l) => {
-                        out.mir_gate.modules.insert(m.module.clone(), (l.state.clone(), Vec::new()));
-                        l.state
-                    }
+                match checked::load_into(&mut out.mir_gate.ledger, &mut out.env, m, names, &keys, None) {
+                    Ok(l) => l.state,
                     Err(e) => {
                         rep.errors.push(format!("the literal reading of `{}` was not accepted, so it cannot be compared with rustc: {e}", m.module));
                         continue;
@@ -105,7 +102,7 @@ pub(super) fn prepare(out: &mut elab::Output, c: &Checked, entries: &[&ConformEn
             };
             let kn = KNames { names, env: &out.env };
             let mut g = LGen::resume(m, &kn, state.clone());
-            let spec = match stmt::statement(&out.env, &mut g, lf, f, &k.global, k) {
+            let spec = match stmt::statement(&out.env, &mut g, lf, f, &k.global) {
                 Ok(s) => s,
                 Err(e) => {
                     rep.errors.push(format!("`{}`: the statement of its theorem cannot be generated, so L cannot be compared: {e}", k.global));

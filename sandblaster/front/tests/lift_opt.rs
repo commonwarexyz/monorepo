@@ -350,8 +350,11 @@ fn low_byte_mod(x: u32) {
 
 fn m_env() -> std::collections::HashMap<String, String> {
     // a real, writable OUT_DIR: the lift conformance check compiles and
-    // runs its harness under `OUT_DIR/<out>-conformance/`
-    let out = std::env::temp_dir().join(format!("sandblaster-lift-opt-out-{}", std::process::id()));
+    // runs its harness under `OUT_DIR/<out>-conformance/` (one per build:
+    // two tests building `bits` at once must not share the harness)
+    static BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let out = std::env::temp_dir().join(format!("sandblaster-lift-opt-out-{}-{n}", std::process::id()));
     let out = out.display().to_string();
     [
         ("CARGO_MANIFEST_DIR", "/host"),

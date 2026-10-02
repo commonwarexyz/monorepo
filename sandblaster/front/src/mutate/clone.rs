@@ -488,6 +488,7 @@ fn checker_fn(f: &FnDef, body: Expr) -> FnDef {
         requires: vec![],
         ensures: None,
         decreases: None,
+        declared: None,
         body: FnBody::Spec(Expr::new(ExprKind::Block(Block { stmts: vec![], tail: Some(Box::new(body)), span }), Ty::Bool, span)),
         target_features: vec![],
         feature_set: vec![],

@@ -22,7 +22,7 @@
 //!   `reconstruct_digest`: no law or proof speaks of `collected`, so the
 //!   proofs pass on the misreading; the theorem does not).
 //! * **Amendment (b)**: a structured reading that adds a precondition the
-//!   declared contract lacks gets no theorem (the statement refuses it).
+//!   declared contract lacks gets no theorem (the elaborator refuses it).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -57,7 +57,7 @@ fn theorems(c: &Checked, facts: &LiftFacts) -> ModuleTheorems {
         let mut items: Vec<String> = c.lift_facts.mir_contracts.iter().map(|x| x.global.trim_start_matches("crate::").to_string()).chain(c.lift_facts.mir_helpers.iter().map(|x| x.global.trim_start_matches("crate::").to_string())).collect();
         items.extend(["^words::", "^stdlib::", "^sha256::"].map(String::from));
         let mut out = checked::elaborate_names(k, &items);
-        checked::prove_lifted(&mut out, facts, &GateOptions::default())
+        checked::prove_and_check(&mut out, k, facts, &GateOptions::default())
     });
     assert_eq!(reps.len(), 1, "one lifted MIR module");
     reps.remove(0)
@@ -320,6 +320,12 @@ fn a_mutated_mir_construct_breaks_the_theorem_of_the_function_that_runs_it() {
 
 /// The gate on `c`: its `mir-theorem` errors and whether it passed.
 fn gate(c: &Checked) -> (Vec<String>, bool) {
+    let (errs, passed, _) = gate_elab(c);
+    (errs, passed)
+}
+
+/// [`gate`], and the elaboration's errors.
+fn gate_elab(c: &Checked) -> (Vec<String>, bool, Vec<String>) {
     sandblaster_front::elab::with_big_stack(move || {
         let k = c.krate.as_ref().unwrap();
         let mut items: Vec<String> = c.lift_facts.mir_contracts.iter().map(|x| x.global.trim_start_matches("crate::").to_string()).chain(c.lift_facts.mir_helpers.iter().map(|x| x.global.trim_start_matches("crate::").to_string())).collect();
@@ -328,7 +334,8 @@ fn gate(c: &Checked) -> (Vec<String>, bool) {
         let mut g = GateReport::default();
         theorem_gate(&mut out, k, c, &mut g);
         let errs: Vec<String> = g.diags.list.iter().filter(|d| d.kind == sandblaster_front::diag::DiagKind::MirTheorem).map(|d| d.msg.clone()).collect();
-        (errs, g.passed())
+        let elab: Vec<String> = out.diags.list.iter().filter(|d| d.kind == sandblaster_front::diag::DiagKind::Elab).map(|d| d.msg.clone()).collect();
+        (errs, g.passed(), elab)
     })
 }
 
@@ -367,20 +374,21 @@ fn a_snapshot_restoring_a_variable_after_an_in_place_write_fails_its_theorems() 
 }
 
 /// Amendment (b): a structured reading carrying a precondition the declared
-/// contract does not state gets no theorem (the statement refuses it), so
-/// an untrusted structurer cannot make a theorem vacuous.
+/// contract does not state is refused by the elaborator (its preconditions
+/// are checked against the declared contract the lift carries apart,
+/// `hir::FnDef::declared`), so it has no definition and no theorem: an
+/// untrusted structurer cannot make a theorem vacuous. (A clause changed in
+/// place, the same number of clauses: `tests/literal.rs`.)
 #[test]
 fn a_precondition_the_declared_contract_lacks_is_refused() {
     let c = read_crate(VARINT, Some(WrongRule::ExtraRequires));
-    // the declared contract is the skeleton's and the attachments' only
-    let feed = c.lift_facts.mir_contracts.iter().find(|k| k.global == "crate::varint::Decoder__u32::feed").expect("feed's contract");
-    assert!(!feed.requires.iter().any(|r| r.contains("true")), "{:?}", feed.requires);
-    let (errs, passed) = gate(&c);
+    let (errs, passed, elab) = gate_elab(&c);
     assert!(!passed);
-    let refused: Vec<&String> = errs.iter().filter(|e| e.contains("which its declared contract") && e.contains("does not state")).collect();
     // (the hook reads the private free functions with the extra clause)
     for f in ["size__u64", "read__u32", "write__u16", "size__u16"] {
-        assert!(refused.iter().any(|e| e.starts_with(&format!("`crate::varint::{f}`"))), "{f}: {errs:#?}");
+        let refused = format!("`crate::varint::{f}` could not be elaborated: it has 1 `requires` clause(s), its declared contract 0");
+        assert!(elab.iter().any(|e| e.starts_with(&refused)), "{f}: {elab:#?}");
+        assert!(errs.iter().any(|e| e.starts_with(&format!("`crate::varint::{f}` has no kernel-checked theorem"))), "{f}: {errs:#?}");
     }
     // a function read without it still has its theorem
     assert!(!errs.iter().any(|e| e.starts_with("`crate::varint::Decoder__u32::feed`")), "{errs:#?}");
