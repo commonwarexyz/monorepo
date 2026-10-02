@@ -4029,7 +4029,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
 
                 // 3) Compare wrapper behavior:
-                //    - Inline fails in `verify`.
+                //    - Inline fails in `verify` and still certifies, trusting the notarization.
                 //    - Deferred returns optimistic success and fails in `certify`.
                 let verify_result = wrapper
                     .verify(verify_context, digest)
@@ -4040,6 +4040,11 @@ mod tests {
                     assert!(
                         !verify_result,
                         "inline verify should return application-level failure"
+                    );
+                    let certify = wrapper.certify(round, digest).await;
+                    assert!(
+                        certify.await.expect("certify result missing"),
+                        "inline certify should trust the notarization"
                     );
                 } else {
                     assert!(
