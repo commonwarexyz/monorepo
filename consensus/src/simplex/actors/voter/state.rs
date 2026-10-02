@@ -1089,11 +1089,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 if self.in_issuance_window(*proposal_view) {
                     return None;
                 }
-                // A pipelined term-start leader can propose before it holds the
-                // outgoing certificate. Ask any peer for that parent; retain
-                // leader affinity for ordinary same-term repair.
-                let target =
-                    (!proposal_view.is_term_start(self.term_length())).then(|| leader.clone());
+                // A pipelined term-start leader may lack its immediate predecessor's
+                // certificate. Older parents and same-term repair retain leader affinity.
+                let pipelined_parent = proposal_view.is_term_start(self.term_length())
+                    && parent_view.next() == *proposal_view;
+                let target = (!pipelined_parent).then(|| leader.clone());
                 Some((*parent_view, Kind::Notarization, target))
             }
             _ => None,
@@ -1104,8 +1104,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// verification.
     ///
     /// Requests missing ancestry from the proposal's elected leader. A
-    /// term-start parent notarization may come from any validator because the
-    /// pipelined proposer might not hold it. [`Self::resolve_ancestry`] decides
+    /// term-start immediate predecessor's notarization may come from any validator
+    /// because the pipelined proposer might not hold it. [`Self::resolve_ancestry`] decides
     /// whether an error justifies a fetch.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].
@@ -3712,7 +3712,10 @@ mod tests {
         runtime.start(|mut context| async move {
             let (
                 Fixture {
-                    schemes, verifier, ..
+                    participants,
+                    schemes,
+                    verifier,
+                    ..
                 },
                 mut state,
             ) = setup_state_with(
@@ -3733,15 +3736,16 @@ mod tests {
             assert!(state.add_nullification(nullification));
             assert_eq!(state.current_view(), View::new(6));
 
-            // A term-start proposal is never inside the issuance window, so
-            // its uncertified parent is missing locally. The pipelined proposer
-            // may not hold the certificate yet, so verification asks any peer.
+            // An older term-start parent requires a certificate at the proposer,
+            // so request it from the elected leader.
             let child = Proposal::new(
                 Rnd::new(Epoch::new(9), View::new(6)),
                 View::new(2),
                 Sha256Digest::from([44u8; 32]),
             );
             assert!(state.set_proposal(View::new(6), child.clone()));
+            let leader =
+                participants[usize::from(state.leader_index(View::new(6)).unwrap())].clone();
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -3752,7 +3756,7 @@ mod tests {
                 }
                     if proposal == View::new(6)
                         && view == View::new(2)
-                        && target.is_none()
+                        && target == Some(leader)
             ));
 
             // The round deduplicates the request while it is outstanding.

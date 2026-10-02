@@ -546,14 +546,16 @@ mod tests {
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _, Reporters,
+        Application as _, CertifiableAutomaton as _, CertifiableBlock as _, HandoffPolicy,
+        HandoffPublication, Heightable as _, Reporter as _, Reporters,
         marshal::{
             Update,
             ancestry::{self, Ancestry},
             core::Processed,
+            standard::Deferred,
         },
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
-        types::Height,
+        types::{FixedEpocher, Height},
     };
     use commonware_cryptography::Digestible as _;
     use commonware_macros::select;
@@ -562,7 +564,7 @@ mod tests {
         Supervisor as _, deterministic,
     };
     use commonware_utils::{
-        NZUsize,
+        NZU64, NZUsize,
         acknowledgement::{Acknowledgement as _, Exact},
         channel::oneshot,
         sync::Mutex,
@@ -607,6 +609,10 @@ mod tests {
 
         async fn genesis(&mut self) -> Self::Block {
             panic!("gated application genesis is not used")
+        }
+
+        fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+            HandoffPolicy::Prepare(HandoffPublication::AfterCertification)
         }
 
         async fn propose(
@@ -1582,6 +1588,80 @@ mod tests {
                 .expect("proposal should remain active");
             assert!(proposal.await.is_none());
             actor.abort();
+        });
+    }
+
+    #[test]
+    fn cancelled_handoff_proposal_unblocks_finalization() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (proposal_gate, proposal_started, mut proposal_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::default(),
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let mut signing = context.child("signing");
+            let scheme =
+                scheme_mocks::fixture(&mut signing, b"cancelled-handoff", 1).schemes[0].clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "cancelled-handoff",
+                scheme,
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let processor = Processor::new(
+                app,
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let policy_application = processor.application();
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor,
+                deferred_verifications: Vec::new(),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.run());
+            let mut mailbox = Mailbox::new(sender, policy_application);
+            let mut deferred = Deferred::new(
+                context.child("deferred"),
+                mailbox.clone(),
+                marshal.mailbox.clone(),
+                FixedEpocher::new(NZU64!(u64::MAX)),
+            );
+            let genesis = TestBlock::new(0, 0);
+            let winner = TestBlock::child(&genesis, 1);
+            let proposal = deferred.propose_handoff(winner.context()).await;
+            proposal_started.await.expect("proposal should start");
+
+            let (acknowledgement, mut waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(winner), acknowledgement));
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(poll!(&mut waiter).is_pending());
+            assert!(!proposal_release.is_closed());
+
+            drop(proposal);
+            select! {
+                result = &mut waiter => {
+                    result.expect("queued finalization should be acknowledged after cancellation");
+                },
+                _ = context.sleep(Duration::from_millis(100)) => {
+                    panic!("cancelled handoff proposal blocked finalization");
+                },
+            }
+            proposal_release.closed().await;
+            actor.abort();
+            let _ = actor.await;
+            marshal.abort().await;
         });
     }
 

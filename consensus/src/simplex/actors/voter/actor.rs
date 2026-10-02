@@ -131,7 +131,7 @@ enum ProposalState<D> {
     /// The automaton has not responded yet.
     Awaiting(ProposalReceiver<D>),
     /// A handoff the application declined until its parent certifies. An
-    /// ordinary request for the same context follows durable certification.
+    /// ordinary request for the same context follows certification.
     Deferred,
     /// A volatile build result awaiting durable parent certification.
     Held(D),
@@ -355,10 +355,10 @@ impl<
     /// Syncs the journal section written by this iteration, if any.
     ///
     /// Called after construction and before publication so every appended artifact
-    /// is durable by the end of the iteration. The next iteration cannot dispatch
-    /// work made eligible here until this sync completes, so a durable child
-    /// certification also implies its parent anchor is durable. A single sync
-    /// coalesces all appends.
+    /// is durable by the end of the iteration. Proposal builds may start before
+    /// this sync, but their responses and child certification wait until the next
+    /// iteration, so a durable child certification implies its parent anchor is
+    /// durable. A single sync coalesces all appends.
     async fn sync_journal(mut self) -> Self {
         let Some(view) = self.dirty_section else {
             return self;
@@ -537,8 +537,8 @@ impl<
     ) {
         // Retain optimistic future-view requests unless their captured ancestry
         // is invalid. Drop requests for exited views. Parent certification retains
-        // pending responses, deferred requests, and held results. Certification
-        // may continue after dropping an exited view's verification receiver.
+        // pending responses and held results. Certification may continue after
+        // dropping an exited view's verification receiver.
         let current_view = self.state.current_view();
         if let Some(request) = pending_propose.as_ref() {
             let reason = if request.view() < current_view {
@@ -560,6 +560,18 @@ impl<
             .is_some_and(|request| request.view() < current_view)
         {
             *pending_verify = None;
+        }
+
+        // Replace a deferred handoff once its exact captured parent certifies.
+        // Dispatch can overlap the journal sync; responses are polled afterward.
+        if let Some(Request(request, _, ProposalState::Deferred)) = pending_propose.as_ref()
+            && self.state.proposal_parent_certified(request.context())
+        {
+            let context = request.context().clone();
+            *pending_propose = Some(
+                self.request_proposal(ProposalRequest::Regular(context))
+                    .await,
+            );
         }
 
         // State and Round prevent duplicate requests when both checkpoints
@@ -1298,18 +1310,11 @@ impl<
 
                 // The prior iteration's sync_journal has completed. Promote held results
                 // here because reconcile_application_requests also runs before the sync.
-                // Replace a deferred handoff with an ordinary request for the same context.
                 if let Some(Request(request, _, state)) = pending_propose.as_mut()
-                    && matches!(state, ProposalState::Deferred | ProposalState::Held(_))
+                    && let ProposalState::Held(payload) = state
                     && self.state.proposal_parent_certified(request.context())
                 {
-                    if let ProposalState::Held(payload) = state {
-                        *state = ProposalState::Ready(*payload);
-                    } else {
-                        let context = request.context().clone();
-                        pending_propose =
-                            Some(self.request_proposal(ProposalRequest::Regular(context)).await);
-                    }
+                    *state = ProposalState::Ready(*payload);
                 }
 
                 // Prepare waiters

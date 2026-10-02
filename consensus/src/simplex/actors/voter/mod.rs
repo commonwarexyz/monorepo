@@ -3425,7 +3425,7 @@ mod tests {
                 VoterOptions {
                     leader_timeout: Duration::from_secs(2),
                     // The certification timeout fires between the view-2
-                    // handoff proposal request (issued with view 1's
+                    // optimistic proposal request (issued with view 1's
                     // notarize after one propose latency) and its response
                     // (a second propose latency later): handling the view-1
                     // timeout must not drop the in-flight request.
@@ -4195,6 +4195,31 @@ mod tests {
                 .count()
         }
 
+        /// Waits for exactly one ordinary replacement with the full captured context.
+        async fn wait_for_replacement(&self, context: &deterministic::Context) {
+            let deadline = context.current() + Duration::from_secs(1);
+            while self.requests_for(View::new(3)) < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "ordinary request did not follow certification"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let contexts: Vec<_> = self
+                .propose_requests
+                .lock()
+                .iter()
+                .filter(|request| request.view() == View::new(3))
+                .cloned()
+                .collect();
+            assert_eq!(contexts.len(), 2);
+            assert_eq!(
+                contexts[0], contexts[1],
+                "ordinary request must reuse the deferred context"
+            );
+            assert_eq!(contexts[1].parent, (View::new(2), self.parent.payload));
+        }
+
         fn respond(&mut self) {
             self.response
                 .take()
@@ -4497,50 +4522,111 @@ mod tests {
         });
     }
 
-    /// A deferred handoff waits in the pending slot. The ordinary request for
-    /// the same context follows the durable parent certification.
+    /// An already deferred request starts its ordinary build before the parent
+    /// sync completes, but its response cannot publish the child yet.
     #[test_traced]
-    fn test_pipelined_handoff_deferred_request_waits_for_certification_sync() {
+    fn test_pipelined_handoff_deferred_build_overlaps_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             let mut fixture =
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut relayed = fixture.observer();
             fixture.defer();
             wait_for_handoff_event(&context, "Deferred").await;
             let certified = fixture.certify_parent(&context).await;
 
             let release = fixture.block_certification(certified).await;
-            // Long enough for a re-request to reach the application if the
-            // certification result alone released the deferral.
+            fixture.wait_for_replacement(&context).await;
+            // The ordinary mock response is available after its 1ms build latency.
             context.sleep(Duration::from_millis(50)).await;
-            assert_eq!(
-                fixture.requests_for(View::new(3)),
-                1,
-                "ordinary request must wait for the certification sync"
+            assert_eq!(fixture.requests_for(View::new(3)), 2);
+            assert!(
+                relayed.recv().now_or_never().is_none(),
+                "ordinary build must not relay before sync"
+            );
+            while let Some(message) = fixture.batcher.recv().now_or_never().flatten() {
+                assert!(
+                    !matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
+                    if vote.view() == View::new(3)),
+                    "ordinary build must not vote before sync"
+                );
+            }
+
+            fixture.release_certification(release).await;
+            let (digest, _) = relayed
+                .recv()
+                .await
+                .expect("ordinary build must relay after sync");
+            loop {
+                if let batcher::Message::Constructed(Vote::Notarize(vote)) = fixture
+                    .batcher
+                    .recv()
+                    .await
+                    .expect("batcher must remain open")
+                    && vote.view() == View::new(3)
+                {
+                    assert_eq!(vote.proposal.payload, digest);
+                    break;
+                }
+            }
+            fixture.wait_for_replacement(&context).await;
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Deferred", 1), ("Requested", 1)],
+                &[],
+            );
+        });
+    }
+
+    /// A response arriving during the parent sync stays Awaiting until the
+    /// loop resumes, then dispatches its ordinary replacement.
+    #[test_traced]
+    fn test_pipelined_handoff_deferred_response_during_certification_sync() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let certified = fixture.certify_parent(&context).await;
+            let release = fixture.block_certification(certified).await;
+            fixture.defer();
+            context.sleep(Duration::from_millis(50)).await;
+            assert_eq!(fixture.requests_for(View::new(3)), 1);
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Requested", 1)],
+                &[],
             );
 
             fixture.release_certification(release).await;
-            let deadline = context.current() + Duration::from_secs(1);
-            while fixture.requests_for(View::new(3)) < 2 {
-                assert!(
-                    context.current() < deadline,
-                    "ordinary request did not follow parent certification"
-                );
-                context.sleep(Duration::from_millis(1)).await;
-            }
-            let contexts: Vec<_> = fixture
-                .propose_requests
-                .lock()
-                .iter()
-                .filter(|request| request.round.view() == View::new(3))
-                .cloned()
-                .collect();
-            assert_eq!(contexts.len(), 2);
-            assert_eq!(
-                contexts[0], contexts[1],
-                "ordinary request must reuse the deferred context"
+            fixture.wait_for_replacement(&context).await;
+            context.sleep(Duration::from_millis(50)).await;
+            fixture.wait_for_replacement(&context).await;
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Deferred", 1), ("Requested", 1)],
+                &[],
             );
-            assert_eq!(contexts[1].parent, (View::new(2), fixture.parent.payload));
+        });
+    }
+
+    /// A late deferral after durable parent certification needs no further
+    /// parent event to dispatch its ordinary replacement.
+    #[test_traced]
+    fn test_pipelined_handoff_deferred_response_after_certification_sync() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let certified = fixture.certify_parent(&context).await;
+            fixture.finish_certification(certified).await;
+            assert_eq!(fixture.requests_for(View::new(3)), 1);
+            fixture.defer();
+            fixture.wait_for_replacement(&context).await;
+            context.sleep(Duration::from_millis(50)).await;
+            fixture.wait_for_replacement(&context).await;
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,

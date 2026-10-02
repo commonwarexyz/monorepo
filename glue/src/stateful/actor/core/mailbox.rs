@@ -187,6 +187,8 @@ where
 /// proposal, verification, and reporting calls to the actor. It evaluates handoff
 /// policy on a retained application clone, including after actor shutdown. A
 /// [`HandoffPolicy::Prepare`] decision does not guarantee proposal availability.
+/// If the actor stops before replying, proposal calls return `None` and verification
+/// calls panic with "stateful actor dropped during verify".
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
