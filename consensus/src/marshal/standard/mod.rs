@@ -24,6 +24,23 @@
 //! Prefer this variant when block sizes are small enough that shipping full blocks
 //! to every peer is acceptable or if participants have sufficiently powerful networking
 //! and want to avoid encoding / decoding overhead.
+//!
+//! # Consistency
+//!
+//! All validators must run the same wrapper for all views in a given epoch. Validators can switch
+//! between [`Inline`] and [`Deferred`] at the same epoch boundary.
+//!
+//! [`Inline`] runs application verification before voting to notarize and trusts the notarization
+//! at certification. Certification receives only the block's round and digest, and [`Inline`]
+//! blocks aren't required to embed the consensus context needed for application verification.
+//! Without that context, a validator that missed the proposal or restarted cannot verify the
+//! block itself, so it relies on the honest validators in the notarizing quorum having verified it.
+//!
+//! [`Deferred`] checks that the block's embedded context matches the proposal before voting to
+//! notarize, without waiting for application verification. It certifies only after application
+//! verification succeeds, using the embedded context if the validator missed the proposal or
+//! restarted. Its notarizations therefore do not guarantee application validity and cannot
+//! safely be trusted by [`Inline`] validators.
 
 commonware_macros::stability_scope!(ALPHA {
     mod deferred;
@@ -2652,6 +2669,172 @@ mod tests {
         }
     }
 
+    /// Switching wrappers at an epoch boundary finalizes and delivers the chain across it.
+    ///
+    /// The old wrapper handles epoch 0 and the new wrapper handles epoch 1 over the same Marshal.
+    /// Application-invalid proposals at the last height of epoch 0 and the first height of epoch 1
+    /// are rejected before valid proposals at the same heights continue the chain.
+    #[test_traced("WARN")]
+    fn test_standard_switch_wrapper_at_epoch_boundary() {
+        const INVALID: u64 = u64::MAX;
+        for (old, new) in [
+            (WrapperKind::Inline, WrapperKind::Deferred),
+            (WrapperKind::Deferred, WrapperKind::Inline),
+        ] {
+            let runner = deterministic::Runner::timed(Duration::from_secs(60));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator"),
+                    &mut oracle,
+                    participants[0].clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let app = setup.application;
+                let mut marshal = setup.mailbox;
+                let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+                let tip = epocher.last(Epoch::new(1)).unwrap();
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let mut parent = (View::zero(), genesis.digest());
+                let mut chain = vec![genesis.digest()];
+                for (epoch, kind) in [(Epoch::zero(), old), (Epoch::new(1), new)] {
+                    let mut wrapper = Wrapper::new(
+                        kind,
+                        context.child("wrapper").with_attribute("epoch", epoch.get()),
+                        MockVerifyingApp::new().with_reject(|block: &B| block.timestamp == INVALID),
+                        marshal.clone(),
+                    );
+                    let first = epocher.first(epoch).unwrap().max(Height::new(1));
+                    let last = epocher.last(epoch).unwrap();
+                    let invalid_height = if epoch.is_zero() { last } else { first };
+                    let mut rejected = 0;
+
+                    // Each epoch starts at view 1, with genesis or the preceding boundary block
+                    // as its view-0 parent.
+                    let mut view = View::zero();
+                    parent.0 = View::zero();
+                    for height in (first.get()..=last.get()).map(Height::new) {
+                        view = view.next();
+
+                        // The Byzantine proposal has the correct context but fails application
+                        // verification: Inline rejects before notarization, Deferred at certification.
+                        if height == invalid_height {
+                            let round = Round::new(epoch, view);
+                            let block_context = Ctx {
+                                round,
+                                leader: participants[1].clone(),
+                                parent,
+                            };
+                            let block =
+                                B::new::<Sha256>(block_context.clone(), parent.1, height, INVALID);
+                            let digest = block.digest();
+                            assert!(marshal.verified(round, block).await);
+                            assert_eq!(
+                                wrapper
+                                    .verify(block_context, digest)
+                                    .await
+                                    .await
+                                    .expect("verify result missing"),
+                                kind == WrapperKind::Deferred,
+                                "{kind:?}: unexpected verification verdict for Byzantine block at {round}"
+                            );
+                            if kind == WrapperKind::Deferred {
+                                let notarization = StandardHarness::make_notarization(
+                                    Proposal {
+                                        round,
+                                        parent: parent.0,
+                                        payload: digest,
+                                    },
+                                    &schemes,
+                                    QUORUM,
+                                );
+                                StandardHarness::report_notarization(&mut marshal, notarization)
+                                    .await;
+                                assert!(
+                                    !wrapper
+                                        .certify(round, digest)
+                                        .await
+                                        .await
+                                        .expect("certify result missing"),
+                                    "{kind:?}: Byzantine block at {round} should not certify"
+                                );
+                            }
+                            rejected += 1;
+                            view = view.next();
+                        }
+
+                        // The honest proposal builds on the last valid block, skipping any
+                        // Byzantine view.
+                        let round = Round::new(epoch, view);
+                        let block_context = Ctx {
+                            round,
+                            leader: participants[0].clone(),
+                            parent,
+                        };
+                        let block =
+                            B::new::<Sha256>(block_context.clone(), parent.1, height, height.get());
+                        let digest = block.digest();
+                        assert!(marshal.verified(round, block).await);
+                        assert!(
+                            wrapper
+                                .verify(block_context, digest)
+                                .await
+                                .await
+                                .expect("verify result missing"),
+                            "{kind:?}: block at {round} should verify"
+                        );
+                        assert!(
+                            wrapper
+                                .certify(round, digest)
+                                .await
+                                .await
+                                .expect("certify result missing"),
+                            "{kind:?}: block at {round} should certify"
+                        );
+                        let finalization = StandardHarness::make_finalization(
+                            Proposal {
+                                round,
+                                parent: parent.0,
+                                payload: digest,
+                            },
+                            &schemes,
+                            QUORUM,
+                        );
+                        StandardHarness::report_finalization(&mut marshal, finalization).await;
+                        parent = (view, digest);
+                        chain.push(digest);
+                    }
+                    assert_eq!(
+                        rejected, 1,
+                        "{kind:?}: epoch {epoch} should reject one Byzantine proposal"
+                    );
+                }
+
+                // The application contains the complete valid chain, including genesis.
+                while !app.blocks().contains_key(&tip) {
+                    context.sleep(Duration::from_millis(50)).await;
+                }
+                let delivered: Vec<_> = app.blocks().values().map(|block| block.digest()).collect();
+                assert_eq!(delivered, chain, "{old:?} -> {new:?}");
+            });
+        }
+    }
+
     #[test_traced("WARN")]
     fn test_standard_verify_missing_candidate_waits_without_fetching() {
         for kind in wrapper_kinds() {
@@ -3824,7 +4007,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
 
                 // 3) Compare wrapper behavior:
-                //    - Inline fails in `verify`.
+                //    - Inline fails in `verify` and still certifies, trusting the notarization.
                 //    - Deferred returns optimistic success and fails in `certify`.
                 let verify_result = wrapper
                     .verify(verify_context, digest)
@@ -3835,6 +4018,11 @@ mod tests {
                     assert!(
                         !verify_result,
                         "inline verify should return application-level failure"
+                    );
+                    let certify = wrapper.certify(round, digest).await;
+                    assert!(
+                        certify.await.expect("certify result missing"),
+                        "inline certify should trust the notarization"
                     );
                 } else {
                     assert!(
