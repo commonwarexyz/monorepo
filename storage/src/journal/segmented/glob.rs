@@ -33,10 +33,12 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, FixedSize};
-use commonware_cryptography::{Crc32, crc32};
+use commonware_cryptography::{Crc32, Hasher as _, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
-use commonware_runtime::{BufMut, Error as RError, Handle};
+use commonware_runtime::{
+    Buf as _, BufMut, BufferPool, Error as RError, Handle, IoBuf, IoBufs, iobuf::EncodeExt as _,
+};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 use zstd::zstd_safe::compress_bound;
 
@@ -65,6 +67,8 @@ pub struct Config<C> {
 /// The glob's state, boxed so the public [Glob] handle stays pointer-sized.
 struct Inner<E: Context, V: Codec> {
     manager: Manager<E, WriteFactory>,
+    pool: BufferPool,
+    write_buffer: NonZeroUsize,
 
     /// Compression level (if enabled).
     compression: Option<u8>,
@@ -76,17 +80,20 @@ struct Inner<E: Context, V: Codec> {
 impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::init].
     async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
+        let pool = context.storage_buffer_pool().clone();
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
-                pool: context.storage_buffer_pool().clone(),
+                pool: pool.clone(),
             },
         };
         let manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
 
         Ok(Self {
             manager,
+            pool,
+            write_buffer: cfg.write_buffer,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         })
@@ -95,32 +102,45 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::append].
     async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
         // Encode and optionally compress, then append checksum
-        let buf = if let Some(level) = self.compression {
+        let bufs = if let Some(level) = self.compression {
             // Compressed: encode first, then compress, then append checksum
             let encoded = value.encode();
             let mut compressed = Vec::with_capacity(compress_bound(encoded.len()) + CHECKSUM_SIZE);
             frame::compress_into(level, &encoded, &mut compressed)?;
             let checksum = Crc32::checksum(&compressed);
             compressed.put_u32(checksum);
-            compressed
-        } else {
+            IoBufs::from(IoBuf::from(compressed))
+        } else if value.encode_size() < self.write_buffer.get().saturating_sub(CHECKSUM_SIZE) {
             // Uncompressed: pre-allocate exact size to avoid copying
             let entry_size = value.encode_size() + CHECKSUM_SIZE;
             let mut buf = Vec::with_capacity(entry_size);
             value.write(&mut buf);
             let checksum = Crc32::checksum(&buf);
             buf.put_u32(checksum);
-            buf
+            IoBufs::from(IoBuf::from(buf))
+        } else {
+            // Keep large retained fields as chunks instead of copying them into a new allocation.
+            let mut bufs = value.encode_with_pool(&self.pool);
+            let mut checksum = Crc32::default();
+            for i in 0..bufs.chunk_count() {
+                checksum.update(bufs.chunk_at(i).expect("chunk index is in range"));
+            }
+            let (_, digest) = checksum.finalize();
+            bufs.append(IoBuf::from(digest.to_vec()));
+            bufs
         };
 
         // Write to blob, taking the writer only when the entry does not fit in its buffer
-        let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
+        let entry_size = u32::try_from(bufs.remaining()).map_err(|_| Error::ValueTooLarge)?;
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size();
-        if !writer.try_write_at(offset, &buf) {
+        if bufs.chunk_count() != 1 || !writer.try_write_at(offset, bufs.chunk()) {
             // Return the writer to the manager only after the owned write succeeds.
             let writer = self.manager.take(section).await?;
-            let writer = writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
+            let writer = writer
+                .write_at(offset, bufs)
+                .await
+                .map_err(Error::Runtime)?;
             self.manager.put(section, writer);
         }
 
@@ -732,6 +752,41 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_glob_chunked_entries_match_contiguous_encoding() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "chunked-entries".into(),
+                compression: None,
+                codec_config: (..).into(),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut glob: Glob<_, Bytes> = Glob::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            let mut entries = Vec::new();
+            for len in [0, 1, 127, 1016, 1017, 1018, 1024, 4096, 70_000] {
+                let value = Bytes::from(vec![7; len]);
+                let mut expected = value.encode().to_vec();
+                expected.put_u32(Crc32::checksum(&expected));
+                let offset;
+                let size;
+                (glob, offset, size) = glob.append(1, &value).await.unwrap();
+                let writer = glob.0.manager.get(1).unwrap().unwrap();
+                let stored = writer.read_at(offset, size as usize).await.unwrap();
+                assert_eq!(stored.coalesce().as_ref(), expected.as_slice());
+                assert_eq!(glob.get(1, offset, size).await.unwrap(), value);
+                entries.push((offset, size, value));
+            }
+            drop(glob.sync(1).await.unwrap());
+            let glob: Glob<_, Bytes> = Glob::init(context.child("reopened"), cfg).await.unwrap();
+            for (offset, size, value) in entries {
+                assert_eq!(glob.get(1, offset, size).await.unwrap(), value);
+            }
+            glob.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_glob_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -847,9 +902,9 @@ mod tests {
     /// stitch the discarded frames behind the new value.
     #[test_traced]
     fn test_glob_truncate_survives_crash() {
-        // A buffer smaller than one 8-byte frame writes every value straight to the blob.
+        // A buffer smaller than each frame chunk writes every chunk straight to the blob.
         let cfg = || Config {
-            write_buffer: NZUsize!(4),
+            write_buffer: NZUsize!(2),
             ..test_cfg()
         };
         for retained in [true, false] {
