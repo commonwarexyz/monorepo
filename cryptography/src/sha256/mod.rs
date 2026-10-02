@@ -345,6 +345,8 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_utils::TestRng;
+    use rand::Rng as _;
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -498,6 +500,54 @@ mod tests {
         assert_pair(
             [&backing[1..33], &backing[17..49]],
             [&backing[2..34], &backing[18..50]],
+        );
+    }
+
+    /// Return `len` random bytes, distinct per `seed`.
+    fn message(len: usize, seed: u64) -> Vec<u8> {
+        let mut message = vec![0; len];
+        TestRng::new(seed).fill_bytes(&mut message);
+        message
+    }
+
+    /// Return `message` in several part decompositions: whole, split at
+    /// block and padding boundaries, with an empty part, and in 7-byte parts
+    /// that put block boundaries inside parts.
+    fn decompositions(message: &[u8]) -> Vec<Vec<&[u8]>> {
+        let len = message.len();
+        let mut decompositions = vec![vec![message], message.chunks(7).collect()];
+        for split in [0, 1, 8, 55, 63, 64, 65, len / 2, len] {
+            let split = split.min(len);
+            let (head, tail) = message.split_at(split);
+            decompositions.push(vec![head, tail]);
+            decompositions.push(vec![head, &[], tail]);
+        }
+        decompositions
+    }
+
+    /// Check the generic pair kernel against one-shot hashing for
+    /// equal-length messages across the block and padding boundaries, with
+    /// the two messages split into different parts.
+    #[test]
+    fn test_hash_pair_equal_lengths_match_hash() {
+        for len in (0..=300).chain([1000, 4099]) {
+            let left = message(len, 1);
+            let right = message(len, 2);
+            let expected = (Sha256::hash(&[&left]), Sha256::hash(&[&right]));
+            let left_parts = decompositions(&left);
+            let right_parts = decompositions(&right);
+            for (index, left) in left_parts.iter().enumerate() {
+                let right = &right_parts[(index + 1) % right_parts.len()];
+                assert_eq!(Sha256::hash_pair(left, right), expected, "len={len}");
+            }
+        }
+
+        // Messages of different lengths hash individually.
+        let left = message(100, 1);
+        let right = message(101, 2);
+        assert_eq!(
+            Sha256::hash_pair(&[&left], &[&right]),
+            (Sha256::hash(&[&left]), Sha256::hash(&[&right]))
         );
     }
 
