@@ -1,5 +1,6 @@
 use super::{
-    CertificateOutcome, Config, Engine, EngineOutcome, Mailbox, Recoverer,
+    CertificateOutcome, Config, Engine, EngineOutcome, Mailbox, Recoverer, Recovery,
+    RecoveryCoordinator,
     scheme::{self, Scheme},
     types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace},
 };
@@ -7,12 +8,13 @@ use crate::{
     Automaton, Reporter,
     types::{Epoch, Height},
 };
+use bytes::Bytes;
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::Encode;
+use commonware_codec::{Decode as _, Encode};
 use commonware_cryptography::{
     Hasher, Sha256,
     bls12381::primitives::variant::{MinPk, MinSig},
-    certificate::{Scheme as _, mocks::Fixture},
+    certificate::{Scheme as _, Verifier as _, mocks::Fixture},
     ed25519::PublicKey,
     sha256::Digest as Sha256Digest,
 };
@@ -23,13 +25,17 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock, Quota, Runner, Spawner as _, Supervisor as _,
+    Clock, Handle, Quota, Runner, Spawner as _, Storage as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic::{self, Context},
 };
 use commonware_utils::{
-    NZU16, NZUsize, NonZeroDuration, channel::oneshot, non_empty, ordered::Quorum as _,
-    probability, sync::Mutex,
+    NZU16, NZUsize, NonZeroDuration,
+    channel::{fallible::OneshotExt as _, oneshot},
+    non_empty,
+    ordered::Quorum as _,
+    probability,
+    sync::Mutex,
 };
 use futures::future::join_all;
 use std::{
@@ -49,7 +55,8 @@ const LINK: Link = Link {
     success_rate: probability!(1.0),
 };
 
-type Registrations = BTreeMap<PublicKey, (Sender<PublicKey, Context>, Receiver<PublicKey>)>;
+type Registration = (Sender<PublicKey, Context>, Receiver<PublicKey>);
+type Registrations = BTreeMap<PublicKey, Registration>;
 
 fn digest(position: Height) -> Sha256Digest {
     Sha256::hash(&[&position.get().to_be_bytes()])
@@ -1739,4 +1746,331 @@ fn test_journal_replay_resumes_partial_mid_range() {
 #[test_traced("INFO")]
 fn test_journal_replay_resumes_with_smaller_window() {
     journal_replay_resumes_partial_mid_range(1);
+}
+
+type Ed25519 = scheme::ed25519::Scheme;
+
+/// Certificates held by an application archive.
+type Archive = Arc<Mutex<BTreeMap<RecoveryKey, Certificate<Ed25519, Sha256Digest>>>>;
+
+/// Engine mailboxes keyed by the scope of the recovery keys they request.
+type Engines = Arc<Mutex<BTreeMap<(RecoveryNamespace, Epoch), Mailbox<Ed25519, Sha256Digest>>>>;
+
+/// Archives every reported certificate under the recovery key that names it.
+#[derive(Clone)]
+struct ArchiveReporter {
+    namespace: RecoveryNamespace,
+    archive: Archive,
+}
+
+impl Reporter for ArchiveReporter {
+    type Activity = Certificate<Ed25519, Sha256Digest>;
+
+    fn report(&mut self, certificate: Self::Activity) -> Feedback {
+        let key = RecoveryKey {
+            namespace: self.namespace,
+            epoch: certificate.epoch,
+            position: certificate.item.position,
+        };
+        self.archive.lock().insert(key, certificate);
+        Feedback::Ok
+    }
+}
+
+/// How an [`ArchiveProducer`] answers requests.
+#[derive(Clone, Copy, Default)]
+enum Serving {
+    /// Serves the requested certificate.
+    #[default]
+    Honest,
+    /// Serves nothing.
+    Withhold,
+    /// Serves a certificate for a different key.
+    Misdirect,
+}
+
+/// Serves resolver requests from the application archive.
+#[derive(Clone, Default)]
+struct ArchiveProducer {
+    archive: Archive,
+    serving: Arc<Mutex<Serving>>,
+}
+
+impl commonware_resolver::p2p::Producer for ArchiveProducer {
+    type Key = RecoveryKey;
+
+    fn produce(&mut self, key: RecoveryKey) -> oneshot::Receiver<Bytes> {
+        let (sender, receiver) = oneshot::channel();
+        let archive = self.archive.lock();
+        let certificate = match *self.serving.lock() {
+            Serving::Honest => archive.get(&key),
+            Serving::Withhold => None,
+            Serving::Misdirect => archive
+                .iter()
+                .find(|(other, _)| **other != key)
+                .map(|(_, certificate)| certificate),
+        };
+        if let Some(certificate) = certificate {
+            sender.send_lossy(certificate.encode());
+        }
+        receiver
+    }
+}
+
+/// Routes each resolver response to the engine that requested its key.
+#[derive(Clone)]
+struct EngineConsumer {
+    context: Arc<Context>,
+    scheme: Ed25519,
+    engines: Engines,
+}
+
+impl commonware_resolver::Consumer for EngineConsumer {
+    type Key = RecoveryKey;
+    type Value = Bytes;
+    type Subscriber = ();
+    type Outcome = commonware_resolver::Outcome;
+
+    fn deliver(
+        &mut self,
+        delivery: commonware_resolver::Delivery<RecoveryKey, ()>,
+        value: Bytes,
+    ) -> oneshot::Receiver<Self::Outcome> {
+        let (sender, receiver) = oneshot::channel();
+        let key = delivery.key;
+        let mailbox = self
+            .engines
+            .lock()
+            .get(&(key.namespace, key.epoch))
+            .cloned();
+        let Some(mut mailbox) = mailbox else {
+            sender.send_lossy(commonware_resolver::Outcome::Ignored);
+            return receiver;
+        };
+        let Ok(certificate) = Certificate::<Ed25519, Sha256Digest>::decode_cfg(
+            value,
+            &self.scheme.certificate_codec_config(),
+        ) else {
+            sender.send_lossy(commonware_resolver::Outcome::Invalid);
+            return receiver;
+        };
+        // The engine checks that the certificate answers `key`.
+        self.context.child("submit").spawn(move |_| async move {
+            sender.send_lossy(mailbox.submit(key, certificate).await.into());
+        });
+        receiver
+    }
+}
+
+/// Starts a validator with its own resolver and recovery coordinator.
+///
+/// The validator reports certificates to the archive served by `producer`. The returned
+/// [`Recovery`] handle keeps the coordinator and resolver serving after the engine stops.
+#[allow(clippy::too_many_arguments)]
+async fn start_validator<A>(
+    context: Context,
+    oracle: &Oracle<PublicKey, Context>,
+    fixture: &Fixture<Ed25519>,
+    index: usize,
+    registration: Registration,
+    application: A,
+    producer: ArchiveProducer,
+    scope: EngineScope,
+) -> (Handle<EngineOutcome>, Recovery)
+where
+    A: Automaton<Context = Height, Digest = Sha256Digest>,
+{
+    let participant = fixture.participants[index].clone();
+    let scheme = fixture.schemes[index].clone();
+    let namespace = Scheme::<Sha256Digest>::recovery_namespace(&scheme);
+    let archive = producer.archive.clone();
+    let engines = Engines::default();
+
+    let (resolver, resolver_mailbox) = commonware_resolver::p2p::Engine::new(
+        context.child("resolver"),
+        commonware_resolver::p2p::Config {
+            peer_provider: oracle.manager(),
+            blocker: oracle.control(participant.clone()),
+            consumer: EngineConsumer {
+                context: Arc::new(context.child("consumer")),
+                scheme: scheme.clone(),
+                engines: engines.clone(),
+            },
+            producer,
+            mailbox_size: NZUsize!(64),
+            me: Some(participant.clone()),
+            timeout: Duration::from_secs(1),
+            fetch_retry_timeout: Duration::from_millis(100),
+            priority_requests: false,
+            priority_responses: false,
+        },
+    );
+    let resolver_network = oracle
+        .control(participant.clone())
+        .register(1, QUOTA)
+        .await
+        .unwrap();
+    resolver.start(resolver_network);
+    let (coordinator, recovery) = RecoveryCoordinator::new(
+        context.child("recovery"),
+        resolver_mailbox,
+        NZUsize!(4),
+        NZUsize!(4),
+    );
+    coordinator.start();
+
+    let (engine, mailbox) = Engine::new(
+        context.child("engine"),
+        Config {
+            epoch: scope.epoch,
+            first: scope.first,
+            last: scope.last,
+            scheme,
+            automaton: application,
+            reporter: ArchiveReporter { namespace, archive },
+            blocker: oracle.control(participant),
+            priority_acks: false,
+            rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(50)),
+            recovery_after_rebroadcasts: NonZeroU64::new(3).unwrap(),
+            recoverer: recovery.clone(),
+            window: NonZeroU64::new(scope.window).unwrap(),
+            journal_partition: scope.partition,
+            journal_write_buffer: NZUsize!(4096),
+            journal_replay_buffer: NZUsize!(4096),
+            journal_heights_per_section: NonZeroU64::new(4).unwrap(),
+            journal_compression: None,
+            journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            strategy: Sequential,
+        },
+    );
+    engines.lock().insert((namespace, scope.epoch), mailbox);
+    (engine.start(registration), recovery)
+}
+
+#[test_traced("INFO")]
+fn test_resolver_recovers_declined_positions_from_peer_archives() {
+    deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let epoch = Epoch::new(21);
+        let first = Height::new(200);
+        let last = Height::new(209);
+        let partition = |index: usize| format!("aggregation-resolver-{index}");
+        let scope = |index: usize| EngineScope {
+            partition: partition(index),
+            epoch,
+            first,
+            last,
+            window: 3,
+        };
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, false).await;
+        let link = async |indices: &[usize]| {
+            for &from in indices {
+                for &to in indices {
+                    if from != to {
+                        oracle
+                            .add_link(
+                                fixture.participants[from].clone(),
+                                fixture.participants[to].clone(),
+                                LINK.clone(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        };
+        link(&[0, 1, 2]).await;
+
+        // Three validators form a quorum and certify the whole range.
+        let producers: Vec<_> = (0..3).map(|_| ArchiveProducer::default()).collect();
+        let mut handles = Vec::new();
+        // Retained recovery handles keep each resolver serving after its engine completes.
+        let mut recoveries = Vec::new();
+        for (index, producer) in producers.iter().enumerate() {
+            let registration = registrations.remove(&fixture.participants[index]).unwrap();
+            let (handle, recovery) = start_validator(
+                context.child("validator").with_attribute("index", index),
+                &oracle,
+                &fixture,
+                index,
+                registration,
+                ImmediateApplication::default(),
+                producer.clone(),
+                scope(index),
+            )
+            .await;
+            handles.push(handle);
+            recoveries.push(recovery);
+        }
+        for result in join_all(handles).await {
+            assert_eq!(
+                result.expect("aggregation engine failed"),
+                EngineOutcome::Completed
+            );
+        }
+
+        // Retire each journal once the archive holds the complete range. A real application
+        // syncs its archive before this step.
+        for (index, producer) in producers.iter().enumerate() {
+            assert_eq!(producer.archive.lock().len(), 10);
+            context.remove(&partition(index), None).await.unwrap();
+        }
+
+        // One peer answers every request with a certificate for another key, and the others
+        // withhold until the late validator rejects that peer.
+        *producers[0].serving.lock() = Serving::Misdirect;
+        for producer in &producers[1..] {
+            *producer.serving.lock() = Serving::Withhold;
+        }
+
+        // A late validator cannot compute any digest, and it joins after the others stop sending
+        // acks. Every certificate must come from a peer archive through the resolver.
+        let late = 3;
+        let application = ClosedApplication::default();
+        let requested = application.requested.clone();
+        let producer = ArchiveProducer::default();
+        let registration = registrations.remove(&fixture.participants[late]).unwrap();
+        for index in 0..3 {
+            link(&[index, late]).await;
+        }
+        let (handle, _recovery) = start_validator(
+            context.child("validator").with_attribute("index", late),
+            &oracle,
+            &fixture,
+            late,
+            registration,
+            application,
+            producer.clone(),
+            scope(late),
+        )
+        .await;
+        let misdirected = (
+            fixture.participants[late].clone(),
+            fixture.participants[0].clone(),
+        );
+        while !oracle.blocked().await.unwrap().contains(&misdirected) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        assert!(producer.archive.lock().is_empty());
+
+        // Recovery retries the rejected keys with the honest peers.
+        for producer in &producers[1..] {
+            *producer.serving.lock() = Serving::Honest;
+        }
+        assert_eq!(
+            handle.await.expect("aggregation engine failed"),
+            EngineOutcome::Completed
+        );
+        assert_eq!(
+            requested.lock().as_slice(),
+            (first.get()..=last.get())
+                .map(Height::new)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            producer.archive.lock().keys().collect::<Vec<_>>(),
+            producers[1].archive.lock().keys().collect::<Vec<_>>()
+        );
+    });
 }
