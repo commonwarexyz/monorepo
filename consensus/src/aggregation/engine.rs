@@ -517,21 +517,21 @@ impl<
             .expect("quorum exceeds usize::MAX");
 
         // Get the acks and check digest consistency
-        let acks_by_epoch = match self.pending.get_mut(&ack.item.height) {
+        let (acks_by_epoch, digest_known) = match self.pending.get_mut(&ack.item.height) {
             None => {
                 // If the height is not in the pending pool, it may be confirmed
                 // (i.e. we have a certificate for it).
                 debug!(height = %ack.item.height, signer = %ack.attestation.signer, "ack height not pending");
                 return (self, false);
             }
-            Some(Pending::Unverified(acks)) => acks,
+            Some(Pending::Unverified(acks)) => (acks, false),
             Some(Pending::Verified(digest, acks)) => {
                 // If we have a verified digest, ensure the ack matches it
                 if ack.item.digest != *digest {
                     debug!(height = %ack.item.height, signer = %ack.attestation.signer, "ack digest mismatch");
                     return (self, false);
                 }
-                acks
+                (acks, true)
             }
         };
 
@@ -542,20 +542,26 @@ impl<
         }
         acks.insert(ack.attestation.signer, ack.clone());
 
-        // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
-        let filtered = acks
-            .values()
-            .filter(|a| a.item.digest == ack.item.digest)
-            .collect::<Vec<_>>();
-        if filtered.len() >= quorum {
-            // Every stored acknowledgement is verified and signer-unique, so a same-item quorum
-            // satisfies the certificate scheme's assembly contract.
-            let certificate =
-                Certificate::from_acks(&*scheme, non_empty![@filtered], &self.strategy)
-                    .expect("verified acknowledgement quorum must assemble");
-            self.metrics.certificates.inc();
-            self = self.handle_certificate(certificate).await;
+        // A matching quorum is impossible with fewer than quorum unique signers.
+        if acks.len() < quorum {
+            return (self, true);
         }
+
+        let certificate = if digest_known {
+            // Every retained ack matches the application digest.
+            Certificate::from_acks(&*scheme, non_empty![@acks.values()], &self.strategy)
+        } else {
+            let matching = acks.values().filter(|a| a.item.digest == ack.item.digest);
+            if matching.clone().count() < quorum {
+                return (self, true);
+            }
+            Certificate::from_acks(&*scheme, non_empty![@matching], &self.strategy)
+        }
+        // Every stored acknowledgement is verified and signer-unique, so a same-item quorum
+        // satisfies the certificate scheme's assembly contract.
+        .expect("verified acknowledgement quorum must assemble");
+        self.metrics.certificates.inc();
+        self = self.handle_certificate(certificate).await;
 
         (self, true)
     }
@@ -1001,8 +1007,9 @@ mod tests {
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
     };
     use commonware_actor::Feedback;
+    use commonware_codec::Encode;
     use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture};
-    use commonware_p2p::Blocker;
+    use commonware_p2p::{Blocker, utils::mocks::inert_channel};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -1026,9 +1033,297 @@ mod tests {
         }
     }
 
+    type TestEngine = Engine<
+        deterministic::Context,
+        mocks::Provider<ed25519::Scheme>,
+        commonware_cryptography::sha256::Digest,
+        mocks::Application,
+        mocks::ReporterMailbox<ed25519::Scheme, commonware_cryptography::sha256::Digest>,
+        mocks::Monitor,
+        NoopBlocker,
+        Sequential,
+    >;
+
+    async fn test_engine(
+        context: deterministic::Context,
+        epoch: Epoch,
+        scheme: ed25519::Scheme,
+    ) -> TestEngine {
+        let provider = mocks::Provider::new();
+        assert!(provider.register(epoch, scheme.clone()));
+        assert!(provider.register(epoch.next(), scheme.clone()));
+        let (_, reporter) = mocks::Reporter::new(context.child("reporter"), scheme);
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+        let journal = Journal::init(
+            context.child("journal"),
+            JConfig {
+                partition: "quorum".to_string(),
+                compression: None,
+                codec_config: ed25519::Scheme::certificate_codec_config_unbounded(),
+                page_cache: page_cache.clone(),
+                write_buffer: NZUsize!(4096),
+            },
+        )
+        .await
+        .unwrap();
+        let mut engine = Engine::new(
+            context,
+            Config {
+                monitor: mocks::Monitor::new(epoch),
+                provider,
+                automaton: mocks::Application::new(mocks::Strategy::Correct),
+                reporter,
+                blocker: NoopBlocker,
+                priority_acks: false,
+                rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
+                epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                window: NonZeroU64::new(10).unwrap(),
+                activity_timeout: HeightDelta::new(10),
+                journal_partition: "quorum".to_string(),
+                journal_write_buffer: NZUsize!(4096),
+                journal_replay_buffer: NZUsize!(4096),
+                journal_heights_per_section: NonZeroU64::new(6).unwrap(),
+                journal_compression: None,
+                journal_page_cache: page_cache,
+                strategy: Sequential,
+            },
+        );
+        engine.epoch = epoch;
+        engine.journal = Some(journal);
+        engine
+    }
+
+    #[rstest::rstest]
+    #[case::known(true, 4, &[(2, true), (0, false), (0, true), (2, true), (2, false), (1, true), (3, true)], Some(5))]
+    #[case::unknown(false, 4, &[(2, true), (0, true), (2, true), (1, true), (3, true)], Some(3))]
+    #[case::unknown_other(false, 4, &[(2, false), (0, false), (1, false), (3, true)], Some(2))]
+    #[case::mixed_quorum(false, 4, &[(0, false), (0, true), (3, true), (2, true), (1, true)], Some(4))]
+    #[case::split(false, 4, &[(0, false), (1, true), (2, false), (3, true)], None)]
+    #[case::single_known(true, 1, &[(0, true)], Some(0))]
+    #[case::single_unknown(false, 1, &[(0, true)], Some(0))]
+    fn quorum_detection(
+        #[case] digest_known: bool,
+        #[case] participants: u32,
+        #[case] arrivals: &[(usize, bool)],
+        #[case] certified_at: Option<usize>,
+    ) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let height = Height::new(2);
+            let digest = Sha256::hash(&[b"payload"]);
+            let other_digest = Sha256::hash(&[b"other"]);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"aggregation-quorum", participants);
+            let mut engine = test_engine(context.child("engine"), epoch, verifier.clone()).await;
+            for height in [height, height.next()] {
+                engine.pending.insert(
+                    height,
+                    if digest_known {
+                        Pending::Verified(digest, BTreeMap::new())
+                    } else {
+                        Pending::Unverified(BTreeMap::new())
+                    },
+                );
+            }
+
+            // Other heights and epochs must not contribute to this quorum.
+            if participants > 1 {
+                for (height, epoch) in [(height.next(), epoch), (height, epoch.next())] {
+                    for scheme in schemes.iter().take(2) {
+                        let ack = Ack::sign(scheme, epoch, Item { height, digest }).unwrap();
+                        let accepted;
+                        (engine, accepted) = engine.handle_ack(&ack).await;
+                        assert!(accepted);
+                        assert!(engine.confirmed.is_empty());
+                    }
+                }
+            }
+
+            let mut retained = BTreeMap::new();
+            let mut expected = None;
+            for (index, &(signer, agrees)) in arrivals.iter().enumerate() {
+                let ack = Ack::sign(
+                    &schemes[signer],
+                    epoch,
+                    Item {
+                        height,
+                        digest: if agrees { digest } else { other_digest },
+                    },
+                )
+                .unwrap();
+                assert!(ack.verify(&mut context, &verifier, &Sequential));
+                let incoming_digest = ack.item.digest;
+                let accepted;
+                (engine, accepted) = engine.handle_ack(&ack).await;
+                assert_eq!(accepted, !digest_known || agrees);
+                if accepted {
+                    retained.entry(ack.attestation.signer).or_insert(ack);
+                }
+                if certified_at == Some(index) {
+                    expected = Some(
+                        Certificate::from_acks(
+                            &verifier,
+                            non_empty![@retained.values().filter(|ack| ack.item.digest == incoming_digest)],
+                            &Sequential,
+                        )
+                        .unwrap(),
+                    );
+                }
+                assert_eq!(
+                    engine.confirmed.get(&height).map(Encode::encode),
+                    expected.as_ref().map(Encode::encode),
+                );
+                let epochs = match &engine.pending[&height] {
+                    Pending::Unverified(epochs) | Pending::Verified(_, epochs) => epochs,
+                };
+                if let Some(acks) = epochs.get(&epoch) {
+                    assert_eq!(acks.len(), retained.len());
+                    for (signer, ack) in acks {
+                        assert_eq!(ack.encode(), retained[signer].encode());
+                    }
+                } else {
+                    assert!(retained.is_empty());
+                }
+            }
+            if let Some(certificate) = expected {
+                assert!(certificate.verify(&mut context, &verifier, &Sequential));
+            }
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::known(true, false)]
+    #[case::unknown(false, false)]
+    #[case::known_above_quorum(true, true)]
+    #[case::unknown_above_quorum(false, true)]
+    fn quorum_after_replay(#[case] digest_known: bool, #[case] recovered_quorum: bool) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let height = Height::new(2);
+            let digest = Sha256::hash(&[b"payload"]);
+            let other_digest = Sha256::hash(&[b"other"]);
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, b"aggregation-quorum-replay", 4);
+            let scheme = if digest_known {
+                schemes[0].clone()
+            } else {
+                verifier.clone()
+            };
+            let mut engine = test_engine(context.child("engine"), epoch, scheme).await;
+            let records = [
+                (1, other_digest),
+                (1, digest),
+                (1, digest),
+                (
+                    2,
+                    if recovered_quorum {
+                        digest
+                    } else {
+                        other_digest
+                    },
+                ),
+            ];
+            for (signer, digest) in records {
+                let ack = Ack::sign(&schemes[signer], epoch, Item { height, digest }).unwrap();
+                engine = engine.record(Activity::Ack(ack)).await;
+            }
+            if digest_known || recovered_quorum {
+                let ack = Ack::sign(&schemes[0], epoch, Item { height, digest }).unwrap();
+                engine = engine.record(Activity::Ack(ack)).await;
+            }
+            engine = engine.sync(height).await;
+            let journal = engine.journal.take().unwrap();
+            let (journal, unverified) = engine.replay(journal).await;
+            engine.journal = Some(journal);
+            assert_eq!(unverified.contains(&height), !digest_known);
+            let epochs = match &engine.pending[&height] {
+                Pending::Verified(selected, epochs) => {
+                    assert!(digest_known);
+                    assert_eq!(*selected, digest);
+                    assert!(epochs[&epoch].values().all(|ack| ack.item.digest == digest));
+                    epochs
+                }
+                Pending::Unverified(epochs) => {
+                    assert!(!digest_known);
+                    epochs
+                }
+            };
+            assert_eq!(epochs[&epoch].len(), if recovered_quorum { 3 } else { 2 });
+            assert_eq!(epochs[&epoch][&Participant::new(1)].item.digest, digest);
+
+            for signer in [0, 3] {
+                let ack = Ack::sign(&schemes[signer], epoch, Item { height, digest }).unwrap();
+                let accepted;
+                (engine, accepted) = engine.handle_ack(&ack).await;
+                assert!(accepted);
+                assert_eq!(engine.confirmed.contains_key(&height), signer == 3);
+            }
+            let certificate = &engine.confirmed[&height];
+            assert_eq!(certificate.item, Item { height, digest });
+            assert!(certificate.verify(&mut context, &verifier, &Sequential));
+            let expected_acks: Vec<_> = [0, 1, 2, 3]
+                .into_iter()
+                .filter(|&signer| recovered_quorum || signer != 2)
+                .map(|signer| Ack::sign(&schemes[signer], epoch, Item { height, digest }).unwrap())
+                .collect();
+            let expected =
+                Certificate::from_acks(&verifier, non_empty![@expected_acks.iter()], &Sequential)
+                    .unwrap();
+            assert_eq!(certificate.encode(), expected.encode());
+        });
+    }
+
     #[test]
+    fn quorum_after_application_digest() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let epoch = Epoch::new(111);
+            let height = Height::new(2);
+            let digest = Sha256::hash(&[b"payload"]);
+            let other_digest = Sha256::hash(&[b"other"]);
+            let Fixture {
+                schemes,
+                verifier,
+                participants,
+                ..
+            } = ed25519::fixture(&mut context, b"aggregation-quorum-digest", 4);
+            let mut engine = test_engine(context.child("engine"), epoch, schemes[0].clone()).await;
+            engine
+                .pending
+                .insert(height, Pending::Unverified(BTreeMap::new()));
+            for (signer, digest) in [(1, digest), (2, other_digest), (3, digest)] {
+                let ack = Ack::sign(&schemes[signer], epoch, Item { height, digest }).unwrap();
+                (engine, _) = engine.handle_ack(&ack).await;
+                assert!(engine.confirmed.is_empty());
+            }
+            let (sender, _) = inert_channel(participants);
+            let mut sender = WrappedSender::new(context.network_buffer_pool().clone(), sender);
+            engine = engine.handle_digest(height, digest, &mut sender).await;
+            let Some(Pending::Verified(selected, epochs)) = engine.pending.get(&height) else {
+                panic!("application digest must be retained");
+            };
+            assert_eq!(*selected, digest);
+            assert_eq!(
+                epochs[&epoch].keys().copied().collect::<Vec<_>>(),
+                vec![
+                    Participant::new(0),
+                    Participant::new(1),
+                    Participant::new(3),
+                ]
+            );
+            let certificate = &engine.confirmed[&height];
+            assert_eq!(certificate.item, Item { height, digest });
+            assert!(certificate.verify(&mut context, &verifier, &Sequential));
+            assert!(engine.rebroadcast_deadlines.contains(&height));
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::known(true)]
+    #[case::unknown(false)]
     #[should_panic(expected = "verified acknowledgement quorum must assemble")]
-    fn assembly_failure_panics() {
+    fn assembly_failure_panics(#[case] digest_known: bool) {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
@@ -1070,9 +1365,14 @@ mod tests {
 
             let height = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
-            engine
-                .pending
-                .insert(height, Pending::Verified(digest, BTreeMap::new()));
+            engine.pending.insert(
+                height,
+                if digest_known {
+                    Pending::Verified(digest, BTreeMap::new())
+                } else {
+                    Pending::Unverified(BTreeMap::new())
+                },
+            );
 
             for scheme in schemes.iter().take(3) {
                 let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
