@@ -1,15 +1,17 @@
-//! Variable-time Pippenger multi-scalar multiplication for batch signature verification.
+//! Variable-time multi-scalar multiplication for batch signature verification.
 //!
-//! [`Term`]s arrive decompressed and recoded into signed digits. The bucket kernel processes
-//! one term per private bucket stripe at once, so updates within each wave never collide.
+//! [`Term`]s arrive decompressed and recoded into signed digits. Small batches (see
+//! [`uses_straus`]) use Straus's method, whose cost has no per-window fixed part. Larger
+//! batches use Pippenger's bucket method: the bucket kernel processes one term per private bucket
+//! stripe at once, so updates within each wave never collide.
 //!
-//! [`multiscalar_mul`] exposes one execution shape for every [`Strategy`]: `(window, term range)`
+//! The bucket method exposes one execution shape for every [`Strategy`]: `(window, term range)`
 //! tiles. A window can be split across several point ranges when there are fewer windows than
 //! workers. Each strategy partition reuses private bucket scratch, tiles of the same window are
 //! added together, and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
-use crate::curve::{G, GAffine, msm::Backend};
+use crate::curve::{G, GAffine, GAffineVec, GVec, LANES, msm::Backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;
@@ -254,16 +256,107 @@ fn partition_ranges(total: usize, ranges: usize) -> Vec<(usize, usize)> {
     result
 }
 
-/// Computes the full MSM over `chunks` (whose terms were recoded at `width`; see [`width_for`]
-/// and [`Term::new`]) with the bucket phase spread across `strategy`'s threads as
-/// `(window, global term range)` tiles. Each tile reduces to one point, same-window points are
-/// added, and the backend positions the resulting window sums.
+/// Whether [`multiscalar_mul`] uses Straus's method rather than buckets for `terms` terms at
+/// `parallelism`. The bucket method's per-window fold costs the same however few terms there
+/// are, and parallel Straus keeps winning longer because its parts share no work. Fit to a sweep
+/// of 1-1,000 signatures at 1 and 8 threads on AMD Zen 5 (AVX-512).
+const fn uses_straus(terms: usize, parallelism: usize) -> bool {
+    terms < if parallelism > 1 { 1024 } else { 384 }
+}
+
+/// Straus's method over lanes: each lane holds one term per group, every group keeps a table of
+/// its points' multiples, and all groups share one accumulator, so each window costs `width`
+/// doublings plus one addition per group. Groups split into contiguous parts across
+/// `strategy`, each with its own accumulator.
+mod straus {
+    use super::{Backend, G, GAffine, GAffineVec, GVec, LANES, Term, num_buckets, num_windows};
+    #[cfg(not(feature = "std"))]
+    use alloc::vec::Vec;
+    use commonware_parallel::Strategy;
+
+    /// Lane-wise multiples `0..=2^(width-1)` of one group's points.
+    fn table<B: Backend>(backend: B, group: &[&Term], width: u32) -> Vec<GVec> {
+        let points = GAffineVec::transpose(core::array::from_fn(|lane| {
+            group.get(lane).map_or(GAffine::IDENTITY, |term| term.point)
+        }));
+        let mut multiple = GVec::identity();
+        let mut table = Vec::with_capacity(num_buckets(width) + 1);
+        table.push(multiple);
+        for _ in 0..num_buckets(width) {
+            multiple = backend.g_add_mixed(multiple, points);
+            table.push(multiple);
+        }
+        table
+    }
+
+    fn part<B: Backend>(backend: B, groups: &[&[&Term]], width: u32) -> G {
+        let tables: Vec<_> = groups
+            .iter()
+            .map(|group| table(backend, group, width))
+            .collect();
+        let mut accumulator = GVec::identity();
+        let mut started = false;
+        for window in (0..num_windows(width)).rev() {
+            if started {
+                for _ in 0..width {
+                    accumulator = backend.g_double(accumulator);
+                }
+            }
+            for (group, table) in groups.iter().zip(&tables) {
+                let digits: [i16; LANES] = core::array::from_fn(|lane| {
+                    group.get(lane).map_or(0, |term| term.digits[window])
+                });
+                if digits.iter().all(|&digit| digit == 0) {
+                    continue;
+                }
+                let index = digits.map(|digit| digit.unsigned_abs() as usize);
+                let negative = digits.map(|digit| digit < 0);
+                accumulator = backend.g_add(
+                    accumulator,
+                    GVec::select_signed(backend, table, &index, &negative),
+                );
+                started = true;
+            }
+        }
+        accumulator.sum_lanes(backend)
+    }
+
+    pub(super) fn multiscalar_mul<B: Backend>(
+        backend: B,
+        terms: &[&Term],
+        width: u32,
+        strategy: &impl Strategy,
+    ) -> G {
+        let groups: Vec<&[&Term]> = terms.chunks(LANES).collect();
+        if groups.is_empty() {
+            return G::IDENTITY;
+        }
+        let parts = strategy.manual().parallelism().clamp(1, groups.len());
+        strategy
+            .map_collect_vec(groups.chunks(groups.len().div_ceil(parts)), |groups| {
+                part(backend, groups, width)
+            })
+            .into_iter()
+            .fold(G::IDENTITY, G::add)
+    }
+}
+
+/// Computes the full MSM over `chunks`, whose terms were recoded at `width` (see [`width_for`]
+/// and [`Term::new`]). Small batches use [`straus`]. Larger ones spread the bucket phase across
+/// `strategy`'s threads as `(window, global term range)` tiles: each tile reduces to one point,
+/// same-window points are added, and the backend positions the resulting window sums.
 pub(super) fn multiscalar_mul<B: Backend>(
     backend: B,
     chunks: &[&[Term]],
     width: u32,
     strategy: &impl Strategy,
 ) -> G {
+    let total = total_terms(chunks);
+    if uses_straus(total, strategy.manual().parallelism()) {
+        let terms: Vec<&Term> = pieces(chunks, 0, total).flatten().collect();
+        return straus::multiscalar_mul(backend, &terms, width, strategy);
+    }
+
     #[derive(Clone, Copy)]
     struct Tile {
         window: usize,
@@ -272,7 +365,6 @@ pub(super) fn multiscalar_mul<B: Backend>(
     }
 
     let parallelism = strategy.manual().parallelism();
-    let total = total_terms(chunks);
     let windows = num_windows(width);
     let ranges = partition_ranges(total, range_count(total, windows, parallelism));
     let mut tiles = Vec::with_capacity(windows * ranges.len());
@@ -503,6 +595,41 @@ mod tests {
                                     multiscalar_mul_terms_serial(backend, &chunks, width);
                                 let actual = multiscalar_mul(backend, &chunks, width, &Sequential);
                                 assert!(points_equal(actual, expected), "n={n} width={width}");
+                            }
+                        }
+                        Ok(())
+                    });
+            }
+        }
+        crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+        crate::curve::with_backend(Check);
+    }
+
+    #[test]
+    fn straus_matches_serial_across_lane_boundaries() {
+        struct Check;
+        impl crate::curve::WithBackend for Check {
+            type Output = ();
+            fn call<B: Backend>(self, backend: B) {
+                let parallel = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                    .unwrap()
+                    .manual();
+                Builder::default()
+                    .with_seed(0)
+                    .with_search_limit(2)
+                    .test(|u| {
+                        for width in [6, 8, 10] {
+                            let terms = arbitrary_terms(u, 383, width)?;
+                            for n in [1, 7, 8, 9, 16, 17, 33, 383] {
+                                let expected =
+                                    multiscalar_mul_terms_serial(backend, &[&terms[..n]], width);
+                                let refs: Vec<&Term> = terms[..n].iter().collect();
+                                let sequential =
+                                    straus::multiscalar_mul(backend, &refs, width, &Sequential);
+                                let parallel =
+                                    straus::multiscalar_mul(backend, &refs, width, &parallel);
+                                assert!(points_equal(sequential, expected), "n={n} width={width}");
+                                assert!(points_equal(parallel, expected), "n={n} width={width}");
                             }
                         }
                         Ok(())

@@ -6,7 +6,7 @@ mod scalar;
 use crate::curve::{Backend, GAffine, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use commonware_parallel::Strategy;
+use commonware_parallel::{Sequential, Strategy};
 use msm::Term;
 use rand_core::CryptoRng;
 pub(crate) use scalar::Scalar;
@@ -360,11 +360,22 @@ impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
     }
 }
 
+/// Batches below this many signatures verify on the calling thread: dispatching each phase to a
+/// pool costs more than the work (measured on AMD Zen 5 at 1, 8 and 32 signatures).
+const SEQUENTIAL_MAX_SIGNATURES: usize = 16;
+
 fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
     rng: &mut R,
     items: &[(&'a VerifyingKeyBytes, &'a Signature, &'a [u8])],
     strategy: &S,
 ) -> bool {
+    if items.len() < SEQUENTIAL_MAX_SIGNATURES {
+        return with_backend(VerifyBatchCall {
+            rng,
+            items,
+            strategy: &Sequential,
+        });
+    }
     with_backend(VerifyBatchCall {
         rng,
         items,

@@ -792,6 +792,28 @@ impl GVec {
         let sums = Self::add_pairs::<{ LANES / 2 }>(sums, backend);
         Self::add_pairs::<{ LANES / 4 }>(sums, backend)[0]
     }
+
+    /// Returns lane `i` of `table[index[i]]` in each lane `i`, negated where `negative[i]`.
+    ///
+    /// Variable-time, so the indices and signs must be public.
+    pub fn select_signed<B: FBackend>(
+        backend: B,
+        table: &[Self],
+        index: &[usize; LANES],
+        negative: &[bool; LANES],
+    ) -> Self {
+        let pick = |coordinate: fn(&Self) -> &FVec| FVec {
+            limbs: array::from_fn(|limb| {
+                array::from_fn(|lane| coordinate(&table[index[lane]]).limbs[limb][lane])
+            }),
+        };
+        Self {
+            x: backend.conditional_neg(pick(|point| &point.x), negative),
+            y: pick(|point| &point.y),
+            t: backend.conditional_neg(pick(|point| &point.t), negative),
+            z: pick(|point| &point.z),
+        }
+    }
 }
 
 /// Like `GVec`, but assuming that the point is in affine representation.
