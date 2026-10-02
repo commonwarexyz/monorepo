@@ -264,6 +264,35 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         })
     }
 
+    /// Validates the signer set and signature encoding, then aggregates the public keys.
+    fn prepare_certificate<'a, S: Scheme>(
+        &self,
+        certificate: &'a Certificate<V>,
+    ) -> Option<(aggregate::PublicKey<V>, &'a aggregate::Signature<V>)> {
+        // Require the signer bitmap to match the participant set.
+        if certificate.signers.len() != self.participants.len() {
+            return None;
+        }
+
+        // Require a quorum of signers.
+        if certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize {
+            return None;
+        }
+
+        // Malformed signatures can skip per-signer group operations.
+        let signature = certificate.signature.get()?;
+
+        // Aggregate the public keys.
+        let mut agg_public = aggregate::PublicKey::<V>::zero();
+        for signer in certificate.signers.iter() {
+            let public_key = self.participants.value(signer.into())?;
+
+            agg_public.add(public_key);
+        }
+
+        Some((agg_public, signature))
+    }
+
     /// Verifies a certificate.
     pub fn verify_certificate<'a, S, R, D>(
         &self,
@@ -277,30 +306,9 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRng,
         D: Digest,
     {
-        // If the certificate signers length does not match the participant set, return false.
-        if certificate.signers.len() != self.participants.len() {
-            return false;
-        }
-
-        // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize {
-            return false;
-        }
-
-        // Malformed signatures can skip per-signer group operations.
-        let Some(signature) = certificate.signature.get() else {
+        let Some((agg_public, signature)) = self.prepare_certificate::<S>(certificate) else {
             return false;
         };
-
-        // Aggregate the public keys.
-        let mut agg_public = aggregate::PublicKey::<V>::zero();
-        for signer in certificate.signers.iter() {
-            let Some(public_key) = self.participants.value(signer.into()) else {
-                return false;
-            };
-
-            agg_public.add(public_key);
-        }
 
         // Verify the aggregate signature.
         aggregate::verify_same_message::<V>(
@@ -312,11 +320,12 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         .is_ok()
     }
 
-    /// Verifies multiple certificates (no batch optimization for BLS multisig).
-    pub fn verify_certificates<'a, S, R, D, I>(
+    /// Verifies multiple certificates in a randomized batch.
+    pub fn verify_certificates<'a, S, R, D, I, T>(
         &self,
         rng: &mut R,
         certificates: NonEmpty<I>,
+        strategy: &T,
     ) -> bool
     where
         S: Scheme,
@@ -324,13 +333,31 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         R: CryptoRng,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a Certificate<V>)>,
+        T: Strategy,
     {
-        for (subject, certificate) in certificates {
-            if !self.verify_certificate::<S, _, _>(rng, subject, certificate) {
-                return false;
-            }
+        // Avoid random scalar multiplications for a single certificate.
+        let (first, rest) = certificates.into_parts();
+        let mut rest = rest.peekable();
+        if rest.peek().is_none() {
+            return self.verify_certificate::<S, _, _>(rng, first.0, first.1);
         }
-        true
+
+        let mut publics = Vec::new();
+        let mut messages = Vec::new();
+        let mut signatures = Vec::new();
+        for (subject, certificate) in NonEmpty::new(first, rest) {
+            let Some((public, signature)) = self.prepare_certificate::<S>(certificate) else {
+                return false;
+            };
+            publics.push(*public.inner());
+            messages.push(ops::hash_with_namespace::<V>(
+                V::MESSAGE,
+                subject.namespace(&self.namespace),
+                &subject.message(),
+            ));
+            signatures.push(*signature.inner());
+        }
+        V::batch_verify(rng, &publics, &messages, &signatures, strategy).is_ok()
     }
 
     pub const fn is_attributable() -> bool {
@@ -554,7 +581,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 &self,
                 rng: &mut R,
                 certificates: commonware_utils::iter::NonEmpty<I>,
-                _strategy: &impl commonware_parallel::Strategy,
+                strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
                 R: rand_core::CryptoRng,
@@ -562,7 +589,7 @@ macro_rules! impl_certificate_bls12381_multisig {
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
             {
                 self.generic
-                    .verify_certificates::<Self, _, D, _>(rng, certificates)
+                    .verify_certificates::<Self, _, D, _, _>(rng, certificates, strategy)
             }
 
             fn is_batchable() -> bool {
@@ -689,8 +716,10 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::{CryptoGroup, Random};
-    use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, Participant, TryCollect, ordered::BiMap, test_rng};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{
+        Faults, N3f1, NZUsize, Participant, TryCollect, ordered::BiMap, test_rng,
+    };
 
     const NAMESPACE: &[u8] = b"test-bls12381-multisig";
     const MESSAGE: &[u8] = b"test message";
@@ -1243,9 +1272,11 @@ mod tests {
             .collect();
         let mut certificates = Vec::new();
 
-        for msg in &messages {
+        for (i, msg) in messages.iter().enumerate() {
             let attestations: Vec<_> = schemes
                 .iter()
+                .cycle()
+                .skip(i)
                 .take(quorum)
                 .map(|s| {
                     s.sign::<Sha256Digest>(TestSubject {
@@ -1261,19 +1292,36 @@ mod tests {
             );
         }
 
-        let certs_iter = messages.iter().zip(&certificates).map(|(msg, cert)| {
-            (
-                TestSubject {
-                    message: msg.clone(),
-                },
-                cert,
-            )
-        });
-
+        let parallel = Rayon::new(NZUsize!(2)).unwrap();
+        for count in 1..=certificates.len() {
+            let entries: Vec<_> = messages
+                .iter()
+                .zip(&certificates)
+                .take(count)
+                .map(|(message, certificate)| {
+                    (
+                        TestSubject {
+                            message: message.clone(),
+                        },
+                        certificate,
+                    )
+                })
+                .collect();
+            assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+                &mut rng,
+                non_empty![@entries.clone()],
+                &Sequential,
+            ));
+            assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
+                &mut rng,
+                non_empty![@entries],
+                &parallel,
+            ));
+        }
         assert!(verifier.verify_certificates::<_, Sha256Digest, _>(
             &mut rng,
-            non_empty![@certs_iter],
-            &Sequential
+            non_empty![@(0..3).map(|_| (TestSubject { message: messages[0].clone() }, &certificates[0]))],
+            &Sequential,
         ));
     }
 
@@ -1335,6 +1383,130 @@ mod tests {
     fn test_verify_certificates_batch_detects_failure_variants() {
         test_verify_certificates_batch_detects_failure::<MinPk>();
         test_verify_certificates_batch_detects_failure::<MinSig>();
+    }
+
+    fn test_verify_certificates_rejects_invalid<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(3)
+            .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap())
+            .collect();
+        let valid = schemes[0]
+            .assemble(non_empty![@attestations.clone()], &Sequential)
+            .unwrap();
+
+        let mut wrong_size = valid.clone();
+        wrong_size.signers = Signers::new(5, valid.signers.iter()).unwrap();
+        let mut sub_quorum = valid.clone();
+        sub_quorum.signers =
+            Signers::new(4, attestations.iter().take(2).map(|a| a.signer)).unwrap();
+        sub_quorum.signature = aggregate::combine_signatures::<V, _>(
+            non_empty![@attestations.iter().take(2).map(|a| a.signature.get().unwrap())],
+        )
+        .into();
+        let mut wrong_signers = valid.clone();
+        wrong_signers.signers =
+            Signers::new(4, schemes.iter().skip(1).map(|s| s.me().unwrap())).unwrap();
+        let mut malformed = valid.clone();
+        malformed.signature = Lazy::deferred(&mut Bytes::from_static(&[0]), ());
+        let mut identity = valid.clone();
+        identity.signature = aggregate::Signature::zero().into();
+
+        for invalid in [wrong_size, sub_quorum, wrong_signers, malformed, identity] {
+            assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                subject.clone(),
+                &invalid,
+                &Sequential,
+            ));
+            for certificates in [[&invalid, &valid], [&valid, &invalid]] {
+                assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+                    &mut rng,
+                    non_empty![@certificates.into_iter().map(|c| (subject.clone(), c))],
+                    &Sequential,
+                ));
+            }
+        }
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            non_empty![
+                (subject.clone(), &valid),
+                (
+                    TestSubject {
+                        message: Bytes::from_static(b"wrong message")
+                    },
+                    &valid
+                )
+            ],
+            &Sequential,
+        ));
+        let wrong_namespace =
+            Scheme::verifier(b"wrong namespace", verifier.generic.participants.clone());
+        assert!(!wrong_namespace.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            non_empty![(subject.clone(), &valid), (subject, &valid)],
+            &Sequential,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificates_rejects_invalid_variants() {
+        test_verify_certificates_rejects_invalid::<MinPk>();
+        test_verify_certificates_rejects_invalid::<MinSig>();
+    }
+
+    fn test_verify_certificates_rejects_cancelling_errors<V: Variant>() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers::<V>(&mut rng, 4);
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+        let attestations = schemes
+            .iter()
+            .take(3)
+            .map(|s| s.sign::<Sha256Digest>(subject.clone()).unwrap());
+        let valid = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        let mut first = valid.clone();
+        let mut second = valid.clone();
+        let delta = V::Signature::generator();
+        let mut signature = valid.signature.get().unwrap().clone();
+        signature.add(&delta);
+        first.signature = signature.into();
+        let mut signature = valid.signature.get().unwrap().clone();
+        signature.add(&-delta);
+        second.signature = signature.into();
+
+        // Unweighted aggregation would hide the two invalid signatures.
+        assert_eq!(
+            *first.signature.get().unwrap().inner() + second.signature.get().unwrap().inner(),
+            *valid.signature.get().unwrap().inner() + valid.signature.get().unwrap().inner(),
+        );
+        for certificate in [&first, &second] {
+            assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                subject.clone(),
+                certificate,
+                &Sequential,
+            ));
+        }
+        assert!(!verifier.verify_certificates::<_, Sha256Digest, _>(
+            &mut rng,
+            non_empty![(subject.clone(), &first), (subject, &second)],
+            &Sequential,
+        ));
+    }
+
+    #[test]
+    fn test_verify_certificates_rejects_cancelling_errors_variants() {
+        test_verify_certificates_rejects_cancelling_errors::<MinPk>();
+        test_verify_certificates_rejects_cancelling_errors::<MinSig>();
     }
 
     fn test_assemble_certificate_rejects_duplicate_signers<V: Variant>() {
