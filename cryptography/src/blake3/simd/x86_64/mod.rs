@@ -8,6 +8,7 @@ use blake3::{BLOCK_LEN, OUT_LEN};
 
 mod avx2;
 mod avx512;
+mod input;
 mod pair;
 mod row;
 
@@ -58,6 +59,21 @@ cfg_if::cfg_if! {
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; OUT_LEN]; 2]> {
     if !supports_avx2() {
         return None;
+    }
+    if let Some(left) = input::Input::new(left)
+        && let Some(right) = input::Input::new(right)
+    {
+        if left.len() != right.len() {
+            return None;
+        }
+        if supports_avx512vl() {
+            // SAFETY: AVX2, AVX-512F, AVX-512VL, and equal input lengths were
+            // established above.
+            return Some(unsafe { pair::hash_direct_vl(&left, &right) });
+        }
+
+        // SAFETY: AVX2 and equal input lengths were established above.
+        return Some(unsafe { pair::hash_direct(&left, &right) });
     }
     let (mut left_buffer, mut right_buffer) = ([0u8; PAIR_LEN], [0u8; PAIR_LEN]);
     let len = gather(left, &mut left_buffer)?;
@@ -224,14 +240,37 @@ fn pair_batch<const L: usize>(inputs: [&[u8]; L], active: usize) -> Option<[[u8;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{input::Input, *};
     use crate::blake3::{
         gather,
         simd::tests::{check_batch, check_lanes},
     };
     use blake3::CHUNK_LEN;
     use commonware_utils::{iter::zip_eq, test_rng};
+    use core::arch::x86_64::_mm_storeu_si128;
     use rand::Rng as _;
+
+    // Each fragment ends at its allocation boundary. Prefix bytes vary alignment.
+    fn fragments(len: usize, multipart: bool, offset: usize, salt: u8) -> Vec<Box<[u8]>> {
+        let sizes: &[usize] = match (len, multipart) {
+            (40, true) => &[8, 32],
+            (64, true) => &[32, 32],
+            (72, true) => &[8, 32, 32],
+            _ => core::slice::from_ref(&len),
+        };
+        let mut position = 0;
+        sizes
+            .iter()
+            .map(|&size| {
+                let mut bytes = vec![0xAA; offset + size].into_boxed_slice();
+                for byte in &mut bytes[offset..] {
+                    *byte = (position as u8).wrapping_mul(37).wrapping_add(salt);
+                    position += 1;
+                }
+                bytes
+            })
+            .collect()
+    }
 
     fn reference(parts: &[&[u8]]) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
@@ -251,6 +290,104 @@ mod tests {
                 bytes
             })
             .collect()
+    }
+
+    /// Check that direct loads read exactly each supported layout at every
+    /// alignment, and that only the supported layouts are recognized.
+    #[test]
+    fn test_direct_input_extents() {
+        // Each layout loads its zero-padded concatenation and rejects a shortened
+        // fragment.
+        for len in [40, 64, 72] {
+            for multipart in [false, true] {
+                for alignment in 0..32 {
+                    let buffers = fragments(len, multipart, alignment, 7);
+                    let parts: Vec<_> = buffers.iter().map(|b| &b[alignment..]).collect();
+                    let input = Input::new(&parts).unwrap();
+                    assert_eq!(input.len(), len);
+                    let mut expected = [0; 128];
+                    expected[..len].copy_from_slice(&parts.concat());
+                    for offset in (0..128).step_by(16) {
+                        let mut actual = [0; 16];
+
+                        // SAFETY: SSE2 is available on x86_64, offsets are multiples
+                        // of 16, and the destination holds the whole 16-byte store.
+                        unsafe {
+                            _mm_storeu_si128(actual.as_mut_ptr().cast(), input.load(offset));
+                        }
+                        assert_eq!(actual, expected[offset..offset + 16]);
+                    }
+                    for changed in 0..parts.len() {
+                        let mut shorter = parts.clone();
+                        shorter[changed] = &shorter[changed][..shorter[changed].len() - 1];
+                        assert!(Input::new(&shorter).is_none());
+                    }
+                }
+            }
+        }
+
+        // Contiguous messages of other lengths and other layouts are rejected.
+        assert!(Input::new(&[]).is_none());
+        assert!(Input::new(&[&[]]).is_none());
+        let data = [0; 73];
+        for len in 0..=73 {
+            assert_eq!(
+                Input::new(&[&data[..len]]).is_some(),
+                matches!(len, 40 | 64 | 72)
+            );
+        }
+        assert!(Input::new(&[&data[..32], &[], &data[..32]]).is_none());
+        assert!(Input::new(&[&data[..8], &data[..16], &data[..16]]).is_none());
+    }
+
+    /// Check the direct pair kernels and the pair dispatch against the reference
+    /// for every pair of layouts at complementary alignments.
+    #[test]
+    fn test_direct_pair_backends() {
+        if !supports_avx2() {
+            return;
+        }
+
+        // Each pair of layouts hashes from exactly sized fragments at
+        // complementary alignments.
+        for len in [40, 64, 72] {
+            for left_multipart in [false, true] {
+                for right_multipart in [false, true] {
+                    for alignment in 0..32 {
+                        let left_buffers = fragments(len, left_multipart, alignment, 9);
+                        let right_buffers = fragments(len, right_multipart, 31 - alignment, 173);
+                        let left_parts: Vec<_> =
+                            left_buffers.iter().map(|b| &b[alignment..]).collect();
+                        let right_parts: Vec<_> =
+                            right_buffers.iter().map(|b| &b[31 - alignment..]).collect();
+                        let left = Input::new(&left_parts).unwrap();
+                        let right = Input::new(&right_parts).unwrap();
+                        let expected = [reference(&left_parts), reference(&right_parts)];
+
+                        // SAFETY: AVX2 was checked and both inputs have length len.
+                        assert_eq!(unsafe { pair::hash_direct(&left, &right) }, expected);
+                        assert_eq!(super::hash_pair(&left_parts, &right_parts), Some(expected));
+                        if supports_avx512vl() {
+                            // SAFETY: AVX2, AVX-512F, and AVX-512VL were checked.
+                            // Both inputs have length len.
+                            assert_eq!(unsafe { pair::hash_direct_vl(&left, &right) }, expected);
+                        }
+
+                        // The two messages may alias.
+                        // SAFETY: AVX2 was checked above. Input validates extents.
+                        assert_eq!(unsafe { pair::hash_direct(&left, &left) }, [expected[0]; 2]);
+                    }
+                }
+            }
+        }
+
+        // Digest fragments may alias.
+        let bytes = [0x55; 32];
+        let repeated = [&bytes[..], &bytes[..]];
+        assert_eq!(
+            super::hash_pair(&repeated, &repeated),
+            Some([reference(&repeated); 2])
+        );
     }
 
     /// Check sixteen exactly sized messages that end in a partial block against

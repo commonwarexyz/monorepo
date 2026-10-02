@@ -8,7 +8,7 @@
 //! The kernel comes in two builds that differ only in how they rotate: AVX2
 //! shifts, or single AVX-512VL rotate instructions (`VL`).
 
-use super::row;
+use super::{input::Input, row};
 use crate::blake3::{
     PAIR_LEN,
     simd::{CHUNK_END, CHUNK_START, IV, ROOT},
@@ -170,4 +170,90 @@ pub(super) unsafe fn hash_pair_vl(
 ) -> [[u8; OUT_LEN]; 2] {
     // SAFETY: AVX2, AVX-512F, and AVX-512VL are enabled for this function.
     unsafe { hash::<true>(left, right, len) }
+}
+
+/// Hash validated messages of equal length without a padded memory buffer.
+///
+/// # Safety
+///
+/// The caller must establish AVX2, and AVX-512F and AVX-512VL when `VL`.
+/// Both inputs must have the same length.
+#[inline(always)]
+unsafe fn direct<const VL: bool>(left: &Input<'_>, right: &Input<'_>) -> [[u8; OUT_LEN]; 2] {
+    let len = left.len();
+
+    // SAFETY: The caller establishes the features this build requires. Input
+    // validates fragment extents, and every load offset is a multiple of 16.
+    unsafe {
+        let mut cv = [
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(IV.as_ptr().cast())),
+            _mm256_broadcastsi128_si256(_mm_loadu_si128(IV.as_ptr().add(4).cast())),
+        ];
+        let flags = CHUNK_START
+            | if len <= BLOCK_LEN {
+                CHUNK_END | ROOT
+            } else {
+                0
+            };
+        let message = [
+            _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(left.load(0)), right.load(0)),
+            _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(left.load(16)), right.load(16)),
+            _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(left.load(32)), right.load(32)),
+            _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(left.load(48)), right.load(48)),
+        ];
+        row::compress::<_, VL>(&mut cv, message, len.min(BLOCK_LEN), flags);
+        if len == 72 {
+            let tail = _mm256_inserti128_si256::<1>(
+                _mm256_castsi128_si256(left.load(BLOCK_LEN)),
+                right.load(BLOCK_LEN),
+            );
+            let tail = _mm256_unpacklo_epi64(tail, _mm256_setzero_si256());
+            row::compress::<_, VL>(
+                &mut cv,
+                [
+                    tail,
+                    _mm256_setzero_si256(),
+                    _mm256_setzero_si256(),
+                    _mm256_setzero_si256(),
+                ],
+                8,
+                CHUNK_END | ROOT,
+            );
+        }
+        let mut outputs = [[0; OUT_LEN]; 2];
+        _mm256_storeu_si256(
+            outputs[0].as_mut_ptr().cast(),
+            _mm256_permute2x128_si256::<0x20>(cv[0], cv[1]),
+        );
+        _mm256_storeu_si256(
+            outputs[1].as_mut_ptr().cast(),
+            _mm256_permute2x128_si256::<0x31>(cv[0], cv[1]),
+        );
+        outputs
+    }
+}
+
+/// Hash two validated, equal-length messages with AVX2 shifts.
+///
+/// # Safety
+///
+/// The caller must establish AVX2 availability.
+/// Both inputs must have the same length.
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn hash_direct(left: &Input<'_>, right: &Input<'_>) -> [[u8; OUT_LEN]; 2] {
+    // SAFETY: AVX2 is enabled and the caller provides equal-length inputs.
+    unsafe { direct::<false>(left, right) }
+}
+
+/// Hash two validated, equal-length messages with native packed rotates.
+///
+/// # Safety
+///
+/// The caller must establish AVX2, AVX-512F, and AVX-512VL availability.
+/// Both inputs must have the same length.
+#[target_feature(enable = "avx2,avx512f,avx512vl")]
+pub(super) unsafe fn hash_direct_vl(left: &Input<'_>, right: &Input<'_>) -> [[u8; OUT_LEN]; 2] {
+    // SAFETY: AVX2, AVX-512F, and AVX-512VL are enabled, and the caller
+    // provides equal-length inputs.
+    unsafe { direct::<true>(left, right) }
 }
