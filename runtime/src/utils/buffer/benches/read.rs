@@ -31,8 +31,8 @@ where
                     // Setup: populate the blob
                     let mut append = create_append(&ctx, &name, cache_ref.clone()).await;
                     let data = vec![0xABu8; TOTAL_SIZE];
-                    append.append(&data).await.unwrap();
-                    append.sync().await.unwrap();
+                    (append, _) = append.append(&data).await.unwrap();
+                    append = append.sync().await.unwrap();
                     drop(append);
 
                     // Benchmark: random reads

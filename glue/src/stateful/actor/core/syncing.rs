@@ -153,21 +153,11 @@ where
                         response.send_lossy(None);
                     });
                 }
-                Message::Verify {
-                    span,
-                    context,
-                    ancestry,
-                    verification,
-                } => {
-                    let process = info_span!(parent: &span, "stateful.actor.verify.defer");
+                Message::Verify(request) => {
+                    let process = info_span!(parent: &request.span, "stateful.actor.verify.defer");
                     self.deferred_verifications
-                        .retain(|request| !request.verification.is_cancelled());
-                    self.deferred_verifications.push(VerificationRequest {
-                        span,
-                        context,
-                        ancestry,
-                        verification,
-                    });
+                        .retain(|deferred| !deferred.verification.is_cancelled());
+                    self.deferred_verifications.push(request);
                     process.in_scope(|| {
                         debug!(
                             deferred_verifications = self.deferred_verifications.len(),

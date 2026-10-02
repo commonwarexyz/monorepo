@@ -1,6 +1,6 @@
 //! Mailbox for the [`super::Stateful`] actor.
 
-use crate::stateful::Application;
+use crate::stateful::{Application, actor::core::verifications::Request};
 use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
@@ -82,12 +82,7 @@ where
     },
 
     /// A request to verify a block.
-    Verify {
-        span: Span,
-        context: (E, A::Context),
-        ancestry: WeakAncestry<A::Block>,
-        verification: Verification,
-    },
+    Verify(Request<E, A>),
 
     /// A finalized block and its marshal acknowledgement.
     Finalized {
@@ -105,7 +100,7 @@ where
     fn is_obsolete(&self) -> bool {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
-            Self::Verify { verification, .. } => verification.is_cancelled(),
+            Self::Verify(request) => request.verification.is_cancelled(),
             Self::Finalized { .. } => false,
         }
     }
@@ -252,12 +247,12 @@ where
             epoch = context.1.epoch().traced(),
             view = context.1.view().traced()
         );
-        let _ = self.sender.enqueue(Message::Verify {
+        let _ = self.sender.enqueue(Message::Verify(Request {
             span,
             context,
             ancestry,
             verification: Verification { response },
-        });
+        }));
 
         // The strong ancestry owner stays live across the await. Dropping this
         // future releases it even while the request sits in the mailbox.

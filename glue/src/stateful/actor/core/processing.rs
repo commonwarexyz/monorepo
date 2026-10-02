@@ -395,21 +395,8 @@ where
                             return;
                         }
                     }
-                    Step::Message(Message::Verify {
-                        span,
-                        context,
-                        ancestry,
-                        verification,
-                    }) => {
-                        verifications.schedule(
-                            processor.verifier(),
-                            VerificationRequest {
-                                span,
-                                context,
-                                ancestry,
-                                verification,
-                            },
-                        );
+                    Step::Message(Message::Verify(request)) => {
+                        verifications.schedule(processor.verifier(), request);
                     }
                     Step::Message(Message::Finalized {
                         span,
@@ -486,20 +473,9 @@ where
                     },
                     _ = &mut proposal => return true,
                     message = mailbox.recv() => match message {
-                        Some(Message::Verify {
-                            span,
-                            context,
-                            ancestry,
-                            verification,
-                        }) => verifications.schedule(
-                            verifier.clone(),
-                            VerificationRequest {
-                                span,
-                                context,
-                                ancestry,
-                                verification,
-                            },
-                        ),
+                        Some(Message::Verify(request)) => {
+                            verifications.schedule(verifier.clone(), request);
+                        }
                         Some(message) => {
                             // Only verifications overtake an active proposal. The first other
                             // message waits for it, and later messages wait behind that one.
@@ -633,7 +609,7 @@ fn boxed<F: Future>(make: impl FnOnce() -> F) -> Pin<Box<F>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, Processing, VerificationRequest};
+    use super::{Message, Processing};
     use crate::stateful::{
         Application, ExecutionError, Input, Proposed, PruneConfig,
         actor::{
@@ -2749,17 +2725,7 @@ mod tests {
                 }
             });
             let request = match receiver.recv().await {
-                Some(Message::Verify {
-                    span,
-                    context: request_context,
-                    ancestry,
-                    verification,
-                }) => VerificationRequest {
-                    span,
-                    context: request_context,
-                    ancestry,
-                    verification,
-                },
+                Some(Message::Verify(request)) => request,
                 _ => panic!("deferred verification request must arrive"),
             };
 

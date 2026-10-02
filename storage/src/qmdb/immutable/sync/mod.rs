@@ -98,9 +98,7 @@ where
         let inactivity_floor_loc =
             crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
-        // Replay the log from the inactivity floor to build the index. Every retained
-        // location is inserted, mirroring the live apply path, so a repeated key keeps
-        // serving one of its written values across restarts.
+        // Replay the log from the inactivity floor to build the index.
         immutable::build_index(
             inactivity_floor_loc,
             &journal.journal,
