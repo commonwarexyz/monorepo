@@ -197,22 +197,11 @@ fn requeue<E, A>(
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    for VerificationRequest {
-        span,
-        context,
-        ancestry,
-        verification,
-    } in requests
-    {
-        if verification.is_cancelled() {
+    for request in requests {
+        if request.verification.is_cancelled() {
             continue;
         }
-        mailbox(Message::Verify {
-            span,
-            context,
-            ancestry,
-            verification,
-        });
+        mailbox(Message::Verify(request));
     }
 }
 
@@ -370,20 +359,9 @@ where
                             select! {
                                 _ = &mut proposal => break,
                                 message = self.mailbox.recv() => match message {
-                                    Some(Message::Verify {
-                                        span,
-                                        context,
-                                        ancestry,
-                                        verification,
-                                    }) => verifications.schedule(
-                                        verifier.clone(),
-                                        VerificationRequest {
-                                            span,
-                                            context,
-                                            ancestry,
-                                            verification,
-                                        },
-                                    ),
+                                    Some(Message::Verify(request)) => {
+                                        verifications.schedule(verifier.clone(), request);
+                                    }
                                     Some(message) => {
                                         // Only verifications overtake an active proposal. The
                                         // first other message waits for it, and later messages
@@ -403,21 +381,8 @@ where
                         }
                     }
                 }
-                Step::Message(Message::Verify {
-                    span,
-                    context,
-                    ancestry,
-                    verification,
-                }) => {
-                    verifications.schedule(
-                        self.processor.verifier(),
-                        VerificationRequest {
-                            span,
-                            context,
-                            ancestry,
-                            verification,
-                        },
-                    );
+                Step::Message(Message::Verify(request)) => {
+                    verifications.schedule(self.processor.verifier(), request);
                 }
                 Step::Message(Message::Finalized {
                     span,
@@ -544,7 +509,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Message, Processing, VerificationRequest};
+    use super::{Message, Processing};
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::{
@@ -2115,17 +2080,7 @@ mod tests {
                 }
             });
             let request = match receiver.recv().await {
-                Some(Message::Verify {
-                    span,
-                    context: request_context,
-                    ancestry,
-                    verification,
-                }) => VerificationRequest {
-                    span,
-                    context: request_context,
-                    ancestry,
-                    verification,
-                },
+                Some(Message::Verify(request)) => request,
                 _ => panic!("deferred verification request must arrive"),
             };
 
