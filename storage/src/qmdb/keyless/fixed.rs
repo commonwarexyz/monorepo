@@ -124,6 +124,79 @@ mod tests {
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
 
+    /// A batch's proof and pinned nodes are refused once a bounded reopen moves the database
+    /// off the batch's chain, even at the batch's own base size.
+    async fn proof_refused_after_off_chain_reopen<F: Family>(context: deterministic::Context) {
+        let cfg = db_config("off-chain-proof", &context, Sequential);
+        let db = TestDb::<F>::init(context.child("db"), cfg.clone(), None)
+            .await
+            .unwrap();
+        let mut seed = db.new_batch();
+        for value in 1..=6 {
+            seed = seed.append(U64::new(value));
+        }
+        let seed = seed.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let batch = db
+            .new_batch()
+            .append(U64::new(100))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (start, ops) = batch.operations();
+        let root = batch.root();
+        let original_proof = batch.proof(&db).unwrap();
+        let original_pins = batch.pinned_nodes(&db).unwrap();
+        assert!(crate::qmdb::verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &original_proof,
+            start,
+            &ops,
+            &original_pins,
+            &root
+        ));
+        drop(db);
+
+        let db = TestDb::<F>::init(context.child("reopen"), cfg, Some(Location::new(1)))
+            .await
+            .unwrap();
+        let mut other = db.new_batch();
+        for value in 11..=16 {
+            other = other.append(U64::new(value));
+        }
+        let other = other.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let (db, _) = db.apply_batch(other).await.unwrap();
+        assert_eq!(db.bounds().end, start);
+        assert!(matches!(
+            batch
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, Location::new(0))
+                .await,
+            Err(Error::StaleBatch)
+        ));
+
+        let proof = batch.proof(&db);
+        let pins = batch.pinned_nodes(&db);
+        assert!(
+            matches!(proof, Err(Error::StaleRead)),
+            "off-chain proof must be refused"
+        );
+        assert!(
+            matches!(pins, Err(Error::StaleRead)),
+            "off-chain pins must be refused"
+        );
+    }
+
+    #[test]
+    fn standard_mmr_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmr::Family>);
+    }
+
+    #[test]
+    fn standard_mmb_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
+    }
+
     async fn bounded_standard<F: Family>(context: deterministic::Context) {
         for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
             let cfg = db_config(&format!("caps-{cap}"), &context, Sequential);
@@ -330,6 +403,22 @@ mod tests {
             assert_eq!(client.bounds(), Location::new(5)..source_end);
             assert_eq!(*client.sync_boundary(), 0);
             assert_eq!(client.root(), source_root);
+
+            // Batch reads between the floor and the retained start are pruned, not refused.
+            let batch = client.new_batch();
+            assert!(matches!(
+                batch.get(Location::new(2), &client).await,
+                Err(crate::qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(2)
+                ))
+            ));
+            assert!(
+                batch
+                    .get(Location::new(5), &client)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
         });
     }
 
@@ -751,19 +840,25 @@ mod tests {
         test_keyless_fixed_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
         test_keyless_fixed_floor_tracking => run_floor_tracking, reopen_indexed;
-        test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, reopen;
-        test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
+        test_keyless_fixed_floor_regression_rejected => run_floor_regression_rejected, db;
+        test_keyless_fixed_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, db;
         test_keyless_fixed_bounded_initialization_restores_floor =>
             run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_fixed_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
         test_keyless_fixed_bounded_initialization_after_reopen_with_floor =>
             run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
-        test_keyless_fixed_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
-        test_keyless_fixed_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
+        test_keyless_fixed_chained_floor_regression_rejected => run_chained_floor_regression_rejected, db;
+        test_keyless_fixed_chained_floor_beyond_commit_rejected => run_chained_floor_beyond_commit_rejected, db;
         test_keyless_fixed_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
         test_keyless_fixed_single_commit_live_set => run_single_commit_live_set, reopen_indexed;
         test_keyless_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, reopen_indexed;
         test_keyless_fixed_get_many => run_get_many, db;
+        test_keyless_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, db;
+        test_keyless_fixed_merkleize_across_prune => run_merkleize_across_prune, db;
+        test_keyless_fixed_stale_fork_refuses => run_stale_fork_refuses, db;
+        test_keyless_fixed_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, db;
+        test_keyless_fixed_reads_below_floor_refused => run_reads_below_floor_refused, db;
     }
 
     #[test_traced("INFO")]

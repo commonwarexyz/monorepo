@@ -10,23 +10,19 @@
 //!
 //! Current batches are branch-scoped views, not immutable snapshots.
 //!
-//! A batch remains valid only while its ancestor chain is still the committed prefix of the DB.
-//! Once a non-ancestor batch is applied, that batch and all of its descendants are invalid objects:
-//! do not read through them, do not build children from them, and do not attempt to apply them.
+//! A batch remains usable only while the DB sits on one of its chain's own states: the state the
+//! chain forked from, an ancestor's tip, or the batch's own tip. Once any other batch is applied
+//! (including one of its own descendants), that batch is stale, as is every descendant the applied
+//! batch is not an ancestor of.
+//! Reads refuse with `StaleRead`, and merkleization and application are rejected with
+//! `StaleBatch` (see [`crate::qmdb::chain`]).
 //!
-//! A short rule of thumb:
-//! - A batch is only usable while it stays on the winning branch.
-//!
-//! Valid:
-//! - Build `A`, apply `A`, then build `B` from `A` and read or merkleize `B`.
-//! - Call [`Db::to_batch`](db::Db::to_batch) and use the returned batch only while no divergent
-//!   branch has been applied.
-//!
-//! Invalid:
-//! - Build siblings `B1` and `B2`, apply `B1`, then call `B2.get()`, `B2.new_batch()`, or
-//!   `apply_batch(B2)`.
-//! - Hold `snapshot = db.to_batch()`, mutate the DB through another branch, then use `snapshot`
-//!   again.
+//! Concretely:
+//! - Build `A`, apply `A`, then build `B` from `A` -- `B` reads and merkleizes normally.
+//! - Build siblings `B1` and `B2`, apply `B1` -- `B2.get()` returns `StaleRead`, while
+//!   `apply_batch(B2)` and merkleizing a child of `B2` return `StaleBatch`.
+//! - Hold `view = db.to_batch()`, mutate the DB through another branch -- `view`'s reads
+//!   refuse from then on.
 //!
 //! # Motivation
 //!
@@ -2270,7 +2266,7 @@ pub mod tests {
             let staged_refs: Vec<_> = staged_keys.iter().collect();
             assert!(matches!(
                 db_a.new_batch().stage(&staged_refs, &db_b).await,
-                Err(Error::StaleBatch)
+                Err(Error::StaleRead)
             ));
 
             let batch = db_a.new_batch().write(key(1), Some(val(3)));
