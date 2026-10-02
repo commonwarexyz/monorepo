@@ -10,7 +10,9 @@ mod avx2;
 mod avx512;
 mod input;
 mod pair;
+mod pair36;
 mod row;
+mod row4;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -75,6 +77,14 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; OUT_LEN
         // SAFETY: AVX2 and equal input lengths were established above.
         return Some(unsafe { pair::hash_direct(&left, &right) });
     }
+    if let Some(left) = pair36::Input::new(left)
+        && let Some(right) = pair36::Input::new(right)
+        && supports_avx512vl()
+    {
+        // SAFETY: AVX2, AVX-512F, and AVX-512VL were established above,
+        // and both inputs validate exactly 36 bytes.
+        return Some(unsafe { pair36::hash(&left, &right) });
+    }
     let (mut left_buffer, mut right_buffer) = ([0u8; PAIR_LEN], [0u8; PAIR_LEN]);
     let len = gather(left, &mut left_buffer)?;
     if gather(right, &mut right_buffer)? != len {
@@ -121,9 +131,18 @@ fn gather(parts: &[&[u8]], buffer: &mut [u8; PAIR_LEN]) -> Option<usize> {
 struct Avx512(());
 
 impl Avx512 {
-    /// Hash equal-length messages.
+    /// Hash equal-length messages, using the row kernel for three or four
+    /// short inputs.
     #[inline]
     fn hash(&self, inputs: [&[u8]; 16], active: usize) -> [[u8; OUT_LEN]; 16] {
+        if matches!(active, 3 | 4) && input::Input::supports_len(inputs[0].len()) {
+            // SAFETY: Construction establishes AVX-512F and the first input
+            // has a supported length. The kernel checks that all lanes agree.
+            let rows = unsafe { row4::hash([inputs[0], inputs[1], inputs[2], inputs[3]]) };
+            let mut outputs = [[0; OUT_LEN]; 16];
+            outputs[..active].copy_from_slice(&rows[..active]);
+            return outputs;
+        }
         pair_batch(inputs, active).unwrap_or_else(|| {
             // SAFETY: Construction establishes AVX-512F and AVX-512BW.
             unsafe { avx512::hash_x16(inputs) }
@@ -196,6 +215,11 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     {
         return Some(digests);
     }
+    if matches!(messages.len(), 3 | 4)
+        && let Some(digests) = hash_rows(messages)
+    {
+        return Some(digests);
+    }
     if supports_avx512() {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
         return Some(batch(messages, pack, |inputs, active| {
@@ -212,6 +236,111 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         }));
     }
     None
+}
+
+/// Keep the row inputs and outputs in a separate frame from the general
+/// batch dispatcher.
+#[inline(never)]
+fn hash_rows<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
+    if !supports_avx512() {
+        return None;
+    }
+    let [first, second, third, rest @ ..] = messages else {
+        return None;
+    };
+    if rest.len() > 1 {
+        return None;
+    }
+    let first = first.as_ref();
+    let inputs = [
+        first,
+        second.as_ref(),
+        third.as_ref(),
+        rest.first().map_or(first, AsRef::as_ref),
+    ];
+    let len = inputs[0].len();
+    if inputs.iter().any(|input| input.len() != len) {
+        return None;
+    }
+    if len == 36 {
+        let parts = inputs.each_ref().map(core::slice::from_ref);
+        return hash_leaves36(parts, messages.len());
+    }
+    if !input::Input::supports_len(len) {
+        return None;
+    }
+
+    // SAFETY: AVX-512F is available, and all captured slices have the same
+    // supported length.
+    let outputs = unsafe { row4::hash(inputs) };
+    Some(
+        outputs
+            .into_iter()
+            .take(messages.len())
+            .map(Digest)
+            .collect(),
+    )
+}
+
+/// Hash three or four messages directly from supported fragments.
+pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option<Vec<Digest>> {
+    if !matches!(messages.len(), 3 | 4) || !supports_avx512() {
+        return None;
+    }
+    let last = messages.get(3).unwrap_or(&messages[2]);
+    if let Some(digests) = hash_leaves36(
+        [&messages[0], &messages[1], &messages[2], last],
+        messages.len(),
+    ) {
+        return Some(digests);
+    }
+    let inputs = [
+        input::Input::new(&messages[0])?,
+        input::Input::new(&messages[1])?,
+        input::Input::new(&messages[2])?,
+        input::Input::new(messages.get(3).unwrap_or(&messages[0]))?,
+    ];
+    if inputs.iter().any(|input| input.len() != inputs[0].len()) {
+        return None;
+    }
+
+    // SAFETY: AVX-512F is available, each Input validates its fragments,
+    // and every captured message has the same supported length.
+    let outputs = unsafe { row4::hash_parts(inputs.each_ref()) };
+    Some(
+        outputs
+            .into_iter()
+            .take(messages.len())
+            .map(Digest)
+            .collect(),
+    )
+}
+
+/// Hash the first `count` (three or four) of four 36-byte messages, such as
+/// BMT leaves, two at a time with the 36-byte pair kernel.
+///
+/// The row kernel has no 36-byte shape. Returns `None` when AVX-512VL is
+/// unavailable or a message is neither one 36-byte part nor a 4-byte part
+/// followed by a 32-byte part.
+fn hash_leaves36(messages: [&[&[u8]]; 4], count: usize) -> Option<Vec<Digest>> {
+    if !supports_avx2() || !supports_avx512vl() {
+        return None;
+    }
+    let [first, second, third, fourth] = messages;
+    let (first, second) = (pair36::Input::new(first)?, pair36::Input::new(second)?);
+    let (third, fourth) = (pair36::Input::new(third)?, pair36::Input::new(fourth)?);
+
+    // SAFETY: AVX2, AVX-512F, and AVX-512VL were established above, and each
+    // input validates exactly 36 bytes.
+    let digests = unsafe { [pair36::hash(&first, &second), pair36::hash(&third, &fourth)] };
+    Some(
+        digests
+            .into_iter()
+            .flatten()
+            .take(count)
+            .map(Digest)
+            .collect(),
+    )
 }
 
 /// Keep the pair kernel's temporaries in a separate stack frame from the
@@ -241,14 +370,18 @@ fn pair_batch<const L: usize>(inputs: [&[u8]; L], active: usize) -> Option<[[u8;
 #[cfg(test)]
 mod tests {
     use super::{input::Input, *};
-    use crate::blake3::{
-        gather,
-        simd::tests::{check_batch, check_lanes},
+    use crate::{
+        Hasher as _,
+        blake3::{
+            Blake3, gather,
+            simd::tests::{check_batch, check_lanes},
+        },
     };
     use blake3::CHUNK_LEN;
     use commonware_utils::{iter::zip_eq, test_rng};
-    use core::arch::x86_64::_mm_storeu_si128;
+    use core::{arch::x86_64::_mm_storeu_si128, cell::Cell};
     use rand::Rng as _;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     // Each fragment ends at its allocation boundary. Prefix bytes vary alignment.
     fn fragments(len: usize, multipart: bool, offset: usize, salt: u8) -> Vec<Box<[u8]>> {
@@ -388,6 +521,278 @@ mod tests {
             super::hash_pair(&repeated, &repeated),
             Some([reference(&repeated); 2])
         );
+    }
+
+    /// Check the row kernel and the three- and four-message batch dispatch against
+    /// the reference with exactly sized contiguous messages.
+    #[test]
+    fn test_row4_lanes_and_batch() {
+        if !supports_avx512() {
+            return;
+        }
+        for len in [40, 64, 72] {
+            for alignment in 0..32 {
+                let buffers: [_; 4] = core::array::from_fn(|lane| {
+                    fragments(len, false, alignment, 17 + lane as u8 * 43)
+                });
+                let inputs: [_; 4] = core::array::from_fn(|lane| &buffers[lane][0][alignment..]);
+                for active in [3, 4] {
+                    // Three active lanes repeat the first message in the fourth.
+                    let mut lanes = inputs;
+                    if active == 3 {
+                        lanes[3] = lanes[0];
+                    }
+                    let expected: [_; 4] = core::array::from_fn(|lane| reference(&[lanes[lane]]));
+
+                    // SAFETY: AVX-512F was checked. All inputs have the same
+                    // supported length, with exact allocation extents.
+                    assert_eq!(unsafe { row4::hash(lanes) }, expected);
+
+                    // The batch dispatch hashes the active messages.
+                    let actual = super::hash_many(&lanes[..active]).unwrap();
+                    for (digest, expected) in actual.iter().zip(&expected[..active]) {
+                        assert_eq!(digest.as_ref(), expected);
+                    }
+                    assert_eq!(actual.len(), active);
+                }
+            }
+        }
+    }
+
+    /// Check three or four messages of `sizes` fragments, each in its own
+    /// allocation at varying alignments, against the reference, including aliased
+    /// messages.
+    fn check_multipart_row4<const P: usize>(sizes: [usize; P]) {
+        for alignment in 0..32 {
+            let buffers: [[(Box<[u8]>, usize); P]; 4] = core::array::from_fn(|lane| {
+                core::array::from_fn(|part| {
+                    let offset = (alignment + lane * 7 + part * 11) % 32;
+                    let salt = (17 + lane * 43 + part * 31) as u8;
+                    let buffer = fragments(sizes[part], false, offset, salt).pop().unwrap();
+                    (buffer, offset)
+                })
+            });
+            let messages: [[&[u8]; P]; 4] = core::array::from_fn(|lane| {
+                core::array::from_fn(|part| {
+                    let (buffer, offset) = &buffers[lane][part];
+                    &buffer[*offset..]
+                })
+            });
+            let expected: [_; 4] = core::array::from_fn(|lane| reference(&messages[lane]));
+            for active in [3, 4] {
+                let actual = super::hash_many_parts(&messages[..active]).unwrap();
+                assert_eq!(actual.len(), active);
+                for (digest, expected) in zip_eq(&actual, &expected[..active]) {
+                    assert_eq!(digest.as_ref(), expected);
+                }
+                let public = Blake3::hash_many_parts(&messages[..active]);
+                for (digest, expected) in zip_eq(&public, &expected[..active]) {
+                    assert_eq!(digest.as_ref(), expected);
+                }
+                assert_eq!(public.len(), active);
+            }
+
+            // Messages may alias one another.
+            let mut aliases = messages;
+            aliases[1] = aliases[0];
+            aliases[3] = aliases[2];
+            for active in [3, 4] {
+                let actual = super::hash_many_parts(&aliases[..active]).unwrap();
+                for (digest, parts) in zip_eq(&actual, &aliases[..active]) {
+                    assert_eq!(digest.as_ref(), reference(parts));
+                }
+            }
+        }
+    }
+
+    /// Check the row kernel on the merkle layouts with exactly sized fragments,
+    /// including digest fragments that share one allocation.
+    #[test]
+    fn test_row4_multipart_fragment_extents_and_aliases() {
+        if !supports_avx512() {
+            return;
+        }
+
+        // Each fragment has its own allocation.
+        check_multipart_row4([8, 32]);
+        check_multipart_row4([32, 32]);
+        check_multipart_row4([8, 32, 32]);
+
+        // Both digest fragments share one exact-size allocation.
+        let position = fragments(8, false, 7, 11).pop().unwrap();
+        let digest = fragments(32, false, 13, 97).pop().unwrap();
+        let aliased = [&position[7..], &digest[13..], &digest[13..]];
+        let messages = [aliased; 4];
+        for active in [3, 4] {
+            let actual = super::hash_many_parts(&messages[..active]).unwrap();
+            for output in actual {
+                assert_eq!(output.as_ref(), reference(&aliased));
+            }
+        }
+    }
+
+    /// Check that three or four messages of `layouts`, with one message of a
+    /// different layout, bypass the row kernel and still hash correctly.
+    fn check_mixed_rows<const P: usize>(layouts: &[[&[u8]; P]]) {
+        for (i, &common) in layouts.iter().enumerate() {
+            for (j, &odd) in layouts.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                for count in [3, 4] {
+                    for position in 0..count {
+                        let mut messages = vec![common; count];
+                        messages[position] = odd;
+                        assert!(super::hash_many_parts(&messages).is_none());
+                        let actual = Blake3::hash_many_parts(&messages);
+                        for (digest, parts) in zip_eq(&actual, &messages) {
+                            assert_eq!(digest.as_ref(), reference(parts));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check that three or four messages with layouts of different lengths bypass
+    /// the row kernel and still hash correctly.
+    #[test]
+    fn test_row4_parts_rejects_mixed_lengths() {
+        if !supports_avx512() {
+            return;
+        }
+        let data: Vec<u8> = (0..72u8).map(|i| i.wrapping_mul(37)).collect();
+
+        // The two-part layouts.
+        check_mixed_rows(&[[&data[..8], &data[8..40]], [&data[..32], &data[32..64]]]);
+
+        // One-part messages of every supported length.
+        check_mixed_rows(&[[&data[..40]], [&data[..64]], [&data[..72]]]);
+    }
+
+    /// Check batches with a message whose view shortens after two conversions.
+    #[test]
+    fn test_row4_rejects_changed_input_lengths() {
+        if !supports_avx512() {
+            return;
+        }
+        struct Message {
+            bytes: [u8; 64],
+            calls: Cell<usize>,
+            shorten: bool,
+        }
+        impl AsRef<[u8]> for Message {
+            fn as_ref(&self) -> &[u8] {
+                let calls = self.calls.replace(self.calls.get() + 1);
+                if self.shorten && calls >= 2 {
+                    &self.bytes[..1]
+                } else {
+                    &self.bytes
+                }
+            }
+        }
+        for count in [3, 4, 19, 20] {
+            let messages: Vec<_> = (0..count)
+                .map(|index| Message {
+                    bytes: [0x5a; 64],
+                    calls: Cell::new(0),
+                    shorten: index == count / 16 * 16 + 1,
+                })
+                .collect();
+
+            // A direct batch may capture the initial views before any changes.
+            // Grouped batches must reject unequal captured slices.
+            let result = catch_unwind(AssertUnwindSafe(|| Blake3::hash_many(&messages)));
+            if let Ok(digests) = result {
+                assert!(count < 16, "count={count}");
+                assert_eq!(digests.len(), count);
+                for digest in digests {
+                    assert_eq!(digest.as_ref(), &reference(&[&[0x5a; 64]]));
+                }
+            }
+        }
+    }
+
+    /// Check that the row dispatch hashes the views it captures, declines
+    /// unsupported or unequal lengths, and sends 36-byte messages to the 36-byte
+    /// pair kernel.
+    #[test]
+    fn test_row_dispatch_captured_views() {
+        if !supports_avx512() {
+            return;
+        }
+        struct Message<'a> {
+            initial: &'a [u8],
+            later: &'a [u8],
+            captured: Cell<bool>,
+        }
+        impl AsRef<[u8]> for Message<'_> {
+            fn as_ref(&self) -> &[u8] {
+                if self.captured.replace(true) {
+                    self.later
+                } else {
+                    self.initial
+                }
+            }
+        }
+        let buffers = fragments(72, false, 7, 31);
+        let full = &buffers[0][7..];
+        for active in [3, 4] {
+            // Views after the first are one byte long.
+            let messages: Vec<_> = (0..active)
+                .map(|_| Message {
+                    initial: full,
+                    later: &full[..1],
+                    captured: Cell::new(false),
+                })
+                .collect();
+            let actual = super::hash_rows(&messages).unwrap();
+            assert_eq!(actual.len(), active);
+            for digest in actual {
+                assert_eq!(digest.as_ref(), &reference(&[full]));
+            }
+
+            // One message of another length declines the row kernel.
+            for unsupported in [1, 36, 40, 64] {
+                let mut inputs = vec![full; active];
+                inputs[1] = &full[..unsupported];
+                assert!(super::hash_rows(&inputs).is_none());
+            }
+
+            // 36-byte messages go two at a time to the 36-byte pair kernel.
+            let leaves = vec![&full[..36]; active];
+            let actual = super::hash_rows(&leaves);
+            assert_eq!(actual.is_some(), supports_avx512vl());
+            for digest in actual.into_iter().flatten() {
+                assert_eq!(digest.as_ref(), &reference(&[&full[..36]]));
+            }
+
+            // The batch dispatch reaches the row kernel.
+            let actual = super::hash_many(&vec![full; active]).unwrap();
+            for digest in actual {
+                assert_eq!(digest.as_ref(), &reference(&[full]));
+            }
+        }
+    }
+
+    /// Check that three or four messages of a 4-byte part and a 32-byte part hash
+    /// directly with the 36-byte pair kernel exactly when AVX-512 and AVX-512VL
+    /// are available.
+    #[test]
+    fn test_leaves36_parts() {
+        let positions = random(4, 4);
+        let digests = random(4, 32);
+        let messages: [[&[u8]; 2]; 4] =
+            core::array::from_fn(|lane| [&positions[lane][..], &digests[lane][..]]);
+        for count in [3, 4] {
+            let actual = super::hash_many_parts(&messages[..count]);
+            assert_eq!(actual.is_some(), supports_avx512() && supports_avx512vl());
+            if let Some(actual) = actual {
+                for (digest, parts) in zip_eq(&actual, &messages[..count]) {
+                    assert_eq!(digest.as_ref(), reference(parts));
+                }
+            }
+        }
     }
 
     /// Check sixteen exactly sized messages that end in a partial block against

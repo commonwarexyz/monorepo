@@ -504,6 +504,12 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
     {
         return Some(vec![left, right]);
     }
+    #[cfg(target_arch = "x86_64")]
+    if matches!(messages.len(), 3 | 4)
+        && let Some(digests) = x86_64::hash_many_parts(messages)
+    {
+        return Some(digests);
+    }
 
     if !batched() {
         return None;
