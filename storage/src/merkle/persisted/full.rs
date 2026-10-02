@@ -79,7 +79,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// The number of leaves visible through this batch.
-    pub fn leaves(&self) -> Location<F> {
+    pub const fn leaves(&self) -> Location<F> {
         self.inner.leaves()
     }
 

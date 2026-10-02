@@ -98,7 +98,14 @@ use alloc::{
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
+#[cfg(feature = "std")]
+use commonware_utils::iter::zip_eq;
 use core::ops::Range;
+
+/// Nodes per [`Hasher::node_digests`] call when merkleizing, and leaves per task when hashing
+/// leaves, bounding the working set.
+#[cfg(feature = "std")]
+const WINDOW: usize = 256;
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
@@ -120,6 +127,8 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
 /// in contrast to [`MerkleizedBatch`].
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
+    /// The number of leaves visible through this batch, maintained on append.
+    leaves: Location<F>,
     appended: Vec<D>,
     overwrites: Overwrites<F, D>,
     /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
@@ -133,6 +142,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Create a new batch from `parent`.
     pub fn new(parent: Arc<MerkleizedBatch<F, D, S>>) -> Self {
         Self {
+            leaves: parent.leaves(),
             parent,
             appended: Vec::new(),
             overwrites: Overwrites::default(),
@@ -165,8 +175,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// The number of leaves visible through this batch.
-    pub fn leaves(&self) -> Location<F> {
-        Location::try_from(self.size()).expect("invalid size")
+    pub const fn leaves(&self) -> Location<F> {
+        self.leaves
     }
 
     /// Resolve a node: own data -> parent chain -> `base` fallback.
@@ -238,30 +248,19 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
-        self.append_leaf_digest(digest, self.leaves(), self.size());
+        self.append_leaf_digest(digest);
         self
     }
 
     /// Append a leaf digest and any parent placeholders.
-    ///
-    /// `leaves` is the leaf index this digest occupies and `size` is the starting node count.
-    /// Returns the new size.
-    fn append_leaf_digest(
-        &mut self,
-        digest: D,
-        leaves: Location<F>,
-        mut size: Position<F>,
-    ) -> Position<F> {
+    fn append_leaf_digest(&mut self, digest: D) {
         self.appended.push(digest);
-        size += 1;
-
-        for height in F::parent_heights(leaves) {
+        for height in F::parent_heights(self.leaves) {
+            let pos = self.size();
+            push_dirty(&mut self.dirty_nodes, height, pos);
             self.appended.push(D::EMPTY);
-            push_dirty(&mut self.dirty_nodes, height, size);
-            size += 1;
         }
-
-        size
+        self.leaves += 1;
     }
 
     /// Add a run of pre-computed leaf digests, in order.
@@ -270,44 +269,60 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
-        let leaves = self.leaves();
-        let mut size = self.size();
-        let end = leaves.checked_add(n).expect("leaf count overflow");
-        let additional = (*Position::try_from(end).expect("size overflow") - *size) as usize;
+        let end = self.leaves.checked_add(n).expect("leaf count overflow");
+        let additional = (*Position::try_from(end).expect("size overflow") - *self.size()) as usize;
         self.appended.reserve(additional);
-
-        // Maintain leaf position and location incrementally to avoid recomputation on every iteration.
-        for (i, digest) in (0u64..).zip(digests) {
-            size = self.append_leaf_digest(digest, leaves + i, size);
+        for digest in digests {
+            self.append_leaf_digest(digest);
         }
         self
     }
 
     /// Hash `element` and add it as a leaf.
-    pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
+    pub fn add(mut self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
-        self.add_leaf_digest(digest)
+        self.append_leaf_digest(digest);
+        self
     }
 
     /// Encode and hash `items` across the strategy, adding their leaf digests in order.
+    ///
+    /// Equivalent to calling [`add`](Self::add) with each item's encoding, but lets the hasher
+    /// hash many leaves at once.
     #[cfg(feature = "std")]
-    pub(crate) fn add_many<Item: Write + Send + Sync>(
-        self,
+    pub fn add_many<Item: Write + Send + Sync>(
+        mut self,
         hasher: &impl Hasher<F, Digest = D>,
         items: &[Item],
     ) -> Self {
-        let first = self.leaves();
-        let digests = self.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
+        // Lay out every leaf and parent placeholder, then hash each leaf straight into its slot.
+        let first = self.leaves;
+        let mut pos = self.size();
+        let end = first
+            .checked_add(items.len() as u64)
+            .expect("leaf count overflow");
+        let size = Position::try_from(end).expect("size overflow");
+        let start = self.appended.len();
+        self.appended
+            .resize((*size - *self.parent.size()) as usize, D::EMPTY);
+        hash_leaves(
+            &self.parent.strategy,
+            hasher,
+            first,
+            items,
+            &mut self.appended[start..],
         );
-        self.add_leaf_digests(digests)
+
+        // Mark the parent placeholders dirty.
+        while self.leaves < end {
+            pos += 1;
+            for height in F::parent_heights(self.leaves) {
+                push_dirty(&mut self.dirty_nodes, height, pos);
+                pos += 1;
+            }
+            self.leaves += 1;
+        }
+        self
     }
 
     /// Validate that `loc` refers to an in-bounds, non-pruned leaf and return its position.
@@ -478,6 +493,83 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             }
         }
     }
+}
+
+/// Encoded bytes per [`Hasher::leaf_digests`] call when hashing leaves, bounding the working set
+/// for large items.
+#[cfg(feature = "std")]
+const WINDOW_BYTES: usize = 64 * 1024;
+
+/// Encode `items` and hash them as the leaves at consecutive locations starting at `first`,
+/// writing each digest to its slot in `nodes`, which holds the nodes from the position of `first`
+/// onward. Other slots are left untouched.
+///
+/// Items are split across the strategy in tasks of at most [`WINDOW`] items, each owning the run
+/// of `nodes` from its first leaf to the next task's. Each task hashes its items together with
+/// [`Hasher::leaf_digests`], starting a new call once the encoded items reach [`WINDOW_BYTES`].
+#[cfg(feature = "std")]
+fn hash_leaves<F: Family, D: Digest, Item: Write + Sync>(
+    strategy: &impl Strategy,
+    hasher: &impl Hasher<F, Digest = D>,
+    first: Location<F>,
+    items: &[Item],
+    nodes: &mut [D],
+) {
+    let chunk = items
+        .len()
+        .div_ceil(strategy.manual().parallelism())
+        .clamp(1, WINDOW);
+    let position = |loc: Location<F>| Position::try_from(loc).expect("valid leaf location");
+    let mut offset = position(first);
+    let mut rest = nodes;
+    let tasks: Vec<_> = items
+        .chunks(chunk)
+        .enumerate()
+        .map(|(index, items)| {
+            let start = first + (index * chunk) as u64;
+            let end = position(start + items.len() as u64);
+            let (nodes, tail) = core::mem::take(&mut rest).split_at_mut((*end - *offset) as usize);
+            rest = tail;
+            let origin = core::mem::replace(&mut offset, end);
+            (start, origin, items, nodes)
+        })
+        .collect();
+    strategy.map_init_collect_vec_with_multiplier(
+        tasks,
+        chunk,
+        // The strategy may create scratch for every task, so size it for a full window up front
+        // instead of growing it from empty in each task.
+        || (Vec::with_capacity(WINDOW_BYTES), Vec::with_capacity(chunk)),
+        |(buffer, ends): &mut (Vec<u8>, Vec<usize>), (mut start, origin, items, nodes)| {
+            let mut rest = items;
+            while !rest.is_empty() {
+                buffer.clear();
+                ends.clear();
+                for item in rest {
+                    item.write(buffer);
+                    ends.push(buffer.len());
+                    if buffer.len() >= WINDOW_BYTES {
+                        break;
+                    }
+                }
+                let mut offset = 0;
+                let leaves: Vec<_> = ends
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &end)| {
+                        let element = &buffer[offset..end];
+                        offset = end;
+                        (position(start + i as u64), element)
+                    })
+                    .collect();
+                for (&(pos, _), digest) in zip_eq(&leaves, hasher.leaf_digests(&leaves)) {
+                    nodes[(*pos - *origin) as usize] = digest;
+                }
+                start += ends.len() as u64;
+                rest = &rest[ends.len()..];
+            }
+        },
+    );
 }
 
 /// Collect ancestor batch data by walking the parent + its Weak chain.
@@ -724,6 +816,8 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 mod tests {
     use super::*;
     use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem};
+    #[cfg(feature = "std")]
+    use commonware_codec::Encode;
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
 
@@ -754,6 +848,58 @@ mod tests {
         };
         mem.apply_batch(&batch).unwrap();
         mem
+    }
+
+    #[cfg(feature = "std")]
+    fn hash_leaves_matches_leaf_digest<F: Family, C: commonware_cryptography::Hasher>() {
+        let hasher = Standard::<C>::new(ForwardFold);
+        let rayon = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(3)).unwrap();
+        let first = Location::<F>::new(37);
+        // Each case is (count, base length, length step): small items cross the WINDOW item
+        // limit, and 20 KiB items cross the WINDOW_BYTES limit.
+        for (count, base, step) in [(600, 32, 40), (600, 105, 0), (10, 20 * 1024, 0)] {
+            for count in [0, 1, 2, WINDOW - 1, WINDOW, WINDOW + 1, count] {
+                let items: Vec<Vec<u8>> = (0..count)
+                    .map(|i| vec![i as u8; base + (i % 7) * step])
+                    .collect();
+
+                // Leaf slots hold their digests and parent slots keep their prior contents.
+                let origin = *Position::try_from(first).unwrap();
+                let end = *Position::try_from(first + count as u64).unwrap();
+                let untouched = hasher.digest(b"untouched");
+                let mut expected = vec![untouched; (end - origin) as usize];
+                for (i, item) in items.iter().enumerate() {
+                    let pos = Position::try_from(first + i as u64).unwrap();
+                    expected[(*pos - origin) as usize] = hasher.leaf_digest(pos, &item.encode());
+                }
+                let hashed = |hash: &dyn Fn(&mut [_])| {
+                    let mut nodes = vec![untouched; expected.len()];
+                    hash(&mut nodes);
+                    nodes
+                };
+                assert_eq!(
+                    hashed(&|nodes| hash_leaves(&Sequential, &hasher, first, &items, nodes)),
+                    expected
+                );
+                assert_eq!(
+                    hashed(&|nodes| hash_leaves(&rayon, &hasher, first, &items, nodes)),
+                    expected
+                );
+                assert_eq!(
+                    hashed(&|nodes| hash_leaves(&rayon.manual(), &hasher, first, &items, nodes)),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_hash_leaves_matches_leaf_digest() {
+        hash_leaves_matches_leaf_digest::<crate::mmr::Family, Sha256>();
+        hash_leaves_matches_leaf_digest::<crate::mmb::Family, Sha256>();
+        hash_leaves_matches_leaf_digest::<crate::mmr::Family, commonware_cryptography::Blake3>();
+        hash_leaves_matches_leaf_digest::<crate::mmb::Family, commonware_cryptography::Blake3>();
     }
 
     fn consistency_with_reference<F: Family>() {
@@ -971,6 +1117,49 @@ mod tests {
                 .merkleize(&base, &hasher);
             assert_eq!(batch_root(&base, &m2, &hasher), base_root);
         });
+    }
+
+    /// Check that `add_many`, interleaved with single adds on a batch whose parent also appended,
+    /// matches adding each encoded item one at a time.
+    #[cfg(feature = "std")]
+    fn add_many_matches_add<F: Family, S: Strategy>(strategy: S) {
+        let hasher: H = Standard::new(ForwardFold);
+        let base = build_reference::<F>(&hasher, 50);
+
+        // Items of varying length, enough to split across several hashing tasks.
+        let items: Vec<Vec<u8>> = (0..(3 * WINDOW + 7))
+            .map(|i| vec![i as u8; 1 + (i * 37) % 300])
+            .collect();
+        let parent = MerkleizedBatch::from_mem_with_strategy(&base, strategy)
+            .new_batch()
+            .add_many(&hasher, &items[..5])
+            .merkleize(&base, &hasher);
+
+        // Mix single adds, an empty run, and runs that start at even (56) and odd (313) leaf
+        // counts.
+        let many = parent
+            .new_batch()
+            .add(&hasher, b"first")
+            .add_many(&hasher, &items[..0])
+            .add_many(&hasher, &items[..WINDOW])
+            .add(&hasher, b"middle")
+            .add_many(&hasher, &items[WINDOW..])
+            .merkleize(&base, &hasher);
+
+        // Rebuild the same batch with one add per encoded item.
+        let mut single = parent.new_batch().add(&hasher, b"first");
+        for item in &items[..WINDOW] {
+            single = single.add(&hasher, &item.encode());
+        }
+        single = single.add(&hasher, b"middle");
+        for item in &items[WINDOW..] {
+            single = single.add(&hasher, &item.encode());
+        }
+        let single = single.merkleize(&base, &hasher);
+        assert_eq!(
+            many.root(&base, &hasher, 0).unwrap(),
+            single.root(&base, &hasher, 0).unwrap()
+        );
     }
 
     fn proof_verification<F: Family>() {
@@ -1296,6 +1485,14 @@ mod tests {
     fn mmr_update_leaf_batched() {
         update_leaf_batched_roundtrip::<crate::mmr::Family>();
     }
+    #[cfg(feature = "std")]
+    #[test]
+    fn mmr_add_many_matches_add() {
+        add_many_matches_add::<crate::mmr::Family, _>(Sequential);
+        let rayon = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(3)).unwrap();
+        add_many_matches_add::<crate::mmr::Family, _>(rayon);
+    }
+
     #[test]
     fn mmr_proof_verification() {
         proof_verification::<crate::mmr::Family>();
@@ -1424,6 +1621,14 @@ mod tests {
     fn mmb_update_leaf_batched() {
         update_leaf_batched_roundtrip::<crate::mmb::Family>();
     }
+    #[cfg(feature = "std")]
+    #[test]
+    fn mmb_add_many_matches_add() {
+        add_many_matches_add::<crate::mmb::Family, _>(Sequential);
+        let rayon = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(3)).unwrap();
+        add_many_matches_add::<crate::mmb::Family, _>(rayon);
+    }
+
     #[test]
     fn mmb_proof_verification() {
         proof_verification::<crate::mmb::Family>();

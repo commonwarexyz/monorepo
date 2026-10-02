@@ -15,6 +15,7 @@ use crate::merkle::{
     hasher::Hasher,
     mem::{Config as MemConfig, Mem},
 };
+use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
@@ -37,15 +38,19 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Add a run of pre-computed leaf digests, in order.
-    pub(crate) fn add_leaf_digests(self, digests: impl IntoIterator<Item = D>) -> Self {
+    /// Encode and hash `items` across the strategy, adding their leaf digests in order.
+    pub(crate) fn add_many<Item: Write + Send + Sync>(
+        self,
+        hasher: &impl Hasher<F, Digest = D>,
+        items: &[Item],
+    ) -> Self {
         Self {
-            inner: self.inner.add_leaf_digests(digests),
+            inner: self.inner.add_many(hasher, items),
         }
     }
 
     /// The number of leaves visible through this batch.
-    pub fn leaves(&self) -> Location<F> {
+    pub const fn leaves(&self) -> Location<F> {
         self.inner.leaves()
     }
 
