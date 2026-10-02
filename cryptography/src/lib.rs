@@ -357,6 +357,25 @@ mod tests {
         assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
     }
 
+    fn test_public_key_order<C: PrivateKey>() {
+        let mut rng = test_rng();
+        let mut keys = Vec::new();
+        for _ in 0..16 {
+            let key = C::random(&mut rng).public_key();
+            let decoded = C::PublicKey::decode(commonware_codec::Copying(key.as_ref())).unwrap();
+            keys.extend([key, decoded]);
+        }
+
+        for a in &keys {
+            for b in &keys {
+                let expected = a.as_ref().cmp(b.as_ref());
+                assert_eq!(a.cmp(b), expected);
+                assert_eq!(a.partial_cmp(b), Some(expected));
+                assert_eq!(a == b, expected.is_eq());
+            }
+        }
+    }
+
     fn test_validate_invalid_public_key<C: Signer>() {
         let result = C::PublicKey::decode(vec![0; 1024]);
         assert!(result.is_err());
@@ -528,6 +547,11 @@ mod tests {
     }
 
     #[test]
+    fn test_secp256r1_standard_public_key_order() {
+        test_public_key_order::<secp256r1::standard::PrivateKey>();
+    }
+
+    #[test]
     fn test_secp256r1_standard_validate_invalid_public_key() {
         test_validate_invalid_public_key::<secp256r1::standard::PrivateKey>();
     }
@@ -571,6 +595,11 @@ mod tests {
     #[test]
     fn test_secp256r1_recoverable_validate() {
         test_validate::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_public_key_order() {
+        test_public_key_order::<secp256r1::recoverable::PrivateKey>();
     }
 
     #[test]
