@@ -1184,9 +1184,17 @@ pub(crate) mod test {
     fn assert_non_trait_futures_are_send(db: &AnyTest, key: Digest, value: Vec<u8>) {
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None));
-        let mut sweep = db.new_batch().sweep(1, 1);
-        is_send(sweep.next(db));
-        is_send(db.new_batch().sweep(1, 1).merkleize(db, None));
+        let mut policy = crate::qmdb::any::floor::Compact {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(db.new_batch().merkleize_with(db, None, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged
+                .merkleize_with(Vec::new(), Vec::new(), None, db, &mut policy)
+                .await
+        });
         is_send(db.get_with_loc(&key));
     }
 

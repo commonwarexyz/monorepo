@@ -84,8 +84,8 @@ pub struct Db<
     pub(crate) active_keys: usize,
 
     /// Activity bitmap over committed operations. Rebuilt from the journal on init and never
-    /// persisted. Floor raises and sweeps draw committed candidates from its set bits. When
-    /// wrapped by `current::Db`, it also supplies grafted-tree leaves and proofs.
+    /// persisted. Floor raises and policy passes draw committed candidates from its set bits.
+    /// When wrapped by `current::Db`, it also supplies grafted-tree leaves and proofs.
     ///
     /// # Invariants
     ///

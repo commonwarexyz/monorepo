@@ -520,8 +520,10 @@ pub mod tests {
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
+                floor::{Compact, Decision, Hold},
                 test::{
-                    Inspect, assert_exact, build, colliding_digest, live, test_any_activity_depths,
+                    Inspect, Script, active, assert_exact, build, colliding_digest, counter, keep,
+                    live, test_any_activity_depths, test_any_policy_freed_ancestors,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -533,10 +535,9 @@ pub mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Metrics as _, Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        telemetry::metrics::metric_samples,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, bitmap::Readable};
     use core::future::Future;
@@ -2313,8 +2314,8 @@ pub mod tests {
             let staged_keys = [key(2)];
             let staged_refs: Vec<_> = staged_keys.iter().collect();
             let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
-            let mut sweep = db_a.new_batch().sweep(usize::MAX, u64::MAX);
-            let swept = db_a.new_batch().sweep(usize::MAX, u64::MAX);
+            let compacted = db_a.new_batch();
+            let (_, held) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a
@@ -2336,9 +2337,17 @@ pub mod tests {
                     .await,
                 Err(Error::StaleBatch)
             ));
-            assert!(matches!(sweep.next(&db_b).await, Err(Error::StaleBatch)));
+            let mut policy = Compact {
+                entries: usize::MAX,
+                skips: u64::MAX,
+            };
             assert!(matches!(
-                swept.merkleize(&db_b, None).await,
+                compacted.merkleize_with(&db_b, None, &mut policy).await,
+                Err(Error::StaleBatch)
+            ));
+            assert!(matches!(
+                held.merkleize_with(vec![(0, Some(val(3)))], Vec::new(), None, &db_b, &mut Hold)
+                    .await,
                 Err(Error::StaleBatch)
             ));
         });
@@ -2369,8 +2378,8 @@ pub mod tests {
             let staged_keys = [key(2)];
             let staged_refs: Vec<_> = staged_keys.iter().collect();
             let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
-            let mut sweep = db_a.new_batch().sweep(usize::MAX, u64::MAX);
-            let swept = db_a.new_batch().sweep(usize::MAX, u64::MAX);
+            let compacted = db_a.new_batch();
+            let (_, held) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a
@@ -2392,9 +2401,17 @@ pub mod tests {
                     .await,
                 Err(Error::StaleBatch)
             ));
-            assert!(matches!(sweep.next(&db_b).await, Err(Error::StaleBatch)));
+            let mut policy = Compact {
+                entries: usize::MAX,
+                skips: u64::MAX,
+            };
             assert!(matches!(
-                swept.merkleize(&db_b, None).await,
+                compacted.merkleize_with(&db_b, None, &mut policy).await,
+                Err(Error::StaleBatch)
+            ));
+            assert!(matches!(
+                held.merkleize_with(vec![(0, Some(val(3)))], Vec::new(), None, &db_b, &mut Hold)
+                    .await,
                 Err(Error::StaleBatch)
             ));
         });
@@ -5026,13 +5043,13 @@ pub mod tests {
         });
     }
 
-    /// A child sweep over a pending parent replaces and evicts committed updates and passes the
+    /// A child policy over a pending parent replaces and evicts committed updates and passes the
     /// update the parent superseded, and the applied chain proves the results.
     #[test_traced("INFO")]
-    fn test_current_ordered_sweep_replace_and_ancestor_proofs() {
+    fn test_current_ordered_policy_replace_and_ancestor_proofs() {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
-            let partition = "current-ordered-sweep-ancestor";
+            let partition = "current-ordered-policy-ancestor";
             let db: OrderedFixedDb = OrderedFixedDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>(partition, &ctx),
@@ -5050,7 +5067,7 @@ pub mod tests {
                 .fold(db.new_batch(), |batch, (i, key)| {
                     batch.write(key, Some(val(i as u64)))
                 });
-            let seed = seed.sweep(0, 0).merkleize(&db, None).await.unwrap();
+            let seed = seed.merkleize_with(&db, None, &mut Hold).await.unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
@@ -5058,30 +5075,37 @@ pub mod tests {
             let parent = db
                 .new_batch()
                 .write(keys[1], Some(val(11)))
-                .sweep(0, 0)
-                .merkleize(&db, None)
+                .merkleize_with(&db, None, &mut Hold)
                 .await
                 .unwrap();
 
             // The child passes the initial commit, replaces the oldest key, passes the update the
-            // parent superseded, and evicts the last base key.
-            let mut child = parent.new_batch::<Sha256>().sweep(usize::MAX, 2);
-            let first = child.next(&db).await.unwrap().expect("oldest key");
-            let first_location = first.location();
-            assert_eq!(*first.key(), keys[0]);
-            assert_eq!(first.replace(val(10)), val(0));
-            let second = child.next(&db).await.unwrap().expect("last base key");
-            assert_eq!(*second.key(), keys[2]);
-            assert_eq!(second.location(), Location::new(*first_location + 2));
-            assert_eq!(second.evict(), val(2));
-
-            // The parent's update lies past the remaining skips.
-            assert!(child.next(&db).await.unwrap().is_none());
-            assert!(!child.is_done());
-            assert_eq!(child.floor(), Location::new(*first_location + 3));
+            // parent superseded, and evicts the last base key. The parent's update lies past the
+            // remaining skips.
+            let oldest = keys[0];
+            let mut policy = Script::new(usize::MAX, 2, move |key: &Digest| {
+                if *key == oldest {
+                    Decision::Replace(val(10))
+                } else {
+                    Decision::Evict
+                }
+            });
+            let child = parent
+                .new_batch::<Sha256>()
+                .merkleize_with(&db, None, &mut policy)
+                .await
+                .unwrap();
+            let first = policy.visited[0].0;
+            assert_eq!(
+                policy.visited,
+                [
+                    (first, keys[0], val(0)),
+                    (Location::new(*first + 2), keys[2], val(2)),
+                ]
+            );
+            assert_eq!(child.bounds().inactivity_floor, Location::new(*first + 3));
 
             // The applied chain matches the speculative root and proves every key.
-            let child = child.merkleize(&db, None).await.unwrap();
             let speculative_root = child.root();
             let (db, _) = db.apply_batch(parent).await.unwrap();
             let (db, _) = db.apply_batch(child).await.unwrap();
@@ -5134,16 +5158,18 @@ pub mod tests {
     /// Evicting the only key empties an ordered database, which then proves the key's
     /// exclusion through the commit.
     #[test_traced("INFO")]
-    fn test_current_ordered_sweep_to_empty_proves_exclusion() {
+    fn test_current_ordered_policy_to_empty_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
             let db: OrderedFixedDb = OrderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-ordered-sweep-empty", &ctx),
+                fixed_config::<OneCap>("current-ordered-policy-empty", &ctx),
                 None,
             )
             .await
             .unwrap();
+
+            // Seed one key.
             let k = key(7);
             let seed = db
                 .new_batch()
@@ -5155,15 +5181,16 @@ pub mod tests {
             assert_eq!(db.active_keys(), 1);
 
             // Evict the only key.
-            let mut sweep = db.new_batch().sweep(usize::MAX, u64::MAX);
-            let entry = sweep.next(&db).await.unwrap().expect("one live key");
-            assert_eq!(*entry.key(), k);
-            assert_eq!(entry.evict(), val(7));
-            assert!(sweep.next(&db).await.unwrap().is_none());
-            assert!(sweep.is_done());
+            let mut policy = Script::new(usize::MAX, u64::MAX, |_: &Digest| Decision::Evict);
+            let batch = db
+                .new_batch()
+                .merkleize_with(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(policy.visited.len(), 1);
+            assert_eq!((policy.visited[0].1, policy.visited[0].2), (k, val(7)));
 
             // The empty database proves exclusion through the commit.
-            let batch = sweep.merkleize(&db, None).await.unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&k).await.unwrap(), None);
             assert_eq!(db.active_keys(), 0);
@@ -5177,15 +5204,15 @@ pub mod tests {
         });
     }
 
-    /// A child sweep passes committed updates that an unapplied parent superseded without
+    /// A child policy passes committed updates that an unapplied parent superseded without
     /// reading them, using the speculative bitmap.
     #[test_traced("INFO")]
-    fn test_current_sweep_skips_updates_superseded_by_pending_parent() {
+    fn test_current_policy_skips_updates_superseded_by_pending_parent() {
         deterministic::Runner::default().start(|context| async move {
             let ctx = context.child("db");
             let db: UnorderedFixedDb = UnorderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("current-sweep-speculative-skip", &ctx),
+                fixed_config::<OneCap>("current-policy-speculative-skip", &ctx),
                 None,
             )
             .await
@@ -5200,8 +5227,7 @@ pub mod tests {
                 .fold(db.new_batch(), |batch, (i, key)| {
                     batch.write(*key, Some(val(i as u64)))
                 })
-                .sweep(0, 0)
-                .merkleize(&db, None)
+                .merkleize_with(&db, None, &mut Hold)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
@@ -5213,123 +5239,145 @@ pub mod tests {
                 .fold(db.new_batch(), |batch, key| {
                     batch.write(*key, Some(val(100)))
                 })
-                .sweep(0, 0)
-                .merkleize(&db, None)
+                .merkleize_with(&db, None, &mut Hold)
                 .await
                 .unwrap();
 
-            // The child's sweep reads only the surviving committed update.
-            let items_read = || -> u64 {
-                let metrics = context.encode();
-                metric_samples(&metrics, "log_journal_items_read_total")
-                    .map(|(_, value)| value.parse::<u64>().unwrap())
-                    .sum()
-            };
+            // The child's policy reads only the surviving committed update before deciding it.
+            let items_read = || counter(&context, "log_journal_items_read_total");
             let before = items_read();
-            let mut sweep = parent.new_batch::<Sha256>().sweep(usize::MAX, u64::MAX);
-            let entry = sweep
-                .next(&db)
+            let mut reads = Vec::new();
+            let mut policy = Script::new(1, u64::MAX, |_: &Digest| {
+                reads.push(items_read());
+                Decision::Keep
+            });
+            let child = parent
+                .new_batch::<Sha256>()
+                .merkleize_with(&db, None, &mut policy)
                 .await
-                .unwrap()
-                .expect("surviving committed key");
-            assert_eq!(*entry.key(), keys[9]);
-            entry.keep();
-            assert_eq!(items_read() - before, 1);
+                .unwrap();
+            assert_eq!(policy.visited.len(), 1);
+            assert_eq!(policy.visited[0].1, keys[9]);
+            assert_eq!(reads, [before + 1]);
 
-            drop((sweep, parent));
+            drop((child, parent));
             db.destroy().await.unwrap();
         });
     }
 
-    /// A write staged before a sweep supersedes its key's update, which the sweep passes as
-    /// inactive, and the batch matches a sweep after the same write and survives reopen.
-    #[test_traced("INFO")]
-    fn test_current_unordered_staged_sweep() {
-        deterministic::Runner::default().start(|context| async move {
-            let ctx = context.child("db");
-            let partition = "current-unordered-staged-sweep";
-            let db: UnorderedFixedDb = UnorderedFixedDb::init(
-                ctx.child("storage"),
-                fixed_config::<OneCap>(partition, &ctx),
-                None,
-            )
-            .await
-            .unwrap();
+    /// Instantiate the staged policy test for one current DB kind. A staged write supersedes its
+    /// key's update, which the policy passes as inactive, and the batch matches a policy after
+    /// the same write and survives reopen.
+    macro_rules! staged_policy_test {
+        ($name:ident, $db:ty) => {
+            #[test_traced("INFO")]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    let ctx = context.child("db");
+                    let partition = stringify!($name);
+                    let db: $db = <$db>::init(
+                        ctx.child("storage"),
+                        fixed_config::<OneCap>(partition, &ctx),
+                        None,
+                    )
+                    .await
+                    .unwrap();
 
-            // Seed three keys in key order with a held floor.
-            let mut keys = [key(31), key(32), key(33)];
-            keys.sort();
-            let seed = keys
-                .into_iter()
-                .enumerate()
-                .fold(db.new_batch(), |batch, (i, key)| {
-                    batch.write(key, Some(val(i as u64)))
-                })
-                .sweep(0, 0)
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            let (db, range) = db.apply_batch(seed).await.unwrap();
-            let db = db.commit().await.unwrap();
-            let tip = db.size();
+                    // Seed three keys in key order with a held floor.
+                    let mut keys = [key(31), key(32), key(33)];
+                    keys.sort();
+                    let seed = keys
+                        .into_iter()
+                        .enumerate()
+                        .fold(db.new_batch(), |batch, (i, key)| {
+                            batch.write(key, Some(val(i as u64)))
+                        })
+                        .merkleize_with(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    let (db, range) = db.apply_batch(seed).await.unwrap();
+                    let db = db.commit().await.unwrap();
+                    let tip = db.size();
 
-            // Stage a write for the middle key, then evict the first key and keep the last.
-            let (read, staged) = db.new_batch().stage(&[&keys[1]], &db).await.unwrap();
-            assert_eq!(read, vec![Some(val(1))]);
-            let mut sweep =
-                staged.sweep(vec![(0, Some(val(30)))], Vec::new(), usize::MAX, u64::MAX);
-            let entry = sweep.next(&db).await.unwrap().expect("first key");
-            assert_eq!(entry.location(), range.start);
-            assert_eq!(entry.evict(), val(0));
-            let entry = sweep.next(&db).await.unwrap().expect("last key");
-            assert_eq!(entry.location(), range.start + 2);
-            entry.keep();
-            assert!(sweep.next(&db).await.unwrap().is_none());
-            assert_eq!(sweep.floor(), tip);
-            let staged = sweep.merkleize(&db, None).await.unwrap();
+                    // Stage a write for the middle key, then evict the first key and keep the last.
+                    let first = keys[0];
+                    let evict = move |key: &Digest| {
+                        if *key == first {
+                            Decision::Evict
+                        } else {
+                            Decision::Keep
+                        }
+                    };
+                    let (read, staged) = db.new_batch().stage(&[&keys[1]], &db).await.unwrap();
+                    assert_eq!(read, vec![Some(val(1))]);
+                    let mut policy = Script::new(usize::MAX, u64::MAX, evict);
+                    let staged = staged
+                        .merkleize_with(
+                            vec![(0, Some(val(30)))],
+                            Vec::new(),
+                            None,
+                            &db,
+                            &mut policy,
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        policy.visited,
+                        [
+                            (range.start, keys[0], val(0)),
+                            (range.start + 2, keys[2], val(2)),
+                        ]
+                    );
+                    assert_eq!(staged.bounds().inactivity_floor, tip);
 
-            // A sweep after the same write produces the same root.
-            let mut sweep = db
-                .new_batch()
-                .write(keys[1], Some(val(30)))
-                .sweep(usize::MAX, u64::MAX);
-            sweep.next(&db).await.unwrap().expect("first key").evict();
-            sweep.next(&db).await.unwrap().expect("last key").keep();
-            assert!(sweep.next(&db).await.unwrap().is_none());
-            let written = sweep.merkleize(&db, None).await.unwrap();
-            let root = staged.root();
-            assert_eq!(written.root(), root);
-            drop(written);
+                    // A policy after the same write produces the same root.
+                    let mut policy = Script::new(usize::MAX, u64::MAX, evict);
+                    let written = db
+                        .new_batch()
+                        .write(keys[1], Some(val(30)))
+                        .merkleize_with(&db, None, &mut policy)
+                        .await
+                        .unwrap();
+                    assert_eq!(policy.locations(), [range.start, range.start + 2]);
+                    let root = staged.root();
+                    assert_eq!(written.root(), root);
+                    drop(written);
 
-            // The applied batch serves every write.
-            let (db, _) = db.apply_batch(staged).await.unwrap();
-            assert_eq!(db.root(), root);
-            assert_eq!(db.inactivity_floor_loc(), tip);
-            assert_eq!(db.get(&keys[0]).await.unwrap(), None);
-            assert_eq!(db.get(&keys[1]).await.unwrap(), Some(val(30)));
-            assert_eq!(db.get(&keys[2]).await.unwrap(), Some(val(2)));
+                    // The applied batch serves every write.
+                    let (db, _) = db.apply_batch(staged).await.unwrap();
+                    assert_eq!(db.root(), root);
+                    assert_eq!(db.inactivity_floor_loc(), tip);
+                    assert_eq!(db.get(&keys[0]).await.unwrap(), None);
+                    assert_eq!(db.get(&keys[1]).await.unwrap(), Some(val(30)));
+                    assert_eq!(db.get(&keys[2]).await.unwrap(), Some(val(2)));
 
-            // The state survives reopen.
-            let db = db.sync().await.unwrap();
-            drop(db);
-            let reopened: UnorderedFixedDb = UnorderedFixedDb::init(
-                ctx.child("reopen"),
-                fixed_config::<OneCap>(partition, &ctx),
-                None,
-            )
-            .await
-            .unwrap();
-            assert_eq!(reopened.root(), root);
-            assert_eq!(reopened.inactivity_floor_loc(), tip);
-            assert_eq!(reopened.get(&keys[1]).await.unwrap(), Some(val(30)));
-            reopened.destroy().await.unwrap();
-        });
+                    // The state survives reopen.
+                    let db = db.sync().await.unwrap();
+                    drop(db);
+                    let reopened: $db = <$db>::init(
+                        ctx.child("reopen"),
+                        fixed_config::<OneCap>(partition, &ctx),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(reopened.root(), root);
+                    assert_eq!(reopened.inactivity_floor_loc(), tip);
+                    assert_eq!(reopened.get(&keys[1]).await.unwrap(), Some(val(30)));
+                    reopened.destroy().await.unwrap();
+                });
+            }
+        };
     }
 
-    /// Instantiate the sweep-raise parity test for one current DB kind. Keeping every update a
-    /// sweep returns until its floor reaches the automatic raise's floor reproduces the raise's
-    /// operations, floor, and canonical root, from the database and from a pending parent.
-    macro_rules! sweep_raise_parity_test {
+    staged_policy_test!(test_current_unordered_staged_policy, UnorderedFixedDb);
+    staged_policy_test!(test_current_ordered_staged_policy, OrderedFixedDb);
+
+    /// Instantiate the policy-raise parity test for one current DB kind. A [`Compact`] policy
+    /// whose entries reach the automatic raise's floor reproduces the raise's operations, floor,
+    /// and canonical root, from the database and from a pending parent. The entries count the
+    /// live updates below the raise's floor of keys the batch does not write.
+    macro_rules! policy_raise_parity_test {
         ($name:ident, $db:ty) => {
             #[test_traced("WARN")]
             fn $name() {
@@ -5346,8 +5394,7 @@ pub mod tests {
                     // Seed 32 updates with a held floor, then supersede every third one.
                     let seed = (0..32)
                         .fold(db.new_batch(), |batch, i| batch.write(key(i), Some(val(i))))
-                        .sweep(0, 0)
-                        .merkleize(&db, None)
+                        .merkleize_with(&db, None, &mut Hold)
                         .await
                         .unwrap();
                     let (db, _) = db.apply_batch(seed).await.unwrap();
@@ -5356,8 +5403,7 @@ pub mod tests {
                         .fold(db.new_batch(), |batch, i| {
                             batch.write(key(i), Some(val(i + 100)))
                         })
-                        .sweep(0, 0)
-                        .merkleize(&db, None)
+                        .merkleize_with(&db, None, &mut Hold)
                         .await
                         .unwrap();
                     let (db, _) = db.apply_batch(churn).await.unwrap();
@@ -5367,7 +5413,7 @@ pub mod tests {
                         (key(40), Some(val(40))),
                     ];
 
-                    // Sweep from the database.
+                    // Compact from the database.
                     let raised = writes
                         .iter()
                         .fold(db.new_batch(), |batch, &(k, v)| batch.write(k, v))
@@ -5379,24 +5425,26 @@ pub mod tests {
                         floor < db.bounds().end,
                         "the raise stays below the base tip"
                     );
-                    let mut sweep = writes
+                    let entries = active(&db, &[], &writes)
+                        .await
+                        .into_iter()
+                        .filter(|loc| *loc < floor)
+                        .count();
+                    let mut policy = Compact {
+                        entries,
+                        skips: u64::MAX,
+                    };
+                    let compacted = writes
                         .iter()
                         .fold(db.new_batch(), |batch, &(k, v)| batch.write(k, v))
-                        .sweep(usize::MAX, u64::MAX);
-                    while sweep.floor() < floor {
-                        sweep
-                            .next(&db)
-                            .await
-                            .unwrap()
-                            .expect("an active update precedes the raise's floor")
-                            .keep();
-                    }
-                    let swept = sweep.merkleize(&db, None).await.unwrap();
-                    assert_eq!(swept.operations(), raised.operations());
-                    assert_eq!(swept.bounds().inactivity_floor, floor);
-                    assert_eq!(swept.root(), raised.root());
+                        .merkleize_with(&db, None, &mut policy)
+                        .await
+                        .unwrap();
+                    assert_eq!(compacted.operations(), raised.operations());
+                    assert_eq!(compacted.bounds().inactivity_floor, floor);
+                    assert_eq!(compacted.root(), raised.root());
 
-                    // Sweep from a pending parent that raised its own floor.
+                    // Compact from a pending parent that raised its own floor.
                     let parent = db
                         .new_batch()
                         .write(key(2), Some(val(202)))
@@ -5417,39 +5465,45 @@ pub mod tests {
                         floor < parent.bounds().tip.size,
                         "the raise stays below the base tip"
                     );
-                    let mut sweep = writes
+                    let entries = active(&db, &[&parent], &writes)
+                        .await
+                        .into_iter()
+                        .filter(|loc| *loc < floor)
+                        .count();
+                    let mut policy = Compact {
+                        entries,
+                        skips: u64::MAX,
+                    };
+                    let compacted = writes
                         .iter()
                         .fold(parent.new_batch::<Sha256>(), |batch, &(k, v)| {
                             batch.write(k, v)
                         })
-                        .sweep(usize::MAX, u64::MAX);
-                    while sweep.floor() < floor {
-                        sweep
-                            .next(&db)
-                            .await
-                            .unwrap()
-                            .expect("an active update precedes the raise's floor")
-                            .keep();
-                    }
-                    let swept = sweep.merkleize(&db, None).await.unwrap();
-                    assert_eq!(swept.operations(), raised.operations());
-                    assert_eq!(swept.bounds().inactivity_floor, floor);
-                    assert_eq!(swept.root(), raised.root());
-                    drop((raised, swept, parent));
+                        .merkleize_with(&db, None, &mut policy)
+                        .await
+                        .unwrap();
+                    assert_eq!(compacted.operations(), raised.operations());
+                    assert_eq!(compacted.bounds().inactivity_floor, floor);
+                    assert_eq!(compacted.root(), raised.root());
+                    drop((raised, compacted, parent));
                     db.destroy().await.unwrap();
                 });
             }
         };
     }
 
-    sweep_raise_parity_test!(test_current_unordered_sweep_matches_raise, UnorderedFixedDb);
-    sweep_raise_parity_test!(test_current_ordered_sweep_matches_raise, OrderedFixedDb);
+    policy_raise_parity_test!(
+        test_current_unordered_policy_matches_raise,
+        UnorderedFixedDb
+    );
+    policy_raise_parity_test!(test_current_ordered_policy_matches_raise, OrderedFixedDb);
 
-    /// Any and Current sweeps over the same history return the same updates and reach the same
-    /// floors under every budget, through a pending parent that supersedes committed updates,
-    /// and merkleize the same operations.
+    /// Any and Current policies over the same history decide the same updates and reach the same
+    /// floors without limits and when bound by entries, by skips, by both, or by zero entries,
+    /// through a pending parent that supersedes committed updates, and merkleize the same
+    /// operations.
     #[test_traced("INFO")]
-    fn test_current_sweep_matches_any() {
+    fn test_current_policy_matches_any() {
         type AnyDb = crate::qmdb::any::unordered::fixed::Db<
             mmr::Family,
             Context,
@@ -5464,7 +5518,7 @@ pub mod tests {
             let ctx = context.child("any");
             let mut any: AnyDb = AnyDb::init(
                 ctx.child("storage"),
-                crate::qmdb::any::test::fixed_db_config::<OneCap>("sweep-any", &ctx),
+                crate::qmdb::any::test::fixed_db_config::<OneCap>("policy-any", &ctx),
                 None,
             )
             .await
@@ -5472,7 +5526,7 @@ pub mod tests {
             let ctx = context.child("current");
             let mut current: UnorderedFixedDb = UnorderedFixedDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("sweep-current", &ctx),
+                fixed_config::<OneCap>("policy-current", &ctx),
                 None,
             )
             .await
@@ -5488,16 +5542,14 @@ pub mod tests {
                 let batch = writes
                     .iter()
                     .fold(any.new_batch(), |batch, &(k, v)| batch.write(k, v))
-                    .sweep(0, 0)
-                    .merkleize(&any, None)
+                    .merkleize_with(&any, None, &mut Hold)
                     .await
                     .unwrap();
                 (any, _) = any.apply_batch(batch).await.unwrap();
                 let batch = writes
                     .iter()
                     .fold(current.new_batch(), |batch, &(k, v)| batch.write(k, v))
-                    .sweep(0, 0)
-                    .merkleize(&current, None)
+                    .merkleize_with(&current, None, &mut Hold)
                     .await
                     .unwrap();
                 (current, _) = current.apply_batch(batch).await.unwrap();
@@ -5511,19 +5563,17 @@ pub mod tests {
             let any_parent = parent
                 .iter()
                 .fold(any.new_batch(), |batch, &(k, v)| batch.write(k, v))
-                .sweep(0, 0)
-                .merkleize(&any, None)
+                .merkleize_with(&any, None, &mut Hold)
                 .await
                 .unwrap();
             let current_parent = parent
                 .iter()
                 .fold(current.new_batch(), |batch, &(k, v)| batch.write(k, v))
-                .sweep(0, 0)
-                .merkleize(&current, None)
+                .merkleize_with(&current, None, &mut Hold)
                 .await
                 .unwrap();
 
-            // Every budget pair yields the same entries, floors, and completion.
+            // Each limit pair yields the same decided updates, floors, and operations.
             for (entries, skips) in [
                 (usize::MAX, u64::MAX),
                 (5, u64::MAX),
@@ -5531,32 +5581,64 @@ pub mod tests {
                 (3, 2),
                 (0, 4),
             ] {
-                let mut any_sweep = any_parent.new_batch::<Sha256>().sweep(entries, skips);
-                let mut current_sweep = current_parent.new_batch::<Sha256>().sweep(entries, skips);
-                loop {
-                    let any_entry = any_sweep.next(&any).await.unwrap();
-                    let current_entry = current_sweep.next(&current).await.unwrap();
-                    assert_eq!(any_entry.is_some(), current_entry.is_some());
-                    let (Some(any_entry), Some(current_entry)) = (any_entry, current_entry) else {
-                        break;
-                    };
-                    assert_eq!(any_entry.location(), current_entry.location());
-                    assert_eq!(any_entry.key(), current_entry.key());
-                    assert_eq!(any_entry.value(), current_entry.value());
-                    any_entry.keep();
-                    current_entry.keep();
-                }
-                assert_eq!(any_sweep.floor(), current_sweep.floor());
-                assert_eq!(any_sweep.is_done(), current_sweep.is_done());
-
-                // Both sweeps merkleize the same operations.
-                let any_swept = any_sweep.merkleize(&any, None).await.unwrap();
-                let current_swept = current_sweep.merkleize(&current, None).await.unwrap();
-                assert_eq!(any_swept.operations(), current_swept.operations());
+                let mut any_policy = Script::new(entries, skips, keep);
+                let any_batch = any_parent
+                    .new_batch::<Sha256>()
+                    .merkleize_with(&any, None, &mut any_policy)
+                    .await
+                    .unwrap();
+                let mut current_policy = Script::new(entries, skips, keep);
+                let current_batch = current_parent
+                    .new_batch::<Sha256>()
+                    .merkleize_with(&current, None, &mut current_policy)
+                    .await
+                    .unwrap();
+                assert_eq!(any_policy.visited, current_policy.visited);
+                assert_eq!(
+                    any_batch.bounds().inactivity_floor,
+                    current_batch.bounds().inactivity_floor
+                );
+                assert_eq!(any_batch.operations(), current_batch.operations());
             }
             drop((any_parent, current_parent));
             any.destroy().await.unwrap();
             current.destroy().await.unwrap();
+        });
+    }
+
+    fn is_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    fn assert_policy_futures_are_send(
+        unordered: &UnorderedFixedDb,
+        ordered: &OrderedFixedDb,
+        key: Digest,
+    ) {
+        let mut policy = Compact {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(
+            unordered
+                .new_batch()
+                .merkleize_with(unordered, None, &mut policy),
+        );
+        is_send(
+            ordered
+                .new_batch()
+                .merkleize_with(ordered, None, &mut policy),
+        );
+        is_send(async move {
+            let (_, staged) = unordered.new_batch().stage(&[&key], unordered).await?;
+            staged
+                .merkleize_with(Vec::new(), Vec::new(), None, unordered, &mut policy)
+                .await
+        });
+        is_send(async move {
+            let (_, staged) = ordered.new_batch().stage(&[&key], ordered).await?;
+            staged
+                .merkleize_with(Vec::new(), Vec::new(), None, ordered, &mut policy)
+                .await
         });
     }
 
@@ -5604,7 +5686,7 @@ pub mod tests {
         }
     }
 
-    /// [`test_any_activity_depths`] on a current database, whose raise and sweep draw candidates
+    /// [`test_any_activity_depths`] on a current database, whose raise and policy draw candidates
     /// from the speculative bitmap.
     async fn test_current_activity_depths<M, C, F, Fut>(context: Context, open_db: F)
     where
@@ -5620,4 +5702,20 @@ pub mod tests {
     }
 
     test_for_all_variants!(test_current_activity_depths, "WARN");
+
+    /// [`test_any_policy_freed_ancestors`] on a current database, whose policy draws candidates
+    /// from the speculative bitmap.
+    async fn test_current_policy_freed_ancestors<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "freed".into()).await;
+        test_any_policy_freed_ancestors(context, db, val).await;
+    }
+
+    test_for_all_variants!(test_current_policy_freed_ancestors, "WARN");
 }

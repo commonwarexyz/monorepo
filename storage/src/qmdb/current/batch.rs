@@ -16,6 +16,7 @@ use crate::{
         any::{
             self, ValueEncoding,
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
+            floor::Policy,
             operation::{Operation, update},
         },
         bitmap::{Shared, fill_from},
@@ -300,22 +301,6 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
-/// A terminal pass over a batch's active updates from its inactivity floor, drawing candidates
-/// from the speculative bitmap.
-///
-/// Returned by [`UnmerkleizedBatch::sweep`] and [`Staged::sweep`]. See [`any::batch::Sweep`].
-pub struct Sweep<F, H, U, const N: usize, S: Strategy>
-where
-    F: Graftable,
-    U: update::Update,
-    H: Hasher,
-    Operation<F, U>: Codec,
-{
-    inner: any::batch::Sweep<F, H, U, S>,
-    grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
-    bitmap_parent: BitmapBatch<N>,
-}
-
 /// A speculative batch of operations whose root digest has been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 ///
@@ -391,21 +376,6 @@ where
     pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.inner = self.inner.write(key, value);
         self
-    }
-
-    /// Start a sweep over the speculative bitmap. See
-    /// [`any::batch::UnmerkleizedBatch::sweep`].
-    pub fn sweep(self, entries: usize, skips: u64) -> Sweep<F, H, U, N, S> {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        Sweep {
-            inner: inner.sweep(entries, skips),
-            grafted_parent,
-            bitmap_parent,
-        }
     }
 
     /// Read through: mutations -> ancestor diffs -> committed DB.
@@ -523,80 +493,6 @@ where
             },
         ))
     }
-
-    /// Record updates for staged reads and upserts for unread keys, then start a sweep. See
-    /// [`any::batch::Staged::sweep`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if any update's `read_index` is out of the staged read range.
-    pub fn sweep(
-        self,
-        updates: Vec<(usize, Option<U::Value>)>,
-        upserts: Vec<(U::Key, Option<U::Value>)>,
-        entries: usize,
-        skips: u64,
-    ) -> Sweep<F, H, U, N, S> {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        Sweep {
-            inner: inner.sweep(updates, upserts, entries, skips),
-            grafted_parent,
-            bitmap_parent,
-        }
-    }
-}
-
-impl<F, H, U, const N: usize, S: Strategy> Sweep<F, H, U, N, S>
-where
-    F: Graftable,
-    U: update::Update,
-    H: Hasher,
-    Operation<F, U>: Codec,
-{
-    /// Return the next active update. See [`any::batch::Sweep::next`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch. Reading an operation can also return a journal
-    /// error. An error or cancellation leaves the sweep unchanged.
-    pub async fn next<E, C, I>(
-        &mut self,
-        db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Option<any::batch::Entry<'_, F, U>>, Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            bitmap_parent,
-            ..
-        } = self;
-        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let bitmap = &*bitmap_parent;
-        inner
-            .next_with(&db.any, |floor, tip, limit, out| {
-                fill_candidates(bitmap, floor, tip, limit, out)
-            })
-            .await
-    }
-
-    /// Return the floor [`merkleize`](Sweep::merkleize) commits unless the final state is
-    /// empty.
-    pub const fn floor(&self) -> Location<F> {
-        self.inner.floor()
-    }
-
-    /// Return whether the floor reached the batch's original tip.
-    pub fn is_done(&self) -> bool {
-        self.inner.is_done()
-    }
 }
 
 impl<F, K, V, H, const N: usize, S: Strategy> Staged<F, H, update::Unordered<K, V>, N, S>
@@ -669,6 +565,60 @@ where
         drop(retained_ancestors);
         result
     }
+
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with `policy`, then merkleize. See [`any::batch::Staged::merkleize_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    #[tracing::instrument(
+        name = "qmdb.current.unordered.batch.merkleize.staged.policy",
+        level = "info",
+        skip_all,
+        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+    )]
+    pub async fn merkleize_with<E, C, I, P>(
+        self,
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
+        metadata: Option<V::Value>,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        policy: &mut P,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value> + Send,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let (inner, staged) = inner.resolve_updates(updates, upserts);
+        let (prepared, staged) = inner
+            .prepare(&db.any)?
+            .advance(staged, policy, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
+        let (inner, retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged, None, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
+    }
 }
 
 impl<F, K, V, H, const N: usize, S: Strategy> Staged<F, H, update::Ordered<K, V>, N, S>
@@ -731,6 +681,60 @@ where
         drop(retained_ancestors);
         result
     }
+
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with `policy`, then merkleize. See [`any::batch::Staged::merkleize_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    #[tracing::instrument(
+        name = "qmdb.current.ordered.batch.merkleize.staged.policy",
+        level = "info",
+        skip_all,
+        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
+    )]
+    pub async fn merkleize_with<E, C, I, P>(
+        self,
+        updates: Vec<(usize, Option<V::Value>)>,
+        upserts: Vec<(K, Option<V::Value>)>,
+        metadata: Option<V::Value>,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        policy: &mut P,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value> + Send,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let (inner, staged) = inner.resolve_updates(updates, upserts);
+        let (prepared, staged) = inner
+            .prepare(&db.any)?
+            .advance(staged, policy, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
+        let (inner, retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
+    }
 }
 
 // Unordered merkleize.
@@ -778,6 +782,53 @@ where
                 None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
+            .await?;
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
+    }
+
+    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
+    /// and return an `Arc<MerkleizedBatch>`. See
+    /// [`any::batch::UnmerkleizedBatch::merkleize_with`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    #[tracing::instrument(
+        name = "qmdb.current.unordered.batch.merkleize.policy",
+        level = "info",
+        skip_all
+    )]
+    pub async fn merkleize_with<E, C, I, P>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+        policy: &mut P,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value> + Send,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let (prepared, staged) = inner
+            .prepare(&db.any)?
+            .advance(Vec::new(), policy, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
+        let (inner, retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged, None, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -834,83 +885,31 @@ where
         drop(retained_ancestors);
         result
     }
-}
 
-impl<F, K, V, H, const N: usize, S: Strategy> Sweep<F, H, update::Unordered<K, V>, N, S>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, update::Unordered<K, V>>: Codec,
-{
-    /// End the sweep and return the merkleized batch. See [`any::batch::Sweep::merkleize`].
+    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
+    /// and return an `Arc<MerkleizedBatch>`. See
+    /// [`any::batch::UnmerkleizedBatch::merkleize_with`].
     ///
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
     /// database instance that created the batch.
     #[tracing::instrument(
-        name = "qmdb.current.unordered.sweep.merkleize",
+        name = "qmdb.current.ordered.batch.merkleize.policy",
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
-        self,
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
-    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (prepared, staged_updates) = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged_updates, None, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
-    }
-}
-
-impl<F, K, V, H, const N: usize, S: Strategy> Sweep<F, H, update::Ordered<K, V>, N, S>
-where
-    F: Graftable,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, update::Ordered<K, V>>: Codec,
-{
-    /// End the sweep and return the merkleized batch. See [`any::batch::Sweep::merkleize`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
-    #[tracing::instrument(
-        name = "qmdb.current.ordered.sweep.merkleize",
-        level = "info",
-        skip_all
-    )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize_with<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value> + Send,
     {
         let Self {
             inner,
@@ -918,9 +917,14 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (prepared, staged_updates) = inner.prepare(&db.any)?;
+        let (prepared, staged) = inner
+            .prepare(&db.any)?
+            .advance(Vec::new(), policy, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
+            .merkleize_with_floor_scan(metadata, staged, |floor, tip, limit, out| {
                 fill_candidates(&bitmap_parent, floor, tip, limit, out)
             })
             .await?;
@@ -1484,7 +1488,7 @@ mod trait_impls {
         journal::contiguous::Mutable,
         qmdb::any::traits::{
             ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-            Sweep as SweepTrait, UnmerkleizedBatch as UnmerkleizedBatchTrait,
+            UnmerkleizedBatch as UnmerkleizedBatchTrait,
         },
     };
     use std::future::Future;
@@ -1509,19 +1513,13 @@ mod trait_impls {
         type Family = F;
         type K = K;
         type V = V::Value;
-        type Update = update::Unordered<K, V>;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
-        type Sweep = Sweep<F, H, update::Unordered<K, V>, N, S>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        fn sweep(self, entries: usize, skips: u64) -> Self::Sweep {
-            Self::sweep(self, entries, skips)
-        }
-
         async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -1529,50 +1527,14 @@ mod trait_impls {
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
             self.merkleize(db, metadata).await
         }
-    }
 
-    impl<F, K, V, H, E, C, I, const N: usize, S>
-        SweepTrait<CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>>
-        for Sweep<F, H, update::Unordered<K, V>, N, S>
-    where
-        F: Graftable,
-        K: Key,
-        V: ValueEncoding + 'static,
-        H: Hasher,
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-        S: Strategy,
-        Operation<F, update::Unordered<K, V>>: Codec,
-    {
-        type Family = F;
-        type Update = update::Unordered<K, V>;
-        type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
-
-        fn next<'a>(
-            &'a mut self,
-            db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        ) -> impl Future<
-            Output = Result<Option<any::batch::Entry<'a, F, Self::Update>>, crate::qmdb::Error<F>>,
-        > {
-            Self::next(self, db)
-        }
-
-        fn floor(&self) -> Location<F> {
-            Self::floor(self)
-        }
-
-        fn is_done(&self) -> bool {
-            Self::is_done(self)
-        }
-
-        async fn merkleize(
+        async fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize_with(db, metadata, policy).await
         }
     }
 
@@ -1593,19 +1555,13 @@ mod trait_impls {
         type Family = F;
         type K = K;
         type V = V::Value;
-        type Update = update::Ordered<K, V>;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
-        type Sweep = Sweep<F, H, update::Ordered<K, V>, N, S>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        fn sweep(self, entries: usize, skips: u64) -> Self::Sweep {
-            Self::sweep(self, entries, skips)
-        }
-
         async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
@@ -1613,50 +1569,14 @@ mod trait_impls {
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
             self.merkleize(db, metadata).await
         }
-    }
 
-    impl<F, K, V, H, E, C, I, const N: usize, S>
-        SweepTrait<CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>>
-        for Sweep<F, H, update::Ordered<K, V>, N, S>
-    where
-        F: Graftable,
-        K: Key,
-        V: ValueEncoding + 'static,
-        H: Hasher,
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-        S: Strategy,
-        Operation<F, update::Ordered<K, V>>: Codec,
-    {
-        type Family = F;
-        type Update = update::Ordered<K, V>;
-        type Metadata = V::Value;
-        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
-
-        fn next<'a>(
-            &'a mut self,
-            db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        ) -> impl Future<
-            Output = Result<Option<any::batch::Entry<'a, F, Self::Update>>, crate::qmdb::Error<F>>,
-        > {
-            Self::next(self, db)
-        }
-
-        fn floor(&self) -> Location<F> {
-            Self::floor(self)
-        }
-
-        fn is_done(&self) -> bool {
-            Self::is_done(self)
-        }
-
-        async fn merkleize(
+        async fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize_with(db, metadata, policy).await
         }
     }
 
