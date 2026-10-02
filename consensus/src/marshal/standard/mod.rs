@@ -15,12 +15,18 @@
 //!
 //! # Wrapper Consistency
 //!
-//! All validators must run the same wrapper for every view of an epoch. Validators must switch
+//! All validators must run the same wrapper for every view of an epoch. Validators can switch
 //! between [`Inline`] and [`Deferred`] at the same epoch boundary.
 //!
-//! [`Inline`] votes to notarize after application verification and certifies without it.
+//! [`Inline`] votes to notarize after application verification. Certification receives only the
+//! round and digest of a notarized block, and [`Inline`] blocks need not embed the consensus
+//! context. A validator that did not verify the block, because it never received the proposal or
+//! restarted, cannot run application verification at certification. [`Inline`] certifies without
+//! it and relies on the notarizing quorum having verified the block.
+//!
 //! [`Deferred`] votes to notarize after checking the block's embedded context and certifies with
-//! the application's verdict.
+//! the application's verdict, using the embedded context when it did not verify the block. Its
+//! notarize vote does not attest to application validity.
 //!
 //! # Usage
 //!
