@@ -705,23 +705,35 @@ where
     R: PartitionRange<Value = Location<F>>,
 {
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
-    while let Some(batch) = rx.recv().await {
-        for (key, loc, is_delete) in batch {
-            if is_delete {
-                if let Some(cursor) = index.get_mut(&key) {
-                    delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
-                }
-            } else {
-                let new_loc = Location::new(loc);
-                if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
-                    update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
-                        .await?;
-                }
 
-                // This update op is now a `find_update_op` candidate for later ops of its key.
-                // `key` is owned by this batch and unused after the update, so move it in.
-                if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, key);
+    // Ops are applied in small windows: each window's partitions are prefetched before any
+    // op is applied, hiding the random-access cache misses partition lookups take.
+    const PREFETCH_WINDOW: usize = 16;
+    while let Some(batch) = rx.recv().await {
+        let mut ops = batch.into_iter();
+        while !ops.as_slice().is_empty() {
+            // Borrow the window's ops for the prefetch pass, then consume exactly those.
+            let window = ops.as_slice().len().min(PREFETCH_WINDOW);
+            for (key, _, _) in &ops.as_slice()[..window] {
+                index.prefetch(key.as_ref());
+            }
+            for (key, loc, is_delete) in ops.by_ref().take(window) {
+                if is_delete {
+                    if let Some(cursor) = index.get_mut(&key) {
+                        delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
+                    }
+                } else {
+                    let new_loc = Location::new(loc);
+                    if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
+                        update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
+                            .await?;
+                    }
+
+                    // This update op is now a `find_update_op` candidate for later ops of its key.
+                    // `key` is owned by this batch and unused after the update, so move it in.
+                    if let Some(cache) = cache.as_mut() {
+                        cache.put(loc, key);
+                    }
                 }
             }
         }

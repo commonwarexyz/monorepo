@@ -39,6 +39,22 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         self.keys.len()
     }
 
+    /// Hint that this partition's keys are about to be searched: loading the array pointer
+    /// here and prefetching its data hides the dependent cache misses a later lookup takes.
+    // Not const: `_mm_prefetch` is const-callable only on nightly toolchains.
+    #[allow(clippy::missing_const_for_fn)]
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn prefetch(&self) {
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
+        // SAFETY: prefetch is a hint with no side effects; any address is permitted.
+        unsafe {
+            core::arch::x86_64::_mm_prefetch(
+                self.keys.as_ptr().cast::<i8>(),
+                core::arch::x86_64::_MM_HINT_T0,
+            );
+        }
+    }
+
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
     /// per distinct key with its values in their current run order.
     pub(super) fn drain_runs(&mut self) -> Vec<(K, Vec<V>)> {
