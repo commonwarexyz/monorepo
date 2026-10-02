@@ -99,6 +99,13 @@ fn run_with(files: &[(&str, &str)], o: &MutateOptions) -> Run {
 /// A crate with a root, a `LAWS.rs` and a `PROOF.rs` (a `follows()` proof
 /// for every law); both modules import `uses` from the root.
 fn with_laws(root: &str, uses: &str, laws: &str, o: &MutateOptions) -> Run {
+    let files = law_crate(root, uses, laws, "");
+    run_with(&files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect::<Vec<_>>(), o)
+}
+
+/// The files of [`with_laws`]'s crate (the root first, without the header);
+/// `proof_extra` is appended to `PROOF.rs`.
+fn law_crate(root: &str, uses: &str, laws: &str, proof_extra: &str) -> Vec<(String, String)> {
     let root = format!("{root}\n#[cfg(sandblaster)]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[path = \"PROOF.rs\"]\nmod proof;\n");
     let mut proof = format!("use sandblaster::prelude::*;\n#[allow(unused_imports)]\nuse super::{{{uses}}};\n");
     for part in laws.split("#[law]").skip(1) {
@@ -107,8 +114,9 @@ fn with_laws(root: &str, uses: &str, laws: &str, o: &MutateOptions) -> Run {
         let sig = &r[r.find('(').unwrap()..=r.find(')').unwrap()];
         proof.push_str(&format!("\n#[proof]\nfn {name}{sig} {{\n    follows();\n}}\n"));
     }
+    proof.push_str(proof_extra);
     let laws = format!("use sandblaster::prelude::*;\nuse super::{{{uses}}};\n{laws}");
-    run_with(&[("r/mod.rs", &root), ("r/LAWS.rs", &laws), ("r/PROOF.rs", &proof)], o)
+    vec![("r/mod.rs".into(), root), ("r/LAWS.rs".into(), laws), ("r/PROOF.rs".into(), proof)]
 }
 
 const MINI_SPEC: &str = r#"
@@ -339,6 +347,15 @@ const CHECKSUM: &str = r#"
 #[spec]
 #[example(checksum(1, 2) == 5)]
 fn checksum(a: Nat, b: Nat) -> Nat { a + 2 * b }
+"#;
+
+/// A law that puts `checksum` on the review surface (its vocabulary).
+const CHECKSUM_LAW: &str = r#"
+/// The checksum covers its first value.
+#[law]
+fn checksum_covers_a(a: Nat, b: Nat) {
+    ensures(checksum(a, b) >= a);
+}
 "#;
 
 /// A spec mutant must be killed by an example: `a + 2 * b` → `a + (2 + b)`
@@ -975,13 +992,21 @@ fn gate_mode_decides_spec_mutants_as_the_full_engine() {
     let sides_laws = format!("use sandblaster::prelude::*;\nuse super::{{pos, db_leaf, proof_leaf}};\n{SIDES_LAWS}");
     let sides_proof = "use sandblaster::prelude::*;\n#[allow(unused_imports)]\nuse super::{pos, db_leaf, proof_leaf};\n#[proof]\nfn sides_agree(i: Nat) {\n    follows();\n}\n#[proof]\nfn positions_are_natural(i: Nat) {\n    follows();\n}\n";
     let two_examples = CHECKSUM.replace("#[example(checksum(1, 2) == 5)]", "#[example(checksum(1, 2) == 5)]\n#[example(checksum(0, 0) == 0)]");
-    let fixtures: Vec<Vec<(&str, &str)>> = vec![vec![("r/mod.rs", CHECKSUM)], vec![("r/mod.rs", &two_examples)], vec![("r/mod.rs", &sides_root), ("r/LAWS.rs", &sides_laws), ("r/PROOF.rs", sides_proof)]];
+    // a law on `checksum` puts it on the review surface: the gate mutates
+    // the review surface's spec functions (proof internals: see
+    // `the_gate_mutates_the_review_surface_not_proof_internals`)
+    let one = law_crate(CHECKSUM, "checksum", CHECKSUM_LAW, "");
+    let two = law_crate(&two_examples, "checksum", CHECKSUM_LAW, "");
+    let strs = |v: &[(String, String)]| v.iter().map(|(p, c)| (p.clone(), c.clone())).collect::<Vec<_>>();
+    let owned: Vec<Vec<(String, String)>> = vec![strs(&one), strs(&two), vec![("r/mod.rs".into(), sides_root.clone()), ("r/LAWS.rs".into(), sides_laws.clone()), ("r/PROOF.rs".into(), sides_proof.into())]];
+    let fixtures: Vec<Vec<(&str, &str)>> = owned.iter().map(|f| f.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect()).collect();
     for files in &fixtures {
         let full = run_with(files, &full_opts);
         let (gate, krate) = gate_run(files);
         assert!(gate.complete, "{:?}", gate.incomplete_reasons);
+        assert!(gate.internal.is_empty(), "every spec function is on the review surface: {:?}", gate.internal);
         let spec: Vec<&(mutate::Mutant, mutate::Outcome)> = full.rep.mutants.iter().filter(|(m, _)| m.target == Target::Spec).collect();
-        assert_eq!(gate.mutants.len(), spec.len(), "the gate runs every spec mutant (and no implementation mutant: no section is unproven):\n{}", full.explain());
+        assert_eq!(gate.mutants.len(), spec.len(), "the gate runs every spec mutant of the review surface (and no implementation mutant: no section is unproven):\n{}", full.explain());
         for ((fm, fo), (gm, go)) in spec.iter().map(|x| (&x.0, &x.1)).zip(gate.mutants.iter().map(|x| (&x.0, &x.1))) {
             assert_eq!((fm.path.as_str(), fm.desc.as_str()), (gm.path.as_str(), gm.desc.as_str()));
             assert_eq!(class(fo.verdict), class(go.verdict), "{} {}: full {:?} ({:?}), gate {:?} ({:?})", fm.path, fm.desc, fo.verdict, fo.by, go.verdict, go.by);
@@ -1010,7 +1035,272 @@ fn gate_mode_ignores_the_mutation_environment() {
     assert_eq!(g.max_mutants, usize::MAX);
     assert_eq!(g.max_per_item, usize::MAX);
     assert!(g.deadline.is_none() && g.gate && g.spec_mutants);
-    let (rep, _) = gate_run(&[("r/mod.rs", CHECKSUM)]);
+    let files = law_crate(CHECKSUM, "checksum", CHECKSUM_LAW, "");
+    let (rep, _) = gate_run(&files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect::<Vec<_>>());
     assert!(rep.complete && rep.enumerated > 0);
     assert!(rep.incomplete_reasons.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// gate mode: what a batch elaborates, and what the gate mutates
+// ---------------------------------------------------------------------
+
+/// [`gate_run`] on owned files.
+fn gate_run_owned(files: &[(String, String)]) -> (MutationReport, Crate) {
+    gate_run(&files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect::<Vec<_>>())
+}
+
+/// The front end's crate of owned files (the root gets [`HEADER`]).
+fn checked(files: &[(String, String)]) -> driver::Checked {
+    let mut owned = files.to_vec();
+    owned[0].1 = format!("{HEADER}{}", owned[0].1);
+    let fs = MemFs::from_files(owned.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    let c = driver::check(Path::new(&owned[0].0), &fs, &TargetInfo::aarch64_apple_darwin());
+    assert!(c.ok(), "front-end errors:\n{}", c.render());
+    c
+}
+
+/// A filtered elaboration of `krate` (the gate's batches): the definitions
+/// that do not check, `(name, status)`.
+fn filtered_failures(krate: &Crate, filter: std::collections::BTreeSet<sandblaster_front::hir::ItemId>) -> Vec<(String, String)> {
+    sandblaster_front::elab::with_big_stack(|| {
+        let mut chain = sandblaster_front::elab::ProverChain::standard();
+        let opts = sandblaster_front::elab::Options { items: Some(std::sync::Arc::new(filter)), ..Default::default() };
+        let out = sandblaster_front::elab::elaborate(krate, &mut chain, &opts);
+        out.defs.iter().filter(|d| d.status != sandblaster_front::elab::DefStatus::Checked).map(|d| (d.name.clone(), format!("{:?}", d.status))).collect()
+    })
+}
+
+/// `seeds` closed under `elab::order::refs` alone: the gate's item filter
+/// before it closed over the types and the `#[bridges]` lemmas.
+fn refs_only(krate: &Crate, seeds: &[sandblaster_front::hir::ItemId]) -> std::collections::BTreeSet<sandblaster_front::hir::ItemId> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut work = seeds.to_vec();
+    while let Some(x) = work.pop() {
+        if out.insert(x) {
+            work.extend(sandblaster_front::elab::order::refs(krate, x));
+        }
+    }
+    out
+}
+
+const COUNTER: &str = r#"
+/// The bound of a counter.
+#[cfg(sandblaster)]
+#[spec]
+#[example(below(3, 4) && !below(4, 4))]
+fn below(x: u64, n: u64) -> bool { x < n }
+
+/// A counter below 100: its invariant calls `below`.
+#[derive(Clone, Copy)]
+#[invariant(below(self.0, 100))]
+struct Counter(u64);
+
+/// The checksum of two values: nothing in it reaches `Counter`.
+#[cfg(sandblaster)]
+#[spec]
+#[example(checksum(1, 2) == 5)]
+fn checksum(a: Nat, b: Nat) -> Nat { a + 2 * b }
+"#;
+
+/// Every elaboration elaborates every type, with its invariant, so the
+/// gate's item filter closes over the types and what their invariants
+/// mention (`elab::order::filter_closure`): the batch of a spec mutant
+/// whose spec closure never reaches `Counter` re-verifies `Counter`, and
+/// every mutant is decided. (The MMR: `PeakIterator`'s invariant
+/// `iter_ok` outside a batch's filter blocked `PeakIterator`, and the
+/// batch's mutants were not run.) Negative twin:
+/// [`a_filter_closed_under_references_alone_blocks_a_type`].
+#[test]
+fn a_type_no_spec_closure_reaches_still_re_verifies_in_the_batch() {
+    let files = law_crate(COUNTER, "checksum", CHECKSUM_LAW, "");
+    let (rep, _) = gate_run_owned(&files);
+    assert!(rep.baseline_verified, "{:?}", rep.baseline_problems);
+    let explain = || rep.mutants.iter().map(|(m, o)| format!("#{} {} {}: {:?} {:?}", m.id, m.path, m.desc, o.verdict, o.by)).collect::<Vec<_>>().join("\n");
+    assert!(rep.complete, "{:?}\n{}", rep.incomplete_reasons, explain());
+    assert_eq!(rep.count(Verdict::NotRun), 0, "{}", explain());
+    assert!(rep.mutants.iter().any(|(m, o)| m.path == "crate::checksum" && o.verdict == Verdict::KilledBySpec), "{}", explain());
+    // `below` (the invariant of a type no statement mentions) is a proof
+    // internal: not mutated
+    assert!(rep.internal.iter().any(|p| p == "crate::below"), "{:?}", rep.internal);
+}
+
+/// Negative twin of
+/// [`a_type_no_spec_closure_reaches_still_re_verifies_in_the_batch`]: the
+/// filter of a `checksum` mutant's batch closed under references alone
+/// leaves out `below`, and `Counter` (elaborated anyway) is blocked; with
+/// `elab::order::filter_closure` it checks.
+#[test]
+fn a_filter_closed_under_references_alone_blocks_a_type() {
+    let c = checked(&law_crate(COUNTER, "checksum", CHECKSUM_LAW, ""));
+    let k = c.krate.clone().unwrap();
+    let (checksum, below) = (k.find("crate::checksum").unwrap(), k.find("crate::below").unwrap());
+    let plain = refs_only(&k, &[checksum]);
+    assert!(!plain.contains(&below));
+    let bad = filtered_failures(&k, plain);
+    assert!(bad.iter().any(|(n, st)| n == "crate::Counter" && st.contains("crate::below")), "{bad:?}");
+    let closed = sandblaster_front::elab::order::filter_closure(&k, [checksum]);
+    assert!(closed.contains(&below));
+    let bad = filtered_failures(&k, closed);
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
+/// What every batch elaborates whatever its mutants reach — every type,
+/// with what its invariant mentions (`elab::order::filter_closure`) — is
+/// part of every spec mutant's cache key (`mutate::cache::Fps::crate_fp`):
+/// an edit of `below`, which no `checksum` mutant's closure reaches,
+/// changes the key of every mutant, so no stored verdict outlives it.
+/// Negative twin: moving the code changes no key.
+#[test]
+fn what_every_batch_elaborates_is_part_of_every_mutant_key() {
+    use sandblaster_front::mutate::cache::Fps;
+    let fp = |counter: &str| {
+        let c = checked(&law_crate(counter, "checksum", CHECKSUM_LAW, ""));
+        let k = c.krate.clone().unwrap();
+        let fps = Fps::new(&k);
+        let reached = fps.reach([k.find("crate::checksum").unwrap()]).contains(&k.find("crate::below").unwrap());
+        (fps.crate_fp.clone(), reached)
+    };
+    let (base, reached) = fp(COUNTER);
+    assert!(!reached, "a `checksum` mutant's closure does not reach `below`");
+    let edited = COUNTER.replace("fn below(x: u64, n: u64) -> bool { x < n }", "fn below(x: u64, n: u64) -> bool { n > x }");
+    assert_ne!(edited, COUNTER);
+    assert_ne!(fp(&edited).0, base, "an edit of what a type's invariant calls is part of every key");
+    let moved = COUNTER.replace("\n/// The bound of a counter.", "\n\n// a comment that moves the code\n/// The bound of a counter.");
+    assert_ne!(moved, COUNTER);
+    assert_eq!(fp(&moved).0, base, "positions are not");
+}
+
+const DOUBLE: &str = r#"
+/// Twice `x`: opaque, so proofs use its bridge (`words::dbl_rw`).
+#[cfg(sandblaster)]
+#[spec]
+#[opaque]
+#[example(dbl(3) == 6)]
+fn dbl(x: Int) -> Int { 2 * x }
+
+/// Doubles a value.
+#[ensures(|r: u64| (r as Int) == dbl(x as Int))]
+pub fn double(x: u32) -> u64 { (x as u64) * 2 }
+
+#[cfg(sandblaster)]
+#[bridges]
+#[path = "WORDS.rs"]
+mod words;
+"#;
+
+const DOUBLE_WORDS: &str = "use sandblaster::prelude::*;\n\n/// `dbl` is `2x`.\n#[lemma]\npub fn dbl_rw(x: Int) {\n    ensures(crate::dbl(x) == 2 * x);\n    unfold(crate::dbl);\n    follows();\n}\n";
+
+/// A law over `dbl` and `double`: a `dbl` mutant's batch builds its
+/// checker, which calls `double`.
+const DOUBLE_LAW: &str = r#"
+/// Doubling computes `dbl`.
+#[law]
+fn double_is_dbl(x: u32) {
+    ensures((double(x) as Int) == dbl(x as Int));
+}
+"#;
+
+fn double_crate() -> Vec<(String, String)> {
+    let mut files = law_crate(DOUBLE, "double, dbl", DOUBLE_LAW, "");
+    files.push(("r/WORDS.rs".into(), DOUBLE_WORDS.into()));
+    files
+}
+
+/// The `#[bridges]` lemmas are rules of `auto` in every proof of the build,
+/// applied without a call, so the gate's item filter includes them: the
+/// checker of the law `double_is_dbl` in a `dbl` mutant's batch calls
+/// `double`, whose `ensures` needs the bridge `dbl_rw`, and `double`
+/// re-verifies in the batch — every mutant is decided. (The MMR: `Family::position_to_location` and
+/// `PeakIterator::to_nearest_size` failed in every batch without
+/// `WORDS.rs`, and no mutant ran.) Negative twin:
+/// [`a_filter_closed_under_references_alone_drops_the_bridges`].
+#[test]
+fn the_bridges_are_rules_of_auto_in_every_batch() {
+    let (rep, _) = gate_run_owned(&double_crate());
+    assert!(rep.baseline_verified, "{:?}", rep.baseline_problems);
+    let explain = || rep.mutants.iter().map(|(m, o)| format!("#{} {} {}: {:?} {:?}", m.id, m.path, m.desc, o.verdict, o.by)).collect::<Vec<_>>().join("\n");
+    assert!(rep.complete, "{:?}\n{}", rep.incomplete_reasons, explain());
+    assert_eq!(rep.count(Verdict::NotRun), 0, "{}", explain());
+    // `dbl` is on the review surface (through the contract of `double`,
+    // which the law mentions): its mutants run and are decided
+    assert!(rep.mutants.iter().any(|(m, o)| m.path == "crate::dbl" && o.verdict == Verdict::KilledBySpec), "{}", explain());
+}
+
+/// Negative twin of [`the_bridges_are_rules_of_auto_in_every_batch`]: a
+/// filter seeded with `double` and closed under references alone leaves
+/// out `words::dbl_rw`, and `double`'s `ensures` is not proven; with
+/// `elab::order::filter_closure` it is.
+#[test]
+fn a_filter_closed_under_references_alone_drops_the_bridges() {
+    let c = checked(&double_crate());
+    let k = c.krate.clone().unwrap();
+    let (double, bridge) = (k.find("crate::double").unwrap(), k.find("crate::words::dbl_rw").unwrap());
+    let plain = refs_only(&k, &[double]);
+    assert!(!plain.contains(&bridge));
+    let bad = filtered_failures(&k, plain);
+    assert!(bad.iter().any(|(n, _)| n == "crate::double" || n == "crate::double::ensures"), "{bad:?}");
+    let closed = sandblaster_front::elab::order::filter_closure(&k, [double]);
+    assert!(closed.contains(&bridge));
+    let bad = filtered_failures(&k, closed);
+    assert!(bad.is_empty(), "{bad:?}");
+}
+
+const TWICE: &str = r#"
+/// Twice a value: one known answer, which a constant mutant passes.
+#[cfg(sandblaster)]
+#[spec]
+#[example(twice(0) == 0)]
+fn twice(a: Nat) -> Nat { 2 * a }
+"#;
+
+/// A proof helper's lemma: `twice` is used by proofs only.
+const TWICE_LEMMA: &str = "\n/// `twice` is at least its argument.\n#[lemma]\nfn twice_ge(a: Nat) {\n    ensures(twice(a) >= a);\n    unfold(twice);\n    follows();\n}\n";
+
+const TWICE_LAW: &str = r#"
+/// Twice a value covers it.
+#[law]
+fn twice_covers(a: Nat) {
+    ensures(twice(a) >= a);
+}
+"#;
+
+/// DESIGN.md §15.9 (*Which spec functions the gate mutates*): the gate
+/// mutates the spec functions of the review surface — what a locked
+/// statement depends on — and not proof internals. `twice` is used only by
+/// a lemma: no locked statement depends on its definition, so its
+/// surviving constant mutant is no finding (and a known answer for it
+/// could only come from the specification itself), while the vocabulary
+/// (`checksum`, which a law mentions) is still held to its known answers.
+/// Negative twin: [`a_spec_function_a_law_uses_is_mutated`].
+#[test]
+fn the_gate_mutates_the_review_surface_not_proof_internals() {
+    let files = law_crate(&format!("{CHECKSUM}{TWICE}"), "checksum, twice", CHECKSUM_LAW, TWICE_LEMMA);
+    let (rep, krate) = gate_run_owned(&files);
+    assert!(rep.baseline_verified && rep.complete, "{:?} {:?}", rep.baseline_problems, rep.incomplete_reasons);
+    assert!(!rep.mutants.iter().any(|(m, _)| m.path == "crate::twice"), "a proof internal is mutated");
+    assert_eq!(rep.internal, vec!["crate::twice".to_string()]);
+    let mut d = Diagnostics::new();
+    mutate::spec15_gate_mutants(&rep, &krate, &mut d);
+    assert!(d.list.iter().any(|x| x.kind == DiagKind::SpecMutantSurvived && x.msg.contains("a mutant of `crate::checksum`")), "the vocabulary is still checked: {:?}", d.list.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    assert!(!d.list.iter().any(|x| x.msg.contains("crate::twice")), "{:?}", d.list.iter().map(|x| &x.msg).collect::<Vec<_>>());
+    // the exploration run (`sandblaster coverage`) still mutates it
+    let full = run_with(&files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect::<Vec<_>>(), &MutateOptions { max_mutants: usize::MAX, ..MutateOptions::default() });
+    assert!(full.rep.mutants.iter().any(|(m, _)| m.path == "crate::twice"), "{}", full.explain());
+}
+
+/// Negative twin of
+/// [`the_gate_mutates_the_review_surface_not_proof_internals`]: once a law
+/// states something about `twice`, it is vocabulary — mutated, and its
+/// surviving constant mutant is `error[spec-mutant-survived]`.
+#[test]
+fn a_spec_function_a_law_uses_is_mutated() {
+    let files = law_crate(&format!("{CHECKSUM}{TWICE}"), "checksum, twice", &format!("{CHECKSUM_LAW}{TWICE_LAW}"), TWICE_LEMMA);
+    let (rep, krate) = gate_run_owned(&files);
+    assert!(rep.baseline_verified && rep.complete, "{:?} {:?}", rep.baseline_problems, rep.incomplete_reasons);
+    assert!(rep.internal.is_empty(), "{:?}", rep.internal);
+    assert!(rep.mutants.iter().any(|(m, _)| m.path == "crate::twice"));
+    let mut d = Diagnostics::new();
+    mutate::spec15_gate_mutants(&rep, &krate, &mut d);
+    assert!(d.list.iter().any(|x| x.kind == DiagKind::SpecMutantSurvived && x.msg.contains("a mutant of `crate::twice`")), "{:?}", d.list.iter().map(|x| &x.msg).collect::<Vec<_>>());
 }

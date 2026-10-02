@@ -349,7 +349,9 @@ impl<'a> DeElab<'a> {
 
     fn requires_ensures(&self, f: &FnDef) -> Vec<String> {
         let mut out: Vec<String> = f.requires.iter().map(|r| format!("requires {}", self.expr(r))).collect();
-        if let Some(en) = &f.ensures {
+        // the contract's `ensures` (a proof file's summaries are not part
+        // of it, DESIGN.md §15.6)
+        if let Some(en) = f.contract_ensures() {
             out.push(format!("ensures |{}: {}| {}", self.pat(&en.binder), self.ty(&en.binder.ty), self.expr(&en.prop)));
         }
         out

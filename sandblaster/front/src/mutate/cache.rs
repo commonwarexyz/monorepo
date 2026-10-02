@@ -11,10 +11,12 @@
 //! the lemmas those name), through statements only for laws, lemmas and
 //! proofs
 //! ([`crate::elab::order::statement_refs`], [`statement_only`]: proofs are
-//! irrelevant to every stored verdict) — the crate-level facts (and the
-//! statements of `#[bridges]` lemmas, rules of `auto`) the
-//! elaborator reads (target, boundary, reachable items), the gate's fixed
-//! options and the toolchain. [`mutant_key`] hashes exactly that, with
+//! irrelevant to every stored verdict) — the crate-level facts the
+//! elaborator reads (target, boundary, reachable items, and what every
+//! batch elaborates whatever its mutants reach: the `#[bridges]` lemmas,
+//! rules of `auto`, and every type, with what they mention,
+//! [`crate::elab::order::filter_closure`]), the gate's fixed options and
+//! the toolchain. [`mutant_key`] hashes exactly that, with
 //! each item's HIR **fingerprinted position-independently** ([`Fps`]: the
 //! item's `Debug` form with spans removed and item and module indices
 //! replaced by paths), so an edit elsewhere in a file does not invalidate
@@ -113,10 +115,15 @@ impl<'k> Fps<'k> {
         reach.sort();
         let mut t = format!("target {:?}\nboundary {}\nreachable {}\n", krate.target, normalize_debug(krate, &format!("{:?}", krate.boundary)), reach.join(" "));
         let mut fps = Fps { krate, fp: RefCell::new(HashMap::new()), refs: RefCell::new(HashMap::new()), crate_fp: String::new() };
-        // the statements of `#[bridges]` lemmas: rules of `auto` in every
-        // elaboration, whether or not a mutant reaches them
-        for it in krate.items.iter().filter(|it| krate.in_bridges_module(it.id)) {
-            t.push_str(&format!("bridge {} {}\n", it.path, fps.item(it.id)));
+        // what every batch elaborates whether or not a mutant reaches it
+        // (`elab::order::filter_closure`): the `#[bridges]` lemmas (rules of
+        // `auto` in every proof) and every type, with what they mention (a
+        // type's invariant, view and representation relation, and the spec
+        // functions those call); laws, lemmas and proofs by their statement
+        let mut base: Vec<String> = crate::elab::order::filter_closure(krate, []).into_iter().map(|x| format!("{} {}", krate.item(x).path, fps.item(x))).collect();
+        base.sort();
+        for l in base {
+            t.push_str(&format!("batch {l}\n"));
         }
         fps.crate_fp = hex(&sha256(t.as_bytes()));
         fps

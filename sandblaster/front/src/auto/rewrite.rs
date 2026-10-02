@@ -588,13 +588,20 @@ impl<'a> Engine<'a> {
     /// b))`.
     pub fn decide_bool(&mut self, st: &St, c: &V) -> R<Option<(bool, Tm)>> {
         let bt = Rc::new(Value::Ind { ind: self.n.bool_ind, params: vec![] });
+        let probe = std::mem::replace(&mut self.lin_probe, true);
+        let mut out = Ok(None);
         for b in [true, false] {
             let g = Rc::new(Value::Eq { ty: bt.clone(), lhs: c.clone(), rhs: self.bool_v(b) });
-            if let Some(p) = self.lin_prove(st, &g, true)? {
-                return Ok(Some((b, p)));
+            match self.lin_prove(st, &g, true) {
+                Ok(None) => {}
+                r => {
+                    out = r.map(|p| p.map(|p| (b, p)));
+                    break;
+                }
             }
         }
-        Ok(None)
+        self.lin_probe = probe;
+        out
     }
 
     /// [`Engine::decide_bool`] with one round of linear arithmetic over
@@ -603,6 +610,7 @@ impl<'a> Engine<'a> {
     pub fn decide_bool_cheap(&mut self, st: &St, c: &V) -> R<Option<(bool, Tm)>> {
         let bt = Rc::new(Value::Ind { ind: self.n.bool_ind, params: vec![] });
         let saved = std::mem::replace(&mut self.lin_no_cuts, true);
+        let probe = std::mem::replace(&mut self.lin_probe, true);
         let mut out = None;
         for b in [true, false] {
             let g = Rc::new(Value::Eq { ty: bt.clone(), lhs: c.clone(), rhs: self.bool_v(b) });
@@ -614,11 +622,13 @@ impl<'a> Engine<'a> {
                 Ok(None) => {}
                 Err(e) => {
                     self.lin_no_cuts = saved;
+                    self.lin_probe = probe;
                     return Err(e);
                 }
             }
         }
         self.lin_no_cuts = saved;
+        self.lin_probe = probe;
         Ok(out)
     }
 

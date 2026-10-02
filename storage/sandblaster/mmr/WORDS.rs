@@ -180,3 +180,17 @@ pub fn pos_ge_false(a: Position, b: Position) {
     position_ge(a, b);
     follows();
 }
+
+/// `max_nodes()` is `2^63 - 1` (the laws' name for `MAX_NODES`).
+#[lemma]
+pub fn max_nodes_value() {
+    ensures(crate::laws::max_nodes() == pow2(63) - 1);
+    by_unfolding(crate::laws::max_nodes);
+}
+
+/// `max_leaves()` is `2^62` (the laws' name for `MAX_LEAVES`).
+#[lemma]
+pub fn max_leaves_value() {
+    ensures(crate::laws::max_leaves() == pow2(62));
+    by_unfolding(crate::laws::max_leaves);
+}

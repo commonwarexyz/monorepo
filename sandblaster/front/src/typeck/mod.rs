@@ -56,10 +56,16 @@ pub struct Contracts {
     pub requires: Vec<syn::Expr>,
     /// `#[ensures(..)]` payload.
     pub ensures: Option<syn::Expr>,
+    /// `#[contract_ensures(..)]` / `#[contract_ensures]` (lifted functions
+    /// only, put there by the lift): [`hir::SpecAnnots::contract_ensures`].
+    pub contract_ensures: Option<Option<syn::Expr>>,
     pub decreases: Option<DecreasesAttr>,
     pub implements: Option<syn::Path>,
     /// `#[mir_contract(requires(..).., decreases(..))]` (`hir::FnDef::declared`).
     pub declared: Option<(Vec<syn::Expr>, Option<DecreasesAttr>)>,
+    /// `#[lift_src(..)]` (lifted functions only, put there by the lift): the
+    /// attached statements as written ([`hir::SpecAnnots::attached`]).
+    pub lift_src: Vec<hir::Attached>,
 }
 
 /// `#[decreases(e)]` / `#[decreases(e, max = C)]`.
@@ -90,6 +96,8 @@ pub struct FnSig {
     pub specialize: bool,
     pub contracts: Contracts,
     pub sig_span: Span,
+    /// The signature's text as the front end read it ([`hir::FnDef::sig_text`]).
+    pub sig_text: String,
     pub docs: Vec<String>,
     pub allow: Vec<String>,
     pub gen_scope: GenScope,
@@ -814,14 +822,25 @@ impl<'a> Checker<'a> {
                     self.hir_items[i] = Some(hir::ItemKind::TypeAlias(hir::TypeAliasDef { ty: t, lts }));
                 }
                 ItemSrc::Struct(s) => {
-                    let (docs, allow) = self.common_attrs(it.module, &s.attrs, &["derive", "must_use", "invariant", "view", "represents"], it.ghost, spec15::Site::Struct);
+                    // `#[lift_src(..)]`: an attached invariant as written (lifted
+                    // modules only, put there by the lift)
+                    let lifted_mod = self.res.mods[it.module.0 as usize].lifted;
+                    let allowed: &[&str] = if lifted_mod { &["derive", "must_use", "invariant", "view", "represents", "lift_src"] } else { &["derive", "must_use", "invariant", "view", "represents"] };
+                    let (docs, allow) = self.common_attrs(it.module, &s.attrs, allowed, it.ghost, spec15::Site::Struct);
+                    let mut attached = Vec::new();
+                    for a in s.attrs.iter().filter(|a| lifted_mod && a.path().is_ident("lift_src")) {
+                        match lift_src_attr(a) {
+                            Some(x) => attached.push(x),
+                            None => self.err(DiagKind::Attribute, self.sp(it.module, a.span()), "malformed `#[lift_src(..)]`"),
+                        }
+                    }
                     self.item_docs.insert(id, (docs, allow));
                     let derives = self.derives(it.module, &s.attrs, it.span, &it.name);
                     let generics = self.generics(it.module, &s.generics);
                     let g = GenScope { params: generics.iter().map(|p| p.name.clone()).collect(), self_ty: None };
                     let (shape, fields) = self.fields(it.module, &s.fields, &g, it.ghost);
                     let lifetimes = s.generics.lifetimes().map(|l| format!("'{}", l.lifetime.ident)).collect();
-                    self.hir_items[i] = Some(hir::ItemKind::Struct(hir::StructDef { lifetimes, generics, shape, fields, derives, methods: vec![], invariant: None, view: None, represents: None }));
+                    self.hir_items[i] = Some(hir::ItemKind::Struct(hir::StructDef { lifetimes, generics, shape, fields, derives, methods: vec![], invariant: None, view: None, represents: None, attached }));
                 }
                 ItemSrc::Enum(e) => {
                     let (docs, allow) = self.common_attrs(it.module, &e.attrs, &["derive", "must_use", "view"], it.ghost, spec15::Site::Enum);
@@ -1034,6 +1053,7 @@ impl<'a> Checker<'a> {
         let it = self.res.items[id.0 as usize].clone();
         let m = it.module;
         let sig_span = self.sp(m, sig.span());
+        let sig_text = crate::deelab::flat(&quote::ToTokens::to_token_stream(sig).to_string());
         // kind: every `fn` of a (ghost) `#[spec]` module is a spec fn unless
         // it says otherwise (§15.1)
         let in_spec_module = it.ghost && (self.res.mods[m.0 as usize].spec || self.res.mods[m.0 as usize].model);
@@ -1065,7 +1085,7 @@ impl<'a> Checker<'a> {
         // lift puts it for an attachment's `opaque();` (crate::lift)
         let lifted_mod = self.res.mods[m.0 as usize].lifted;
         let allowed: &[&str] = match kind {
-            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract"],
+            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract", "contract_ensures", "lift_src"],
             FnKind::Exec => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern"],
             FnKind::Spec => &["spec", "requires", "decreases", "inline", "must_use", "example", "examples", "mirrors_impl", "assumption", "opaque"],
             // `#[rewrite]` on a lemma: an optimization lemma (`f(x̄) == g(x̄)`,
@@ -1213,6 +1233,26 @@ impl<'a> Checker<'a> {
                         _ => self.err(DiagKind::Contract, span, "malformed `#[mir_contract]`"),
                     }
                 }
+            } else if path.is_ident("lift_src") {
+                // an attached statement as its ghost module wrote it
+                // (`crate::lift`, [`hir::Attached`])
+                match lift_src_attr(a) {
+                    Some(x) => contracts.lift_src.push(x),
+                    None => self.err(DiagKind::Contract, span, "malformed `#[lift_src(..)]`"),
+                }
+            } else if path.is_ident("contract_ensures") {
+                // the lift's split of a lifted function's `ensures` into its
+                // contract and proof-file summaries (`crate::lift::ensures_attrs`)
+                if contracts.contract_ensures.is_some() {
+                    self.err(DiagKind::Contract, span, "at most one `#[contract_ensures]` per function");
+                }
+                match &a.meta {
+                    syn::Meta::Path(_) => contracts.contract_ensures = Some(None),
+                    _ => match a.parse_args::<syn::Expr>() {
+                        Ok(e) => contracts.contract_ensures = Some(Some(e)),
+                        Err(e) => self.err(DiagKind::Contract, span, format!("malformed `#[contract_ensures]`: {e}")),
+                    },
+                }
             } else if path.is_ident("target_feature") {
                 match a.parse_args::<syn::MetaNameValue>() {
                     Ok(nv) if nv.path.is_ident("enable") => match &nv.value {
@@ -1265,7 +1305,7 @@ impl<'a> Checker<'a> {
             self.diags.push(Diagnostic::error(DiagKind::Attribute, sig_span, "`#[inline(always)]` cannot be combined with `#[target_feature]`").note("rustc rejects this combination (DESIGN.md §3.1)"));
         }
         let feature_set = feature_closure(&self.res.target.arch, &target_features);
-        FnSig { kind, ghost, owner, receiver, generics, lifetimes, params, param_lts, ret, ret_lts, target_features, feature_set, inline, must_use, specialize, contracts, sig_span, docs, allow, gen_scope: g, impl_block: None, impl_lifetimes: vec![], impl_self_lts: vec![], spec, ghost_params }
+        FnSig { kind, ghost, owner, receiver, generics, lifetimes, params, param_lts, ret, ret_lts, target_features, feature_set, inline, must_use, specialize, contracts, sig_span, sig_text, docs, allow, gen_scope: g, impl_block: None, impl_lifetimes: vec![], impl_self_lts: vec![], spec, ghost_params }
     }
 
     // ------------------------------------------------------------------
@@ -1286,7 +1326,7 @@ impl<'a> Checker<'a> {
                     let mut cx = expr::Cx::new(self, m, None, FnKind::Spec, true, Ty::Bool, GenScope::default(), vec![]);
                     let x = cx.check(&e, &Ty::Bool);
                     let locals = std::mem::take(&mut cx.locals);
-                    out.push(hir::Example { expr: x, locals, span });
+                    out.push(hir::Example { expr: x, locals, span, text: example_text(&e) });
                 }
                 Err(e) => self.err(DiagKind::Attribute, span, format!("malformed `#[example]`: {e} (expected a closed `bool` spec expression)")),
             }
@@ -1439,5 +1479,22 @@ pub fn parse_decreases_args(args: &[syn::Expr]) -> Result<(syn::Expr, Option<u64
             }
         }
         _ => Err("expected `decreases(e)` or `decreases(e, max = C)`".into()),
+    }
+}
+
+/// An `#[example(e)]`'s text: `e`'s tokens, flattened ([`hir::Example::text`]).
+pub(crate) fn example_text(e: &syn::Expr) -> String {
+    crate::deelab::flat(&quote::ToTokens::to_token_stream(e).to_string())
+}
+
+/// `#[lift_src("kind", "module", in_laws, "text")]`: a statement a ghost
+/// `#[lift]` module attached to a lifted item, as written there (put by
+/// `crate::lift`; [`hir::Attached`]).
+fn lift_src_attr(a: &syn::Attribute) -> Option<hir::Attached> {
+    let args = a.parse_args_with(syn::punctuated::Punctuated::<syn::Lit, syn::Token![,]>::parse_terminated).ok()?;
+    let v: Vec<&syn::Lit> = args.iter().collect();
+    match v.as_slice() {
+        [syn::Lit::Str(k), syn::Lit::Str(m), syn::Lit::Bool(l), syn::Lit::Str(t)] => Some(hir::Attached { kind: k.value(), module: m.value(), in_laws: l.value, text: t.value() }),
+        _ => None,
     }
 }

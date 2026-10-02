@@ -22,7 +22,10 @@
 //! * **memory** — the process-wide soft limit of `sandblaster-memguard`
 //!   ([`sandblaster_memguard::soft_limit_exceeded`], also polled by the
 //!   kernel's step ticker) and a per-goal cap on heap growth
-//!   ([`DEFAULT_GOAL_HEAP`]).
+//!   ([`DEFAULT_GOAL_HEAP`]). The cap measures the goal's own thread
+//!   (memguard's per-thread count, [`sandblaster_memguard::thread_growth`]):
+//!   a goal runs on one thread, and what other threads allocate meanwhile
+//!   (the mutation gate's batches run on several) is not its growth.
 //!
 //! When a limit is hit, the current goal's [`Exhaustion`] is recorded and
 //! the next [`settle`] zeroes the budget, so every later kernel call fails
@@ -64,7 +67,8 @@ use sandblaster_kernel::value::{Arg, Budget, Closure, Elim, EnvEntry, Head, V, V
 /// under-estimates.
 pub const DEFAULT_GOAL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default cap on the heap growth of one goal (bytes).
+/// Default cap on the heap growth of one goal (bytes): what the goal's
+/// thread allocated minus what it freed since the goal's scope opened.
 pub const DEFAULT_GOAL_HEAP: usize = 1 << 30;
 
 /// Front-end work between two polls of the clock and the heap.
@@ -89,7 +93,10 @@ struct Limits {
     deadline: Instant,
     timeout: Duration,
     start: Instant,
+    /// This thread's [`sandblaster_memguard::thread_allocated`] when the
+    /// scope opened.
     heap0: usize,
+    /// The growth of this thread's heap the scope may cause (bytes).
     heap_cap: usize,
     /// The enclosing scope's counters, restored on exit.
     saved: (u64, u64, Option<Exhaustion>, u32),
@@ -170,8 +177,15 @@ pub struct Scope {
 impl Scope {
     /// Opens a scope for a prover call with budget `b`: its deadline is
     /// `timeout` from now (default [`goal_timeout`]), but never later than
-    /// the enclosing scope's.
+    /// the enclosing scope's; its heap cap is [`DEFAULT_GOAL_HEAP`].
     pub fn enter(timeout: Option<Duration>, b: &Budget) -> Scope {
+        Scope::enter_capped(timeout, DEFAULT_GOAL_HEAP, b)
+    }
+
+    /// [`Scope::enter`] with a cap of `heap_cap` bytes on the growth of
+    /// this thread's heap (never more than what the enclosing scope has
+    /// left).
+    pub fn enter_capped(timeout: Option<Duration>, heap_cap: usize, b: &Budget) -> Scope {
         let now = Instant::now();
         let timeout = timeout.unwrap_or_else(goal_timeout);
         let saved = (PENDING.get(), AVAIL.get(), REASON.get(), CALLS.get());
@@ -179,14 +193,16 @@ impl Scope {
             let mut l = l.borrow_mut();
             let mut deadline = now.checked_add(timeout).unwrap_or(now + Duration::from_secs(1 << 30));
             let mut timeout = timeout;
-            let mut heap_cap = DEFAULT_GOAL_HEAP;
-            let heap0 = sandblaster_memguard::allocated();
+            let mut heap_cap = heap_cap;
+            let heap0 = sandblaster_memguard::thread_allocated();
             if let Some(p) = l.last() {
                 if p.deadline < deadline {
                     deadline = p.deadline;
                     timeout = p.timeout;
                 }
-                heap_cap = heap_cap.min((p.heap0 + p.heap_cap).saturating_sub(heap0));
+                // what the enclosing scope has left of its cap
+                let used = usize::try_from(heap0.wrapping_sub(p.heap0) as isize).unwrap_or(0);
+                heap_cap = heap_cap.min(p.heap_cap.saturating_sub(used));
             }
             l.push(Limits { deadline, timeout, start: now, heap0, heap_cap, saved });
         });
@@ -227,7 +243,7 @@ fn poll_env() {
         if sandblaster_memguard::soft_limit_exceeded() {
             return Some(Exhaustion::Memory);
         }
-        if sandblaster_memguard::allocated() > lim.heap0.saturating_add(lim.heap_cap) {
+        if sandblaster_memguard::thread_growth(lim.heap0) > isize::try_from(lim.heap_cap).unwrap_or(isize::MAX) {
             return Some(Exhaustion::GoalHeap);
         }
         if Instant::now() >= lim.deadline {
@@ -323,8 +339,8 @@ pub fn describe(r: Exhaustion) -> String {
         }
         Exhaustion::TooLarge => format!("a term too large for proof search (read-back cost over {MAX_QUOTE_COST} nodes)"),
         Exhaustion::GoalHeap => format!(
-            "per-goal heap cap exceeded: heap grew by {} MiB, cap {} MiB",
-            sandblaster_memguard::allocated().saturating_sub(heap0) >> 20,
+            "per-goal heap cap exceeded: the goal's thread grew its heap by {} MiB, cap {} MiB",
+            sandblaster_memguard::thread_growth(heap0).max(0) >> 20,
             cap >> 20
         ),
     }

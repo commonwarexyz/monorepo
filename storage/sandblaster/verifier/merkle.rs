@@ -11,6 +11,9 @@
 #[path = "../../src/merkle/position.rs"]
 pub mod position;
 
+// `LocationRangeExt` stays host code too: its one impl is on core's
+// `Range<Location>`, a type outside the lifted files, and turns it into a
+// `Range<usize>` for slice indexing (`as usize`, the target's width).
 #[lift(mir = "verifier.sbmir", in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read, LocationRangeExt", unverified_fns = "Location::try_from")]
 #[path = "../../src/merkle/location.rs"]
 pub mod location;

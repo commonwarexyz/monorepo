@@ -1,0 +1,245 @@
+;; rustc's MIR of `fx_lk_host::a, fx_lk_host::b`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lk_host")
+(module "fx_lk_host::a, fx_lk_host::b")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "fc944b90b25b8e7c767d9815c19b0fa5f94e017b68524fc6b1dfa617a821f3ca")
+(source "src/b.rs" "8bb86407606ebc8a0efcb73b31f10effd77fb592a7d1513741b1d34f8e1ce92a")
+(root "fx_lk_host::a::Pos::new")
+(root "fx_lk_host::a::Pos::halve")
+(root "fx_lk_host::a::Pos::third")
+(root "fx_lk_host::a::Hidden::get")
+(root "fx_lk_host::a::quarter")
+(root "fx_lk_host::a::down")
+(root "fx_lk_host::b::Tick::new")
+(root "fx_lk_host::b::Tick::fifth")
+(root "fx_lk_host::b::Tick::sixth")
+(root "fx_lk_host::b::seventh")
+(root "<fx_lk_host::a::Pos as std::clone::Clone>::clone")
+(root "<fx_lk_host::a::Hidden as std::clone::Clone>::clone")
+(root "<fx_lk_host::b::Tick as std::clone::Clone>::clone")
+(note "fx_lk_host::a::child::twelfth: not extracted: not among the items asked for (SBMIR_ITEMS)")
+(note "fx_lk_host::b::Tick::left_out: not extracted: a host function (SBMIR_SKIP_FNS)")
+(adt-def "a::Hidden" (path "fx_lk_host::a::Hidden") (kind struct) (args ())
+  (variant 0 "Hidden" 0 (field "0" u64) (no-glue)))
+(adt-def "a::Pos" (path "fx_lk_host::a::Pos") (kind struct) (args ())
+  (variant 0 "Pos" 0 (field "0" u64) (no-glue)))
+(adt-def "b::Tick" (path "fx_lk_host::b::Tick") (kind struct) (args ())
+  (variant 0 "Tick" 0 (field "0" u64) (no-glue)))
+(fn "fx_lk_host::a::Pos::new"
+  (kind root) (def "fx_lk_host::a::Pos::new") (args ())
+  (item inherent (adt "a::Pos") "new")
+  (span "src/a.rs" 7 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "a::Pos") 0) (copy (p 1))) (at "src/a.rs" 8 9))
+    (return (at "src/a.rs" 9 6)))
+)
+(fn "fx_lk_host::a::Pos::halve"
+  (kind root) (def "fx_lk_host::a::Pos::halve") (args ())
+  (item inherent (adt "a::Pos") "halve")
+  (span "src/a.rs" 11 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "a::Pos") imm)
+    (2 u64 mut)
+    (3 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (use (copy (p 1 (field 0 u64)))) (at "src/a.rs" 12 9))
+    (assign (p 3) (bin eq (int u64 2) (int u64 0)) (at "src/a.rs" 12 9))
+    (assert (move (p 3)) false div-zero 1 (at "src/a.rs" 12 9)))
+  (bb 1
+    (assign (p 0) (bin div (move (p 2)) (int u64 2)) (at "src/a.rs" 12 9))
+    (return (at "src/a.rs" 13 6)))
+)
+(fn "fx_lk_host::a::Pos::third"
+  (kind root) (def "fx_lk_host::a::Pos::third") (args ())
+  (item inherent (adt "a::Pos") "third")
+  (span "src/a.rs" 15 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "a::Pos") imm)
+    (2 u64 mut)
+    (3 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (use (copy (p 1 (field 0 u64)))) (at "src/a.rs" 16 9))
+    (assign (p 3) (bin eq (int u64 3) (int u64 0)) (at "src/a.rs" 16 9))
+    (assert (move (p 3)) false div-zero 1 (at "src/a.rs" 16 9)))
+  (bb 1
+    (assign (p 0) (bin div (move (p 2)) (int u64 3)) (at "src/a.rs" 16 9))
+    (return (at "src/a.rs" 17 6)))
+)
+(fn "fx_lk_host::a::Hidden::get"
+  (kind root) (def "fx_lk_host::a::Hidden::get") (args ())
+  (item inherent (adt "a::Hidden") "get")
+  (span "src/a.rs" 24 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "a::Hidden") imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 (field 0 u64)))) (at "src/a.rs" 25 9))
+    (return (at "src/a.rs" 26 6)))
+)
+(fn "fx_lk_host::a::quarter"
+  (kind root) (def "fx_lk_host::a::quarter") (args ())
+  (item fn "quarter")
+  (span "src/a.rs" 29 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 4) (int u64 0)) (at "src/a.rs" 30 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 30 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 4)) (at "src/a.rs" 30 5))
+    (return (at "src/a.rs" 31 2)))
+)
+(fn "fx_lk_host::a::down"
+  (kind root) (def "fx_lk_host::a::down") (args ())
+  (item fn "down")
+  (span "src/a.rs" 33 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 bool mut)
+    (3 u32 mut)
+    (4 (tuple u32 bool) mut))
+  (debug "h" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (copy (p 1)) (int u32 0)) (at "src/a.rs" 34 8))
+    (switch (move (p 2)) (0 2) (otherwise 1) (at "src/a.rs" 34 8)))
+  (bb 1
+    (assign (p 0) (use (int u32 0)) (at "src/a.rs" 34 17))
+    (goto 4 (at "src/a.rs" 34 5)))
+  (bb 2
+    (assign (p 4) (checked sub (copy (p 1)) (int u32 1)) (at "src/a.rs" 34 33))
+    (assert (move (p 4 (field 1 bool))) false overflow 3 (at "src/a.rs" 34 33)))
+  (bb 3
+    (assign (p 3) (use (move (p 4 (field 0 u32)))) (at "src/a.rs" 34 33))
+    (call (fn "fx_lk_host::a::down") (args (move (p 3))) (p 0) 4 (at "src/a.rs" 34 28)))
+  (bb 4
+    (return (at "src/a.rs" 35 2)))
+)
+(fn "fx_lk_host::b::Tick::new"
+  (kind root) (def "fx_lk_host::b::Tick::new") (args ())
+  (item inherent (adt "b::Tick") "new")
+  (span "src/b.rs" 5 5)
+  (argc 1)
+  (locals
+    (0 (adt "b::Tick") mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "b::Tick") 0) (copy (p 1))) (at "src/b.rs" 6 9))
+    (return (at "src/b.rs" 7 6)))
+)
+(fn "fx_lk_host::b::Tick::fifth"
+  (kind root) (def "fx_lk_host::b::Tick::fifth") (args ())
+  (item inherent (adt "b::Tick") "fifth")
+  (span "src/b.rs" 9 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "b::Tick") imm)
+    (2 u64 mut)
+    (3 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (use (copy (p 1 (field 0 u64)))) (at "src/b.rs" 10 9))
+    (assign (p 3) (bin eq (int u64 5) (int u64 0)) (at "src/b.rs" 10 9))
+    (assert (move (p 3)) false div-zero 1 (at "src/b.rs" 10 9)))
+  (bb 1
+    (assign (p 0) (bin div (move (p 2)) (int u64 5)) (at "src/b.rs" 10 9))
+    (return (at "src/b.rs" 11 6)))
+)
+(fn "fx_lk_host::b::Tick::sixth"
+  (kind root) (def "fx_lk_host::b::Tick::sixth") (args ())
+  (item inherent (adt "b::Tick") "sixth")
+  (span "src/b.rs" 13 5)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 (adt "b::Tick") imm)
+    (2 u64 mut)
+    (3 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (use (copy (p 1 (field 0 u64)))) (at "src/b.rs" 14 9))
+    (assign (p 3) (bin eq (int u64 6) (int u64 0)) (at "src/b.rs" 14 9))
+    (assert (move (p 3)) false div-zero 1 (at "src/b.rs" 14 9)))
+  (bb 1
+    (assign (p 0) (bin div (move (p 2)) (int u64 6)) (at "src/b.rs" 14 9))
+    (return (at "src/b.rs" 15 6)))
+)
+(fn "fx_lk_host::b::seventh"
+  (kind root) (def "fx_lk_host::b::seventh") (args ())
+  (item fn "seventh")
+  (span "src/b.rs" 22 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 7) (int u64 0)) (at "src/b.rs" 23 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/b.rs" 23 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 7)) (at "src/b.rs" 23 5))
+    (return (at "src/b.rs" 24 2)))
+)
+(fn "<fx_lk_host::a::Pos as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lk_host::a::Pos as std::clone::Clone>::clone") (args ())
+  (item impl (adt "a::Pos") "Clone" () "clone")
+  (span "src/a.rs" 3 10)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 (ref shared (adt "a::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))) (at "src/a.rs" 3 10))
+    (return (at "src/a.rs" 3 15)))
+)
+(fn "<fx_lk_host::a::Hidden as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lk_host::a::Hidden as std::clone::Clone>::clone") (args ())
+  (item impl (adt "a::Hidden") "Clone" () "clone")
+  (span "src/a.rs" 20 10)
+  (argc 1)
+  (locals
+    (0 (adt "a::Hidden") mut)
+    (1 (ref shared (adt "a::Hidden")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))) (at "src/a.rs" 20 10))
+    (return (at "src/a.rs" 20 15)))
+)
+(fn "<fx_lk_host::b::Tick as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lk_host::b::Tick as std::clone::Clone>::clone") (args ())
+  (item impl (adt "b::Tick") "Clone" () "clone")
+  (span "src/b.rs" 1 10)
+  (argc 1)
+  (locals
+    (0 (adt "b::Tick") mut)
+    (1 (ref shared (adt "b::Tick")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))) (at "src/b.rs" 1 10))
+    (return (at "src/b.rs" 1 15)))
+)

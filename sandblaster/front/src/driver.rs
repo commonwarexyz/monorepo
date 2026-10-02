@@ -138,8 +138,21 @@ pub fn check(root: &Path, fs: &dyn FileProvider, target: &TargetInfo) -> Checked
     // in-place lifted modules: their `pub` functions may carry `requires`
     // (host obligations, listed in the record)
     let in_place_files: std::collections::HashSet<crate::span::FileId> = loaded.lifted.iter().filter(|l| l.in_place).map(|l| l.file).collect();
+    // a lifted crate's proof files: the ghost `#[lift]` modules other than
+    // the laws file (never on the review surface, DESIGN.md §15.6)
+    let proof_files: std::collections::HashSet<crate::span::FileId> = loaded.lifted.iter().filter(|l| l.ghost && l.name != crate::lift::LAWS_MODULE).map(|l| l.file).collect();
+    // the non-ghost `#[lift]` sources (in place or copied)
+    let lift_sources: std::collections::HashSet<crate::span::FileId> = loaded.lifted.iter().filter(|l| !l.ghost).map(|l| l.file).collect();
+    // the ghost `#[lift]` modules (the laws file, the proof files)
+    let lift_ghosts: std::collections::HashSet<crate::span::FileId> = loaded.lifted.iter().filter(|l| l.ghost).map(|l| l.file).collect();
     for m in krate.modules.iter_mut() {
+        m.lift_source = !m.ghost && m.lifted && lift_sources.contains(&m.file);
+        m.lift_ghost = m.ghost && lift_ghosts.contains(&m.file);
         m.lifted = m.lifted && in_place_files.contains(&m.file);
+        m.proof_file = m.ghost && proof_files.contains(&m.file);
+        if m.lifted {
+            m.host_access = loaded.lift_facts.host_access.iter().find(|(f, _)| *f == m.file).map(|(_, a)| a.clone()).unwrap_or_default();
+        }
     }
     // the text of `#[examples(file = ..)]` vector files (build inputs in
     // the source map; the elaborator reads their records, DESIGN.md §15.7)
@@ -239,6 +252,10 @@ fn assemble(res: &Resolver, ck: &Checker, target: &TargetInfo) -> Crate {
                 model: m.model,
                 bridges: m.bridges,
                 lifted: m.lifted,
+                proof_file: false,
+                lift_source: false,
+                lift_ghost: false,
+                host_access: Default::default(),
             }
         })
         .collect();

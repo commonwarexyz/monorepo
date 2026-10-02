@@ -364,7 +364,7 @@ pub fn abstract_reasons(krate: &Crate, id: ItemId, view_injective: bool) -> Vec<
     for &f in &krate.reachable {
         let fit = krate.item(f);
         match &fit.kind {
-            ItemKind::Fn(fd) if fit.vis == Vis::Public && fd.kind == FnKind::Exec => {
+            ItemKind::Fn(fd) if host_visible(krate, fit) && fd.kind == FnKind::Exec => {
                 let tys: Vec<&Ty> = fd.params.iter().filter(|p| !p.ghost).map(|p| &p.ty).chain(std::iter::once(&fd.ret)).collect();
                 if let Some(w) = tys.iter().find_map(|t| container_in(t)) {
                     out.push(format!(
@@ -498,17 +498,107 @@ pub fn exported_functions(krate: &Crate) -> Vec<ItemId> {
     out
 }
 
+/// The host-callable functions of the in-place lifted modules
+/// ([`Module::lifted`]): the host's own files, whose functions host code
+/// calls directly whether or not the DSL root re-exports them (DESIGN.md
+/// §15.5, *Every host-callable function*):
+///
+/// * every non-private function, free or a method (`pub`, `pub(crate)`,
+///   `pub(super)`): the rest of the host crate calls a `pub(crate) fn` as
+///   freely as a `pub fn` (`iterator::pos_to_height`), and the methods of
+///   a type the DSL root does not re-export as freely as those of one it
+///   does. Among them are the impls on primitives, which the lift makes
+///   free functions (`u64 == Position` is `u64__eq__Position`,
+///   `u64::from(pos)` is `u64__from__Position`; a sealed trait's method on
+///   `u16` is the `pub(crate)` function `Trait__u16__m`), and the methods
+///   of trait impls;
+/// * every private function and private inherent method the host source
+///   declares, when the module has a host child module (one the lift
+///   leaves out, compiled outside tests): Rust lets a module's
+///   descendants call its private items ([`crate::hir::HostAccess`]).
+///
+/// They seed [`Crate::reachable`], so they are boundary functions: §15.5
+/// requires their contracts and the lock holds them. The lift's own
+/// helpers (loop functions) and the private functions of a module without
+/// host child modules stay internal.
+pub fn in_place_host_fns(krate: &Crate) -> Vec<ItemId> {
+    krate.items.iter().filter(|it| is_in_place_host_fn(krate, it)).map(|it| it.id).collect()
+}
+
+/// `Type::method` of a method item (the instance suffix of a lifted
+/// family's type, `Decoder__u16`, dropped), the name of a free function.
+fn host_name(it: &Item) -> String {
+    let path = it.path.to_string();
+    let segs: Vec<&str> = path.split("::").collect();
+    match &it.kind {
+        ItemKind::Fn(f) if f.owner.is_some() && segs.len() >= 2 => {
+            let ty = segs[segs.len() - 2];
+            format!("{}::{}", ty.split("__").next().unwrap_or(ty), segs[segs.len() - 1])
+        }
+        _ => it.name.clone(),
+    }
+}
+
+/// Whether `it` is one of the [`in_place_host_fns`]: a non-ghost exec
+/// function (free or a method) of an in-place lifted module that host code
+/// can call — non-private in the host's source, or private with a host
+/// child module that sees it.
+pub fn is_in_place_host_fn(krate: &Crate, it: &Item) -> bool {
+    let ItemKind::Fn(f) = &it.kind else { return false };
+    if it.ghost || f.kind != FnKind::Exec {
+        return false;
+    }
+    let Some(m) = krate.modules.get(it.module.0 as usize).filter(|m| m.lifted && !m.ghost) else { return false };
+    if f.owner.is_none() && !m.items.contains(&it.id) {
+        return false;
+    }
+    let name = host_name(it);
+    let host_private = if f.owner.is_some() { m.host_access.private_methods.contains(&name) } else { it.vis == Vis::Private };
+    if host_private { m.host_access.private_callable(&name) } else { it.vis != Vis::Private }
+}
+
+/// The private functions of the in-place lifted modules that code the
+/// lift leaves out calls by name (an `unverified_fns` method, an
+/// `unverified_impls` impl, an item outside `items = ..`) and that are not
+/// host-callable through a host child module: host code relies on them,
+/// but §15.5 does not count them yet (DESIGN.md §15.5). Reported as
+/// warnings.
+pub fn left_out_callers(krate: &Crate) -> Vec<ItemId> {
+    krate
+        .items
+        .iter()
+        .filter(|it| {
+            let ItemKind::Fn(f) = &it.kind else { return false };
+            let Some(m) = krate.modules.get(it.module.0 as usize).filter(|m| m.lifted && !m.ghost) else { return false };
+            let name = host_name(it);
+            let declared_private = if f.owner.is_some() { m.host_access.private_methods.contains(&name) } else { it.vis == Vis::Private && m.host_access.private_fns.contains(&name) };
+            !it.ghost && f.kind == FnKind::Exec && declared_private && !m.host_access.private_callable(&name) && m.host_access.called.contains(name.rsplit("::").next().unwrap_or(&name))
+        })
+        .map(|it| it.id)
+        .collect()
+}
+
+/// Whether host code can call item `it` once it is reachable: it is `pub`,
+/// or it is one of the [`in_place_host_fns`] (a `pub(crate)` function of
+/// the host's own file). The boundary is the reachable items for which
+/// this holds.
+pub fn host_visible(krate: &Crate, it: &Item) -> bool {
+    it.vis == Vis::Public || is_in_place_host_fn(krate, it)
+}
+
 /// Every function host code can call (DESIGN.md §15.5 "every function
 /// exported from the crate"): the [`exported_functions`], and every other
-/// `pub` function of [`Crate::reachable`] — the verified boundary of §3.1,
-/// which also contains the public tree of a `pub mod` at the root (a
-/// layout [`spec15_gate`] rejects). Determinacy covers all of them, so no
-/// host-callable function escapes it before the gate is on.
+/// host-visible function of [`Crate::reachable`] ([`host_visible`]) — the
+/// verified boundary of §3.1, which also contains the public tree of a
+/// `pub mod` at the root (a layout [`spec15_gate`] rejects) and the
+/// non-private free functions of the in-place lifted modules
+/// ([`in_place_host_fns`]: the impls on primitives among them). Determinacy covers all of them, so no host-callable
+/// function escapes it before the gate is on.
 pub fn boundary_functions(krate: &Crate) -> Vec<ItemId> {
     let mut out = exported_functions(krate);
     for &id in &krate.reachable {
         let it = krate.item(id);
-        if !it.ghost && it.vis == Vis::Public && matches!(it.kind, ItemKind::Fn(_)) {
+        if !it.ghost && host_visible(krate, it) && matches!(it.kind, ItemKind::Fn(_)) {
             out.push(id);
         }
     }
@@ -743,6 +833,9 @@ fn compute_boundary(krate: &mut Crate, res: &Resolver, diags: &mut Diagnostics) 
             ExportTarget::Module(m) => Def::Mod(m),
         })
         .collect();
+    // the host's own files (in place): host code calls their non-private
+    // free functions and impls on primitives directly, exported or not
+    work.extend(in_place_host_fns(krate).into_iter().map(Def::Item));
     while let Some(d) = work.pop() {
         match d {
             Def::Item(id) => {
@@ -804,7 +897,7 @@ fn compute_boundary(krate: &mut Crate, res: &Resolver, diags: &mut Diagnostics) 
         }
         reachable.push(id);
         if let ItemKind::Fn(f) = &it.kind
-            && it.vis == Vis::Public
+            && host_visible(krate, it)
         {
             // a lifted function's `requires` is a host obligation (listed in
             // the record of a crate verified in place), not a boundary error
@@ -814,6 +907,14 @@ fn compute_boundary(krate: &mut Crate, res: &Resolver, diags: &mut Diagnostics) 
     }
     krate.boundary = exports;
     krate.reachable = reachable;
+    for id in left_out_callers(krate) {
+        let it = krate.item(id);
+        let sp = krate.fn_def(id).map(|f| f.sig_span).unwrap_or(it.span);
+        diags.push(
+            Diagnostic::warning(DiagKind::Boundary, sp, format!("the private function `{}` of an in-place module is called by host code the lift leaves out of its file", it.path))
+                .note("that code (an `unverified_fns` method, an `unverified_impls` impl or an item outside `items = ..`) relies on what it returns, but §15.5 does not count it among the host-callable functions yet: it has no locked contract (DESIGN.md §15.5)"),
+        );
+    }
 }
 
 /// The live boundary rules of §3.1 for a `pub` function reachable from the
@@ -1046,7 +1147,7 @@ pub fn spec15_gate(krate: &Crate, diags: &mut Diagnostics) {
     for &id in &krate.reachable {
         let it = krate.item(id);
         if let ItemKind::Fn(f) = &it.kind
-            && it.vis == Vis::Public
+            && host_visible(krate, it)
             && !f.generics.is_empty()
         {
             diags.push(

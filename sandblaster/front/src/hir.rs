@@ -474,6 +474,22 @@ impl Crate {
     pub fn in_model_module(&self, id: ItemId) -> bool {
         self.module(self.item(id).module).model
     }
+    /// The proof file of a lifted crate that declares item `id`, if any
+    /// ([`Module::proof_file`], or a module inside one). Its items and the
+    /// `ensures` it attaches are proof internals, never locked (DESIGN.md
+    /// §15.6).
+    pub fn lift_proof_file(&self, id: ItemId) -> Option<ModId> {
+        let mut m = Some(self.item(id).module);
+        while let Some(mid) = m {
+            let md = self.module(mid);
+            if md.proof_file {
+                return Some(mid);
+            }
+            m = md.parent;
+        }
+        None
+    }
+
     /// Whether item `id` is declared in a `#[spec]` module (§15.1).
     pub fn in_spec_module(&self, id: ItemId) -> bool {
         self.module(self.item(id).module).spec
@@ -564,8 +580,64 @@ pub struct Module {
     /// An in-place lifted module (`#[lift(in_place)]`, SEMANTICS.md §19.5):
     /// the host's own file read as-is. A `pub` function with `requires` is
     /// allowed there: the precondition is a host obligation, listed in the
-    /// record (`driver::lifted::in_place_record`).
+    /// record (`driver::lifted::in_place_record`). Host code calls its
+    /// `pub` functions directly — free functions and the impls on
+    /// primitives (`u64 == Position`) included — so they are on the
+    /// boundary ([`crate::validate::in_place_host_fns`]).
     pub lifted: bool,
+    /// A lifted crate's proof file: a ghost `#[lift]` module other than the
+    /// laws file (`crate::lift::LAWS_MODULE`), e.g. `PROOF.rs`. Its items
+    /// and the `ensures` it attaches are proof internals, never on the
+    /// review surface (DESIGN.md §15.6).
+    pub proof_file: bool,
+    /// A non-ghost `#[lift]` source (in place or copied, not the lift
+    /// prelude): its functions' signatures are the lift's rewriting of the
+    /// source's ([`FnDef::sig_text`]).
+    pub lift_source: bool,
+    /// A ghost `#[lift]` module (the laws file or a proof file) or a module
+    /// inside one: the lift re-emits its items, their attributes without
+    /// spans, so an `#[example]`'s text is its tokens ([`Example::text`]).
+    pub lift_ghost: bool,
+    /// For an in-place lifted module: what host code the lift leaves out
+    /// can call of it besides its non-private functions (DESIGN.md §15.5,
+    /// `validate::in_place_host_fns`).
+    pub host_access: HostAccess,
+}
+
+/// The private functions of an in-place lifted module that host code the
+/// lift leaves out can call (DESIGN.md §15.5, *Every host-callable
+/// function*): Rust lets a module's descendants call its private items, so
+/// every private function the host source declares is host-callable when
+/// the module has a **host child module** — one the lift leaves out that
+/// is compiled outside tests (not `#[cfg(test)]`). The module's own
+/// left-out code (an `unverified_fns` method, an `unverified_impls` impl,
+/// an item not among `items = ..`, a feature-gated item) may call a
+/// private function too: those calls are recorded (`called`) and reported
+/// (`validate::left_out_callers`), not yet counted. Filled by the lift
+/// ([`crate::lift::LiftFacts::host_access`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HostAccess {
+    /// The host child modules (by name).
+    pub host_children: Vec<String>,
+    /// The private free functions the host source declares (by name).
+    pub private_fns: std::collections::BTreeSet<String>,
+    /// The private inherent methods the host source declares, as
+    /// `Type::method` (the lift makes them `pub(crate)` in the model, so
+    /// that proofs may name them; host code still sees them private).
+    pub private_methods: std::collections::BTreeSet<String>,
+    /// The names the left-out code calls: method names (`x.m(..)`), the last
+    /// segment of a qualified path (`Self::m`, `T::m`) and single-segment
+    /// paths (`f(..)`), and every identifier inside a macro call.
+    pub called: std::collections::BTreeSet<String>,
+}
+
+impl HostAccess {
+    /// Whether host code can call the private function or method `name`
+    /// (`Type::method` for a method) the host source declares: the module
+    /// has a host child module.
+    pub fn private_callable(&self, name: &str) -> bool {
+        (self.private_fns.contains(name) || self.private_methods.contains(name)) && !self.host_children.is_empty()
+    }
 }
 
 /// An item.
@@ -659,6 +731,30 @@ pub struct StructDef {
     pub view: Option<View>,
     /// `#[represents(|s, a| P)]` (§15.3, S1).
     pub represents: Option<Represents>,
+    /// The invariants a ghost `#[lift]` module attached to this lifted
+    /// struct, as written there ([`Attached`]).
+    pub attached: Vec<Attached>,
+}
+
+/// A statement a ghost `#[lift]` module (the laws file or a proof file)
+/// attached to a lifted item with `#[lift_attach]` (`crate::lift`), as
+/// written there: the lift records it on the item (`#[lift_src(..)]`)
+/// because the spliced tokens carry their own file's line and column but
+/// are read as the host file's. `SPEC.lock`'s source text of the item is
+/// built from these (an edit elsewhere in the laws file changes no hash),
+/// and the surface refuses a proof file's precondition, depth bound or
+/// invariant on a boundary item (DESIGN.md §15.6).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attached {
+    /// `requires`, `ensures`, `decreases` or `invariant`.
+    pub kind: String,
+    /// The DSL path of the ghost module that wrote it (`crate::laws`,
+    /// `crate::proof`).
+    pub module: String,
+    /// Written in the laws file (`crate::lift::LAWS_MODULE`).
+    pub in_laws: bool,
+    /// The statement's arguments as written, whitespace collapsed.
+    pub text: String,
 }
 
 /// `#[invariant(p)]` on a struct (DESIGN.md §15.3): the invariants of one
@@ -940,6 +1036,13 @@ pub struct FnDef {
     pub locals: Vec<LocalDecl>,
     /// Span of the signature (`fn name(..) -> T`).
     pub sig_span: Span,
+    /// The signature's text (`fn name(..) -> T`, its tokens as the front end
+    /// read them, flattened): for a function of a `#[lift]` source the
+    /// lifted signature, whose rewritten tokens (`Self::Output` read as the
+    /// type it names) keep spans from elsewhere in the host file, so its
+    /// span covers no contiguous text (`crate::surface`: the lock's `src`
+    /// of such a function).
+    pub sig_text: String,
 }
 
 impl FnDef {
@@ -985,6 +1088,26 @@ impl FnDef {
             parts.insert(at, (l, t));
         }
         parts.into_iter().map(|(_, t)| format!(" {t}")).collect()
+    }
+
+    /// The `ensures` of the function's contract (DESIGN.md §15.6): the
+    /// laws file's part when a proof file attached summaries
+    /// ([`SpecAnnots::contract_ensures`]), else the `ensures`.
+    pub fn contract_ensures(&self) -> Option<&Ensures> {
+        // (a copy the optimizer made drops the `ensures`, and with it the
+        // contract)
+        self.ensures.as_ref()?;
+        match &self.spec.contract_ensures {
+            Some(c) => c.as_ref(),
+            None => self.ensures.as_ref(),
+        }
+    }
+
+    /// The name of the lemma that states the contract's `ensures`:
+    /// `f::contract` (projected from `f::ensures`) when a proof file attached
+    /// summaries, else `f::ensures`.
+    pub fn contract_lemma(&self) -> &'static str {
+        if self.spec.contract_ensures.is_some() { "contract" } else { "ensures" }
     }
 
     /// Whether the function has a precondition other than literal `true`
@@ -1077,6 +1200,19 @@ pub struct SpecAnnots {
     /// `#[opaque]` on a spec function (DESIGN.md §5.6, §15 S5): its kernel
     /// definition is opaque in proofs. Not part of its meaning.
     pub opaque: Option<Span>,
+    /// `#[contract_ensures(..)]` / `#[contract_ensures]` on a lifted exec
+    /// function (put there by the lift, `crate::lift::ensures_attrs`): a
+    /// proof file attached summaries to its `ensures`, so its contract —
+    /// what `SPEC.lock` holds and §15.5 determines — is only the laws
+    /// file's part: `Some(Some(e))`, or `Some(None)` when the laws file
+    /// states none. The full `ensures` stays the proven postcondition and
+    /// the fact at call sites. `None`: the contract is the `ensures`
+    /// (DESIGN.md §15.6). Read it through [`FnDef::contract_ensures`].
+    pub contract_ensures: Option<Option<Ensures>>,
+    /// On a lifted exec function: the `requires`, `ensures` and
+    /// `decreases` ghost `#[lift]` modules attached to it, as written there
+    /// ([`Attached`]).
+    pub attached: Vec<Attached>,
 }
 
 impl SpecAnnots {
@@ -1145,6 +1281,11 @@ pub struct Example {
     pub expr: Expr,
     pub locals: Vec<LocalDecl>,
     pub span: Span,
+    /// The expression's tokens as the front end read them, flattened: the
+    /// lock's `src` of an example of a ghost `#[lift]` module
+    /// ([`Module::lift_ghost`]), whose attributes the lift re-emits without
+    /// spans, so its span covers no text (`crate::surface`).
+    pub text: String,
 }
 
 /// Record format of a vector file.

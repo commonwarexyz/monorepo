@@ -45,6 +45,16 @@
 //! growth or shrinkage of a thread's heap, not per allocation
 //! ([`shared_updates`] counts the touches).
 //!
+//! **Per-thread growth.** Each thread also counts the bytes it allocated
+//! minus the bytes it freed ([`thread_allocated`], a plain thread-local
+//! cell next to the stock), so a limit on the growth caused by one piece of
+//! work on one thread — the prover's per-goal heap cap — measures that
+//! work, not what other threads allocate meanwhile (the mutation gate
+//! elaborates its batches on several threads at once). A block freed by
+//! another thread than the one that allocated it lowers the freeing
+//! thread's count instead: compare two readings of one thread with
+//! [`thread_growth`], which reads the wrapping difference.
+//!
 //! **Guarantees.** With `n` threads holding stock (each at most
 //! [`THREAD_STOCK_MAX`] = 128 KiB):
 //!
@@ -159,6 +169,9 @@ struct Local {
     /// Bytes reserved on the counter and not in use by this thread.
     stock: Cell<usize>,
     state: Cell<u8>,
+    /// Bytes this thread allocated minus the bytes it freed, wrapping
+    /// ([`thread_allocated`]); counted in every state.
+    net: Cell<usize>,
 }
 
 /// Returns the thread's stock to the counter when the thread exits.
@@ -177,8 +190,21 @@ impl Drop for ExitHook {
 }
 
 thread_local! {
-    static LOCAL: Local = const { Local { stock: Cell::new(0), state: Cell::new(NEW) } };
+    static LOCAL: Local = const { Local { stock: Cell::new(0), state: Cell::new(NEW), net: Cell::new(0) } };
     static EXIT: ExitHook = const { ExitHook };
+}
+
+/// Counts `size` more bytes in use by the calling thread
+/// ([`thread_allocated`]); never allocates, panics or unwinds.
+#[inline]
+fn net_add(size: usize) {
+    let _ = LOCAL.try_with(|l| l.net.set(l.net.get().wrapping_add(size)));
+}
+
+/// Counts `size` fewer bytes in use by the calling thread.
+#[inline]
+fn net_sub(size: usize) {
+    let _ = LOCAL.try_with(|l| l.net.set(l.net.get().wrapping_sub(size)));
 }
 
 impl Local {
@@ -204,18 +230,24 @@ impl Local {
     }
 
     /// Account for `size` more bytes in use (`size < THREAD_STOCK`); `None`
-    /// if the stock is not usable.
+    /// if the stock is not usable. Counts them in [`Local::net`] when they
+    /// are granted.
     #[inline]
     fn charge(&self, size: usize) -> Option<bool> {
         if !self.ready() {
             return None;
         }
         let s = self.stock.get();
-        if s >= size {
+        let ok = if s >= size {
             self.stock.set(s - size);
-            return Some(true);
+            true
+        } else {
+            self.refill(size - s)
+        };
+        if ok {
+            self.net.set(self.net.get().wrapping_add(size));
         }
-        Some(self.refill(size - s))
+        Some(ok)
     }
 
     /// The stock is `need` bytes short of a request: reserve those plus a
@@ -235,12 +267,14 @@ impl Local {
     }
 
     /// Account for `size` fewer bytes in use (`size < THREAD_STOCK`); false
-    /// if the stock is not usable.
+    /// if the stock is not usable. Counts them in [`Local::net`] when it
+    /// accounts for them.
     #[inline]
     fn credit(&self, size: usize) -> bool {
         if !self.ready() {
             return false;
         }
+        self.net.set(self.net.get().wrapping_sub(size));
         let s = self.stock.get() + size;
         if s > THREAD_STOCK_MAX {
             self.stock.set(THREAD_STOCK);
@@ -253,16 +287,25 @@ impl Local {
 }
 
 /// Account for an allocation of `size` bytes; false if it would exceed the
-/// hard limit.
+/// hard limit. A granted allocation is counted for the calling thread
+/// ([`thread_allocated`]).
 #[inline]
 fn charge(size: usize) -> bool {
     if size < THREAD_STOCK {
         if let Ok(Some(ok)) = LOCAL.try_with(|l| l.charge(size)) {
             return ok;
         }
-        return reserve_shared(size);
+        let ok = reserve_shared(size);
+        if ok {
+            net_add(size);
+        }
+        return ok;
     }
-    reserve_shared(size) || charge_with_stock(size)
+    let ok = reserve_shared(size) || charge_with_stock(size);
+    if ok {
+        net_add(size);
+    }
+    ok
 }
 
 /// A request of at least [`THREAD_STOCK`] bytes that the counter refused:
@@ -290,12 +333,14 @@ fn charge_with_stock(size: usize) -> bool {
         .unwrap_or(false)
 }
 
-/// Account for `size` bytes no longer in use.
+/// Account for `size` bytes no longer in use (and no longer counted for the
+/// calling thread).
 #[inline]
 fn credit(size: usize) {
     if size < THREAD_STOCK && matches!(LOCAL.try_with(|l| l.credit(size)), Ok(true)) {
         return;
     }
+    net_sub(size);
     release_shared(size);
 }
 
@@ -372,6 +417,24 @@ static GLOBAL: Guard = Guard;
 pub fn allocated() -> usize {
     let own = LOCAL.try_with(|l| l.stock.get()).unwrap_or(0);
     SHARED.reserved.load(Ordering::Relaxed).saturating_sub(own)
+}
+
+/// Bytes allocated by the calling thread so far minus the bytes it freed,
+/// through Rust's allocator: a wrapping counter (a thread that frees blocks
+/// another thread allocated can take it below an earlier reading), so read
+/// differences with [`thread_growth`]. Unlike [`allocated`] it does not
+/// move when other threads allocate (module docs, *Per-thread growth*).
+#[inline]
+pub fn thread_allocated() -> usize {
+    LOCAL.try_with(|l| l.net.get()).unwrap_or(0)
+}
+
+/// The calling thread's heap growth since `since`, an earlier reading of
+/// [`thread_allocated`] on the same thread: bytes allocated minus bytes
+/// freed by this thread in between (negative when it freed more).
+#[inline]
+pub fn thread_growth(since: usize) -> isize {
+    thread_allocated().wrapping_sub(since) as isize
 }
 
 /// The peak of the process-wide reservation so far: at least the peak of

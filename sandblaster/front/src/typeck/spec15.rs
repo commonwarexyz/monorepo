@@ -1155,7 +1155,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             let mut cx = Cx::new(&mut *self.ck, m, None, FnKind::Spec, true, Ty::Bool, GenScope::default(), vec![]);
             let x = cx.check(e, &Ty::Bool);
             let locals = std::mem::take(&mut cx.locals);
-            out.examples.push(Example { expr: x, locals, span: *span });
+            out.examples.push(Example { expr: x, locals, span: *span, text: super::example_text(e) });
         }
         if !syn.example_files.is_empty() {
             if sig.ret != Ty::Bool || sig.kind != FnKind::Spec {

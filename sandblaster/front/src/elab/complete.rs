@@ -416,8 +416,13 @@ impl<'a> Elab<'a> {
         for &id in exec.keys() {
             let path = krate.item(id).path.to_string();
             let mut cs: Vec<(&'static str, GlobalId)> = Vec::new();
-            if krate.fn_def(id).is_some_and(|f| f.ensures.is_some()) {
-                match env.lookup_global(&format!("{path}::ensures")) {
+            // the contract's `ensures`: `f::contract` when a proof file
+            // attached summaries (never part of the determinacy statement,
+            // DESIGN.md §15.6), else `f::ensures`
+            if let Some(f) = krate.fn_def(id)
+                && f.contract_ensures().is_some()
+            {
+                match env.lookup_global(&format!("{path}::{}", f.contract_lemma())) {
                     Some(g) if self.defs.iter().any(|d| d.global == Some(g) && d.status == DefStatus::Checked) => cs.push(("ensures", g)),
                     _ => failed_contracts.entry(id).or_default().push(format!("the `#[ensures]` of `{path}` did not verify")),
                 }

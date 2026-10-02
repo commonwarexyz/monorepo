@@ -9,18 +9,33 @@ use crate::merkle::proof::Subtree;
 use crate::sha256::{collision, collision_resistance, sha256};
 
 // ---------------------------------------------------------------------------
-// Preconditions of the position arithmetic the verifier calls (the panics
-// the code documents; the same statements as `sandblaster/mmr/LAWS.rs`)
+// Vocabulary: the bound (as in `sandblaster/mmr/LAWS.rs`)
 // ---------------------------------------------------------------------------
 
-/// `location_to_position` is for locations up to `MAX_LEAVES` (`2^62`).
-#[lift_attach(crate::merkle::mmr::Family::location_to_position)]
-fn location_to_position_pre() {
-    requires((loc.0 as Int) <= pow2(62));
+/// `MAX_LEAVES`: the largest valid location or leaf count.
+#[spec]
+#[example(max_leaves() == pow2(62))]
+pub fn max_leaves() -> Int {
+    pow2(62)
 }
 
-/// `children` is for a node of height `1 ≤ height < 64` (its left child
-/// `pos - 2^height` exists).
+// ---------------------------------------------------------------------------
+// Preconditions of the position arithmetic the verifier calls (what the
+// code's documentation makes callers guarantee; the same statements as
+// `sandblaster/mmr/LAWS.rs`)
+// ---------------------------------------------------------------------------
+
+/// `location_to_position` is for locations up to `MAX_LEAVES` (`2^62`), the
+/// trait's guaranteed domain (the code itself panics only from `2^63`).
+#[lift_attach(crate::merkle::mmr::Family::location_to_position)]
+fn location_to_position_pre() {
+    requires((loc.0 as Int) <= crate::laws::max_leaves());
+}
+
+/// `children` needs `height < 64` and `2^height <= pos` (the shift
+/// `1 << height` and the subtraction `pos - 2^height` must not overflow).
+/// The trait's caller guarantee `height > 0` is not needed by the code: at
+/// height 0 it returns `(pos - 1, pos - 1)`.
 #[lift_attach(crate::merkle::mmr::Family::children)]
 fn children_pre() {
     requires(height < 64u32 && pow2(height as Int) <= (pos.0 as Int));
@@ -108,22 +123,22 @@ fn location_sub_assign_pre() {
 // ---------------------------------------------------------------------------
 
 /// A subtree of height `height` whose root is at position `pos` and whose
-/// first leaf is at location `leaf_start` is at most 62 high, its leaves lie
-/// within `MAX_LEAVES` (`2^62`), and its root's position is at least that of
-/// the first node of its height (`2^(h+1) - 2`, the root of the leftmost tree
-/// of that height).
+/// first leaf is at location `leaf_start` has its `2^height` leaves within
+/// `MAX_LEAVES` (so it is at most 62 high), and its root's position is at
+/// least that of the first node of its height (`2^(h+1) - 2`, the root of
+/// the leftmost tree of that height).
 #[spec]
 #[example(shaped(2u64, 1u32, 0u64) && shaped(6u64, 2u32, 0u64) && shaped(5u64, 1u32, 2u64))]
 #[example(!shaped(1u64, 1u32, 0u64) && !shaped(0u64, 63u32, 0u64) && !shaped(2u64, 1u32, 4611686018427387903u64))]
 pub fn shaped(pos: u64, height: u32, leaf_start: u64) -> bool {
-    height <= 62u32 && (leaf_start as Int) + pow2(height as Int) <= pow2(62) && (pos as Int) + 2 >= pow2((height as Int) + 1)
+    (leaf_start as Int) + pow2(height as Int) <= max_leaves() && (pos as Int) + 2 >= pow2((height as Int) + 1)
 }
 
 /// A subtree the verifier can be given (`shaped`, of its fields).
 #[spec]
 #[opaque]
 pub fn well_shaped(s: Subtree) -> bool {
-    s.height <= 62u32 && (s.leaf_start.0 as Int) + pow2(s.height as Int) <= pow2(62) && (s.pos.0 as Int) + 2 >= pow2((s.height as Int) + 1)
+    (s.leaf_start.0 as Int) + pow2(s.height as Int) <= max_leaves() && (s.pos.0 as Int) + 2 >= pow2((s.height as Int) + 1)
 }
 
 /// `leaf_end` needs a well-shaped subtree.

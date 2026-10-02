@@ -58,6 +58,11 @@ FIXTURES = [
     ("mt_half", "mt_half", "a", "a.sbmir", []),
     ("mt_pair", "mt_pair", "a", "a.sbmir", []),
     ("mt_cmp", "mt_cmp", "a", "a.sbmir", []),
+    ("mt_ord", "mt_ord", "a", "a.sbmir", ["--skip-traits", "Debug,Display,Hash"]),
+    # tests/lock_surface.rs
+    ("lk_prim", "lk_prim", "a", "a.sbmir", []),
+    ("lk_paths", "lk_paths", "a,b", "ab.sbmir", []),
+    ("lk_host", "lk_host", "a,b", "ab.sbmir", ["--skip-fns", "Tick::left_out", "--items", "a::child="]),
     # tests/aug_int_toolchain.rs
     ("ai_err", "ai_err", "w", "w.sbmir", []),
     ("ai_signed", "ai_signed", "s", "s.sbmir", []),
@@ -82,6 +87,8 @@ FIXTURES = [
     ("opt_ip_inplace", "opt_ip_inplace", "bits,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
     # tests/build_loop.rs
     ("bl_mbits_edited", "bl_mbits_edited", "bits", "bits.sbmir", []),
+    # tests/in_place_cache.rs
+    ("ic_two", "ic_two", "a", "a.sbmir", []),
     # tests/lowered_use.rs
     ("lu_nested", "lu_nested", "outer,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
     ("lu_nested_line", "lu_nested_line", "outer,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),

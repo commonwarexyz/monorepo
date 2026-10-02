@@ -13,25 +13,25 @@
 //! `PeakIterator::to_nearest_size`): `mmr/mod.rs` declares `iterator` by
 //! its lowered declaration (sandblaster DESIGN.md §2.1, "Compiling the
 //! optimized output"); a rewrite the round trip rejects, or any failed
-//! proof, fails the build. The specification lock is not accepted yet, so this uses
-//! the development aid `compile_lifted_pending_gates` (to be removed before
-//! landing): the §15 gates are reported, not enforced, and it issues no
-//! verdict — it writes `OUT_DIR/mmr-pending.txt` (`NOT VERIFIED —
-//! DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES PENDING`) and a `NOT
-//! VERIFIED` stub as `OUT_DIR/mmr-verified.txt`. Once the lock is accepted
-//! this becomes `compile_lifted` (which also runs the lift conformance
-//! check of the in-place modules: it passes for the MMR; for the verifier
-//! below it finds no value mismatch but 16 `reconstruct_digest` inputs run
-//! out of the kernel's step budget, so it does not pass yet, see
-//! sandblaster `docs/mir-lift.md` §5).
+//! proof, fails the build. The MMR's specification lock is accepted
+//! (`sandblaster/mmr/SPEC.lock`), so this is `compile_lifted`: every §15 gate
+//! (including spec mutation), every per-function MIR theorem and the lift
+//! conformance check of the in-place modules must pass, and a passing build
+//! writes the verdict to `OUT_DIR/mmr-verified.txt`. An unchanged rebuild
+//! takes the cached verdict; a changed law needs `sandblaster spec --accept`.
 //!
 //! It also verifies the first set of the Merkle proof verifier in place
 //! (`sandblaster/verifier`: the hashing of `src/merkle/hasher.rs` at
 //! `Standard<Sha256>` and the subtree reconstruction of `src/merkle/proof.rs`),
 //! its bodies read from rustc's MIR too (`sandblaster/verifier/verifier.sbmir`;
 //! re-extract it after editing `hasher.rs`, `proof.rs` or the position
-//! files), with the same development aid: `OUT_DIR/verifier-pending.txt`.
+//! files). Its §15 gates are not complete yet (examples, sections and its
+//! lock), so it uses the development aid `compile_lifted_pending_gates` (to
+//! be removed before landing): proofs and MIR theorems are checked, the gates
+//! are reported, not enforced, and it issues no verdict
+//! (`OUT_DIR/verifier-pending.txt`, `NOT VERIFIED — DEVELOPMENT BUILD: PROOFS
+//! CHECKED, §15 GATES PENDING`).
 fn main() {
-    sandblaster::build::compile_lifted_pending_gates("sandblaster/mmr/mod.rs", "mmr");
+    sandblaster::build::compile_lifted("sandblaster/mmr/mod.rs", "mmr");
     sandblaster::build::compile_lifted_pending_gates("sandblaster/verifier/mod.rs", "verifier");
 }

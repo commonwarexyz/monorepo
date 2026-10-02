@@ -584,6 +584,28 @@ host/
   toolchain computed for byte-identical inputs, so it cannot turn a failure
   into a pass. On a miss the spec-mutation gate still reuses the verdicts of
   the spec mutants whose inputs did not change (§15.8, *Gate mode*).
+* **In place** (`compile_lifted`, `driver::in_place`): the same, with the
+  verdict key extended by the **host inputs** of the lift conformance check
+  (`conform::host_inputs`), which compiles a copy of the host crate: every
+  file under `src/`, the copy's manifest, the workspace manifest and lock,
+  the features (so, unlike module mode, the host's features are part of
+  the key), every file of each path dependency in the closure of the
+  host's normal and build dependencies (but its `tests/`, `benches/`,
+  `examples/`, `target/` and nested packages, as the toolchain identity
+  reads the toolchain's crates), `cargo -V`, the cargo configuration files
+  and the environment that changes how cargo builds the copy; the build
+  script watches the dependencies' files too. The shared cache holds the
+  whole verdict (every output the build writes to `OUT_DIR`: record,
+  report, timing, lowered copies, their index, the round-trip copies). On
+  a miss each part keeps its own cache: the spec mutants, the theorem
+  gate's verdicts (replayed through the kernel) and the lift conformance
+  pass (module mode's too), whose key covers only what the check reads —
+  the sources, the host models, the MIR and contracts, the host inputs and
+  a position-independent fingerprint of every item but laws, lemmas and
+  proofs (the input pools draw on the crate's constants, the precondition
+  checkers call its spec functions) — so editing a law, a proof or the lock
+  re-verifies without re-running it. A pending-gates build stores no
+  verdict but uses those three caches.
 * Several verified modules in one crate: one `compile_module` call per
   module file, each with its own output name (a repeated name fails).
 * The lock is the root's, as in crate mode (`sandblaster spec <root> --accept`).
@@ -1469,6 +1491,17 @@ deterministically in source order.
 * Dependent match idiom: `match c as y return Π(e :Irr Eq(D, c, y)). R with
   arms` applied to `refl`; each arm receives the path equation as an `Irr`
   binder.
+* **Relevant slots.** A lemma's `requires` are relevant hypotheses (its
+  proof may case on them), so the obligations of a lemma call are proven in
+  relevant position. The provers do not track relevance: when a proof is
+  valid only in an irrelevant position (it uses an irrelevant fact, such as
+  a `use_hyp` instance or a path condition) and the proposition carries no
+  information (equations, `Unit`, `Empty`, and `Π`, `Σ` and propositions by
+  cases — a `match`/`if` in a statement, `&&` on booleans — built from
+  them), the elaborator promotes it — `eq::promote` at each equation, under
+  the same case split — instead of handing the kernel an irrelevant
+  variable in a relevant position. A proposition whose proofs carry
+  information (`∨`, `∃`) still needs a relevant proof.
 
 ### 7.3 Exec functions
 
@@ -1486,7 +1519,10 @@ For `fn f<T..>(x: A..) -> R` with requires `P₁..Pₙ` and ensures `Q`:
   walking the body: at each tail value `v` the prover proves `Q[x, v]` in that
   branch's context; branches combine with the same dependent matches; `Delta`
   unfolds recursive `f`; recursive calls get facts from recursive calls to
-  `f::ensures`.
+  `f::ensures`. A call of an opaque function `g` written in `Q` brings
+  `g::ensures` as a fact of that proof, as a call in the body does, so a
+  contract may name a value through a function callers know by its
+  contract.
 
 ### 7.4 Loops (normative desugaring)
 
@@ -1558,7 +1594,17 @@ an `AutoFailure`. Steps iterated to a fixpoint within the budget:
    `abstract_occurrences`), then renormalize.
 7. **Axiom instantiation** for atoms headed by `min, max, sat_sub, sat_add,
    div, rem, wshr, wshl, and, or, cast, count_ones`; piecewise ones become case
-   splits on their comparison.
+   splits on their comparison. A product `a·b` of two non-literal factors
+   gets `mul_mono` instances, each linear in the atom and its factors:
+   `0 ≤ a·b` for nonnegative factors, `b ≤ a·b` for `1 ≤ a` (and the mirror
+   image), `a·b ≤ U·b`, `a·b ≤ a·V`, `a·b ≤ U·V` for literal bounds `a ≤ U`,
+   `b ≤ V`. **Lemma instantiation** (checked lemmas of the bundled
+   library): a complement `!x` is `MAX − x` (`bits::not_val_<w>`); for a
+   goal about exponents (each goal atom occurs in the exponent of a `pow2`
+   atom, and the negated goal pushes an exponent up), `x ≤ ⌊log₂ U⌋` from a
+   provable `pow2(x) ≤ U` (`nat::pow2_lt_rev`), only when those bounds
+   refute the negated goal, and not inside the probes of steps 5 and 8
+   (a fact refuted by its opposite, a comparison decided both ways).
 8. **Arithmetic decision** of stuck comparisons in target and facts by
    linarith, rewriting them to `true`/`false`.
 9. **Arithmetic congruence:** when an equality fails to convert only because
@@ -2915,6 +2961,55 @@ must be **determined** by the specification: immediately by `#[refines]`
 with determinacy (§15.2), otherwise by a kernel-checked obligation per
 section.
 
+* **Every host-callable function (normative).** "Exported" means callable
+  by host code: besides the `pub use` list and the `pub` methods of the
+  types it reaches, every function of an in-place lifted module
+  (SEMANTICS.md §19.5) — the host's own file, whose functions the rest of
+  the host crate calls directly whether or not the DSL root re-exports
+  them — that host code can name:
+  - every non-private function (`pub`, `pub(crate)`, `pub(super)`), free
+    or a method: `mmr::iterator::pos_to_height` is a `pub(crate) const
+    fn`; a `pub(crate)` method counts like a `pub` one, and so do the
+    methods of a type of the module that the DSL root does not re-export
+    (host code holds its values all the same). Among them are the impls
+    on primitives, which the lift makes free functions (`u64 == Position`
+    is `u64__eq__Position`, `u64::from(pos)` is `u64__from__Position`; a
+    sealed trait's method on `u16` is the `pub(crate)` function
+    `Trait__u16__m`), the methods of trait impls, and the associated
+    constants it reads as constant functions (`Family__MAX_NODES`);
+  - every private function and private inherent method that the host
+    source declares, when the module has a **host child module**: a
+    module the lift leaves out — a `mod m;` that is not a lifted child, a
+    feature-gated module, a module an item macro of another crate declares
+    (`cfg_if!`) — other than a `#[cfg(test)]` one (or `cfg(all(test,
+    ..))`; a `cfg(not(test))` or `cfg(any(test, ..))` module, compiled
+    outside tests, is a host child). Rust lets a module's
+    descendants call its private items, and the lift does not read the
+    child's code, so every private function of the module counts, whether
+    or not the child calls it (by name, not by use: precise to the
+    module, an over-approximation within it). `mmr/mod.rs` has host
+    children (`batch`, `mem`, `proof`, …), so a private function it
+    declared would be on the boundary; a module whose only child is
+    `mod tests` keeps its private functions internal.
+
+  A loop helper the lift splits off stays internal, and so does every
+  private function of a module without host children. The module's *own*
+  left-out code — an `unverified_fns` method, an `unverified_impls` impl,
+  an item outside `items = ..`, a feature-gated item — can call its
+  private functions too: the lift records the names that code calls and
+  the build reports each private function it calls as a warning
+  (`validate::left_out_callers`), but does not yet count it. The one
+  instance today is the verifier's `Subtree::reconstruct_digest` (and
+  `is_outside`, `is_inside`, `children`, `is_before`), called by the
+  left-out `Proof::reconstruct_root_inner` and `Subtree::collect_*`:
+  counting them needs `reconstruct_digest`'s depth bound stated in the
+  verifier's laws file and a decision on depth bounds of in-place
+  functions as host obligations (§3.1 refuses a depth bound on a boundary
+  function; a `requires` there is a host obligation). The host-callable
+  functions are boundary functions: §15.5 requires their contracts and
+  the lock holds them (`validate::in_place_host_fns`,
+  `validate::host_visible`, `hir::HostAccess`).
+
 * **Sections are computed, never declared.** They are the strongly connected
   components of the graph "law or contract mentions exec function",
   restricted to functions not determined by `#[refines]`, ordered by a
@@ -2994,8 +3089,12 @@ section.
 * **Discharges (by `auto`):** refinement (transitivity through views; the
   refinement hypothesis of a member rewrites it first, which keeps large
   sections easy); exact characterizations of boolean functions
-  `f(x) == true ↔ P(x)` (split on both results); recursive equations
-  (induction with `ih`).
+  `f(x) == true ↔ P(x)` (split on both results); extensionality of the
+  lift prelude's enums (the checked lemmas `partial_ordering_ext` and
+  `ordering_ext` of `crate::__lift_model`, applied at the two results with
+  their premises closed from the hypotheses: a contract that says how `<`,
+  `<=`, `>`, `>=` read `partial_cmp`'s answer determines it); recursive
+  equations (induction with `ih`).
 * **Domain.** Determinacy is over inputs satisfying `requires`. Every
   `requires` of a function in a section, and of every `#[refines]` target,
   must not be refuted by the §10 non-vacuity refuter and must be met by an
@@ -3032,12 +3131,64 @@ trust the crate, the **review surface**, defined deterministically
 Everything else is a **proof internal** and never locked: helper spec fns
 that only proofs use and their examples, invariants (e.g. `#[lift_attach]`
 ones) of types no statement mentions, contracts of functions no statement
-mentions, lemmas and proofs. A proof refactor therefore never changes the
+mentions, lemmas and proofs.
+
+**A lifted crate's lock is its laws file (normative).** The reviewer reads
+one thing: the laws file (`LAWS.rs`, the ghost `#[lift]` module `laws`) and
+the vocabulary it needs. So a lifted function's **contract** — what the
+lock holds and what §15.5 takes as its hypothesis — is the `ensures` the
+laws file attaches, alone. An `ensures` a proof file attaches (any other
+ghost `#[lift]` module, `PROOF.rs`) is a **proof-internal summary**: it is
+proven with the contract (the lift conjoins both into the function's
+`ensures`, the fact at every call site) but never locked and never part of
+a determinacy statement; when both exist the contract is the lemma
+`f::contract`, proven from `f::ensures`. Nothing a proof file defines
+(`crate::proof::*`) is ever on the review surface: a locked statement that
+reaches one — a law, a laws-file contract, a boundary signature — is a
+surface error, and the lock refuses it (`surface::proof_file_errors`).
+Preconditions are part of the function's type wherever they are written,
+so on a **locked item** only the laws file may attach them: a `requires`
+or a depth bound (`decreases(.., max = ..)`) a proof file attaches to a
+function whose signature or contract is locked — a boundary function, or
+a function a law or contract mentions — or an invariant it attaches to a
+locked type (a boundary type, a type the vocabulary mentions, the
+invariant item itself), is a surface error naming the item and the proof
+file (`surface::attached_proof_file_errors`); the same attachment from
+the laws file is the locked contract. An attachment names its target by its **full
+path**: `crate::m::f` for a function of the lifted module `crate::m`,
+`crate::m::S::f` for a method of a struct `S` declared in `crate::m`,
+`crate::m::S` for its invariant. A path whose module does not hold the
+item is refused, naming where it is, and same-named functions of two
+lifted modules (`crate::a::f`, `crate::b::f`) get separate contracts. A
+function of an impl on a primitive is named by its lifted name
+(`#[lift_attach(crate::merkle::position::u64__from__Position)]`), so
+`From<Position> for u64` and `From<Location> for u64` get separate
+contracts; the bare method name (`crate::m::from`) still attaches when
+one impl of the module answers to it (a trait's impls on several
+primitives are instances of one method) and is refused, naming the
+candidates, when several do. The source text `SPEC.lock` hashes for an
+attached statement (`src`) is the statement as its own file wrote it
+(`hir::Attached`): the spliced tokens keep their file's line and column,
+so a line added elsewhere in the laws file changes no hash, while an edit
+of the statement changes its item's. Only the laws file's statements
+enter it: a proof file's `ensures` is a summary, and its plain
+termination measure (`decreases(e)`, no depth bound) is proof text. A
+lifted function's own part of `src` is its signature's text as the lift
+reads it (`hir::FnDef::sig_text`: the lifted signature's tokens,
+flattened), not a host-file snippet: the lift rewrites tokens
+(`Self::Output` read as the type it names) that keep spans from elsewhere
+in the host file, so the signature's span covers no contiguous text. An
+`#[example]` of the laws file is hashed by its expression's tokens,
+flattened (`hir::Example::text`), for the same reason: the lift re-emits
+the laws file's attributes without spans, so an edit of a known answer
+changes its `src`, and a move or a new layout does not. A proof refactor therefore never changes the
 lock; a change of a law, of its vocabulary, of a known answer of the
 vocabulary or of a boundary signature always does. The kept set is closed
 under dependencies, so no kept item's hash depends on an internal. Proof
-internals still pass every gate (spec closure, examples and coverage, spec
-mutation): they leave the lock, not the build. (Behavior snapshots and the
+internals still pass the other gates (spec closure, examples and coverage):
+they leave the lock, not the build. Spec mutation, which validates the
+specification a reviewer trusts, mutates the review surface only (§15.9,
+*Which spec functions the gate mutates*). (Behavior snapshots and the
 unconstrained-behavior report, once implemented, are roots.) The varint
 pilot's lock went from 360 items to 116: the 244 proof internals left are
 63 spec fns no statement uses (57 PROOF.rs helpers, 6 lift-model functions)
@@ -3063,7 +3214,11 @@ kept entry changed. There are no user axioms (§5.10 is fixed).
   established exec function; the file hash for prelude and builtin globals;
   and an error for any other exec global. The header records the lock
   format, the kernel, prelude, SEMANTICS, builtins and target-model hashes,
-  and every section (`R`, `P`, `Deps`, `H(complete_p)`).
+  for a lifted crate the `lift` hash of the lift prelude (`lift/prelude.rs`,
+  `lift/model.rs`: the definitions its contracts read — `ord_lt` …
+  `ord_ge` read `<` … `>=` from `partial_cmp`'s answer,
+  `range_inclusive_u32` builds `a..=b`, the buffer model), and every
+  section (`R`, `P`, `Deps`, `H(complete_p)`).
 * **Enforcement.** The set of entries must equal the computed surface
   exactly; a missing lock, or any added, removed or changed item, is
   `error[spec-lock]` naming each item (the lock gate of every build).
@@ -3118,8 +3273,10 @@ checks:
   lowering and compared with kernel evaluation on random and boundary inputs
   (the §10.3 harness), because elaboration of the ghost language is TCB for
   the meaning of specs (§1.1 item 6).
-* **Spec mutation.** The §15.9 operators applied to spec fns must be killed
-  by examples or the oracle; a surviving spec mutant is an error.
+* **Spec mutation.** The §15.9 operators applied to the spec fns and spec
+  constants of the review surface (§15.6) must be killed by examples or the
+  oracle; a surviving spec mutant is an error. Proof internals are not
+  mutated (§15.9, *Which spec functions the gate mutates*).
 * **External differential evidence**: the oracle (§14.5, `qmdb/oracle`)
   compares the spec's behaviour against production Commonware on generated
   and fuzzed corpora; disagreements are spec bugs (or production bugs).
@@ -3170,28 +3327,41 @@ states a crate verdict (`sandblaster::build::compile`, the CLI's `check`,
 SHA-256 of the emitted file.
 
 **Gate mode of the counterexample engine.** The spec-mutation gate runs
-every spec mutant, with no cap, no deadline and no environment variable
+every spec mutant of the review surface (§15.9, *Which spec functions the
+gate mutates*), with no cap, no deadline and no environment variable
 (the `SANDBLASTER_MUTANTS_*` variables shape only `sandblaster coverage`'s
 exploration run), on the build's own elaboration as the baseline. Only an
 example (vector records included) or a definite counterexample to a law can
 kill a spec mutant (§15.7), so a mutant's re-check elaborates only its spec
 closure — the mutated spec item and the spec functions that use it, with
 their examples — and the `bool` checkers of the laws in its closure, never
-proofs or the implementation. Its known answers run one per elaboration,
+proofs or the implementation. The elaboration's item filter
+(`elab::order::filter_closure`) closes these over references and adds what
+every elaboration of the build has without a reference reaching it: the
+`#[bridges]` lemmas (rules of `auto` in every proof) and every type with
+what its invariant, view and representation relation mention (types are
+always elaborated). The part of the crate a batch re-elaborates must
+re-verify as in the build — the functions the law checkers call are proven
+again — or the batch's mutants are not run (incomplete, an error). Its
+known answers run one per elaboration,
 stopping at the first kill: the `#[example]`s nearest the mutated item
 first, then the smallest vector file (stopping at its first failing
 record); then the distinguishing search — a survivor without a
 distinguishing input is possibly equivalent, which passes, so the larger
 vector files run only for a survivor with a witness. Batches run on up to
-four threads (a resource setting; verdicts are per mutant).
+four threads (a resource setting; verdicts are per mutant): the prover's
+per-goal heap cap counts the goal's own thread (memguard's per-thread
+count), so one batch's growth never trips another batch's goals.
 **Incremental spec mutation**: with the verdict cache (§2.1), a spec
 mutant's verdict is stored under a key that covers everything its re-check
 reads — the toolchain, the gate options, the mutant (item, operator, site,
 diff), its plan (closure, known answers, observation points) and a
 position-independent fingerprint (HIR without spans, indices replaced by
 paths) of every item reachable from its clones, law checkers and compared
-functions — so an edit re-runs exactly the mutants whose statement or code,
-or the code of something they read, changed. Resource outcomes (not run,
+functions, and of what every batch elaborates whatever its mutants reach
+(the `#[bridges]` lemmas and every type, with what they mention:
+`elab::order::filter_closure`) — so an edit re-runs exactly the mutants
+whose statement or code, or the code of something they read, changed. Resource outcomes (not run,
 killed only by budget) are never stored; a stored outcome restores the
 verdict, its witnesses and its LR8 records, so the report is the same as a
 cold run's. The hit and miss counts are in `<out>-timing.json`, never in
@@ -3261,6 +3431,29 @@ batches and re-elaborates from scratch every N mutants or at a memguard
 soft-limit fraction (the kernel `Env` has no removal). A definite
 counterexample may be emitted as a kernel-checked refutation of
 `complete_p(R)`.
+
+**Which spec functions the gate mutates.** Spec mutation (§15.7) validates
+the specification a reviewer trusts, so the gate (§15.8, *Gate mode*)
+mutates the spec functions and spec constants of the **review surface**
+(§15.6): the vocabulary of the locked statements, the toolchain's libraries
+included where a locked statement uses them (a law over `aligned` puts
+`stdlib::bits::aligned` on the surface, and its survivors need known answers
+there). A **proof internal** — a spec function only proofs use: a
+`PROOF.rs` helper, a library or lift-model function no locked statement
+mentions — is not mutated, and the report lists it
+(`proof_internals_not_mutated`). Nothing a reviewer trusts depends on its
+definition: whatever it is, the locked statements are proven from it or
+the build fails, so a surviving mutant of it is no gap in the
+specification. The known answer that would kill it has no independent
+source either — no standard defines a proof helper — so demanding one
+would make agents restate proof helpers from their own definitions (the
+self-derived answers §15.7 does not count), and a proof refactor, which
+never changes the lock, would ask for new ones. A vocabulary mutant is
+killed, as before, by a law or by a known answer of a spec function of its
+closure (a proof internal's example over the vocabulary is a
+kernel-checked fact about it). `sandblaster coverage` still explores every
+spec function. (Proof internals still need examples for the coverage gate,
+§15.7.)
 
 ### 15.10 Reporting
 
@@ -3374,7 +3567,8 @@ coverage gate exempts a break predicate (`collision`, the last disjunct of a
   chain; the only producer of a `CrateVerdict` and of the lock-accept
   permit), with the stage APIs in `driver::stage` (header
   `STATUS: STAGE OUTPUT`, rejected by every consumer of crate output), one
-  lock per root, the engine's gate mode (every spec mutant; known answers
+  lock per root, the engine's gate mode (every spec mutant of the review
+  surface; known answers
   nearest first, one per elaboration, stopping at the first kill; a filtered
   elaboration of only the mutant's spec closure and law checkers, on up to
   four threads; measured on the S1 SHA-256 sample: 1526 spec mutants in

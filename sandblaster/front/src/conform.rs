@@ -49,9 +49,14 @@
 //!
 //! Bounded (a fixed evaluation budget per function; seconds for the varint
 //! pilot's 64 functions) and cached: a pass is recorded in the work
-//! directory under a key over this check's version, the toolchain identity,
-//! the source, the host models, both shims, the entries, the edition and
-//! `rustc -vV`; the same key skips the check and replays the recorded
+//! directory and in the shared verdict cache (`driver::cache`, namespace
+//! [`CACHE_NS`]) under a key over this check's version, the toolchain
+//! identity, the source, the host models, both shims, the entries, the
+//! edition, `rustc -vV`, the MIR and contracts the literal reading reads,
+//! and a position-independent fingerprint of every item of the DSL crate
+//! but its laws, lemmas and proofs ([`items_key`]: the input pools draw on
+//! the crate's constants, the precondition checkers call its spec
+//! functions); the same key skips the check and replays the recorded
 //! report ([`Record`]), so the report, its summary and the emitted header
 //! are the same bytes whether the check ran or was cached (the wall-clock
 //! time is not part of any of them).
@@ -82,7 +87,7 @@ use crate::surface::{hex, sha256};
 
 mod in_place;
 mod literal;
-pub use in_place::check_in_place;
+pub use in_place::{check_in_place, host_inputs, HostInputs};
 pub use literal::LITERAL_CASES;
 
 /// This check's version (part of the cache key).
@@ -127,13 +132,17 @@ pub struct Config {
     /// names: upper case, `_` for `-`); `None` or none enabled: the
     /// default features.
     pub features: Option<Vec<String>>,
+    /// The build's environment variables that change how cargo builds the
+    /// in-place harness (`in_place::affects_cargo`; the copy inherits them):
+    /// part of its key. Empty outside a build.
+    pub build_env: Vec<(String, String)>,
 }
 
 impl Config {
     /// A configuration outside a build (no host crate: in-place modules
     /// cannot be checked).
     pub fn new(rustc: PathBuf, work_dir: PathBuf, edition: &str, toolchain_id: &str) -> Config {
-        Config { rustc, work_dir, edition: edition.into(), toolchain_id: toolchain_id.into(), manifest_dir: None, cargo: PathBuf::from("cargo"), features: None }
+        Config { rustc, work_dir, edition: edition.into(), toolchain_id: toolchain_id.into(), manifest_dir: None, cargo: PathBuf::from("cargo"), features: None, build_env: Vec::new() }
     }
 
     /// The configuration of a module-mode build: `RUSTC` (else `rustc`),
@@ -149,6 +158,7 @@ impl Config {
             manifest_dir: Some(manifest_dir.to_path_buf()),
             cargo: PathBuf::from(env("CARGO").unwrap_or_else(|| "cargo".into())),
             features: Some(std::env::vars().filter_map(|(k, _)| k.strip_prefix("CARGO_FEATURE_").map(str::to_string)).collect()),
+            build_env: std::env::vars().filter(|(k, _)| in_place::affects_cargo(k)).collect(),
         }
     }
 }
@@ -406,9 +416,10 @@ pub fn check(out: &mut elab::Output, krate: &Crate, c: &Checked, info: &LiftedIn
     k.push_str(&format!("entries {}\n", hex(&sha256(format!("{entries:?}{:?}{:?}", c.lift_facts.instances, c.lift_facts.test_hook).as_bytes()))));
     k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED} {LITERAL_CASES}\n"));
     k.push_str(&literal_key(c));
+    k.push_str(&items_key(krate));
     rep.key = hex(&sha256(k.as_bytes()));
     let key_path = cfg.work_dir.join("conformance.key");
-    if let Some(r) = std::fs::read_to_string(&key_path).ok().and_then(|t| Record::parse(&t, &rep.key)) {
+    if let Some(r) = recorded_pass(c, &key_path, &rep.key) {
         r.replay(&mut rep);
         rep.cached = true;
         rep.elapsed = t0.elapsed();
@@ -436,9 +447,58 @@ pub fn check(out: &mut elab::Output, krate: &Crate, c: &Checked, info: &LiftedIn
     }
     rep.elapsed = t0.elapsed();
     if rep.passed() {
-        let _ = std::fs::write(&key_path, Record::of(&rep).render());
+        record_pass(c, &key_path, &rep);
     }
     rep
+}
+
+/// The shared verdict cache's namespace of passes of this check
+/// (`driver::cache`): an entry is a [`Record`] under the check's key.
+pub const CACHE_NS: &str = "conformance";
+
+/// A recorded pass under `key`: the work directory's record, else the
+/// shared verdict cache's entry (the build's, `Checked::cache`; a new target
+/// directory reuses the pass of another one). An entry of another key, a
+/// malformed record or an entry that fails its integrity check is a miss.
+pub(crate) fn recorded_pass(c: &Checked, key_path: &Path, key: &str) -> Option<Record> {
+    if let Some(r) = std::fs::read_to_string(key_path).ok().and_then(|t| Record::parse(&t, key)) {
+        return Some(r);
+    }
+    let vc = c.cache.as_deref()?;
+    match vc.store.get(CACHE_NS, key) {
+        crate::driver::cache::Lookup::Hit(files) => files.iter().find(|(n, _)| n == "record").and_then(|(_, t)| Record::parse(t, key)),
+        _ => None,
+    }
+}
+
+/// Records a pass: in the work directory and in the shared verdict cache
+/// (a failure to write either only costs a re-run).
+pub(crate) fn record_pass(c: &Checked, key_path: &Path, rep: &Report) {
+    let text = Record::of(rep).render();
+    let _ = std::fs::write(key_path, &text);
+    if let Some(vc) = c.cache.as_deref() {
+        let _ = vc.store.put(CACHE_NS, &rep.key, &[("record", text.as_str())]);
+    }
+}
+
+/// The part of the cache key that the DSL crate adds (both modes): a
+/// position-independent fingerprint ([`crate::mutate::cache::Fps`]) of
+/// every item but laws, lemmas and proofs. The check reads the lifted
+/// functions and the host models, the constants the input pools draw from,
+/// the types whose invariants filter inputs, and the spec functions the
+/// precondition checkers call (which may live in any file of the DSL
+/// crate); it never reads a law, a lemma or a proof, so editing one, or
+/// moving code, leaves the key unchanged.
+pub fn items_key(krate: &Crate) -> String {
+    let fps = crate::mutate::cache::Fps::new(krate);
+    let mut lines: Vec<String> = krate
+        .items
+        .iter()
+        .filter(|it| !matches!(&it.kind, ItemKind::Fn(f) if matches!(f.kind, FnKind::Law | FnKind::Lemma | FnKind::Proof)))
+        .map(|it| format!("{} {}", it.path, fps.item(it.id)))
+        .collect();
+    lines.sort();
+    format!("items {}\n", hex(&sha256(lines.join("\n").as_bytes())))
 }
 
 /// A recorded pass (`conformance.key` in the work directory): the key and

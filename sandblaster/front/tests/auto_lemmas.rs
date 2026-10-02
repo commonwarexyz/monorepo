@@ -328,6 +328,8 @@ fn bits_core_lemmas_load() {
                 "eq_zero_false_pos",
                 "lz_ge_one",
                 "popcnt_shr1",
+                "bit1_flip",
+                "not_val",
                 "wadd_exact",
                 "wsub_exact",
                 "wmul_exact",

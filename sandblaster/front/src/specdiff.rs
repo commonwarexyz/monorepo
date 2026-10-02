@@ -781,7 +781,7 @@ pub fn sheet(root: &str, s: &Surface, status: &LockStatus, changes: &[Change]) -
     ));
     o.push_str(&format!("SPEC.lock ({}): {}\n", status.file, status.summary()));
     if !s.internal.is_empty() {
-        o.push_str(&format!("Proof internals (checked by every gate, not locked: helper spec functions, their examples, invariants and contracts no statement mentions): {}\n", s.internal.len()));
+        o.push_str(&format!("Proof internals (not locked and not mutated, checked by the other gates: helper spec functions, their examples, invariants and contracts no statement mentions): {}\n", s.internal.len()));
     }
     for h in &status.header {
         o.push_str(&format!("  toolchain differs: {h}\n"));

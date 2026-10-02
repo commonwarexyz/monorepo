@@ -40,6 +40,7 @@ const FIXTURES: &[(&str, &str)] = &[
     (include_str!("mir_fixtures/mt_half/src/a.rs"), include_str!("mir_fixtures/mt_half/a.sbmir")),
     (include_str!("mir_fixtures/mt_pair/src/a.rs"), include_str!("mir_fixtures/mt_pair/a.sbmir")),
     (include_str!("mir_fixtures/mt_cmp/src/a.rs"), include_str!("mir_fixtures/mt_cmp/a.sbmir")),
+    (include_str!("mir_fixtures/mt_ord/src/a.rs"), include_str!("mir_fixtures/mt_ord/a.sbmir")),
 ];
 
 /// The files, and rustc's MIR of the lifted `src/a.rs` beside the DSL root
@@ -227,6 +228,59 @@ fn a_host_function_in_a_law_is_not_a_trusted_dependency() {
     let deps: Vec<&(String, DepHow)> = secs.iter().flat_map(|(_, d)| d).collect();
     assert!(!deps.iter().any(|(d, h)| d == "crate::a::lt" && *h == DepHow::Prelude), "{secs:?}");
     assert!(deps.iter().any(|(d, h)| d == "crate::__lift::ord_lt" && *h == DepHow::Prelude), "{secs:?}");
+}
+
+// ---------------------------------------------------------------------
+// extensionality of the prelude's enums in completeness proofs
+// ---------------------------------------------------------------------
+
+/// The sections of a lifted crate: members, fully specified, and how each
+/// `complete_p` was proven.
+fn section_proofs(files: &[(&str, &str)]) -> Vec<(Vec<String>, bool, Vec<String>)> {
+    let c = front_ok(files);
+    let k = c.krate.clone().unwrap();
+    let kr = &k;
+    sandblaster_front::elab::with_big_stack(move || {
+        let mut chain = sandblaster_front::elab::ProverChain::standard();
+        let out = sandblaster_front::elab::elaborate(kr, &mut chain, &sandblaster_front::elab::Options::default());
+        out.sections.iter().map(|s| (s.members.iter().map(|m| kr.item(*m).path.to_string()).collect(), s.fully_specified(), s.statements.iter().map(|c| c.proof.clone()).collect())).collect()
+    })
+}
+
+/// `mt_ord`: a newtype `P` whose `partial_cmp` is `Some(self.cmp(other))`
+/// and whose `cmp` compares the values (`Position`'s impls).
+const ORD: &str = include_str!("mir_fixtures/mt_ord/src/a.rs");
+
+/// `P`'s contracts as the MMR's laws state `Position`'s: `cmp` by an
+/// opaque spec function, `partial_cmp` by the four tests, `partial_cmp`
+/// opaque to its callers; `tests` is `partial_cmp`'s contract.
+fn ord_files(tests: &str) -> (String, String) {
+    let laws = format!(
+        "use sandblaster::prelude::*;\n\n/// The ordering of two numbers.\n#[spec]\n#[opaque]\n#[example(ord_of(1, 2) == crate::__lift::Ordering::Less && ord_of(2, 2) == crate::__lift::Ordering::Equal)]\npub fn ord_of(a: Int, b: Int) -> crate::__lift::Ordering {{\n    if a < b {{ crate::__lift::Ordering::Less }} else if a == b {{ crate::__lift::Ordering::Equal }} else {{ crate::__lift::Ordering::Greater }}\n}}\n\n#[lift_attach(crate::a::P::new)]\nfn p_new() {{\n    ensures(|ret: crate::a::P| ret == crate::a::P(x));\n}}\n\n#[lift_attach(crate::a::P::eq)]\nfn p_eq() {{\n    ensures(|ret: bool| ret == (self.0 == other.0));\n}}\n\n#[lift_attach(crate::a::P::cmp)]\nfn p_cmp() {{\n    ensures(|ret: crate::__lift::Ordering| ret == crate::laws::ord_of(self.0 as Int, other.0 as Int));\n}}\n\n#[lift_attach(crate::a::P::partial_cmp)]\nfn p_partial_cmp() {{\n    {tests}\n}}\n"
+    );
+    let proof = "use sandblaster::prelude::*;\n\n#[lemma]\nfn ord_def(a: Int, b: Int) {\n    ensures(crate::laws::ord_of(a, b) == (if a < b { crate::__lift::Ordering::Less } else if a == b { crate::__lift::Ordering::Equal } else { crate::__lift::Ordering::Greater }));\n    by_unfolding(crate::laws::ord_of);\n}\n\n#[lift_attach(crate::a::P::cmp)]\nfn p_cmp_facts() {\n    at_start! {\n        crate::proof::ord_def(self.0 as Int, other.0 as Int);\n    }\n}\n\n#[lift_attach(crate::a::P::partial_cmp)]\nfn p_partial_cmp_facts() {\n    opaque();\n    at_start! {\n        crate::proof::ord_def(self.0 as Int, other.0 as Int);\n    }\n}\n".to_string();
+    (laws, proof)
+}
+
+#[test]
+fn auto_determines_a_comparison_by_extensionality() {
+    // no `#[proof(complete = ..)]`: `auto` applies the prelude's
+    // `partial_ordering_ext` (the four tests tell the four answers apart),
+    // where rewriting with the hypotheses alone does not close it
+    let (laws, proof) = ord_files("ensures(|ret: Option<crate::__lift::Ordering>| crate::__lift::ord_lt(ret) == (self.0 < other.0) && crate::__lift::ord_le(ret) == (self.0 <= other.0) && crate::__lift::ord_gt(ret) == (self.0 > other.0) && crate::__lift::ord_ge(ret) == (self.0 >= other.0));");
+    let secs = section_proofs(&[(R, &lifted_root()), (A, ORD), (L, &laws), (P, &proof)]);
+    let s = secs.iter().find(|(m, _, _)| m.iter().any(|x| x == "crate::a::P::partial_cmp")).unwrap_or_else(|| panic!("{secs:?}"));
+    assert!(s.1, "`partial_cmp` is not determined: {secs:?}");
+    assert!(s.2.iter().any(|p| p.contains("extensionality")), "{secs:?}");
+}
+
+#[test]
+fn extensionality_needs_every_test() {
+    // the twin: `<` alone does not tell `Equal`, `Greater` and `None` apart
+    let (laws, proof) = ord_files("ensures(|ret: Option<crate::__lift::Ordering>| crate::__lift::ord_lt(ret) == (self.0 < other.0));");
+    let secs = section_proofs(&[(R, &lifted_root()), (A, ORD), (L, &laws), (P, &proof)]);
+    let s = secs.iter().find(|(m, _, _)| m.iter().any(|x| x == "crate::a::P::partial_cmp")).unwrap_or_else(|| panic!("{secs:?}"));
+    assert!(!s.1, "`partial_cmp` is determined by `<` alone: {secs:?}");
 }
 
 // ---------------------------------------------------------------------

@@ -17,10 +17,10 @@
 use std::rc::Rc;
 
 use sandblaster_kernel::api::{Ctx, CtxEntry, Env};
-use sandblaster_kernel::term::{GlobalId, IndId, Lvl, Name, Rel, Term, Tm};
+use sandblaster_kernel::term::{GlobalId, Idx, IndId, Lvl, Name, Rel, Term, Tm};
 use sandblaster_kernel::value::{Budget, EnvEntry, EvalError, V, VEnv};
 
-use super::util::{fold_array_eta, occurs, shift, var_at, venv_push};
+use super::util::{fold_array_eta, var_at, venv_push};
 use crate::prover::FactOrigin;
 
 /// Where a fact of the search came from.
@@ -237,15 +237,127 @@ impl St {
     }
 
     /// Close this frame's wrappers around `body` (a term at the current
-    /// depth). Unused lets are dropped.
-    pub fn finish(&self, mut body: Tm) -> Tm {
-        for w in self.wraps.iter().rev() {
+    /// depth). Unused lets are dropped ([`close_wraps`]).
+    pub fn finish(&self, body: Tm) -> Tm {
+        close_wraps(&self.wraps, body)
+    }
+
+    /// Names of the context binders (for printing).
+    pub fn names(&self) -> Vec<Name> {
+        self.ctx.entries.iter().map(|e| e.name.clone()).collect()
+    }
+}
+
+/// `body` (a term under the wrappers) closed by the wrappers, outermost
+/// first; a `let` whose variable nothing uses is dropped.
+///
+/// Linear in the size of the result: one pass finds the wrappers that are
+/// used (by the body, or by the type or value of a kept wrapper inside
+/// them), one pass per kept term renumbers its variables. (One `occurs`
+/// test and one shift of the whole body per wrapper, the obvious loop, is
+/// quadratic: a proof of tens of thousands of nodes under the dozens of
+/// facts a search derives, most of them unused, cost more steps than the
+/// search that found it, and the goal ran out of budget after its proof
+/// was built.)
+fn close_wraps(wraps: &[Wrap], body: Tm) -> Tm {
+    let n = wraps.len();
+    if n == 0 {
+        return body;
+    }
+    // `used[j]`: wrapper `j`'s variable occurs in the body or in a kept
+    // wrapper inside it (a term under the wrappers `0..m` refers to wrapper
+    // `m - 1 - f` by the free index `f < m`)
+    let mut used = vec![false; n];
+    mark_free_wraps(&body, &mut used);
+    for j in (0..n).rev() {
+        match &wraps[j] {
+            Wrap::Let { ty, val, .. } if used[j] => {
+                mark_free_wraps(ty, &mut used[..j]);
+                mark_free_wraps(val, &mut used[..j]);
+            }
+            Wrap::Let { .. } => {}
+            Wrap::Lam { dom, .. } => mark_free_wraps(dom, &mut used[..j]),
+        }
+    }
+    let keep: Vec<bool> = (0..n).map(|j| used[j] || matches!(wraps[j], Wrap::Lam { .. })).collect();
+    // `kept[m]`: the kept wrappers among `0..m`
+    let mut kept = vec![0u32; n + 1];
+    for j in 0..n {
+        kept[j + 1] = kept[j] + keep[j] as u32;
+    }
+    // a term under the wrappers `0..m`, its variables renumbered for the kept
+    // wrappers (a wrapper it refers to is kept; a variable of the enclosing
+    // context moves down by the dropped wrappers)
+    let renumber = |t: &Tm, m: usize| -> Tm {
+        if kept[m] == m as u32 {
+            return t.clone();
+        }
+        crate::elab::tm::map_post(t, 0, &mut |node, depth| {
+            Some(match &*node {
+                Term::Var(Idx(i)) if *i >= depth => {
+                    let f = (*i - depth) as usize;
+                    let f2 = if f < m { kept[m] - kept[m - f] } else { (f - m) as u32 + kept[m] };
+                    Rc::new(Term::Var(Idx(f2 + depth)))
+                }
+                _ => node,
+            })
+        })
+        .expect("renumber")
+    };
+    let mut out = renumber(&body, n);
+    for j in (0..n).rev() {
+        if !keep[j] {
+            continue;
+        }
+        out = match &wraps[j] {
+            Wrap::Let { name, ty, val } => Rc::new(Term::Let { name: name.clone(), rel: Rel::Irr, ty: renumber(ty, j), val: renumber(val, j), body: out }),
+            Wrap::Lam { name, rel, dom } => Rc::new(Term::Lam { name: name.clone(), rel: *rel, dom: renumber(dom, j), body: out }),
+        };
+    }
+    out
+}
+
+/// Marks in `used` the wrappers a term under the wrappers `0..used.len()`
+/// refers to (the free index `f` names wrapper `used.len() - 1 - f`; larger
+/// indices are the enclosing context). One pass over the term graph,
+/// charged to the goal ([`super::meter`]), that stops once every wrapper is
+/// marked (so it never costs more than the obvious loop's `occurs` tests).
+fn mark_free_wraps(t: &Tm, used: &mut [bool]) {
+    let m = used.len() as u32;
+    let mut unmarked = used.iter().filter(|u| !**u).count();
+    if unmarked == 0 {
+        return;
+    }
+    crate::elab::tm::any_node_depth(t, &mut |node, depth| {
+        if let Term::Var(Idx(i)) = node
+            && *i >= depth
+            && *i - depth < m
+        {
+            let j = (m - 1 - (*i - depth)) as usize;
+            if !used[j] {
+                used[j] = true;
+                unmarked -= 1;
+            }
+        }
+        unmarked == 0
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sandblaster_kernel::util::mk;
+
+    /// The obvious loop, the reference: one `occurs` test and one shift of
+    /// the whole body per wrapper.
+    fn close_naive(wraps: &[Wrap], mut body: Tm) -> Tm {
+        for w in wraps.iter().rev() {
             body = match w {
                 Wrap::Let { name, ty, val } => {
-                    if occurs(&body, 0) {
+                    if super::super::util::occurs(&body, 0) {
                         Rc::new(Term::Let { name: name.clone(), rel: Rel::Irr, ty: ty.clone(), val: val.clone(), body })
                     } else {
-                        shift(&body, -1)
+                        super::super::util::shift(&body, -1)
                     }
                 }
                 Wrap::Lam { name, rel, dom } => Rc::new(Term::Lam { name: name.clone(), rel: *rel, dom: dom.clone(), body }),
@@ -254,8 +366,109 @@ impl St {
         body
     }
 
-    /// Names of the context binders (for printing).
-    pub fn names(&self) -> Vec<Name> {
-        self.ctx.entries.iter().map(|e| e.name.clone()).collect()
+    /// A deterministic pseudo-random source.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self, n: u64) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (self.0 >> 33) % n.max(1)
+        }
+    }
+
+    /// A term over `ctx` free variables, with binders of its own.
+    fn term(r: &mut Lcg, ctx: u32, size: u32) -> Tm {
+        if size <= 1 || r.next(4) == 0 {
+            return if ctx > 0 && r.next(3) != 0 { mk::var(r.next(ctx as u64) as u32) } else { mk::ty() };
+        }
+        match r.next(3) {
+            0 => mk::app(term(r, ctx, size / 2), term(r, ctx, size / 2)),
+            1 => mk::lam("x", Rel::Rel, term(r, ctx, size / 3), term(r, ctx + 1, size / 2)),
+            _ => mk::let_("y", Rel::Irr, term(r, ctx, size / 3), term(r, ctx, size / 3), term(r, ctx + 1, size / 2)),
+        }
+    }
+
+    /// The wrappers of a search over an enclosing context of `outer`
+    /// variables: mostly lets, some λs.
+    fn wraps(r: &mut Lcg, outer: u32, n: u32) -> Vec<Wrap> {
+        (0..n)
+            .map(|j| {
+                let ctx = outer + j;
+                if r.next(4) == 0 {
+                    Wrap::Lam { name: mk::name("a"), rel: Rel::Rel, dom: term(r, ctx, 4) }
+                } else {
+                    Wrap::Let { name: mk::name("h"), ty: term(r, ctx, 4), val: term(r, ctx, 6) }
+                }
+            })
+            .collect()
+    }
+
+    /// The binders `close_*` put around an application body.
+    fn binders(t: &Tm) -> usize {
+        match &**t {
+            Term::Let { body, .. } | Term::Lam { body, .. } => 1 + binders(body),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn close_wraps_agrees_with_the_obvious_loop() {
+        let mut r = Lcg(7);
+        let mut cases_with_drops = 0;
+        for _ in 0..400 {
+            let (outer, n) = (r.next(4) as u32, r.next(12) as u32);
+            let ws = wraps(&mut r, outer, n);
+            // an application, so the binders of the result are the wrappers
+            let body = mk::app(term(&mut r, outer + n, 12), term(&mut r, outer + n, 12));
+            let (a, b) = (close_wraps(&ws, body.clone()), close_naive(&ws, body));
+            assert_eq!(format!("{a:?}"), format!("{b:?}"));
+            if binders(&a) < ws.len() {
+                cases_with_drops += 1;
+            }
+        }
+        assert!(cases_with_drops > 50, "the cases drop lets ({cases_with_drops})");
+        // a used let is kept, an unused one is dropped and the variables
+        // above it renumbered: `h0 x` (`x` the enclosing variable) under
+        // `let h0; let h1` closes to `let h0; h0 x`
+        let ws = vec![
+            Wrap::Let { name: mk::name("h0"), ty: mk::ty(), val: mk::ty() },
+            Wrap::Let { name: mk::name("h1"), ty: mk::ty(), val: mk::ty() },
+        ];
+        let a = close_wraps(&ws, mk::app(mk::var(1), mk::var(2)));
+        assert_eq!(format!("{a:?}"), format!("{:?}", mk::let_("h0", Rel::Irr, mk::ty(), mk::ty(), mk::app(mk::var(0), mk::var(1)))));
+        // and a let used only by a kept let's value is kept
+        let ws = vec![
+            Wrap::Let { name: mk::name("h0"), ty: mk::ty(), val: mk::ty() },
+            Wrap::Let { name: mk::name("h1"), ty: mk::ty(), val: mk::var(0) },
+        ];
+        let a = close_wraps(&ws, mk::var(0));
+        assert_eq!(binders(&a), 2);
+    }
+
+    /// A balanced application tree of `2^d` leaves over the enclosing
+    /// variables `base ..= base + 2`.
+    fn tree(d: u32, base: u32, k: &mut u32) -> Tm {
+        if d == 0 {
+            *k += 1;
+            return if (*k).is_multiple_of(2) { mk::ty() } else { mk::var(base + *k % 3) };
+        }
+        mk::app(tree(d - 1, base, k), tree(d - 1, base, k))
+    }
+
+    #[test]
+    fn close_wraps_is_linear() {
+        // 300 lets, none used, around a body of ~65k nodes: the obvious loop
+        // visits the body twice per let (~39M nodes), this pass about twice
+        let ws: Vec<Wrap> = (0..300).map(|_| Wrap::Let { name: mk::name("h"), ty: mk::ty(), val: mk::ty() }).collect();
+        let body = tree(15, 300, &mut 0);
+        let b0 = Budget { steps: u64::MAX / 4 };
+        let _s = crate::auto::meter::Scope::enter(None, &b0);
+        let mut b = Budget { steps: b0.steps };
+        let out = close_wraps(&ws, body);
+        crate::auto::meter::settle(&mut b);
+        let used = b0.steps - b.steps;
+        assert!(used < 400_000, "closing 300 unused lets around 65k nodes charged {used} units");
+        // the enclosing variables moved down by the 300 dropped lets
+        assert_eq!(binders(&out), 0);
+        assert!(!format!("{out:?}").contains("Idx(3"), "a variable was not renumbered");
     }
 }

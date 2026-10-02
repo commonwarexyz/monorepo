@@ -21,7 +21,7 @@
 //! | --- | --- |
 //! | `macro_rules!` + item-position invocations | expanded (`$x:ty`/`ident`/`expr`/`tt`/`literal`, `$(..)sep*`/`+`/`?`) |
 //! | inline `mod m { .. }` (not `cfg(test)`) | flattened into the parent (`use super::*;` dropped) |
-//! | `#[cfg(test)]`, `#[cfg(feature = ..)]` items | dropped, listed (host-only code; not part of the lifted meaning) |
+//! | `#[cfg(test)]` (or `all(.., test, ..)`) items; items behind a `cfg` naming a feature or `test` otherwise (`feature = ..`, `not(test)`, `any(test, ..)`) | dropped, listed (test code, or host-only code compiled outside tests: a module behind such a `cfg` is a host child module, §15.5); not part of the lifted meaning |
 //! | a **sealed** trait (declared in a private inline module) with impls for concrete types | the trait disappears; each impl method becomes a free function `Trait__Ty__m(self_: Ty, ..)` |
 //! | generic items whose parameters are bounded by sealed traits | one monomorphic instance per impl type (`write` → `write__u16`, `Decoder<U>` → `Decoder__u16`) |
 //! | `&mut self`, `&mut impl Buf`, `&mut impl BufMut` parameters (and §19.10's states) | state passing: the function takes the state by value and returns it (`(state.., value)`) |
@@ -50,6 +50,26 @@
 //! lifted item: a struct `#[invariant]`, a function's contract, or the
 //! `k`-th loop of rustc's MIR (`loop_nr = k`; the MIR reading places it on
 //! the `while` or the loop helper it reads, `mir::read::LoopAttach`).
+//!
+//! A function's `ensures(..)` from the laws file (`LAWS.rs`, the module
+//! [`LAWS_MODULE`]) are its contract; those from a proof file are
+//! proof-internal summaries: all are conjoined into `#[ensures]` (proven,
+//! the fact at call sites) and, when a proof file attached any,
+//! `#[contract_ensures(..)]` names the laws file's part — what the lock
+//! holds and §15.5 determines (DESIGN.md §15.6; `ensures_attrs`). An
+//! attachment names its target by its full path (`crate::m::f`,
+//! `crate::m::S::f` with `S` declared in `crate::m`, `crate::m::S`): a path
+//! whose module does not hold the item is refused, naming where it is, and
+//! same-named functions of two modules get separate attachments. A
+//! function of an impl on a primitive is attached to by its lifted name
+//! (`crate::m::u64__from__Pos`); its bare method name (`crate::m::from`)
+//! still works when nothing else in the module answers to it, and is
+//! refused when several impls do. Each attached `requires`, `ensures`,
+//! `decreases` and `invariant` is also recorded as written
+//! (`#[lift_src(..)]`, [`crate::hir::Attached`]): the spliced tokens keep
+//! their own file's line and column, so `SPEC.lock`'s source text and the
+//! surface's refusal of a proof file's statement on a boundary item read
+//! that record, never the host file at those positions.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -207,6 +227,10 @@ pub struct LiftFacts {
     /// The loop helpers the (untrusted) reading of the bodies built, with
     /// what their loop lemmas are stated over (`crate::mir::checked`).
     pub mir_helpers: Vec<MirHelper>,
+    /// Per in-place lifted source file: what host code the lift leaves out
+    /// can call of it besides its non-private functions (DESIGN.md §15.5;
+    /// [`crate::hir::HostAccess`], read by `validate::in_place_host_fns`).
+    pub host_access: Vec<(FileId, crate::hir::HostAccess)>,
 }
 
 /// A loop helper of a lifted function read from MIR: a hint for its
@@ -518,6 +542,12 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     }
     // host models other than enums, for the MIR reading (`crate::mir::HostModels`)
     let mut mir_host = crate::mir::HostModels::default();
+    for s in &sources {
+        let mut starts = vec![0usize];
+        starts.extend(s.text.match_indices('\n').map(|(i, _)| i + 1));
+        cx.texts.insert(s.file, (s.text.clone(), starts));
+    }
+    let ghost_paths: HashMap<String, String> = sources.iter().filter(|s| s.ghost).map(|s| (s.name.clone(), s.module_path.clone())).collect();
     for s in sources {
         cx.file = s.file;
         cx.pre_ghost = s.ghost || s.host;
@@ -537,10 +567,16 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
                 }
             }
         }
-        let items = cx.preprocess(s.ast.items, 0);
+        cx.host_called.clear();
         let children: Vec<String> = s.children.iter().map(|(n, _)| n.clone()).collect();
+        let access = (s.opts.in_place && !s.ghost && !s.host).then(|| host_access_of(&s.ast.items, &children));
+        let items = cx.preprocess(s.ast.items, 0);
         let mut items = cx.host_filter(items, &s.opts, &children);
         cx.erase_open_generics(&mut items);
+        if let Some(mut a) = access {
+            a.called = std::mem::take(&mut cx.host_called);
+            facts.host_access.push((s.file, a));
+        }
         for it in items.iter_mut() {
             open::CorePaths.visit_item_mut(it);
         }
@@ -560,10 +596,12 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     }
     cx.check_sealed();
     // 3. attachments (ghost modules)
-    for (_, file, ghost, _, _, items) in &mut pre {
+    for (_, file, ghost, _, modname, items) in &mut pre {
         if *ghost {
             cx.file = *file;
-            cx.take_attachments(items);
+            let in_laws = modname == LAWS_MODULE;
+            let module = ghost_paths.get(modname.as_str()).cloned().unwrap_or_else(|| format!("crate::{modname}"));
+            cx.take_attachments(items, in_laws, &module);
         }
     }
     // 3b. `#[lift(mir = ..)]`: rustc's MIR of the module's bodies
@@ -582,7 +620,8 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             let requires: std::collections::BTreeSet<String> = cx.attach_fn.iter().filter(|(_, a)| a.stmts.iter().any(|st| attach_call(st, "requires").is_some())).map(|(n, _)| n.clone()).collect();
             let open: BTreeMap<String, String> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p).trim_start_matches("crate::").to_string())).collect();
             let consts: BTreeMap<(String, String), bool> = cx.open.assoc_consts.iter().map(|(t, c)| ((t.clone(), c.clone()), cx.open.const_fns.contains(&open::const_name(t, c)))).collect();
-            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types: cx.attach_ty.keys().cloned().collect(), host: mir_host.clone() };
+            let invariant_types = cx.attach_ty.keys().map(|k| k.rsplit("::").next().unwrap_or(k).to_string()).collect();
+            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types, host: mir_host.clone() };
             let lookup = |p: &str| -> Option<Vec<u8>> { files.iter().find(|(f, _)| f.ends_with(&format!("/{p}")) || f == p).map(|(_, b)| b.clone()) };
             match crate::mir::load(text, &lookup, names, suffix) {
                 Ok(l) => {
@@ -618,6 +657,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         }
         out.push(LiftResult { module_index: idx, items: lifted });
     }
+    cx.ambiguous_attachments();
     // an attachment that attached to nothing is an error, never dropped
     // silently (its author relies on the contract it states)
     let mut unused: Vec<(String, Span)> = Vec::new();
@@ -628,7 +668,15 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     }
     for (k, a) in &cx.attach_fn {
         if !cx.attach_used.contains(&format!("fn {k}")) {
-            unused.push((k.clone(), a.span));
+            // a function of that name elsewhere: the path names the wrong module
+            let name = k.rsplit("::").next().unwrap_or(k);
+            match cx.lifted_paths.get(name).filter(|ps| !ps.contains(k)) {
+                Some(ps) => {
+                    let list: Vec<String> = ps.iter().map(|p| format!("`{p}`")).collect();
+                    cx.errors.push((a.span, format!("attachment to `{k}`: the module `{}` holds no lifted `{name}`; it is {}", k.rsplit_once("::").map(|x| x.0).unwrap_or(""), list.join(", ")), vec![format!("attach to it by its full path, e.g. `#[lift_attach({})]`", ps.iter().next().cloned().unwrap_or_default())]));
+                }
+                None => unused.push((k.clone(), a.span)),
+            }
         }
     }
     for ((f, n), a) in &cx.attach_loop {
@@ -768,8 +816,55 @@ struct Attach {
     /// Generic params of the attachment function (names substituted like the target's).
     params: Vec<String>,
     stmts: Vec<syn::Stmt>,
+    /// Per statement: written in the laws file (the ghost `#[lift]` module
+    /// `laws`, [`LAWS_MODULE`]). A function's contract — what the lock
+    /// holds and §15.5 determines — is its laws-file `ensures` only; an
+    /// `ensures` from any other ghost module (PROOF.rs) is a proof-internal
+    /// summary: proven, and a fact at call sites, never locked (DESIGN.md
+    /// §15.6).
+    in_laws: Vec<bool>,
+    /// Per statement: the DSL path of the ghost module that wrote it
+    /// (`crate::laws`, `crate::proof`).
+    modules: Vec<String>,
+    /// Per statement: the arguments of a `requires(..)`, `ensures(..)`,
+    /// `decreases(..)` or `invariant(..)` call as written in its own file,
+    /// whitespace collapsed (empty for other statements). The spliced
+    /// tokens keep their own file's line and column but are read as the
+    /// host file's, so the item records this text (`#[lift_src]`,
+    /// [`crate::hir::Attached`]): `SPEC.lock`'s source text of the item.
+    srcs: Vec<String>,
+    /// Per statement: its span in its own file (for errors).
+    spans: Vec<Span>,
     span: Span,
 }
+
+impl Attach {
+    /// Appends a later attachment to the same item (file order).
+    fn extend(&mut self, other: Attach) {
+        self.stmts.extend(other.stmts);
+        self.in_laws.extend(other.in_laws);
+        self.modules.extend(other.modules);
+        self.srcs.extend(other.srcs);
+        self.spans.extend(other.spans);
+    }
+
+    /// `#[lift_src(..)]` for statement `i` of kind `kind` (`requires`,
+    /// `ensures`, `decreases`, `invariant`): the statement as written.
+    fn src_attr(&self, i: usize, kind: &str) -> syn::Attribute {
+        let k = syn::LitStr::new(kind, PSpan::call_site());
+        let m = syn::LitStr::new(&self.modules[i], PSpan::call_site());
+        let l = syn::LitBool::new(self.in_laws[i], PSpan::call_site());
+        let t = syn::LitStr::new(&self.srcs[i], PSpan::call_site());
+        syn::parse_quote!(#[lift_src(#k, #m, #l, #t)])
+    }
+}
+
+/// The ghost `#[lift]` module that holds the laws and the contracts a
+/// reviewer reads (`#[cfg(sandblaster)] #[lift] #[path = "LAWS.rs"] mod
+/// laws;`). Every other ghost `#[lift]` module is a proof file: its items
+/// and the `ensures` it attaches are proof internals, never locked
+/// (DESIGN.md §15.6).
+pub const LAWS_MODULE: &str = "laws";
 
 #[derive(Default)]
 struct Ctx {
@@ -794,6 +889,12 @@ struct Ctx {
     /// Function attachments (`ensures(..)`), by source name.
     attach_fn: HashMap<String, Attach>,
     attach_used: HashSet<String>,
+    /// The functions a bare attachment name reaches: name → (the item it
+    /// is a method or function of, the lifted path). A function of an impl
+    /// on a primitive answers to its lifted name (`u64__from__Position`)
+    /// and, when nothing else does, to its bare method name (`from`); a
+    /// bare name that reaches several impls on primitives is refused.
+    bare_candidates: BTreeMap<String, std::collections::BTreeSet<(String, String)>>,
     unused_attachments: Vec<(String, Span)>,
     attach_sigma: HashMap<String, syn::Type>,
     attach_bounds: HashMap<String, Vec<String>>,
@@ -838,6 +939,16 @@ struct Ctx {
     mir_contracts: Vec<MirContract>,
     /// [`LiftFacts::mir_helpers`].
     mir_helpers: Vec<MirHelper>,
+    /// The text of every lifted source file and its line starts (an
+    /// attachment's statements are read from their own file's text).
+    texts: HashMap<FileId, (String, Vec<usize>)>,
+    /// Every lifted exec function by its name (source, `S::m` or lifted
+    /// name): the full paths attachments reach it by (an attachment whose
+    /// path names the wrong module is refused, naming where it is).
+    lifted_paths: BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// The names the code the lift leaves out of the current source calls
+    /// ([`crate::hir::HostAccess::called`]; [`Ctx::note_left_out`]).
+    host_called: std::collections::BTreeSet<String>,
 }
 
 impl Ctx {
@@ -860,6 +971,12 @@ impl Ctx {
         self.dropped.push(Dropped { span, what, why: why.to_string() });
     }
 
+    /// Records the names that code the lift leaves out calls (host code of
+    /// the lifted file: [`crate::hir::HostAccess::called`]).
+    fn note_left_out(&mut self, t: &impl ToTokens) {
+        host_called_names(t.to_token_stream(), false, &mut self.host_called);
+    }
+
     // -----------------------------------------------------------------------
     // 1. preprocessing
     // -----------------------------------------------------------------------
@@ -871,6 +988,10 @@ impl Ctx {
         for item in items {
             if let Some(why) = host_only(item_attrs_of(&item)) {
                 let what = describe(&item);
+                // feature-gated code is host code of the build; tests are not
+                if !is_test_only(item_attrs_of(&item)) {
+                    self.note_left_out(&item);
+                }
                 self.drop_item(item.span(), what, why);
                 continue;
             }
@@ -886,6 +1007,7 @@ impl Ctx {
                 }
                 syn::Item::Macro(m) if m.mac.path.segments.len() >= 2 => {
                     // a macro of another crate (`cfg_if::cfg_if!`): host code
+                    self.note_left_out(&m);
                     let name = m.mac.path.to_token_stream().to_string().replace(' ', "");
                     self.drop_item(m.span(), format!("item macro `{name}!`"), "a macro of another crate (host code; the items it expands to are not part of the lifted meaning)");
                 }
@@ -1196,7 +1318,7 @@ impl Ctx {
     // 3. attachments
     // -----------------------------------------------------------------------
 
-    fn take_attachments(&mut self, items: &mut Vec<syn::Item>) {
+    fn take_attachments(&mut self, items: &mut Vec<syn::Item>, in_laws: bool, module: &str) {
         let mut keep = Vec::new();
         for item in items.drain(..) {
             let syn::Item::Fn(f) = &item else {
@@ -1216,38 +1338,67 @@ impl Ctx {
                     continue;
                 }
             };
-            let mut target: Option<String> = None;
+            let mut segs: Vec<String> = Vec::new();
             let mut lp = None;
             for (i, x) in args.iter().enumerate() {
                 match x {
-                    syn::Expr::Path(p) if i == 0 => {
-                        let segs: Vec<String> = p.path.segments.iter().map(|s| s.ident.to_string()).collect();
-                        target = match segs.as_slice() {
-                            [.., ty, m] if self.structs.contains_key(ty) => Some(format!("{ty}::{m}")),
-                            [.., last] => Some(last.clone()),
-                            [] => None,
-                        };
-                    }
+                    syn::Expr::Path(p) if i == 0 => segs = p.path.segments.iter().map(|s| s.ident.to_string()).collect(),
                     syn::Expr::Assign(asg) if matches!(&*asg.left, syn::Expr::Path(p) if p.path.is_ident("loop_nr")) => lp = expr_usize(&asg.right),
                     other => self.err(other.span(), "`#[lift_attach(path)]` or `#[lift_attach(path, loop_nr = k)]`"),
                 }
             }
-            let (target_ty, target_fn) = match &target {
-                Some(t) if self.structs.contains_key(t.as_str()) && lp.is_none() => (Some(t.clone()), None),
-                Some(t) => (None, Some(t.clone())),
-                None => (None, None),
+            // the target, by its full path: a struct (`crate::m::S`), a
+            // method of a lifted struct (`crate::m::S::f`, `S` declared in
+            // `crate::m`) or a function of the module `crate::m`
+            // (`crate::m::f`; checked against the lifted functions at the
+            // end, [`lift`]); a path whose module does not hold the struct
+            // is refused, naming where it is
+            let n = segs.len();
+            let written = segs.join("::");
+            let struct_at = |cx: &Ctx, ty: &str, wmod: &[String]| -> Result<String, String> {
+                let decl = cx.struct_module_path(ty);
+                let wmod = wmod.join("::");
+                if wmod == decl {
+                    Ok(decl)
+                } else {
+                    Err(format!("attachment to `{written}`: the module `{wmod}` holds no lifted `{ty}`; it is `{decl}::{ty}`"))
+                }
+            };
+            let (target_ty, target_fn) = if n == 0 {
+                (None, None)
+            } else if lp.is_none() && self.structs.contains_key(&segs[n - 1]) {
+                match struct_at(self, &segs[n - 1], &segs[..n - 1]) {
+                    Ok(decl) => (Some(format!("{decl}::{}", segs[n - 1])), None),
+                    Err(msg) => {
+                        self.errors.push((span, msg, vec![]));
+                        continue;
+                    }
+                }
+            } else if n >= 2 && self.structs.contains_key(&segs[n - 2]) {
+                match struct_at(self, &segs[n - 2], &segs[..n - 2]) {
+                    Ok(decl) => (None, Some(format!("{decl}::{}::{}", segs[n - 2], segs[n - 1]))),
+                    Err(msg) => {
+                        self.errors.push((span, msg, vec![]));
+                        continue;
+                    }
+                }
+            } else {
+                (None, Some(written.clone()))
             };
             let params = f.sig.generics.params.iter().filter_map(|p| match p {
                 syn::GenericParam::Type(t) => Some(t.ident.to_string()),
                 _ => None,
             }).collect();
-            let at = Attach { params, stmts: f.block.stmts.clone(), span };
+            let k = f.block.stmts.len();
+            let srcs: Vec<String> = f.block.stmts.iter().map(|st| self.stmt_args_text(st)).collect();
+            let spans: Vec<Span> = f.block.stmts.iter().map(|st| self.sp(st.span())).collect();
+            let at = Attach { params, stmts: f.block.stmts.clone(), in_laws: vec![in_laws; k], modules: vec![module.to_string(); k], srcs, spans, span };
             match (target_ty, target_fn, lp) {
                 (Some(t), None, None) => {
                     // several attachments to one item (a law file's precondition, a
                     // proof file's summary) are one attachment, in file order
                     match self.attach_ty.get_mut(&t) {
-                        Some(prev) => prev.stmts.extend(at.stmts),
+                        Some(prev) => prev.extend(at),
                         None => {
                             self.attach_ty.insert(t, at);
                         }
@@ -1257,7 +1408,7 @@ impl Ctx {
                     // several attachments to one item (a law file's precondition, a
                     // proof file's summary) are one attachment, in file order
                     match self.attach_loop.get_mut(&(fname.clone(), k)) {
-                        Some(prev) => prev.stmts.extend(at.stmts),
+                        Some(prev) => prev.extend(at),
                         None => {
                             self.attach_loop.insert((fname, k), at);
                         }
@@ -1267,7 +1418,7 @@ impl Ctx {
                     // several attachments to one item (a law file's precondition, a
                     // proof file's summary) are one attachment, in file order
                     match self.attach_fn.get_mut(&fname) {
-                        Some(prev) => prev.stmts.extend(at.stmts),
+                        Some(prev) => prev.extend(at),
                         None => {
                             self.attach_fn.insert(fname, at);
                         }
@@ -1277,6 +1428,53 @@ impl Ctx {
             }
         }
         *items = keep;
+    }
+
+    /// The DSL path of the module that declares the lifted struct `ty`.
+    fn struct_module_path(&self, ty: &str) -> String {
+        match self.structs.get(ty) {
+            Some(si) => self.open.module_paths.get(&si.module).cloned().unwrap_or_else(|| format!("crate::{}", si.module)),
+            None => self.conform_module_path(),
+        }
+    }
+
+    /// The full path attachments reach a lifted function by, from the name
+    /// [`Ctx::attach_key`] gives it: `crate::m::S::f` for a method `S::f`
+    /// of a lifted struct (`crate::m` declares `S`), else `crate::m::f`
+    /// for the module `crate::m` being emitted. Recorded for the refusal
+    /// of a misdirected attachment ([`Ctx::lifted_paths`]).
+    fn attach_path(&mut self, name: &str) -> String {
+        let full = match name.split_once("::") {
+            Some((ty, _)) if self.structs.contains_key(ty) => format!("{}::{name}", self.struct_module_path(ty)),
+            _ => format!("{}::{name}", self.conform_module_path()),
+        };
+        let last = name.rsplit("::").next().unwrap_or(name).to_string();
+        self.lifted_paths.entry(last).or_default().insert(full.clone());
+        full
+    }
+
+    /// The arguments of an attachment statement `requires(..)`,
+    /// `ensures(..)`, `decreases(..)` or `invariant(..)` as written in the
+    /// attachment's file (whitespace collapsed); empty for any other
+    /// statement. Read while [`Ctx::file`] is the attachment's file.
+    fn stmt_args_text(&self, st: &syn::Stmt) -> String {
+        let syn::Stmt::Expr(syn::Expr::Call(c), _) = st else { return String::new() };
+        let syn::Expr::Path(p) = &*c.func else { return String::new() };
+        if !["requires", "ensures", "decreases", "invariant"].iter().any(|k| p.path.is_ident(k)) {
+            return String::new();
+        }
+        let g = c.paren_token.span.join();
+        let Some((text, starts)) = self.texts.get(&self.file) else { return String::new() };
+        let byte = |lc: proc_macro2::LineColumn| -> Option<usize> {
+            let start = *starts.get(lc.line.checked_sub(1)?)?;
+            let line = &text[start..];
+            Some(start + line.chars().take(lc.column).map(char::len_utf8).sum::<usize>())
+        };
+        match (byte(g.start()), byte(g.end())) {
+            // without the parentheses
+            (Some(a), Some(b)) if a < b && b <= text.len() => crate::deelab::flat(&text[a + 1..b - 1]),
+            _ => String::new(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1378,11 +1576,12 @@ impl Ctx {
                         }
                         drop(rw);
                         // attached invariant
-                        if let Some(at) = self.attach_ty.get(&sname).cloned() {
-                            self.attach_used.insert(format!("type {sname}"));
-                            for st in &at.stmts {
+                        let tkey = format!("{}::{sname}", self.conform_module_path());
+                        if let Some(at) = self.attach_ty.get(&tkey).cloned() {
+                            self.attach_used.insert(format!("type {tkey}"));
+                            for (i, st) in at.stmts.iter().enumerate() {
                                 let Some(mut e) = attach_call(st, "invariant") else {
-                                    self.err(st.span(), "a type attachment holds `invariant(..);` statements only");
+                                    self.errors.push((at.spans[i], "a type attachment holds `invariant(..);` statements only".into(), vec![]));
                                     continue;
                                 };
                                 let asig: HashMap<String, syn::Type> = at.params.iter().zip(params.iter()).filter_map(|(a, p)| sigma.get(&p.name).map(|t| (a.clone(), t.clone()))).collect();
@@ -1398,6 +1597,10 @@ impl Ctx {
                                     self.open.host_obligations.push((format!("type {}", s2.ident), e.to_token_stream().to_string()));
                                 }
                                 s2.attrs.push(syn::parse_quote!(#[invariant(#e)]));
+                                // as written, for `SPEC.lock` and the proof-file refusal
+                                if !ghost {
+                                    s2.attrs.push(at.src_attr(i, "invariant"));
+                                }
                             }
                         }
                         let dd = if self.open.derive_default.contains(&sname) { self.derived_default(&s, &s2, ghost) } else { None };
@@ -1702,7 +1905,11 @@ impl Ctx {
                                 let lifted = format!("{}::{name}", self.conform_module_path());
                                 self.conform_skipped.push(ConformSkip { module: self.cur_module.clone(), lifted, why: format!("the associated constant `{sname}::{}` lifted as a constant function (a constant, not a function of the source: compared through the functions that read it)", c.ident) });
                             }
-                            out.push(syn::parse_quote!(#(#attrs)* #[allow(non_snake_case)] pub fn #name() -> #ty { #e }));
+                            // its contract, attached like any function's (the
+                            // value host code reads: on the boundary of an
+                            // in-place module, `validate::in_place_host_fns`)
+                            let contract = if ghost { vec![] } else { self.const_fn_contract(&name.to_string(), &sigma, &self_ty) };
+                            out.push(syn::parse_quote!(#(#attrs)* #(#contract)* #[allow(non_snake_case)] pub fn #name() -> #ty { #e }));
                         } else {
                             out.push(syn::parse_quote!(#(#attrs)* pub const #name: #ty = #e;));
                         }
@@ -1733,6 +1940,8 @@ impl Ctx {
             Some(owner) => format!("{owner}::{}", f.sig.ident),
             None => f.sig.ident.to_string(),
         };
+        // `akey`: the full path attachments name it by
+        let (orig_name, akey) = self.attach_key(&orig_name, self_ty.as_ref(), rename.as_deref(), ghost);
         let mut bounds: HashMap<String, Vec<String>> = outer.iter().map(|p| (p.name.clone(), p.bounds.clone())).collect();
         for p in self.generic_params(&f.sig.generics) {
             bounds.insert(p.name, p.bounds);
@@ -1880,7 +2089,7 @@ impl Ctx {
         let n_skeleton = f.attrs.len();
         if use_mir {
             let n = self.mir_read.len();
-            let (b, h) = self.mir_body(&mut f.sig, &orig_name, self_ty.as_ref(), &state_names, &state_tys);
+            let (b, h) = self.mir_body(&mut f.sig, &akey, self_ty.as_ref(), &state_names, &state_tys);
             f.block = Box::new(b);
             helpers = h;
             mir_key = self.mir_read.get(n).map(|r| r.1.clone());
@@ -1894,13 +2103,19 @@ impl Ctx {
             }
         }
         let n_read = f.attrs.len();
-        if let Some(at) = self.attach_fn.get(&orig_name).cloned() {
-            self.attach_used.insert(format!("fn {orig_name}"));
+        if let Some(at) = self.attach_fn.get(&akey).cloned() {
+            self.attach_used.insert(format!("fn {akey}"));
             let sigma2: HashMap<String, syn::Type> = self.attach_sigma.clone();
             // several `ensures(..)` (a law file's contract, a proof file's
-            // summary) are one contract: their conjunction
-            let mut ensures: Vec<syn::Expr> = Vec::new();
-            for st in &at.stmts {
+            // summary) are proven as one: their conjunction, in file order,
+            // is the `#[ensures]` (call sites get all of it); the contract —
+            // what the lock holds and §15.5 determines — is the laws file's
+            // part alone (`#[contract_ensures]`, DESIGN.md §15.6)
+            let mut ensures: Vec<(syn::Expr, bool)> = Vec::new();
+            // each statement as written (`#[lift_src]`: `SPEC.lock`'s source
+            // text of the function, and the proof-file refusal)
+            let mut srcs: Vec<syn::Attribute> = Vec::new();
+            for (i, (st, &in_laws)) in at.stmts.iter().zip(&at.in_laws).enumerate() {
                 // `at_start! { .. }`: proof steps before the body (facts about the parameters)
                 if let syn::Stmt::Macro(m) = st
                     && m.mac.path.is_ident("at_start")
@@ -1946,6 +2161,7 @@ impl Ctx {
                     drop(rw);
                     self.open.host_obligations.push((orig_name.clone(), attach_call(st, "requires").map(|x| x.to_token_stream().to_string()).unwrap_or_default()));
                     f.attrs.push(syn::parse_quote!(#[requires(#e)]));
+                    srcs.push(at.src_attr(i, "requires"));
                     continue;
                 }
                 // `decreases(e, max = C);`: the measure and depth bound of a
@@ -1962,13 +2178,14 @@ impl Ctx {
                     rw.expr(&mut args[0], None);
                     drop(rw);
                     if f.attrs.iter().any(|a| a.path().is_ident("decreases")) {
-                        self.err(st.span(), "`decreases(..);` twice for the same function");
+                        self.errors.push((at.spans[i], "`decreases(..);` twice for the same function".into(), vec![]));
                     }
                     f.attrs.push(syn::parse_quote!(#[decreases(#(#args),*)]));
+                    srcs.push(at.src_attr(i, "decreases"));
                     continue;
                 }
                 let Some(mut e) = attach_call(st, "ensures") else {
-                    self.err(st.span(), "a function attachment holds `requires(..);`, `ensures(..);`, `decreases(..);`, `opaque();` and `at_start! { .. }` only");
+                    self.errors.push((at.spans[i], "a function attachment holds `requires(..);`, `ensures(..);`, `decreases(..);`, `opaque();` and `at_start! { .. }` only".into(), vec![]));
                     continue;
                 };
                 let ab = self.attach_bounds.clone();
@@ -1977,12 +2194,15 @@ impl Ctx {
                 rw.self_ty = self_ty.clone();
                 rw.expr(&mut e, None);
                 drop(rw);
-                ensures.push(e);
+                ensures.push((e, in_laws));
+                srcs.push(at.src_attr(i, "ensures"));
             }
-            match conjoin_ensures(ensures) {
-                Ok(Some(e)) => f.attrs.push(syn::parse_quote!(#[ensures(#e)])),
-                Ok(None) => {}
+            match ensures_attrs(ensures) {
+                Ok(attrs) => f.attrs.extend(attrs),
                 Err(msg) => self.errors.push((at.span, msg, vec![])),
+            }
+            if !ghost {
+                f.attrs.extend(srcs);
             }
         }
         // the declared contract (skeleton and attachments: the reading of
@@ -2024,6 +2244,103 @@ impl Ctx {
         out
     }
 
+    /// The contract attributes of the constant function `name` (an
+    /// associated constant the lift reads as `S__C()`) from its attachment:
+    /// `ensures(..)` only (it has no parameters and no body to annotate).
+    fn const_fn_contract(&mut self, name: &str, sigma: &HashMap<String, syn::Type>, self_ty: &syn::Type) -> Vec<syn::Attribute> {
+        let key = self.attach_path(name);
+        let Some(at) = self.attach_fn.get(&key).cloned() else { return vec![] };
+        self.attach_used.insert(format!("fn {key}"));
+        let mut ens = Vec::new();
+        let mut srcs = Vec::new();
+        for (i, (st, &in_laws)) in at.stmts.iter().zip(&at.in_laws).enumerate() {
+            let Some(mut e) = attach_call(st, "ensures") else {
+                self.errors.push((at.spans[i], "an attachment to a constant function (an associated constant) holds `ensures(..);` only".into(), vec![]));
+                continue;
+            };
+            srcs.push(at.src_attr(i, "ensures"));
+            let mut rw = FnRw::new(self, sigma.clone(), true);
+            rw.self_ty = Some(self_ty.clone());
+            rw.expr(&mut e, None);
+            drop(rw);
+            ens.push((e, in_laws));
+        }
+        match ensures_attrs(ens) {
+            Ok(mut a) => {
+                a.extend(srcs);
+                a
+            }
+            Err(msg) => {
+                self.errors.push((at.span, msg, vec![]));
+                vec![]
+            }
+        }
+    }
+
+    /// The name attachments reach the function being lifted by
+    /// (`orig_name`: `S::m` for a method of a lifted struct, else the source
+    /// name). A function of an impl on a primitive (`impl From<Position> for
+    /// u64`, `impl PartialEq<Location> for u64`, a sealed trait's method on
+    /// `u16`) is keyed by its lifted name (`u64__from__Position`), so two
+    /// such impls get separate contracts; its bare method name (`from`)
+    /// still reaches it when nothing else answers to that name (refused
+    /// otherwise, at the end of the lift: [`Ctx::ambiguous_attachments`]).
+    /// Returns the name and the full path attachments name it by
+    /// ([`Ctx::attach_path`]: `crate::m::u64__from__Position`).
+    fn attach_key(&mut self, orig_name: &str, self_ty: Option<&syn::Type>, rename: Option<&str>, ghost: bool) -> (String, String) {
+        if ghost {
+            return (orig_name.to_string(), format!("{}::{orig_name}", self.conform_module_path()));
+        }
+        let prim = self_ty.and_then(type_name).is_some_and(|n| is_prim(&n));
+        let lifted = rename.map(str::to_string).unwrap_or_else(|| orig_name.to_string());
+        let lifted_full = self.attach_path(&lifted);
+        if prim && rename.is_some() && (self.attach_fn.contains_key(&lifted_full) || self.attach_loop.keys().any(|(f, _)| *f == lifted_full)) {
+            return (lifted, lifted_full);
+        }
+        let full = self.attach_path(orig_name);
+        if prim || self_ty.is_none() {
+            // the impl as written, trait arguments included: `impl
+            // From<Position<F>>` and `impl From<Location<F>>` are two (a
+            // bare `from` would give both one contract), while one trait's
+            // impls on several primitives (a sealed `impl SPrim for i16`,
+            // `for i32`, ..) are instances of one method, like a generic
+            // function's, and share its attachment
+            let owner = match (&self.cur_impl, prim) {
+                (Some((t, _, ty)), true) => format!("impl {}", t.clone().unwrap_or_else(|| ty.clone())),
+                _ => format!("fn {}::{orig_name}", self.conform_module_path()),
+            };
+            let path = format!("{}::{lifted}", self.conform_module_path());
+            self.bare_candidates.entry(full.clone()).or_default().insert((owner, path));
+        }
+        (orig_name.to_string(), full)
+    }
+
+    /// A bare attachment name (`eq`) that reaches the functions of several
+    /// impls on primitives (`u64 == Position`, `u64 == Location`): the
+    /// attachment would give both one contract. Refused, naming them.
+    fn ambiguous_attachments(&mut self) {
+        let mut errs = Vec::new();
+        for (k, cands) in &self.bare_candidates {
+            let owners: std::collections::BTreeSet<&String> = cands.iter().map(|(o, _)| o).collect();
+            if owners.len() < 2 || !owners.iter().any(|o| o.starts_with("impl ")) {
+                continue;
+            }
+            let span = match (self.attach_fn.get(k), self.attach_loop.iter().find(|((f, _), _)| f == k)) {
+                (Some(a), _) => a.span,
+                (None, Some((_, a))) => a.span,
+                (None, None) => continue,
+            };
+            let list: Vec<String> = cands.iter().map(|(o, p)| format!("`{p}` (`{o}`)")).collect();
+            let first = cands.iter().find(|(o, _)| o.starts_with("impl ")).map(|(_, p)| p.clone()).unwrap_or_default();
+            errs.push((
+                span,
+                format!("the attachment to `{k}` is ambiguous: `{k}` is a function of several impls on primitives, which get separate contracts: {}", list.join(", ")),
+                vec![format!("attach to one by its lifted name, e.g. `#[lift_attach({first})]`")],
+            ));
+        }
+        self.errors.extend(errs);
+    }
+
     /// The DSL path of the module being emitted (`crate::varint`,
     /// `crate::merkle::mmr` for an in-place module).
     fn conform_module_path(&self) -> String {
@@ -2050,7 +2367,7 @@ impl Ctx {
     /// structured reading sees the signature only, never the function's
     /// attributes: it cannot add to or change the declared contract, which
     /// alone states the theorem's preconditions (`mir::stmt`).
-    fn mir_body(&mut self, sig: &mut syn::Signature, orig_name: &str, self_ty: Option<&syn::Type>, state_names: &[String], state_tys: &[(String, syn::Type)]) -> (syn::Block, Vec<syn::Item>) {
+    fn mir_body(&mut self, sig: &mut syn::Signature, akey: &str, self_ty: Option<&syn::Type>, state_names: &[String], state_tys: &[(String, syn::Type)]) -> (syn::Block, Vec<syn::Item>) {
         let empty: syn::Block = syn::parse_quote!({ unreachable!() });
         let Some(ld) = self.cur_mir.clone() else { return (empty, vec![]) };
         let lifted = match self_ty.and_then(type_name) {
@@ -2107,13 +2424,14 @@ impl Ctx {
             }
         };
         let mut loops: HashMap<usize, crate::mir::read::LoopAttach> = HashMap::new();
-        let keys: Vec<usize> = self.attach_loop.keys().filter(|(fnm, _)| fnm == orig_name).map(|(_, k)| *k).collect();
+        // (loop attachments name the function by its full path, `akey`)
+        let keys: Vec<usize> = self.attach_loop.keys().filter(|(fnm, _)| fnm == akey).map(|(_, k)| *k).collect();
         // a source name in a loop attachment denotes the variable in scope
         // at the loop (`let size = *size;` shadows the parameter)
         let scopes = crate::mir::read::loop_scopes(&ld.m, &key, &params).unwrap_or_default();
         for k in keys {
-            let mut at = self.attach_loop[&(orig_name.to_string(), k)].clone();
-            self.attach_used.insert(format!("loop {orig_name}#{k}"));
+            let mut at = self.attach_loop[&(akey.to_string(), k)].clone();
+            self.attach_used.insert(format!("loop {akey}#{k}"));
             if let Some(map) = scopes.get(k).filter(|m| !m.is_empty()) {
                 at.stmts = at.stmts.iter().map(|st| rename_vars(st, map)).collect();
             }
@@ -4157,6 +4475,30 @@ fn is_delegation(f: &syn::ImplItemFn, m: &str) -> bool {
     mc.method == m && matches!(&*mc.receiver, syn::Expr::Path(p) if p.path.is_ident("self")) && mc.args.is_empty() && f.sig.inputs.len() == 1
 }
 
+/// The contract attributes of a lifted function from its attached
+/// `ensures(..)` (each with whether the laws file wrote it): `#[ensures(E)]`,
+/// the conjunction of all of them in file order (proven; the fact at call
+/// sites), and, when a proof file attached any, `#[contract_ensures(L)]` —
+/// the conjunction of the laws file's alone — or `#[contract_ensures]` when
+/// the laws file attached none. The contract (what `SPEC.lock` holds and
+/// §15.5 determines) is `L`; the rest are proof-internal summaries
+/// (DESIGN.md §15.6).
+pub(crate) fn ensures_attrs(es: Vec<(syn::Expr, bool)>) -> Result<Vec<syn::Attribute>, String> {
+    let summaries = es.iter().any(|(_, in_laws)| !in_laws);
+    let laws: Vec<syn::Expr> = es.iter().filter(|(_, l)| *l).map(|(e, _)| e.clone()).collect();
+    let mut out = Vec::new();
+    if let Some(e) = conjoin_ensures(es.into_iter().map(|(e, _)| e).collect())? {
+        out.push(syn::parse_quote!(#[ensures(#e)]));
+    }
+    if summaries {
+        match conjoin_ensures(laws)? {
+            Some(l) => out.push(syn::parse_quote!(#[contract_ensures(#l)])),
+            None => out.push(syn::parse_quote!(#[contract_ensures])),
+        }
+    }
+    Ok(out)
+}
+
 /// The conjunction of several attached `ensures(..)` of one function: the
 /// same closure `|ret: T| a && b` when each binds the result with the same
 /// pattern and type, `a && b` when none does (no result); anything else is
@@ -4235,20 +4577,155 @@ fn item_attrs_of(item: &syn::Item) -> &[syn::Attribute] {
     }
 }
 
-/// `#[cfg(test)]` / `#[cfg(feature = ..)]`: host-only code.
+/// Code the lift leaves out, by its `#[cfg(..)]`: test-only code
+/// ([`is_test_only`]), and code behind a predicate that names a cargo
+/// feature or `test` (`cfg(feature = "std")`, `cfg(any(test, feature =
+/// ".."))`, `cfg(not(test))`): host code, compiled outside the crate's
+/// tests in some build (DESIGN.md §15.5).
 fn host_only(attrs: &[syn::Attribute]) -> Option<&'static str> {
-    for a in attrs {
-        if a.path().is_ident("cfg") {
-            let s = a.meta.to_token_stream().to_string();
-            if s.contains("test") {
-                return Some("`#[cfg(test)]` (the crate's tests run against the emitted module)");
+    if is_test_only(attrs) {
+        return Some("`#[cfg(test)]` (the crate's tests run against the emitted module)");
+    }
+    let preds: Vec<syn::Meta> = attrs.iter().filter_map(cfg_predicate).collect();
+    if preds.iter().any(|p| cfg_names(p, "feature")) {
+        return Some("behind a cargo feature (host-only support code, e.g. `arbitrary` fuzzing impls)");
+    }
+    if preds.iter().any(|p| cfg_names(p, "test")) {
+        return Some("behind a `cfg` on `test` that builds outside the crate's tests also compile (host code)");
+    }
+    None
+}
+
+/// Compiled only for the crate's tests: a `#[cfg(test)]` or
+/// `#[cfg(all(.., test, ..))]` (nested `all` included). Any other predicate
+/// that mentions `test` — `not(test)`, `any(test, ..)` — or a feature named
+/// like one (`feature = "test-utils"`) is compiled outside tests too.
+fn is_test_only(attrs: &[syn::Attribute]) -> bool {
+    fn implies_test(p: &syn::Meta) -> bool {
+        match p {
+            syn::Meta::Path(x) => x.is_ident("test"),
+            syn::Meta::List(l) if l.path.is_ident("all") => cfg_args(l).iter().any(implies_test),
+            _ => false,
+        }
+    }
+    attrs.iter().filter_map(cfg_predicate).any(|p| implies_test(&p))
+}
+
+/// The predicate of a `#[cfg(..)]` attribute (`None` for another attribute;
+/// rustc rejects a malformed one).
+fn cfg_predicate(a: &syn::Attribute) -> Option<syn::Meta> {
+    a.path().is_ident("cfg").then(|| a.parse_args::<syn::Meta>().ok()).flatten()
+}
+
+/// The arguments of `all(..)`, `any(..)`, `not(..)`.
+fn cfg_args(l: &syn::MetaList) -> Vec<syn::Meta> {
+    l.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated).map(|p| p.into_iter().collect()).unwrap_or_default()
+}
+
+/// The cfg predicate `p` names the option `key` (`test`, `feature = ".."`)
+/// anywhere, under `all`, `any` or `not`.
+fn cfg_names(p: &syn::Meta, key: &str) -> bool {
+    match p {
+        syn::Meta::Path(x) => x.is_ident(key),
+        syn::Meta::NameValue(nv) => nv.path.is_ident(key),
+        syn::Meta::List(l) => cfg_args(l).iter().any(|q| cfg_names(q, key)),
+    }
+}
+
+/// What the host source of an in-place module declares that host code the
+/// lift leaves out can call ([`crate::hir::HostAccess`], DESIGN.md §15.5):
+/// its host child modules — the modules the lift leaves out (a `mod m;`
+/// that is not a lifted child, a feature-gated module, a module an item
+/// macro of another crate declares, `cfg_if!`), not `#[cfg(test)]` ones —
+/// and its private free functions and private inherent methods, also those
+/// of the inline modules the lift flattens into it. (`called` is filled
+/// while the lift drops the left-out code, [`Ctx::note_left_out`].)
+fn host_access_of(items: &[syn::Item], children: &[String]) -> crate::hir::HostAccess {
+    fn walk(items: &[syn::Item], children: &[String], top: bool, a: &mut crate::hir::HostAccess) {
+        for item in items {
+            if is_test_only(item_attrs_of(item)) {
+                continue;
             }
-            if s.contains("feature") {
-                return Some("behind a cargo feature (host-only support code, e.g. `arbitrary` fuzzing impls)");
+            let gated = host_only(item_attrs_of(item)).is_some();
+            match item {
+                syn::Item::Mod(m) if m.content.is_none() => {
+                    if !(top && children.iter().any(|c| m.ident == c.as_str())) {
+                        a.host_children.push(m.ident.to_string());
+                    }
+                }
+                syn::Item::Mod(m) if gated => a.host_children.push(m.ident.to_string()),
+                syn::Item::Mod(m) => {
+                    if let Some((_, inner)) = &m.content {
+                        walk(inner, children, false, a);
+                    }
+                }
+                syn::Item::Macro(m) if m.mac.path.segments.len() >= 2 => {
+                    // `cfg_if::cfg_if! { if #[cfg(feature = "std")] { pub mod full; } }`
+                    fn mods(ts: TokenStream, out: &mut Vec<String>) {
+                        let toks: Vec<proc_macro2::TokenTree> = ts.into_iter().collect();
+                        for (i, t) in toks.iter().enumerate() {
+                            match t {
+                                proc_macro2::TokenTree::Ident(id) if id == "mod" => {
+                                    if let Some(proc_macro2::TokenTree::Ident(n)) = toks.get(i + 1) {
+                                        out.push(n.to_string());
+                                    }
+                                }
+                                proc_macro2::TokenTree::Group(g) => mods(g.stream(), out),
+                                _ => {}
+                            }
+                        }
+                    }
+                    mods(m.mac.tokens.clone(), &mut a.host_children);
+                }
+                syn::Item::Fn(f) if !gated && matches!(f.vis, syn::Visibility::Inherited) => {
+                    a.private_fns.insert(f.sig.ident.to_string());
+                }
+                syn::Item::Impl(im) if !gated && im.trait_.is_none() => {
+                    if let Some(tn) = type_name(&im.self_ty) {
+                        for ii in &im.items {
+                            if let syn::ImplItem::Fn(f) = ii
+                                && matches!(f.vis, syn::Visibility::Inherited)
+                            {
+                                a.private_methods.insert(format!("{tn}::{}", f.sig.ident));
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
-    None
+    let mut a = crate::hir::HostAccess::default();
+    walk(items, children, true, &mut a);
+    a.host_children.sort();
+    a.host_children.dedup();
+    a
+}
+
+/// The names `ts` (code the lift leaves out) calls, for
+/// [`crate::hir::HostAccess::called`]: an identifier applied to arguments
+/// (`f(..)`, `x.m(..)`, `T::m(..)`), the segment after `::` or `.` (a path
+/// or method used as a value, `map(Self::m)`), and every identifier inside
+/// a macro call (`assert!(x.m())`): by name, an over-approximation.
+fn host_called_names(ts: TokenStream, in_macro: bool, out: &mut std::collections::BTreeSet<String>) {
+    let toks: Vec<proc_macro2::TokenTree> = ts.into_iter().collect();
+    let punct = |i: usize, c: char| matches!(toks.get(i), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == c);
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            proc_macro2::TokenTree::Ident(id) => {
+                let applied = matches!(toks.get(i + 1), Some(proc_macro2::TokenTree::Group(g)) if g.delimiter() == proc_macro2::Delimiter::Parenthesis);
+                let after_sep = i >= 1 && (punct(i - 1, '.') || (i >= 2 && punct(i - 1, ':') && punct(i - 2, ':')));
+                if in_macro || applied || after_sep {
+                    out.insert(id.to_string());
+                }
+            }
+            proc_macro2::TokenTree::Group(g) => {
+                let macro_args = i >= 1 && punct(i - 1, '!');
+                host_called_names(g.stream(), in_macro || macro_args, out);
+            }
+            _ => {}
+        }
+    }
 }
 
 fn describe(item: &syn::Item) -> String {
@@ -4654,4 +5131,50 @@ fn rename_vars(st: &syn::Stmt, map: &HashMap<String, String>) -> syn::Stmt {
         out.into_iter().collect()
     }
     syn::parse2(walk(st.to_token_stream(), map)).unwrap_or_else(|_| st.clone())
+}
+
+#[cfg(test)]
+mod cfg_tests {
+    //! Which `#[cfg(..)]` code is test-only (DESIGN.md §15.5: only a
+    //! `#[cfg(test)]` module is not a host child module), with its twin.
+
+    use super::{host_access_of, host_only, is_test_only, item_attrs_of};
+
+    fn items(src: &str) -> Vec<syn::Item> {
+        syn::parse_file(src).unwrap().items
+    }
+
+    #[test]
+    fn a_cfg_that_mentions_test_but_compiles_outside_tests_is_host_code() {
+        // `not(test)`, `any(test, ..)`, a feature named like `test`: compiled
+        // outside the crate's tests, so host code — still left out, but a
+        // module behind it is a host child module
+        let src = "#[cfg(not(test))] mod a;\n#[cfg(any(test, feature = \"fuzzing\"))] mod b;\n#[cfg(feature = \"test-utils\")] mod c;\n#[cfg(any(feature = \"std\", test))] mod d {}\n#[cfg(not(all(test, feature = \"std\")))] mod e;\n";
+        for it in items(src) {
+            let attrs = item_attrs_of(&it);
+            assert!(!is_test_only(attrs), "test-only: {}", quote::ToTokens::to_token_stream(&it));
+            let why = host_only(attrs).unwrap_or_else(|| panic!("not left out: {}", quote::ToTokens::to_token_stream(&it)));
+            assert!(!why.contains("#[cfg(test)]"), "{why}");
+        }
+        let a = host_access_of(&items(&format!("{src}fn private() {{}}\n")), &[]);
+        assert_eq!(a.host_children, ["a", "b", "c", "d", "e"]);
+        assert!(a.private_callable("private"), "{a:?}");
+    }
+
+    #[test]
+    fn only_cfg_test_and_cfg_all_test_are_test_only() {
+        // the twin: `test`, `all(.., test, ..)` (nested too) are compiled for
+        // the crate's tests alone, and their modules are no host children
+        let src = "#[cfg(test)] mod a;\n#[cfg(all(test, feature = \"std\"))] mod b {}\n#[cfg(all(feature = \"std\", all(test, unix)))] mod c;\n#[cfg(unix)] #[cfg(test)] mod d;\n";
+        for it in items(src) {
+            let attrs = item_attrs_of(&it);
+            assert!(is_test_only(attrs), "not test-only: {}", quote::ToTokens::to_token_stream(&it));
+            assert!(host_only(attrs).is_some_and(|why| why.contains("#[cfg(test)]")));
+        }
+        let a = host_access_of(&items(&format!("{src}fn private() {{}}\n")), &[]);
+        assert!(a.host_children.is_empty(), "{a:?}");
+        assert!(!a.private_callable("private"), "{a:?}");
+        // and a predicate on neither tests nor features is lifted
+        assert!(host_only(item_attrs_of(&items("#[cfg(unix)] fn f() {}")[0])).is_none());
+    }
 }

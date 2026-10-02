@@ -10,6 +10,9 @@
 #[path = "../../src/merkle/position.rs"]
 pub mod position;
 
+// `LocationRangeExt` stays host code too: its one impl is on core's
+// `Range<Location>`, a type outside the lifted files, and turns it into a
+// `Range<usize>` for slice indexing (`as usize`, the target's width).
 #[lift(mir = "mmr.sbmir", in_place, instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_impls = "commonware_codec::Write, commonware_codec::EncodeSize, commonware_codec::Read, LocationRangeExt")]
 #[path = "../../src/merkle/location.rs"]
 pub mod location;
@@ -17,8 +20,10 @@ pub mod location;
 // Two functions stay unchecked host code (listed in the record):
 // `subtree_root_position` and `leftmost_leaf`: the prover does not yet
 // close their `checked_shl(..).expect(..)` and
-// `checked_add(..).and_then(..).expect(..)` chains (`leftmost_leaf`'s final
-// `expect` is what `position_to_location_is_complete` justifies).
+// `checked_add(..).and_then(..).expect(..)` chains. No law yet justifies
+// `leftmost_leaf`'s final `expect`: `position_to_location_is_complete`
+// needs the position written as `mmr_size(loc)`, and `leftmost_leaf` has it
+// as `pos + 2 - 2^(height+1)`.
 #[lift(mir = "mmr.sbmir", in_place, children = "iterator", instance = "Family: crate::merkle::mmr::Family, Graftable: crate::merkle::mmr::Family", unverified_fns = "Family::subtree_root_position, Family::leftmost_leaf")]
 #[path = "../../src/merkle/mmr/mod.rs"]
 pub mod mmr;

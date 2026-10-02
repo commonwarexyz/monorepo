@@ -33,7 +33,14 @@
 //!    the equal cases are `refl` and the two crossed cases are refuted from
 //!    the chained instances (an exact characterization `f(x) == true ↔
 //!    P(x)` refutes both: `F' x = true ⇒ P x ⇒ f x = true`, and back);
-//! 3. **induction** — for a recursive `p` whose section states its
+//! 3. **extensionality** — for `obs_eq` at a type of the lift prelude with
+//!    a checked extensionality lemma ([`EXT_LEMMAS`]: two
+//!    `Option<Ordering>` that agree on `<`, `<=`, `>`, `>=` are equal):
+//!    the lemma at the two results, its premises closed by the prover
+//!    chain from the chained instances as in the direct discharge (a
+//!    contract that states how `<`, `<=`, `>`, `>=` read `partial_cmp`'s
+//!    answer determines it);
+//! 4. **induction** — for a recursive `p` whose section states its
 //!    recursive equation (`F_p' x̄ = E[F', x̄]`): the statement is proven as
 //!    a definition by measure recursion on `p`'s measure; after rewriting
 //!    both sides with the equation instances, the boolean scrutinees of `E`
@@ -449,7 +456,12 @@ pub fn prove(env: &Env, prover: &mut ProverChain, stmt: &Tm, lay: &Layout, ind: 
         }
     }
     let target = shift(&concl, (inst.depth() - n) as i64);
-    let done = |inst: &PCx<'_>, p: Tm, by: &'static str, recursion: Recursion, arity: u32| Proven { body: lams(&bs, inst.wrap(0, p)), recursion, arity, by };
+    let done = |inst: &PCx<'_>, p: Tm, by: &'static str, recursion: Recursion, arity: u32| {
+        if std::env::var_os("SANDBLASTER_TRACE_SECTIONS").is_some() {
+            eprintln!("    complete: {by}");
+        }
+        Proven { body: lams(&bs, inst.wrap(0, p)), recursion, arity, by }
+    };
 
     // 1. direct
     match inst.clone().close(prover, &target, &hints) {
@@ -469,7 +481,21 @@ pub fn prove(env: &Env, prover: &mut ProverChain, stmt: &Tm, lay: &Layout, ind: 
             }
         }
     }
-    // 3. induction on p's measure
+    // 3. extensionality
+    if let Term::Eq { ty, lhs, rhs } = &*target {
+        for name in EXT_LEMMAS {
+            let Some(g) = env.lookup_global(name) else { continue };
+            match ext_apply(&mut inst.clone(), prover, g, ty, lhs, rhs, &target, &hints) {
+                Ok(Some(p)) => return Ok(done(&inst, p, "auto: extensionality (the answers agree on every test)", Recursion::None, 0)),
+                Ok(None) => {}
+                Err(f) => {
+                    tried.push(format!("extensionality (`{name}`): a premise was not closed"));
+                    last = Some(f);
+                }
+            }
+        }
+    }
+    // 4. induction on p's measure
     if let Some(ind) = ind {
         match induction(&mut inst.clone(), prover, lay, &bs, &concl, n, &params, ind, &target, &hints) {
             Ok(p) => return Ok(done(&inst, p, "auto: induction with the recursive equation", Recursion::Measure { measure: ind.measure.clone() }, n)),
@@ -482,6 +508,41 @@ pub fn prove(env: &Env, prover: &mut ProverChain, stmt: &Tm, lay: &Layout, ind: 
     let mut f = last.unwrap_or_default();
     f.tried.splice(0..0, tried);
     Err(f)
+}
+
+/// The extensionality lemmas of the lift prelude (`lift/model.rs`) that
+/// discharge 3 applies: each `Π(a b : T). P(a, b) → Eq(T, a, b)`, checked
+/// like any lemma of the crate.
+pub const EXT_LEMMAS: &[&str] = &["crate::__lift_model::partial_ordering_ext", "crate::__lift_model::ordering_ext"];
+
+/// Discharge 3: the extensionality lemma `g` at `a`, `b` (terms of type
+/// `ty` at the current depth), each premise closed by the prover chain (an
+/// equation used relevantly is promoted). `Ok(None)` when `g` is not about
+/// `ty` or does not conclude `Eq(ty, a, b)`.
+#[allow(clippy::too_many_arguments)]
+fn ext_apply(pcx: &mut PCx<'_>, prover: &mut ProverChain, g: GlobalId, ty: &Tm, a: &Tm, b: &Tm, target: &Tm, hints: &[Hint]) -> Result<Option<Tm>, Fail> {
+    let Some(gty) = pcx.env.global_type(g) else { return Ok(None) };
+    let tyv = pcx.eval(ty)?;
+    let Some((mut app, mut rest)) = pcx.instantiate_terms(mk::global(g), &gty, &[(a.clone(), tyv.clone()), (b.clone(), tyv)]) else { return Ok(None) };
+    // both arguments taken (the lemma is about `ty`)
+    if !matches!(&*app, Term::App { fun, .. } if matches!(&**fun, Term::App { .. })) {
+        return Ok(None);
+    }
+    // the premises
+    while let Term::Pi { rel, dom, cod, .. } = &*rest.clone() {
+        let p = pcx.close(prover, dom, hints)?;
+        let p = match (&**dom, rel) {
+            (Term::Eq { ty: ety, lhs, rhs }, Rel::Rel) => promote(pcx.env, ety, lhs, rhs, p)?,
+            _ => p,
+        };
+        app = Rc::new(Term::App { rel: *rel, fun: app, arg: p.clone() });
+        rest = crate::elab::tm::subst0(cod, &p);
+    }
+    let (rv, tv) = (pcx.eval(&rest)?, pcx.eval(target)?);
+    if !pcx.conv(&rv, &tv) {
+        return Ok(None);
+    }
+    Ok(Some(app))
 }
 
 /// Discharge 2: `Eq(Bool, a, b)` by splitting both sides.

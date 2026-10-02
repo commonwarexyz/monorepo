@@ -5,7 +5,7 @@
 //!
 //! | Module | Theory |
 //! | --- | --- |
-//! | `bits` | halving arithmetic, `pow2`, `popcount`, `log2`, multiples of `2^e` (`aligned`), big-endian `u64` bytes |
+//! | `bits` | halving arithmetic, `pow2`, `popcount`, `log2`, multiples of `2^e` (`aligned`), a word's trailing zeros and trailing ones at every width, big-endian `u64` bytes |
 //! | `folds` | `fold_left`, `fold_right`, `fold_right1`, `map`, `all`, `any`, `all2`, `zip`, `scan` over any function (ghost function values `fn(A, T) -> A`): their laws over `++`, `take`, `skip`, fusion, induction, relations and injectivity |
 //! | `seqs` | lengths, elements and splits of `take` / `skip` / `++` |
 //! | `bridges` | the code's words, slices and options against `Nat` and `Seq` (rules of the prover) |

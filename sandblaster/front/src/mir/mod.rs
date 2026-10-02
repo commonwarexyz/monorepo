@@ -97,8 +97,11 @@ pub struct ModuleNames {
     pub sealed: BTreeSet<String>,
     /// Host-model enums: name → variant names.
     pub host_enums: BTreeMap<String, Vec<String>>,
-    /// Source functions with a `requires` attachment (`write`,
-    /// `Decoder::feed`): their calls are obligations, bound where they occur.
+    /// Source functions with a `requires` attachment, by the full path the
+    /// attachment names them by (`crate::varint::write`,
+    /// `crate::varint::Decoder::feed`, `crate::m::u64__from__Pos`;
+    /// `lift::Ctx::attach_path`): their calls are obligations, bound where
+    /// they occur.
     pub requires: BTreeSet<String>,
     /// Open traits read at one instance (SEMANTICS.md §19.6): trait name →
     /// the instance's path in the crate (`Family` → `merkle::mmr::Family`).
@@ -183,12 +186,7 @@ impl ModuleNames {
     /// `name` qualified by the DSL module of the crate item `def_path`
     /// (bare within the module being read).
     fn qualify(&self, def_path: &str, name: &str) -> String {
-        let krate = self.module.split("::").next().unwrap_or("");
-        let best = self.dsl_modules.iter().filter(|d| {
-            let cp = format!("{krate}{}", d.trim_start_matches("crate"));
-            def_path.starts_with(&format!("{cp}::"))
-        }).max_by_key(|d| d.len());
-        match best {
+        match self.dsl_module(def_path) {
             Some(d) if *d != *self.current.borrow() => format!("{d}::{name}"),
             _ => name.to_string(),
         }
@@ -590,10 +588,18 @@ impl Names for ModuleNames {
             Item::Impl(_, _, _, mname) => mname.clone(),
             _ => String::new(),
         };
+        // attachments name a function by its full path (`lift::Ctx::
+        // attach_path`): its module (its self type's for a method) and its
+        // source name, or its lifted name (`u64__from__Position`, a
+        // function of an impl on a primitive: `lift::Ctx::attach_key`)
+        // (a sealed trait's impl on a primitive, `<u32 as m::sealed::T>::f`:
+        // the trait's module)
+        let modp = self.dsl_module(&item_path).or_else(|| item_path.split_once(" as ").and_then(|(_, r)| self.dsl_module(r))).cloned().unwrap_or_else(|| self.current.borrow().clone());
+        let has_requires = |n: &str| self.requires.contains(&format!("{modp}::{n}"));
         // (a lowered copy `__sandblaster_opt_g` of `g`, the lifted round
         // trip's, is bound where `g` is: binding is always a faithful order)
         let copy_of = orig.strip_prefix(crate::driver::lowered::HELPER_PREFIX);
-        let total = !self.requires.contains(&orig) && !copy_of.is_some_and(|g| self.requires.contains(g));
+        let total = !has_requires(&orig) && !has_requires(&name) && !copy_of.is_some_and(has_requires);
         // a `&self` receiver: the lift takes `self` by value
         let by_value: Vec<usize> = if f.argc >= 1 && f.debug.iter().any(|(n, l)| n == "self" && *l == 1) && matches!(f.locals.get(1), Some((Ty::Ref(false, _), _))) { vec![0] } else { vec![] };
         Some(LiftedCallee { path, states, has_ret, total, by_value })
@@ -681,7 +687,18 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
             return Err(format!("the source `{path}` changed since the MIR was extracted (re-run the extraction: sandblaster/mirx/extract.sh)"));
         }
     }
-    let mut by_lifted = BTreeMap::new();
+    // one extraction may hold several modules (`a, b`): a function of this
+    // module wins over a same-named one of another (`a::third`, `b::third`)
+    let own = format!("{}::{module_suffix}::", krate_of(&m.module));
+    let owns = |f: &Fn| {
+        let p = match &f.item {
+            Item::Inherent(Ty::Adt(k), _) | Item::Impl(Ty::Adt(k), ..) => m.adts.get(k).map(|d| d.path.clone()).unwrap_or_default(),
+            _ => f.def.clone(),
+        };
+        p.starts_with(&own) || p.contains(&format!(" as {own}"))
+    };
+    let mut by_lifted: BTreeMap<String, String> = BTreeMap::new();
+    let mut rank: BTreeMap<String, (bool, bool)> = BTreeMap::new();
     for k in &m.roots {
         if let Some(f) = m.fns.get(k)
             && let Some(n) = names.lifted_name(&m, f)
@@ -690,8 +707,9 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
             // at the instance are one lifted function: the inherent one
             // (the lift requires the trait's to be a pure delegation to it,
             // or the same body, SEMANTICS.md §19.10)
-            let inherent = matches!(f.item, Item::Inherent(..));
-            if inherent || !by_lifted.contains_key(&n) {
+            let r = (owns(f), matches!(f.item, Item::Inherent(..)));
+            if rank.get(&n).is_none_or(|old| r > *old || (r == *old && r.1)) {
+                rank.insert(n.clone(), r);
                 by_lifted.insert(n, k.clone());
             }
         }

@@ -67,11 +67,34 @@
 //! it (the key file records the digest of the record and the copies).
 //!
 //! Re-runs and verdict reuse are otherwise module mode's
-//! ([`super::module`]): the build script re-runs on any edit under `src/`;
-//! the verdict is reused when the verdict key (toolchain, environment,
-//! target, root, name and the content of every file the front end read —
-//! the in-place files included) matches and the record and copies still
-//! have their recorded digest.
+//! ([`super::module`]): the build script re-runs on any edit under `src/`
+//! (and of the inputs below outside the host crate); the verdict is reused
+//! when the **verdict key** matches and the record and copies still have
+//! their recorded digest. The key is module mode's — the verifier context
+//! (toolchain identity, overflow checks, `rustc -vV`, the `SANDBLASTER_*`
+//! variables that can change a result), the target, the root, the name,
+//! the edition and the content of every file the front end read (the DSL
+//! files — laws, proofs, words —, the in-place files, the `.sbmir` files,
+//! the profile) and the lock — plus the **host inputs** of the lift
+//! conformance check (`conform::host_inputs`: every file under `src/`, the
+//! copy's manifest, the workspace manifest and lock, the features, the
+//! files of every path dependency, cargo, its configuration and the
+//! environment that changes its build), because the conformance check
+//! compiles all of them.
+//!
+//! **The shared verdict cache** ([`super::cache`]): when `OUT_DIR` has no
+//! matching key file (a new target directory, another profile, `cargo
+//! clean`), the whole verdict — every output this build writes to
+//! `OUT_DIR` — is looked up under the same key (namespace [`CACHE_NS`];
+//! integrity-checked: a tampered entry is rejected and the crate verified),
+//! and a new verdict is stored there. On a miss, the build reuses what did
+//! not change, each under its own key: the spec mutants' verdicts
+//! (`mutate::cache`: an edit re-runs only the mutants it can affect), the
+//! theorem gate's verdicts (replayed through the kernel), and the lift
+//! conformance check's pass (`conform`: its key covers its inputs only, so
+//! an edit of a law or a proof, or of the lock, does not re-run it). A
+//! pending-gates build has no verdict key and stores no verdict, but reuses
+//! and stores those three.
 
 use std::path::{Path, PathBuf};
 
@@ -325,7 +348,7 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
     if let Some(dir) = root_path.parent() {
         o.cargo.push(format!("cargo::rerun-if-changed={}", dir.display()));
     }
-    let checked = check(&root_path, fs, &target);
+    let mut checked = check(&root_path, fs, &target);
     // only paths that exist: cargo re-runs a build script on every build
     // when a watched path is missing (the lift prelude is virtual; a lock
     // not yet accepted is absent, and its creation changes the watched
@@ -436,9 +459,27 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
     let out = format!("{name}-verified.txt");
     let code_path = out_dir.join(&out);
     let key_path = out_dir.join(format!("{name}-verdict.key"));
-    // (a pending-gates build never reuses a verdict: it has none)
+    // the verdict key (module docs): module mode's — every file the front
+    // end read, the lock, the profile, the target, the context — plus the
+    // host inputs of the lift conformance check (everything its copy of the
+    // host crate compiles or is configured by); a pending-gates build never
+    // reuses or stores a verdict: it has none
     let conform = crate::conform::Config::for_build(env, fs, &manifest, &out_dir, name, context);
-    let key = if gates == GateUse::Enforce { context.map(|ctx| verdict_key(ctx, env, fs, &root_path, &format!("in-place\nout {name}\nedition {}", conform.edition), &checked)) } else { None };
+    let key = match (gates, context) {
+        (GateUse::Enforce, Some(ctx)) => match crate::conform::host_inputs(&conform) {
+            Ok(h) => {
+                for w in &h.watch {
+                    o.cargo.push(format!("cargo::rerun-if-changed={}", w.display()));
+                }
+                Some(verdict_key(ctx, env, fs, &root_path, &format!("in-place\nout {name}\nedition {}\nhost-inputs {}", conform.edition, hex(&sha256(h.text.as_bytes()))), &checked))
+            }
+            Err(e) => {
+                o.cargo.push(format!("cargo::warning=sandblaster: `{name}`: no verdict reuse (the host inputs of the lift conformance check: {})", e.replace('\n', " ")));
+                None
+            }
+        },
+        _ => None,
+    };
     if let Some(k) = &key
         && let (Ok(kt), Ok(code)) = (fs.read(&key_path), fs.read(&code_path))
         && let Some(on_disk) = copies.iter().map(|c| fs.read(&c.dst).ok().map(|t| (c.dst.clone(), t))).collect::<Option<Vec<_>>>()
@@ -447,6 +488,22 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
         o.cargo.push(format!("cargo::warning=sandblaster: `{name}` verified in place, unchanged (verdict key {}): reusing `{}` and its lowered copies", &k[..16], code_path.display()));
         o.ok = true;
         return o;
+    }
+    // the shared verdict cache (module docs): the whole verdict, else (on a
+    // miss, and in a pending-gates build) the per-mutant verdicts, the
+    // theorem gate's replays and the conformance passes whose inputs did
+    // not change
+    let cache = super::module::open_cache(context, env, &mut o);
+    if let (Some(k), Some(vc)) = (&key, &cache)
+        && let Some(digest) = reuse_cached(vc, k, name, &out_dir, &copies, &mut o)
+    {
+        o.outputs.push((key_path, key_text(k, &digest)));
+        o.cargo.push(format!("cargo::warning=sandblaster: `{name}` verified in place, unchanged (verdict key {}): reusing the verdict cache entry in `{}`", &k[..16], vc.store.dir().display()));
+        o.ok = true;
+        return o;
+    }
+    if let Some(vc) = &cache {
+        checked.cache = Some(std::sync::Arc::new(vc.clone()));
     }
     let root_display = root_path.display().to_string();
     let b = build_crate_emitting(&checked, LockUse::Enforce, &root_display, &Emission::InPlace { out: out.clone(), conform });
@@ -501,11 +558,56 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
     o.outputs.insert(0, (code_path, record));
     o.outputs.extend(files);
     if let Some(k) = &key {
+        if let Some(vc) = &cache {
+            store_cached(vc, k, &out_dir, &o.outputs, &mut o.cargo);
+        }
         o.outputs.push((key_path, key_text(k, &digest)));
     }
     o.cargo.push(format!("cargo::warning=sandblaster: `{name}` verified in place (`{root}`): {}", verdict.summary()));
     o.ok = true;
     o
+}
+
+/// The namespace of whole in-place verdicts in the shared verdict cache
+/// (`driver::cache`).
+pub const CACHE_NS: &str = "in-place";
+
+/// Stores a whole in-place verdict under `key`: every output of the build
+/// in `OUT_DIR` (the record, the report, the timing, the lowered copies,
+/// their index and the round-trip copies), by file name (a failure is a
+/// warning).
+fn store_cached(vc: &super::cache::VerdictCache, key: &str, out_dir: &Path, outputs: &[(PathBuf, String)], cargo: &mut Vec<String>) {
+    let files: Vec<(&str, &str)> = outputs.iter().filter(|(p, _)| p.parent() == Some(out_dir)).filter_map(|(p, t)| p.file_name().and_then(|f| f.to_str()).map(|f| (f, t.as_str()))).collect();
+    if let Err(e) = vc.store.put(CACHE_NS, key, &files) {
+        cargo.push(format!("cargo::warning=sandblaster: verdict cache: {}", e.replace('\n', " ")));
+    }
+}
+
+/// A whole in-place verdict of the shared cache under `key`: pushes every
+/// stored output (into `OUT_DIR`) and returns the output digest of the
+/// record and the lowered copies (the key file's); `None` on a miss, or on
+/// an entry without the record or one of this build's copies (a warning:
+/// the crate is verified).
+fn reuse_cached(vc: &super::cache::VerdictCache, key: &str, name: &str, out_dir: &Path, copies: &[LoweredCopy], o: &mut BuildOutcome) -> Option<String> {
+    let files = match vc.store.get(CACHE_NS, key) {
+        super::cache::Lookup::Hit(files) => files,
+        super::cache::Lookup::Miss => return None,
+        super::cache::Lookup::Rejected(why) => {
+            o.cargo.push(format!("cargo::warning=sandblaster: verdict cache entry {}… rejected ({why}); verifying", &key[..16]));
+            return None;
+        }
+    };
+    let get = |n: &str| files.iter().find(|(f, _)| f == n).map(|(_, t)| t.clone());
+    let record = get(&format!("{name}-verified.txt"));
+    let written: Option<Vec<(PathBuf, String)>> = copies.iter().map(|c| c.dst.file_name().and_then(|f| f.to_str()).and_then(get).map(|t| (c.dst.clone(), t))).collect();
+    let (Some(record), Some(written)) = (record, written) else {
+        o.cargo.push(format!("cargo::warning=sandblaster: verdict cache entry {}… rejected (it lacks the record or a lowered copy); verifying", &key[..16]));
+        return None;
+    };
+    for (f, t) in files {
+        o.outputs.push((out_dir.join(f), t));
+    }
+    Some(outputs_digest(&record, &written))
 }
 
 /// Fail closed (DESIGN.md §2.1): a host file compiled from its lowered copy

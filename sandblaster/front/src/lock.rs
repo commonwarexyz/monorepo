@@ -5,8 +5,8 @@
 //! sections and the known answers of the vocabulary; never proof
 //! internals — `crate::surface`, *What is locked*) and a
 //! header recording the lock format, the toolchain (kernel, prelude,
-//! SEMANTICS, builtins and target-model hashes), the TCB statement and the
-//! computed sections, and the Merkle root of it all.
+//! SEMANTICS, builtins, lift-prelude and target-model hashes), the TCB
+//! statement and the computed sections, and the Merkle root of it all.
 //!
 //! # Format (`sandblaster-spec-lock/1`)
 //!
@@ -15,6 +15,7 @@
 //! root <H(header, (key, H(i))…)>
 //! kernel <hash>           prelude <hash>      (one per line)
 //! semantics <hash>        builtins <hash>
+//! lift <hash>             (a lifted crate only: the lift prelude)
 //! target aarch64 <hash>   (one line per accepted target)
 //! sections 1
 //! section section:crate::f R {crate::f} P {crate::f} Deps {} H <H(i)…> (one per section)
@@ -134,6 +135,13 @@ pub const BUILTIN_SOURCES: &[(&str, &str)] = &[
     ("elab/ghost.core", include_str!("elab/ghost.core")),
 ];
 
+/// The `lift` hash of a lifted crate's lock header: the lift prelude, whose
+/// definitions a lifted crate's contracts use (`ord_lt` reads `<` from
+/// `partial_cmp`'s answer, `range_inclusive_u32` builds `a..=b`, the buffer
+/// model of `BufMut`). A crate written in the DSL does not load it, and its
+/// lock has no `lift` line.
+pub const LIFT_SOURCES: &[(&str, &str)] = &[("lift/prelude.rs", crate::lift::PRELUDE_EXEC), ("lift/model.rs", crate::lift::PRELUDE_MODEL)];
+
 /// What a dependency line names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DepKind {
@@ -216,6 +224,9 @@ pub struct Lock {
     pub prelude: Hash,
     pub semantics: Hash,
     pub builtins: Hash,
+    /// The lift prelude ([`LIFT_SOURCES`]) of a lifted crate; `None` (no
+    /// `lift` line) for a crate written in the DSL.
+    pub lift: Option<Hash>,
     /// Accepted targets and their target-model hashes.
     pub targets: BTreeMap<String, Hash>,
     pub sections: usize,
@@ -243,7 +254,7 @@ impl Lock {
     /// An empty lock with the header of `s`.
     pub fn empty_for(s: &Surface) -> Lock {
         let sections = s.items.iter().filter(|i| i.kind == SurfaceKind::Section).count();
-        let mut l = Lock { format: FORMAT.into(), root: [0; 32], kernel: s.kernel, prelude: s.prelude, semantics: s.semantics, builtins: s.builtins, targets: BTreeMap::new(), sections, tcb: TCB.iter().map(|x| x.to_string()).collect(), entries: vec![] };
+        let mut l = Lock { format: FORMAT.into(), root: [0; 32], kernel: s.kernel, prelude: s.prelude, semantics: s.semantics, builtins: s.builtins, lift: s.lift, targets: BTreeMap::new(), sections, tcb: TCB.iter().map(|x| x.to_string()).collect(), entries: vec![] };
         l.targets.insert(s.target.clone(), s.target_model);
         l.root = l.compute_root();
         l
@@ -271,6 +282,12 @@ impl Lock {
         put(&self.format);
         for (n, h) in [("kernel", &self.kernel), ("prelude", &self.prelude), ("semantics", &self.semantics), ("builtins", &self.builtins)] {
             put(n);
+            put(&hex(h));
+        }
+        // only a lifted crate's header has it (the roots of other locks are
+        // unchanged)
+        if let Some(h) = &self.lift {
+            put("lift");
             put(&hex(h));
         }
         for (t, h) in &self.targets {
@@ -308,6 +325,9 @@ impl Lock {
         s.push_str(&format!("format {}\n", l.format));
         s.push_str(&format!("root {}\n", hex(&root)));
         s.push_str(&format!("kernel {}\nprelude {}\nsemantics {}\nbuiltins {}\n", hex(&l.kernel), hex(&l.prelude), hex(&l.semantics), hex(&l.builtins)));
+        if let Some(h) = &l.lift {
+            s.push_str(&format!("lift {}\n", hex(h)));
+        }
         for (t, h) in &l.targets {
             s.push_str(&format!("target {t} {}\n", hex(h)));
         }
@@ -419,11 +439,12 @@ impl Lock {
             match w {
                 "format" => format = Some(arg.to_string()),
                 "root" => root = Some(hash_of(arg, n)?),
-                "kernel" | "prelude" | "semantics" | "builtins" => {
+                "kernel" | "prelude" | "semantics" | "builtins" | "lift" => {
                     let k: &str = match w {
                         "kernel" => "kernel",
                         "prelude" => "prelude",
                         "semantics" => "semantics",
+                        "lift" => "lift",
                         _ => "builtins",
                     };
                     hdr.insert(k, hash_of(arg, n)?);
@@ -466,7 +487,7 @@ impl Lock {
                 kernel_omitted: r.omitted,
             });
         }
-        let mut l = Lock { format, root: root.ok_or("no `root` line")?, kernel: get("kernel")?, prelude: get("prelude")?, semantics: get("semantics")?, builtins: get("builtins")?, targets, sections: sections.ok_or("no `sections` line")?, tcb, entries };
+        let mut l = Lock { format, root: root.ok_or("no `root` line")?, kernel: get("kernel")?, prelude: get("prelude")?, semantics: get("semantics")?, builtins: get("builtins")?, lift: hdr.get("lift").copied(), targets, sections: sections.ok_or("no `sections` line")?, tcb, entries };
         l.sort();
         if section_lines != l.section_lines() {
             return Err("the header's `section` lines do not match the section entries (edited by hand?)".into());
@@ -745,6 +766,12 @@ pub fn compare(text: Option<&str>, s: &Surface, file: &str) -> LockStatus {
             st.header.push(format!("{name}: locked {}…, this toolchain {}…", h8(&l), h8(&c)));
         }
     }
+    match (lock.lift, s.lift) {
+        (Some(l), Some(c)) if l != c => st.header.push(format!("lift: the lift prelude locked {}…, this toolchain {}…", h8(&l), h8(&c))),
+        (None, Some(c)) => st.header.push(format!("lift: the lift prelude is not locked (this toolchain {}…; a lock of a lifted crate pins it)", h8(&c))),
+        (Some(l), None) => st.header.push(format!("lift: the lock pins a lift prelude ({}…), but the crate is not lifted", h8(&l))),
+        _ => {}
+    }
     match lock.targets.get(&s.target) {
         None => st.header.push(format!("target {}: not accepted for this target (accepted: {})", s.target, lock.targets.keys().cloned().collect::<Vec<_>>().join(", "))),
         Some(h) if *h != s.target_model => st.header.push(format!("target {}: target-model library locked {}…, this toolchain {}…", s.target, h8(h), h8(&s.target_model))),
@@ -878,16 +905,17 @@ fn accept_into(old: Option<&Lock>, s: &Surface, sel: &Selection) -> Result<(Lock
         }
     };
     if header {
-        let before = (lock.kernel, lock.prelude, lock.semantics, lock.builtins, lock.targets.get(&t).copied(), lock.tcb.clone(), lock.format.clone());
+        let before = (lock.kernel, lock.prelude, lock.semantics, lock.builtins, lock.lift, lock.targets.get(&t).copied(), lock.tcb.clone(), lock.format.clone());
         lock.format = FORMAT.into();
         lock.kernel = s.kernel;
         lock.prelude = s.prelude;
         lock.semantics = s.semantics;
         lock.builtins = s.builtins;
+        lock.lift = s.lift;
         lock.tcb = TCB.iter().map(|x| x.to_string()).collect();
         lock.sections = s.items.iter().filter(|i| i.kind == SurfaceKind::Section).count();
         lock.targets.insert(t.clone(), s.target_model);
-        acc.header = before != (lock.kernel, lock.prelude, lock.semantics, lock.builtins, Some(s.target_model), lock.tcb.clone(), lock.format.clone());
+        acc.header = before != (lock.kernel, lock.prelude, lock.semantics, lock.builtins, lock.lift, Some(s.target_model), lock.tcb.clone(), lock.format.clone());
     } else if !lock.targets.contains_key(&t) {
         // the first entry accepted for this target records its model library
         lock.targets.insert(t.clone(), s.target_model);

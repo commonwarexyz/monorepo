@@ -38,6 +38,12 @@ use super::util::*;
 /// Maximal nesting of argument congruence.
 const MAX_CONGR_DEPTH: u32 = 3;
 
+/// Maximal nesting of constructor splits (of different data types, see
+/// [`Engine::ctor_split`]): an option of a pair of a struct
+/// (`Some((P(e), g)) == Some((P(x), g))`) reaches its integer equation
+/// `e == x` at the third level.
+pub const MAX_CTOR_SPLIT: u32 = 3;
+
 impl Engine<'_> {
     /// Close `f(a..) == f(b..)` by argument congruence (see the module docs).
     pub fn arg_congruence(&mut self, st: &St, t: &V) -> R<Option<Tm>> {
@@ -250,7 +256,7 @@ impl Engine<'_> {
     /// step), which the argument congruences above do not do. Without it
     /// the search keeps unfolding the sides' recursive functions instead.
     pub fn ctor_split(&mut self, st: &St, t: &V) -> R<Option<Tm>> {
-        if self.in_ctor_split {
+        if self.ctor_split_inds.len() as u32 >= MAX_CTOR_SPLIT {
             return Ok(None);
         }
         let Some((aty, l, r)) = as_eq(t) else { return Ok(None) };
@@ -260,6 +266,11 @@ impl Engine<'_> {
             return Ok(None);
         }
         let (ind, ctor) = (*ind, *ctor);
+        // inside a split of the same type (a recursive structure): no
+        // nested split
+        if self.ctor_split_inds.contains(&ind) {
+            return Ok(None);
+        }
         // a list of several known elements on either side (a literal list,
         // an eta-expanded array): conversion and the list rules decide it
         // as a whole, not element by element
@@ -294,9 +305,9 @@ impl Engine<'_> {
             }
             let Some(dv) = self.eval(st, &dom)? else { return Ok(None) };
             let g = Rc::new(Value::Eq { ty: dv, lhs: x.clone(), rhs: y.clone() });
-            self.in_ctor_split = true;
+            self.ctor_split_inds.push(ind);
             let p = self.solve(st, g, true);
-            self.in_ctor_split = false;
+            self.ctor_split_inds.pop();
             let Some(p) = p? else { return Ok(None) };
             eqs.push(p);
             split = true;
@@ -305,12 +316,20 @@ impl Engine<'_> {
             return Ok(None);
         }
         let Some(p) = crate::elab::tm::ctor_congruence_term(self.env, ind, ctor, ps, &la[..nrel], &ra[..nrel], &la[nrel..], &ra[nrel..], &eqs) else { return Ok(None) };
-        let mut b = sandblaster_kernel::value::Budget { steps: self.b.steps.min(20_000_000) };
-        let start = b.steps;
-        let ok = self.env.check(&st.ctx, &self.promote(st, t, p.clone()), t, &mut b).is_ok();
-        self.b.steps = self.b.steps.saturating_sub(start - b.steps);
-        if !ok {
-            return Ok(None);
+        // checked (a term the kernel cannot check within the goal's budget
+        // is no proof: the search goes on without it) at the outermost
+        // split, whose term contains the nested splits' — so each nested
+        // equation is checked once, not once per level — and wherever the
+        // constructor has `Irr` fields (their types, generalized in the
+        // motive, may depend on the relevant ones)
+        if self.ctor_split_inds.is_empty() || nrel < c.fields.len() {
+            let mut b = sandblaster_kernel::value::Budget { steps: self.b.steps.min(20_000_000) };
+            let start = b.steps;
+            let ok = self.env.check(&st.ctx, &self.promote(st, t, p.clone()), t, &mut b).is_ok();
+            self.b.steps = self.b.steps.saturating_sub(start - b.steps);
+            if !ok {
+                return Ok(None);
+            }
         }
         self.note("constructor split (the arguments' equations)");
         Ok(Some(p))
@@ -386,7 +405,12 @@ impl Engine<'_> {
             if self.arith_distinct(st, &goal)? {
                 return Ok(None);
             }
-            if let Some(p) = self.lin_prove(st, &goal, true)? {
+            // (inside the atom congruence of an enrichment round, the
+            // round's facts are enriched already: one linarith round over
+            // them, not three enriched ones per atom pair — a pair that does
+            // not hold, `popcount(x << g)` against `popcount(y << g)`, would
+            // cost that on every enriched linarith call)
+            if let Some(p) = self.lin_prove(st, &goal, !self.in_atom_congr)? {
                 return Ok(Some(p));
             }
             // integer applications of one function (`h(p.a, p.b)` against

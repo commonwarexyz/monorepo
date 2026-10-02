@@ -302,6 +302,27 @@ def[lemma] bits::ind_le_one : (b : Bool) -> Eq(Bool, #le_int({ib}, 1int), true) 
             ),
         ));
     }
+    // [a] = [b] for two booleans that imply each other (the indicators of
+    // two K1 conditions that say the same thing, `tz_shr1`).
+    let (ia, iz) = (ind("a"), ind("z"));
+    let (ta, tb) = ("Eq(Bool, a, true)", "Eq(Bool, b, true)");
+    items.push(Item::plain(
+        "bits::ind_iff".into(),
+        format!(
+            "-- [a] = [b] when a and b imply each other.
+def[lemma] bits::ind_iff : (a : Bool) -> (b : Bool) -> (.ab : (h : {ta}) -> {tb}) -> (.ba : (h : {tb}) -> {ta}) -> Eq(Int, {ia}, {ib}) :=
+  fun (a : Bool) (b : Bool) (.ab : (h : {ta}) -> {tb}) (.ba : (h : {tb}) -> {ta}) =>
+    (match a : Bool as y return (.e : Eq(Bool, a, y)) -> Eq(Int, {iy}, {ib}) with
+     | false => fun (.e : Eq(Bool, a, false)) =>
+         (match b : Bool as z return (.f : Eq(Bool, b, z)) -> Eq(Int, 0int, {iz}) with
+          | false => fun (.f : Eq(Bool, b, false)) => refl(Int, 0int)
+          | true => fun (.f : {tb}) => absurd(Eq(Int, 0int, 1int), bool::false_ne_true (eq::trans Bool false a true (eq::sym Bool a false e) (ba f)))
+          end) .refl(Bool, b)
+     | true => fun (.e : {ta}) => eq::sym Int ({ib}) 1int (bits::ind_true b .(ab e))
+     end) .refl(Bool, a)
+"
+        ),
+    ));
     for w in WIDTHS {
         items.extend(width_items(wd(w)));
     }
@@ -410,6 +431,8 @@ fn width_items(d: Wd) -> Vec<Item> {
     let goal = format!("Eq(Int, #cast_u32_int({}), #iadd(#cast_u32_int({}), {}))", d.cnt("x"), d.cnt(&x1), d.int(&d.and("x", &one)));
     let p = g.lin(hs, &goal);
     out.push(lemma(g, format!("bits::popcnt_shr1_{s}"), &goal, &p));
+    out.push(bit1_flip(d));
+    out.push(not_val(d));
     // Exactness of wrapping operations: equal to the checked operation when
     // it is in its domain (so linarith reads them exactly).
     for (name, hyp, wop, cop) in [
@@ -425,6 +448,127 @@ fn width_items(d: Wd) -> Vec<Item> {
         out.push(it);
     }
     out
+}
+
+/// `b ^ 1 = 1 − b` in `Int` for a bit `b ≤ 1` (by cases on `b == 0`: in
+/// each arm the value is moved in and both sides compute).
+fn bit1_flip(d: Wd) -> Item {
+    let (s, t) = (d.s, d.t);
+    let (z, one) = (d.lit(0), d.lit(1));
+    let hyp = d.holds("le", "b", &one);
+    let stmt = |b: &str| format!("Eq(Int, {}, #isub(1int, {}))", d.int(&d.op("xor", &[b, &one])), d.int(b));
+    let goal = stmt("b");
+    let test = d.op("eq", &["b", &z]);
+    let mut g = Gen::new(&[("b", t), (".h", &hyp), (".e", &format!("Eq(Bool, {test}, true)"))]);
+    let is0 = g.lin(vec![("e".into(), format!("Eq(Bool, {test}, true)"))], &d.eq(&z, "b"));
+    g.binders.pop();
+    g.binders.push((".e".into(), format!("Eq(Bool, {test}, false)")));
+    let pos: Hyp = (format!("bits::eq_zero_false_pos_{s} b .e"), d.holds("lt", &z, "b"));
+    let is1 = g.lin(vec![pos, ("h".into(), hyp.clone())], &d.eq(&one, "b"));
+    g.binders.pop();
+    let body = format!(
+        "(match {test} : Bool as y return (.e : Eq(Bool, {test}, y)) -> {goal} with
+     | false => fun (.e : Eq(Bool, {test}, false)) => transport({t}, {one}, b, {is1}, y. {sy}, refl(Int, 0int))
+     | true => fun (.e : Eq(Bool, {test}, true)) => transport({t}, {z}, b, {is0}, y. {sy}, refl(Int, 1int))
+     end) .refl(Bool, {test})",
+        sy = stmt("y"),
+    );
+    let mut it = lemma(g, format!("bits::bit1_flip_{s}"), &goal, &body);
+    it.text = format!("-- b ^ 1 = 1 − b for a bit b.\n{}", it.text);
+    it
+}
+
+/// `!x = MAX − x` in `Int` (`auto` adds it for every `!x` it meets, so
+/// linear arithmetic reads a complement exactly). By measure recursion on
+/// `x`: `!x` is twice `(!x) >> 1` plus its bit 0; `(!x) >> 1` is `!(x >> 1)`
+/// without its top bit, which is set (word identities), so it is
+/// `MAX − (x >> 1) − 2^(w−1)` by the recursive call; and bit 0 of `!x` is
+/// `1 −` bit 0 of `x` (`bits::bit1_flip`). `x = 0`: both sides compute.
+fn not_val(d: Wd) -> Item {
+    let (s, t, n) = (d.s, d.t, d.n);
+    let (z, one) = (d.lit(0), d.lit(1));
+    let not = |x: &str| d.op("not", &[x]);
+    let stmt = |x: &str| format!("Eq(Int, {}, #isub({}int, {}))", d.int(&not(x)), d.max(), d.int(x));
+    let goal = stmt("x");
+    let test = d.op("eq", &["x", &z]);
+    let x1 = d.shr("x", 1);
+    let mut g = Gen::new(&[("x", t), (".e", &format!("Eq(Bool, {test}, true)"))]);
+    let is0 = g.lin(vec![("e".into(), format!("Eq(Bool, {test}, true)"))], &d.eq(&z, "x"));
+    g.binders.pop();
+    let ef = format!("Eq(Bool, {test}, false)");
+    g.binders.push((".e".into(), ef.clone()));
+    let pos: Hyp = (format!("bits::eq_zero_false_pos_{s} x .e"), d.holds("lt", &z, "x"));
+    let dec = g.lin(vec![pos], &d.holds("lt", &x1, "x"));
+    let bit0 = d.and("x", &one);
+    let le1 = g.lin(vec![], &d.holds("le", &bit0, &one));
+    let hs: Vec<Hyp> = vec![
+        (format!("rec({x1}; {dec})"), stmt(&x1)),
+        d.bv(&d.shr(&not("x"), 1), &d.and(&not(&x1), &d.lit(d.max() >> 1))),
+        d.bv(&d.shr(&not(&x1), n - 1), &one),
+        d.bv(&d.and(&not("x"), &one), &d.op("xor", &[&bit0, &one])),
+        (format!("bits::bit1_flip_{s} ({bit0}) .{le1}"), format!("Eq(Int, {}, #isub(1int, {}))", d.int(&d.op("xor", &[&bit0, &one])), d.int(&bit0))),
+    ];
+    let step = g.lin(hs, &goal);
+    g.binders.pop();
+    let body = format!(
+        "(match {test} : Bool as y return (.e : Eq(Bool, {test}, y)) -> {goal} with
+     | false => fun (.e : {ef}) => {step}
+     | true => fun (.e : Eq(Bool, {test}, true)) => transport({t}, {z}, x, {is0}, y. {sy}, refl(Int, {max}int))
+     end) .refl(Bool, {test})",
+        sy = stmt("y"),
+        max = d.max(),
+    );
+    let mut it = lemma(g, format!("bits::not_val_{s}"), &goal, &body);
+    it.text = format!("-- !x = MAX − x.\n{} measure (x)\n", it.text.trim_end());
+    it
+}
+
+/// `tz(x) = tz(x >> 1) + 1` in `Int` for an even `x ≠ 0` (the step of the
+/// trailing-zeros induction of `stdlib::bits`, which states the trailing
+/// zeros of a word for every count at once). The K1 sums of `x` and of
+/// `y = x >> 1` agree term by term — the low `m + 1` bits of `x` are zero
+/// exactly when the low `m` bits of `y` are, bit 0 of `x` being zero
+/// (`bits::ind_iff`, each direction by linarith over two word identities)
+/// — except `x`'s first term (`x & 1 = 0`: 1) and `y`'s last (`y ≠ 0`: 0).
+fn tz_shr1(d: Wd) -> Item {
+    let (s, t, n) = (d.s, d.t, d.n);
+    let z = d.lit(0);
+    let one = d.lit(1);
+    let y = d.shr("x", 1);
+    let h1 = d.eq(&d.and("x", &one), &z);
+    let h2 = d.holds("ne", "x", &z);
+    let mut g = Gen::new(&[("x", t), (".h1", &h1), (".h2", &h2)]);
+    let mut hs = vec![d.def_hyp("trailing_zeros_def", "x"), d.def_hyp("trailing_zeros_def", &y)];
+    // x's first term: x & 1 = 0
+    let c1 = d.tz_cond("x", 1);
+    let pf = g.lin(vec![("h1".into(), h1.clone())], &format!("Eq(Bool, {c1}, true)"));
+    hs.push(ind_is(&c1, true, &pf));
+    // y's last term: y & (2^w − 1) is y, not 0 (x ≥ 1 is even, so y ≥ 1)
+    let cn = d.tz_cond(&y, n);
+    let pos: Hyp = (format!("bits::ne_zero_pos_{s} x .h2"), d.holds("lt", &z, "x"));
+    let pf = g.lin(vec![pos, ("h1".into(), h1.clone())], &format!("Eq(Bool, {cn}, false)"));
+    hs.push(ind_is(&cn, false, &pf));
+    // the other terms in pairs: [x & (2^(m+1) − 1) = 0] = [y & (2^m − 1) = 0]
+    for m in 1..n {
+        let (a, b) = (d.tz_cond("x", m + 1), d.tz_cond(&y, m));
+        let xm = d.and("x", &d.mask(m + 1));
+        // y & (2^m − 1) is (x & (2^(m+1) − 1)) >> 1, and x & 1 its lowest bit
+        let link1 = d.bv(&d.and(&y, &d.mask(m)), &d.shr(&xm, 1));
+        let link2 = d.bv(&d.and("x", &one), &d.and(&xm, &one));
+        let (ha, hb) = (format!("Eq(Bool, {a}, true)"), format!("Eq(Bool, {b}, true)"));
+        g.binders.push(("h".into(), ha.clone()));
+        let ab = g.lin(vec![("h".into(), ha.clone()), link1.clone()], &hb);
+        g.binders.pop();
+        g.binders.push(("h".into(), hb.clone()));
+        let ba = g.lin(vec![("h".into(), hb.clone()), link1, link2, ("h1".into(), h1.clone())], &ha);
+        g.binders.pop();
+        hs.push((format!("bits::ind_iff ({a}) ({b}) .(fun (h : {ha}) => {ab}) .(fun (h : {hb}) => {ba})"), format!("Eq(Int, {}, {})", ind(&a), ind(&b))));
+    }
+    let goal = format!("Eq(Int, #cast_u32_int({}), #iadd(#cast_u32_int({}), 1int))", d.tz("x"), d.tz(&y));
+    let p = g.lin(hs, &goal);
+    let mut it = lemma(g, format!("bits::tz_shr1_{s}"), &goal, &p);
+    it.text = format!("-- tz(x) = tz(x >> 1) + 1 for an even x ≠ 0.\n{}", it.text);
+    it
 }
 
 /// Fill in the certificates of an item (each hole is linearized in the
@@ -609,10 +753,16 @@ pub enum Family {
     /// `cnt(x) ≤ cnt(x >> k) + k` in `Int` (`1 ≤ k < w`; the steps of
     /// `popcnt_le_k`, each from the previous one).
     PopcntShrLe,
+    /// `tz(x) = tz(x >> 1) + 1` in `Int` for an even `x ≠ 0`: one lemma per
+    /// width, no `k` ([`Family::fixed`]; named `bits::tz_shr1_<w>`). The
+    /// step of the trailing-zeros induction of `stdlib::bits`, which states
+    /// a word's trailing zeros for every count at once. On demand: its
+    /// proof compares the K1 sums term by term (`w − 1` pairs).
+    TzShr1,
 }
 
 impl Family {
-    pub const ALL: [Family; 14] = [
+    pub const ALL: [Family; 15] = [
         Family::LzRange,
         Family::PopcntStep,
         Family::PopcntShrZero,
@@ -627,7 +777,14 @@ impl Family {
         Family::LzLower,
         Family::LzGe,
         Family::PopcntShrLe,
+        Family::TzShr1,
     ];
+
+    /// One lemma per width, with no literal parameter: named
+    /// `bits::<stem>_<w>`, valid at `k = 0` only.
+    pub fn fixed(self) -> bool {
+        matches!(self, Family::TzShr1)
+    }
 
     pub fn stem(self) -> &'static str {
         match self {
@@ -645,6 +802,7 @@ impl Family {
             Family::LzLower => "lz_lower",
             Family::LzGe => "lz_ge",
             Family::PopcntShrLe => "popcnt_shr_le",
+            Family::TzShr1 => "tz_shr1",
         }
     }
 
@@ -656,6 +814,7 @@ impl Family {
                 k < n
             }
             Family::PopcntShrZero | Family::WshlExact | Family::ShlExact | Family::PopcntSplit | Family::PopcntShrLe => k >= 1 && k < n,
+            Family::TzShr1 => k == 0 && n >= 2,
         }
     }
 }
@@ -666,6 +825,15 @@ impl Family {
 /// elaborator generate them on demand ([`ensure`]).
 pub fn parse_lemma_name(name: &str) -> Option<(Family, Width, u32)> {
     let n = name.strip_prefix("bits::").unwrap_or(name);
+    // a fixed family: `<stem>_<w>`
+    for f in Family::ALL.into_iter().filter(|f| f.fixed()) {
+        if let Some(ws) = n.strip_prefix(f.stem()).and_then(|r| r.strip_prefix('_'))
+            && let Some(w) = WIDTHS.into_iter().find(|w| wd(*w).s == ws)
+            && f.valid(w, 0)
+        {
+            return Some((f, w, 0));
+        }
+    }
     const FAMS: [Family; 15] = [
         Family::LzRange, Family::PopcntStep, Family::PopcntShrZero, Family::MaskSplit, Family::ClzXorPrefix, Family::WshlExact, Family::ShlExact,
         Family::PopcntSplit, Family::PopcntLowStep, Family::TzRange, Family::PopcntLe, Family::LzLower, Family::LzGe, Family::PopcntShrLe, Family::LzRange,
@@ -689,8 +857,11 @@ pub fn parse_lemma_name(name: &str) -> Option<(Family, Width, u32)> {
     None
 }
 
-/// `bits::<stem>_<w>_<k>`.
+/// `bits::<stem>_<w>_<k>` (`bits::<stem>_<w>` for a fixed family).
 pub fn lemma_name(f: Family, w: Width, k: u32) -> String {
+    if f.fixed() {
+        return format!("bits::{}_{}", f.stem(), wd(w).s);
+    }
     format!("bits::{}_{}_{k}", f.stem(), wd(w).s)
 }
 
@@ -995,6 +1166,7 @@ pub fn family_item(f: Family, w: Width, k: u32) -> Option<Item> {
             );
             lemma(g, name, &goal, &body)
         }
+        Family::TzShr1 => tz_shr1(d),
         Family::WshlExact => {
             let bound = d.lit(d.max() >> k);
             let hyp = d.holds("le", "a", &bound);

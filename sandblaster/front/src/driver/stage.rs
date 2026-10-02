@@ -18,7 +18,7 @@ use std::time::Instant;
 use crate::canon;
 use crate::diag::Severity;
 use crate::elab::{self, DefStatus};
-use crate::hir::{self, Crate, ItemId, ItemKind, LawProof, Recursion};
+use crate::hir::{Crate, ItemId, ItemKind, LawProof, Recursion};
 use crate::json::Json;
 use crate::span::SourceMap;
 
@@ -65,7 +65,7 @@ pub fn front_end_report_json(c: &Checked, root_display: &str) -> String {
             d.str("path", &it.path.to_string());
             d.str("kind", kind_name(&it.kind));
             d.bool("ghost", it.ghost);
-            d.bool("boundary", reach.contains(&it.id) && it.vis == hir::Vis::Public);
+            d.bool("boundary", reach.contains(&it.id) && crate::validate::host_visible(k, it));
             if let ItemKind::Fn(f) = &it.kind {
                 d.num("requires", f.requires.len() as i64);
                 d.bool("ensures", f.ensures.is_some());

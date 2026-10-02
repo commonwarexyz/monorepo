@@ -350,6 +350,27 @@ fn a_prelude_change_is_detected_in_the_header_and_its_dependents() {
 }
 
 #[test]
+fn a_crate_written_in_the_dsl_has_no_lift_prelude_line() {
+    // the lift prelude is pinned only for a lifted crate (`lock_surface.rs`,
+    // `a_lifted_crate_pins_the_lift_prelude`): this crate does not load it,
+    // so its lock has no `lift` line and a changed prelude does not touch it
+    let files = fixture();
+    let c = check(&files);
+    let k = c.krate.as_ref().unwrap();
+    let (before, after) = driver::stage::with_elaboration(k, &VerifyOptions::default(), |out| {
+        let before = surface::compute(out, k, &c.sm, &SurfaceOptions::default());
+        let mut tc = surface::Toolchain::current().clone();
+        tc.lift = [9; 32];
+        let after = surface::compute(out, k, &c.sm, &SurfaceOptions { toolchain: Some(tc), ..Default::default() });
+        (before, after)
+    });
+    assert_eq!(before.lift, None);
+    let text = lock::preview_accept(None, &before, &Selection::All).unwrap().0.render();
+    assert!(!text.lines().any(|l| l.starts_with("lift ")), "{}", &text[..400]);
+    assert_eq!(lock::compare(Some(&text), &after, "r/SPEC.lock").state, LockState::Matches);
+}
+
+#[test]
 fn a_changed_target_model_evidence_is_detected() {
     // the `simd` sample dispatches the NEON `vaddq_u32` on aarch64
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/samples/simd/mod.rs");

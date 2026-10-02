@@ -175,7 +175,7 @@ pub fn build(krate: &Crate, rep: MutationReport, sheet: Option<String>) -> Cover
                         format!("partially constrained: {observed_here} surviving mutant(s) (of it or of the code it uses) differ from it on some input (section #{i}: {w})")
                     } else if !as_dependency.is_empty() {
                         format!("not determined: surviving mutants of it change {} (section #{i}: {w})", list(&as_dependency))
-                    } else if b.laws.is_empty() && b.refines.is_none() && !krate.fn_def(*id).is_some_and(|f| f.ensures.is_some()) {
+                    } else if b.laws.is_empty() && b.refines.is_none() && !krate.fn_def(*id).is_some_and(|f| f.contract_ensures().is_some()) {
                         format!("unspecified: no law, contract or refinement constrains it (section #{i})")
                     } else {
                         format!("not determined (section #{i}: {w})")

@@ -11,7 +11,7 @@
 //! model.
 
 use sandblaster::prelude::*;
-use crate::__lift::{Result, TryGetError, I16, I32, I64};
+use crate::__lift::{ord_ge, ord_gt, ord_le, ord_lt, Ordering, Result, TryGetError, I16, I32, I64};
 
 /// `BufMut::put_u8(n)`: appends `n`.
 #[example(bufmut_put_u8(seq![1u8], 2u8) == seq![1u8, 2u8])]
@@ -94,4 +94,30 @@ pub fn i32_of_int(i: Int) -> I32 {
 #[example(i64_of_int(18446744073709551616) == I64(0u64) && i64_of_int(-18446744073709551616) == I64(0u64) && i64_of_int(9223372036854775807) == I64(9223372036854775807u64))]
 pub fn i64_of_int(i: Int) -> I64 {
     if i >= 0 { I64((i as Nat) as u64) } else { I64((18446744073709551616 - ((-i) as Nat) % 18446744073709551616) as u64) }
+}
+
+// ---------------------------------------------------------------------------
+// Extensionality of the prelude's enums: lemmas `auto` applies to the §15.5
+// goals (`auto::complete::EXT_LEMMAS`). Checked like any lemma.
+// ---------------------------------------------------------------------------
+
+/// Extensionality of comparison answers: two answers of `partial_cmp` that
+/// agree on `<`, `<=`, `>` and `>=` are equal (the four tests tell the four
+/// answers apart). `auto` applies it to the §15.5 goals of functions that
+/// return an `Option<Ordering>` (`auto::complete`, discharge 3), whose
+/// contracts state how `<`, `<=`, `>`, `>=` read the answer.
+#[lemma]
+pub fn partial_ordering_ext(a: Option<Ordering>, b: Option<Ordering>) {
+    requires(ord_lt(a) == ord_lt(b) && ord_le(a) == ord_le(b) && ord_gt(a) == ord_gt(b) && ord_ge(a) == ord_ge(b));
+    ensures(a == b);
+    by_cases(a, b);
+}
+
+/// Extensionality of orderings: two orderings that agree on `<` and `>` are
+/// equal (the same for `cmp`'s answers, `auto::complete`, discharge 3).
+#[lemma]
+pub fn ordering_ext(a: Ordering, b: Ordering) {
+    requires(ord_lt(Some(a)) == ord_lt(Some(b)) && ord_gt(Some(a)) == ord_gt(Some(b)));
+    ensures(a == b);
+    by_cases(a, b);
 }

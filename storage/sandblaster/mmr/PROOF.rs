@@ -4,7 +4,7 @@
 //! the host files.
 
 use sandblaster::prelude::*;
-use crate::laws::{fits, height_in, mmr_size, mountains, node_height, peaks, valid_size};
+use crate::laws::{fits, height_in, iter_ok, mmr_size, mountains, node_height, peaks, valid_size};
 use crate::iter::yields;
 use crate::merkle::{Location, Position};
 use crate::merkle::mmr::Family;
@@ -524,24 +524,8 @@ fn two_pow(t: Nat) {
 // `PeakIterator`: its states
 // ---------------------------------------------------------------------------
 
-/// The iterator's state: finished (`two_h <= 1`, `next` returns `None`) or
-/// valid.
-#[lift_attach(crate::merkle::mmr::iterator::PeakIterator)]
-fn peak_iterator_state() {
-    invariant(crate::proof::iter_ok(self.size.0, self.node_pos.0, self.two_h));
-}
-
-/// An iterator state: finished (`t <= 1`), or at the tree of height
-/// `log2(t) - 1` whose root is `p`, with `s + t - (p + 2)` nodes from its
-/// first one on making mountains of distinct heights below `log2(t)`.
-#[spec]
-#[opaque]
-#[example(iter_ok(0u64, 0u64, 0u64) && iter_ok(19u64, 30u64, 32u64) && !iter_ok(1u64, 0u64, 4u64) && !iter_ok(2u64, 30u64, 32u64))]
-pub fn iter_ok(s: u64, p: u64, t: u64) -> bool {
-    t <= 1u64 || (2 <= (t as Int) && (t as Int) <= pow2(63) && pow2(log2(t as Nat)) == (t as Int)
-        && 1 <= (s as Int) && (s as Int) < pow2(63) && (t as Int) <= (p as Int) + 2 && (p as Int) + 2 <= (s as Int) + (t as Int)
-        && fits((s as Int) + (t as Int) - ((p as Int) + 2), (log2(t as Nat) as Int) - 1))
-}
+// (the invariant, `crate::laws::iter_ok`, is in LAWS.rs: it is locked
+// with the type)
 
 /// A state of the iterator from its parts as plain words (a small context
 /// for unfolding `iter_ok`).
@@ -596,8 +580,8 @@ fn new_start(s: u64) {
     follows();
 }
 
-/// `PeakIterator::new`: the facts its checks and its result rely on; its
-/// state's remaining peaks are the MMR's peaks by size.
+/// `PeakIterator::new`: the facts its checks and its result rely on (its
+/// state's remaining peaks: `new_peaks`).
 #[lift_attach(crate::merkle::mmr::iterator::PeakIterator::new)]
 fn new_facts() {
     opaque();
@@ -605,7 +589,26 @@ fn new_facts() {
         crate::proof::new_facts(size.0);
         crate::proof::new_bits(size.0);
     }
-    ensures(|ret: PeakIterator| crate::proof::plist(ret.size.0, ret.node_pos.0, ret.two_h) == crate::proof::srow(0, size.0 as Nat, 63));
+}
+
+/// `new`'s first state (from its contract): its remaining peaks are the
+/// MMR's peaks by size.
+#[lemma]
+fn new_peaks(size: Position) {
+    requires((size.0 as Int) < pow2(63) && valid_size(size.0 as Nat));
+    ensures(plist(PeakIterator::new(size).size.0, PeakIterator::new(size).node_pos.0, PeakIterator::new(size).two_h) == srow(0, size.0 as Nat, 63));
+    let it = PeakIterator::new(size);
+    new_facts(size.0);
+    new_bits(size.0);
+    if size.0 == 0u64 {
+        assert(it.size.0 == 0u64 && it.node_pos.0 == 0u64 && it.two_h == 0u64);
+        follows();
+    } else {
+        assert(it.size.0 == size.0);
+        assert(it.node_pos.0 == (u64::MAX >> size.0.leading_zeros()) - 1u64);
+        assert(it.two_h == 1u64 << (!(u64::MAX >> size.0.leading_zeros())).trailing_zeros());
+        follows();
+    }
 }
 
 /// A peak at the state's tree: the tree to its right, of the same height,
@@ -1585,11 +1588,12 @@ fn seq_chain(a: Seq<(Int, Int)>, b: Seq<(Int, Int)>, c: Seq<(Int, Int)>, d: Seq<
     follows();
 }
 
-/// From `new`'s and `next`'s summaries.
+/// From `new`'s first state (`new_peaks`) and `next`'s summary.
 #[proof]
 fn peak_iterator_yields_the_peaks(n: Nat, size: Position) {
     let it = PeakIterator::new(size);
     mmr_sizes_are_valid_lemma(n);
+    new_peaks(size);
     mmr_size_ge(n);
     crate::stdlib::bits::pow2_mono(63, 64);
     srow_mountains(0, n, 63);
@@ -2182,16 +2186,16 @@ fn pth_start(p: u64) {
     }
 }
 
-/// `pos_to_height` is the node's height.
+/// `pos_to_height`'s contract (`pos_to_height_value` in LAWS.rs): the
+/// start's facts.
 #[lift_attach(crate::merkle::mmr::iterator::pos_to_height)]
-fn pos_to_height_summary() {
+fn pos_to_height_start() {
     at_start! {
         crate::proof::pth_start(pos.0);
     }
-    ensures(|ret: u32| (ret as Nat) == crate::laws::node_height(pos.0 as Nat));
 }
 
-/// From the summary (`Family::pos_to_height` calls it).
+/// From the contract (`Family::pos_to_height` calls it).
 #[proof]
 fn pos_to_height_is_the_node_height(pos: Position) {
     let r = crate::merkle::mmr::iterator::pos_to_height(pos);
@@ -2733,39 +2737,24 @@ fn location_partial_cmp_facts() {
     }
 }
 
-/// Answers of `partial_cmp` that agree on `<`, `<=`, `>` and `>=` are
-/// equal (the four tests tell the four answers apart).
-#[lemma]
-fn ordering_ext(a: Option<crate::__lift::Ordering>, b: Option<crate::__lift::Ordering>) {
-    requires(crate::__lift::ord_lt(a) == crate::__lift::ord_lt(b) && crate::__lift::ord_le(a) == crate::__lift::ord_le(b)
-        && crate::__lift::ord_gt(a) == crate::__lift::ord_gt(b) && crate::__lift::ord_ge(a) == crate::__lift::ord_ge(b));
-    ensures(a == b);
-    by_cases(a, b);
+/// `u64`'s `partial_cmp` with a position compares the value.
+#[lift_attach(crate::merkle::position::u64__partial_cmp__Position)]
+fn u64_partial_cmp_position_facts() {
+    at_start! {
+        crate::proof::order_def(self_ as Int, other.0 as Int);
+    }
 }
 
-/// `Position::partial_cmp` is pinned by its contract.
-#[proof(complete = crate::merkle::position::Position::partial_cmp)]
-fn position_partial_cmp_determined(a: Position, other: &Position) {
-    apply(ordering_ext);
+/// `u64`'s `partial_cmp` with a location compares the value.
+#[lift_attach(crate::merkle::location::u64__partial_cmp__Location)]
+fn u64_partial_cmp_location_facts() {
+    at_start! {
+        crate::proof::order_def(self_ as Int, other.0 as Int);
+    }
 }
 
-/// `Location::partial_cmp` is pinned by its contract.
-#[proof(complete = crate::merkle::location::Location::partial_cmp)]
-fn location_partial_cmp_determined(a: Location, other: &Location) {
-    apply(ordering_ext);
-}
-
-/// `Position::partial_cmp` with a `u64` is pinned by its contract.
-#[proof(complete = crate::merkle::position::Position::partial_cmp__u64)]
-fn position_partial_cmp_u64_determined(a: Position, other: &u64) {
-    apply(ordering_ext);
-}
-
-/// `Location::partial_cmp` with a `u64` is pinned by its contract.
-#[proof(complete = crate::merkle::location::Location::partial_cmp__u64)]
-fn location_partial_cmp_u64_determined(a: Location, other: &u64) {
-    apply(ordering_ext);
-}
+// (`partial_cmp`'s answers are pinned by their contracts: `auto` applies
+// the lift prelude's `crate::__lift_model::partial_ordering_ext`)
 
 /// The default iterator is finished (`two_h = 0`), a state of the
 /// invariant.
@@ -2777,50 +2766,13 @@ fn peak_iterator_default_facts() {
 }
 
 
-/// An answer of `chunk_peaks` is its root position and height.
-#[lemma]
-fn once_canon(a: crate::__lift::Once<(Position, u32)>, n: Int, g: u32) {
-    requires(0 <= n && n < pow2(64));
-    requires(a.v.is_some() && (a.v.unwrap_or((Position::new(0u64), 0u32)).0.0 as Int) == n && a.v.unwrap_or((Position::new(0u64), 0u32)).1 == g);
-    ensures(a == crate::__lift::once((Position::new(n as u64), g)));
-    match a {
-        crate::__lift::Once { v: va } => match va {
-            None => by_contradiction(),
-            Some(x) => {
-                u64_eq_int(x.0.0, n);
-                position_ext(x.0, Position::new(n as u64));
-                match x {
-                    (x0, x1) => follows(),
-                }
-            }
-        },
-    }
-}
-
-/// `once_canon`, the other way round.
-#[lemma]
-fn once_canon_sym(b: crate::__lift::Once<(Position, u32)>, n: Int, g: u32) {
-    requires(0 <= n && n < pow2(64));
-    requires(b.v.is_some() && (b.v.unwrap_or((Position::new(0u64), 0u32)).0.0 as Int) == n && b.v.unwrap_or((Position::new(0u64), 0u32)).1 == g);
-    ensures(crate::__lift::once((Position::new(n as u64), g)) == b);
-    once_canon(b, n, g);
-    follows();
-}
-
-/// `chunk_peaks` is pinned by its contract.
+/// `chunk_peaks` is pinned by its contract (an equation: both answers are
+/// the same `once((Position::new(..), g))`).
 #[proof(complete = crate::merkle::mmr::Family::chunk_peaks)]
 fn chunk_peaks_determined(size: Position, chunk_idx: u64, grafting_height: u32) {
     use_hyp(0, size, chunk_idx, grafting_height);
     use_real(0, size, chunk_idx, grafting_height);
-    chunk_facts(chunk_idx, grafting_height);
-    mmr_size_le((chunk_idx as Int) * pow2(grafting_height as Int));
-    sandblaster::lemmas::nat::popcount_nonneg((chunk_idx as Int) * pow2(grafting_height as Int));
-    sandblaster::lemmas::nat::pow2_succ(grafting_height as Int);
-    crate::stdlib::bits::pow2_mono(62, 64);
-    let e = once_canon(crate::merkle::mmr::Family::chunk_peaks(size, chunk_idx, grafting_height),
-        mmr_size((chunk_idx as Int) * pow2(grafting_height as Int)) + pow2((grafting_height as Int) + 1) - 2, grafting_height);
-    rewrite(e);
-    apply(once_canon_sym);
+    follows();
 }
 
 // ---------------------------------------------------------------------------
@@ -3840,6 +3792,139 @@ fn to_nearest_size_determined(size: Position) {
     use_hyp(1, size, b.0 as Nat);
     use_real(1, size, a.0 as Nat);
     apply(position_ext);
+}
+
+// ---------------------------------------------------------------------------
+// `parent_heights_are_the_appended_parents`: what appending leaf `n` adds
+// (its trailing ones are read off by the stdlib's generic facts)
+// ---------------------------------------------------------------------------
+
+/// Appending leaf `n` with `t` trailing ones adds `t + 1` nodes (the leaf,
+/// then one parent per trailing one).
+#[lemma]
+fn append_size(n: Nat, t: Int) {
+    requires(0 <= t && pow2(t) <= n + 1 && crate::stdlib::bits::aligned(n + 1 - pow2(t), t + 1));
+    ensures(mmr_size(n + 1) == mmr_size(n) + 1 + t);
+    crate::stdlib::bits::aligned_weaken((n + 1 - pow2(t)) as Nat, t + 1);
+    crate::stdlib::bits::aligned_eq((n + 1 - pow2(t)) as Nat, t + 1 - 1, t);
+    crate::stdlib::bits::popcount_add((n + 1 - pow2(t)) as Nat, (pow2(t) - 1) as Nat, t);
+    crate::stdlib::bits::popcount_low_ones(t);
+    crate::stdlib::bits::popcount_same((n + 1 - pow2(t)) + (pow2(t) - 1), n);
+    sandblaster::lemmas::nat::pow2_succ(t);
+    crate::stdlib::bits::popcount_add((n + 1 - pow2(t)) as Nat, pow2(t) as Nat, t + 1);
+    crate::stdlib::bits::popcount_pow2(t);
+    crate::stdlib::bits::popcount_same((n + 1 - pow2(t)) + pow2(t), n + 1);
+    by_unfolding(mmr_size);
+}
+
+/// [`aligned_height`], the root case: `l = 0`, `h = i`.
+#[lemma]
+fn aligned_height_root(l: Nat, i: Nat, h: Nat) {
+    requires(i == h && l + pow2(i) <= pow2(h));
+    ensures(height_in(mmr_size(l) + pow2(i + 1) - 2, h) == i);
+    assert(l == 0, { pow2_eq(i, h); by_arithmetic(); });
+    mmr_size_zero(l);
+    if h == 0 {
+        height_in_zero(mmr_size(l) + pow2(i + 1) - 2, h);
+        follows();
+    } else {
+        pow2_eq(h + 1, i + 1);
+        height_in_root(mmr_size(l) + pow2(i + 1) - 2, h);
+        follows();
+    }
+}
+
+/// [`aligned_height`], a step into the left subtree (`l < 2^(h-1)`).
+#[lemma]
+fn aligned_height_left(l: Nat, i: Nat, h: Nat) {
+    requires(i < h && crate::stdlib::bits::aligned(l, i) && l + pow2(i) <= pow2(h) && l < pow2(h - 1));
+    ensures(height_in(mmr_size(l) + pow2(i + 1) - 2, h) == height_in(mmr_size(l) + pow2(i + 1) - 2, h - 1)
+        && l + pow2(i) <= pow2(h - 1));
+    sandblaster::lemmas::nat::pow2_succ(i);
+    sandblaster::lemmas::nat::pow2_succ(h - 1);
+    sandblaster::lemmas::nat::pow2_succ(h);
+    pow2_eq(h - 1 + 1, h);
+    mmr_size_le(l);
+    crate::stdlib::bits::aligned_pow2(h - 1);
+    crate::stdlib::bits::aligned_down(pow2(h - 1) as Nat, h - 1, i);
+    crate::stdlib::bits::aligned_gap(l, pow2(h - 1) as Nat, i);
+    height_in_left(mmr_size(l) + pow2(i + 1) - 2, h);
+}
+
+/// [`aligned_height`], a step into the right subtree (`l >= 2^(h-1)`).
+#[lemma]
+fn aligned_height_right(l: Nat, i: Nat, h: Nat) {
+    requires(i < h && crate::stdlib::bits::aligned(l, i) && l + pow2(i) <= pow2(h) && pow2(h - 1) <= l);
+    ensures(height_in(mmr_size(l) + pow2(i + 1) - 2, h) == height_in(mmr_size(l - pow2(h - 1)) + pow2(i + 1) - 2, h - 1)
+        && crate::stdlib::bits::aligned(l - pow2(h - 1), i) && l - pow2(h - 1) + pow2(i) <= pow2(h - 1));
+    sandblaster::lemmas::nat::pow2_succ(i);
+    sandblaster::lemmas::nat::pow2_succ(h - 1);
+    sandblaster::lemmas::nat::pow2_succ(h);
+    pow2_eq(h - 1 + 1, h);
+    crate::stdlib::bits::aligned_pow2(h - 1);
+    crate::stdlib::bits::aligned_down(pow2(h - 1) as Nat, h - 1, i);
+    crate::stdlib::bits::aligned_diff(l, pow2(h - 1) as Nat, i);
+    mmr_size_top(l, h - 1);
+    mmr_size_le(l - pow2(h - 1));
+    mmr_size_ge((l - pow2(h - 1)) as Nat);
+    height_in_right(mmr_size(l) + pow2(i + 1) - 2, h);
+    assert(mmr_size(l) + pow2(i + 1) - 2 + 1 - pow2(h) == mmr_size(l - pow2(h - 1)) + pow2(i + 1) - 2, { by_arithmetic(); });
+    rewrite(mmr_size(l) + pow2(i + 1) - 2 + 1 - pow2(h) == mmr_size(l - pow2(h - 1)) + pow2(i + 1) - 2);
+    follows();
+}
+
+/// The node `2^(i+1) - 2` after the nodes of the first `l` leaves, `l` a
+/// multiple of `2^i` with `l + 2^i <= 2^h`, is the root of the perfect tree
+/// over the leaves `l .. l + 2^i`: its height in the tree of height `h` is
+/// `i`.
+#[lemma]
+#[decreases(h)]
+fn aligned_height(l: Nat, i: Nat, h: Nat) {
+    requires(i <= h && crate::stdlib::bits::aligned(l, i) && l + pow2(i) <= pow2(h));
+    ensures(height_in(mmr_size(l) + pow2(i + 1) - 2, h) == i);
+    if h == i {
+        aligned_height_root(l, i, h);
+    } else if l < pow2(h - 1) {
+        aligned_height_left(l, i, h);
+        aligned_height(l, i, h - 1);
+        follows();
+    } else {
+        aligned_height_right(l, i, h);
+        aligned_height((l - pow2(h - 1)) as Nat, i, h - 1);
+        follows();
+    }
+}
+
+/// Appending leaf `n` (`n < 2^62`) with `t` trailing ones: the nodes at
+/// `mmr_size(n) + i`, `i <= t`, have height `i`, and the MMR grows by
+/// `t + 1` nodes.
+#[lemma]
+fn append_nat(n: Nat, t: Int, i: Int) {
+    requires(0 <= i && i <= t && t <= 62 && n < pow2(62) && pow2(t) <= n + 1 && crate::stdlib::bits::aligned(n + 1 - pow2(t), t + 1));
+    ensures(node_height(mmr_size(n) + i) == i && mmr_size(n + 1) == mmr_size(n) + 1 + t);
+    append_size(n, t);
+    crate::stdlib::bits::aligned_below_low_bit(n + 1, t, i);
+    crate::stdlib::bits::popcount_add((n + 1 - pow2(i)) as Nat, (pow2(i) - 1) as Nat, i);
+    crate::stdlib::bits::popcount_low_ones(i);
+    crate::stdlib::bits::popcount_same((n + 1 - pow2(i)) + (pow2(i) - 1), n);
+    sandblaster::lemmas::nat::pow2_succ(i);
+    assert(mmr_size(n) + i == mmr_size(n + 1 - pow2(i)) + pow2(i + 1) - 2, { by_unfolding(mmr_size); });
+    crate::stdlib::bits::pow2_mono(62, 64);
+    aligned_height((n + 1 - pow2(i)) as Nat, i as Nat, 64);
+    assert(node_height(mmr_size(n) + i) == height_in(mmr_size(n) + i, 64), { by_unfolding(node_height); });
+    rewrite(mmr_size(n) + i == mmr_size(n + 1 - pow2(i)) + pow2(i + 1) - 2);
+    follows();
+}
+
+/// From the contract of `parent_heights` (its range ends at the trailing
+/// ones `t` of the leaf count `n`): `n + 1 - 2^t` is a multiple of
+/// `2^(t+1)` (`stdlib::bits::trailing_ones_u64`).
+#[proof]
+fn parent_heights_are_the_appended_parents(leaves: Location, i: Nat) {
+    let r = Family::parent_heights(leaves);
+    crate::stdlib::bits::trailing_ones_u64(leaves.0);
+    append_nat(leaves.0 as Nat, (!leaves.0).trailing_zeros() as Int, i as Int);
+    follows();
 }
 
 // ---------------------------------------------------------------------------

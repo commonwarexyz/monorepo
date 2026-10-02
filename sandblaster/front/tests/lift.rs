@@ -232,7 +232,7 @@ fn an_attachment_to_a_missing_item_is_an_error() {
     let proof = "use sandblaster::prelude::*;\n\n#[lift_attach(crate::w::Wrap::nope)]\nfn s() {\n    ensures(|ret: usize| ret >= 0usize);\n}\n";
     let r = root(ATTACH_ROOT);
     let c = check(&[("r/mod.rs", &r), ("r/w.rs", W), ("r/PROOF.rs", proof)]);
-    rejects(&c, DiagKind::Unsupported, "attachment to `Wrap::nope` matches no lifted item");
+    rejects(&c, DiagKind::Unsupported, "attachment to `crate::w::Wrap::nope` matches no lifted item");
 }
 
 // ---------------------------------------------------------------------

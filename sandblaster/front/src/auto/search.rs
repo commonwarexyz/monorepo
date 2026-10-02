@@ -146,10 +146,20 @@ pub struct Engine<'a> {
     /// The round in which the last successful [`Engine::lin_prove`] found
     /// its certificate (`u32::MAX`: by an integer cut).
     pub lin_round: Option<u32>,
-    /// Inside a constructor split ([`super::congr`]): the arguments'
-    /// searches do not split constructors again (a long literal list, an
-    /// eta-expanded array, would be split element by element).
-    pub in_ctor_split: bool,
+    /// The data types of the enclosing constructor splits
+    /// ([`super::congr`]): an argument's search splits its own constructor
+    /// equation through layers of different types (`Some((P(e), g))`: the
+    /// option, the pair, the struct), up to [`super::congr::MAX_CTOR_SPLIT`]
+    /// levels, but a recursive structure one level only (a tree inside a
+    /// tree, a list's tail: as one equation, not node by node — the nested
+    /// proof of a hashed tree's bytes outgrew the kernel's check).
+    pub ctor_split_inds: Vec<sandblaster_kernel::term::IndId>,
+    /// Inside a probe whose failure is the usual outcome: a stuck
+    /// comparison decided both ways ([`Engine::decide_bool`]), a fact
+    /// refuted by its opposite ([`Engine::contradiction`]). The exponent
+    /// bounds ([`super::arith`]) are for goals, not for probes, which run on
+    /// every node.
+    pub lin_probe: bool,
 }
 
 impl<'a> Engine<'a> {
@@ -183,7 +193,8 @@ impl<'a> Engine<'a> {
             cast_used: false,
             lin_skip_rounds: 0,
             lin_round: None,
-            in_ctor_split: false,
+            ctor_split_inds: Vec::new(),
+            lin_probe: false,
         }
     }
 
@@ -1266,7 +1277,10 @@ impl<'a> Engine<'a> {
                     lhs: l.clone(),
                     rhs: Rc::new(Value::Ctor { ind: self.n.bool_ind, ctor: (!b) as u32, params: vec![], args: vec![] }),
                 });
-                if let Some(p) = self.lin_prove(st, &opp, true)? {
+                let probe = std::mem::replace(&mut self.lin_probe, true);
+                let r = self.lin_prove(st, &opp, true);
+                self.lin_probe = probe;
+                if let Some(p) = r? {
                     self.note("contradiction: disequality fact refuted by linarith");
                     let c = self.quote(st, &l);
                     let hv = st.var(f.lvl);
@@ -1715,7 +1729,12 @@ fn prove_goal_with(env: &Env, g: &Goal, b: &mut Budget, cfg: &AutoConfig, db: &L
     // exhaustion (budget, deadline, memory) is a failure, even when a term
     // was built at the last moment
     let result = match result {
-        Ok(Some(_)) if !super::meter::settle(e.b) || super::meter::exhausted().is_some() => Err(Stop::Budget),
+        Ok(Some(_)) if !super::meter::settle(e.b) || super::meter::exhausted().is_some() => {
+            if e.trace {
+                eprintln!("[auto] a proof was built, but the goal's limits ran out: {:?} (steps left {})", super::meter::exhausted(), e.b.steps);
+            }
+            Err(Stop::Budget)
+        }
         r => r,
     };
     match result {
@@ -1765,10 +1784,16 @@ fn prove_goal_with(env: &Env, g: &Goal, b: &mut Budget, cfg: &AutoConfig, db: &L
             Ok(t)
         }
         Ok(None) => {
+            if e.trace {
+                eprintln!("[auto] the search ended without a proof (steps left {})", e.b.steps);
+            }
             let used = Used { simp: !no_simp && e.simp_used, cast: e.cast_used };
             Err((e.failure(g), used))
         }
         Err(Stop::Budget) => {
+            if e.trace {
+                eprintln!("[auto] stopped: {:?} (steps left {}, nodes {})", super::meter::exhausted(), e.b.steps, e.nodes);
+            }
             let note = if e.nodes > cfg.max_nodes { format!("budget exhausted (search node limit {})", cfg.max_nodes) } else { super::meter::failure_note() };
             // a deadline or memory stop leaves nothing for a retry
             let retry = matches!(super::meter::exhausted(), None | Some(super::meter::Exhaustion::Steps));

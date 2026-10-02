@@ -1,0 +1,166 @@
+;; rustc's MIR of `fx_lk_paths::a, fx_lk_paths::b`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lk_paths")
+(module "fx_lk_paths::a, fx_lk_paths::b")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "2014b7caf89d59975f05f54678f85808e9d79990baba62b597c2c8f84a56ca0f")
+(source "src/b.rs" "442a7fa8940e6419adc8529d77bff3805ed51571dc5abfdef40894fe402a6ef9")
+(root "<u32 as fx_lk_paths::a::sealed::Halve>::halve")
+(root "fx_lk_paths::a::Pos::new")
+(root "fx_lk_paths::a::third")
+(root "fx_lk_paths::a::quarter")
+(root "fx_lk_paths::a::eighth")
+(root "fx_lk_paths::a::sixteenth")
+(root "fx_lk_paths::a::half_of")
+(root "fx_lk_paths::b::third")
+(root "<fx_lk_paths::a::Pos as std::clone::Clone>::clone")
+(note "fx_lk_paths::a::sealed::Halve::halve: not instantiated: a trait's own method (its impls are extracted)")
+(adt-def "a::Pos" (path "fx_lk_paths::a::Pos") (kind struct) (args ())
+  (variant 0 "Pos" 0 (field "0" u64) (no-glue)))
+(fn "<u32 as fx_lk_paths::a::sealed::Halve>::halve"
+  (kind root) (def "<u32 as fx_lk_paths::a::sealed::Halve>::halve") (args ())
+  (item impl u32 "Halve" () "halve")
+  (span "src/a.rs" 7 9)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 bool mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u32 2) (int u32 0)) (at "src/a.rs" 8 13))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 8 13)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u32 2)) (at "src/a.rs" 8 13))
+    (return (at "src/a.rs" 9 10)))
+)
+(fn "fx_lk_paths::a::Pos::new"
+  (kind root) (def "fx_lk_paths::a::Pos::new") (args ())
+  (item inherent (adt "a::Pos") "new")
+  (span "src/a.rs" 19 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "a::Pos") 0) (copy (p 1))) (at "src/a.rs" 20 9))
+    (return (at "src/a.rs" 21 6)))
+)
+(fn "fx_lk_paths::a::third"
+  (kind root) (def "fx_lk_paths::a::third") (args ())
+  (item fn "third")
+  (span "src/a.rs" 24 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 3) (int u64 0)) (at "src/a.rs" 25 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 25 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 3)) (at "src/a.rs" 25 5))
+    (return (at "src/a.rs" 26 2)))
+)
+(fn "fx_lk_paths::a::quarter"
+  (kind root) (def "fx_lk_paths::a::quarter") (args ())
+  (item fn "quarter")
+  (span "src/a.rs" 28 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 4) (int u64 0)) (at "src/a.rs" 29 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 29 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 4)) (at "src/a.rs" 29 5))
+    (return (at "src/a.rs" 30 2)))
+)
+(fn "fx_lk_paths::a::eighth"
+  (kind root) (def "fx_lk_paths::a::eighth") (args ())
+  (item fn "eighth")
+  (span "src/a.rs" 32 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 8) (int u64 0)) (at "src/a.rs" 33 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 33 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 8)) (at "src/a.rs" 33 5))
+    (return (at "src/a.rs" 34 2)))
+)
+(fn "fx_lk_paths::a::sixteenth"
+  (kind root) (def "fx_lk_paths::a::sixteenth") (args ())
+  (item fn "sixteenth")
+  (span "src/a.rs" 36 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 u64 mut)
+    (3 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "fx_lk_paths::a::eighth") (args (copy (p 1))) (p 2) 1 (at "src/a.rs" 37 5)))
+  (bb 1
+    (assign (p 3) (bin eq (int u64 2) (int u64 0)) (at "src/a.rs" 37 5))
+    (assert (move (p 3)) false div-zero 2 (at "src/a.rs" 37 5)))
+  (bb 2
+    (assign (p 0) (bin div (move (p 2)) (int u64 2)) (at "src/a.rs" 37 5))
+    (return (at "src/a.rs" 38 2)))
+)
+(fn "fx_lk_paths::a::half_of"
+  (kind root) (def "fx_lk_paths::a::half_of") (args ())
+  (item fn "half_of")
+  (span "src/a.rs" 40 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (call (fn "<u32 as fx_lk_paths::a::sealed::Halve>::halve") (args (copy (p 1))) (p 0) 1 (at "src/a.rs" 41 5)))
+  (bb 1
+    (return (at "src/a.rs" 42 2)))
+)
+(fn "fx_lk_paths::b::third"
+  (kind root) (def "fx_lk_paths::b::third") (args ())
+  (item fn "third")
+  (span "src/b.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 5) (int u64 0)) (at "src/b.rs" 2 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/b.rs" 2 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 5)) (at "src/b.rs" 2 5))
+    (return (at "src/b.rs" 3 2)))
+)
+(fn "<fx_lk_paths::a::Pos as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lk_paths::a::Pos as std::clone::Clone>::clone") (args ())
+  (item impl (adt "a::Pos") "Clone" () "clone")
+  (span "src/a.rs" 15 10)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 (ref shared (adt "a::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))) (at "src/a.rs" 15 10))
+    (return (at "src/a.rs" 15 15)))
+)

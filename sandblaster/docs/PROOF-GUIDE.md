@@ -176,7 +176,16 @@ checks. It:
     about `b.take(n)`;
   * a goal `C(a₁, ..) == C(b₁, ..)` with one constructor on both sides
     (`seq![g, ..rest] == seq![c, ..more]`, `Some(x) == Some(y)`) is the
-    equations of its arguments, each proven on its own;
+    equations of its arguments, each proven on its own — through layers of
+    different types (`Some((P(e), g)) == Some((P(x), g))` down to
+    `e == x`, at most three), but one level of a recursive structure (a
+    list's tail, a subtree, is one equation). So a contract may name the
+    value it returns the way the code builds it, through its constructors
+    (`ret.v == Some((Position::new(n as u64), g))`), instead of reading the
+    value back field by field;
+  * a contract that names a function known by its contract only (an
+    opaque function, a constructor with a loop) has that function's
+    contract as a fact in its proof, as a call in a body does;
   * a goal `p || q` whose side depends on a case (`first || x > 0` when a
     fact says `g != 0 || first`) is proven by splitting that case first;
   * a sequence whose length the facts fix at 0 is `seq![]` (`xs.len() == 0`
@@ -195,7 +204,8 @@ It does **not**:
 * do induction. You write that with `#[induction(x)]` and `ih(..)`;
 * guess which lemma to use. Your proof applies it (`apply(lemma)` finds the
   arguments);
-* do nonlinear arithmetic (`x * y` with two variables, `x / pow2(e)` or
+* do nonlinear arithmetic beyond the monotonicity facts of a product below
+  (`x * y` with two variables is otherwise unknown; no `x / pow2(e)` or
   `x % pow2(e)` for a variable `e`);
 * look inside opaque functions;
 * search without limit. Every goal has a step budget and a time limit, and
@@ -239,6 +249,24 @@ from the facts in scope by linear arithmetic.
   `popcount(x) == x % 2 + popcount(x / 2)` for `x >= 0` when `x % 2` or
   `popcount(x / 2)` also occurs there (auto does not unroll `popcount`
   further on its own: for `popcount(x / 4)`, state the step you need).
+* **Products of two unknowns.** For `a * b` with no literal factor, auto
+  knows `0 <= a * b` when both factors are nonnegative, `b <= a * b` when
+  `a >= 1` (and `a <= a * b` when `b >= 1`), and `a * b <= U * b`,
+  `a * b <= a * V`, `a * b <= U * V` for literal bounds `a <= U`, `b <= V`.
+  So `(c + 1) * pow2(g) <= pow2(62)` gives `pow2(g) <= pow2(62)`.
+* **Exponents.** For a goal about the exponent of a power (`g <= 62`,
+  `t + 1 < 64`: every variable of the goal inside the exponent of a
+  `pow2(..)` in the facts), auto bounds the exponent through the power:
+  when `pow2(g) <= U` follows from the facts for a number `U` they mention
+  (directly, or through a product as above), it derives
+  `g <= ⌊log₂ U⌋`.
+* **Complements.** `!x` is `MAX - x` (`u64::MAX - x` for a `u64`), so
+  facts about `(!n).trailing_zeros()` meet facts about `n`.
+* **Trailing zeros and ones** are not built in beyond the bit library's
+  per-step facts; for every count at once, call
+  `crate::stdlib::bits::trailing_zeros_u64(x)` (`x` is `2^z` times an odd
+  number) or `trailing_ones_u64(n)` (`n + 1` is `2^t` times an odd number),
+  and the `u8`/`u16`/`u32`/`usize` versions.
 
 Not covered yet: division or remainder by `pow2(e)` for a variable `e` (the
 kernel has no rule for a division by a non-literal divisor, so write such
@@ -507,7 +535,9 @@ error[obligation]: unproven obligation [ensures] in `crate::l`
 unfolding transparent functions on the way (`verify` into `verify_inputs(..)`,
 `reconstruct_shape` into `reconstruct_checked(..)`). The lemma's hypotheses
 are then proven as for an explicit call, and its conclusion becomes a fact
-(`let h = apply(lemma);` names it). If no instantiation fits, or two different
+(`let h = apply(lemma);` names it). A fact that states a hypothesis by cases
+(a `match` or `if` in a statement, such as a `use_hyp(..)` instance) serves
+a lemma's `requires` as it is. If no instantiation fits, or two different
 ones fit equally well, the build fails and lists the requires, the facts and
 the candidates. In that case, call the lemma explicitly: `lemma(a, b, ..);`.
 
@@ -852,8 +882,12 @@ crate and the lock its own gates accepted (`tests/gated_util.rs`).
 ## 6. When the specification does not pin the code down
 
 The spec-mutation gate of every build (DESIGN.md §15.8) mutates the
-specification and fails the build when a spec mutant survives every example
-and law with a distinguishing input. `sandblaster coverage <crate>`
+specification — the spec functions of the review surface, what the laws
+file's statements use — and fails the build when a spec mutant survives
+every example and law with a distinguishing input. A proof helper (a spec
+function only proofs use, such as one of `PROOF.rs`) is not mutated: no
+locked statement depends on its definition (DESIGN.md §15.9), and the
+report lists it. `sandblaster coverage <crate>`
 (DESIGN.md §15.9, §15.10) runs the same gates, then an exploration run that
 also mutates the code, re-verifies each mutant, and reports per function
 what killed its mutants. Neither ever makes anything pass: the findings are
@@ -895,6 +929,7 @@ reasons to add a law or an example.
   `SANDBLASTER_MUTANTS_MAX`, `SANDBLASTER_MUTANTS_PER_ITEM`), stopped for time
   (`--time-budget`) or memory, or has mutants killed only by budget: nothing
   is claimed about those. Those caps shape only `sandblaster coverage`'s
-  exploration run; the build's gate always runs every spec mutant, and
+  exploration run; the build's gate always runs every spec mutant of the
+  review surface, and
   `coverage` exits 0 only when the crate has a verdict. An exploration run
   prints a progress line per batch.

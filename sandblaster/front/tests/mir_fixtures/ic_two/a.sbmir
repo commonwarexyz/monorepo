@@ -1,0 +1,44 @@
+;; rustc's MIR of `fx_ic_two::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_ic_two")
+(module "fx_ic_two::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "65d6b602d55d97a9f60954fe0e92022c3f38a7ff1f83690d175f1ca65eb20679")
+(root "fx_ic_two::a::half")
+(root "fx_ic_two::a::inc")
+(fn "fx_ic_two::a::half"
+  (kind root) (def "fx_ic_two::a::half") (args ())
+  (item fn "half")
+  (span "src/a.rs" 1 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (int u64 2) (int u64 0)) (at "src/a.rs" 2 5))
+    (assert (move (p 2)) false div-zero 1 (at "src/a.rs" 2 5)))
+  (bb 1
+    (assign (p 0) (bin div (copy (p 1)) (int u64 2)) (at "src/a.rs" 2 5))
+    (return (at "src/a.rs" 3 2)))
+)
+(fn "fx_ic_two::a::inc"
+  (kind root) (def "fx_ic_two::a::inc") (args ())
+  (item fn "inc")
+  (span "src/a.rs" 5 1)
+  (argc 1)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 (tuple u64 bool) mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (checked add (copy (p 1)) (int u64 1)) (at "src/a.rs" 6 5))
+    (assert (move (p 2 (field 1 bool))) false overflow 1 (at "src/a.rs" 6 5)))
+  (bb 1
+    (assign (p 0) (use (move (p 2 (field 0 u64)))) (at "src/a.rs" 6 5))
+    (return (at "src/a.rs" 7 2)))
+)

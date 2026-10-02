@@ -180,8 +180,9 @@ impl GateReport {
         );
         if let Some(m) = &self.mutation {
             let mut o = Json::obj();
-            o.str("mode", "gate: every spec mutant, no cap, no deadline; implementation mutants only when a section is not fully specified");
+            o.str("mode", "gate: every spec mutant of the review surface, no cap, no deadline; implementation mutants only when a section is not fully specified");
             o.num("enumerated", m.enumerated as i64);
+            o.put("proof_internals_not_mutated", Json::Arr(m.internal.iter().map(|x| Json::string(x)).collect()));
             o.num("run", m.mutants.iter().filter(|(_, x)| x.verdict != crate::mutate::Verdict::NotRun).count() as i64);
             o.bool("complete", m.complete);
             let mut counts = Json::obj();
@@ -480,7 +481,7 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
             b.changes = crate::specdiff::Classifier::new(&out, &surface, &terms, old).changes();
         }
         let tg = Instant::now();
-        run_gates(&out, krate, c, &b.spec, &b.changes, lock, &mut b.gates);
+        run_gates(&out, krate, c, &surface, &b.spec, &b.changes, lock, &mut b.gates);
         // the theorem of every lifted function read from MIR, in this very
         // environment (after the other gates: it extends the environment
         // with the literal reading and the theorems)
@@ -847,8 +848,11 @@ fn theorems_json(reports: &[crate::mir::checked::ModuleTheorems]) -> Json {
 }
 
 /// Runs the six §15 gates in order (see the module docs) and records each
-/// one's outcome.
-fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, spec: &LockStatus, changes: &[crate::specdiff::Change], lock: LockUse, rep: &mut GateReport) {
+/// one's outcome. `surface` is the build's specification surface: spec
+/// mutation mutates the spec items of its review surface
+/// ([`crate::mutate::review_scope`]).
+#[allow(clippy::too_many_arguments)]
+fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, surface: &Surface, spec: &LockStatus, changes: &[crate::specdiff::Change], lock: LockUse, rep: &mut GateReport) {
     let record = |rep: &mut GateReport, gate: &'static str, d: Diagnostics, note: String| {
         let warnings = d.list.iter().filter(|x| x.severity == Severity::Warning).count();
         rep.results.push(GateResult { gate, ran: true, errors: d.error_count(), warnings, note });
@@ -888,10 +892,16 @@ fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, spec: &
     }
     // with the verdict cache of the build entry point, a spec mutant whose
     // inputs did not change keeps its stored verdict (`mutate::cache`)
-    let m = crate::mutate::run_gate_cached(krate, &c.sm, out, c.cache.as_deref());
+    let m = crate::mutate::run_gate_cached(krate, &c.sm, out, c.cache.as_deref(), surface);
     let mut d = Diagnostics::new();
     crate::mutate::spec15_gate_mutants(&m, krate, &mut d);
-    let note = format!("{} mutant(s), {} killed by the specification, {} possibly equivalent", m.mutants.len(), m.count(crate::mutate::Verdict::KilledBySpec) + m.count(crate::mutate::Verdict::KilledBySafety), m.count(crate::mutate::Verdict::PossiblyEquivalent));
+    let note = format!(
+        "{} mutant(s), {} killed by the specification, {} possibly equivalent; {} proof-internal spec item(s) not mutated",
+        m.mutants.len(),
+        m.count(crate::mutate::Verdict::KilledBySpec) + m.count(crate::mutate::Verdict::KilledBySafety),
+        m.count(crate::mutate::Verdict::PossiblyEquivalent),
+        m.internal.len()
+    );
     record(rep, "mutation", d, note);
     rep.mutation = Some(m);
 }

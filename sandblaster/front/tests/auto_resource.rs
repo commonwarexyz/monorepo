@@ -203,3 +203,63 @@ fn deadline_budget_and_memory_limits_stop_front_end_work() {
     let f = r.expect_err("must fail");
     assert!(f.tried.iter().any(|x| x.contains("memory soft limit exceeded")), "{:?}", f.tried);
 }
+
+/// The per-goal heap cap measures the goal's own thread (memguard's
+/// per-thread count): another thread's allocations while the goal runs —
+/// the mutation gate elaborates its batches on several threads — do not
+/// trip it, although the process-wide heap grows past the cap. Negative
+/// twin: [`a_goal_that_allocates_past_its_heap_cap_trips_it`].
+#[test]
+fn a_goals_heap_cap_counts_only_its_own_thread() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    const CAP: usize = 32 << 20;
+    let (opened, grown) = (std::sync::Barrier::new(2), std::sync::Barrier::new(2));
+    let (reason, process_growth) = std::thread::scope(|s| {
+        let goal = s.spawn(|| {
+            let _scope = meter::Scope::enter_capped(None, CAP, &Budget { steps: u64::MAX / 2 });
+            let before = memguard::allocated();
+            opened.wait();
+            // the other thread now holds 4x the cap
+            grown.wait();
+            let process_growth = memguard::allocated().saturating_sub(before);
+            let r = meter::check();
+            opened.wait();
+            (r, process_growth)
+        });
+        s.spawn(|| {
+            opened.wait();
+            let big: Vec<u8> = std::hint::black_box(vec![0u8; 4 * CAP]);
+            grown.wait();
+            // released only after the goal checked its cap
+            opened.wait();
+            drop(big);
+        });
+        goal.join().unwrap()
+    });
+    let trips = meter::take_trips();
+    assert!(process_growth >= 4 * CAP, "the process-wide heap grew by {} MiB only", process_growth >> 20);
+    assert_eq!(reason, None, "another thread's allocations tripped the goal's heap cap: {trips:?}");
+    assert!(trips.is_empty(), "{trips:?}");
+}
+
+/// Negative twin of [`a_goals_heap_cap_counts_only_its_own_thread`]: a goal
+/// whose own thread allocates past its cap trips it (a safety net, recorded
+/// as a trip, never a result).
+#[test]
+fn a_goal_that_allocates_past_its_heap_cap_trips_it() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    const CAP: usize = 32 << 20;
+    let (reason, note, trips) = std::thread::spawn(|| {
+        let _scope = meter::Scope::enter_capped(None, CAP, &Budget { steps: u64::MAX / 2 });
+        let big: Vec<u8> = std::hint::black_box(vec![0u8; 4 * CAP]);
+        let r = meter::check();
+        let note = meter::failure_note();
+        drop(big);
+        (r, note, meter::take_trips())
+    })
+    .join()
+    .unwrap();
+    assert_eq!(reason, Some(meter::Exhaustion::GoalHeap), "{note}");
+    assert!(note.contains("per-goal heap cap exceeded") && note.contains("cap 32 MiB"), "{note}");
+    assert!(trips.iter().any(|t| t.reason == meter::Exhaustion::GoalHeap), "{trips:?}");
+}

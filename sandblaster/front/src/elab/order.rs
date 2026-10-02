@@ -219,6 +219,35 @@ fn type_spec_refs(r: &mut Refs, kind: &ItemKind) {
     }
 }
 
+/// The item filter of a partial elaboration that must elaborate `seeds`
+/// ([`super::Options::items`]; the mutation gate's batches): the seeds and
+/// what the full build elaborates for every proof without any reference
+/// reaching it, closed under [`refs`]:
+///
+/// * the lemmas of `#[bridges]` modules: rules of `auto` for every proof
+///   after them ([`dependency_order`] visits them first), applied without a
+///   call, so no reference reaches them;
+/// * every type: a filtered elaboration elaborates every type whatever the
+///   filter ([`super::Options::elaborates`]), and a type's invariant, view
+///   and representation relation need what they mention.
+///
+/// A filter closed under [`refs`] from the seeds alone drops both: a proof
+/// that `auto` closed with a bridge fails without it, and a type whose
+/// invariant calls a spec function no seed reaches is blocked (the
+/// mutation gate then found the unchanged crate not re-verifying, and ran
+/// none of the batch's mutants).
+pub fn filter_closure(krate: &Crate, seeds: impl IntoIterator<Item = ItemId>) -> BTreeSet<ItemId> {
+    let mut work: Vec<ItemId> = seeds.into_iter().collect();
+    work.extend(krate.items.iter().filter(|it| krate.in_bridges_module(it.id) || matches!(it.kind, ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::TypeAlias(_))).map(|it| it.id));
+    let mut out = BTreeSet::new();
+    while let Some(x) = work.pop() {
+        if out.insert(x) {
+            work.extend(refs(krate, x).into_iter().filter(|r| !out.contains(r)));
+        }
+    }
+    out
+}
+
 /// Dependency order of all items.
 pub fn dependency_order(krate: &Crate) -> Vec<ItemId> {
     let n = krate.items.len();

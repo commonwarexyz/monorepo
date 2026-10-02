@@ -1,6 +1,8 @@
 //! Bits of natural numbers, one at a time: halving (`x / 2`, `x % 2`), `pow2`, `popcount`, and
 //! multiples of `2^e` (`aligned`). Linear arithmetic decides `/ 2` and `% 2`; a division by
-//! `pow2(e)` for a symbolic `e` it cannot, so these facts are stated with `aligned` instead.
+//! `pow2(e)` for a symbolic `e` it cannot, so these facts are stated with `aligned` instead. A
+//! word's trailing zeros and trailing ones are stated the same way, for every count at once
+//! (`trailing_zeros_<w>`, `trailing_ones_<w>`: no lemma per count).
 
 use sandblaster::prelude::*;
 
@@ -223,6 +225,8 @@ pub fn count_ones_u64(x: u64) {
 #[spec]
 #[opaque]
 #[example(aligned(12, 2) && !aligned(12, 3) && aligned(5, 0))]
+// 0 is a multiple of 2; 2 is not a multiple of 4
+#[example(aligned(0, 1) && !aligned(2, 2))]
 #[decreases(e)]
 pub fn aligned(x: Int, e: Int) -> bool {
     if e <= 0 { true } else { x >= 0 && x % 2 == 0 && aligned(x / 2, e - 1) }
@@ -538,4 +542,282 @@ pub fn popcount_below(x: Nat, e: Int) {
         popcount_below(x / 2, e - 1);
         by_arithmetic();
     }
+}
+
+/// A multiple of 2^e is a multiple of every smaller power 2^f.
+#[lemma]
+#[decreases(e)]
+pub fn aligned_down(x: Nat, e: Int, f: Int) {
+    requires(0 <= f && f <= e && aligned(x, e));
+    ensures(aligned(x, f));
+    if e == f {
+        aligned_eq(x, e, f);
+    } else {
+        aligned_weaken(x, e);
+        aligned_down(x, e - 1, f);
+    }
+}
+
+/// The lowest set bit of `x` is bit `t` (`x − 2^t` is a multiple of 2^(t+1)): then for every
+/// `i <= t`, `2^i <= x` and `x − 2^i` is a multiple of 2^i (it adds the bits `t − 1 .. i`, each a
+/// multiple of 2^i, to `x − 2^t`).
+#[lemma]
+#[decreases(t - i)]
+pub fn aligned_below_low_bit(x: Nat, t: Int, i: Int) {
+    requires(0 <= i && i <= t && pow2(t) <= x && aligned(x - pow2(t), t + 1));
+    ensures(pow2(i) <= x && aligned(x - pow2(i), i));
+    if i == t {
+        aligned_weaken((x - pow2(t)) as Nat, t + 1);
+        aligned_eq((x - pow2(t)) as Nat, t + 1 - 1, i);
+        pow2_same(i, t);
+        aligned_same((x - pow2(t)) as Nat, (x - pow2(i)) as Nat, i);
+        follows();
+    } else {
+        aligned_below_low_bit(x, t, i + 1);
+        pow2_step(i + 1);
+        aligned_add_pow2((x - pow2(i + 1)) as Nat, i + 1);
+        aligned_eq((x - pow2(i + 1) + pow2(i + 1 - 1)) as Nat, i + 1 - 1, i);
+        aligned_same((x - pow2(i + 1) + pow2(i + 1 - 1)) as Nat, (x - pow2(i)) as Nat, i);
+        follows();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Trailing zeros and trailing ones of a word, for every count at once (no lemma per count).
+// ---------------------------------------------------------------------------------------------
+
+/// The trailing zeros `z` of a nonzero word (`x.trailing_zeros()`): `x` is `2^z` times an odd
+/// number — a multiple of `2^z` (its lowest `z` bits are zero), and `x - 2^z` a multiple of
+/// `2^(z+1)` (bit `z` is set). By halving: an odd `x` has none (`bits::tz_range_u64_0`), an even
+/// one has one more than its half (`bits::tz_shr1_u64`).
+#[lemma]
+#[decreases(x)]
+pub fn trailing_zeros_u64(x: u64) {
+    requires(x != 0u64);
+    ensures(pow2(x.trailing_zeros() as Int) <= (x as Int) && aligned(x as Int, x.trailing_zeros() as Int)
+        && aligned((x as Int) - pow2(x.trailing_zeros() as Int), (x.trailing_zeros() as Int) + 1));
+    if (x & 1u64) == 1u64 {
+        // odd: no trailing zero, and `x - 1` is twice `x >> 1`
+        sandblaster::lemmas::bits::tz_range_u64_0(x);
+        aligned_zero(x as Nat, 0);
+        aligned_zero((x >> 1u32) as Nat, 0);
+        aligned_double((x >> 1u32) as Nat, 0, 1);
+        follows();
+    } else {
+        // even: one more than `x >> 1`, and twice its multiples
+        sandblaster::lemmas::bits::tz_shr1_u64(x);
+        trailing_zeros_u64(x >> 1u32);
+        let z = (x >> 1u32).trailing_zeros() as Int;
+        aligned_double((x >> 1u32) as Nat, z, z + 1);
+        aligned_double((((x >> 1u32) as Int) - pow2(z)) as Nat, z + 1, z + 2);
+        pow2_step(z + 1);
+        follows();
+    }
+}
+
+/// The trailing ones `t` of a word below `u64::MAX` (`(!n).trailing_zeros()`, the position of
+/// its lowest zero bit): `n + 1` is `2^t` times an odd number — `2^t <= n + 1`, and `n + 1 - 2^t`
+/// is a multiple of `2^(t+1)` (the lowest `t` bits of `n` are ones, bit `t` is zero). From
+/// [`trailing_zeros_u64`] at `!n`, which is `2^64 - 1 - n`.
+#[lemma]
+pub fn trailing_ones_u64(n: u64) {
+    requires(n != 18446744073709551615u64);
+    ensures(pow2((!n).trailing_zeros() as Int) <= (n as Int) + 1
+        && aligned((n as Int) + 1 - pow2((!n).trailing_zeros() as Int), ((!n).trailing_zeros() as Int) + 1));
+    trailing_zeros_u64(!n);
+    let t = (!n).trailing_zeros() as Int;
+    // `2^64 - (!n - 2^t) = n + 1 + 2^t` is a multiple of 2^(t+1) ...
+    aligned_pow2(64);
+    aligned_down(pow2(64) as Nat, 64, t + 1);
+    aligned_diff(pow2(64) as Nat, (((!n) as Int) - pow2(t)) as Nat, t + 1);
+    // ... and positive, so at least 2^(t+1); less 2^(t+1) it is `n + 1 - 2^t`
+    aligned_ge(((n as Int) + 1 + pow2(t)) as Nat, t + 1);
+    pow2_step(t + 1);
+    aligned_pow2(t + 1);
+    aligned_diff(((n as Int) + 1 + pow2(t)) as Nat, pow2(t + 1) as Nat, t + 1);
+    follows();
+}
+
+/// [`trailing_zeros_u64`] for `u8`.
+#[lemma]
+#[decreases(x)]
+pub fn trailing_zeros_u8(x: u8) {
+    requires(x != 0u8);
+    ensures(pow2(x.trailing_zeros() as Int) <= (x as Int) && aligned(x as Int, x.trailing_zeros() as Int)
+        && aligned((x as Int) - pow2(x.trailing_zeros() as Int), (x.trailing_zeros() as Int) + 1));
+    if (x & 1u8) == 1u8 {
+        // odd: no trailing zero, and `x - 1` is twice `x >> 1`
+        sandblaster::lemmas::bits::tz_range_u8_0(x);
+        aligned_zero(x as Nat, 0);
+        aligned_zero((x >> 1u32) as Nat, 0);
+        aligned_double((x >> 1u32) as Nat, 0, 1);
+        follows();
+    } else {
+        // even: one more than `x >> 1`, and twice its multiples
+        sandblaster::lemmas::bits::tz_shr1_u8(x);
+        trailing_zeros_u8(x >> 1u32);
+        let z = (x >> 1u32).trailing_zeros() as Int;
+        aligned_double((x >> 1u32) as Nat, z, z + 1);
+        aligned_double((((x >> 1u32) as Int) - pow2(z)) as Nat, z + 1, z + 2);
+        pow2_step(z + 1);
+        follows();
+    }
+}
+
+/// [`trailing_ones_u64`] for `u8`.
+#[lemma]
+pub fn trailing_ones_u8(n: u8) {
+    requires(n != 255u8);
+    ensures(pow2((!n).trailing_zeros() as Int) <= (n as Int) + 1
+        && aligned((n as Int) + 1 - pow2((!n).trailing_zeros() as Int), ((!n).trailing_zeros() as Int) + 1));
+    trailing_zeros_u8(!n);
+    let t = (!n).trailing_zeros() as Int;
+    // `2^8 - (!n - 2^t) = n + 1 + 2^t` is a multiple of 2^(t+1) ...
+    aligned_pow2(8);
+    aligned_down(pow2(8) as Nat, 8, t + 1);
+    aligned_diff(pow2(8) as Nat, (((!n) as Int) - pow2(t)) as Nat, t + 1);
+    // ... and positive, so at least 2^(t+1); less 2^(t+1) it is `n + 1 - 2^t`
+    aligned_ge(((n as Int) + 1 + pow2(t)) as Nat, t + 1);
+    pow2_step(t + 1);
+    aligned_pow2(t + 1);
+    aligned_diff(((n as Int) + 1 + pow2(t)) as Nat, pow2(t + 1) as Nat, t + 1);
+    follows();
+}
+
+/// [`trailing_zeros_u64`] for `u16`.
+#[lemma]
+#[decreases(x)]
+pub fn trailing_zeros_u16(x: u16) {
+    requires(x != 0u16);
+    ensures(pow2(x.trailing_zeros() as Int) <= (x as Int) && aligned(x as Int, x.trailing_zeros() as Int)
+        && aligned((x as Int) - pow2(x.trailing_zeros() as Int), (x.trailing_zeros() as Int) + 1));
+    if (x & 1u16) == 1u16 {
+        // odd: no trailing zero, and `x - 1` is twice `x >> 1`
+        sandblaster::lemmas::bits::tz_range_u16_0(x);
+        aligned_zero(x as Nat, 0);
+        aligned_zero((x >> 1u32) as Nat, 0);
+        aligned_double((x >> 1u32) as Nat, 0, 1);
+        follows();
+    } else {
+        // even: one more than `x >> 1`, and twice its multiples
+        sandblaster::lemmas::bits::tz_shr1_u16(x);
+        trailing_zeros_u16(x >> 1u32);
+        let z = (x >> 1u32).trailing_zeros() as Int;
+        aligned_double((x >> 1u32) as Nat, z, z + 1);
+        aligned_double((((x >> 1u32) as Int) - pow2(z)) as Nat, z + 1, z + 2);
+        pow2_step(z + 1);
+        follows();
+    }
+}
+
+/// [`trailing_ones_u64`] for `u16`.
+#[lemma]
+pub fn trailing_ones_u16(n: u16) {
+    requires(n != 65535u16);
+    ensures(pow2((!n).trailing_zeros() as Int) <= (n as Int) + 1
+        && aligned((n as Int) + 1 - pow2((!n).trailing_zeros() as Int), ((!n).trailing_zeros() as Int) + 1));
+    trailing_zeros_u16(!n);
+    let t = (!n).trailing_zeros() as Int;
+    // `2^16 - (!n - 2^t) = n + 1 + 2^t` is a multiple of 2^(t+1) ...
+    aligned_pow2(16);
+    aligned_down(pow2(16) as Nat, 16, t + 1);
+    aligned_diff(pow2(16) as Nat, (((!n) as Int) - pow2(t)) as Nat, t + 1);
+    // ... and positive, so at least 2^(t+1); less 2^(t+1) it is `n + 1 - 2^t`
+    aligned_ge(((n as Int) + 1 + pow2(t)) as Nat, t + 1);
+    pow2_step(t + 1);
+    aligned_pow2(t + 1);
+    aligned_diff(((n as Int) + 1 + pow2(t)) as Nat, pow2(t + 1) as Nat, t + 1);
+    follows();
+}
+
+/// [`trailing_zeros_u64`] for `u32`.
+#[lemma]
+#[decreases(x)]
+pub fn trailing_zeros_u32(x: u32) {
+    requires(x != 0u32);
+    ensures(pow2(x.trailing_zeros() as Int) <= (x as Int) && aligned(x as Int, x.trailing_zeros() as Int)
+        && aligned((x as Int) - pow2(x.trailing_zeros() as Int), (x.trailing_zeros() as Int) + 1));
+    if (x & 1u32) == 1u32 {
+        // odd: no trailing zero, and `x - 1` is twice `x >> 1`
+        sandblaster::lemmas::bits::tz_range_u32_0(x);
+        aligned_zero(x as Nat, 0);
+        aligned_zero((x >> 1u32) as Nat, 0);
+        aligned_double((x >> 1u32) as Nat, 0, 1);
+        follows();
+    } else {
+        // even: one more than `x >> 1`, and twice its multiples
+        sandblaster::lemmas::bits::tz_shr1_u32(x);
+        trailing_zeros_u32(x >> 1u32);
+        let z = (x >> 1u32).trailing_zeros() as Int;
+        aligned_double((x >> 1u32) as Nat, z, z + 1);
+        aligned_double((((x >> 1u32) as Int) - pow2(z)) as Nat, z + 1, z + 2);
+        pow2_step(z + 1);
+        follows();
+    }
+}
+
+/// [`trailing_ones_u64`] for `u32`.
+#[lemma]
+pub fn trailing_ones_u32(n: u32) {
+    requires(n != 4294967295u32);
+    ensures(pow2((!n).trailing_zeros() as Int) <= (n as Int) + 1
+        && aligned((n as Int) + 1 - pow2((!n).trailing_zeros() as Int), ((!n).trailing_zeros() as Int) + 1));
+    trailing_zeros_u32(!n);
+    let t = (!n).trailing_zeros() as Int;
+    // `2^32 - (!n - 2^t) = n + 1 + 2^t` is a multiple of 2^(t+1) ...
+    aligned_pow2(32);
+    aligned_down(pow2(32) as Nat, 32, t + 1);
+    aligned_diff(pow2(32) as Nat, (((!n) as Int) - pow2(t)) as Nat, t + 1);
+    // ... and positive, so at least 2^(t+1); less 2^(t+1) it is `n + 1 - 2^t`
+    aligned_ge(((n as Int) + 1 + pow2(t)) as Nat, t + 1);
+    pow2_step(t + 1);
+    aligned_pow2(t + 1);
+    aligned_diff(((n as Int) + 1 + pow2(t)) as Nat, pow2(t + 1) as Nat, t + 1);
+    follows();
+}
+
+/// [`trailing_zeros_u64`] for `usize`.
+#[lemma]
+#[decreases(x)]
+pub fn trailing_zeros_usize(x: usize) {
+    requires(x != 0usize);
+    ensures(pow2(x.trailing_zeros() as Int) <= (x as Int) && aligned(x as Int, x.trailing_zeros() as Int)
+        && aligned((x as Int) - pow2(x.trailing_zeros() as Int), (x.trailing_zeros() as Int) + 1));
+    if (x & 1usize) == 1usize {
+        // odd: no trailing zero, and `x - 1` is twice `x >> 1`
+        sandblaster::lemmas::bits::tz_range_usize_0(x);
+        aligned_zero(x as Nat, 0);
+        aligned_zero((x >> 1u32) as Nat, 0);
+        aligned_double((x >> 1u32) as Nat, 0, 1);
+        follows();
+    } else {
+        // even: one more than `x >> 1`, and twice its multiples
+        sandblaster::lemmas::bits::tz_shr1_usize(x);
+        trailing_zeros_usize(x >> 1u32);
+        let z = (x >> 1u32).trailing_zeros() as Int;
+        aligned_double((x >> 1u32) as Nat, z, z + 1);
+        aligned_double((((x >> 1u32) as Int) - pow2(z)) as Nat, z + 1, z + 2);
+        pow2_step(z + 1);
+        follows();
+    }
+}
+
+/// [`trailing_ones_u64`] for `usize`.
+#[lemma]
+pub fn trailing_ones_usize(n: usize) {
+    requires(n != 18446744073709551615usize);
+    ensures(pow2((!n).trailing_zeros() as Int) <= (n as Int) + 1
+        && aligned((n as Int) + 1 - pow2((!n).trailing_zeros() as Int), ((!n).trailing_zeros() as Int) + 1));
+    trailing_zeros_usize(!n);
+    let t = (!n).trailing_zeros() as Int;
+    // `2^64 - (!n - 2^t) = n + 1 + 2^t` is a multiple of 2^(t+1) ...
+    aligned_pow2(64);
+    aligned_down(pow2(64) as Nat, 64, t + 1);
+    aligned_diff(pow2(64) as Nat, (((!n) as Int) - pow2(t)) as Nat, t + 1);
+    // ... and positive, so at least 2^(t+1); less 2^(t+1) it is `n + 1 - 2^t`
+    aligned_ge(((n as Int) + 1 + pow2(t)) as Nat, t + 1);
+    pow2_step(t + 1);
+    aligned_pow2(t + 1);
+    aligned_diff(((n as Int) + 1 + pow2(t)) as Nat, pow2(t + 1) as Nat, t + 1);
+    follows();
 }

@@ -340,6 +340,13 @@ pub fn remap_fn(f: &mut FnDef, map: &HashMap<ItemId, ItemId>) {
     if let Some(d) = &mut f.decreases {
         remap_expr(&mut d.measure, map);
     }
+    // the declared contract the elaborator compares the preconditions with
+    if let Some((rs, d)) = &mut f.declared {
+        rs.iter_mut().for_each(|r| remap_expr(r, map));
+        if let Some(d) = d {
+            remap_expr(&mut d.measure, map);
+        }
+    }
     match &mut f.body {
         FnBody::Exec(e) | FnBody::Spec(e) => remap_expr(e, map),
         FnBody::Script(ss) => ss.iter_mut().for_each(|s| remap_script(s, map)),
@@ -369,6 +376,9 @@ pub fn remap_fn(f: &mut FnDef, map: &HashMap<ItemId, ItemId>) {
     }
     for ex in &mut a.examples {
         remap_expr(&mut ex.expr, map);
+    }
+    if let Some(Some(en)) = &mut a.contract_ensures {
+        remap_expr(&mut en.prop, map);
     }
     if let Some(m) = &mut a.mirrors_of {
         remap_id(map, m);
@@ -504,6 +514,7 @@ fn checker_fn(f: &FnDef, body: Expr) -> FnDef {
         spec: SpecAnnots::default(),
         locals: f.locals.clone(),
         sig_span: f.sig_span,
+        sig_text: f.sig_text.clone(),
     }
 }
 

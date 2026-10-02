@@ -194,8 +194,8 @@ pub fn pos_ge_false(a: Position, b: Position) {
 /// equation opens it the same way in goals and facts).
 #[lemma]
 pub fn well_shaped_is(s: crate::merkle::proof::Subtree) {
-    ensures(crate::laws::well_shaped(s) == (s.height <= 62u32 && (s.leaf_start.0 as Int) + pow2(s.height as Int) <= pow2(62) && (s.pos.0 as Int) + 2 >= pow2((s.height as Int) + 1)));
-    by_unfolding(crate::laws::well_shaped);
+    ensures(crate::laws::well_shaped(s) == ((s.leaf_start.0 as Int) + pow2(s.height as Int) <= pow2(62) && (s.pos.0 as Int) + 2 >= pow2((s.height as Int) + 1)));
+    by_unfolding(crate::laws::well_shaped, crate::laws::max_leaves);
 }
 
 /// The left half of a subtree is one level down (`left_half` is opaque;
@@ -226,4 +226,11 @@ pub fn left_half_start(s: crate::merkle::proof::Subtree) {
 pub fn disjoint_is(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<crate::merkle::Location>) {
     ensures(crate::laws::disjoint(s, range) == ((s.leaf_start.0 as Int) + pow2(s.height as Int) <= (range.start.0 as Int) || s.leaf_start.0 >= range.end.0));
     by_unfolding(crate::laws::disjoint);
+}
+
+/// `max_leaves()` is `2^62` (the laws' name for `MAX_LEAVES`).
+#[lemma]
+pub fn max_leaves_value() {
+    ensures(crate::laws::max_leaves() == pow2(62));
+    by_unfolding(crate::laws::max_leaves);
 }

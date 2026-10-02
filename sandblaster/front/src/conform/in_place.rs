@@ -34,8 +34,11 @@
 //! target directory beside the check's other files (a nested build of the
 //! host crate: the copy has no build script, so it does not verify itself
 //! again). The inputs, the kernel evaluations and the comparison are the
-//! check's ([`super`]); the cache key also covers every file of the host
-//! crate the copy compiles, the host manifest and the workspace lock.
+//! check's ([`super`]); the cache key also covers everything the copy
+//! compiles or is configured by ([`host_inputs`]: every file under the
+//! host's `src/`, the host manifest, the workspace lock and manifest, the
+//! features, the files of every path dependency, cargo, its configuration
+//! files and the environment that changes its build).
 
 use super::*;
 
@@ -532,33 +535,28 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
         }
     };
     rep.rustc = rv.lines().find_map(|l| l.strip_prefix("release: ")).unwrap_or("?").to_string();
-    let host = match HostCrate::read(cfg, &manifest) {
+    let HostInputs { host, tree, text: host_text, .. } = match host_inputs(cfg) {
         Ok(h) => h,
         Err(e) => {
             rep.errors.push(e);
             return done(rep);
         }
     };
-    // the cache key: the check, the toolchain, every file the copy compiles
+    // the cache key: the check, the toolchain, everything the copy compiles
+    // or is configured by ([`host_inputs`]), the DSL crate's items
     let mut k = format!("{VERSION} in-place\ntoolchain {}\nedition {}\nrustc {}\n", hex(&sha256(cfg.toolchain_id.as_bytes())), cfg.edition, hex(&sha256(rv.as_bytes())));
-    let mut tree = Vec::new();
-    if let Err(e) = walk(&src_dir, &src_dir, &mut tree) {
-        rep.errors.push(e);
-        return done(rep);
-    }
-    for (rel, bytes) in &tree {
-        k.push_str(&format!("src {} {}\n", rel.display(), hex(&sha256(bytes))));
-    }
-    k.push_str(&format!("manifest {}\nlock {}\nfeatures {:?}\n", hex(&sha256(host.manifest.as_bytes())), hex(&sha256(host.lock.as_bytes())), host.features));
+    k.push_str(&host_text);
     for l in c.lifted.iter().filter(|l| l.host) {
         k.push_str(&format!("host {} {}\n", l.name, hex(&sha256(c.sm.get(l.file).map(|f| f.text.as_bytes()).unwrap_or_default()))));
     }
-    k.push_str(&format!("entries {}\n", hex(&sha256(format!("{entries:?}{:?}{:?}{:?}", c.lift_facts.instances, c.lift_facts.open_instances, c.lift_facts.test_hook).as_bytes()))));
+    k.push_str(&format!("entries {}\n", hex(&sha256(format!("{entries:?}{:?}{:?}{:?}{:?}", c.lift_facts.instances, c.lift_facts.open_instances, c.lift_facts.test_hook, c.lift_facts.mir_host_types).as_bytes()))));
     k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED} {}\n", super::LITERAL_CASES));
     k.push_str(&super::literal_key(c));
+    k.push_str(&super::items_key(krate));
     rep.key = hex(&sha256(k.as_bytes()));
     let key_path = cfg.work_dir.join("conformance.key");
-    if std::fs::read_to_string(&key_path).is_ok_and(|t| t == format!("{VERSION}\npassed {}\n", rep.key)) {
+    if let Some(r) = super::recorded_pass(c, &key_path, &rep.key) {
+        r.replay(&mut rep);
         rep.cached = true;
         return done(rep);
     }
@@ -599,9 +597,143 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
     }
     let rep = done(rep);
     if rep.passed() {
-        let _ = std::fs::write(&key_path, format!("{VERSION}\npassed {}\n", rep.key));
+        super::record_pass(c, &key_path, &rep);
     }
     rep
+}
+
+/// The host side of an in-place check's inputs ([`host_inputs`]).
+pub struct HostInputs {
+    host: HostCrate,
+    /// Every file under the host's `src/` (relative path, bytes).
+    tree: Vec<(PathBuf, Vec<u8>)>,
+    /// One line per input (part of the check's key and of the in-place
+    /// verdict key, `driver::in_place`).
+    pub text: String,
+    /// The paths a build script watches so that an edit of an input outside
+    /// the host crate re-runs it (`cargo::rerun-if-changed`): the workspace
+    /// manifest and lock, and the top-level entries of every path
+    /// dependency that its digest reads.
+    pub watch: Vec<PathBuf>,
+}
+
+/// Everything the harness — a copy of the host crate, built by `cargo` —
+/// compiles or is configured by, besides the toolchain and `rustc` (which
+/// the keys cover through the verifier context): every file under the
+/// host's `src/`, the copy's manifest (the host's dependencies and
+/// features, from `cargo metadata`), the workspace lock and manifest, the
+/// features the copy enables, the files of every **path dependency** in the
+/// closure of the host's normal and build dependencies (the copy compiles
+/// them from their current sources; every file of the package directory
+/// but the top-level `tests/`, `benches/`, `examples/` and `target/`,
+/// nested packages and dot files, as the toolchain identity reads the
+/// toolchain's own crates — registry dependencies are pinned by the lock),
+/// `cargo -V`, the cargo configuration files that apply to the copy's
+/// build, and the environment variables that change how cargo builds it
+/// (`RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_PROFILE_*`,
+/// `CARGO_BUILD_*` but the job count, `CARGO_TARGET_*` but the target
+/// directory, `CARGO_UNSTABLE_*`, `RUSTC_BOOTSTRAP`; [`Config::build_env`]).
+pub fn host_inputs(cfg: &Config) -> Result<HostInputs, String> {
+    let manifest = cfg.manifest_dir.clone().ok_or("the in-place modules' harness is a copy of the host crate, and no host crate directory was given (the check runs in a build: `compile_lifted`)")?;
+    let host = HostCrate::read(cfg, &manifest)?;
+    let src_dir = crate::loader::normalize(&std::path::absolute(manifest.join("src")).unwrap_or_else(|_| manifest.join("src")));
+    let mut tree = Vec::new();
+    walk(&src_dir, &src_dir, &mut tree)?;
+    let mut watch: Vec<PathBuf> = vec![manifest.join("Cargo.toml")];
+    watch.extend([host.ws_root.join("Cargo.toml"), host.ws_root.join("Cargo.lock")]);
+    let mut t = String::new();
+    for (rel, bytes) in &tree {
+        t.push_str(&format!("src {} {}\n", rel.display(), hex(&sha256(bytes))));
+    }
+    t.push_str(&format!("manifest {}\nlock {}\nfeatures {:?}\nworkspace-manifest {}\n", hex(&sha256(host.manifest.as_bytes())), hex(&sha256(host.lock.as_bytes())), host.features, hex(&sha256(host.ws_manifest.as_bytes()))));
+    for (dir, name) in &host.path_deps {
+        t.push_str(&format!("path-dep {name} {} {}\n", dir.display(), package_digest(dir, &mut watch)?));
+    }
+    let cv = Command::new(&cfg.cargo).arg("-V").env_remove("RUSTC_WRAPPER").output().map_err(|e| format!("cannot run `{} -V`: {e}", cfg.cargo.display()))?;
+    t.push_str(&format!("cargo {}\n", hex(&sha256(&cv.stdout))));
+    for f in cargo_configs(&cfg.work_dir.join("crate")) {
+        if let Ok(bytes) = std::fs::read(&f) {
+            t.push_str(&format!("cargo-config {} {}\n", f.display(), hex(&sha256(&bytes))));
+        }
+    }
+    let mut env: Vec<&(String, String)> = cfg.build_env.iter().filter(|(k, _)| affects_cargo(k)).collect();
+    env.sort();
+    for (k, v) in env {
+        t.push_str(&format!("env {k} {}\n", hex(&sha256(v.as_bytes()))));
+    }
+    watch.retain(|p| p.exists());
+    Ok(HostInputs { host, tree, text: t, watch })
+}
+
+/// Whether the environment variable `k` changes how cargo builds the copy
+/// ([`host_inputs`]; a job count or a target directory only changes where
+/// and how fast).
+pub fn affects_cargo(k: &str) -> bool {
+    matches!(k, "RUSTFLAGS" | "CARGO_ENCODED_RUSTFLAGS" | "RUSTC_BOOTSTRAP")
+        || k.starts_with("CARGO_PROFILE_")
+        || k.starts_with("CARGO_UNSTABLE_")
+        || (k.starts_with("CARGO_BUILD_") && k != "CARGO_BUILD_JOBS")
+        || (k.starts_with("CARGO_TARGET_") && k != "CARGO_TARGET_DIR")
+}
+
+/// The cargo configuration files that apply to a build run in `dir`:
+/// `.cargo/config.toml` and `.cargo/config` in `dir` and each ancestor,
+/// and in `$CARGO_HOME` (else `~/.cargo`).
+fn cargo_configs(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let abs = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut d = Some(abs.as_path());
+    while let Some(x) = d {
+        for n in ["config.toml", "config"] {
+            out.push(x.join(".cargo").join(n));
+        }
+        d = x.parent();
+    }
+    if let Some(home) = std::env::var_os("CARGO_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo"))) {
+        for n in ["config.toml", "config"] {
+            out.push(home.join(n));
+        }
+    }
+    out.into_iter().filter(|p| p.is_file()).collect()
+}
+
+/// The digest of a path dependency's package directory ([`host_inputs`]):
+/// every file by relative path, length and SHA-256, but the top-level
+/// `tests/`, `benches/`, `examples/` and `target/`, dot files and nested
+/// packages (a directory with its own `Cargo.toml`: a dependency on it is
+/// in the closure on its own). The top-level entries it reads are added to
+/// `watch`.
+pub fn package_digest(dir: &Path, watch: &mut Vec<PathBuf>) -> Result<String, String> {
+    fn go(base: &Path, dir: &Path, top: bool, t: &mut String, watch: &mut Vec<PathBuf>) -> Result<(), String> {
+        let mut ents: Vec<PathBuf> = std::fs::read_dir(dir).map_err(|e| format!("cannot list `{}`: {e}", dir.display()))?.flatten().map(|e| e.path()).collect();
+        ents.sort();
+        for p in ents {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.starts_with('.') || (top && matches!(name.as_str(), "tests" | "benches" | "examples" | "target")) {
+                continue;
+            }
+            let md = std::fs::metadata(&p).map_err(|e| format!("cannot stat `{}`: {e}", p.display()))?;
+            if md.is_dir() {
+                if !p.join("Cargo.toml").is_file() {
+                    if top {
+                        watch.push(p.clone());
+                    }
+                    go(base, &p, false, t, watch)?;
+                }
+            } else if md.is_file() {
+                if top {
+                    watch.push(p.clone());
+                }
+                let bytes = std::fs::read(&p).map_err(|e| format!("cannot read `{}`: {e}", p.display()))?;
+                let rel = p.strip_prefix(base).unwrap_or(&p).display().to_string();
+                t.push_str(&format!("file {rel} {} {}\n", bytes.len(), hex(&sha256(&bytes))));
+            }
+        }
+        Ok(())
+    }
+    let mut t = String::new();
+    go(dir, dir, true, &mut t, watch)?;
+    Ok(hex(&sha256(t.as_bytes())))
 }
 
 /// The harness code of the library newtypes rustc's MIR has for host
@@ -688,6 +820,47 @@ struct HostCrate {
     lock: String,
     lib_name: String,
     features: Option<Vec<String>>,
+    /// The workspace manifest (path dependencies inherit from it) and root.
+    ws_manifest: String,
+    ws_root: PathBuf,
+    /// The closure of the host's normal and build path dependencies:
+    /// package directory (normalized) → package name.
+    path_deps: BTreeMap<PathBuf, String>,
+}
+
+/// The packages of `cargo metadata --no-deps` on `manifest` (a workspace
+/// member's lists every member): directory (normalized) → name and the
+/// directories of its normal and build path dependencies.
+fn metadata_packages(cfg: &Config, manifest: &Path) -> Result<(J, BTreeMap<PathBuf, (String, Vec<PathBuf>)>), String> {
+    let o = Command::new(&cfg.cargo)
+        .args(["metadata", "--format-version", "1", "--no-deps", "--offline", "--manifest-path"])
+        .arg(manifest)
+        .env_remove("RUSTC_WRAPPER")
+        .output()
+        .map_err(|e| format!("cannot run `{} metadata`: {e}", cfg.cargo.display()))?;
+    if !o.status.success() {
+        return Err(format!("`cargo metadata` on `{}` failed: {}", manifest.display(), String::from_utf8_lossy(&o.stderr).lines().take(10).collect::<Vec<_>>().join("\n")));
+    }
+    let meta = J::parse(&String::from_utf8_lossy(&o.stdout)).map_err(|e| format!("cannot read `cargo metadata`: {e}"))?;
+    let mut pkgs = BTreeMap::new();
+    if let Some(J::Arr(ps)) = jget(&meta, "packages") {
+        for p in ps {
+            let Some(m) = jstr(p, "manifest_path") else { continue };
+            let dir = crate::loader::normalize(Path::new(m).parent().unwrap_or(Path::new(m)));
+            pkgs.insert(dir, (jstr(p, "name").unwrap_or_default().to_string(), path_dep_dirs(p)));
+        }
+    }
+    Ok((meta, pkgs))
+}
+
+/// The directories of the normal and build path dependencies of the
+/// package `p` (a `cargo metadata` package; dev-dependencies are not
+/// compiled into the library).
+fn path_dep_dirs(p: &J) -> Vec<PathBuf> {
+    match jget(p, "dependencies") {
+        Some(J::Arr(ds)) => ds.iter().filter(|d| jstr(d, "kind") != Some("dev")).filter_map(|d| jstr(d, "path")).map(|x| crate::loader::normalize(Path::new(x))).collect(),
+        _ => vec![],
+    }
 }
 
 fn jget<'j>(j: &'j J, k: &str) -> Option<&'j J> {
@@ -721,16 +894,7 @@ fn jstrs(j: &J, k: &str) -> Vec<String> {
 impl HostCrate {
     fn read(cfg: &Config, manifest_dir: &Path) -> Result<HostCrate, String> {
         let mpath = manifest_dir.join("Cargo.toml");
-        let o = Command::new(&cfg.cargo)
-            .args(["metadata", "--format-version", "1", "--no-deps", "--offline", "--manifest-path"])
-            .arg(&mpath)
-            .env_remove("RUSTC_WRAPPER")
-            .output()
-            .map_err(|e| format!("cannot run `{} metadata`: {e}", cfg.cargo.display()))?;
-        if !o.status.success() {
-            return Err(format!("`cargo metadata` on `{}` failed: {}", mpath.display(), String::from_utf8_lossy(&o.stderr).lines().take(10).collect::<Vec<_>>().join("\n")));
-        }
-        let meta = J::parse(&String::from_utf8_lossy(&o.stdout)).map_err(|e| format!("cannot read `cargo metadata`: {e}"))?;
+        let (meta, mut known) = metadata_packages(cfg, &mpath)?;
         let want = crate::loader::normalize(&mpath);
         let pkg = match jget(&meta, "packages") {
             Some(J::Arr(ps)) => ps.iter().find(|p| jstr(p, "manifest_path").is_some_and(|m| crate::loader::normalize(Path::new(m)) == want)),
@@ -746,6 +910,23 @@ impl HostCrate {
         .ok_or_else(|| format!("the host package `{name}` has no library target (the harness calls the in-place modules through it)"))?;
         let ws_root = jstr(&meta, "workspace_root").map(PathBuf::from).unwrap_or_else(|| manifest_dir.to_path_buf());
         let ws_manifest = std::fs::read_to_string(ws_root.join("Cargo.toml")).unwrap_or_default();
+        // the closure of the host's normal and build path dependencies (a
+        // package outside the workspace is read with its own metadata)
+        let host_dir = crate::loader::normalize(want.parent().unwrap_or(&want));
+        let mut path_deps: BTreeMap<PathBuf, String> = BTreeMap::new();
+        let mut work = path_dep_dirs(pkg);
+        while let Some(d) = work.pop() {
+            if d == host_dir || path_deps.contains_key(&d) {
+                continue;
+            }
+            if !known.contains_key(&d) {
+                let (_, more) = metadata_packages(cfg, &d.join("Cargo.toml"))?;
+                known.extend(more);
+            }
+            let (name, deps) = known.get(&d).ok_or_else(|| format!("the path dependency `{}` of the host is not a package `cargo metadata` lists", d.display()))?;
+            path_deps.insert(d.clone(), name.clone());
+            work.extend(deps.iter().cloned());
+        }
         if ws_manifest.lines().any(|l| l.trim_start().starts_with("[patch") || l.trim_start().starts_with("[replace")) {
             return Err(format!("the workspace manifest `{}` patches dependencies (`[patch]`/`[replace]`): the harness's copy of the host crate does not reproduce that yet", ws_root.join("Cargo.toml").display()));
         }
@@ -812,7 +993,7 @@ impl HostCrate {
             let norm = |f: &str| f.to_uppercase().replace('-', "_");
             feats.iter().filter(|f| enabled.iter().any(|e| *e == norm(f))).cloned().collect::<Vec<_>>()
         });
-        Ok(HostCrate { manifest: m, lock, lib_name, features })
+        Ok(HostCrate { manifest: m, lock, lib_name, features, ws_manifest, ws_root, path_deps })
     }
 }
 

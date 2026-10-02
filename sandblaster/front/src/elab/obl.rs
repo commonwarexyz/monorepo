@@ -342,6 +342,10 @@ impl<'a> Elab<'a> {
             if self.check_proof(&p2, target, relevant).is_ok() {
                 break;
             }
+            if relevant && let Some(q) = self.repair_relevance(&p2, target) {
+                res = Ok(q);
+                break;
+            }
             let saved = self.prover.start;
             self.prover.start = i + 1;
             let mut b2 = self.budget();
@@ -365,6 +369,14 @@ impl<'a> Elab<'a> {
             Ok(p) => match {
                 let p2 = super::recert::recertify(&self.env, &self.f.scope.ctx, &p);
                 let r = self.check_proof(&p2, target, relevant);
+                // (a proof valid only in an irrelevant position, promoted)
+                let (r, p2) = match r {
+                    Err(e) if relevant => match self.repair_relevance(&p2, target) {
+                        Some(q) => (Ok(()), q),
+                        None => (Err(e), p2),
+                    },
+                    r => (r, p2),
+                };
                 if trace {
                     eprintln!("obl {id} {} in {}: proven by {} in {:?}, proof size {}, checked in {:?}: {}", kind_name(&kind), self.f.name, self.prover.last_name(), t1, super::tm::size(&p2), t0.elapsed() - t1, r.is_ok());
                 }
@@ -416,6 +428,20 @@ impl<'a> Elab<'a> {
         }
         let facts = sc.facts.iter().filter(|f| !sc.hidden.contains(&f.lvl.0)).cloned().collect();
         (sc.ctx.clone(), facts)
+    }
+
+    /// A prover result for a relevant slot that checks only in an
+    /// irrelevant position — it closes the goal with an irrelevant fact
+    /// whose statement is no equation (a match-shaped hypothesis of
+    /// `use_hyp`, a conjunction of such) — made relevant by promotion when
+    /// the target carries no information ([`Elab::promote_irr`]: equations,
+    /// `Unit`, `Empty`, `Π`/`Σ` of them, propositions by cases).
+    fn repair_relevance(&self, p: &Tm, target: &Tm) -> Option<Tm> {
+        if super::tm::has_erased(p) || self.check_proof(p, target, false).is_err() {
+            return None;
+        }
+        let q = self.promote_irr(target, p, 16)?;
+        self.check_proof(&q, target, true).ok().map(|_| q)
     }
 
     /// Kernel check of a prover result in the goal context.

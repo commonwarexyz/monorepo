@@ -65,9 +65,11 @@
 //! change the lock, while a change of any law, of the vocabulary it uses, of
 //! an example of that vocabulary or of a boundary signature does. The kept
 //! set is closed under dependencies, so filtering changes no kept item's
-//! hash. Proof internals are still checked by every gate (spec closure,
-//! examples and coverage, spec mutation): they are left out of the lock,
-//! not out of the build. The rule is deterministic: it reads only the
+//! hash. Proof internals are still checked by the other gates (spec
+//! closure, examples and coverage): they are left out of the lock, not out
+//! of the build. Spec mutation mutates the review surface only
+//! (`crate::mutate::review_scope`; DESIGN.md §15.9): no locked statement
+//! depends on a proof internal's definition. The rule is deterministic: it reads only the
 //! computed items, the boundary and the HIR's `#[refines]`/`#[assumption]`.
 //! (Behavior snapshots and the unconstrained-behavior report, when they
 //! exist, are roots too.)
@@ -325,6 +327,11 @@ pub struct Toolchain {
     /// The builtins table, the elaboration-semantics definitions, the ghost
     /// library and the intrinsic table.
     pub builtins: Hash,
+    /// The lift prelude ([`crate::lock::LIFT_SOURCES`]: `lift/prelude.rs`,
+    /// `lift/model.rs`), the definitions a lifted crate's contracts use
+    /// (`ord_lt`, `range_inclusive_u32`, the buffer model): the `lift`
+    /// line of a lifted crate's lock header.
+    pub lift: Hash,
     /// The ghost-language library `elab/ghost.core`.
     pub ghost: Hash,
     /// The elaboration-semantics definitions (`elab/semantics.rs`).
@@ -404,12 +411,17 @@ impl Toolchain {
             for (name, text) in crate::lock::BUILTIN_SOURCES {
                 builtins.s(name).s(text);
             }
+            let mut lift = Enc::default();
+            for (name, text) in crate::lock::LIFT_SOURCES {
+                lift.s(name).s(text);
+            }
             Toolchain {
                 kernel: kernel.done(),
                 prelude: prelude.done(),
                 prelude_files,
                 semantics: sha256(crate::lock::SEMANTICS_MD.as_bytes()),
                 builtins: builtins.done(),
+                lift: lift.done(),
                 ghost: sha256(ghost_text.as_bytes()),
                 semantics_defs: sha256(crate::lock::SEMANTICS_RS.as_bytes()),
                 target,
@@ -505,6 +517,11 @@ pub struct Surface {
     pub prelude: Hash,
     pub semantics: Hash,
     pub builtins: Hash,
+    /// The lift prelude's hash ([`Toolchain::lift`]) when the crate is
+    /// lifted (it loads the lift prelude, `crate::__lift`): its contracts
+    /// read the prelude's definitions, so the lock pins them. `None` for a
+    /// crate written in the DSL, whose lock has no `lift` line.
+    pub lift: Option<Hash>,
     /// The target semantics library of [`Surface::target`].
     pub target_model: Hash,
     /// Every item, sorted by key.
@@ -517,7 +534,8 @@ pub struct Surface {
     /// The keys of the computed items that are **not** on the review
     /// surface (proof internals: helper spec functions and their examples,
     /// invariants of types no statement mentions, …; module docs, *What is
-    /// locked*), sorted. Never locked; the gates check them all the same.
+    /// locked*), sorted. Never locked and never mutated; the other gates
+    /// check them all the same.
     pub internal: Vec<String>,
 }
 
@@ -1040,7 +1058,9 @@ enum Role {
     Eq(ItemId),
     View(ItemId),
     Represents(ItemId),
-    /// `f::ensures`, `f::refines`, `f::loop#k::ensures`: part of `f`'s contract.
+    /// `f::ensures`, `f::contract`, `f::refines`, `f::loop#k::ensures`:
+    /// part of `f`'s contract (a proof file's summaries in `f::ensures`
+    /// are not: the surface states `f::contract` then).
     FnLemma(ItemId),
     LoopHelper(ItemId),
     /// `S::invariant#k`, `S::holds#k`, `S::inv#k` (S2): the invariant of `S`.
@@ -1174,21 +1194,37 @@ impl<'a> Builder<'a> {
         let f = self.krate.fn_def(id)?;
         let env = &self.out.env;
         let mut parts = vec![("fn".to_string(), env.global_type(g)?)];
-        if let Some(e) = self.def_named(&format!("{}::ensures", it.path)) {
+        // the contract's `ensures`: the laws file's, never a proof file's
+        // summaries (`f::contract` when it has any; DESIGN.md §15.6)
+        if f.contract_ensures().is_some()
+            && let Some(e) = self.def_named(&format!("{}::{}", it.path, f.contract_lemma()))
+        {
             parts.push(("ensures".to_string(), env.global_type(e)?));
         }
         if let Some(r) = self.def_named(&format!("{}::refines", it.path)) {
             parts.push(("refines".to_string(), env.global_type(r)?));
         }
-        let mut src = snippet(self.sm, f.sig_span);
-        for r in &f.requires {
-            src.push_str(&format!(" requires({})", snippet(self.sm, r.span)));
-        }
-        if let Some(en) = &f.ensures {
-            src.push_str(&format!(" ensures({})", snippet(self.sm, en.prop.span)));
-        }
-        if let Some(d) = &f.decreases {
-            src.push_str(&format!(" decreases({}{})", snippet(self.sm, d.measure.span), d.max.map(|m| format!(", max = {m}")).unwrap_or_default()));
+        // the signature's text: as written, or, for a function of a `#[lift]`
+        // source, the lifted signature (its rewritten tokens keep spans from
+        // elsewhere in the host file, so its span covers no contiguous text)
+        let lifted = self.krate.modules.get(it.module.0 as usize).is_some_and(|m| m.lift_source);
+        let mut src = if lifted { f.sig_text.clone() } else { snippet(self.sm, f.sig_span) };
+        if f.spec.attached.is_empty() {
+            for r in &f.requires {
+                src.push_str(&format!(" requires({})", snippet(self.sm, r.span)));
+            }
+            if let Some(en) = f.contract_ensures() {
+                src.push_str(&format!(" ensures({})", snippet(self.sm, en.prop.span)));
+            }
+            if let Some(d) = &f.decreases {
+                src.push_str(&format!(" decreases({}{})", snippet(self.sm, d.measure.span), d.max.map(|m| format!(", max = {m}")).unwrap_or_default()));
+            }
+        } else {
+            // a lifted function's contract is attached from a ghost
+            // `#[lift]` module: its statements as written there (the spliced
+            // tokens' positions are that file's, not the host file's), the
+            // `ensures` of the laws file only (DESIGN.md §15.6)
+            src.push_str(&attached_src(&f.spec.attached));
         }
         if let Some(r) = &f.spec.refines {
             src.push_str(&format!(" {}", snippet(self.sm, r.span)));
@@ -1289,7 +1325,7 @@ impl<'a> Builder<'a> {
                     "eq" => Role::Eq(id),
                     "view" => Role::View(id),
                     "represents" => Role::Represents(id),
-                    "ensures" | "refines" => Role::FnLemma(id),
+                    "ensures" | "refines" | "contract" => Role::FnLemma(id),
                     "view_inj" | "view_inj_fields" => Role::View(id),
                     r if r.starts_with("invariant#") || r.starts_with("holds#") || r.starts_with("inv#") => Role::Invariant(id),
                     "eq_sound" | "eq_complete" => Role::Eq(id),
@@ -1487,7 +1523,9 @@ pub fn compute_with_terms(out: &Output, krate: &Crate, sm: &SourceMap, opts: &Su
     let tc = opts.toolchain.as_ref().unwrap_or_else(|| Toolchain::current());
     let arch = krate.target.arch.name().to_string();
     let reachable: HashSet<ItemId> = krate.reachable.iter().copied().collect();
-    let boundary: HashSet<ItemId> = krate.items.iter().filter(|it| !it.ghost && it.vis == Vis::Public && reachable.contains(&it.id)).map(|it| it.id).collect();
+    // the reachable items host code can call or name (`pub`, and the
+    // non-private free functions of an in-place module)
+    let boundary: HashSet<ItemId> = krate.items.iter().filter(|it| !it.ghost && crate::validate::host_visible(krate, it) && reachable.contains(&it.id)).map(|it| it.id).collect();
     let mut b = Builder {
         out,
         krate,
@@ -1632,7 +1670,12 @@ pub fn compute_with_terms(out: &Output, krate: &Crate, sm: &SourceMap, opts: &Su
                     // written with (a refactor into a spec function keeps the
                     // key); the spec functions it calls are recorded
                     let st = deelab::invariant(krate, it, inv);
-                    let src: Vec<String> = inv.props.iter().map(|(_, sp)| snippet(sm, *sp)).collect();
+                    // (an invariant attached from a ghost `#[lift]` module: as
+                    // written there, `hir::Attached`)
+                    let src: Vec<String> = match &krate.item(id).kind {
+                        ItemKind::Struct(sd) if !sd.attached.is_empty() => sd.attached.iter().filter(|a| a.kind == "invariant").map(|a| a.text.clone()).collect(),
+                        _ => inv.props.iter().map(|(_, sp)| snippet(sm, *sp)).collect(),
+                    };
                     let mut parts = Vec::new();
                     let mut np = 0;
                     for k in 0.. {
@@ -1706,7 +1749,10 @@ pub fn compute_with_terms(out: &Output, krate: &Crate, sm: &SourceMap, opts: &Su
         let it = krate.item(ex.item);
         let Some(src) = krate.examples_of(ex.item).get(index as usize) else { continue };
         let key = format!("{}:{}#{index}", SurfaceKind::Example.tag(), it.path);
-        let mut p = b.pending(key, SurfaceKind::Example, Some(ex.item), snippet(sm, src.span), deelab::example(krate, it, index as usize, src), Stmt { parts: vec![("term".into(), t.clone())], np: 0, recursive: false });
+        // its text: as written, or, in a ghost `#[lift]` module (the laws
+        // file), its tokens (the lift re-emits the attribute without spans)
+        let text = if krate.module(it.module).lift_ghost { src.text.clone() } else { snippet(sm, src.span) };
+        let mut p = b.pending(key, SurfaceKind::Example, Some(ex.item), text, deelab::example(krate, it, index as usize, src), Stmt { parts: vec![("term".into(), t.clone())], np: 0, recursive: false });
         p.span = src.span;
         b.push(p);
     }
@@ -1791,9 +1837,99 @@ pub fn compute_with_terms(out: &Output, krate: &Crate, sm: &SourceMap, opts: &Su
     let (items, internal) = review_surface(items, krate, &b.boundary);
     let kept: HashSet<String> = items.iter().map(|i| i.key.clone()).collect();
     terms.retain(|k, _| kept.contains(k));
-    let errors: Vec<SurfaceError> = b.errors.into_iter().filter(|e| kept.contains(&e.key)).collect();
-    let surface = Surface { target: arch, kernel: tc.kernel, prelude: tc.prelude, semantics: tc.semantics, builtins: tc.builtins, target_model, items, errors, laws: crate::elab::law_rules::law_table(krate), internal };
+    let mut errors: Vec<SurfaceError> = b.errors.into_iter().filter(|e| kept.contains(&e.key)).collect();
+    errors.extend(proof_file_errors(&items, krate));
+    errors.extend(attached_proof_file_errors(&items, krate, &b.boundary));
+    // a lifted crate loads the lift prelude (`crate::__lift`, `loader.rs`)
+    let lift = krate.modules.iter().any(|m| m.parent == Some(krate.root) && m.name == "__lift").then_some(tc.lift);
+    let surface = Surface { target: arch, kernel: tc.kernel, prelude: tc.prelude, semantics: tc.semantics, builtins: tc.builtins, lift, target_model, items, errors, laws: crate::elab::law_rules::law_table(krate), internal };
     (surface, terms)
+}
+
+/// The kept items that a lifted crate's proof file defines (an item of a
+/// ghost `#[lift]` module other than the laws file, `crate::proof::*`):
+/// proof internals that a locked statement reaches. A reviewer reads the
+/// laws file and the vocabulary it needs, never the proof file, so each is
+/// an error (DESIGN.md §15.6) — the lock would hold an agent artifact.
+fn proof_file_errors(items: &[SurfaceItem], krate: &Crate) -> Vec<SurfaceError> {
+    let mut out = Vec::new();
+    for i in items {
+        let Some(id) = i.item else { continue };
+        let Some(m) = krate.lift_proof_file(id) else { continue };
+        let users: Vec<&str> = items.iter().filter(|u| u.deps.iter().any(|d| d.item && d.name == i.key)).map(|u| u.key.as_str()).take(3).collect();
+        out.push(SurfaceError {
+            key: i.key.clone(),
+            span: i.span,
+            msg: format!("`{}` is a proof internal (it is defined in the proof file `{}`), but the review surface reaches it{}", i.path, krate.module(m).path, if users.is_empty() { String::new() } else { format!(" through {}", users.iter().map(|u| format!("`{u}`")).collect::<Vec<_>>().join(", ")) }),
+            note: "a locked statement may use only the laws file's vocabulary: state what the reviewer needs in the laws file (LAWS.rs), or keep the statement that uses it a proof-internal summary or lemma in the proof file (DESIGN.md §15.6)".into(),
+        });
+    }
+    out
+}
+
+/// The source text of a lifted function's attached contract
+/// ([`crate::hir::Attached`]): the laws file's `requires`, `decreases` and
+/// `ensures`, in file order. Nothing a proof file attaches: its `ensures`
+/// is a proof-internal summary, its plain termination measure
+/// (`decreases(e)`) is proof text, and a `requires` or depth bound from it
+/// on a locked item is refused ([`attached_proof_file_errors`]).
+fn attached_src(attached: &[crate::hir::Attached]) -> String {
+    let mut out = String::new();
+    for a in attached {
+        if !a.in_laws {
+            continue;
+        }
+        out.push_str(&format!(" {}({})", a.kind, a.text));
+    }
+    out
+}
+
+/// The statements a proof file attached to a locked item (DESIGN.md
+/// §15.6): a `requires` or a depth bound (`decreases(.., max = ..)`) of a
+/// function whose contract or signature is locked — part of its type,
+/// whether it is a boundary function or a function a law or contract
+/// mentions — or an invariant of a locked type (a boundary type, a type
+/// the vocabulary mentions, or the invariant item itself). The lock holds
+/// only what the laws file states, so each is an error naming the item and
+/// the proof file; the same statement in the laws file is not.
+fn attached_proof_file_errors(items: &[SurfaceItem], krate: &Crate, boundary: &HashSet<ItemId>) -> Vec<SurfaceError> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<ItemId> = HashSet::new();
+    for i in items {
+        let Some(id) = i.item else { continue };
+        let locks_it = matches!(i.kind, SurfaceKind::BoundarySignature | SurfaceKind::Contract | SurfaceKind::TrustedExtern | SurfaceKind::BoundaryType | SurfaceKind::Type | SurfaceKind::Invariant);
+        if !locks_it || !seen.insert(id) {
+            continue;
+        }
+        let it = krate.item(id);
+        let what_item = if boundary.contains(&id) { "boundary item" } else { "locked item" };
+        let attached: Vec<(&crate::hir::Attached, &str)> = match &it.kind {
+            ItemKind::Fn(f) => f
+                .spec
+                .attached
+                .iter()
+                .filter_map(|a| match a.kind.as_str() {
+                    "requires" => Some((a, "precondition")),
+                    "decreases" if f.decreases.as_ref().is_some_and(|d| d.max.is_some()) => Some((a, "recursion depth bound")),
+                    _ => None,
+                })
+                .collect(),
+            ItemKind::Struct(sd) => sd.attached.iter().filter(|a| a.kind == "invariant").map(|a| (a, "invariant")).collect(),
+            _ => vec![],
+        };
+        for (a, what) in attached {
+            if a.in_laws {
+                continue;
+            }
+            out.push(SurfaceError {
+                key: i.key.clone(),
+                span: i.span,
+                msg: format!("the {what_item} `{}` has a {what} attached from the proof file `{}` (`{}({})`): the lock would hold a proof file's statement", it.path, a.module, a.kind, a.text),
+                note: "a locked item's preconditions, depth bound and invariant are part of the locked surface, which is the laws file's: move the attachment to the laws file (LAWS.rs), where the reviewer reads it (DESIGN.md §15.6)".into(),
+            });
+        }
+    }
+    out
 }
 
 /// Whether an item is a **root** of the review surface (module docs, *What

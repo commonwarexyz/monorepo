@@ -107,13 +107,23 @@
 //! exploration run). It reuses the build's own elaboration as the
 //! baseline and runs:
 //!
-//! * **every spec mutant**. Only an example (vector records included) or
+//! * **every spec mutant of the review surface** ([`review_scope`]): the
+//!   spec functions and spec constants a locked statement depends on
+//!   (DESIGN.md §15.6). A proof internal — a spec function only proofs
+//!   use — is not mutated ([`MutationReport::internal`] lists them): no
+//!   locked statement depends on its definition, so whatever it is the
+//!   locked guarantees hold (or the proofs fail), and a known answer for it
+//!   has no independent source (DESIGN.md §15.9).
+//!   Only an example (vector records included) or
 //!   a definite counterexample to a law kills a spec mutant (item 5), so a
 //!   spec mutant's batch elaborates only its spec closure — the mutated
 //!   spec item and the spec functions that use it, with their examples —
 //!   plus the `bool` checkers of the laws in its closure and the originals
 //!   it is compared with, through the elaborator's item filter
-//!   (`elab::Options::items`). Laws, lemmas, proofs and the refinements of
+//!   (`elab::Options::items`, built by `elab::order::filter_closure`: with
+//!   the `#[bridges]` lemmas, rules of `auto` in every proof of the build,
+//!   and the types, which every elaboration elaborates, with what their
+//!   invariants mention). Laws, lemmas, proofs and the refinements of
 //!   the implementation are not re-proven: their failure is never a kill.
 //!   Every law checker is evaluated (for LR8); then the known answers,
 //!   one per elaboration, stopping at the first kill ([`example_slots`]):
@@ -123,7 +133,8 @@
 //!   and the larger vector files only for a survivor with a witness.
 //!   Batches of fixed size run on up to four threads ([`run_parallel`]);
 //!   verdicts are per mutant, so the result does not depend on the
-//!   scheduling;
+//!   scheduling (the prover's per-goal heap cap counts the goal's own
+//!   thread, so one batch's growth never trips another's goals);
 //! * **implementation mutants only when some section is not fully
 //!   specified**: when every `complete_p` is proven no implementation
 //!   mutant has an observation point (item 4), so none can produce a
@@ -461,6 +472,12 @@ pub struct MutationReport {
     pub tests_note: String,
     /// Items not mutated, with why (constants used at type level).
     pub excluded: Vec<(String, String)>,
+    /// Gate mode: the spec functions and spec constants not mutated because
+    /// they are proof internals — not on the review surface (DESIGN.md
+    /// §15.6), so no locked statement depends on their definitions (§15.9,
+    /// *Which spec functions the gate mutates*). By path; empty for the
+    /// exploration run, which mutates every spec item.
+    pub internal: Vec<String>,
     /// Items with mutation sites none of whose mutants was sampled.
     pub not_sampled: Vec<String>,
     /// Items whose mutants the per-item cap sampled: `(path, run, of)`.
@@ -500,16 +517,32 @@ pub fn run(krate: &Crate, sm: &SourceMap, opts: &MutateOptions) -> MutationRepor
 /// The crate gate's run (see *Gate mode* in the module docs): `out` is the
 /// build's own elaboration of `krate` (the baseline), and the call must
 /// run on its elaboration thread. The options are fixed
-/// ([`MutateOptions::gate`]).
+/// ([`MutateOptions::gate`]); the spec items mutated are those of the
+/// review surface ([`review_scope`]), computed here from `out`.
 pub fn run_gate(krate: &Crate, sm: &SourceMap, out: &elab::Output) -> MutationReport {
-    run_gate_cached(krate, sm, out, None)
+    let surface = crate::surface::compute(out, krate, sm, &crate::surface::SurfaceOptions { kernel_text: false, ..Default::default() });
+    run_gate_cached(krate, sm, out, None, &surface)
+}
+
+/// The spec items the gate mutates: the spec functions and spec constants
+/// of the review surface — the vocabulary of the locked statements
+/// (DESIGN.md §15.6) — given as the surface `run_gate_cached` receives
+/// (its [`crate::surface::Surface::items`] are the review surface). A spec
+/// function only proofs use (a proof internal) is not mutated: no locked
+/// statement depends on its definition (§15.9, *Which spec functions the
+/// gate mutates*).
+pub fn review_scope(surface: &crate::surface::Surface) -> BTreeSet<ItemId> {
+    use crate::surface::SurfaceKind;
+    surface.items.iter().filter(|i| matches!(i.kind, SurfaceKind::SpecFn | SurfaceKind::SpecConst | SurfaceKind::Constant)).filter_map(|i| i.item).collect()
 }
 
 /// [`run_gate`] with the verdict cache (`crate::driver::cache`): a spec
 /// mutant whose inputs are unchanged since a run stored its verdict is not
 /// re-run ([`cache`], *incremental spec mutation*); every decided verdict
-/// of this run is stored.
-pub fn run_gate_cached(krate: &Crate, sm: &SourceMap, out: &elab::Output, vc: Option<&crate::driver::cache::VerdictCache>) -> MutationReport {
+/// of this run is stored. `surface` is the build's specification surface
+/// (the spec items of its review surface are mutated, [`review_scope`]).
+pub fn run_gate_cached(krate: &Crate, sm: &SourceMap, out: &elab::Output, vc: Option<&crate::driver::cache::VerdictCache>, surface: &crate::surface::Surface) -> MutationReport {
+    let scope = review_scope(surface);
     let mut opts = MutateOptions::gate();
     opts.impl_mutants = out.sections.iter().any(|s| !s.fully_specified());
     // progress lines on stderr (output only)
@@ -519,7 +552,7 @@ pub fn run_gate_cached(krate: &Crate, sm: &SourceMap, out: &elab::Output, vc: Op
     let problems: Vec<String> = out.defs.iter().filter(|d| !matches!(d.status, DefStatus::Checked | DefStatus::Deferred(_))).map(|d| format!("`{}`: {}", d.name, crate::driver::def_status_str(&d.status))).take(20).collect();
     rep.base = base_items(out, krate);
     let base = baseline_of(out, krate);
-    run_from(krate, sm, &opts, out.verified(), problems, base, 0, rep, t0, vc)
+    run_from(krate, sm, &opts, out.verified(), problems, base, 0, rep, t0, vc, Some(&scope))
 }
 
 /// How a published member of a section is specified.
@@ -1000,14 +1033,18 @@ struct Enumeration {
     total: usize,
     excluded: Vec<(String, String)>,
     capped: Vec<(String, usize, usize)>,
+    /// Spec items outside the scope (proof internals), not mutated.
+    internal: Vec<String>,
 }
 
 /// Every mutant of the crate, in item and node order (the per-item cap
-/// applied; see the module docs).
-fn enumerate(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, rev: &HashMap<ItemId, BTreeSet<ItemId>>) -> Enumeration {
+/// applied; see the module docs). With a `scope` (gate mode: the review
+/// surface, [`review_scope`]) only the spec items in it are mutated; the
+/// others are listed in [`Enumeration::internal`].
+fn enumerate(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, rev: &HashMap<ItemId, BTreeSet<ItemId>>, scope: Option<&BTreeSet<ItemId>>) -> Enumeration {
     let hw = hardware(krate);
     let type_level = type_level_consts(krate, rev);
-    let mut e = Enumeration { all: vec![], total: 0, excluded: vec![], capped: vec![] };
+    let mut e = Enumeration { all: vec![], total: 0, excluded: vec![], capped: vec![], internal: vec![] };
     for it in &krate.items {
         let Some(target) = mutation_target(krate, it, &hw) else { continue };
         if target == Target::Impl && !opts.impl_mutants || target == Target::Spec && !opts.spec_mutants {
@@ -1015,6 +1052,16 @@ fn enumerate(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, rev: &HashMap<
         }
         let path = it.path.to_string();
         if !only_matches(&opts.only, &path) {
+            continue;
+        }
+        // a proof internal: no locked statement depends on its definition
+        if target == Target::Spec
+            && let Some(sc) = scope
+            && !sc.contains(&it.id)
+        {
+            if body_of(it).is_some() {
+                e.internal.push(path);
+            }
             continue;
         }
         if let Some(why) = type_level.get(&it.id) {
@@ -1047,7 +1094,7 @@ fn enumerate(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, rev: &HashMap<
 /// Every mutant of the crate (no cap; for tools and tests).
 pub fn enumerate_mutants(krate: &Crate, sm: &SourceMap, opts: &MutateOptions) -> Vec<Mutant> {
     let rev = clone::reverse_refs(krate);
-    enumerate(krate, sm, &MutateOptions { max_per_item: usize::MAX, ..opts.clone() }, &rev).all
+    enumerate(krate, sm, &MutateOptions { max_per_item: usize::MAX, ..opts.clone() }, &rev, None).all
 }
 
 /// The global sample: round-robin over the mutated items (each item's
@@ -1913,12 +1960,14 @@ fn run_here(krate: &Crate, sm: &SourceMap, opts: &MutateOptions) -> MutationRepo
         rep.base = base_items(&out, krate);
         (baseline_of(&out, krate), verified, problems)
     };
-    run_from(krate, sm, opts, verified, problems, base, base_growth, rep, t0, None)
+    run_from(krate, sm, opts, verified, problems, base, base_growth, rep, t0, None, None)
 }
 
-/// The engine after the baseline (shared by [`run`] and [`run_gate`]).
+/// The engine after the baseline (shared by [`run`] and [`run_gate`]);
+/// `scope`: the spec items mutated (gate mode, [`review_scope`]), or every
+/// spec item.
 #[allow(clippy::too_many_arguments)]
-fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool, problems: Vec<String>, base: Baseline, base_growth: usize, mut rep: MutationReport, t0: Instant, vc: Option<&crate::driver::cache::VerdictCache>) -> MutationReport {
+fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool, problems: Vec<String>, base: Baseline, base_growth: usize, mut rep: MutationReport, t0: Instant, vc: Option<&crate::driver::cache::VerdictCache>, scope: Option<&BTreeSet<ItemId>>) -> MutationReport {
     rep.baseline_verified = verified;
     rep.baseline_problems = problems;
     rep.unknown_only = unknown_only(krate, &opts.only);
@@ -1931,9 +1980,10 @@ fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool,
         return rep;
     }
     let rev = clone::reverse_refs(krate);
-    let en = enumerate(krate, sm, opts, &rev);
+    let en = enumerate(krate, sm, opts, &rev, scope);
     rep.enumerated = en.total;
     rep.excluded = en.excluded;
+    rep.internal = en.internal;
     for (p, kept, of) in &en.capped {
         rep.incomplete_reasons.push(format!("{kept} of {of} mutants of `{p}` run (SANDBLASTER_MUTANTS_PER_ITEM = {}; a deterministic sample)", opts.max_per_item));
     }
@@ -2391,9 +2441,10 @@ fn gate_cloned(krate: &Crate, id: ItemId) -> bool {
 /// The extended crate of a gate-mode batch of spec mutants (see *Gate
 /// mode* in the module docs) and the item filter of its elaboration: the
 /// clones, the law checkers, the `requires` checkers and the compared
-/// originals, closed under references. Each clone keeps only the mutant's
-/// `slot`-th known answer ([`Plan::slots`]); the law checkers are built in
-/// slot 0.
+/// originals, closed under references with the `#[bridges]` lemmas and
+/// the types ([`elab::order::filter_closure`]). Each clone keeps only the
+/// mutant's `slot`-th known answer ([`Plan::slots`]); the law checkers are
+/// built in slot 0.
 fn build_batch_gate(krate: &Crate, plans: &[Plan], idx: &[usize], mutants: &[Mutant], slot: usize) -> (Crate, Vec<BatchMutant>, Option<BTreeSet<ItemId>>) {
     let mut k = krate.clone();
     let mut bms = Vec::new();
@@ -2501,14 +2552,11 @@ fn build_batch_gate(krate: &Crate, plans: &[Plan], idx: &[usize], mutants: &[Mut
             f.spec.example_files.clear();
         }
     }
-    // everything the seeds refer to, transitively
-    let mut filter: BTreeSet<ItemId> = BTreeSet::new();
-    let mut work: Vec<ItemId> = seeds.into_iter().collect();
-    while let Some(x) = work.pop() {
-        if filter.insert(x) {
-            work.extend(elab::order::refs(&k, x));
-        }
-    }
+    // everything the seeds refer to, transitively, with what the build
+    // elaborates for every proof unreferenced (the `#[bridges]` lemmas, the
+    // types and what their invariants, views and representations mention):
+    // the unchanged part of the batch must re-verify as it does in the build
+    let filter = elab::order::filter_closure(&k, seeds);
     (k, bms, Some(filter))
 }
 
@@ -3004,6 +3052,7 @@ pub fn report_json(rep: &MutationReport) -> Json {
                 .collect(),
         ),
     );
+    o.put("proof_internals_not_mutated", strs(&rep.internal));
     let mut counts = Json::obj();
     for v in Verdict::ALL {
         counts.num(v.word(), rep.count(v) as i64);

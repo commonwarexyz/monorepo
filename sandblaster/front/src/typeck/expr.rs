@@ -279,12 +279,18 @@ pub fn check_fn(ck: &mut Checker, id: ItemId, inputs: &[syn::FnArg], block: &syn
     cx.ghost = true;
     let mut requires: Vec<Expr> = sig.contracts.requires.iter().map(|r| cx.prop(r)).collect();
     let mut ensures = sig.contracts.ensures.as_ref().map(|e| cx.ensures(e, &sig.ret));
+    let contract_ensures = sig.contracts.contract_ensures.as_ref().map(|c| c.as_ref().map(|e| cx.ensures(e, &sig.ret)));
     let decreases = sig.contracts.decreases.as_ref().map(|(e, max)| {
         let measure = cx.measure(e);
         Decreases { measure, max: *max }
     });
     // §15 annotations (ghost context, parameters in scope)
-    let spec = cx.lower_fn_spec(&sig);
+    let mut spec = cx.lower_fn_spec(&sig);
+    if contract_ensures.is_some() && ensures.is_none() {
+        cx.err(DiagKind::Contract, sig.sig_span, "`#[contract_ensures]` without `#[ensures]`");
+    }
+    spec.contract_ensures = contract_ensures;
+    spec.attached = sig.contracts.lift_src.clone();
     let induction = sig.spec.induction.as_ref().and_then(|(x, _)| cx.lookup_local(x));
     // `#[induction(n)]` on a `Nat`/`Int` parameter implies the measure `n`
     // (`#[decreases(n)]`): the elaborator checks it at every `ih(..)`
@@ -369,6 +375,7 @@ pub fn check_fn(ck: &mut Checker, id: ItemId, inputs: &[syn::FnArg], block: &syn
         spec,
         locals,
         sig_span: sig.sig_span,
+        sig_text: sig.sig_text.clone(),
     })
 }
 

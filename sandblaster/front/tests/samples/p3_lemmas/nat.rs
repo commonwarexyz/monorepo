@@ -51,3 +51,17 @@ fn popcount_step(x: Int) {
         by_unfolding(popcount);
     }
 }
+
+/// `a < b` when `pow2(a) < pow2(b)` (`pow2` is monotone; `auto::arith`
+/// reads an exponent's bound off its power's with it).
+#[lemma]
+fn pow2_lt_rev(a: Int, b: Int) {
+    requires(pow2(a) < pow2(b));
+    ensures(a < b);
+    if a < b {
+        follows();
+    } else {
+        pow2_mono(b, a);
+        by_contradiction();
+    }
+}

@@ -134,10 +134,12 @@ pub struct Options {
     /// Deterministic, like every budget (§15.8); not user-facing.
     pub complete_budget: u64,
     /// The mutation gate's item filter (`crate::mutate`, gate mode): only
-    /// these items are elaborated (types are always elaborated; the set
-    /// must be closed under [`order::refs`]), and the whole-crate passes
-    /// (§15 post passes, sections, law rules) are skipped. The output of a
-    /// filtered elaboration is **never a verification**: it carries an
+    /// these items are elaborated (types are always elaborated), and the
+    /// whole-crate passes (§15 post passes, sections, law rules) are
+    /// skipped. Build the set with [`order::filter_closure`]: closed under
+    /// [`order::refs`], with every type's references and the `#[bridges]`
+    /// lemmas (rules of `auto` in every proof of the build). The output of
+    /// a filtered elaboration is **never a verification**: it carries an
     /// error diagnostic, so [`Output::verified`] is false. The build and
     /// the CLI never set it.
     pub items: Option<std::sync::Arc<std::collections::BTreeSet<ItemId>>>,

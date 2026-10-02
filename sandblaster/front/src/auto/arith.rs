@@ -16,7 +16,8 @@
 //!   a non-literal divisor get their unconditional axioms (`and_le_*`,
 //!   `or_ge_*`, `or_le_add`, `xor_le_or`, `shr_le`, `rem_lt`); literal
 //!   masks, shifts, divisions and truncating casts are already linearized
-//!   definitionally by the kernel;
+//!   definitionally by the kernel; a complement `!x` gets its value
+//!   `MAX − x` (`bits::not_val_<w>`);
 //! * `count_ones`, `leading_zeros` and `trailing_zeros` get the bound
 //!   lemmas of `lemmas/bits.core` (`bits::count_ones_le_<w>`,
 //!   `bits::{leading,trailing}_zeros_le_<w>`, and the strict `_lt_<w>` when
@@ -301,8 +302,10 @@ impl<'a> Engine<'a> {
         };
         for round in 0..rounds {
             let Some(sys) = self.linearize(st, &hyps, &goal_tm)? else { return Ok(None) };
-            // (a round the caller knows fails for this class: no search)
-            let cert = if round < skip && round + 1 < rounds { None } else { simplex::certificate(&sys) };
+            // (a round the caller knows fails for this class: no search; a
+            // failed search leaves its feasible points to the enrichment)
+            let mut points: Option<Vec<Vec<Option<super::rat::Q>>>> = None;
+            let cert = if round < skip && round + 1 < rounds { None } else { certificate_or_point(&sys).map_err(|p| points = Some(p.into_iter().collect())).ok() };
             if let Some(cert) = cert {
                 self.lin_round = Some(round);
                 return Ok(Some(self.lin_term(st, hyps, goal_tm, &sys, cert)?));
@@ -319,7 +322,7 @@ impl<'a> Engine<'a> {
                 break;
             }
             let before = hyps.len();
-            self.enrich(st, &sys, &goal_atoms, &mut hyps, &mut seen)?;
+            self.enrich(st, &sys, points.as_deref(), &goal_atoms, &mut hyps, &mut seen)?;
             if hyps.len() == before {
                 break;
             }
@@ -734,7 +737,7 @@ impl<'a> Engine<'a> {
 
     /// One enrichment round: axiom instances, type bounds and lemma
     /// instances for the atoms of `sys` (see the module docs).
-    fn enrich(&mut self, st: &St, sys: &LinSystem, goal_atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>) -> R<()> {
+    fn enrich(&mut self, st: &St, sys: &LinSystem, points: Option<&[Vec<Option<super::rat::Q>>]>, goal_atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>) -> R<()> {
         let mut atoms = sys.atoms.clone();
         // the atoms of disequality facts (`a ≠ b`, not linarith hypotheses,
         // split on demand by the cuts) are enriched too, so the cut arms have
@@ -790,6 +793,7 @@ impl<'a> Engine<'a> {
         self.enrich_quotients(st, &in_goal, hyps, seen)?;
         self.enrich_pow2_pairs(st, &in_goal, hyps, seen)?;
         if !self.in_atom_congr {
+            self.enrich_pow2_exponents(st, sys, points, goal_atoms, hyps, seen)?;
             // the argument equations of two atoms are linear facts or not at
             // all: no integer cuts for them (each costs a search per pair)
             self.in_atom_congr = true;
@@ -1161,6 +1165,240 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
+    /// The exponent of a power, bounded through the power (pe P3/C5 read
+    /// backwards), for a goal about exponents: each goal atom occurs in the
+    /// exponent of a `pow2` atom of the round (`g ≤ 62`, `t + 1 < 64`), and
+    /// the negated goal pushes an exponent up. For such an atom `pow2(x)`
+    /// (at most four) and the smallest literal `U` among the hypotheses'
+    /// with `pow2(x) ≤ U` following from the round's facts, the bound
+    /// `x < k + 1` for `k = ⌊log₂ U⌋` (`nat::pow2_lt_rev`, from
+    /// `pow2(x) ≤ U < 2^(k+1)`). So `(c + 1)·2^g ≤ 2^62` gives `g ≤ 62` once
+    /// the product's monotonicity (`2^g ≤ (c + 1)·2^g`) has put `pow2(g)`
+    /// among the atoms.
+    ///
+    /// Cost: the search tries goals that do not hold on every enriched
+    /// linarith call, and a proof search per candidate ran the verifier's
+    /// subtree lemma out of budget. So the rule does not run inside a probe
+    /// ([`Engine::lin_probe`]); it decides on the round's linear system
+    /// (rows swapped in, no kernel calls); the round's feasible point ends
+    /// it when no bound could cut that point off (a point with
+    /// `x ≤ bits(⌊pow2(x)⌋) − 1` satisfies every such bound, as a provable
+    /// `pow2(x) ≤ U` holds there); the candidates are bisected (refutation is
+    /// monotone in `U`); and the bounds are proved only when they refute the
+    /// round's negated goal.
+    fn enrich_pow2_exponents(&mut self, st: &St, sys: &LinSystem, points: Option<&[Vec<Option<super::rat::Q>>]>, goal_atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>) -> R<()> {
+        use super::rat::Q;
+        use sandblaster_kernel::linarith::{Constraint, ConstraintKind};
+        if self.rule_depth >= 1 || self.lin_probe || goal_atoms.is_empty() || sys.problems.is_empty() {
+            return Ok(());
+        }
+        let (Some(rev), Some(pow2)) = (self.env.lookup_global("nat::pow2_lt_rev"), self.env.lookup_global("ghost::pow2")) else { return Ok(()) };
+        let int = Width::Int;
+        let n = sys.atoms.len();
+        // the round's `pow2` atoms with a non-literal exponent that mentions
+        // a goal atom, every goal atom in one of them
+        let mut exps: Vec<(usize, Tm)> = Vec::new();
+        for (i, a) in sys.atoms.iter().enumerate() {
+            let Some(("ghost::pow2", x)) = self.nat_fn_app(a) else { continue };
+            if matches!(&*x, Term::Lit { .. }) || exps.iter().any(|(_, y)| self.env.alpha_eq_relevant(y, &x, &|p, q| p == q)) {
+                continue;
+            }
+            exps.push((i, x));
+        }
+        if !goal_atoms.iter().all(|g| exps.iter().any(|(_, x)| self.mentions_atom(x, std::slice::from_ref(g), 0))) {
+            return Ok(());
+        }
+        let mut powers: Vec<(usize, Tm, Constraint)> = Vec::new();
+        for (ai, x) in exps {
+            if powers.len() == 4 || !self.mentions_atom(&x, goal_atoms, 0) {
+                continue;
+            }
+            // a marker per exponent, so a later round does not redo it
+            let key = sandblaster_kernel::prim::prim0(PrimOp::INeg, vec![x.clone()]);
+            if seen.iter().any(|s| self.env.alpha_eq_relevant(s, &key, &|p, q| p == q)) {
+                continue;
+            }
+            seen.push(key);
+            // the row `x ≤ 0` over the round's atoms: the negated goal of
+            // `(x ≤ 0) = false`, linearized alone, its atoms found among the
+            // round's (or the power is not used)
+            let Some(g) = self.cond(st, sandblaster_kernel::prim::prim0(PrimOp::Le(int), vec![x.clone(), mk::lit(int, 0u8)]), false)? else { continue };
+            let g = self.quote(st, &g);
+            let Some(small) = self.linearize(st, &[], &g)? else { continue };
+            let Some(row) = small.problems.first().and_then(|p| p.iter().find(|c| c.origin == ConstraintOrigin::NegatedGoal)) else { continue };
+            let mut coeffs = Vec::new();
+            for (j, c) in &row.coeffs {
+                let Some(i) = sys.atoms.iter().position(|a| self.env.alpha_eq_relevant(a, &small.atoms[*j], &|p, q| p == q)) else { break };
+                coeffs.push((i, c.clone()));
+            }
+            if coeffs.len() == row.coeffs.len() && row.kind == ConstraintKind::Le0 {
+                powers.push((ai, x, Constraint { coeffs, constant: row.constant.clone(), kind: ConstraintKind::Le0, origin: ConstraintOrigin::Hyp(usize::MAX) }));
+            }
+        }
+        // the negated goal must push an exponent up: a coefficient of the
+        // opposite sign to the exponent's in some atom (`h ≤ 1` negated is
+        // `h ≥ 2`, which an upper bound can cut off; `h > 1` negated is
+        // `h ≤ 1`, which none can)
+        let negs: Vec<&Constraint> = sys.problems.iter().filter_map(|p| p.iter().find(|c| c.origin == ConstraintOrigin::NegatedGoal)).collect();
+        powers.retain(|(_, _, row)| {
+            negs.iter().any(|ng| {
+                row.coeffs.iter().any(|(i, b)| ng.coeffs.iter().any(|(j, g)| i == j && b * g < BigInt::from(0)))
+            })
+        });
+        if powers.is_empty() {
+            return Ok(());
+        }
+        // the round's feasible points: those of its certificate search, or
+        // a search here (a round the caller skipped); none (it gave up): no
+        // bounds
+        let mut own: Vec<Vec<Option<Q>>> = Vec::new();
+        let points: &[Vec<Option<Q>>] = match points {
+            Some(p) => p,
+            None => {
+                for p in &sys.problems {
+                    match simplex::farkas_staged_point(p, n) {
+                        Ok(_) => continue,
+                        Err(Some(pt)) => own.push(pt),
+                        Err(None) => return Ok(()),
+                    }
+                }
+                &own
+            }
+        };
+        if points.is_empty() {
+            return Ok(());
+        }
+        // at a point: `x`'s value, and `bits(⌊pow2(x)⌋) − 1`
+        let at = |pt: &[Option<Q>], ai: usize, row: &Constraint| -> Option<(Q, BigInt)> {
+            let mut xv = Q::int(row.constant.clone());
+            for (i, c) in &row.coeffs {
+                xv = xv.add(&Q::int(c.clone()).mul(pt.get(*i)?.as_ref()?));
+            }
+            let pw = pt.get(ai)?.as_ref()?;
+            let fl = if pw.is_neg() { BigInt::from(0) } else { pw.num() / pw.den() };
+            Some((xv, BigInt::from(fl.bits()) - 1))
+        };
+        // per power: whether its bound may cut a point off, and the largest
+        // exponent value to cut off (`None`: a value is unknown — outside
+        // the point's neighbourhood)
+        let mut useful = vec![false; powers.len()];
+        let mut need: Vec<Option<Q>> = vec![None; powers.len()];
+        let mut unknown = vec![false; powers.len()];
+        for pt in points {
+            let mut cut = false;
+            for (k, (ai, _, row)) in powers.iter().enumerate() {
+                match at(pt, *ai, row) {
+                    Some((xv, thr)) if !xv.sub(&Q::int(thr.clone())).is_pos() => {}
+                    Some((xv, _)) => {
+                        cut = true;
+                        useful[k] = true;
+                        if need[k].as_ref().is_none_or(|m| xv.sub(m).is_pos()) {
+                            need[k] = Some(xv);
+                        }
+                    }
+                    None => {
+                        cut = true;
+                        useful[k] = true;
+                        unknown[k] = true;
+                    }
+                }
+            }
+            if !cut {
+                return Ok(());
+            }
+        }
+        let mut cands: Vec<BigInt> = Vec::new();
+        for (_, stated) in hyps.iter() {
+            visit_lits(stated, &mut |v| {
+                if v >= &BigInt::from(1) && !cands.contains(v) {
+                    cands.push(v.clone());
+                }
+            });
+        }
+        cands.sort();
+        // the round's facts and implicit constraints, without its negated goal
+        let base: Vec<Constraint> = sys.problems[0].iter().filter(|c| c.origin != ConstraintOrigin::NegatedGoal).cloned().collect();
+        // (exponent, k + 1 = the bit length of U, the row `x − k ≤ 0`)
+        let mut found: Vec<(Tm, BigInt, Constraint)> = Vec::new();
+        for (k, (ai, x, row)) in powers.into_iter().enumerate() {
+            if !useful[k] {
+                continue;
+            }
+            // the smallest `U` refuting `pow2(x) ≥ U + 1` (refutation is
+            // monotone in `U`: the largest first, then a bisection), among
+            // those whose bound `bits(U) − 1` is below a value to cut off
+            let refutes = |u: &BigInt| {
+                let mut p = base.clone();
+                p.push(Constraint { coeffs: vec![(ai, BigInt::from(-1))], constant: u + 1, kind: ConstraintKind::Le0, origin: ConstraintOrigin::NegatedGoal });
+                simplex::farkas_staged(&p, n).is_some()
+            };
+            let el: Vec<&BigInt> = cands
+                .iter()
+                .filter(|u| unknown[k] || need[k].as_ref().is_none_or(|m| m.sub(&Q::int(BigInt::from(u.bits()) - 1)).is_pos()))
+                .collect();
+            let Some(last) = el.last() else { continue };
+            if !refutes(last) {
+                continue;
+            }
+            let (mut lo, mut hi) = (0, el.len() - 1);
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                if refutes(el[mid]) {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            let u = el[lo].clone();
+            let k1 = BigInt::from(u.bits());
+            let mut row = row;
+            row.constant -= &k1 - 1;
+            found.push((x, k1, row));
+        }
+        if found.is_empty() {
+            return Ok(());
+        }
+        // the bounds close the goal with the round's facts, or none is added
+        for p in &sys.problems {
+            let mut p = p.clone();
+            p.extend(found.iter().map(|(_, _, r)| r.clone()));
+            if simplex::farkas_staged(&p, n).is_none() {
+                return Ok(());
+            }
+        }
+        let hs = hyps.clone();
+        for (x, k1, _) in found {
+            let pk1 = mk::app(mk::global(pow2), mk::lit(int, k1.clone()));
+            let c = sandblaster_kernel::prim::prim0(PrimOp::Lt(int), vec![mk::app(mk::global(pow2), x.clone()), pk1]);
+            let Some(pf) = self.prove_cond(st, &c, &hs)? else { continue };
+            if let Some(h) = self.pow2_lemma(st, rev, &x, &mk::lit(int, k1), vec![pf])? {
+                hyps.push(h);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether one of `atoms` occurs in `t` (outside binders, at most eight
+    /// levels deep).
+    fn mentions_atom(&self, t: &Tm, atoms: &[Tm], depth: u32) -> bool {
+        if depth > 8 {
+            return false;
+        }
+        if atoms.iter().any(|a| self.env.alpha_eq_relevant(a, t, &|p, q| p == q)) {
+            return true;
+        }
+        if matches!(&**t, Term::Lam { .. } | Term::Pi { .. } | Term::Let { .. } | Term::Sigma { .. } | Term::Match { .. }) {
+            return false;
+        }
+        let mut found = false;
+        crate::elab::tm::children(t, &mut |c| {
+            if !found && self.mentions_atom(c, atoms, depth + 1) {
+                found = true;
+            }
+        });
+        found
+    }
+
     /// `lemma a b h…` for a `nat::pow2_*` lemma whose binders after the two
     /// `Int` arguments are the hypotheses proved by `proofs`, with its
     /// statement.
@@ -1502,6 +1740,11 @@ impl<'a> Engine<'a> {
                 self.push_axiom(st, Schema::OrLeAdd, w, args.to_vec(), hyps)?;
             }
             Xor(w) => self.push_axiom(st, Schema::XorLeOr, w, args.to_vec(), hyps)?,
+            // a complement is exact: `!x = MAX − x` (`bits::not_val_<w>`,
+            // a checked lemma of `lemmas/bits.core`)
+            Not(w) if args.len() == 1 && w.bits().is_some() => {
+                self.push_lemma(st, &format!("bits::not_val_{}", sfx(w)), vec![(Rel::Rel, args[0].clone())], hyps)?
+            }
             WShr(w) | Shr(w) => {
                 self.push_axiom(st, Schema::ShrLe, w, args.to_vec(), hyps)?;
                 // a non-literal amount below the width: `x >> s = x / pow2(s)`
@@ -1537,6 +1780,13 @@ impl<'a> Engine<'a> {
             LeadingZeros(w) | TrailingZeros(w) => {
                 let stem = if matches!(op, LeadingZeros(_)) { "leading_zeros" } else { "trailing_zeros" };
                 self.push_lemma(st, &format!("bits::{stem}_le_{}", sfx(w)), vec![(Rel::Rel, args[0].clone())], hyps)?;
+                // the count of a complement `!y` (trailing ones): its value
+                // first, so `!y ≠ 0` follows from `y ≠ MAX`
+                if let Term::Prim { op: Not(w2), args: ys, .. } = &*args[0]
+                    && ys.len() == 1
+                {
+                    self.push_lemma(st, &format!("bits::not_val_{}", sfx(*w2)), vec![(Rel::Rel, ys[0].clone())], hyps)?;
+                }
                 let c = prim(Ne(w), vec![args[0].clone(), mk::lit(w, 0u8)]);
                 if let Some(p) = self.prove_cond(st, &c, &hyps.clone())? {
                     self.push_lemma(st, &format!("bits::{stem}_lt_{}", sfx(w)), vec![(Rel::Rel, args[0].clone()), (Rel::Irr, p)], hyps)?;
@@ -1601,42 +1851,67 @@ impl<'a> Engine<'a> {
             Rem(w) if proofs.len() == 1 => {
                 self.push_axiom(st, Schema::RemLt, w, vec![args[0].clone(), args[1].clone(), proofs[0].clone()], hyps)?;
             }
-            // A product of two non-literal factors (a non-linear atom):
-            // bound it by `mul_mono` from bounds `0 ≤ a ≤ A`, `0 ≤ b ≤ B`
-            // (`0 ≤ a·b` and `a·b ≤ A·B`).
+            // A product of two non-literal factors (a non-linear atom),
+            // bounded by `mul_mono` (`0 ≤ a ≤ A ∧ 0 ≤ b ≤ B → a·b ≤ A·B`,
+            // the kernel's one axiom about such products) for nonnegative
+            // factors: `0 ≤ a·b`; `b ≤ a·b` when `1 ≤ a` (and `a ≤ a·b`
+            // when `1 ≤ b`): a factor of at least 1 does not decrease the
+            // other; `a·b ≤ U·b` for a literal bound `a ≤ U` (and `a·b ≤
+            // a·V` for `b ≤ V`), and `a·b ≤ U·V` when both have one. Every
+            // instance is linear in the atom and its factors.
             IMul if args.len() == 2 && !args.iter().any(|a| matches!(&**a, Term::Lit { .. })) => {
+                let (a, b) = (args[0].clone(), args[1].clone());
+                // the facts of the `Nat` functions in the factors (`1 ≤
+                // pow2(x)`): a power inside a product is not an atom yet
+                self.nat_inner_facts(st, &a, hyps, 0)?;
+                self.nat_inner_facts(st, &b, hyps, 0)?;
                 let hs = hyps.clone();
-                let (Some((pa0, ua, pa1)), Some((pb0, ub, pb1))) =
-                    (self.int_bounds(st, &args[0], &hs)?, self.int_bounds(st, &args[1], &hs)?)
-                else {
+                let int = Width::Int;
+                let le = |x: &Tm, y: &Tm| prim(Le(int), vec![x.clone(), y.clone()]);
+                let (zero, one) = (mk::lit(int, 0u8), mk::lit(int, 1u8));
+                let (Some(pa0), Some(pb0)) = (self.prove_cond(st, &le(&zero, &a), &hs)?, self.prove_cond(st, &le(&zero, &b), &hs)?) else {
                     return Ok(());
                 };
-                let zero = mk::lit(Width::Int, 0u8);
-                let le0 = self.cond(st, prim(Le(Width::Int), vec![zero.clone(), zero.clone()]), true)?;
-                let refl0 = le0.map(|_| mk::refl(mk::bool_ty(self.n.bool_ind), mk::bool_lit(self.n.bool_ind, true)));
-                if let Some(r0) = refl0 {
-                    // 0·0 ≤ a·b.
-                    let lo = vec![zero.clone(), args[0].clone(), zero.clone(), args[1].clone(), r0.clone(), pa0.clone(), r0, pb0.clone()];
-                    self.push_axiom(st, Schema::MulMono, Width::Int, lo, hyps)?;
+                let (Some(p00), Some(p01)) = (self.prove_cond(st, &le(&zero, &zero), &hs)?, self.prove_cond(st, &le(&zero, &one), &hs)?) else {
+                    return Ok(());
+                };
+                // (`a ≤ a` needs no hypothesis)
+                let (Some(paa), Some(pbb)) = (self.prove_cond(st, &le(&a, &a), &[])?, self.prove_cond(st, &le(&b, &b), &[])?) else {
+                    return Ok(());
+                };
+                // 0·0 ≤ a·b
+                self.push_axiom(st, Schema::MulMono, int, vec![zero.clone(), a.clone(), zero.clone(), b.clone(), p00.clone(), pa0.clone(), p00.clone(), pb0.clone()], hyps)?;
+                // 1·b ≤ a·b and a·1 ≤ a·b
+                if let Some(pa1) = self.prove_cond(st, &le(&one, &a), &hs)? {
+                    self.push_axiom(st, Schema::MulMono, int, vec![one.clone(), a.clone(), b.clone(), b.clone(), p01.clone(), pa1, pb0.clone(), pbb.clone()], hyps)?;
                 }
-                // a·b ≤ A·B.
-                let hi = vec![args[0].clone(), mk::lit(Width::Int, ua), args[1].clone(), mk::lit(Width::Int, ub), pa0, pa1, pb0, pb1];
-                self.push_axiom(st, Schema::MulMono, Width::Int, hi, hyps)?;
+                if let Some(pb1) = self.prove_cond(st, &le(&one, &b), &hs)? {
+                    self.push_axiom(st, Schema::MulMono, int, vec![a.clone(), a.clone(), one.clone(), b.clone(), pa0.clone(), paa.clone(), p01.clone(), pb1], hyps)?;
+                }
+                // a·b ≤ U·b, a·b ≤ a·V, a·b ≤ U·V
+                let ua = self.int_upper(st, &a, &hs)?;
+                let ub = self.int_upper(st, &b, &hs)?;
+                if let Some((u, pu)) = &ua {
+                    self.push_axiom(st, Schema::MulMono, int, vec![a.clone(), mk::lit(int, u.clone()), b.clone(), b.clone(), pa0.clone(), pu.clone(), pb0.clone(), pbb.clone()], hyps)?;
+                }
+                if let Some((v, pv)) = &ub {
+                    self.push_axiom(st, Schema::MulMono, int, vec![a.clone(), a.clone(), b.clone(), mk::lit(int, v.clone()), pa0.clone(), paa.clone(), pb0.clone(), pv.clone()], hyps)?;
+                }
+                if let (Some((u, pu)), Some((v, pv))) = (ua, ub) {
+                    self.push_axiom(st, Schema::MulMono, int, vec![a, mk::lit(int, u), b, mk::lit(int, v), pa0, pu, pb0, pv], hyps)?;
+                }
             }
             _ => {}
         }
         Ok(())
     }
 
-    /// Bounds `0 ≤ a ≤ U` of an `Int` term by linarith: proofs of both and
-    /// the literal `U`, the smallest provable among the literals of the
-    /// hypotheses and the range of a machine-integer cast.
-    fn int_bounds(&mut self, st: &St, a: &Tm, hyps: &[Hyp]) -> R<Option<(Tm, BigInt, Tm)>> {
+    /// A literal upper bound `a ≤ U` of an `Int` term by linarith: the
+    /// smallest provable among the literals of the hypotheses and the range
+    /// of a machine-integer cast, with its proof.
+    fn int_upper(&mut self, st: &St, a: &Tm, hyps: &[Hyp]) -> R<Option<(BigInt, Tm)>> {
         use PrimOp::*;
         let prim = |op: PrimOp, x: Vec<Tm>| sandblaster_kernel::prim::prim0(op, x);
-        let zero = mk::lit(Width::Int, 0u8);
-        let Some(g0) = self.cond(st, prim(Le(Width::Int), vec![zero, a.clone()]), true)? else { return Ok(None) };
-        let Some(p0) = self.lin_with(st, hyps, &g0)? else { return Ok(None) };
         let mut cands: Vec<BigInt> = Vec::new();
         for (_, stated) in hyps {
             visit_lits(stated, &mut |n| {
@@ -1654,7 +1929,7 @@ impl<'a> Engine<'a> {
         for c in cands.into_iter().take(16) {
             let Some(g) = self.cond(st, prim(Le(Width::Int), vec![a.clone(), mk::lit(Width::Int, c.clone())]), true)? else { continue };
             if let Some(p) = self.lin_with(st, hyps, &g)? {
-                return Ok(Some((p0, c, p)));
+                return Ok(Some((c, p)));
             }
         }
         Ok(None)
@@ -2069,6 +2344,17 @@ pub fn lit_v(w: Width, n: impl Into<BigInt>) -> V {
 /// A bare `Head::Var` value at level `l` with an empty spine?
 pub fn is_var_level(v: &V, l: u32) -> bool {
     matches!(&**v, Value::Neu(Neutral { head: Head::Var(x), spine }) if x.0 == l && spine.is_empty())
+}
+
+/// [`simplex::certificate`], or the feasible point of the first problem
+/// without one (`None`: the search gave up).
+fn certificate_or_point(sys: &LinSystem) -> Result<Vec<sandblaster_kernel::term::Rat>, Option<Vec<Option<super::rat::Q>>>> {
+    let mut out = Vec::new();
+    for p in &sys.problems {
+        let c = simplex::farkas_staged_point(p, sys.atoms.len())?;
+        out.extend(c.iter().map(super::rat::Q::to_rat));
+    }
+    Ok(out)
 }
 
 /// Visit the integer literals of a term.

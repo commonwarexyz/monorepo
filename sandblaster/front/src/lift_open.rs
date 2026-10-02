@@ -807,6 +807,7 @@ impl Ctx {
                 && let Some(inst) = instances.get(&tn)
                 && !matches!(&*im.self_ty, syn::Type::Path(st) if is_instance_path(&st.path, inst))
             {
+                self.note_left_out(im);
                 self.drop_item(im.span(), format!("impl `{tn}` for `{written}`"), "an instance of the open trait other than the verified one (`instance = ..`): unverified host code");
                 continue;
             }
@@ -827,6 +828,7 @@ impl Ctx {
             if !opts.items.is_empty()
                 && let Some(what) = not_selected(&item, &opts.items)
             {
+                self.note_left_out(&item);
                 self.drop_item(item.span(), what, "not among the file's selected `items`: unchecked host code");
                 continue;
             }
@@ -838,21 +840,25 @@ impl Ctx {
                     continue;
                 }
                 syn::Item::Macro(m) if m.mac.path.segments.len() >= 2 => {
+                    self.note_left_out(m);
                     let name = m.mac.path.to_token_stream().to_string().replace(' ', "");
                     self.drop_item(m.span(), format!("item macro `{name}!`"), "a macro of another crate (host code; the items it expands to are not part of the lifted meaning)");
                     continue;
                 }
                 syn::Item::Impl(im) if im.trait_.as_ref().is_some_and(|(_, p, _)| unverified_impl(p)) => {
+                    self.note_left_out(im);
                     let tn = im.trait_.as_ref().map(|(_, p, _)| p.to_token_stream().to_string().replace(' ', "")).unwrap_or_default();
                     self.drop_item(im.span(), format!("impl `{tn}` for `{}`", super::ty_key(&im.self_ty)), "declared `unverified_impls`: unchecked host code");
                     continue;
                 }
                 syn::Item::Impl(im) if im.trait_.as_ref().is_some_and(|(_, p, _)| p.segments.last().is_some_and(|s| DROPPED_TRAITS.contains(&s.ident.to_string().as_str()))) => {
+                    self.note_left_out(im);
                     let tn = im.trait_.as_ref().map(|(_, p, _)| p.to_token_stream().to_string().replace(' ', "")).unwrap_or_default();
                     self.drop_item(im.span(), format!("impl `{tn}` for `{}`", super::ty_key(&im.self_ty)), "value semantics or formatting (the model is by value; `Copy`/`Clone` are derived on the model; formatting and hashing are host code)");
                     continue;
                 }
                 syn::Item::Trait(t) if opts.unverified_impls.iter().any(|u| u.rsplit("::").next() == Some(&t.ident.to_string())) => {
+                    self.note_left_out(t);
                     self.drop_item(t.span(), format!("trait `{}`", t.ident), "declared `unverified_impls`: its impls are unchecked host code");
                     continue;
                 }
@@ -865,13 +871,18 @@ impl Ctx {
             {
                 let tn = t.ident.to_string();
                 let mut dropped = Vec::new();
+                let mut left_out = Vec::new();
                 t.items.retain(|ti| match ti {
                     syn::TraitItem::Fn(f) if f.default.is_some() && opts.unverified_fns.iter().any(|u| *u == format!("{tn}::{}", f.sig.ident)) => {
                         dropped.push((f.sig.ident.span(), format!("{tn}::{}", f.sig.ident)));
+                        left_out.push(f.to_token_stream());
                         false
                     }
                     _ => true,
                 });
+                for ts in left_out {
+                    self.note_left_out(&ts);
+                }
                 for (sp, name) in dropped {
                     self.drop_item(sp, format!("provided method `{name}`"), "declared `unverified_fns`: unchecked host code (the verified instance has no such method; a lifted caller does not load)");
                 }
@@ -881,13 +892,18 @@ impl Ctx {
                 && let Some(tn) = super::type_name(&im.self_ty)
             {
                 let mut dropped = Vec::new();
+                let mut left_out = Vec::new();
                 im.items.retain(|ii| match ii {
                     syn::ImplItem::Fn(f) if opts.unverified_fns.iter().any(|u| *u == format!("{tn}::{}", f.sig.ident)) => {
                         dropped.push((f.sig.ident.span(), format!("{tn}::{}", f.sig.ident)));
+                        left_out.push(f.to_token_stream());
                         false
                     }
                     _ => true,
                 });
+                for ts in left_out {
+                    self.note_left_out(&ts);
+                }
                 for (sp, name) in dropped {
                     self.drop_item(sp, format!("method `{name}`"), "declared `unverified_fns`: unchecked host code");
                 }
@@ -1404,11 +1420,14 @@ impl Ctx {
         // and `at_start! { .. }` proof steps before the body — the derive
         // has no precondition)
         let mut contract: Vec<syn::Attribute> = Vec::new();
+        let mut ensures: Vec<(syn::Expr, bool)> = Vec::new();
         let mut steps: Vec<syn::Stmt> = Vec::new();
-        let key = format!("{}::default", s.ident);
+        // (attachments name it by its full path, `crate::m::S::default`)
+        let key = self.attach_path(&format!("{}::default", s.ident));
+        let mut srcs: Vec<syn::Attribute> = Vec::new();
         if let Some(at) = self.attach_fn.get(&key).cloned() {
             self.attach_used.insert(format!("fn {key}"));
-            for st in &at.stmts {
+            for (i, (st, &in_laws)) in at.stmts.iter().zip(&at.in_laws).enumerate() {
                 if let syn::Stmt::Macro(m) = st
                     && m.mac.path.is_ident("at_start")
                 {
@@ -1425,13 +1444,22 @@ impl Ctx {
                     continue;
                 }
                 let Some(mut e) = super::attach_call(st, "ensures") else {
-                    self.err(st.span(), "an attachment to a derived `default` holds `ensures(..);` and `at_start! { .. }` only");
+                    self.errors.push((at.spans[i], "an attachment to a derived `default` holds `ensures(..);` and `at_start! { .. }` only".into(), vec![]));
                     continue;
                 };
                 let mut rw = super::FnRw::new(self, HashMap::new(), true);
                 rw.expr(&mut e, None);
                 drop(rw);
-                contract.push(syn::parse_quote!(#[ensures(#e)]));
+                ensures.push((e, in_laws));
+                srcs.push(at.src_attr(i, "ensures"));
+            }
+            // the contract is the laws file's part (`super::ensures_attrs`)
+            match super::ensures_attrs(ensures) {
+                Ok(attrs) => contract.extend(attrs),
+                Err(msg) => self.errors.push((at.span, msg, vec![])),
+            }
+            if !ghost {
+                contract.extend(srcs);
             }
         }
         let proof: Option<syn::Stmt> = (!steps.is_empty()).then(|| syn::parse_quote!(proof! { #(#steps)* }));

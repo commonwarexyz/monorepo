@@ -15,7 +15,7 @@
 use std::rc::Rc;
 
 use sandblaster_kernel::term::{DefKind, GlobalId, Recursion, Rel, Term, Tm};
-use sandblaster_kernel::util::{mk, shift};
+use sandblaster_kernel::util::{mk, shift, shift_from};
 
 use super::items::{lam_tele, pi_tele};
 use super::{Elab, FnState, Mode, R};
@@ -117,12 +117,114 @@ impl<'a> WalkGoal<'a> for EnsGoal<'a> {
                 Some(en) => s.ensures_prop(en, &rt, t, span)?,
                 None => s.nat_range_prop(ret, t, span)?,
             };
-            s.prove_relevant(ObligationKind::Ensures, span, &goal)
+            s.with_callee_contracts(&goal, span, &mut |s, g| s.prove_relevant(ObligationKind::Ensures, span, g))
         })
     }
 }
 
+/// At most this many callee contracts per contract goal
+/// ([`Elab::with_callee_contracts`]).
+const CALLEE_CONTRACTS_MAX: usize = 8;
+
 impl<'a> Elab<'a> {
+    /// The contracts of the calls a contract statement writes (`goal`, a
+    /// term at the current depth): for each full application `g a…` in it
+    /// of an opaque function (callers know it by its contract: `opaque()`,
+    /// §5.6) with a checked `g::ensures`, the instance `g::ensures a… :
+    /// Q[a…, g a…]` is an irrelevant fact of `k`'s proof of the goal — a
+    /// call in a statement brings its callee's contract as a call in a body
+    /// does (DESIGN.md §7.3), so a contract may name an opaque function
+    /// (an opaque constructor `Position::new(x)`) whose value only its own
+    /// contract states. A transparent callee needs none: evaluation unfolds
+    /// it. Calls under the statement's binders count when they do not use
+    /// them. At most [`CALLEE_CONTRACTS_MAX`].
+    pub(super) fn with_callee_contracts(&mut self, goal: &Tm, span: Span, k: &mut dyn FnMut(&mut Elab<'a>, &Tm) -> R<Tm>) -> R<Tm> {
+        let insts = self.callee_contract_instances(goal);
+        if insts.is_empty() {
+            return k(self, goal);
+        }
+        let saved = self.f.scope.clone();
+        let n = insts.len() as i64;
+        let r = (|| -> R<Tm> {
+            for (i, (eg, ty, pf)) in insts.iter().enumerate() {
+                let (ty, pf) = (shift(ty, i as i64), shift(pf, i as i64));
+                self.push_fact_rel("h_ens", Rel::Irr, &ty, Some(&pf), FactOrigin::CalleeEnsures(*eg), span)?;
+            }
+            k(self, &shift(goal, n))
+        })();
+        self.f.scope = saved;
+        let mut body = r?;
+        for (i, (_, ty, pf)) in insts.iter().enumerate().rev() {
+            body = mk::let_("h_ens", Rel::Irr, shift(ty, i as i64), shift(pf, i as i64), body);
+        }
+        Ok(body)
+    }
+
+    /// The callee contract instances of [`Elab::with_callee_contracts`]:
+    /// `(g::ensures, statement, proof)`, terms at the current depth.
+    fn callee_contract_instances(&self, goal: &Tm) -> Vec<(GlobalId, Tm, Tm)> {
+        let mut calls: Vec<Tm> = Vec::new();
+        fn walk(t: &Tm, depth: u32, out: &mut Vec<Tm>, budget: &mut u32) {
+            if *budget == 0 {
+                return;
+            }
+            *budget -= 1;
+            if let Term::App { .. } = &**t {
+                let (h, _) = super::items::spine(t);
+                if matches!(&*h, Term::Global(_)) && (0..depth).all(|i| !sandblaster_kernel::util::occurs(t, i)) {
+                    out.push(shift(t, -(depth as i64)));
+                }
+            }
+            super::tm::children_depth(t, &mut |c, k| walk(c, depth + k, out, budget));
+        }
+        let mut budget = 4096;
+        walk(goal, 0, &mut calls, &mut budget);
+        let mut out: Vec<(GlobalId, Tm, Tm)> = Vec::new();
+        for c in calls {
+            if out.len() >= CALLEE_CONTRACTS_MAX {
+                break;
+            }
+            let (h, args) = super::items::spine(&c);
+            let Term::Global(g) = &*h else { continue };
+            // a transparent callee's value is its body (evaluation sees it);
+            // an opaque one is known by its contract only
+            if self.env.global_opaque(*g) != Some(true) {
+                continue;
+            }
+            let Some(name) = self.env.global_name(*g) else { continue };
+            let ens = format!("{name}::ensures");
+            if !self.defs.iter().any(|d| d.name == ens && d.status == super::DefStatus::Checked) {
+                continue;
+            }
+            let Some(eg) = self.env.lookup_global(&ens) else { continue };
+            let Some(n) = self.env.global_param_rels(eg).map(|r| r.len()) else { continue };
+            if args.len() != n {
+                continue;
+            }
+            let Some(mut t) = self.env.global_type(eg) else { continue };
+            let mut ok = true;
+            for _ in 0..n {
+                let next = match &*t {
+                    Term::Pi { cod, .. } => cod.clone(),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                };
+                t = next;
+            }
+            if !ok {
+                continue;
+            }
+            let ty = super::tm::subst_closed(&t, &args);
+            if out.iter().any(|(_, t2, _)| self.env.alpha_eq_relevant(t2, &ty, &|a, b| a == b)) {
+                continue;
+            }
+            let proof = mk::apps(mk::global(eg), args.iter().map(|a| (Rel::Rel, a.clone())));
+            out.push((eg, ty, proof));
+        }
+        out
+    }
     /// Defines and proves `f::ensures` for the exec function `id` (global
     /// `g`).
     pub fn ensures_def(&mut self, id: ItemId, f: &'a FnDef, g: GlobalId) -> R<()> {
@@ -533,6 +635,7 @@ impl<'a> Elab<'a> {
             None => self.nat_range_prop(&f.ret, app.clone(), span)?,
         };
         let ty = pi_tele(&binders, goal.clone());
+        let full_goal = goal.clone();
         // walk the body (the committed body of `f`, `Rec` already replaced
         // by `f`): unfold `f x h` to it by conversion (transparent,
         // non-recursive) or `delta` (recursive, or opaque: functions with
@@ -578,7 +681,44 @@ impl<'a> Elab<'a> {
         }
         let lam = lam_tele(&binders, proof);
         let failed = self.f.failed;
-        self.add_definition(&name, DefKind::Ensures, Some(id), ty, lam, recursion, arity, false, failed, span)?;
+        let eg = self.add_definition(&name, DefKind::Ensures, Some(id), ty, lam, recursion, arity, false, failed, span)?;
+        // a proof file attached summaries: the contract is the laws file's
+        // part, `f::contract`, proven from `f::ensures`
+        if en.is_some()
+            && let Some(Some(cen)) = &f.spec.contract_ensures
+            && !failed
+        {
+            self.contract_def(id, cen, eg, &binders, &full_goal, &app, &ret_ty, span)?;
+        }
+        Ok(())
+    }
+
+    /// `f::contract : Π(T..)(x..)(h : P..). L[x, f x h]` (DESIGN.md §15.6):
+    /// the contract of a lifted function whose `ensures` a proof file
+    /// extended with summaries — `L`, the laws file's `ensures` — proven
+    /// from `f::ensures` (whose statement `full` is `L` conjoined with the
+    /// summaries). `f::contract` is what `SPEC.lock` holds and what §15.5
+    /// takes as `f`'s hypothesis; `f::ensures` stays the fact at call sites.
+    #[allow(clippy::too_many_arguments)]
+    fn contract_def(&mut self, id: ItemId, cen: &'a Ensures, eg: sandblaster_kernel::term::GlobalId, binders: &[super::items::TBinder], full: &Tm, app: &Tm, ret_ty: &Tm, span: Span) -> R<()> {
+        let name = format!("{}::contract", self.krate.item(id).path);
+        let goal = self.ensures_prop(cen, ret_ty, app.clone(), span)?;
+        let ty = pi_tele(binders, goal.clone());
+        let rels = self.env.global_param_rels(eg).unwrap_or_default();
+        let mut pf = mk::global(eg);
+        for (i, r) in rels.iter().enumerate() {
+            pf = Rc::new(Term::App { rel: *r, fun: pf, arg: self.f.scope.var(i as u32) });
+        }
+        let (d0, saved) = (self.depth(), self.f.scope.clone());
+        let proof = self.fact_in("h_ens", full.clone(), pf, FactOrigin::CalleeEnsures(eg), span, &mut |s| {
+            let g = shift(&goal, (s.depth() - d0) as i64);
+            s.prove_relevant(ObligationKind::Ensures, span, &g)
+        });
+        self.f.scope = saved;
+        let proof = proof?;
+        let failed = self.f.failed;
+        let lam = lam_tele(binders, proof);
+        self.add_definition(&name, DefKind::Ensures, Some(id), ty, lam, Recursion::None, binders.len() as u32, false, failed, span)?;
         Ok(())
     }
 
@@ -757,11 +897,77 @@ impl<'a> Elab<'a> {
             Term::Ind { ind, .. } if *ind == self.p.unit => Some(self.unit_val()),
             Term::Ind { ind, .. } if *ind == self.env.empty_ind() => Some(Rc::new(Term::Absurd { ty: ty.clone(), proof: p.clone() })),
             Term::Ind { .. } => None,
+            // a proposition by cases: a match whose arms are propositions
+            // (a `match`/`if` in a statement, `o.is_some() && ..`), alone or
+            // in the dependent idiom `(match s .. λ(e : Eq(D, s, y)). ..) refl`
+            Term::Match { .. } => self.promote_match(ty, None, p, fuel),
+            Term::App { rel, fun, arg } if matches!(&**fun, Term::Match { .. }) => self.promote_match(fun, Some((*rel, arg.clone())), p, fuel),
             _ => {
-                let t2 = super::tm::head_unfold(&self.env, ty, &|t| matches!(t, Term::Eq { .. } | Term::Pi { .. } | Term::Sigma { .. } | Term::Ind { .. }))?;
+                let t2 = super::tm::head_unfold(&self.env, ty, &|t| matches!(t, Term::Eq { .. } | Term::Pi { .. } | Term::Sigma { .. } | Term::Ind { .. } | Term::Match { .. }))?;
                 self.promote_irr(&t2, p, fuel - 1)
             }
         }
+    }
+
+    /// [`Elab::promote_irr`] of a proposition by cases: `m` is a match whose
+    /// motive returns a type (`y. Type`), or — with `app = Some((rel, a))`,
+    /// the dependent idiom `m a` — a function type `y. Π(e : E). Type` whose
+    /// arms are `λ(e : E). Tₖ`. The proof matches on the same scrutinee and
+    /// promotes in each arm, where the proposition computes to its arm:
+    ///
+    /// `(match s as y return Π(e : E). Π(.h : M(y) e). M(y) e with
+    ///   Cₖ(x̄) ⇒ λe. λ.h. promote(Tₖ, h)) a .p`
+    ///
+    /// (`M(y)` is `m` with the scrutinee `y`; without `app` the same with no
+    /// `e`). `None` when an arm is not a proposition `promote_irr` handles.
+    fn promote_match(&self, m: &Tm, app: Option<(Rel, Tm)>, p: &Tm, fuel: u32) -> Option<Tm> {
+        if fuel == 0 {
+            return None;
+        }
+        let Term::Match { ind, params, scrut, motive, arms } = &**m else { return None };
+        // the motive's body: `Type`, or `Π(e : E). Type` for the idiom
+        let sort = |t: &Term| matches!(t, Term::Sort(_));
+        let e_binder = match (&**motive, &app) {
+            (b, None) if sort(b) => None,
+            (Term::Pi { name, rel, dom, cod }, Some((arel, _))) if sort(cod) && rel == arel => Some((name.clone(), *rel, dom.clone())),
+            _ => return None,
+        };
+        let k: i64 = if e_binder.is_some() { 2 } else { 1 };
+        // `M(y)` (applied to `e`), under the binders `y` [`e`]
+        let m_y = {
+            let arms_k: Vec<sandblaster_kernel::term::Arm> = arms.iter().map(|a| sandblaster_kernel::term::Arm { names: a.names.clone(), body: shift_from(&a.body, k, a.names.len() as u32) }).collect();
+            let mt: Tm = Rc::new(Term::Match { ind: *ind, params: params.iter().map(|t| shift(t, k)).collect(), scrut: mk::var((k - 1) as u32), motive: shift_from(motive, k, 1), arms: arms_k });
+            match &e_binder {
+                Some((_, rel, _)) => Rc::new(Term::App { rel: *rel, fun: mt, arg: mk::var(0) }),
+                None => mt,
+            }
+        };
+        let inner = mk::pi("h", Rel::Irr, m_y.clone(), shift(&m_y, 1));
+        let new_motive = match &e_binder {
+            Some((name, rel, dom)) => mk::pi(name, *rel, dom.clone(), inner),
+            None => inner,
+        };
+        let mut new_arms = Vec::with_capacity(arms.len());
+        for a in arms {
+            let body = match &e_binder {
+                Some(_) => {
+                    let Term::Lam { name, rel, dom, body: tk } = &*a.body else { return None };
+                    let pr = self.promote_irr(&shift(tk, 1), &mk::var(0), fuel - 1)?;
+                    mk::lam(name, *rel, dom.clone(), mk::lam("h", Rel::Irr, tk.clone(), pr))
+                }
+                None => {
+                    let pr = self.promote_irr(&shift(&a.body, 1), &mk::var(0), fuel - 1)?;
+                    mk::lam("h", Rel::Irr, a.body.clone(), pr)
+                }
+            };
+            new_arms.push(sandblaster_kernel::term::Arm { names: a.names.clone(), body });
+        }
+        let mt: Tm = Rc::new(Term::Match { ind: *ind, params: params.clone(), scrut: scrut.clone(), motive: new_motive, arms: new_arms });
+        let applied = match app {
+            Some((rel, a)) => Rc::new(Term::App { rel, fun: mt, arg: a }),
+            None => mt,
+        };
+        Some(mk::app_irr(applied, p.clone()))
     }
 
     /// `Q[ret := v]` as `let ret : R = v; Q`.
