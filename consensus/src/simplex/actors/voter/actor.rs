@@ -570,6 +570,7 @@ impl<
         // exposes. The resolver's unrestricted backfill therefore cannot be
         // narrowed by that later target.
         resolver.updated(Certificate::Notarization(notarization.clone()));
+
         // Update our local round with the certificate.
         self = self.handle_notarization(notarization.clone()).await;
         (self, Some(notarization))
@@ -588,6 +589,7 @@ impl<
 
         // Notify resolver so dependent parents can progress.
         resolver.updated(Certificate::Nullification(nullification.clone()));
+
         // Track the certificate locally to avoid rebuilding it.
         self = self.handle_nullification(nullification.clone()).await;
         (self, Some(nullification))
@@ -625,6 +627,7 @@ impl<
 
         // Tell the resolver this view is complete so it can stop requesting it.
         resolver.updated(Certificate::Finalization(finalization.clone()));
+
         // Advance the consensus core with the finalization proof.
         self = self.handle_finalization(finalization.clone()).await;
         (self, Some(finalization))
