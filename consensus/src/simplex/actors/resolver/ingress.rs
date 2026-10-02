@@ -24,7 +24,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// The certificate.
         certificate: Certificate<S, D>,
     },
-    /// Certification result for a notarization.
+    /// Certification verdict for a notarization.
     Certified {
         /// The span carried with this message.
         span: Span,
@@ -239,7 +239,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Notify the resolver of a certification result.
+    /// Notify the resolver of a certification verdict.
     pub fn certified(&mut self, notarization: Notarization<S, D>, success: bool) {
         let _ = self.sender.enqueue(MailboxMessage::Certified {
             span: info_span!(

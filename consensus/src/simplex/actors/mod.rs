@@ -68,10 +68,10 @@ impl Kind {
 /// The boundary at which an ask retires.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Until {
-    /// The resolver floor passes the view.
+    /// The resolver floor reaches the view.
     ///
     /// Used for background repair of the nullification gaps below the current
-    /// view, which resolver state stops tracking once its floor is above them.
+    /// view, which resolver state stops tracking once its floor reaches them.
     Floor,
     /// The view is finalized.
     ///

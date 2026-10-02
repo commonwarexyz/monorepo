@@ -181,30 +181,30 @@ impl<
         }
     }
 
-    /// Records a certificate and applies its resolver lifecycle effects.
+    /// Records a certificate and applies its effects.
     fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         certificate: Certificate<S, D>,
     ) {
-        let effects = self.state.handle(certificate);
+        let effects = self.state.updated(certificate);
         self.apply_effects(resolver, effects);
     }
 
-    /// Handles a certification outcome from the voter.
+    /// Records a certification verdict and applies its effects.
     fn certified<R: Resolver<Key = U64, Subscriber = Ask>>(
         &mut self,
         resolver: &mut R,
         notarization: Notarization<S, D>,
         success: bool,
     ) {
-        let effects = self.state.handle_certified(notarization, success);
+        let effects = self.state.certified(notarization, success);
         self.apply_effects(resolver, effects);
     }
 
-    /// Applies the side effects requested by [super::state::State] to the resolver.
+    /// Applies the [Effect]s returned by [State] to the resolver.
     fn apply_effects<R: Resolver<Key = U64, Subscriber = Ask>>(
-        &mut self,
+        &self,
         resolver: &mut R,
         effects: Vec<Effect>,
     ) {
@@ -223,8 +223,8 @@ impl<
                 Effect::Finalized(finalized) => {
                     Self::retire(resolver, move |view, _| view <= finalized);
                 }
-                Effect::RetainAbove(floor) => {
-                    // Resolver state does not repair below its floor, so a
+                Effect::Raised(floor) => {
+                    // Resolver state does not repair at or below its floor, so a
                     // background ask there has nothing left to do. Only
                     // background asks retire here, because a proposal may name
                     // ancestry below the floor and only finalization rules that
@@ -237,21 +237,16 @@ impl<
         }
     }
 
-    /// Retires the asks that new evidence settles.
+    /// Retires every ask for which `retired` holds.
     ///
-    /// `settled` reports whether the evidence answers an ask. [Resolver::retain]
-    /// takes an owned predicate, so it cannot call [State::settled]. Every
-    /// retirement here names a span of views and a kind, which the caller captures
-    /// by value instead.
-    ///
-    /// Settlement is monotonic: no later evidence unsettles an ask. A retirement
-    /// therefore stays true however the resolver orders it against fetches, which
-    /// it reorders under backpressure.
+    /// Every predicate tests a monotonic condition: settlement, finalization, or
+    /// the floor. A retirement therefore stays true however the resolver orders it
+    /// against fetches, which it reorders under backpressure.
     fn retire<R: Resolver<Key = U64, Subscriber = Ask>>(
         resolver: &mut R,
-        settled: impl Fn(View, Ask) -> bool + Send + 'static,
+        retired: impl Fn(View, Ask) -> bool + Send + 'static,
     ) {
-        let _ = resolver.retain(move |key, ask| !settled(View::new(u64::from(key)), *ask));
+        let _ = resolver.retain(move |key, ask| !retired(View::new(u64::from(key)), *ask));
     }
 
     /// Issues a background fetch for the nullification covering `view`.
@@ -1373,7 +1368,7 @@ mod tests {
             // A numeric floor raise alone does not identify which ancestry
             // requirement it satisfies. Both remaining targeted requests
             // survive until matching evidence or finalization arrives.
-            actor.apply_effects(&mut resolver, vec![Effect::RetainAbove(second_requested)]);
+            actor.apply_effects(&mut resolver, vec![Effect::Raised(second_requested)]);
             assert_eq!(resolver.outstanding(), vec![3, 6]);
 
             // Finalization is the universal boundary. No valid proposal can
@@ -2050,7 +2045,7 @@ mod tests {
             );
 
             assert_eq!(receiver.await.unwrap(), Outcome::Ignored);
-            assert_eq!(actor.state.last_finalized(), View::new(6));
+            assert!(!actor.state.settled(View::new(7), Kind::Nullification));
             assert_eq!(
                 actor.state.produce(View::new(6)),
                 Some(finalization.encode())
