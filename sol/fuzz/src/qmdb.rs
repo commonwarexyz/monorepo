@@ -1696,83 +1696,79 @@ mod tests {
         }
     }
 
-    fn unordered_matrix<F: Graftable, H: Hasher>(family: &str, hash: &str) {
-        for encoding in ["fixed", "variable"] {
-            for root_kind in [RootKind::Operations, RootKind::Current] {
-                for (leaves, location, floor, operation, history, expected) in [
-                    (1u64, 0u64, 0u64, "update", "indexed", true),
-                    (1023, 1022, 768, "update", "indexed", true),
-                    (257, 256, 0, "delete", "", false),
-                    (383, 382, 0, "commit", "", true),
-                    (639, 638, 0, "commit-metadata", "", true),
-                    (255, 0, 0, "update", "updated", false),
-                    (256, 255, 0, "update", "updated", true),
-                    (257, 0, 0, "update", "deleted", false),
-                    (513, 512, 0, "update", "deleted", false),
-                ] {
-                    for length in VARIABLE_LENGTHS {
-                        let mut args = vec![
-                            "fuzz".to_owned(),
-                            "qmdb".into(),
-                            "--hash".into(),
-                            hash.into(),
-                            "unordered".into(),
-                            "--leaves".into(),
-                            leaves.to_string(),
-                            "--location".into(),
-                            location.to_string(),
-                            "--seed".into(),
-                            "71".into(),
-                            "--family".into(),
-                            family.into(),
-                            "--inactivity-floor".into(),
-                            floor.to_string(),
-                            "--encoding".into(),
-                            encoding.into(),
-                            "--operation".into(),
-                            operation.into(),
-                            "--root".into(),
-                            match root_kind {
-                                RootKind::Operations => "operations".into(),
-                                RootKind::Current => "current".into(),
-                            },
-                        ];
-                        if matches!(root_kind, RootKind::Current) {
-                            args.extend(["--chunk-bytes".into(), "32".into()]);
-                        }
-                        if !history.is_empty() {
-                            args.extend(["--history".into(), history.into()]);
-                        }
-                        if encoding == "variable" {
-                            args.extend(["--value-length".into(), length.to_string()]);
-                        }
-                        let encoded = Cli::try_parse_from(args)
-                            .unwrap()
-                            .command
-                            .execute()
-                            .unwrap();
-                        if encoding == "fixed" {
-                            check_unordered::<
-                                F,
-                                H,
-                                unordered::fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>,
-                            >(
-                                &encoded, root_kind, &(), expected, floor != 0
-                            );
-                            break;
-                        } else {
-                            check_unordered::<
-                                F,
-                                H,
-                                unordered::variable::Operation<F, FixedBytes<32>, Vec<u8>>,
-                            >(
-                                &encoded,
-                                root_kind,
-                                &((), ((0..=129).into(), ())),
-                                expected,
-                                floor != 0,
-                            );
-                        }
+    fn unordered_matrix<F: Graftable, H: Hasher>(family: &str, hash: &str, encoding: &str) {
+        for root_kind in [RootKind::Operations, RootKind::Current] {
+            for (leaves, location, floor, operation, history, expected) in [
+                (1u64, 0u64, 0u64, "update", "indexed", true),
+                (1023, 1022, 768, "update", "indexed", true),
+                (257, 256, 0, "delete", "", false),
+                (383, 382, 0, "commit", "", true),
+                (639, 638, 0, "commit-metadata", "", true),
+                (255, 0, 0, "update", "updated", false),
+                (256, 255, 0, "update", "updated", true),
+                (257, 0, 0, "update", "deleted", false),
+                (513, 512, 0, "update", "deleted", false),
+            ] {
+                for length in VARIABLE_LENGTHS {
+                    let mut args = vec![
+                        "fuzz".to_owned(),
+                        "qmdb".into(),
+                        "--hash".into(),
+                        hash.into(),
+                        "unordered".into(),
+                        "--leaves".into(),
+                        leaves.to_string(),
+                        "--location".into(),
+                        location.to_string(),
+                        "--seed".into(),
+                        "71".into(),
+                        "--family".into(),
+                        family.into(),
+                        "--inactivity-floor".into(),
+                        floor.to_string(),
+                        "--encoding".into(),
+                        encoding.into(),
+                        "--operation".into(),
+                        operation.into(),
+                        "--root".into(),
+                        match root_kind {
+                            RootKind::Operations => "operations".into(),
+                            RootKind::Current => "current".into(),
+                        },
+                    ];
+                    if matches!(root_kind, RootKind::Current) {
+                        args.extend(["--chunk-bytes".into(), "32".into()]);
+                    }
+                    if !history.is_empty() {
+                        args.extend(["--history".into(), history.into()]);
+                    }
+                    if encoding == "variable" {
+                        args.extend(["--value-length".into(), length.to_string()]);
+                    }
+                    let encoded = Cli::try_parse_from(args)
+                        .unwrap()
+                        .command
+                        .execute()
+                        .unwrap();
+                    if encoding == "fixed" {
+                        check_unordered::<
+                            F,
+                            H,
+                            unordered::fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>,
+                        >(&encoded, root_kind, &(), expected, floor != 0);
+                        break;
+                    } else {
+                        check_unordered::<
+                            F,
+                            H,
+                            unordered::variable::Operation<F, FixedBytes<32>, Vec<u8>>,
+                        >(
+                            &encoded,
+                            root_kind,
+                            &((), ((0..=129).into(), ())),
+                            expected,
+                            floor != 0,
+                        );
                     }
                 }
             }
@@ -1958,11 +1954,43 @@ mod tests {
     }
 
     #[test]
-    fn unordered_cli_codecs_activity_and_inactive_prefixes() {
-        unordered_matrix::<mmr::Family, Keccak256>("mmr", "keccak256");
-        unordered_matrix::<mmr::Family, Sha256>("mmr", "sha256");
-        unordered_matrix::<mmb::Family, Keccak256>("mmb", "keccak256");
-        unordered_matrix::<mmb::Family, Sha256>("mmb", "sha256");
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmr_keccak256_fixed() {
+        unordered_matrix::<mmr::Family, Keccak256>("mmr", "keccak256", "fixed");
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmr_keccak256_variable() {
+        unordered_matrix::<mmr::Family, Keccak256>("mmr", "keccak256", "variable");
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmr_sha256_fixed() {
+        unordered_matrix::<mmr::Family, Sha256>("mmr", "sha256", "fixed");
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmr_sha256_variable() {
+        unordered_matrix::<mmr::Family, Sha256>("mmr", "sha256", "variable");
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmb_keccak256_fixed() {
+        unordered_matrix::<mmb::Family, Keccak256>("mmb", "keccak256", "fixed");
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmb_keccak256_variable() {
+        unordered_matrix::<mmb::Family, Keccak256>("mmb", "keccak256", "variable");
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmb_sha256_fixed() {
+        unordered_matrix::<mmb::Family, Sha256>("mmb", "sha256", "fixed");
+    }
+
+    #[test]
+    fn unordered_cli_codecs_activity_and_inactive_prefixes_mmb_sha256_variable() {
+        unordered_matrix::<mmb::Family, Sha256>("mmb", "sha256", "variable");
     }
 
     #[test]
@@ -2208,90 +2236,118 @@ mod tests {
         }
     }
 
-    #[test]
-    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes() {
-        for family in ["mmr", "mmb"] {
-            for hash in ["keccak256", "sha256"] {
-                for encoding in ["fixed", "variable"] {
-                    for operation in ["append", "commit", "commit-metadata"] {
-                        for (leaves, location, floor) in [
-                            (1u64, 0u64, 0u64),
-                            (3, 1, 0),
-                            (11, 9, 8),
-                            (257, 256, 128),
-                            (1793, 1792, 1792),
-                        ] {
-                            if location == 0 && operation != "commit" {
-                                continue;
-                            }
-                            for seed in 0..8u64 {
-                                let length = VARIABLE_LENGTHS[seed as usize].to_string();
-                                let length_args = if encoding == "variable" {
-                                    vec!["--value-length", length.as_str()]
-                                } else {
-                                    vec![]
-                                };
-                                let encoded = Cli::try_parse_from(
-                                    [
-                                        "fuzz",
-                                        "qmdb",
-                                        "--hash",
-                                        hash,
-                                        "keyless",
-                                        "--leaves",
-                                        &leaves.to_string(),
-                                        "--location",
-                                        &location.to_string(),
-                                        "--seed",
-                                        &seed.to_string(),
-                                        "--family",
-                                        family,
-                                        "--inactivity-floor",
-                                        &floor.to_string(),
-                                        "--encoding",
-                                        encoding,
-                                        "--operation",
-                                        operation,
-                                    ]
-                                    .into_iter()
-                                    .chain(length_args),
-                                )
-                                .unwrap()
-                                .command
-                                .execute()
-                                .unwrap();
-                                let output =
-                                    <AnyOutput as SolValue>::abi_decode_params_validate(&encoded)
-                                        .unwrap();
-                                assert_eq!(output.leaves, leaves);
-                                assert_eq!(output.location, location);
-                                if leaves == 1793 {
-                                    assert_ne!(output.inactivePeaks, 0);
-                                }
-                                match (family, hash) {
-                                    ("mmr", "keccak256") => {
-                                        verify_keyless_output::<mmr::Family, Keccak256>(
-                                            &output, encoding, operation, seed, floor,
-                                        )
-                                    }
-                                    ("mmr", _) => verify_keyless_output::<mmr::Family, Sha256>(
-                                        &output, encoding, operation, seed, floor,
-                                    ),
-                                    (_, "keccak256") => {
-                                        verify_keyless_output::<mmb::Family, Keccak256>(
-                                            &output, encoding, operation, seed, floor,
-                                        )
-                                    }
-                                    _ => verify_keyless_output::<mmb::Family, Sha256>(
-                                        &output, encoding, operation, seed, floor,
-                                    ),
-                                }
-                            }
-                        }
+    fn assert_keyless_cli_covers_codecs(family: &str, hash: &str, encoding: &str) {
+        for operation in ["append", "commit", "commit-metadata"] {
+            for (leaves, location, floor) in [
+                (1u64, 0u64, 0u64),
+                (3, 1, 0),
+                (11, 9, 8),
+                (257, 256, 128),
+                (1793, 1792, 1792),
+            ] {
+                if location == 0 && operation != "commit" {
+                    continue;
+                }
+                for seed in 0..8u64 {
+                    let length = VARIABLE_LENGTHS[seed as usize].to_string();
+                    let length_args = if encoding == "variable" {
+                        vec!["--value-length", length.as_str()]
+                    } else {
+                        vec![]
+                    };
+                    let encoded = Cli::try_parse_from(
+                        [
+                            "fuzz",
+                            "qmdb",
+                            "--hash",
+                            hash,
+                            "keyless",
+                            "--leaves",
+                            &leaves.to_string(),
+                            "--location",
+                            &location.to_string(),
+                            "--seed",
+                            &seed.to_string(),
+                            "--family",
+                            family,
+                            "--inactivity-floor",
+                            &floor.to_string(),
+                            "--encoding",
+                            encoding,
+                            "--operation",
+                            operation,
+                        ]
+                        .into_iter()
+                        .chain(length_args),
+                    )
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
+                    let output =
+                        <AnyOutput as SolValue>::abi_decode_params_validate(&encoded).unwrap();
+                    assert_eq!(output.leaves, leaves);
+                    assert_eq!(output.location, location);
+                    if leaves == 1793 {
+                        assert_ne!(output.inactivePeaks, 0);
+                    }
+                    match (family, hash) {
+                        ("mmr", "keccak256") => verify_keyless_output::<mmr::Family, Keccak256>(
+                            &output, encoding, operation, seed, floor,
+                        ),
+                        ("mmr", _) => verify_keyless_output::<mmr::Family, Sha256>(
+                            &output, encoding, operation, seed, floor,
+                        ),
+                        (_, "keccak256") => verify_keyless_output::<mmb::Family, Keccak256>(
+                            &output, encoding, operation, seed, floor,
+                        ),
+                        _ => verify_keyless_output::<mmb::Family, Sha256>(
+                            &output, encoding, operation, seed, floor,
+                        ),
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmr_keccak256_fixed() {
+        assert_keyless_cli_covers_codecs("mmr", "keccak256", "fixed");
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmr_keccak256_variable() {
+        assert_keyless_cli_covers_codecs("mmr", "keccak256", "variable");
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmr_sha256_fixed() {
+        assert_keyless_cli_covers_codecs("mmr", "sha256", "fixed");
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmr_sha256_variable() {
+        assert_keyless_cli_covers_codecs("mmr", "sha256", "variable");
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmb_keccak256_fixed() {
+        assert_keyless_cli_covers_codecs("mmb", "keccak256", "fixed");
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmb_keccak256_variable() {
+        assert_keyless_cli_covers_codecs("mmb", "keccak256", "variable");
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmb_sha256_fixed() {
+        assert_keyless_cli_covers_codecs("mmb", "sha256", "fixed");
+    }
+
+    #[test]
+    fn keyless_cli_covers_codecs_operations_and_inactive_prefixes_mmb_sha256_variable() {
+        assert_keyless_cli_covers_codecs("mmb", "sha256", "variable");
     }
 
     #[test]
@@ -2421,79 +2477,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn materialized_current_proofs_cover_chunk_boundaries() {
-        for family in ["mmr", "mmb"] {
-            for hash in ["keccak256", "sha256"] {
-                for leaves in [
-                    1u64, 255, 256, 257, 382, 383, 384, 511, 512, 513, 638, 639, 640, 769, 1024,
-                    1793, 4097,
-                ] {
-                    for location in [0, leaves / 2, leaves - 1] {
-                        for floor in [0, location] {
-                            let encoded = Cli::try_parse_from([
-                                "fuzz",
-                                "qmdb",
-                                "--hash",
-                                hash,
-                                "current",
-                                "--leaves",
-                                &leaves.to_string(),
-                                "--location",
-                                &location.to_string(),
-                                "--seed",
-                                "42",
-                                "--family",
-                                family,
-                                "--inactivity-floor",
-                                &floor.to_string(),
-                                "--chunk-bytes",
-                                "32",
-                            ])
-                            .unwrap()
-                            .command
-                            .execute()
+    fn assert_current_proofs_cover_chunk_boundaries(family: &str, hash: &str, leaves: &[u64]) {
+        for &leaves in leaves {
+            for location in [0, leaves / 2, leaves - 1] {
+                for floor in [0, location] {
+                    let encoded = Cli::try_parse_from([
+                        "fuzz",
+                        "qmdb",
+                        "--hash",
+                        hash,
+                        "current",
+                        "--leaves",
+                        &leaves.to_string(),
+                        "--location",
+                        &location.to_string(),
+                        "--seed",
+                        "42",
+                        "--family",
+                        family,
+                        "--inactivity-floor",
+                        &floor.to_string(),
+                        "--chunk-bytes",
+                        "32",
+                    ])
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
+                    let output =
+                        <OperationOutput as SolValue>::abi_decode_params_validate(&encoded)
                             .unwrap();
-                            let output =
-                                <OperationOutput as SolValue>::abi_decode_params_validate(&encoded)
-                                    .unwrap();
-                            match (family, hash) {
-                                ("mmr", "keccak256") => {
-                                    verify_output::<mmr::Family, Keccak256, 32>(&output)
-                                }
-                                ("mmr", _) => verify_output::<mmr::Family, Sha256, 32>(&output),
-                                (_, "keccak256") => {
-                                    verify_output::<mmb::Family, Keccak256, 32>(&output)
-                                }
-                                _ => verify_output::<mmb::Family, Sha256, 32>(&output),
-                            }
-                            assert_eq!(output.leaves, leaves);
-                            assert_eq!(output.location, location);
-                            assert_eq!(output.operation.len(), 97);
-                            assert_eq!(output.operation[0], 0xD2);
-                            assert_ne!(
-                                output.chunk[(location % 256 / 8) as usize] & (1 << (location % 8)),
-                                0
-                            );
-                            let graftable = match family {
-                                "mmr" => leaves / 256,
-                                _ if leaves < 383 => 0,
-                                _ => (leaves - 383) / 256 + 1,
-                            };
-                            assert_eq!(output.pending != [0; 32], leaves / 256 > graftable);
-                            assert_eq!(output.partial != [0; 32], leaves % 256 != 0);
-                            if family == "mmb" && leaves == 513 && floor == 512 {
-                                assert_ne!(output.inactivePeaks, 0);
-                            }
-                            if family == "mmr" {
-                                if leaves.is_power_of_two() {
-                                    assert_eq!(output.inactivePeaks, 0);
-                                } else if leaves == 513 && floor == 512 {
-                                    assert_eq!(output.inactivePeaks, 1);
-                                } else if leaves == 1793 && floor == 1792 {
-                                    assert_eq!(output.inactivePeaks, 3);
-                                }
-                            }
+                    match (family, hash) {
+                        ("mmr", "keccak256") => {
+                            verify_output::<mmr::Family, Keccak256, 32>(&output)
+                        }
+                        ("mmr", _) => verify_output::<mmr::Family, Sha256, 32>(&output),
+                        (_, "keccak256") => verify_output::<mmb::Family, Keccak256, 32>(&output),
+                        _ => verify_output::<mmb::Family, Sha256, 32>(&output),
+                    }
+                    assert_eq!(output.leaves, leaves);
+                    assert_eq!(output.location, location);
+                    assert_eq!(output.operation.len(), 97);
+                    assert_eq!(output.operation[0], 0xD2);
+                    assert_ne!(
+                        output.chunk[(location % 256 / 8) as usize] & (1 << (location % 8)),
+                        0
+                    );
+                    let graftable = match family {
+                        "mmr" => leaves / 256,
+                        _ if leaves < 383 => 0,
+                        _ => (leaves - 383) / 256 + 1,
+                    };
+                    assert_eq!(output.pending != [0; 32], leaves / 256 > graftable);
+                    assert_eq!(output.partial != [0; 32], leaves % 256 != 0);
+                    if family == "mmb" && leaves == 513 && floor == 512 {
+                        assert_ne!(output.inactivePeaks, 0);
+                    }
+                    if family == "mmr" {
+                        if leaves.is_power_of_two() {
+                            assert_eq!(output.inactivePeaks, 0);
+                        } else if leaves == 513 && floor == 512 {
+                            assert_eq!(output.inactivePeaks, 1);
+                        } else if leaves == 1793 && floor == 1792 {
+                            assert_eq!(output.inactivePeaks, 3);
                         }
                     }
                 }
@@ -2502,97 +2548,182 @@ mod tests {
     }
 
     #[test]
-    fn exclusion_matches_cyclic_intervals_and_empty_commits() {
+    fn materialized_current_proofs_cover_chunk_boundaries_mmr_keccak256_low() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmr",
+            "keccak256",
+            &[1, 255, 256, 257, 382, 383, 384, 511, 512],
+        );
+    }
+
+    #[test]
+    fn materialized_current_proofs_cover_chunk_boundaries_mmr_keccak256_high() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmr",
+            "keccak256",
+            &[513, 638, 639, 640, 769, 1024, 1793, 4097],
+        );
+    }
+
+    #[test]
+    fn materialized_current_proofs_cover_chunk_boundaries_mmr_sha256_low() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmr",
+            "sha256",
+            &[1, 255, 256, 257, 382, 383, 384, 511, 512],
+        );
+    }
+
+    #[test]
+    fn materialized_current_proofs_cover_chunk_boundaries_mmr_sha256_high() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmr",
+            "sha256",
+            &[513, 638, 639, 640, 769, 1024, 1793, 4097],
+        );
+    }
+
+    #[test]
+    fn materialized_current_proofs_cover_chunk_boundaries_mmb_keccak256_low() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmb",
+            "keccak256",
+            &[1, 255, 256, 257, 382, 383, 384, 511, 512],
+        );
+    }
+
+    #[test]
+    fn materialized_current_proofs_cover_chunk_boundaries_mmb_keccak256_high() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmb",
+            "keccak256",
+            &[513, 638, 639, 640, 769, 1024, 1793, 4097],
+        );
+    }
+
+    #[test]
+    fn materialized_current_proofs_cover_chunk_boundaries_mmb_sha256_low() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmb",
+            "sha256",
+            &[1, 255, 256, 257, 382, 383, 384, 511, 512],
+        );
+    }
+
+    #[test]
+    fn materialized_current_proofs_cover_chunk_boundaries_mmb_sha256_high() {
+        assert_current_proofs_cover_chunk_boundaries(
+            "mmb",
+            "sha256",
+            &[513, 638, 639, 640, 769, 1024, 1793, 4097],
+        );
+    }
+
+    fn assert_exclusion_matches(family: &str, hash: &str) {
         type ExclusionOutput = <sol!((bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes, bool)) as SolType>::RustType;
-        for family in ["mmr", "mmb"] {
-            for hash in ["keccak256", "sha256"] {
-                for leaves in [1u64, 256, 257, 383, 513] {
-                    for location in [0, leaves - 1] {
-                        for mode in ["interval", "single", "empty"] {
-                            for metadata in [false, true] {
-                                if metadata && mode != "empty" {
-                                    continue;
-                                }
-                                let start = 2 * (location + 1);
-                                let end = 2 * ((location + 1) % leaves + 1);
-                                let keys = match mode {
-                                    "interval" => Some(
-                                        (1..=leaves)
-                                            .map(|index| const_hex::encode(key(2 * index)))
-                                            .collect::<Vec<_>>()
-                                            .join(","),
-                                    ),
-                                    "single" => Some(const_hex::encode(key(start))),
-                                    _ => None,
-                                };
-                                for query in [0, start - 1, start, start + 1, end, u64::MAX] {
-                                    let query_hex = const_hex::encode(key(query));
-                                    let mut arguments = vec![
-                                        "fuzz".to_owned(),
-                                        "qmdb".into(),
-                                        "--hash".into(),
-                                        hash.into(),
-                                        "exclude".into(),
-                                        "--leaves".into(),
-                                        leaves.to_string(),
-                                        "--location".into(),
-                                        location.to_string(),
-                                        "--seed".into(),
-                                        "42".into(),
-                                        "--key".into(),
-                                        query_hex,
-                                        "--family".into(),
-                                        family.into(),
-                                        "--mode".into(),
-                                        mode.into(),
-                                        "--encoding".into(),
-                                        "fixed".into(),
-                                        "--key-size".into(),
-                                        "32".into(),
-                                        "--value-size".into(),
-                                        "32".into(),
-                                        "--chunk-bytes".into(),
-                                        "32".into(),
-                                    ];
-                                    if let Some(keys) = &keys {
-                                        arguments.extend(["--keys".into(), keys.clone()]);
-                                    } else {
-                                        arguments.push("--derive-keys".into());
-                                    }
-                                    if metadata {
-                                        arguments.push("--metadata".into());
-                                    }
-                                    let result =
-                                        Cli::try_parse_from(arguments).unwrap().command.execute();
-                                    if mode != "interval" && location != leaves - 1 {
-                                        assert!(result.is_err());
-                                        continue;
-                                    }
-                                    let encoded = result.unwrap();
-                                    let output =
-                                        ExclusionOutput::abi_decode_params_validate(&encoded)
-                                            .unwrap();
-                                    let expected = match mode {
-                                        "empty" => true,
-                                        "single" => query != start,
-                                        _ if start == end => query != start,
-                                        _ if start < end => query > start && query < end,
-                                        _ => query > start || query < end,
-                                    };
-                                    assert_eq!(
-                                        output.10, expected,
-                                        "{family} {hash} {leaves} {location} {mode} {metadata} {query}"
-                                    );
-                                    assert_eq!(output.1, leaves);
-                                    assert_eq!(output.2, location);
-                                    assert_eq!(output.9.len(), 97);
-                                }
+        for leaves in [1u64, 256, 257, 383, 513] {
+            for location in [0, leaves - 1] {
+                for mode in ["interval", "single", "empty"] {
+                    for metadata in [false, true] {
+                        if metadata && mode != "empty" {
+                            continue;
+                        }
+                        let start = 2 * (location + 1);
+                        let end = 2 * ((location + 1) % leaves + 1);
+                        let keys = match mode {
+                            "interval" => Some(
+                                (1..=leaves)
+                                    .map(|index| const_hex::encode(key(2 * index)))
+                                    .collect::<Vec<_>>()
+                                    .join(","),
+                            ),
+                            "single" => Some(const_hex::encode(key(start))),
+                            _ => None,
+                        };
+                        for query in [0, start - 1, start, start + 1, end, u64::MAX] {
+                            let query_hex = const_hex::encode(key(query));
+                            let mut arguments = vec![
+                                "fuzz".to_owned(),
+                                "qmdb".into(),
+                                "--hash".into(),
+                                hash.into(),
+                                "exclude".into(),
+                                "--leaves".into(),
+                                leaves.to_string(),
+                                "--location".into(),
+                                location.to_string(),
+                                "--seed".into(),
+                                "42".into(),
+                                "--key".into(),
+                                query_hex,
+                                "--family".into(),
+                                family.into(),
+                                "--mode".into(),
+                                mode.into(),
+                                "--encoding".into(),
+                                "fixed".into(),
+                                "--key-size".into(),
+                                "32".into(),
+                                "--value-size".into(),
+                                "32".into(),
+                                "--chunk-bytes".into(),
+                                "32".into(),
+                            ];
+                            if let Some(keys) = &keys {
+                                arguments.extend(["--keys".into(), keys.clone()]);
+                            } else {
+                                arguments.push("--derive-keys".into());
                             }
+                            if metadata {
+                                arguments.push("--metadata".into());
+                            }
+                            let result = Cli::try_parse_from(arguments).unwrap().command.execute();
+                            if mode != "interval" && location != leaves - 1 {
+                                assert!(result.is_err());
+                                continue;
+                            }
+                            let encoded = result.unwrap();
+                            let output =
+                                ExclusionOutput::abi_decode_params_validate(&encoded).unwrap();
+                            let expected = match mode {
+                                "empty" => true,
+                                "single" => query != start,
+                                _ if start == end => query != start,
+                                _ if start < end => query > start && query < end,
+                                _ => query > start || query < end,
+                            };
+                            assert_eq!(
+                                output.10, expected,
+                                "{family} {hash} {leaves} {location} {mode} {metadata} {query}"
+                            );
+                            assert_eq!(output.1, leaves);
+                            assert_eq!(output.2, location);
+                            assert_eq!(output.9.len(), 97);
                         }
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn exclusion_matches_cyclic_intervals_and_empty_commits_mmr_keccak256() {
+        assert_exclusion_matches("mmr", "keccak256");
+    }
+
+    #[test]
+    fn exclusion_matches_cyclic_intervals_and_empty_commits_mmr_sha256() {
+        assert_exclusion_matches("mmr", "sha256");
+    }
+
+    #[test]
+    fn exclusion_matches_cyclic_intervals_and_empty_commits_mmb_keccak256() {
+        assert_exclusion_matches("mmb", "keccak256");
+    }
+
+    #[test]
+    fn exclusion_matches_cyclic_intervals_and_empty_commits_mmb_sha256() {
+        assert_exclusion_matches("mmb", "sha256");
     }
 
     #[test]

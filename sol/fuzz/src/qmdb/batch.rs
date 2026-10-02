@@ -711,125 +711,135 @@ mod tests {
         }
     }
 
-    #[test]
-    fn current_ranges_cover_zero_mixed_pending_partial_and_inactive_chunks() {
-        for family in ["mmr", "mmb"] {
-            for hash in ["keccak256", "sha256"] {
-                for activity in ["all", "mixed", "zero"] {
-                    for (leaves, start, count, floor) in [
-                        (1u64, 0u64, 1u64, 0u64),
-                        (255, 0, 255, 0),
-                        (256, 0, 256, 0),
-                        (257, 250, 7, 0),
-                        (383, 250, 133, 0),
-                        (638, 250, 388, 0),
-                        (639, 0, 639, 0),
-                        (1023, 768, 255, 768),
-                        (1535, 1024, 511, 1024),
-                    ] {
-                        let encoded = run(&[
-                            "--hash",
-                            hash,
-                            "range",
-                            "--leaves",
-                            &leaves.to_string(),
-                            "--start",
-                            &start.to_string(),
-                            "--count",
-                            &count.to_string(),
-                            "--seed",
-                            "71",
-                            "--family",
-                            family,
-                            "--variant",
-                            "unordered",
-                            "--root",
-                            "current",
-                            "--activity",
-                            activity,
-                            "--inactivity-floor",
-                            &floor.to_string(),
-                            "--chunk-bytes",
-                            "32",
-                            "--encoding",
-                            "fixed",
-                        ])
-                        .unwrap();
-                        let output = CurrentRange::abi_decode_params_validate(&encoded).unwrap();
-                        assert_eq!(output.1, leaves);
-                        assert_eq!(output.2, start);
-                        assert_eq!(output.5.len(), count as usize);
-                        assert_eq!(
-                            output.6.len(),
-                            ((start + count - 1) / 256 - start / 256 + 1) as usize * 32
-                        );
-                        if floor != 0 {
-                            assert_ne!(output.3, 0);
-                        }
-                        if family == "mmr" {
-                            assert_eq!(output.8, Bytes32::ZERO);
-                        }
-                        if leaves == 638 && family == "mmb" {
-                            assert_ne!(output.8, Bytes32::ZERO);
-                            assert_ne!(output.9, Bytes32::ZERO);
-                        }
-                        for (chunk_index, chunk) in output.6.as_chunks::<32>().0.iter().enumerate()
-                        {
-                            for bit in 0..256u64 {
-                                let index = (start / 256 + chunk_index as u64) * 256 + bit;
-                                let active = index < leaves
-                                    && index >= floor
-                                    && match activity {
-                                        "all" => true,
-                                        "mixed" => {
-                                            !(index / 256).is_multiple_of(3)
-                                                && !index.is_multiple_of(3)
-                                        }
-                                        _ => false,
-                                    };
-                                assert_eq!(
-                                    chunk[(bit / 8) as usize] & (1 << (bit % 8)) != 0,
-                                    active
-                                );
-                            }
-                        }
-                        let locations = format!("{},{},{}", start + count - 1, start, start);
-                        let encoded = run(&[
-                            "--hash",
-                            hash,
-                            "multi",
-                            "--leaves",
-                            &leaves.to_string(),
-                            "--locations",
-                            &locations,
-                            "--seed",
-                            "71",
-                            "--family",
-                            family,
-                            "--variant",
-                            "unordered",
-                            "--root",
-                            "current",
-                            "--activity",
-                            activity,
-                            "--inactivity-floor",
-                            &floor.to_string(),
-                            "--chunk-bytes",
-                            "32",
-                            "--encoding",
-                            "fixed",
-                        ])
-                        .unwrap();
-                        let multi = CurrentMulti::abi_decode_params_validate(&encoded).unwrap();
-                        assert_eq!(multi.0, output.0);
-                        assert_eq!(multi.7, output.7);
-                        assert_eq!(multi.9, output.8);
-                        assert_eq!(multi.10, output.9);
-                        assert!(multi.4.windows(2).all(|pair| pair[0] < pair[1]));
+    fn assert_current_ranges_cover(family: &str, hash: &str) {
+        for activity in ["all", "mixed", "zero"] {
+            for (leaves, start, count, floor) in [
+                (1u64, 0u64, 1u64, 0u64),
+                (255, 0, 255, 0),
+                (256, 0, 256, 0),
+                (257, 250, 7, 0),
+                (383, 250, 133, 0),
+                (638, 250, 388, 0),
+                (639, 0, 639, 0),
+                (1023, 768, 255, 768),
+                (1535, 1024, 511, 1024),
+            ] {
+                let encoded = run(&[
+                    "--hash",
+                    hash,
+                    "range",
+                    "--leaves",
+                    &leaves.to_string(),
+                    "--start",
+                    &start.to_string(),
+                    "--count",
+                    &count.to_string(),
+                    "--seed",
+                    "71",
+                    "--family",
+                    family,
+                    "--variant",
+                    "unordered",
+                    "--root",
+                    "current",
+                    "--activity",
+                    activity,
+                    "--inactivity-floor",
+                    &floor.to_string(),
+                    "--chunk-bytes",
+                    "32",
+                    "--encoding",
+                    "fixed",
+                ])
+                .unwrap();
+                let output = CurrentRange::abi_decode_params_validate(&encoded).unwrap();
+                assert_eq!(output.1, leaves);
+                assert_eq!(output.2, start);
+                assert_eq!(output.5.len(), count as usize);
+                assert_eq!(
+                    output.6.len(),
+                    ((start + count - 1) / 256 - start / 256 + 1) as usize * 32
+                );
+                if floor != 0 {
+                    assert_ne!(output.3, 0);
+                }
+                if family == "mmr" {
+                    assert_eq!(output.8, Bytes32::ZERO);
+                }
+                if leaves == 638 && family == "mmb" {
+                    assert_ne!(output.8, Bytes32::ZERO);
+                    assert_ne!(output.9, Bytes32::ZERO);
+                }
+                for (chunk_index, chunk) in output.6.as_chunks::<32>().0.iter().enumerate() {
+                    for bit in 0..256u64 {
+                        let index = (start / 256 + chunk_index as u64) * 256 + bit;
+                        let active = index < leaves
+                            && index >= floor
+                            && match activity {
+                                "all" => true,
+                                "mixed" => {
+                                    !(index / 256).is_multiple_of(3) && !index.is_multiple_of(3)
+                                }
+                                _ => false,
+                            };
+                        assert_eq!(chunk[(bit / 8) as usize] & (1 << (bit % 8)) != 0, active);
                     }
                 }
+                let locations = format!("{},{},{}", start + count - 1, start, start);
+                let encoded = run(&[
+                    "--hash",
+                    hash,
+                    "multi",
+                    "--leaves",
+                    &leaves.to_string(),
+                    "--locations",
+                    &locations,
+                    "--seed",
+                    "71",
+                    "--family",
+                    family,
+                    "--variant",
+                    "unordered",
+                    "--root",
+                    "current",
+                    "--activity",
+                    activity,
+                    "--inactivity-floor",
+                    &floor.to_string(),
+                    "--chunk-bytes",
+                    "32",
+                    "--encoding",
+                    "fixed",
+                ])
+                .unwrap();
+                let multi = CurrentMulti::abi_decode_params_validate(&encoded).unwrap();
+                assert_eq!(multi.0, output.0);
+                assert_eq!(multi.7, output.7);
+                assert_eq!(multi.9, output.8);
+                assert_eq!(multi.10, output.9);
+                assert!(multi.4.windows(2).all(|pair| pair[0] < pair[1]));
             }
         }
+    }
+
+    #[test]
+    fn current_ranges_cover_zero_mixed_pending_partial_and_inactive_chunks_mmr_keccak256() {
+        assert_current_ranges_cover("mmr", "keccak256");
+    }
+
+    #[test]
+    fn current_ranges_cover_zero_mixed_pending_partial_and_inactive_chunks_mmr_sha256() {
+        assert_current_ranges_cover("mmr", "sha256");
+    }
+
+    #[test]
+    fn current_ranges_cover_zero_mixed_pending_partial_and_inactive_chunks_mmb_keccak256() {
+        assert_current_ranges_cover("mmb", "keccak256");
+    }
+
+    #[test]
+    fn current_ranges_cover_zero_mixed_pending_partial_and_inactive_chunks_mmb_sha256() {
+        assert_current_ranges_cover("mmb", "sha256");
     }
 
     #[test]
