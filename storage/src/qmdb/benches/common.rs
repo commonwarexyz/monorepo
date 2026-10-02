@@ -107,7 +107,6 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
 }
 
 // -- Unauthenticated store --
-
 pub type StoreDb = Store<Context, Digest, Vec<u8>, EightCap>;
 
 /// Open an unauthenticated store benchmark database using the shared benchmark configuration.

@@ -192,7 +192,6 @@ fn bench_var_value_init(c: &mut Criterion) {
 }
 
 // -- Unauthenticated store --
-
 fn bench_store_init(c: &mut Criterion) {
     let cfg = Config::default();
     for (elements, operations) in CASES {

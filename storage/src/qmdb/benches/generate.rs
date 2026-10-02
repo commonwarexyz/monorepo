@@ -141,7 +141,6 @@ fn bench_var_value_generate(c: &mut Criterion) {
 }
 
 // -- Unauthenticated store --
-
 fn bench_store_generate(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     for (elements, operations) in STORE_CASES {
