@@ -21,7 +21,6 @@ use core::{
 };
 use futures::{
     TryStreamExt as _,
-    future::try_join_all,
     stream::{self, Stream},
 };
 
@@ -319,9 +318,19 @@ where
         &self,
         locs: impl Iterator<Item = Location<F>> + Send,
     ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
-        // Conflicting entries are independent, so their journal reads can run concurrently.
-        let futures = locs.map(|loc| Self::get_update_op(&self.log, loc));
-        let mut updates = try_join_all(futures).await?;
+        let mut positions: Vec<_> = locs.map(|loc| *loc).collect();
+        positions.sort_unstable();
+        let mut updates: Vec<_> = self
+            .log
+            .read_many(&positions)
+            .await?
+            .into_iter()
+            .zip(positions)
+            .map(|(op, loc)| match op {
+                Operation::Update(data) => data,
+                _ => unreachable!("expected update operation at location {}", loc),
+            })
+            .collect();
 
         // Descending order lets the stream emit ascending keys with constant-time pops.
         updates.sort_unstable_by(|a, b| b.key.cmp(&a.key));
