@@ -722,7 +722,10 @@ where
         // state sync, then restart it without clearing any partitions.
         .crash(Crash::Schedule(
             Schedule::new()
-                .at(Duration::from_secs(5), Action::Crash(late_joiner.clone()))
+                .at(
+                    Duration::from_millis(6_250),
+                    Action::Crash(late_joiner.clone()),
+                )
                 .at(Duration::from_secs(7), Action::Restart(late_joiner)),
         ))
         .exit_condition(ProcessedHeightAtLeast::new(130))
@@ -730,7 +733,9 @@ where
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(130))
         .run()
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .for_each(|result| assert_eq!(result.crashes, 1));
 }
 
 /// Partition the late joiner, crash it mid-sync, then restart it into the same
@@ -1219,7 +1224,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
         );
 
         let plan = SyncPlan::init(context.child("plan"), "certify-qmdb-stateful".to_string()).await;
-        let (stateful, stateful_mailbox) = StatefulActor::init(
+        let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application: App::new(genesis),
@@ -1367,7 +1372,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         let mut db_config = qmdb_config("stable-leader-qmdb-stateful", page_cache);
         db_config.journal_config.items_per_blob = NZU64!(1024);
         db_config.merkle_config.items_per_blob = NZU64!(1024);
-        let (stateful, mut stateful_mailbox) = StatefulActor::init(
+        let (stateful, mut stateful_mailbox) = StatefulActor::new(
             delayed.child("stateful"),
             StatefulConfig {
                 application: App::new(genesis),
@@ -1553,7 +1558,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             "certify-multi-qmdb-stateful".to_string(),
         )
         .await;
-        let (stateful, stateful_mailbox) = StatefulActor::init(
+        let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,
@@ -1811,7 +1816,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             "prune-overlap-multi-qmdb-stateful".to_string(),
         )
         .await;
-        let (stateful, stateful_mailbox) = StatefulActor::init(
+        let (stateful, stateful_mailbox) = StatefulActor::new(
             context.child("stateful"),
             StatefulConfig {
                 application,

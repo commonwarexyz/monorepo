@@ -37,21 +37,21 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
-    /// Set `key` to `value` in the speculative batch.
+    /// Sets `key` to `value` in the batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.batch = self.batch.set(key, value);
         self
@@ -72,15 +72,15 @@ where
     S: Strategy,
     Operation<F, K, V>: EncodeShared,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await

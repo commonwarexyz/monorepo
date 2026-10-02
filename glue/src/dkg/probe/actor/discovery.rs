@@ -3,8 +3,8 @@ use crate::{
     dkg::{
         ReshareBlock,
         network::Manager,
-        probe::{ActorArtifact, Artifact, mailbox::Message, wire},
-        types::{EpochInfo, Participants, Payload},
+        probe::{ActorArtifact, Artifact, Bootstrap, mailbox::Message, wire},
+        types::{EpochInfo, Payload},
     },
     stateful::probe::sample::Sample,
 };
@@ -51,20 +51,13 @@ where
     V: Variant,
 {
     height: Height,
-    epoch: Epoch,
+    floor: Finalization<S, V::Commitment>,
     in_flight: Option<Candidate<S, V>>,
     candidates: VecDeque<Candidate<S, V>>,
 }
 
-/// The discovery phase of the DKG probe actor.
-///
-/// Waits for subscribers, solicits the configured bootstrap committee's latest
-/// finalizations, and selects the highest valid finalization from `f + 1`
-/// distinct replies as the state-sync floor. The floor's epoch names the target
-/// epoch: discovery then fetches that epoch's boundary finalization and block
-/// from peers. Once the boundary block yields the target epoch's public
-/// [`Artifact`], discovery resolves all subscribers and can hand off to
-/// [`Service`] after marshal is attached.
+/// Discovery phase of the probe actor (see the
+/// [module docs](crate::dkg::probe#protocol)).
 pub(super) struct Discovery<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -82,8 +75,7 @@ where
     pub(super) context: ContextCell<E>,
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) manager: M,
-    pub(super) bootstrap_participants: Participants<S::PublicKey>,
-    pub(super) bootstrap_directory: <V::ApplicationBlock as ReshareBlock>::Directory,
+    pub(super) bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     pub(super) verifier: S,
     pub(super) genesis: EpochInfo<
         <V::ApplicationBlock as ReshareBlock>::Variant,
@@ -159,7 +151,7 @@ where
                         Ok(false) => {}
                         Err(error) => {
                             warn!(
-                                epoch = %self.sample.minimum_epoch(),
+                                epoch = %self.bootstrap.epoch,
                                 %error,
                                 "failed to activate bootstrap peer set, shutting down",
                             );
@@ -202,8 +194,10 @@ where
         .await;
     }
 
-    /// Handle a new subscriber, returning whether a solicitation was sent (so
-    /// the caller can reset the retry deadline).
+    /// Handles a subscriber and returns whether it started a solicitation.
+    ///
+    /// Answers the subscriber immediately if the artifact is known. Returns an
+    /// error if the bootstrap snapshot cannot be activated.
     fn subscribe(
         &mut self,
         response: oneshot::Sender<ActorArtifact<S, V>>,
@@ -216,30 +210,28 @@ where
         let solicit = self.subscribers.is_empty() && self.sample.floor().is_none();
         self.subscribers.push(response);
         if solicit {
-            // Track the bootstrap epoch's canonical peer set at its own ID so
-            // the configured committee is dialable. The contents match what
-            // the orchestrator tracks if it later enters this epoch, so a
-            // duplicate registration is rejected harmlessly. Tracking is
-            // deferred until discovery actually solicits: a node that never
-            // bootstraps must not claim an ID above the epochs its
-            // orchestrator still enters.
+            // Activate the snapshot only when soliciting: a node that never
+            // bootstraps must not claim a peer-set ID above the epochs its
+            // orchestrator still enters. A later orchestrator activation of this
+            // epoch has identical contents.
             self.manager.track(
-                self.sample.minimum_epoch(),
-                self.bootstrap_participants.tracked_peers(),
-                &self.bootstrap_directory,
+                self.bootstrap.epoch,
+                self.bootstrap.participants.tracked_peers(),
+                &self.bootstrap.directory,
             )?;
             self.request_latest(boundary_sender);
         }
         Ok(solicit)
     }
 
-    /// Clears collected replies and solicits the configured committee's latest
+    /// Clears collected replies and solicits the snapshot dealers' latest
     /// finalizations.
     fn request_latest(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) {
         self.sample.reset();
         boundary_sender.send(
             Recipients::Some(
-                self.bootstrap_participants
+                self.bootstrap
+                    .participants
                     .dealers
                     .iter()
                     .cloned()
@@ -250,7 +242,7 @@ where
         );
     }
 
-    /// Broadcast a request for the boundary finalization of `epoch` to all peers.
+    /// Requests the boundary finalization of `epoch` from all peers.
     fn request_boundary_finalization(
         epoch: Epoch,
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
@@ -262,8 +254,7 @@ where
         );
     }
 
-    /// Handle a boundary protocol response, returning whether a new request was
-    /// sent so the caller can reset the retry deadline.
+    /// Handles a probe response and returns whether it sent a new request.
     fn handle_boundary_response(
         &mut self,
         peer: S::PublicKey,
@@ -306,15 +297,9 @@ where
         }
     }
 
-    /// Handle a solicited latest-finalization reply, returning whether the
-    /// completed sample sent a boundary request (so the caller can reset the
-    /// retry deadline).
-    ///
-    /// At most one reply is counted per peer. Replies must come from the
-    /// configured committee and verify under the all-epoch verifier. Replies
-    /// below the bootstrap epoch are ignored without blocking: the chain
-    /// reached the bootstrap epoch by definition, so they are stale but not
-    /// proof of misbehavior.
+    /// Records a latest-finalization reply that passes the discovery rules (see
+    /// the [module docs](crate::dkg::probe#protocol)) and returns whether a
+    /// boundary request was sent.
     fn handle_latest(
         &mut self,
         peer: S::PublicKey,
@@ -323,11 +308,12 @@ where
     ) -> bool {
         // Once the floor is selected or the peer has contributed this request
         // round, further replies are ignored without verification.
-        if !self.sample.pending(&peer) {
+        if !self.sample.awaits(&peer) {
             return false;
         }
         if self
-            .bootstrap_participants
+            .bootstrap
+            .participants
             .dealers
             .position(&peer)
             .is_none()
@@ -338,8 +324,8 @@ where
         if finalization.epoch() < self.sample.minimum_epoch() {
             debug!(
                 epoch = %finalization.epoch(),
-                bootstrap_epoch = %self.sample.minimum_epoch(),
-                "ignoring latest finalization below bootstrap epoch"
+                minimum_epoch = %self.sample.minimum_epoch(),
+                "ignoring latest finalization below minimum epoch"
             );
             return false;
         }
@@ -356,21 +342,18 @@ where
             return false;
         }
         self.sample.record(peer, finalization);
-        self.try_select_floor(boundary_sender)
+        self.select(boundary_sender)
     }
 
-    /// Selects the highest finalization once `f + 1` distinct committee members
-    /// have replied, then begins the boundary fetch for the floor's epoch.
+    /// Selects the highest finalization once `f + 1` distinct dealers have
+    /// replied, then begins the boundary fetch for the floor's epoch.
     ///
     /// Returns whether a boundary request was sent.
-    fn try_select_floor(
-        &mut self,
-        boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) -> bool {
-        // The all-epoch verifier judges every recorded reply.
+    fn select(&mut self, boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>) -> bool {
+        // Every recorded reply was verified under the all-epoch verifier.
         let Some(floor) = self
             .sample
-            .select(self.bootstrap_participants.dealers.len(), |_| true)
+            .select(self.bootstrap.participants.dealers.len(), |_| true)
         else {
             return false;
         };
@@ -389,13 +372,13 @@ where
         let Some(height) = target.previous().and_then(|epoch| self.epocher.last(epoch)) else {
             // Unreachable without a forged quorum: re-sample rather than wedge.
             warn!(epoch = %target, "sampled floor epoch has no boundary height");
-            self.sample = Sample::new(self.sample.minimum_epoch());
+            self.sample.reset();
             return false;
         };
         Self::request_boundary_finalization(target, boundary_sender);
         self.pending = Some(Pending {
             height,
-            epoch: target,
+            floor,
             in_flight: None,
             candidates: VecDeque::new(),
         });
@@ -410,7 +393,7 @@ where
     ) -> bool {
         let mut pending = self.pending.take().expect("pending checked by caller");
 
-        let Some(expected_finalization_epoch) = pending.epoch.previous() else {
+        let Some(expected_finalization_epoch) = pending.floor.epoch().previous() else {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary response");
             self.pending = Some(pending);
             return false;
@@ -420,7 +403,7 @@ where
         if response_finalization_epoch < expected_finalization_epoch {
             debug!(
                 response_finalization_epoch = %response_finalization_epoch,
-                pending_epoch = %pending.epoch,
+                pending_epoch = %pending.floor.epoch(),
                 "ignoring stale bootstrap boundary response"
             );
             self.pending = Some(pending);
@@ -479,7 +462,7 @@ where
             self.pending = Some(pending);
             return false;
         };
-        if candidate.peer != peer || pending.epoch != epoch {
+        if candidate.peer != peer || pending.floor.epoch() != epoch {
             pending.in_flight = Some(candidate);
             self.pending = Some(pending);
             return false;
@@ -508,7 +491,7 @@ where
                 }
             };
 
-        let Some(artifact) = self.artifact_from_block(&pending, candidate.finalization, block)
+        let Some(artifact) = Self::artifact_from_block(&pending, candidate.finalization, block)
         else {
             commonware_p2p::block!(self.blocker, peer, "invalid bootstrap boundary block");
             Self::request_next_block(&mut pending, boundary_sender);
@@ -533,23 +516,22 @@ where
         boundary_sender: &mut impl Sender<PublicKey = S::PublicKey>,
     ) {
         let Some(candidate) = pending.candidates.pop_front() else {
-            debug!(epoch = %pending.epoch, "requesting boundary finalizations");
-            Self::request_boundary_finalization(pending.epoch, boundary_sender);
+            debug!(epoch = %pending.floor.epoch(), "requesting boundary finalizations");
+            Self::request_boundary_finalization(pending.floor.epoch(), boundary_sender);
             return;
         };
 
         let commitment = candidate.finalization.proposal.payload;
-        debug!(epoch = %pending.epoch, ?commitment, "requesting boundary block");
+        debug!(epoch = %pending.floor.epoch(), ?commitment, "requesting boundary block");
         boundary_sender.send(
             Recipients::One(candidate.peer.clone()),
-            wire::Message::<S, V>::BlockRequest(pending.epoch).encode(),
+            wire::Message::<S, V>::BlockRequest(pending.floor.epoch()).encode(),
             false,
         );
         pending.in_flight = Some(candidate);
     }
 
     fn artifact_from_block(
-        &self,
         pending: &Pending<S, V>,
         finalization: Finalization<S, V::Commitment>,
         block: V::Block,
@@ -562,18 +544,14 @@ where
         let Some(Payload::EpochInfo(info)) = block.payload() else {
             return None;
         };
-        if info.epoch != pending.epoch {
+        if info.epoch != pending.floor.epoch() {
             return None;
         }
 
         Some(Artifact {
             finalization: Some(finalization),
             info,
-            floor: self
-                .sample
-                .floor()
-                .cloned()
-                .expect("boundary fetch requires a selected floor"),
+            floor: pending.floor.clone(),
         })
     }
 

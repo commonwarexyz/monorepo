@@ -137,7 +137,7 @@ jobs:
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
 
   Tests-Subset:
-    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\", sde: \"${{ matrix.sde }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) }}\")"
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.rustflags && format(', rustflags: \"{0}\"', matrix.rustflags) || '' }}, cpu: \"${{ matrix.sde && format('sde -{0}', matrix.sde) || matrix.qemu && format('qemu -cpu {0}', matrix.qemu) || 'native' }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) || '' }}\")"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -149,18 +149,62 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
-          # Run the crates with AVX-512 paths on an emulated Ice Lake server, which has every feature they use.
+          # Ice Lake-SP has SHA-NI, AVX-512, IFMA, GFNI, and VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             sde: icx
-            cpu-features: "avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
-          # Skylake servers have AVX-512 without IFMA, GFNI, or VPCLMULQDQ, so paths that need those fall back.
+            cpu-features: "avx2 bmi2 adx sha avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
+          # Skylake-SP has AVX-512 without SHA-NI, IFMA, GFNI, or VPCLMULQDQ.
           - os: ubuntu-latest
             package: commonware-cryptography
             flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
             sde: skx
-            cpu-features: "avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
+            cpu-features: "avx2 bmi2 adx !sha avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
+          # Zen 2 has AVX2 and SHA-NI without AVX-512.
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            qemu: EPYC-Rome
+            cpu-features: "avx2 bmi2 adx sha !avx512f"
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release --target x86_64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
+            rustflags: "-C target-feature=+avx2,+sha"
+            static-features: "avx2 sha !avx512f"
+            qemu: EPYC-Rome
+            cpu-features: "avx2 bmi2 adx sha !avx512f"
+          # Broadwell has AVX2, BMI2, and ADX without SHA-NI or AVX-512.
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            qemu: Broadwell
+            cpu-features: "avx2 bmi2 adx !sha !avx512f"
+          # Neoverse N2 has SHA-3 and SVE2.
+          - os: ubuntu-24.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            qemu: neoverse-n2
+            cpu-features: "sha2 sha3 sve sve2"
+          - os: ubuntu-24.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release --target aarch64-unknown-linux-gnu --no-default-features --lib -p commonware-cryptography-curve25519"
+            rustflags: "-C target-feature=+sha2,+sve2"
+            static-features: "sha2 sve2 !sha3"
+            qemu: neoverse-n2
+            cpu-features: "sha2 sha3 sve sve2"
+          # Neoverse N1 has SHA-2 without SHA-3 or SVE.
+          - os: ubuntu-24.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            qemu: neoverse-n1
+            cpu-features: "sha2 !sha3 !sve !sve2"
+          - os: ubuntu-24.04-arm
+            package: commonware-cryptography
+            flags: "--cargo-profile release --no-default-features --lib -p commonware-cryptography-curve25519"
+            static-features: "!sha2 !sha3 !sve2"
+            qemu: neoverse-n1
+            cpu-features: "sha2 !sha3 !sve !sve2"
           # Test each package with a std feature without std, one package at a time.
           - os: ubuntu-latest
             package: all
@@ -174,7 +218,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}
+        additional-cache-key: ${{ matrix.flags || 'default' }}${{ matrix.rustflags }}
         sccache-r2-bucket: ${{ secrets.SCCACHE_R2_BUCKET }}
         sccache-r2-endpoint: ${{ secrets.SCCACHE_R2_ENDPOINT }}
         sccache-r2-access-key-id: ${{ secrets.SCCACHE_R2_ACCESS_KEY_ID }}
@@ -193,12 +237,44 @@ jobs:
         echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum -c -
         mkdir -p "$RUNNER_TEMP/sde"
         tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
-        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --" >> "$GITHUB_ENV"
+        emulator="$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --"
+        echo "EMULATOR=$emulator" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$emulator" >> "$GITHUB_ENV"
+    - name: Install QEMU
+      if: ${{ matrix.qemu }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-user
+        emulator="qemu-$(uname -m) -cpu ${{ matrix.qemu }}"
+        runner="CARGO_TARGET_$(uname -m | tr '[:lower:]' '[:upper:]')_UNKNOWN_LINUX_GNU_RUNNER"
+        echo "EMULATOR=$emulator" >> "$GITHUB_ENV"
+        echo "$runner=$emulator" >> "$GITHUB_ENV"
     - name: Check emulated CPU features
-      if: ${{ matrix.sde }}
+      if: ${{ matrix.cpu-features }}
       run: |
         rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
-        $CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}
+        $EMULATOR "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}
+    - name: Configure rustflags
+      if: ${{ matrix.rustflags }}
+      run: |
+        rustflags="CARGO_TARGET_$(uname -m | tr '[:lower:]' '[:upper:]')_UNKNOWN_LINUX_GNU_RUSTFLAGS"
+        echo "$rustflags=${!rustflags:+${!rustflags} }${{ matrix.rustflags }}" >> "$GITHUB_ENV"
+    - name: Check static CPU features
+      if: ${{ matrix.static-features }}
+      run: |
+        cfg=$(rustc --print cfg --target "$(uname -m)-unknown-linux-gnu" ${{ matrix.rustflags }})
+        unexpected=()
+        for arg in ${{ matrix.static-features }}; do
+          feature="${arg#!}"
+          grep -qx "target_feature=\"$feature\"" <<< "$cfg" && found=true || found=false
+          [ "$arg" = "$feature" ] && expected=true || expected=false
+          echo "$feature: $found"
+          [ "$found" = "$expected" ] || unexpected+=("$arg")
+        done
+        if [ ${#unexpected[@]} -ne 0 ]; then
+          echo "unexpected static CPU features: ${unexpected[*]}"
+          exit 1
+        fi
     - name: Run no-std tests
       if: ${{ matrix.no-std }}
       run: just test-no-std --verbose
@@ -206,7 +282,7 @@ jobs:
       if: ${{ !matrix.no-std }}
       run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
     - name: Run subset doc tests
-      if: ${{ !matrix.sde && !matrix.no-std }}
+      if: ${{ !matrix.sde && !matrix.qemu && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
   Stability:

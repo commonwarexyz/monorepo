@@ -63,23 +63,23 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
-    /// Read multiple values and return a staged batch for the same keys.
+    /// Reads multiple values and returns a staged batch for the same keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn stage(
         self,
         keys: &[&U::Key],
@@ -104,7 +104,7 @@ where
         ))
     }
 
-    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
+    /// Records an upsert (`Some`) or a delete (`None`) of `key`.
     pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
@@ -122,14 +122,14 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Set commit metadata included in the [`merkleize`](Self::merkleize) call, replacing any
-    /// metadata set before staging.
+    /// Sets the metadata committed by [`merkleize`](Self::merkleize), replacing any metadata set
+    /// before staging.
     pub fn with_metadata(mut self, metadata: U::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Expand this staged batch with more reads.
+    /// Expands this staged batch with more reads.
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
@@ -177,19 +177,16 @@ where
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
-    /// this method if more keys must be read into the staged index space.
-    ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](AnyStaged::expand) ranges. Metadata
-    /// set via [`with_metadata`](AnyStaged::with_metadata) (or before staging) is committed with the
-    /// returned batch.
+    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
+    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
+    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
+    /// with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if an index in `updates` is outside the staged read set.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -220,15 +217,15 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await

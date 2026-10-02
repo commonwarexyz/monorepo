@@ -290,9 +290,7 @@ where
 
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
-        for value in self.appends {
-            ops.push(Operation::Append(value));
-        }
+        ops.extend(self.appends.into_iter().map(Operation::Append));
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
         let total_size = self.base.size + ops.len() as u64;

@@ -102,9 +102,7 @@ where
                 .await?
                 .ok_or(Error::HistoricalFloorPruned(size))?;
 
-        // Replay the log from the inactivity floor to build the snapshot. Every retained
-        // location is inserted, mirroring the live apply path, so a repeated key keeps
-        // serving one of its written values across restarts.
+        // Replay the log from the inactivity floor to build the snapshot.
         immutable::build_snapshot(
             inactivity_floor_loc,
             &journal.journal,

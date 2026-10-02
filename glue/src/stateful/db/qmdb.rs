@@ -1,4 +1,7 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB databases.
+//!
+//! Batch reads fall back to the database's applied state at the time of the read, not to a
+//! snapshot taken when the batch was created.
 
 use super::{
     BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
@@ -81,7 +84,9 @@ impl<D: Qmdb> Deref for Unmerkleized<D> {
 }
 
 impl<D: Qmdb> Unmerkleized<D> {
-    /// Set commit metadata included in the next [`merkleize`](UnmerkleizedTrait::merkleize).
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
+    ///
+    /// The metadata carries over when the batch is staged.
     pub fn with_metadata(mut self, metadata: D::Metadata) -> Self {
         self.metadata = Some(metadata);
         self
@@ -92,8 +97,8 @@ impl<D> Unmerkleized<D>
 where
     D: Qmdb<Floor = Option<Location<<D as sync::Database>::Family>>>,
 {
-    /// Set the inactivity floor included in the next [`merkleize`](UnmerkleizedTrait::merkleize).
-    /// When unset, the commit records floor 0.
+    /// Sets the inactivity floor committed by [`merkleize`](UnmerkleizedTrait::merkleize)
+    /// (location 0 when unset).
     pub const fn with_inactivity_floor(mut self, floor: Location<D::Family>) -> Self {
         self.floor = Some(floor);
         self

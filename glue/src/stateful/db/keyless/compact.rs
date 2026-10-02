@@ -29,7 +29,7 @@ where
     C: Clone + Send + Sync + 'static,
     S: Strategy,
 {
-    /// Append a value to the speculative batch.
+    /// Appends `value` to the batch.
     pub fn append(mut self, value: V::Value) -> Self {
         self.batch = self.batch.append(value);
         self
@@ -175,7 +175,7 @@ mod tests {
             assert_eq!(guard.get_metadata(), Some(U64::new(9)));
 
             let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
-            assert_eq!(target.root, guard.root());
+            assert_eq!(target.root, expected_root);
             assert_eq!(target.range.end(), mmr::Location::new(3));
         });
     }

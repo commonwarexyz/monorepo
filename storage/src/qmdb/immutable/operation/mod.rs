@@ -30,7 +30,7 @@ pub(crate) const COMMIT_CONTEXT: u8 = 1;
 /// setting new values and committing - no updates or deletions.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum Operation<F: Family, K: Key, V: ValueEncoding> {
-    /// Set a key to a value. The key must not already exist.
+    /// Set a key to a value. The key must be set at most once across the database history.
     Set(K, V::Value),
 
     /// Commit with optional metadata and the inactivity floor location.

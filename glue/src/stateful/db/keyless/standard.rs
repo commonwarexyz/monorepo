@@ -33,16 +33,19 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Read a value by location, falling back to applied state.
+    /// Reads a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to applied state.
+    /// Reads multiple values by location, falling back to applied state.
     ///
-    /// Locations must be sorted in ascending order. Returns results in the same
-    /// order as the input locations.
+    /// Returns results in the same order as `locations`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `locations` is not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],
@@ -51,7 +54,7 @@ where
         self.batch.get_many(locations, &db).await
     }
 
-    /// Append a value to the speculative batch.
+    /// Appends `value` to the batch.
     pub fn append(mut self, value: V::Value) -> Self {
         self.batch = self.batch.append(value);
         self
@@ -69,16 +72,19 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
-    /// Read a value by location, falling back to applied state.
+    /// Reads a value by location, falling back to applied state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(location, &db).await
     }
 
-    /// Read multiple values by location, falling back to applied state.
+    /// Reads multiple values by location, falling back to applied state.
     ///
-    /// Locations must be sorted in ascending order. Returns results in the same
-    /// order as the input locations.
+    /// Returns results in the same order as `locations`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `locations` is not strictly increasing.
     pub async fn get_many(
         &self,
         locations: &[Location<F>],

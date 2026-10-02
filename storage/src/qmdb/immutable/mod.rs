@@ -89,7 +89,6 @@ use crate::{
     },
     translator::Translator,
 };
-use ahash::AHashSet;
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
@@ -114,11 +113,7 @@ pub use compact::{
 pub use operation::Operation;
 
 /// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
-/// every retained [Operation::Set] and keeping prior locations of the same key. Assumes the log
-/// is not pruned beyond the inactivity floor.
-///
-/// Repeats of a full key all land in the snapshot, matching a snapshot maintained live, so reads
-/// of a repeated key keep returning one of its written values however the snapshot was built.
+/// every retained [Operation::Set]. Assumes the log is not pruned beyond the inactivity floor.
 ///
 /// `init_buffer` sizes the replay read buffer (in bytes).
 async fn build_snapshot<F, K, V, C, T>(
@@ -170,8 +165,7 @@ pub struct Config<T: Translator, J, S: Strategy> {
 ///
 /// # Invariant
 ///
-/// A key must be set at most once across the database history. If a key is set more than once,
-/// reads of that key may return any of its written values.
+/// A key must be set at most once across the database history.
 ///
 /// Use [fixed::Db] or [variable::Db] for concrete instantiations.
 pub struct Immutable<
@@ -275,9 +269,7 @@ where
             .await?
             .ok_or(Error::UnexpectedData(size - 1))?;
 
-        // Replay the log from the inactivity floor to build the snapshot. Every retained
-        // location is inserted, mirroring the live apply path, so a repeated key keeps
-        // serving one of its written values across restarts and bounded initializations.
+        // Replay the log from the inactivity floor to build the snapshot.
         build_snapshot(
             inactivity_floor_loc,
             &journal.journal,
@@ -675,35 +667,9 @@ where
         // Apply journal.
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
 
-        // Apply snapshot inserts. Child first (child wins via `seen`), then
-        // uncommitted ancestor batches.
-        //
-        // `seen` is only consulted when at least one ancestor diff will be applied, so it is
-        // skipped entirely otherwise.
+        // Apply snapshot inserts for the batch and every unapplied ancestor.
         let bounds = self.journal.bounds();
-        let track_shadow = batch
-            .bounds
-            .ancestors
-            .iter()
-            .any(|a| a.state.size > db_size);
-        let seen_cap = if track_shadow {
-            batch.diff.len()
-                + batch
-                    .bounds
-                    .ancestors
-                    .iter()
-                    .zip(&batch.ancestor_diffs)
-                    .filter(|(a, _)| a.state.size > db_size)
-                    .map(|(_, d)| d.len())
-                    .sum::<usize>()
-        } else {
-            0
-        };
-        let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         for (key, entry) in batch.diff.iter() {
-            if track_shadow {
-                seen.insert(key);
-            }
             self.snapshot
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
@@ -712,10 +678,8 @@ where
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
-                if seen.insert(key) {
-                    self.snapshot
-                        .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
-                }
+                self.snapshot
+                    .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
             }
         }
 
@@ -2400,61 +2364,14 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Child batch overrides same key set by parent.
-    #[boxed]
-    pub(crate) async fn run_batch_chained_key_override<F: Family, V, C>(
-        context: deterministic::Context,
-        open_db: impl Fn(
-            deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
-    ) where
-        V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
-        C::Item: EncodeShared,
-    {
-        let db = open_db(context.child("db")).await;
-
-        let key = Sha256::hash(&[&0u64.to_be_bytes()]);
-        let val_parent = Sha256::fill(1u8);
-        let val_child = Sha256::fill(2u8);
-
-        // Parent sets key.
-        let parent_m = db
-            .new_batch()
-            .set(key, val_parent)
-            .merkleize(&db, None, Location::new(0))
-            .await
-            .unwrap();
-
-        // Child overrides same key.
-        let mut child = parent_m.new_batch::<Sha256>();
-        child = child.set(key, val_child);
-
-        // Child's pending mutation wins over parent diff.
-        assert_eq!(child.get(&key, &db).await.unwrap(), Some(val_child));
-
-        let child_m = child.merkleize(&db, None, Location::new(0)).await.unwrap();
-
-        // After merkleize, child's diff wins.
-        assert_eq!(child_m.get(&key, &db).await.unwrap(), Some(val_child));
-
-        // Apply and verify.
-        let (db, _) = db.apply_batch(child_m).await.unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(val_child));
-
-        db.destroy().await.unwrap();
-    }
-
-    /// Same key set across two sequential applied batches. This breaks the key-uniqueness
-    /// invariant, so reads may return any of the written values. `get()` must still return one
-    /// of them, live and across a restart, and after pruning every other version it returns the
-    /// survivor. The prune check runs on a never-restarted db so the snapshot still holds both
-    /// locations and `get()` must skip the pruned one within the bucket.
+    /// Two keys that collide under the translator are set in sequential applied batches. After
+    /// pruning the first write, `get()` skips its location within the shared bucket and still
+    /// serves the second key.
     ///
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
     #[boxed]
-    pub(crate) async fn run_batch_sequential_key_override<F: Family, V, C>(
+    pub(crate) async fn run_prune_collision_bucket<F: Family, V, C>(
         context: deterministic::Context,
         open_db_small_sections: impl Fn(
             deterministic::Context,
@@ -2467,67 +2384,45 @@ pub(super) mod tests {
     {
         let db = open_db_small_sections(context.child("db")).await;
 
-        let key = Sha256::hash(&[&0u64.to_be_bytes()]);
+        // Two keys sharing the first two bytes collide under TwoCap.
+        let mut k1_bytes = [0u8; 32];
+        let mut k2_bytes = [0u8; 32];
+        k1_bytes[0] = 0xAA;
+        k1_bytes[1] = 0xBB;
+        k2_bytes[0] = 0xAA;
+        k2_bytes[1] = 0xBB;
+        k1_bytes[31] = 0x01;
+        k2_bytes[31] = 0x02;
+        let key1 = Digest::from(k1_bytes);
+        let key2 = Digest::from(k2_bytes);
         let v1 = Sha256::fill(1u8);
         let v2 = Sha256::fill(2u8);
 
-        // First batch sets key.
-        // Layout: 0=initial commit, 1=Set(key,v1), 2=Commit
+        // Layout: 0=initial commit, 1=Set(key1,v1), 2=Commit, 3=Set(key2,v2),
+        // 4=Commit(floor=4). Floor=4 permits prune(2).
         let merkleized = db
             .new_batch()
-            .set(key, v1)
-            .merkleize(&db, None, Location::new(0))
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
-
-        // Second batch sets same key to different value.
-        // Layout continues: 3=Set(key,v2), 4=Commit
-        let merkleized = db
-            .new_batch()
-            .set(key, v2)
-            .merkleize(&db, None, Location::new(0))
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
-
-        // Either written value may be served for the repeated key.
-        let live = db.get(&key).await.unwrap().unwrap();
-        assert!(live == v1 || live == v2);
-
-        // A restart must also serve one of the written values.
-        db.commit().await.unwrap();
-        let db = open_db_small_sections(context.child("reopen")).await;
-        let reopened = db.get(&key).await.unwrap().unwrap();
-        assert!(reopened == v1 || reopened == v2);
-        db.destroy().await.unwrap();
-
-        // Rebuild the same history on a fresh db without restarting, so the
-        // snapshot bucket holds both locations. Floor=4 permits prune(2).
-        // Layout: 0=initial commit, 1=Set(key,v1), 2=Commit, 3=Set(key,v2),
-        // 4=Commit(floor=4)
-        let db = open_db_small_sections(context.child("prune")).await;
-        let merkleized = db
-            .new_batch()
-            .set(key, v1)
+            .set(key1, v1)
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let merkleized = db
             .new_batch()
-            .set(key, v2)
+            .set(key2, v2)
             .merkleize(&db, None, Location::new(4))
             .await
             .unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
+        assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
 
         // Prune past the first Set (loc 1). With items_per_section=1, pruning
         // to loc 2 removes the blob containing loc 1. get() must skip the
-        // pruned location within the bucket and serve the survivor.
+        // pruned location within the bucket.
         let db = db.prune(Location::new(2)).await.unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
+        assert_eq!(db.get(&key1).await.unwrap(), None);
+        assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
 
         db.destroy().await.unwrap();
     }
@@ -2784,6 +2679,8 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
+    /// Applying a batch over an applied ancestor and unapplied ones, including an empty one,
+    /// inserts one snapshot location per key, matching the snapshot rebuilt on reopen.
     #[boxed]
     pub(crate) async fn run_partial_ancestor_commit<F: Family, V, C>(
         context: deterministic::Context,
@@ -2804,14 +2701,19 @@ pub(super) mod tests {
         let v2 = Sha256::fill(2u8);
         let v3 = Sha256::fill(3u8);
 
-        // Chain: DB <- A <- B <- C
+        // Chain: DB <- A <- E <- B <- C, where E is empty.
         let a = db
             .new_batch()
             .set(key1, v1)
             .merkleize(&db, None, Location::new(0))
             .await
             .unwrap();
-        let b = a
+        let e = a
+            .new_batch::<Sha256>()
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let b = e
             .new_batch::<Sha256>()
             .set(key2, v2)
             .merkleize(&db, None, Location::new(0))
@@ -2826,7 +2728,7 @@ pub(super) mod tests {
 
         let expected_root = c.root();
 
-        // Apply only A, then apply C directly (B uncommitted).
+        // Apply only A, then apply C directly (E and B uncommitted).
         let (db, _) = db.apply_batch(a).await.unwrap();
         let (db, _) = db.apply_batch(c).await.unwrap();
 
@@ -2834,6 +2736,26 @@ pub(super) mod tests {
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&key3).await.unwrap(), Some(v3));
+
+        // The snapshot holds one location per key.
+        let keys = [key1, key2, key3];
+        let locations = |db: &TestDb<F, V, C>| {
+            keys.iter()
+                .map(|key| {
+                    let mut locations: Vec<_> = db.snapshot.get(key).copied().collect();
+                    locations.sort();
+                    locations
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(db.snapshot.items(), keys.len());
+        let live = locations(&db);
+
+        // Reopen: the rebuilt snapshot holds the same locations.
+        db.sync().await.unwrap();
+        let db = open_db(context.child("reopen")).await;
+        assert_eq!(db.snapshot.items(), keys.len());
+        assert_eq!(locations(&db), live);
 
         db.destroy().await.unwrap();
     }
@@ -3654,219 +3576,6 @@ pub(super) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Opening an earlier commit restores a repeated key excluded by the latest floor.
-    /// Either value written within the selected history may be returned.
-    #[boxed]
-    pub(crate) async fn run_bounded_initialization_after_reopen_repeated_key_gap<F: Family, V, C>(
-        context: deterministic::Context,
-        open_db: impl Fn(
-            deterministic::Context,
-            Option<Location<F>>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
-    ) where
-        V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
-        C::Item: EncodeShared,
-    {
-        let db = open_db(context.child("first"), None).await.unwrap();
-
-        let key = Sha256::fill(7u8);
-        let v1 = Sha256::fill(17u8);
-        let v2 = Sha256::fill(18u8);
-        let k3 = Sha256::fill(8u8);
-        let v3 = Sha256::fill(19u8);
-
-        // Commit A: Set(key, v1) with floor=0.
-        let (db, _) = commit_sets(db, [(key, v1)], None).await;
-        let first_size = db.bounds().end;
-
-        // Commit B: Set(key, v2) with floor=0. Either written value may be served.
-        let (db, _) = commit_sets(db, [(key, v2)], None).await;
-        let second_size = db.bounds().end;
-        let live = db.get(&key).await.unwrap().unwrap();
-        assert!(live == v1 || live == v2);
-
-        // Commit C: raises floor above both earlier writes.
-        let (db, _) = commit_sets_with_floor(db, [(k3, v3)], None, second_size).await;
-        db.sync().await.unwrap();
-
-        // Reopen: snapshot rebuilt from floor=second_size, key excluded.
-        let db = open_db(context.child("second"), None).await.unwrap();
-        assert!(db.get(&key).await.unwrap().is_none());
-        assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
-
-        // Commit B retains both writes to the key, so either value may be returned.
-        _ = db.sync().await.unwrap();
-        let db = open_db(context.child("cap"), Some(second_size))
-            .await
-            .unwrap();
-        let recovered = db.get(&key).await.unwrap().unwrap();
-        assert!(recovered == v1 || recovered == v2);
-
-        // Open commit A. Only v1 is retained, so reads must return it.
-        _ = db.sync().await.unwrap();
-        let db = open_db(context.child("cap"), Some(first_size))
-            .await
-            .unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
-
-        db.destroy().await.unwrap();
-    }
-
-    /// Opening an earlier commit rebuilds its snapshot from the selected floor, restoring
-    /// repeated-key writes that a later floor excluded.
-    #[boxed]
-    pub(crate) async fn run_bounded_initialization_after_reopen_mixed_gap_retained<
-        F: Family,
-        V,
-        C,
-    >(
-        context: deterministic::Context,
-        open_db: impl Fn(
-            deterministic::Context,
-            Option<Location<F>>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
-    ) where
-        V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
-        C::Item: EncodeShared,
-    {
-        let db = open_db(context.child("first"), None).await.unwrap();
-
-        let key = Sha256::fill(7u8);
-        let v1 = Sha256::fill(17u8);
-        let v2 = Sha256::fill(18u8);
-        let k3 = Sha256::fill(8u8);
-        let v3 = Sha256::fill(19u8);
-
-        // Commit A: Set(key, v1) at loc=0, floor=0.
-        let (db, _) = commit_sets(db, [(key, v1)], None).await;
-        let first_size = db.bounds().end;
-
-        // Commit B: Set(key, v2), floor=0. Either written value may be served.
-        let (db, _) = commit_sets(db, [(key, v2)], None).await;
-        let second_size = db.bounds().end;
-        let live = db.get(&key).await.unwrap().unwrap();
-        assert!(live == v1 || live == v2);
-
-        // Commit C: raises floor to first_size, so loc=0 is below floor but
-        // loc for v2 is retained.
-        let (db, _) = commit_sets_with_floor(db, [(k3, v3)], None, first_size).await;
-        db.sync().await.unwrap();
-
-        // Reopen: snapshot rebuilt from floor=first_size. The v2 write for key
-        // is retained; the v1 write is excluded.
-        let db = open_db(context.child("second"), None).await.unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
-
-        // Open commit B. Replay from its floor includes both v1 and v2.
-        _ = db.sync().await.unwrap();
-        let db = open_db(context.child("cap"), Some(second_size))
-            .await
-            .unwrap();
-        let recovered = db.get(&key).await.unwrap().unwrap();
-        assert!(recovered == v1 || recovered == v2);
-
-        // Open commit A. Only v1 is retained, so reads must return it.
-        _ = db.sync().await.unwrap();
-        let db = open_db(context.child("cap"), Some(first_size))
-            .await
-            .unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
-
-        db.destroy().await.unwrap();
-    }
-
-    /// Opening before a repeated key's newer write retains the older value.
-    #[boxed]
-    pub(crate) async fn run_bounded_initialization_repeated_key<F: Family, V, C>(
-        context: deterministic::Context,
-        open_db: impl Fn(
-            deterministic::Context,
-            Option<Location<F>>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
-    ) where
-        V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
-        C::Item: EncodeShared,
-    {
-        let db = open_db(context.child("first"), None).await.unwrap();
-
-        let key = Sha256::fill(7u8);
-        let v1 = Sha256::fill(17u8);
-        let v2 = Sha256::fill(18u8);
-
-        // Commit A: Set(key, v1) with floor=0.
-        let (db, _) = commit_sets(db, [(key, v1)], None).await;
-        let first_size = db.bounds().end;
-
-        // Commit B: Set(key, v2) with floor=0. Either written value may be served.
-        let (db, _) = commit_sets(db, [(key, v2)], None).await;
-        let live = db.get(&key).await.unwrap().unwrap();
-        assert!(live == v1 || live == v2);
-
-        // Reopen at commit A. The v2 location is dropped and the retained v1 location keeps serving
-        // the key.
-        _ = db.sync().await.unwrap();
-        let db = open_db(context.child("cap"), Some(first_size))
-            .await
-            .unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
-
-        db.destroy().await.unwrap();
-    }
-
-    /// After an ordinary reopen, opening at an earlier bound still preserves a repeated key's
-    /// retained value.
-    #[boxed]
-    pub(crate) async fn run_bounded_initialization_after_reopen_repeated_key_retained<
-        F: Family,
-        V,
-        C,
-    >(
-        context: deterministic::Context,
-        open_db: impl Fn(
-            deterministic::Context,
-            Option<Location<F>>,
-        )
-            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
-    ) where
-        V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
-        C::Item: EncodeShared,
-    {
-        let db = open_db(context.child("first"), None).await.unwrap();
-
-        let key = Sha256::fill(7u8);
-        let v1 = Sha256::fill(17u8);
-        let v2 = Sha256::fill(18u8);
-
-        // Commit A: Set(key, v1) with floor=0.
-        let (db, _) = commit_sets(db, [(key, v1)], None).await;
-        let first_size = db.bounds().end;
-
-        // Commit B: Set(key, v2) with floor=0, then persist for the reopen.
-        let (db, _) = commit_sets(db, [(key, v2)], None).await;
-        db.sync().await.unwrap();
-
-        // Reopen: replay visits both writes and keeps only the newer location.
-        let db = open_db(context.child("second"), None).await.unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
-
-        // Reopen at commit A with an unchanged floor. The newer location is dropped, and the older
-        // write, still retained in the restored journal, must keep the key readable.
-        _ = db.sync().await.unwrap();
-        let db = open_db(context.child("cap"), Some(first_size))
-            .await
-            .unwrap();
-        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
-
-        db.destroy().await.unwrap();
-    }
-
     /// After committing with `floor = commit_loc` and pruning down to it, the live set is
     /// exactly one operation — the commit itself. This is the minimum non-empty live set
     /// achievable under the per-commit bound. The DB must remain fully usable:
@@ -4046,15 +3755,19 @@ pub(super) mod tests {
         assert_eq!(results, vec![Some(v1), Some(v3), None]);
 
         // Child of merkleized parent reads parent diff.
-        let v3_new = Sha256::fill(30u8);
-        let child = parent.new_batch::<Sha256>().set(k3, v3_new);
-        let results = child.get_many(&[&k1, &k3, &k_missing], &db).await.unwrap();
-        assert_eq!(results, vec![Some(v1), Some(v3_new), None]);
+        let k4 = Sha256::fill(4u8);
+        let v4 = Sha256::fill(14u8);
+        let child = parent.new_batch::<Sha256>().set(k4, v4);
+        let results = child
+            .get_many(&[&k1, &k3, &k4, &k_missing], &db)
+            .await
+            .unwrap();
+        assert_eq!(results, vec![Some(v1), Some(v3), Some(v4), None]);
 
         db.destroy().await.unwrap();
     }
 
-    /// `get_many` fills every slot of a repeated key.
+    /// `get_many` fills every slot of a key listed more than once in the input.
     #[boxed]
     pub(crate) async fn run_get_many_duplicate_keys<F: Family, V, C>(
         context: deterministic::Context,
