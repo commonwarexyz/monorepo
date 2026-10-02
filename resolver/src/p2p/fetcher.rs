@@ -15,7 +15,7 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     marker::PhantomData,
     mem,
     time::{Duration, SystemTime},
@@ -354,20 +354,12 @@ where
         });
     }
 
-    /// Retains only the fetches with keys greater than the given key.
+    /// Retains only the fetches whose keys satisfy the predicate.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
-        // Collect IDs to remove based on key predicate
-        let ids_to_remove: Vec<ID> = self
-            .requests
-            .iter()
-            .filter(|(_, req)| !predicate(&req.key))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids_to_remove {
+        for (id, req) in self.requests.extract_if(|_, req| !predicate(&req.key)) {
             self.active.remove(&id);
-            self.requests.remove(&id);
+            self.key_to_id.remove(&req.key);
         }
-        self.key_to_id.retain(|k, _| predicate(k));
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
 
@@ -375,7 +367,9 @@ where
         self.waiter = None;
     }
 
-    /// Adds a key to the front of the pending queue.
+    /// Adds a key to the pending queue, ahead of all retries.
+    ///
+    /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
         assert!(!self.pending.contains(&key));
         // A previous pending key may have pushed the waiter far into the future
@@ -432,12 +426,10 @@ where
 
     /// Remove the active request matching `id` and `peer`.
     fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
-        let req = self.requests.get(&id)?;
-        if &req.peer != peer {
-            return None;
-        }
-
-        let req = self.requests.remove(&id)?;
+        let req = match self.requests.entry(id) {
+            Entry::Occupied(entry) if &entry.get().peer == peer => entry.remove(),
+            _ => return None,
+        };
         self.active.remove(&id);
         self.key_to_id.remove(&req.key);
         Some(req)
@@ -820,6 +812,8 @@ mod tests {
             assert!(fetcher.key_to_id.contains_key(&MockKey(10)));
             assert!(!fetcher.key_to_id.contains_key(&MockKey(20)));
             assert!(!fetcher.key_to_id.contains_key(&MockKey(30)));
+            assert_eq!(fetcher.active.len(), 1);
+            assert!(fetcher.active.contains(&100));
         });
     }
 
@@ -1096,6 +1090,33 @@ mod tests {
             fetcher.record_response(&peer, elapsed, 1);
             let observed = throughput(Duration::from_millis(20), 1);
             assert_eq!(fetcher.participants.get(&peer), Some(Reverse(observed / 2)));
+        });
+    }
+
+    #[test]
+    fn test_pop_response_requires_matching_peer() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer = PrivateKey::from_seed(1).public_key();
+            let other_peer = PrivateKey::from_seed(2).public_key();
+            add_test_active(&mut fetcher, 100, MockKey(10));
+
+            // A response from another peer leaves the request active
+            assert!(fetcher.pop_response(100, &other_peer).is_none());
+            assert_eq!(fetcher.len_active(), 1);
+            assert!(fetcher.active.contains(&100));
+            assert_eq!(fetcher.key_to_id.get(&MockKey(10)), Some(&100));
+
+            // The requested peer's response removes it from request tracking
+            let (key, _) = fetcher.pop_response(100, &peer).expect("matching response");
+            assert_eq!(key, MockKey(10));
+            assert_eq!(fetcher.len_active(), 0);
+            assert!(fetcher.active.is_empty());
+            assert!(!fetcher.key_to_id.contains_key(&key));
+
+            // A repeated response is ignored
+            assert!(fetcher.pop_response(100, &peer).is_none());
         });
     }
 

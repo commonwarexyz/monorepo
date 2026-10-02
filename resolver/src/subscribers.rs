@@ -113,7 +113,7 @@ where
             self.entries.remove(key);
             return None;
         }
-        self.pending(key)
+        Self::non_empty(entry)
     }
 
     /// Clones a key's subscriber map into a [NonEmptyVec], or `None` when empty.

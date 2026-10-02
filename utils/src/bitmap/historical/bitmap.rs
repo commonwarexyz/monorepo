@@ -672,14 +672,11 @@ impl<const N: usize> DirtyBitMap<N> {
             // Popping from appended region: remove from appended_bits vector.
             self.state.appended_bits.pop().unwrap()
         } else {
-            // Popping from base region: check if it was modified.
-            if let Some(&modified_value) = self.state.modified_bits.get(&bit) {
-                self.state.modified_bits.remove(&bit);
-                modified_value
-            } else {
-                // Not modified, return original value.
-                self.current.get_bit(bit)
-            }
+            // Popping from base region: return the modified value, or the original if unmodified.
+            self.state
+                .modified_bits
+                .remove(&bit)
+                .unwrap_or_else(|| self.current.get_bit(bit))
         }
     }
 
