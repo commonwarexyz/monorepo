@@ -1,4 +1,56 @@
-//! BLAKE3 kernels for merkle node pairs, independent message batches, and subtrees.
+//! BLAKE3 kernels for merkle node pairs, independent message batches, and
+//! subtrees of `hash_with`.
+//!
+//! # Subtrees
+//!
+//! On aarch64 with NEON, a subtree of `hash_with` within one part that spans
+//! at least two full chunks hashes its full chunks in vector lanes with a
+//! separate chunk counter per lane and merges their chaining values level by
+//! level in lanes.
+//!
+//! # Batches
+//!
+//! The batch kernels hash one message per SIMD lane: each vector holds the
+//! same state word of every message, so a single instruction advances every
+//! message at once. Messages of equal length share the same chunk and parent
+//! structure, so the whole tree (chunk compressions and parent merges) runs in
+//! lockstep across lanes. This fills vectors even when each message is too
+//! short for BLAKE3's chunk-level parallelism within a single message.
+//!
+//! A batch of multi-chunk messages too small to fill the lanes instead packs
+//! the nodes of every message's tree into lanes, one tree level at a time:
+//! each full chunk takes its own lane and counter, then each partial final
+//! chunk, then each parent. It packs only messages with fewer full chunks
+//! than lanes, and only when that takes fewer passes over the full chunks
+//! (see [`batch`]).
+//!
+//! # Kernels
+//!
+//! On x86_64, AVX-512 batches hash 16 messages and AVX2 batches 8. With AVX2,
+//! a pair of equal-length messages of at most two blocks holds one state row
+//! of both messages in each 256-bit vector, one message per 128-bit half, and
+//! a batch with two active lanes uses this pair kernel when its messages fit.
+//! Pairs of 40, 64, or 72 bytes, given contiguously or in the merkle part
+//! layouts, load their bytes directly, as do pairs of 36 bytes when AVX-512VL
+//! is available. With AVX-512, three or four messages of 40, 64, or 72 bytes
+//! hold one message per 128-bit group of 512-bit state rows. Calls with three
+//! or four 36-byte messages go two at a time to the 36-byte pair kernel when
+//! AVX-512VL is available.
+//!
+//! On aarch64, NEON batches hash 8 messages with two vectors per word, and
+//! batches of at most four active lanes use four-lane words. With SVE2, the
+//! four-lane words perform every xor-rotate with `XAR` and the eight-lane
+//! words perform three of the four. With the SHA-3 extension, a pair holds
+//! each word of both messages in one vector, duplicated so that the 64-bit
+//! `XAR` rotates it, and batches with two active lanes use these words.
+//! Without SHA-3, two messages hash one at a time with the [blake3] crate.
+//! Pairs with the merkle layouts, given contiguously or as their fields, load
+//! their fields directly when SVE2 or the SHA-3 extension is available, and
+//! with SVE2 use two state-row streams with 32-bit `XAR`.
+//!
+//! Kernel code keeps intrinsics out of closures: a closure does not inherit
+//! its caller's target features, so intrinsics inside it compile to
+//! out-of-line calls.
 
 use super::{Digest, gather};
 #[cfg(not(feature = "std"))]
@@ -458,6 +510,9 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
             let [left, right] = x86_64::hash_pair(left, right)?;
             Some((Digest(left), Digest(right)))
         } else if #[cfg(any(target_feature = "neon", feature = "std"))] {
+            if let Some([left, right]) = aarch64::hash_pair_parts(left, right) {
+                return Some((Digest(left), Digest(right)));
+            }
             if !aarch64::supports_pair() {
                 return None;
             }
@@ -887,6 +942,67 @@ mod tests {
 
         // SAFETY: The portable words require no target features.
         check_lanes::<5>(|inputs| unsafe { hash::<[u32; 5], 5>(inputs) });
+    }
+
+    /// Check that each kernel is selected exactly when the CPU has its
+    /// features.
+    #[test]
+    fn test_kernels_dispatch() {
+        // Without std, dispatch uses only statically enabled target features.
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "aarch64")] {
+                #[cfg(feature = "std")]
+                let (neon, sha3, sve2) = (
+                    std::arch::is_aarch64_feature_detected!("neon"),
+                    std::arch::is_aarch64_feature_detected!("sha3"),
+                    std::arch::is_aarch64_feature_detected!("sve2"),
+                );
+                #[cfg(not(feature = "std"))]
+                let (neon, sha3, sve2) = (
+                    cfg!(target_feature = "neon"),
+                    cfg!(target_feature = "sha3"),
+                    cfg!(target_feature = "sve2"),
+                );
+
+                // Without SHA-3, only the merkle layouts pair, and only with SVE2.
+                let pair = |len: usize| neon && (sha3 || (sve2 && matches!(len, 36 | 40 | 64 | 72)));
+                let many = neon;
+            } else {
+                #[cfg(feature = "std")]
+                let (avx2, avx512) = (
+                    std::arch::is_x86_feature_detected!("avx2"),
+                    std::arch::is_x86_feature_detected!("avx512f")
+                        && std::arch::is_x86_feature_detected!("avx512bw"),
+                );
+                #[cfg(not(feature = "std"))]
+                let (avx2, avx512) = (
+                    cfg!(target_feature = "avx2"),
+                    cfg!(all(target_feature = "avx512f", target_feature = "avx512bw")),
+                );
+                let pair = |_: usize| avx2;
+                let many = avx2 || avx512;
+            }
+        }
+        for len in [0, 36, 40, 64, 72, 128] {
+            let (left, right) = (vec![1u8; len], vec![2u8; len]);
+            assert_eq!(
+                hash_pair(&[&left], &[&right]).is_some(),
+                pair(len),
+                "len {len}"
+            );
+
+            // Two short messages without a pair kernel hash individually.
+            assert_eq!(
+                hash_many_parts(&[[&left[..]], [&right[..]]]).is_some(),
+                pair(len),
+                "len {len}"
+            );
+        }
+        assert!(hash_pair(&[&[0u8; 64]], &[&[0u8; 65]]).is_none());
+        assert!(hash_pair(&[&[0u8; 129]], &[&[0u8; 129]]).is_none());
+        assert_eq!(hash_many(&[[0u8; 64]; 16]).is_some(), many);
+        assert_eq!(hash_many::<&[u8]>(&[]).is_some(), many);
+        assert_eq!(batched(), many);
     }
 
     #[test]

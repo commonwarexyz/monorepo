@@ -1,4 +1,16 @@
 //! NEON kernels.
+//!
+//! Batches hash eight messages with two NEON vectors per word, so two
+//! independent mixing chains fill the vector pipes that one four-lane chain
+//! leaves idle. When SVE2 is available, their 12, 8, and 7 bit xor-rotates use
+//! the `XAR` instruction. Partial batches use four-lane words, whose fused
+//! xor-rotates all use `XAR` when available. Pairs with the merkle layouts use
+//! two state-row streams with SVE2. Other pairs use duplicated words with the
+//! SHA-3 extension's `XAR`, and hash one at a time without it.
+//!
+//! A `hash_with` subtree of two or more chunks hashes its chunks in the same
+//! lanes, with a separate chunk counter per lane, and merges their chaining
+//! values level by level in lanes.
 
 use super::{Digest, Nodes, Words, batch};
 #[cfg(not(feature = "std"))]
@@ -10,6 +22,10 @@ use blake3::{
 use core::arch::aarch64::*;
 #[cfg(not(miri))]
 use core::arch::asm;
+
+mod pair_parts;
+mod row_pair;
+pub(super) use pair_parts::hash_pair_parts;
 
 /// Messages per NEON vector.
 const LANES: usize = 4;
@@ -1184,6 +1200,11 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         sve2: supports_sve2(),
     };
     let sha3 = supports_sha3();
+    if let [left, right] = messages
+        && let Some([left, right]) = hash_pair_parts(&[left.as_ref()], &[right.as_ref()])
+    {
+        return Some(Vec::from([Digest(left), Digest(right)]));
+    }
     if matches!(messages.len(), 3 | 4) {
         // SAFETY: NEON availability was established above, and the feature
         // snapshot records whether the four-lane SVE2 kernel is available.
