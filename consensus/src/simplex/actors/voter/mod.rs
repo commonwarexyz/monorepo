@@ -3739,17 +3739,17 @@ mod tests {
         });
     }
 
-    fn finalization_from_resolver<S, F, L>(mut fixture: F, elector: L)
+    /// A recovered finalization above the current view must be applied and
+    /// reported.
+    fn recovered_finalization_is_reported<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        // This is a regression test as the resolver didn't use to send
-        // finalizations to the voter
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"finalization_from_resolver".to_vec();
+        let namespace = b"recovered_finalization_is_reported".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Get participants
@@ -3790,12 +3790,12 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Send a finalization from resolver (view 2, which is current+1)
+            // Recover a finalization for view 2 (one above the current view).
             let view = View::new(2);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(&[b"finalization_from_resolver"]),
+                Sha256::hash(&[b"recovered_finalization_is_reported"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Finalization(finalization.clone()));
@@ -3819,25 +3819,31 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_finalization_from_resolver() {
-        finalization_from_resolver::<_, _, Random>(
+    fn test_recovered_finalization_is_reported() {
+        recovered_finalization_is_reported::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
-        finalization_from_resolver::<_, _, Random>(
+        recovered_finalization_is_reported::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
-        finalization_from_resolver::<_, _, RoundRobin>(
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
-        finalization_from_resolver::<_, _, RoundRobin>(
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
-        finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
-        finalization_from_resolver::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
+            ed25519::fixture,
+            RoundRobin::default(),
+        );
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
+            secp256r1::fixture,
+            RoundRobin::default(),
+        );
     }
 
     /// Regression: a voter that misses one mid-term notarization must request
@@ -6700,7 +6706,7 @@ mod tests {
             )
             .await;
 
-            // Capture the leader's local notarize so we can resolve the matching
+            // Capture the leader's local notarize so we can deliver the matching
             // notarization back into the voter to drive certification.
             let proposal = loop {
                 match batcher_receiver.recv().await.unwrap() {
@@ -6718,7 +6724,7 @@ mod tests {
                 .recovered(Certificate::Notarization(notarization));
 
             // A finalize for the leader-owned view proves the voter certified its
-            // own proposal without consulting the automaton.
+            // own proposal.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
@@ -6731,7 +6737,7 @@ mod tests {
                         if nullify.view() == target_view =>
                     {
                         panic!(
-                            "leader-owned proposal should certify locally instead of nullifying view {target_view}"
+                            "leader-owned proposal should certify instead of nullifying view {target_view}"
                         );
                     }
                     batcher::Message::Update { .. } => {},
@@ -6973,7 +6979,7 @@ mod tests {
                 }
             }
 
-            // Resolve the matching notarization to drive certification on the
+            // Deliver the matching notarization to drive certification on the
             // restarted voter.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
@@ -6993,7 +6999,7 @@ mod tests {
                         if nullify.view() == target_view =>
                     {
                         panic!(
-                            "leader-owned recovered proposal should certify locally instead of nullifying view {target_view}"
+                            "leader-owned recovered proposal should certify instead of nullifying view {target_view}"
                         );
                     }
                     batcher::Message::Update { .. } => {},
