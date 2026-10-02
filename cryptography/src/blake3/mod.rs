@@ -215,6 +215,10 @@ impl Hasher for Blake3 {
     }
 
     fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(digests) = simd::hash_many(messages) {
+            return digests;
+        }
         messages
             .iter()
             .map(|message| one(message.as_ref()))
