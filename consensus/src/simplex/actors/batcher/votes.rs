@@ -87,8 +87,8 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Creates a tracker sized for `participants` validators.
     ///
     /// When `retain_votes_after_certification` is false, full votes are released
-    /// once their phase certifies. Otherwise they remain until explicitly cleared
-    /// or the tracker is dropped.
+    /// once their phase certifies. Otherwise they remain until the tracker is
+    /// dropped.
     pub(super) const fn new(participants: usize, retain_votes_after_certification: bool) -> Self {
         Self {
             participants,
@@ -142,7 +142,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Records one phase according to its full-to-compact storage lifecycle.
     ///
     /// A full phase owns duplicate detection and full-vote storage. A compacted
-    /// phase retains only signer facts until explicitly cleared.
+    /// phase retains only signer facts.
     fn record_phase<T: Attributable + Clone>(
         participants: usize,
         compacted: &mut Vec<u8>,
@@ -446,17 +446,29 @@ mod tests {
 
         // A certificate can arrive before any individual votes. Subsequent votes
         // must use compact storage instead of recreating the released full map.
+        let finalize =
+            Vote::Finalize(Finalize::sign(&fixture.schemes[0], proposal.clone()).unwrap());
         let mut certificate_first = VoteTracker::new(2, false);
         certificate_first.release_notarizes(&proposal);
-        assert!(matches!(
-            certificate_first.record(&vote, Some(&proposal)),
-            Outcome::Added { retained: false }
-        ));
+        certificate_first.release_finalizes(&proposal);
+        for vote in [&vote, &finalize] {
+            assert!(matches!(
+                certificate_first.record(vote, Some(&proposal)),
+                Outcome::Added { retained: false }
+            ));
+        }
         assert!(matches!(&certificate_first.notarizes, Phase::Compacted));
-        assert!(matches!(
-            certificate_first.record(&vote, Some(&proposal)),
-            Outcome::Duplicate { retained: false }
-        ));
+        assert!(matches!(&certificate_first.finalizes, Phase::Compacted));
+
+        // Compact records still mark signers that have the proposal.
+        assert!(certificate_first.has_notarize_for(signer, &proposal));
+        assert!(certificate_first.has_finalize_for(signer, &proposal));
+        for vote in [&vote, &finalize] {
+            assert!(matches!(
+                certificate_first.record(vote, Some(&proposal)),
+                Outcome::Duplicate { retained: false }
+            ));
+        }
 
         let mut retaining = VoteTracker::new(2, true);
         assert!(matches!(
