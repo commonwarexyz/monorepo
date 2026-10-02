@@ -409,7 +409,7 @@ mod tests {
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_utils::{test_rng, union_unique};
 
     #[test]
     fn test_codec_private_key() {
@@ -481,6 +481,59 @@ mod tests {
     fn batch_verify_empty() {
         let batch = Batch::new(0);
         assert!(!batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn batch_verify_valid() {
+        let mut rng = test_rng();
+        let mut batch = Batch::new(3);
+        for i in 0..3u8 {
+            let key = PrivateKey::random(&mut rng);
+            let message = [i; 8];
+            let signature = key.sign(b"namespace", &message);
+            assert!(batch.add(b"namespace", &message, &key.public_key(), &signature));
+        }
+        assert!(batch.verify(&mut rng, &Sequential));
+    }
+
+    #[test]
+    fn batch_verify_invalid() {
+        // One signature over the wrong message fails the batch, wherever it is added.
+        let mut rng = test_rng();
+        let keys: Vec<_> = (0..3).map(|_| PrivateKey::random(&mut rng)).collect();
+        for invalid in 0..keys.len() {
+            let mut batch = Batch::new(keys.len());
+            for (i, key) in keys.iter().enumerate() {
+                let message = [i as u8; 8];
+                let signed = if i == invalid { [0xff; 8] } else { message };
+                let signature = key.sign(b"namespace", &signed);
+                batch.add(b"namespace", &message, &key.public_key(), &signature);
+            }
+            assert!(!batch.verify(&mut rng, &Sequential));
+        }
+    }
+
+    #[test]
+    fn batch_framing_matches_union_unique() {
+        // Namespaced batching must verify the same bytes as an explicitly framed raw signature.
+        let mut rng = test_rng();
+        let private = Private::random(&mut rng);
+        let namespace = b"namespace";
+        let message = b"message";
+        let signature = Signature::from(ops::sign::<MinPk>(
+            &private,
+            MinPk::MESSAGE,
+            &union_unique(namespace, message),
+        ));
+        let public_key = PrivateKey::from(private).public_key();
+        for supplied_namespace in [namespace.as_slice(), b"other"] {
+            let mut batch = Batch::new(1);
+            batch.add(supplied_namespace, message, &public_key, &signature);
+            assert_eq!(
+                batch.verify(&mut rng, &Sequential),
+                supplied_namespace == namespace,
+            );
+        }
     }
 
     #[cfg(feature = "arbitrary")]
