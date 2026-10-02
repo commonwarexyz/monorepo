@@ -23,17 +23,24 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
-use commonware_macros::boxed;
+use commonware_macros::{boxed, select};
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range};
+use commonware_utils::{
+    NZU16, NZU64, NZUsize, TestRng,
+    channel::{mpsc, oneshot},
+    non_empty_range,
+    sync::Mutex,
+};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    pin::pin,
     sync::Arc,
+    time::Duration,
 };
 
 pub(crate) type DbOf<H> = <H as SyncTestHarness>::Db;
@@ -537,6 +544,114 @@ where
 
         H::destroy(synced_db).await;
         H::destroy(target_db).await;
+    });
+}
+
+struct DelayedBoundary<S> {
+    source: S,
+    gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+impl<S: Source<Op: Send>> Source for DelayedBoundary<S> {
+    type Family = S::Family;
+    type Digest = S::Digest;
+    type Op = S::Op;
+    type Error = S::Error;
+
+    async fn serve(&self, request: sync::Request<Self::Family>) -> sync::source::Result<Self> {
+        let response = self.source.serve(request).await?;
+        if matches!(request, sync::Request::Boundary { .. }) {
+            let (requested, release) = self
+                .gate
+                .lock()
+                .take()
+                .expect("the unchanged boundary must not be fetched again");
+            requested.send(()).unwrap();
+            release.await.unwrap();
+        }
+        Ok(response)
+    }
+}
+
+pub(crate) fn test_target_updates_preserve_delayed_boundary<H: SyncTestHarness>()
+where
+    OpOf<H>: Encode + Clone + Send + Sync,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::timed(Duration::from_secs(30));
+    executor.start(|context| async move {
+        let target_db = H::init_db(context.child("target")).await;
+        let target_db = H::apply_ops(target_db, H::create_ops(20), None).await;
+        let target_db = H::prune(target_db, Location::new(5)).await;
+        let start = H::bounds(&target_db).start;
+        assert!(*start > 0);
+        let initial_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(start, H::bounds(&target_db).end),
+        };
+        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 1), None).await;
+        let next_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(start, H::bounds(&target_db).end),
+        };
+        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 2), None).await;
+        let final_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(start, H::bounds(&target_db).end),
+        };
+        let target_db = Arc::new(target_db);
+        let (requested_tx, requested_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config("delayed_boundary", &context),
+            target: initial_target,
+            source: DelayedBoundary {
+                source: target_db.clone(),
+                gate: Mutex::new(Some((requested_tx, release_rx))),
+            },
+            fetch_batch_size: NZU64!(4),
+            max_outstanding_requests: 1,
+            apply_batch_size: NZU64!(4),
+            update_rx: Some(update_rx),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 1,
+        };
+        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+
+        // Hold a real boundary proof until the engine has processed the first update.
+        let client = {
+            let mut step = pin!(client.step());
+            select! {
+                requested = requested_rx => requested.unwrap(),
+                _ = step.as_mut() => panic!("the boundary response must remain pending"),
+            }
+            update_tx.send(next_target).await.unwrap();
+            match step.await.unwrap() {
+                NextStep::Continue(client) => client,
+                NextStep::Complete(_) => panic!("client should not be complete"),
+            }
+        };
+        release_tx
+            .send(())
+            .expect("retained boundary request was cancelled");
+        let client = match client.step().await.unwrap() {
+            NextStep::Continue(client) => client,
+            NextStep::Complete(_) => panic!("client should not be complete"),
+        };
+        assert_eq!(Contiguous::bounds(client.journal()).end, *start + 1);
+
+        // The boundary is now verified and applied. Evict its original root before finishing.
+        update_tx.send(final_target.clone()).await.unwrap();
+        drop(update_tx);
+        let synced = client.sync().await.unwrap();
+        assert_eq!(H::db_root(&synced), final_target.root);
+        assert_eq!(H::bounds(&synced), start..final_target.range.end());
+        H::destroy(synced).await;
+        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("single source"))).await;
     });
 }
 
@@ -1145,6 +1260,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_target_update_during_sync() {
                 super::test_target_update_during_sync::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_updates_preserve_delayed_boundary() {
+                super::test_target_updates_preserve_delayed_boundary::<$harness>();
             }
 
             #[test]

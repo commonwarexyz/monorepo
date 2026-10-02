@@ -428,8 +428,8 @@ where
 
     /// Reset sync state for a target update.
     ///
-    /// Retains only operation requests beyond the new lower bound whose captured verification
-    /// roots are still covered by the configured retention window.
+    /// Retains requests whose verification roots remain in the retention window, keeping
+    /// the new boundary free for pinned-node fetching when the lower bound advances.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
@@ -449,17 +449,12 @@ where
             }
         }
 
-        // Preserve fetches for retained targets at or beyond the new lower bound;
-        // their late responses verify against retained roots. A boundary request at
-        // the unchanged start also survives (it seeds the journal position), while
-        // one whose start moved is cancelled so the fresh size can fetch pinned nodes.
+        // Requests at a moved boundary must leave room for fetching its pinned nodes.
+        // An unchanged boundary can still use a response from a retained root.
         let new_start = new_target.range.start();
         self.outstanding_requests.retain(|request| {
-            let eligible = match request {
-                Request::Operations { .. } => request.start() >= new_start,
-                Request::Boundary { start, .. } => *start == new_start,
-            };
-            eligible && self.retained_sizes.contains(&request.size())
+            (request.start() > new_start || (!start_moved && request.start() == new_start))
+                && self.retained_sizes.contains(&request.size())
         });
 
         self.target = new_target;
@@ -634,7 +629,7 @@ where
             Response::Boundary {
                 op, pinned_nodes, ..
             } => {
-                // A tracked boundary request belongs to the current target.
+                // A retained boundary response authenticates the current lower bound.
                 self.pinned_nodes = Some(pinned_nodes);
                 self.store_operations(start_loc, vec![op]);
             }
@@ -1087,6 +1082,37 @@ mod tests {
                 Err(Aborted)
             ));
             assert!(engine.outstanding_requests.contains(&Location::new(7)));
+            assert_eq!(engine.outstanding_requests.len(), 1);
+        });
+    }
+
+    #[test]
+    fn moved_floor_schedules_boundary_without_waiting_for_old_operation() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            config.max_outstanding_requests = 0;
+            config.max_retained_roots = 1;
+            let mut engine = Engine::new(config).await.unwrap();
+            let operation_id = insert_pending_request(
+                &mut engine,
+                Request::Operations {
+                    size: Location::new(10),
+                    start: Location::new(6),
+                    max_ops: NZU64!(1),
+                },
+            );
+            assert!(engine.outstanding_requests.contains(&Location::new(5)));
+
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(12)),
+            };
+            let mut engine = engine.reset_for_target_update(next).await.unwrap();
+            engine.schedule_requests();
+
+            assert!(engine.outstanding_requests.remove(operation_id).is_none());
+            assert!(!engine.outstanding_requests.contains(&Location::new(5)));
+            assert!(engine.outstanding_requests.contains(&Location::new(6)));
             assert_eq!(engine.outstanding_requests.len(), 1);
         });
     }
