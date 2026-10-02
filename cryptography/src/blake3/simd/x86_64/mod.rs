@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use blake3::{BLOCK_LEN, OUT_LEN};
 
 mod avx2;
+mod avx512;
 mod pair;
 mod row;
 
@@ -16,6 +17,13 @@ cfg_if::cfg_if! {
         #[inline]
         pub(super) fn supports_avx2() -> bool {
             std::arch::is_x86_feature_detected!("avx2")
+        }
+
+        /// Return whether AVX-512F and AVX-512BW are available.
+        #[inline]
+        fn supports_avx512() -> bool {
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
         }
 
         /// Return whether AVX-512F and AVX-512VL are available.
@@ -28,6 +36,11 @@ cfg_if::cfg_if! {
         /// Return whether AVX2 is statically enabled.
         pub(super) const fn supports_avx2() -> bool {
             cfg!(target_feature = "avx2")
+        }
+
+        /// Return whether AVX-512F and AVX-512BW are statically enabled.
+        const fn supports_avx512() -> bool {
+            cfg!(all(target_feature = "avx512f", target_feature = "avx512bw"))
         }
 
         /// Return whether AVX-512F and AVX-512VL are statically enabled.
@@ -87,6 +100,50 @@ fn gather(parts: &[&[u8]], buffer: &mut [u8; PAIR_LEN]) -> Option<usize> {
     Some(len)
 }
 
+/// AVX-512 kernels. A value exists only once AVX-512F and AVX-512BW are
+/// available.
+struct Avx512(());
+
+impl Avx512 {
+    /// Hash equal-length messages.
+    #[inline]
+    fn hash(&self, inputs: [&[u8]; 16], active: usize) -> [[u8; OUT_LEN]; 16] {
+        pair_batch(inputs, active).unwrap_or_else(|| {
+            // SAFETY: Construction establishes AVX-512F and AVX-512BW.
+            unsafe { avx512::hash_x16(inputs) }
+        })
+    }
+
+    /// Hash equal-length `messages` with their nodes packed into lanes (see
+    /// [`super::pack`]).
+    fn pack(&self, messages: &[&[u8]], digests: &mut Vec<Digest>) {
+        super::pack(self, messages, digests);
+    }
+}
+
+impl Nodes<16> for Avx512 {
+    fn leaves(&self, inputs: [&[u8]; 16], counters: [u64; 16], _: usize) -> [[u8; OUT_LEN]; 16] {
+        // SAFETY: AVX-512F availability was established on construction.
+        unsafe { avx512::leaves_x16(inputs, counters) }
+    }
+
+    fn tails(&self, inputs: [&[u8]; 16], _: usize) -> [[u8; OUT_LEN]; 16] {
+        // SAFETY: AVX-512F and AVX-512BW availability was established on
+        // construction.
+        unsafe { avx512::tails_x16(inputs) }
+    }
+
+    fn parents(
+        &self,
+        children: [&[u8; BLOCK_LEN]; 16],
+        root: u32,
+        _: usize,
+    ) -> [[u8; OUT_LEN]; 16] {
+        // SAFETY: AVX-512F availability was established on construction.
+        unsafe { avx512::parents_x16(children, root) }
+    }
+}
+
 /// AVX2 kernels. A value exists only once AVX2 is available.
 struct Avx2(());
 
@@ -115,13 +172,19 @@ impl Nodes<8> for Avx2 {
     }
 }
 
-/// Hash independent messages in batches of 8 (AVX2).
+/// Hash independent messages in batches of 16 (AVX-512) or 8 (AVX2).
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     if let [left, right] = messages
         && supports_avx2()
         && let Some(digests) = hash_two(left.as_ref(), right.as_ref())
     {
         return Some(digests);
+    }
+    if supports_avx512() {
+        let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
+        return Some(batch(messages, pack, |inputs, active| {
+            Avx512(()).hash(inputs, active)
+        }));
     }
     if supports_avx2() {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx2(()).pack(messages, digests);
@@ -232,6 +295,16 @@ mod tests {
     }
 
     #[test]
+    fn test_avx512_lanes_match_reference() {
+        if !supports_avx512() {
+            return;
+        }
+
+        // SAFETY: AVX-512F and AVX-512BW availability was checked above.
+        check_lanes::<16>(|inputs| unsafe { avx512::hash_x16(inputs) });
+    }
+
+    #[test]
     fn test_avx2_batch_matches_reference() {
         if !supports_avx2() {
             return;
@@ -243,6 +316,19 @@ mod tests {
                     // SAFETY: AVX2 availability was checked above.
                     unsafe { avx2::hash_x8(inputs) }
                 })
+            })
+        });
+    }
+
+    #[test]
+    fn test_avx512_batch_matches_reference() {
+        if !supports_avx512() {
+            return;
+        }
+        let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
+        check_batch(|messages| {
+            batch(messages, pack, |inputs, active| {
+                Avx512(()).hash(inputs, active)
             })
         });
     }
