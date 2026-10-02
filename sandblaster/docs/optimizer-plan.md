@@ -229,7 +229,8 @@ Owner: printer.
   oracle's `bench-release` profile (no overflow checks).
 - Under an `overflow-checks = true` profile (Commonware's release profile):
   - P18 is ≥ 1.5× faster (curve25519's F::mul measured 1.9× for the same
-    change);
+    change, *(third-party code)*: Commonware's F::mul with overflow checks
+    on vs off; the emitted P18 gain is 1.43–1.57×);
   - QMDB N=32 `verify` is no slower than under `bench-release` + 2%.
 - A debug build still traps an injected overflow (the DESIGN §10.3 oracle is
   intact).
@@ -451,7 +452,7 @@ noted.
 | No `height > MAX_HEIGHT` check | **Met on the verify path.** `merkle::reconstruct__portable` and `__sha2` are driven through `reconstruct_shape` and `reconstruct_checked`, and the fact `height ≤ 62` prunes the check (`opt_qmdb` asserts it). The clones behind the public `reconstruct_checked` and `reconstruct_shape` entry points still have it; the verify path no longer calls them |
 | No `nb + na ≥ 62` check | **Not met.** The check tests lengths of `list_take` slices whose counts come from saturating subtraction, `min` and bool-to-int casts; linear arithmetic over `shape`'s facts does not decide it, so neither the unfolding trial nor guard specialization removes it (design §6.4) |
 | N=1 `verify` ≤ 292 ns | **Met:** 0.869 of H2 in the same binary, 269.2 ns scaled to H2's recorded 309.8 (273.1 ns raw) |
-| Corpus P1, P2, P4, P6, P11, P13 within 1.25× of ideal | **Met** before the merge: P13 went from 12.9× to 1.00× in the O6 fix; P1–P11 were 0.97–1.03× in the verifier's run. Not re-run after the merge |
+| Corpus P1, P2, P4, P6, P11, P13 within 1.25× of ideal | **Met** before the merge (development set: measured on the program the feature was built for): P13 went from 12.9× to 1.00× in the O6 fix; P1–P11 were 0.97–1.03× in the verifier's run. Not re-run after the merge |
 | Must-reject R6, R7, R8 | **Met**, plus R28 (misstated enumeration arm) and R29 (wrong set-bit step). `opt_reject` 33/33 |
 | Summary lemma under a stable name | **Met:** `crate::merkle::shape_go::summary` |
 | Budgets | **Met:** `shape`'s loop summary took 11,063,271 steps (limit 5·10^8); G9 optimizer time 1.418× (N=32) and 1.434× (N=1) (limit 1.5×); peak RSS +193 / +184 MiB (limit 512 MiB) |
@@ -499,7 +500,10 @@ Owner: optimizer (sequences).
     `Specialized { link: Lemma }`.
 - **N=32** (the oracle `bench-release` table):
   - no production or deep workload is more than 1% slower than H2;
-  - generated/Commonware stays ≤ 0.77 on every workload;
+  - generated/Commonware stays ≤ 0.77 on every workload (a development-set
+    regression check, **not** an optimizer acceptance criterion: it compares
+    the QMDB port, a different fixed-shape program with hand-written hash
+    variants, with Commonware's generic verifier);
   - the geometric mean vs hand-written stays ≤ 0.95 (production) and ≤ 0.96
     (deep);
   - deep workloads are at least 3% faster than H2 on geometric mean.
@@ -530,11 +534,11 @@ H2 in the same binary times H2's recorded value.
 | N=1 `verify` ≤ 275 ns (ratio ≤ 0.8877 of H2's 309.8) | **Met:** 0.869 of H2 in the same binary, 269.2 ns scaled (273.1 ns raw); 0.944 of pre-H1 in the same run |
 | `shape`, `uint64`, `location`, `parse`, `reconstruct_finish` report `Specialized { link: Lemma }` | **Met** in both instances; 80/111 functions specialized |
 | N=32: no workload more than 1% slower than H2 | **Met** in a same-binary aligned A/B of the current emission (vMeasure, 9 rounds): worst workload 0.9913 of H2, A/A noise within 0.50% |
-| N=32: generated/Commonware ≤ 0.77 on every workload | **Met:** largest ratio 0.748 (oracle table on the final emission, 3 rounds); geometric means 0.671 (production) and 0.715 (deep) |
+| N=32: generated/Commonware ≤ 0.77 on every workload (development-set regression check, not an optimizer criterion: the port vs a different program) | **Met:** largest ratio 0.748 (oracle table on the final emission, 3 rounds); geometric means 0.671 (production) and 0.715 (deep) |
 | N=32: geometric mean vs hand-written ≤ 0.95 (production), ≤ 0.96 (deep) | **Met:** 0.900 (production) and 0.939 (deep), same table |
 | N=32: deep workloads ≥ 3% faster than H2 (geometric mean) | **Not met:** 0.981 of H2 (production 0.950), in the same aligned A/B |
 | G6; QMDB laws and obligations | **Met:** G6 passes; the strict verified builds prove every law and obligation (887 obligations proven, 141 definitions kernel-checked, in each instance) |
-| Corpus P7 ≥ 8× (0–3 words), ≥ 2× (0–60 words) | **Met** before the merge: 8.80× and 2.18× (verifier 9.41× and 2.10×). Not re-run after the merge |
+| Corpus P7 ≥ 8× (0–3 words), ≥ 2× (0–60 words) | **Met** before the merge (development set: measured on the program the feature was built for): 8.80× and 2.18× (verifier 9.41× and 2.10×). Not re-run after the merge |
 | Corpus P8 ≥ 1.1× | **Not met:** the code is the same as O1's. It needs a summary of the loop that builds the table plus a synthesized fold helper; `index_scanl` is ready in `seq.core` |
 | Must-reject R5, R9 | **Met**; `opt_reject` 33/33 |
 | Budgets: cold time ≤ 1.5×, RSS ≤ 512 MiB | **Met:** G9 1.418× (N=32) and 1.434× (N=1) of the O2 baseline, peak RSS +193 / +184 MiB |
@@ -587,10 +591,12 @@ Owners: optimizer (cost) + targets.
   - `shape` in the v3-scalar and v4 clones contains `lzcnt`, `popcnt` and
     `bzhi` or `shlx`;
   - the P1, P2, P4, P6, P11 and P13 clones contain `lzcnt`/`tzcnt`/`popcnt`.
-- **Cost model reproduces the M5 decisions:**
+- **Cost model: regression checks on three development-set decisions**
+  (accuracy is to be measured on the held-out decision set):
   - NEON SHA lanes are rejected;
   - SWAR varint is rejected;
-  - with the QMDB profile, the closed form beats set-bit iteration at N=32.
+  - a regression check on the development profile: with the QMDB profile,
+    the closed form beats set-bit iteration at N=32.
 - **Must-reject:** R21.
 - **Determinism:** `PROFILE.json` and the tuning hash are the only inputs that
   change choices (G1 variant test).
@@ -615,13 +621,13 @@ other agents running.
 
 | Item | Outcome |
 | --- | --- |
-| Corpus P3 → `count_ones` ≥ 8× | **Met:** 8.710× (default layout) and 8.698× (aligned), judged 8.698×, current/ideal 1.00; the aegraph rewrites the 64-step sum by `rules::count_ones_sum_u64_u32` (rung `Rewritten`, kernel-checked lemma link) |
+| Corpus P3 → `count_ones` ≥ 8× | **Met** (development set: measured on the program the feature was built for): 8.710× (default layout) and 8.698× (aligned), judged 8.698×, current/ideal 1.00; the aegraph rewrites the 64-step sum by `rules::count_ones_sum_u64_u32` (rung `Rewritten`, kernel-checked lemma link) |
 | Controls P9, P14 within 2% | **Met through identical machine code:** both compile to the same machine code as the O1 emission (`samecode.py`); the measured per-layout ratios on that code are placement noise (P9 at 16 words: 1.161 and 1.157 default, 0.879 aligned in the verifier's rerun), so they are not the evidence |
 | x86 asm: `shape` v3-scalar and v4 clones have `lzcnt`, `popcnt`, `bzhi`/`shlx` | **Met:** `lzcnt`, 2 `popcnt`, `shlx` (and 3 `shrx`) in both clones at the x86-64 baseline level, both instances; the portable `shape` has `bsr` |
 | x86 asm: P1, P2, P4, P6, P11, P13 clones have `lzcnt`/`tzcnt`/`popcnt` | **Met** for the `v3_scalar` and `v4` clones (P3's too); G7 asmcheck 166/166 |
 | Cost model: NEON SHA lanes rejected | **Met:** lanes 302.9 vs SHA2 150.0 cycles per block (M5 tables); measured 98.3 vs 30.5 ns/msg |
 | Cost model: SWAR varint rejected | **Met:** SWAR 5.890 vs unrolled 4.289 cycles; the measured rows agree (SWAR slower at 5 and 9 bytes, parity at 1–2) |
-| Cost model: closed form beats set-bit at N = 32 with the QMDB profile | **Met:** closed form 8.534, set-bit 87.821, early exit 265.423 cycles on the N = 32 samples (8.534 / 78.489 / 269.199 with both corpora, as a build merges them); the rungs are now ordered by cost |
+| Cost model: closed form beats set-bit at N = 32 with the QMDB profile (a regression check on the development profile) | **Met:** closed form 8.534, set-bit 87.821, early exit 265.423 cycles on the N = 32 samples (8.534 / 78.489 / 269.199 with both corpora, as a build merges them); the rungs are now ordered by cost |
 | Must-reject R21 | **Met (after the fixer's change):** the release binary with forced detection and every `lzcnt`/`tzcnt` patched to `bsr`/`bsf` runs under Rosetta 2: the patched clone alone is wrong (`bit_len(1)` = 64), the self-test fails and the portable code runs; the unpatched binary runs the clone; `opt_reject` 34/34. The self-test's checks go through `black_box` (as first built, LLVM folded them and a `bsr` CPU passed) and G7 asserts its instructions |
 | Determinism | **Met:** G1 byte-identical (three builds per instance, cold and warm); a changed tuning file changes the P3 choice and the cache key (`opt_egraph`), identical inputs give identical output |
 | O7 QMDB gate | **Met:** the aarch64 emission is the O7 emission plus the self-test glue, compiled out on Apple (G10: 125/173 identical, `has_sha2` listed); N = 1 `verify` 0.872 of H2 (270.1 ns scaled), `reconstruct_finish` 0.8286 (73.9 ns scaled, 0.1% margin), `shape` 2.41/2.39/2.39 ns; N = 32 same-binary (aligned, 7 rounds): worst workload 0.9917 of H2, A/A within 0.63% |
@@ -740,7 +746,7 @@ with other agents running.
 | x8 (AVX2) | **Met:** 14.1 M steps, +96 MiB; compiles for both triples; not dispatched |
 | NEON x4 SHA proven, then rejected by the M5 cost model | **Met:** 3.2 M steps, +44 MiB; 2484 vs 378 cycles for the SHA2 variant |
 | Shape-specialized x16 with a constant second block | **Met:** `hash64_x16`: 51.8 M steps, +264 MiB; not dispatched |
-| P12 ≥ 1.8× at 16 B and ≥ 6× at 256 B on aarch64 | **Met:** judged 2.555× and 6.643× (default and aligned layouts; the NEON search variant, `opt/par/search.rs`) |
+| P12 ≥ 1.8× at 16 B and ≥ 6× at 256 B on aarch64 | **Met** (development set: measured on the program the feature was built for): judged 2.555× and 6.643× (default and aligned layouts; the NEON search variant, `opt/par/search.rs`) |
 | SIMD `seq::eq` candidate | **Met:** generated, proven equal to the word form (`seqeq::neon_word_<n>`), rejected by the M5 tables (16 B: 22.2 vs 12.0 cycles; 32 B: 38.0 vs 21.4) |
 | Must-reject R16, R26 | **Met:** `opt_reject` 37/37 (R16: lanes 3/4 swapped, `lane_equiv` rejected; R26: a lane kernel without its host run, and a NEON variant with withheld model evidence) |
 | Budgets | **Met:** model consistency suite 133 s of test time; each lane proof ≤ 264 MiB |
@@ -865,7 +871,7 @@ pinned to `86b7ee8674`.
 
 **Acceptance** (M5, emitted code):
 - automatic subtree-parallel BMT/MMR build: ≥ 2.5× at 2^12 leaves and ≥ 6× at
-  2^16 (measured candidates 2.9× and 7.1×);
+  2^16 (measured *(hand-written candidates)* 2.9× and 7.1×);
 - batch 20-deep paths: ≥ 5.5× at K=1024 and ≥ 7× at K=4096 (measured candidates
   6.0× and 8.1×);
 - outputs are identical under `Sequential`, Rayon(4), Rayon(12) and `Scoped`
@@ -1087,6 +1093,16 @@ Owner: targets.
 
 ## 4. Target summary
 
+Every target below is measured on the development set (QMDB, the corpus,
+the programs the features were built for). They are regression gates: on
+their own they cannot justify a new feature, and none is evidence that the
+optimizer is general or beats rustc. The held-out evaluation
+(`sandblaster/bench/heldout/REPORT.md`, first run 2026-10-02) found the
+optimizer changes 0 of 31 held-out functions (optimizer-only geomean 1.02
+default layout, 1.005 aligned, vs rustc on the same source): no held-out loop
+reaches the optimizer (the MIR reader and exec-only elaboration refuse 28 of
+31). Repeat it at every milestone and publish it next to these targets.
+
 ### 4.1 QMDB (zero source changes; same-binary A/B on emitted code)
 
 | Milestone | `shape` N=1 / N=32 / uniform | `reconstruct_finish` | `parse` | N=1 `verify` | N=32 |
@@ -1094,7 +1110,7 @@ Owner: targets.
 | baseline H2 | 24.8 / 46.0 / 61.5 ns | 89.2 ns | 6.46 ns | 309.8 ns | — |
 | O5 | – | – | **≤ 1.7 ns** | ≤ H2 | no workload > H2 + 1% |
 | O6 | **≤ 2.6 ns each** | – | – | ≤ 292 ns | – |
-| O7 (regression gate) | – | **≤ 74 ns** | – | **≤ 275 ns** (pre-H1 284.0) | no workload > H2 + 1%; ≤ 0.77× Commonware; ≤ 0.95/0.96× hand-written; deep ≥ 3% faster |
+| O7 (regression gate) | – | **≤ 74 ns** | – | **≤ 275 ns** (pre-H1 284.0) | no workload > H2 + 1%; ≤ 0.77× Commonware (development-set regression only, not an optimizer criterion); ≤ 0.95/0.96× hand-written; deep ≥ 3% faster |
 | O8 | aarch64 `cssc`: ≤ 2.3 ns (if D2) | – | – | maintained | maintained |
 | O20 | x86: record | x86: record | x86: record | x86 A/B published | x86 A/B published |
 

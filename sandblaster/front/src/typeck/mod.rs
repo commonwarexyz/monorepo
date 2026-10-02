@@ -1088,8 +1088,9 @@ impl<'a> Checker<'a> {
             FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract", "contract_ensures", "lift_src"],
             FnKind::Exec => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern"],
             FnKind::Spec => &["spec", "requires", "decreases", "inline", "must_use", "example", "examples", "mirrors_impl", "assumption", "opaque"],
-            // `#[rewrite]` on a lemma: an optimization lemma (`f(x̄) == g(x̄)`,
-            // `driver::lowered`); proven, so it needs no human review
+            // `#[rewrite]` on a lemma: `f(x̄) == g(x̄)` naming a user-supplied
+            // alternative `g` (`driver::lowered`); proven, so it needs no
+            // correctness review, but it is user code, not optimizer output
             FnKind::Lemma => &["lemma", "decreases", "induction", "fuel_sufficient", "rewrite"],
             FnKind::Law => &["law", "rewrite", "induction", "reduces_to", "definitional", "corollary"],
             FnKind::Proof => &["proof", "decreases", "induction"],

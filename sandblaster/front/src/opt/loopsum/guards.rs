@@ -4,18 +4,25 @@
 //! separately (an EUSolver decision tree of depth one); the result is
 //! `ite(guard, E₁, E₂)`. Predicates for `FirstMatch` loops (when the payload
 //! is set, whether the result is set) are comparisons of two atoms.
+//!
+//! Every constant here comes from the loop ([`Pool`]): the thresholds of
+//! `xᵢ < c` are the loop's own comparison literals and the per-iteration
+//! boundaries of its shift amounts, and the template's divisors are the
+//! pool's (never a fixed list of one target's constants).
 
 use sandblaster_kernel::term::{PrimOp, Width};
 
 use super::expr::{self, E, Ty, Val};
+use super::pool::Pool;
 use super::synth;
 
 /// Guards tried for a depth-1 tree.
 pub const MAX_GUARDS: usize = 8;
 
-/// Candidate guards over the inputs: `xᵢ < c` and `xᵢ == c` for the
-/// constants, and `xᵢ < xⱼ`.
-fn candidate_guards(widths: &[Width]) -> Vec<E> {
+/// Candidate guards over the inputs, in the order tried: `xᵢ < xⱼ` (the
+/// loop's own tests between inputs), `xᵢ == 0`, then `xᵢ < c` for the
+/// pool's thresholds ([`Pool::thresholds`]).
+pub fn candidate_guards(widths: &[Width], pool: &Pool) -> Vec<E> {
     // the comparisons of two inputs first (the loop's own tests), then
     // `xᵢ == 0`, then `xᵢ < c`
     let mut out = Vec::new();
@@ -31,10 +38,8 @@ fn candidate_guards(widths: &[Width]) -> Vec<E> {
     }
     for (i, w) in widths.iter().enumerate() {
         let x = expr::var(i as u32, *w);
-        for c in [1u128, 2, 128, 1 << 14, 1 << 32] {
-            if c <= expr::mask(*w) {
-                out.push(expr::op2(PrimOp::Lt(*w), x.clone(), expr::lit(*w, c)));
-            }
+        for c in pool.thresholds(*w) {
+            out.push(expr::op2(PrimOp::Lt(*w), x.clone(), expr::lit(*w, c)));
         }
     }
     out
@@ -43,16 +48,16 @@ fn candidate_guards(widths: &[Width]) -> Vec<E> {
 /// A witness as one expression, or as `ite(guard, E₁, E₂)` over a
 /// candidate guard (each side synthesized on its part of the samples).
 /// Returns the expression and the classes enumerated.
-pub fn witness(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], max_size: usize) -> Option<(E, usize)> {
-    if let Some(e) = affine_atom(widths, inputs, target) {
+pub fn witness(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], max_size: usize, pool: &Pool) -> Option<(E, usize)> {
+    if let Some(e) = affine_atom(widths, inputs, target, pool) {
         return Some((e, 0));
     }
-    if let Some(f) = synth::synthesize_with(widths, inputs, target, Ty::W(Width::U32), max_size, &solvable) {
+    if let Some(f) = synth::synthesize_with(widths, inputs, target, Ty::W(Width::U32), max_size, pool, &solvable) {
         return Some((f.expr, f.candidates));
     }
     let mut total = 0usize;
     // (a bounded number of guards: a failing witness must fail fast)
-    for g in candidate_guards(widths).into_iter().take(MAX_GUARDS) {
+    for g in candidate_guards(widths, pool).into_iter().take(MAX_GUARDS) {
         let (mut ti, mut tt, mut fi, mut ft) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (x, t) in inputs.iter().zip(target) {
             match g.eval(x, None).and_then(|v| v.as_bool()) {
@@ -71,7 +76,7 @@ pub fn witness(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], max_size:
             continue;
         }
         let small = max_size.saturating_sub(2).max(1);
-        let (Some(a), Some(b)) = (synth::synthesize_with(widths, &ti, &tt, Ty::W(Width::U32), small, &solvable), synth::synthesize_with(widths, &fi, &ft, Ty::W(Width::U32), small, &solvable)) else { continue };
+        let (Some(a), Some(b)) = (synth::synthesize_with(widths, &ti, &tt, Ty::W(Width::U32), small, pool, &solvable), synth::synthesize_with(widths, &fi, &ft, Ty::W(Width::U32), small, pool, &solvable)) else { continue };
         total += a.candidates + b.candidates;
         return Some((expr::ite(g, a.expr, b.expr), total));
     }
@@ -97,9 +102,12 @@ pub fn solvable(e: &E) -> bool {
 /// The template library's shapes (design §7.4: proposed directly, the
 /// enumeration stays the general path): a witness `c ± A` or `(c − A) / k`
 /// for a bit-count atom `A` — `lz`, `tz` or `popcnt` of an input, of the
-/// `^`, `|` or `&` of two inputs, or of `x | 1`. Each candidate is checked
-/// on every sample.
-pub fn affine_atom(widths: &[Width], inputs: &[Vec<u128>], target: &[Val]) -> Option<E> {
+/// `^` of two inputs, or of `x | 1` (the generic operand that makes `lz`
+/// and `tz` total) — with `k` one of the pool's divisors
+/// ([`Pool::divisors`]: `2`, the loop's shift amounts and literal
+/// divisors). The offset `c` is solved from the samples. Each candidate is
+/// checked on every sample.
+pub fn affine_atom(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], pool: &Pool) -> Option<E> {
     let n = widths.len();
     let mut operands: Vec<E> = (0..n).map(|i| expr::var(i as u32, widths[i])).collect();
     for i in 0..n {
@@ -139,12 +147,11 @@ pub fn affine_atom(widths: &[Width], inputs: &[Vec<u128>], target: &[Val]) -> Op
                 }
             }
             // t = (c − a) / k
-            for k in 2..=8i128 {
-                let lo = k * tv[0] + av[0];
-                for c in lo..lo + k {
-                    if c < 0 {
-                        continue;
-                    }
+            for k in pool.divisors().into_iter().filter_map(|k| i128::try_from(k).ok()).filter(|k| *k > 1 && *k <= 1 << 64) {
+                // the offsets every sample allows: `k·t + a ≤ c < k·t + a + k`
+                let lo = av.iter().zip(&tv).map(|(a, t)| k * t + a).max().unwrap_or(0).max(0);
+                let hi = av.iter().zip(&tv).map(|(a, t)| k * t + a + k).min().unwrap_or(0);
+                for c in lo..hi {
                     if av.iter().zip(&tv).all(|(a, t)| c - a >= 0 && (c - a) / k == *t) {
                         let e = std::rc::Rc::new(super::expr::CE::DivLit(expr::op2(PrimOp::WSub(Width::U32), u32l(c), a.clone()), k as u128));
                         if check(&e) {

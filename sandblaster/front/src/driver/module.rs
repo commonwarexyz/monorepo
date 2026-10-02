@@ -291,6 +291,7 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
         }
     }
     o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_STRICT_OPT".into());
+    o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES".into());
     o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_MEM_LIMIT_GB".into());
     o.cargo.push("cargo::rerun-if-env-changed=RUSTC".into());
     let code_path = out_dir.join(format!("{out}.rs"));

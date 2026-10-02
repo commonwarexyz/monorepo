@@ -1,0 +1,9 @@
+[heldout] out: sandblaster/bench/heldout-harness/results/latest; load: 6.10 5.61 4.17; rounds: 31
+[heldout] optimizer: 0 of 31 functions changed
+[heldout] [default-release] building
+[heldout] [default-release] load before: 4.23 5.13 4.11; after: 4.13 5.10 4.10
+[heldout] [align-release] building
+[heldout] [align-release] load before: 4.12 5.08 4.10; after: 4.03 5.04 4.09
+[heldout] [default-release-nooc] building
+[heldout] [default-release-nooc] load before: 3.95 5.01 4.09; after: 3.87 4.98 4.08
+[heldout] wrote sandblaster/bench/heldout/REPORT.md; done in 101 s

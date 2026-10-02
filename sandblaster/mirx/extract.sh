@@ -24,7 +24,8 @@
 # * --instance: open traits read at one instance (SEMANTICS.md §19.6);
 # * --skip-traits: impls of these traits are not extracted (host code);
 # * --inject: a DSL module compiled as `mod name;` of the crate root (the
-#   `#[lift(opt)]` alternatives, in the crate's context);
+#   verifier's `instances.rs`; a crate's `#[lift(opt)]` module of user
+#   alternatives, when it has one, in the crate's context);
 # * --replace: compile a source as if it had another file's text (the lifted
 #   round trip's copy of a rewritten file, DESIGN.md §2.1); its SHA-256 is
 #   that text's;
@@ -34,12 +35,13 @@
 # * --manifest: the package is in another workspace than the monorepo's (the
 #   toolchain's own test fixtures, sandblaster/front/tests/mir_fixtures).
 #
-#   sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,opt \
-#       storage/sandblaster/mmr/mmr.sbmir \
+#   sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,merkle::hasher,merkle::proof \
+#       storage/sandblaster/verifier/verifier.sbmir \
 #       --stub mmr-lowered__merkle__mmr__iterator.rs=storage/src/merkle/mmr/iterator.rs \
 #       --stubs 'commonware_codec:varint.rs=codec/sandblaster/varint/varint.rs' \
-#       --instance Family=merkle::mmr::Family,Graftable=merkle::mmr::Family \
-#       --skip-traits Debug,Display,Hash --inject opt=storage/sandblaster/mmr/opt.rs
+#       --instance 'Family=merkle::mmr::Family,..' --skip-traits Debug,Display,Hash \
+#       --inject instances=storage/sandblaster/verifier/instances.rs --items '..' --skip-fns '..'
+#   (the full command, and the MMR's, are in the README)
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 pkg="$1"; module="$2"; out="$3"; shift 3

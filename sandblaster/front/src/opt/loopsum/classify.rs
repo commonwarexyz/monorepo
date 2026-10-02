@@ -292,7 +292,10 @@ pub enum Class {
     /// `v − w` when `v ≥ w`, else `v`; `w` (parameter `wp`) a static halving
     /// power of two, `2^e` at the call.
     BitDigit { wp: u32, e: u32 },
-    /// `c + 1` exactly on the peak paths of the `BitDigit` `v`.
+    /// `c + 1` exactly on the peak paths of the `BitDigit` `v`. (Structural,
+    /// but built for one development shape, the MMR/QMDB peak walk;
+    /// fairness audit J14: its hit count on the held-out set is to be
+    /// reported, plan step 8.)
     GuardCount { v: u32 },
     /// Determined by a linear relation `Σ cᵢ·xᵢ = const` over classified
     /// parameters, with coefficient `±1` on this one.
@@ -304,6 +307,8 @@ pub enum Class {
     /// `thr` (a `Const` parameter: `idx > thr`, or `idx ≥ thr` when not
     /// `strict`) and bit `idx` of the `Const` parameter `src` is set; `c`
     /// otherwise (plan O6: corpus P13, "set bits above position k").
+    /// Structural, but built for that one program (fairness audit J14: its
+    /// held-out hit count is to be reported, plan step 8).
     MaskedCount { idx: u32, src: u32, thr: u32, strict: bool },
     Unknown(String),
 }

@@ -21,6 +21,14 @@
 //!   lemmas the aegraph's explanations use to rewrite an operand of a
 //!   checked operation, whose proof slot mentions that operand.
 //!
+//! **One idiom deep** (fairness audit of 2026-10-02, J14): the rule library
+//! is the bit-sum template alone, written for corpus P3. It is structural
+//! (every width, matched modulo `bvnorm`), but one development-set idiom is
+//! not evidence of a general aegraph: grow it by mining code (held-out or
+//! development), never by adding one template per corpus program, and
+//! report how often `Rewritten` fires on the held-out set (plan step 8)
+//! before claiming generality.
+//!
 //! **Trust.** None: the build never runs rulegen. It loads the files and the
 //! kernel checks every lemma again on every build that uses them
 //! (`opt::egraph::rules::ensure`); a wrong rule cannot be loaded.

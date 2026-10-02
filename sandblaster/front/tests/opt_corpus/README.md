@@ -17,9 +17,18 @@ plan §4.2.
 
 **Frozen.** Everything above the `// ---- additions` line of `dsl/mod.rs`, every
 program file and the three candidate files are frozen (gate G6,
-`tools/gates/g6.sh`). New programs are added as new files with a `pub mod`
-line after the marker, then recorded with `tools/gates/g6.sh --record` (which
-only appends).
+`sandblaster/tools/gates/g6.sh`, with the harness's O1 emission and
+hand-written references and the QMDB fixture). New programs are added as new
+files with a `pub mod` line after the marker, then recorded with
+`sandblaster/tools/gates/g6.sh --record` (which only appends).
+
+**Development set.** The corpus is where the optimizer was developed: many
+programs restate the benchmark targets (P4 the MMR peak walk, P5/P6 varints,
+P7 QMDB's peak buffer, P16 Merkle paths, P17 Reed–Solomon's GF(2^16), P18 the
+curve25519 carry chain), and features were built per program. Its results
+are development-set numbers: regression evidence, never evidence of
+generality, which only the held-out evaluation gives (fairness audit of
+2026-10-02; DESIGN.md §8.2 item 11).
 
 **Tests.**
 - `tests/opt_explore.rs` (`corpus_outcomes_match_the_manifest`): the strict

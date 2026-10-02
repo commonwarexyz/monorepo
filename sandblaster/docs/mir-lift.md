@@ -2,8 +2,8 @@
 
 Status: prototype; every exec module of the repository reads its bodies
 through it: commonware-codec's varint with its laws and proofs unchanged,
-commonware-storage's MMR position and peak arithmetic (in place, with its
-`#[rewrite]` alternatives) with its laws unchanged and one proof lemma
+commonware-storage's MMR position and peak arithmetic (in place) with its
+laws unchanged and one proof lemma
 restated in the MIR's shape, and the first set of storage's Merkle proof
 verifier (`hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree
 reconstruction, in place) with its laws and proofs unchanged. The source
@@ -148,8 +148,9 @@ and lifted names, exactly as before.
 * **In place and the lifted round trip** (DESIGN.md §2.1). An in-place crate
   is extracted as a whole (`merkle::position,merkle::location,merkle::mmr`,
   its lowered copies stubbed by the sources, the dependencies' verifying
-  build scripts stubbed, `#[lift(opt)]` alternatives compiled in the
-  crate's context by `--inject`). The lifted round trip reads back a copy of
+  build scripts stubbed; a crate's `#[lift(opt)]` alternatives, when it has
+  any, compiled in the crate's context by `--inject` — storage's MMR has
+  none). The lifted round trip reads back a copy of
   a rewritten file (the source, the rewritten functions' copies, the
   helpers); its bodies must be rustc's too, so the round trip of a MIR
   module reads `<stem>.roundtrip__<module>.sbmir`, the extraction of the
@@ -157,7 +158,9 @@ and lifted names, exactly as before.
   the copy to `OUT_DIR/<name>-roundtrip__<module>.rs`). The load checks the
   copy's SHA-256 like any source, so a stale round-trip MIR fails the round
   trip, and a host that compiles the file's lowered copy fails its build
-  (fail closed); re-extract and build again.
+  (fail closed); re-extract and build again. A file with no rewritten
+  function has no round-trip copy and needs no round-trip MIR (storage's
+  MMR today).
 
 ## 4. What works
 
@@ -175,14 +178,21 @@ and lifted names, exactly as before.
   48 laws, 21,241 obligations, 0 failed (21,247 before the reader changes of the MMR's move: comparisons of literals fold, a panicking path is one obligation).
 * A misreading is caught: reading one constant of `write`'s MIR wrong
   (`len += 2` for `len += 1`) makes the laws fail (see §5).
-* commonware-storage's MMR (`storage/sandblaster/mmr`, in place): all 102
-  lifted exec functions of `position.rs`, `location.rs`, `mmr/mod.rs`,
-  `mmr/iterator.rs` and the `#[rewrite]` alternatives of `opt.rs`, read from
-  `mmr.sbmir`: 5,602 obligations and the 10 laws proven (the source lift:
-  5,589); the optimizer still rewrites `PeakIterator::to_nearest_size` to
-  `opt::to_nearest_size_fast`, the lifted round trip reads the copy from
-  `mmr.roundtrip__merkle__mmr__iterator.sbmir` and passes, and rustc
-  compiles the lowered copy. LAWS.rs is unchanged; PROOF.rs changes in one
+* commonware-storage's MMR (`storage/sandblaster/mmr`, in place): all
+  lifted exec functions of `position.rs`, `location.rs`, `mmr/mod.rs` and
+  `mmr/iterator.rs`, read from `mmr.sbmir`, with every obligation and the
+  laws proven. **No MMR function is rewritten**: the optimizer finds no
+  cheaper residual for any of them (the build report's `lifted_optimizer`
+  gives each function's reason), so the lowered copy of `mmr/iterator.rs`
+  that rustc compiles (the host declares it by its lowered declaration) is
+  `mmr/iterator.rs` byte for byte after its leading `//!` lines, and there
+  is no round-trip copy to extract. (A hand-written proven alternative of
+  `PeakIterator::to_nearest_size`, `opt.rs`, used to replace it through a
+  `#[rewrite]` lemma; it was user code, not optimizer output, and is
+  removed: DESIGN.md principle 3. It measured about 40× faster than the
+  original binary search on uniform-bit-length sizes, in a harness without
+  an A/A control; that is not an optimizer result and is not reproducible
+  from the current tree.) LAWS.rs is unchanged; PROOF.rs changes in one
   place (below). The lift conformance check of the in-place modules passes
   on the MIR-read bodies (§5). Its harness compiles a copy of the host crate
   without a build script, so a lowered declaration (`mod m {
@@ -244,7 +254,7 @@ and lifted names, exactly as before.
 | trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884** | after §6 step 5 (checked structuring): L's generator `mir/literal.rs` 1,217 + `literal.core` 139 + `mir/stmt.rs` 210 + `mir/mod.rs` 491 + the parse `ir.rs` 482 + `sexp.rs` 131 = **2,670**, printer `mirx` 1,131 → **3,801**, plus the gate's trusted check `gate.rs` 164 (≈ 189 with its call sites), the elaborator's precondition check 39 and the lift glue ≈ 260 (`read.rs` untrusted) → **≈ 4,289** (≈ 4,972 at the first stage that made `read.rs` untrusted); before it: `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
 | grows with | every surface feature (each port added ~2k) | new MIR constructs only (the MMR survey added intrinsics, `Cmp`, unsizing, reference constants, iterator models: ≈ 0.2k; moving the MMR ≈ 0.5k; moving the verifier ≈ 0.3k: host models, open-trait instances and items in the printer, `Option<&mut T>` states, field write-back) |
 | untrusted support | — | after §6 step 5: the structurer `read.rs` 2,433, `cfg.rs` 298 (with L's ranks, loop headers and panicking blocks), the walker `simproof.rs` 4,565 and `checked.rs` (all of it untrusted since the trusted check moved to `gate.rs`); before: `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
-| MMR laws / proof lines adapted | 10 laws, PROOF.rs 4,074 lines | LAWS.rs unchanged; PROOF.rs: one lemma's `ensures` (`ptl_pick`, the candidate tests of `position_to_location`) restated in the MIR's shape, 9 lines replaced by 16 (+2 comment lines); `opt.rs`: the host file's imports (`use crate::merkle::Family as _`, 3 lines → 6 with a comment), so that rustc compiles it |
+| MMR laws / proof lines adapted | 10 laws, PROOF.rs 4,074 lines | LAWS.rs unchanged; PROOF.rs: one lemma's `ensures` (`ptl_pick`, the candidate tests of `position_to_location`) restated in the MIR's shape, 9 lines replaced by 16 (+2 comment lines) |
 | MMR obligations / definitions / laws | 5,589 / 724 / 10 | 5,602 / 724 / 10 (every obligation and law proven) |
 | MMR `sandblaster check` (proofs, gates up to the missing lock) | 226 s | 231 s |
 | verifier (set 1) laws / proof lines adapted | 5 laws, PROOF.rs 442 lines | **0** lines changed (LAWS.rs, PROOF.rs unchanged); `merkle.rs`: `mir = "verifier.sbmir"` on the five in-place declarations; new `instances.rs` (the extraction's instances) |
@@ -301,7 +311,8 @@ Moving the MMR also found: core's `checked_add` tests the overflow flag of
 obligation), named constants (`Family::MAX_NODES`, a value of a type with
 private fields) are the lifted constants they name, references to
 constants are references, and comparisons of literals fold. After the
-move the survey reads 84 of 92 roots (7 new: `opt.rs`); the 8 others are
+move the survey reads 77 of 85 roots (the 7 roots of the removed `opt.rs`
+alternatives not counted); the 8 others are
 the 6 codec impls the MMR leaves out (`unverified_impls`) and the 2
 `TryFrom` impls, which build the host model `Error<F>` the survey tool
 does not declare (the lift reads them).
@@ -310,8 +321,7 @@ does not declare (the lift reads them).
 
 1. **Now** (this prototype): bodies from MIR for module-mode crates;
    the source lift keeps the skeleton and the ghost language.
-2. **MMR** (done, in place, with its `#[rewrite]` alternatives and the
-   round trip's MIR) **and verifier** (set 1 done, in place; §4): multi-module extraction (done in the
+2. **MMR** (done, in place) **and verifier** (set 1 done, in place; §4): multi-module extraction (done in the
    driver: `SBMIR_MODULE="a,b"`, open-trait instances `SBMIR_INSTANCE`),
    leaves for core's range iterators (then the lift prelude's `RangeU64`
    model, deleted in step 3: `Range::next`'s MIR goes through
@@ -383,7 +393,7 @@ does not declare (the lift reads them).
    a kernel-checked theorem per lifted function (§20.5) equates it with the
    structured reading, which `read.rs` now only proposes. Every verified
    build checks every lifted function's theorem (the gate, §20.6: varint
-   63 of 63, the MMR 76 of 76, the verifier's set 1 69 of 69), the lifted
+   63 of 63, the MMR 69 of 69, the verifier's set 1 69 of 69), the lifted
    round trip proves the shipped copy's theorem (§20.7), the theorems are
    cached in the verdict cache, the lift conformance check runs L against
    rustc as well as S (§20.8), and fault injection shows the theorems catch

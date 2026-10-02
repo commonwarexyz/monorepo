@@ -25,7 +25,8 @@
 //!   reading whose names another extraction's reading took over is refused.
 //!
 //! On storage: every lifted function of the verifier's first set (69), and
-//! of the MMR (76, with the model lemma of core's `u64::div_ceil`).
+//! of the MMR (69, with the model lemma of core's `u64::div_ceil`; no
+//! optimization alternative, so no rewritten function).
 //! The shipped code's theorems of the lifted round trip (§20.7) are tested
 //! in `tests/lowered_use.rs`.
 
@@ -266,7 +267,7 @@ fn the_mmr_functions_of_this_stage_have_their_theorems() {
         assert!(o.result.is_ok(), "`{w}`: {:?}", o.result);
     }
     assert!(m.outcomes.iter().any(|o| o.kind == "model lemma" && o.global == "u64::div_ceil" && o.result.is_ok()));
-    assert_eq!((m.functions(), m.proven()), (76, 76), "missing: {:?}", m.missing);
+    assert_eq!((m.functions(), m.proven()), (69, 69), "missing: {:?}", m.missing);
 }
 
 // ---------------------------------------------------------------------------

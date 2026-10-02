@@ -3,8 +3,8 @@
 //! `sandblaster profile` runs the portable semantics — the kernel's
 //! reference evaluator — over a crate's declared corpora (benchmark
 //! fixtures, test vectors) and records, for every **loop head** (a user
-//! recursion that some body calls with a literal measure above the driver's
-//! unroll limit: what Σ2 summarizes), the argument values it is entered
+//! recursion that some body calls with a literal measure the driver does not
+//! unroll, `drive::unroll_pays`: what Σ2 summarizes), the argument values it is entered
 //! with. The entry function is evaluated with the loop heads folded and
 //! then resumed application by application ([`collect`]), so every loop
 //! call is observed with its actual arguments; the program is not changed.
@@ -16,6 +16,15 @@
 //! §7.3 (a)). Without it the traces are the seeded corner samples alone.
 //! Untrusted: a profile can only change which candidates are tried, never
 //! what is admitted.
+//!
+//! **Train ≠ test** (fairness audit of 2026-10-02, J8). A corpus is a
+//! directory of fixtures or a **split manifest** (a `.txt` file: one fixture
+//! path per line, relative to the manifest, `#` comments; QMDB's are
+//! `fixtures/qmdb/splits/*-profile.txt`, every second fixture by name). The
+//! profile is recorded on a profile half only and the benchmark times the
+//! other half: [`Profile::check_timed`] refuses any timed input that lies in
+//! a corpus an entry was recorded on, and every report states whether a
+//! profile was used (its hash keys the proof cache and is reported).
 //!
 //! Format (`sandblaster-profile/1`): `{"format", "entries": [{"root",
 //! "entry", "corpora", "fixtures", "loops": [{"loop": "<path>", "calls": n,
@@ -181,9 +190,9 @@ pub fn for_root(fs: &dyn crate::loader::FileProvider, root: &Path) -> Option<(Pa
 }
 
 /// The loop heads of a crate (see the module docs): user recursions with a
-/// measure parameter that some body calls with a literal above
-/// `max_static_trips`.
-pub fn loop_heads(krate: &Crate, fn_globals: &HashMap<ItemId, GlobalId>, max_static_trips: u32) -> HashSet<GlobalId> {
+/// measure parameter that some body calls with a literal trip count the
+/// driver does not unroll (`drive::unroll_pays` under `cfg`).
+pub fn loop_heads(krate: &Crate, fn_globals: &HashMap<ItemId, GlobalId>, cfg: &crate::opt::drive::DriveConfig) -> HashSet<GlobalId> {
     let mut measure: HashMap<ItemId, usize> = HashMap::new();
     for it in &krate.items {
         if let ItemKind::Fn(f) = &it.kind
@@ -194,8 +203,9 @@ pub fn loop_heads(krate: &Crate, fn_globals: &HashMap<ItemId, GlobalId>, max_sta
         }
     }
     struct V<'a> {
+        krate: &'a Crate,
         measure: &'a HashMap<ItemId, usize>,
-        max: u32,
+        cfg: &'a crate::opt::drive::DriveConfig,
         out: HashSet<ItemId>,
     }
     impl crate::visit::Visitor for V<'_> {
@@ -203,14 +213,15 @@ pub fn loop_heads(krate: &Crate, fn_globals: &HashMap<ItemId, GlobalId>, max_sta
             if let ExprKind::Call { callee: Callee::Item(c, _), args } = &e.kind
                 && let Some(&i) = self.measure.get(c)
                 && let Some(ExprKind::Lit(Lit::Int(n))) = args.get(i).map(|a| &a.kind)
-                && *n > self.max as u128
+                && let Some(f) = self.krate.fn_def(*c)
+                && !u32::try_from(*n).is_ok_and(|t| crate::opt::drive::unroll_pays(self.krate, *c, f, t, self.cfg))
             {
                 self.out.insert(*c);
             }
             crate::visit::walk_expr(self, e);
         }
     }
-    let mut v = V { measure: &measure, max: max_static_trips, out: HashSet::new() };
+    let mut v = V { krate, measure: &measure, cfg, out: HashSet::new() };
     for it in &krate.items {
         if let ItemKind::Fn(f) = &it.kind {
             crate::visit::walk_fn(&mut v, f);
@@ -413,17 +424,54 @@ fn clone_head(h: &Head) -> Head {
     }
 }
 
-/// The profile of `entry` over the fixture directories `corpora`: each
-/// fixture is a JSON object whose fields `fields` (hex strings) are the
-/// entry's arguments, as byte slices, in order.
-pub fn run(out: &elab::Output, krate: &Crate, root: &str, entry: &str, corpora: &[PathBuf], fields: &[String], max_static_trips: u32) -> Result<Profile, String> {
-    let heads = loop_heads(krate, &out.fn_globals, max_static_trips);
+/// The fixture files of a corpus: a directory's `*.json` files (sorted), or
+/// the files a split manifest lists (a `.txt` file: one path per line,
+/// relative to the manifest's directory; blank lines and `#` comments
+/// skipped), in its order.
+pub fn corpus_files(corpus: &Path) -> Result<Vec<PathBuf>, String> {
+    if corpus.is_dir() {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(corpus).map_err(|e| format!("{}: {e}", corpus.display()))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+        files.sort();
+        return Ok(files);
+    }
+    let text = std::fs::read_to_string(corpus).map_err(|e| format!("{}: {e}", corpus.display()))?;
+    let base = corpus.parent().unwrap_or(Path::new("."));
+    Ok(text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(|l| base.join(l)).collect())
+}
+
+impl Profile {
+    /// Refuses timed inputs a profile was recorded on (train ≠ test, see the
+    /// module docs): every file of `timed` is compared with every file of
+    /// every entry's corpora (`base`: the directory the corpora are relative
+    /// to, `PROFILE.json`'s), by canonical path. `Err` names the overlap.
+    pub fn check_timed(&self, base: &Path, timed: &[PathBuf]) -> Result<(), String> {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let timed: Vec<PathBuf> = timed.iter().map(|p| canon(p)).collect();
+        let mut overlap = Vec::new();
+        for e in &self.entries {
+            for c in &e.corpora {
+                for f in corpus_files(&base.join(c))? {
+                    let f = canon(&f);
+                    if timed.contains(&f) {
+                        overlap.push(format!("{} (profile entry `{}` / `{}`, corpus `{c}`)", f.display(), e.root, e.entry));
+                    }
+                }
+            }
+        }
+        if overlap.is_empty() { Ok(()) } else { Err(format!("{} timed input(s) are profile inputs (record the profile on a disjoint split): {}", overlap.len(), overlap.join(", "))) }
+    }
+}
+
+/// The profile of `entry` over the corpora `corpora` (fixture directories or
+/// split manifests, [`corpus_files`]): each fixture is a JSON object whose
+/// fields `fields` (hex strings) are the entry's arguments, as byte slices,
+/// in order.
+pub fn run(out: &elab::Output, krate: &Crate, root: &str, entry: &str, corpora: &[PathBuf], fields: &[String], cfg: &crate::opt::drive::DriveConfig) -> Result<Profile, String> {
+    let heads = loop_heads(krate, &out.fn_globals, cfg);
     let mut loops = Loops::new();
     let mut n = 0usize;
     for dir in corpora {
-        let mut files: Vec<PathBuf> = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
-        files.sort();
-        for f in files {
+        for f in corpus_files(dir)? {
             let text = std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?;
             let J::Obj(fx) = J::parse(&text)? else { return Err(format!("{}: not a JSON object", f.display())) };
             let mut args = Vec::new();
@@ -449,14 +497,17 @@ pub fn run(out: &elab::Output, krate: &Crate, root: &str, entry: &str, corpora: 
     Ok(Profile { entries: vec![Entry { root: root.to_string(), entry: entry.to_string(), corpora: corpora.iter().map(|c| c.display().to_string()).collect(), fixtures: n, loops }] })
 }
 
-/// `sandblaster profile`: elaborates the checked crate (exec code) and runs
-/// [`run`] over the corpora.
+/// `sandblaster profile`: elaborates the checked crate and runs [`run`]
+/// over the corpora. The whole crate is elaborated (not the test-only
+/// exec-only mode, which `VerifyOptions::exec_only` reserves for tests):
+/// exec code may call proof lemmas (QMDB's verifier does since its §15
+/// spec), and an exec-only elaboration leaves such a function unelaborated.
 pub fn profile_crate(c: &crate::driver::Checked, root: &str, entry: &str, corpora: &[PathBuf], fields: &[String]) -> Result<Profile, String> {
     let k = c.krate.as_ref().ok_or("the crate has front-end errors")?;
     if !c.ok() {
         return Err("the crate has front-end errors".into());
     }
-    let opts = crate::driver::VerifyOptions { exec_only: true, ..Default::default() };
-    let max = crate::opt::drive::DriveConfig::default().max_static_trips;
-    crate::driver::stage::with_elaboration(k, &opts, |out| run(out, k, root, entry, corpora, fields, max))
+    let opts = crate::driver::VerifyOptions { exec_only: false, ..Default::default() };
+    let cfg = crate::opt::drive::DriveConfig::default();
+    crate::driver::stage::with_elaboration(k, &opts, |out| run(out, k, root, entry, corpora, fields, &cfg))
 }

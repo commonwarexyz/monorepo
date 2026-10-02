@@ -4,6 +4,13 @@
 //! chain (kernel-checked) — and the optimizer's use of them (the loop
 //! helper, `rung = ClosedForm`).
 //!
+//! **Development-set regression tests** (fairness audit of 2026-10-02,
+//! J16): `shape_go` is QMDB's, the `p*` loops are corpus programs. These
+//! pins catch accidental changes, not evidence of generality (DESIGN.md
+//! §8.2 item 11). `set_bit_iteration_at_32_bits` is a width-coverage test
+//! of the generalized set-bit rung (J6), written with the change: not a
+//! held-out measurement.
+//!
 //! `cargo test --release -p sandblaster-front --test opt_loopsum -- --test-threads=1 --nocapture`
 
 use std::path::Path;
@@ -43,7 +50,11 @@ fn item(src: &str, marker: &str) -> String {
             break;
         }
     }
-    lines[start..=end].join("\n")
+    // the §15 `#[refines(..)]` and `#[view(..)]` annotations name the
+    // fixture's `model` module, which these in-memory copies do not carry
+    // (the QMDB fixture gained them with its spec); the optimizer reads
+    // neither, so they are dropped from the copy
+    lines[start..=end].iter().filter(|l| !(l.starts_with("#[refines(") || l.starts_with("#[view("))).copied().collect::<Vec<_>>().join("\n")
 }
 
 fn repo(path: &str) -> String {
@@ -348,7 +359,7 @@ fn profile_records_loop_calls() {
     let (calls, value, heads) = elab::with_big_stack(|| {
         let mut chain = ProverChain::standard();
         let out = elab::elaborate(k, &mut chain, &elab::Options { exec_only: true, ..Default::default() });
-        let heads = profile::loop_heads(k, &out.fn_globals, 10);
+        let heads = profile::loop_heads(k, &out.fn_globals, &sandblaster_front::opt::drive::DriveConfig::default());
         let (calls, v) = profile::collect(&out, k, "two", "[7, 3, 9]", &heads).unwrap();
         let v = out.env.print_term(&[], &out.env.quote(Lvl(0), &v, false));
         (calls, v, heads.len())
@@ -544,3 +555,51 @@ fn shape_set_bit_iteration() {
     assert!(f.candidates.iter().any(|c| c.reason.contains("::bits::idle") && c.reason.contains("::bits::equiv")), "{:?}", f.candidates);
 }
 
+
+/// The set-bit rung at another width (fairness audit J6: it used to accept
+/// only 64-bit digit variables, the width of QMDB's `shape_go`). A 32-bit
+/// binary-digit walk written for this test — the widths `2^30, …, 1`,
+/// largest first, counting the widths that fit — gets the rung with its
+/// jump stated at `31 + s₀ − lz(v)`, and its enumeration lemmas are
+/// kernel-checked. A width-coverage test of the generalized rung, not a
+/// held-out measurement.
+#[test]
+fn set_bit_iteration_at_32_bits() {
+    let src = format!(
+        "{HEADER}
+/// The widths of `n` (below `2^31`) that fit, largest first: one width per call.
+#[requires(fuel <= 31)]
+#[requires((count as Int) + (fuel as Int) <= 31)]
+#[decreases(fuel)]
+pub(crate) fn digits_go(fuel: u32, n: u32, width: u32, count: u32) -> u32 {{
+    if fuel == 0 {{
+        return count;
+    }}
+    if n < width {{
+        digits_go(fuel - 1, n, width / 2, count)
+    }} else {{
+        digits_go(fuel - 1, n - width, width / 2, count + 1)
+    }}
+}}
+
+pub fn digits(n: u32) -> u32 {{
+    if n >= (1u32 << 31u32) {{
+        return 0;
+    }}
+    digits_go(31, n, 1u32 << 30u32, 0)
+}}
+"
+    );
+    let em = optimize_src(&src, LoopConfig { synthesis: false, prefer_set_bits: true, ..LoopConfig::default() });
+    let f = report(&em, "crate::digits");
+    for c in &f.candidates {
+        println!("{:?} chosen={} {} {:?}", c.rung, c.chosen, c.reason.chars().take(1500).collect::<String>(), c.rejected_by);
+    }
+    println!("{}", body_of(&em.code, "digits"));
+    println!("{}", body_of(&em.code, "digits_go__bits"));
+    assert!(matches!(f.outcome, Outcome::Specialized { .. }), "{:?}", f.candidates);
+    assert_eq!(f.rung, Some(Rung::SetBits), "{:?}", f.candidates);
+    let h = body_of(&em.code, "digits_go__bits");
+    assert!(h.contains("leading_zeros"), "the jump to the next set bit: {h}");
+    assert!(f.candidates.iter().any(|c| c.reason.contains("::bits::idle") && c.reason.contains("::bits::equiv")), "{:?}", f.candidates);
+}

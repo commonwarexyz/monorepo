@@ -9,7 +9,8 @@
 //! 2. recurrence classes and per-parameter closed forms ([`classify`],
 //!    [`invariant`]);
 //! 3. traces on profile and corner inputs ([`traces`]) and enumerative
-//!    synthesis of the witness iteration ([`synth`]);
+//!    synthesis of the witness iteration ([`synth`]), every constant of
+//!    either harvested from the loop itself ([`pool`]);
 //! 4. the `K + 1` per-literal lemmas ([`lemmas`]) — each `lemma_j` states
 //!    that the loop at iteration `j` (the invariant holding) returns the
 //!    closed-form result, and is checked by the kernel;
@@ -39,6 +40,7 @@ pub mod guards;
 pub mod invariant;
 pub mod lemmas;
 pub mod onestep;
+pub mod pool;
 pub mod rungs;
 pub mod setbits;
 pub mod synth;
@@ -336,11 +338,11 @@ pub fn key_of(env: &Env, def: GlobalId, args: &[Arg]) -> Option<(LoopKey, Vec<Op
 
 /// Whether the loop application `def args` goes to Σ2 (the driver's
 /// policy): a user recursion (tail-recursive, a literal measure of at least
-/// two trips — above the unroll limit the loop is kept otherwise, below it
-/// the driver unrolls it or builds per-level helpers when Σ2 fails), at
-/// least one dynamic argument, not failed before.
-pub fn candidate(env: &Env, is_user_recursion: bool, trips: Option<u32>, max_static_trips: u32, def: GlobalId, args: &[Arg]) -> Option<LoopKey> {
-    let _ = max_static_trips;
+/// two trips — when Σ2 fails, the driver unrolls it or builds per-level
+/// helpers where the cost model says unrolling pays, `drive::unroll_pays`,
+/// and keeps the loop otherwise), at least one dynamic argument, not failed
+/// before.
+pub fn candidate(env: &Env, is_user_recursion: bool, trips: Option<u32>, def: GlobalId, args: &[Arg]) -> Option<LoopKey> {
     if !is_user_recursion {
         return None;
     }

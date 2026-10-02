@@ -27,6 +27,21 @@ and Bend, with one pitch:
 > Verus-style proof code; agents write the proofs and a small kernel checks
 > them; proven compositional symbolic execution then makes the code faster
 > than rustc alone.**
+>
+> "Faster than rustc" is the **goal, not yet achieved on code the optimizer
+> was not built for.** The evidence, kept apart:
+>
+> | evidence | optimizer only, vs rustc on the same source | what it shows |
+> | --- | --- | --- |
+> | **held-out** (`bench/heldout/REPORT.md`, 2026-10-02: 30 blind H1 programs + the 1 function H2's rule accepted) | geomean **1.02** (default layout) / **1.005** (aligned layout) over all 31, no exclusions: **0 of 31 functions changed**; the A/A control spreads 0.70–1.79 / 0.97–1.12 | nothing yet: 22 are refused by the MIR reader, 6 by exec-only elaboration (no termination measure, or a panic no precondition rules out), and the 3 that reach the optimizer are kept as written |
+> | development set (QMDB port, N = 32 / N = 1) | 0.88–1.00× / 289 vs 318–325 ns | gains on the program the optimizer was developed on (timed before the profile split, J8: the profile was then recorded on the timed fixtures; not re-timed) |
+> | development set (optimizer corpus P1–P20) | per program, `optimizer-plan.md` | programs features were built for |
+> | augmented Commonware code (codec varint, storage MMR) | no change: nothing cheaper found, compiled as written (not timed) | — |
+>
+> Today the optimizer makes held-out code neither faster nor slower: the
+> code compiles as written. Any "faster than rustc" statement cites the
+> held-out report (§8.2 item 11); the evaluation is repeated at each optimizer
+> milestone and the held-out row updated from it.
 
 It augments existing Rust: the critical, pure parts of a crate become verified
 modules with the same API, and the rest of the crate stays as it is.
@@ -68,16 +83,20 @@ modules with the same API, and the rest of the crate stays as it is.
 | Augments existing Rust crates | — | yes, in place | no | no | yes: verified modules inside the crate |
 | What a human writes and reads | code only | code plus invariants, triggers, ghost code, lemma calls | proofs | laws | laws only |
 | Catches an agent's logic bugs | no (memory safety only) | yes | yes | yes | yes: every live function proven |
-| Makes the code faster | — | no (compiled as written) | no | own runtime | yes: proven compositional symbolic execution, fueled by laws, plus proven SIMD |
+| Makes the code faster | — | no (compiled as written) | no | own runtime | the goal: proven compositional symbolic execution, fueled by laws, plus proven SIMD (development set: 0.88–1.00× on QMDB; held-out: no function changed yet, measured geomean 1.02 / 1.005 is placement noise) |
 | Protects against weak or gamed laws | — | no | no | no (laws may restate code or say little) | yes: §15 determinacy, mutation, unconstrained-behavior report, lock diffs |
 | Trusted base | rustc | Z3 plus Verus | small kernel | a TypeScript checker | small kernel; solvers and AI search, never trusted |
 
 The moat is the combination: agents write the *obvious* code in the language
 they know best; the kernel proves it meets laws that §15 forces to pin the
 behaviour down; the proven optimizer (compositional symbolic execution) and
-hardware kernels make it faster than rustc alone; the human reviews a law diff.
+hardware kernels are to make it faster than rustc alone (so far shown on the
+development set only; on held-out code it changes nothing yet, North star
+table); the human reviews a law diff.
 Against Verus specifically: humans read laws, not proof code; no trusted SMT;
-and verification makes the code faster instead of merely costing nothing.
+and verification is to make the code faster instead of merely costing nothing
+(the goal above; development-set evidence only so far; on held-out code no
+function changed yet, North star table).
 
 **Principles that follow.**
 
@@ -98,10 +117,18 @@ and verification makes the code faster instead of merely costing nothing.
    invariant and bound facts drop checks (O6 facts), associativity and
    commutativity turn folds into lane or thread reductions (O11/O13/O14),
    round trip and canonicity delete or shortcut encode/decode, determinacy and
-   idempotence allow memoizing equal calls. Human laws often double as fuel;
-   agents add **optimization lemmas** — proven, so they need no human review:
-   they can make code faster, never wrong. Write the obvious code, prove a
-   lemma, get better-than-compiler speed.
+   idempotence allow memoizing equal calls. Human laws often double as fuel,
+   and agents may add lemmas the optimizer uses **as facts** — proven, so
+   they need no human review: they can make code faster, never wrong. That is
+   all the fuel there is: the optimizer derives the faster code from the
+   source and these facts. A **hand-written `#[rewrite]` alternative** (a
+   faster function `g` proven equal to a source function `f`, §2.1) is not
+   fuel: it is **user code**. It is reported separately from the optimizer's
+   output (its origin in every build summary, index and report), never
+   counted in a "faster than rustc" claim, and not allowed on benchmark-target
+   functions (the QMDB, codec, storage, cryptography and coding hot paths
+   measured as evidence). The optimizer's speed is what it derives by
+   itself.
 4. **The agent loop is the product.** Per-function incremental checking in
    seconds, cached; goals and failures as structured data an agent can act on
    (LSP/MCP), with concrete counterexamples (§15.9); automation that saves
@@ -121,8 +148,11 @@ and verification makes the code faster instead of merely costing nothing.
 * agent time-to-green and tokens for a task;
 * incremental check time after an edit, and full-build time;
 * proof churn: proof lines that must change for a realistic code change;
-* runtime speed against hand-written Rust and Commonware (the QMDB regression
-  gate, §8.2).
+* runtime speed against rustc on the same source: the **held-out**
+  optimizer-only geomean (`sandblaster/bench/heldout-harness/run.sh`, report
+  `bench/heldout/REPORT.md`), the only speed number a "faster than rustc"
+  claim may cite; beside it, the development-set regression gates (QMDB,
+  corpus, §8.2), which catch regressions but justify no feature.
 
 **How we prove the claim.** An agentic benchmark: the same tasks given to
 agents in Rust, Lean, Bend and sandblaster, measuring bugs caught, time to
@@ -284,8 +314,9 @@ green, speed of the result and the human review load.
      final `&mut` referents), proven by the untrusted walker
      (`mir/simproof.rs`, 4,565, and the rest of `mir/checked.rs`) and
      checked by the kernel, or the module is not verified (the theorem
-     gate; varint 63 of 63, the MMR 76 of 76, the verifier's set 1 69 of
-     69). Before this step the structurer was trusted: `read.rs` 2,417 +
+     gate; varint 63 of 63, the MMR 69 of 69 — 76 of 76 before the
+     hand-written `opt.rs` alternatives were removed — the verifier's set 1
+     69 of 69). Before this step the structurer was trusted: `read.rs` 2,417 +
      `mod.rs` 434 + `mirx` 1,131 = 3,982, with the parse counted
      untrusted. The count is a little lower; its kind changed — local,
      construct-by-construct translations, each checkable against the MIR
@@ -352,9 +383,7 @@ green, speed of the result and the human review load.
    reading's trust was shrunk to a literal reading checked against the
    structured one (§6 step 5, done). commonware-codec's varint is verified this
    way with its laws and proofs unchanged, commonware-storage's MMR in
-   place (with its `#[rewrite]` alternatives and the lifted round trip of
-   its lowered copy, whose bodies are rustc's MIR of the copy) with its
-   laws unchanged, and the first set of its Merkle proof verifier
+   place with its laws unchanged, and the first set of its Merkle proof verifier
    (`hasher.rs` at `Standard<Sha256>`, `Subtree::reconstruct_digest`) with
    its laws and proofs unchanged.
    **Mitigation: the lift conformance check** (`sandblaster/front/src/conform.rs`;
@@ -620,7 +649,8 @@ host/
   inputs; `OUT_DIR/<out>-conformance/`, cached by content hash, a cached
   pass replaying its recorded report) the emitted file is a header (status
   `VERIFIED + LIFTED AS-IS`, or `VERIFIED + LIFTED + OPTIMIZED` with the
-  rewritten functions listed,
+  rewritten functions listed — `+ USER REWRITES` instead, or as well, when a
+  user `#[rewrite]` alternative replaced one, marked as user code —
   the boundary, what is not verified — `#[lift(unverified = ..)]`
   instances and the items the lift dropped — the host models and the
   `SPEC.lock` root), then the source **byte for byte after its leading
@@ -642,8 +672,8 @@ host/
   release. The emitted file (still the source byte for byte) says so in
   its header. The lift conformance check compares the read functions with
   the build's rustc. An in-place crate is
-  extracted as a whole (its `#[lift(opt)]` alternatives compiled in the
-  crate's context); the lifted round trip of a rewritten file reads rustc's
+  extracted as a whole (a crate's `#[lift(opt)]` alternatives, when it has
+  any, compiled in the crate's context); the lifted round trip of a rewritten file reads rustc's
   MIR of the copy it checks (`<stem>.roundtrip__<module>.sbmir`, extracted
   from the copy the build writes to `OUT_DIR/<name>-roundtrip__<module>.rs`,
   in module mode as in place;
@@ -684,19 +714,27 @@ host/
     as that impl's method. All verified instances must qualify, or none is
     rewritten. (Not yet: a generic function with a buffer state, or without
     a by-value parameter of its type — FRICTION, listed.)
-  * an **optimization alternative** named by a **`#[rewrite]` lemma**
-    `f(x̄) == g(x̄)` (proven like any lemma, so it needs no review — North
-    star principle 3): `g` is a function of a `#[lift(opt)]` module of the
-    DSL root, written by the agent in the host's dialect over the original
-    API (verified and lifted like any code, never emitted as a module), and
-    `g`'s own text — with the alternatives it calls, renamed, private — is
-    the replacement. The link is a new kernel-checked definition
+  * a **user-supplied alternative** named by a **`#[rewrite]` lemma**
+    `f(x̄) == g(x̄)` (proven like any lemma, so it needs no correctness
+    review): `g` is a function of a `#[lift(opt)]` module of the DSL root,
+    written by hand in the host's dialect over the original API (verified
+    and lifted like any code, never emitted as a module), and `g`'s own
+    text — with the alternatives it calls, renamed, private — is the
+    replacement. The link is a new kernel-checked definition
     `<f>::rewrite_equiv : Π x̄ (h̄ : Req_f). Eq(R, f x̄ h̄, g x̄ h̄)` whose
     proof is the lemma applied to the binders: the kernel checks that the
     lemma states exactly that (the alternative takes the source function's
-    parameters and preconditions). This is how a faster algorithm that no
-    optimizer derives (a closed form of a bit walk, a narrower search)
-    enters code that is verified as written. (`#[lift(opt)]` lifts its
+    parameters and preconditions). **This is user code, not optimizer
+    output** (principle 3): the record carries its origin
+    (`LowerOrigin::UserRewrite`); the build summary, the lowered-copy index
+    header and the report JSON count it apart from the optimizer's
+    residuals; the optimizer's own residual for `f` is still built and its
+    outcome recorded beside it; it is never counted in a "faster than rustc"
+    claim; and it is not allowed on benchmark-target functions. An
+    alternative is tried before the residual; the evaluation-only option
+    `OptOptions::exclude_user_rewrites` (`SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES=1`)
+    leaves every alternative out to measure the optimizer alone — it never
+    disables the optimizer, which always runs. (`#[lift(opt)]` lifts its
     module exactly like `#[lift]`; SEMANTICS.md §19 gets that sentence at
     the next lock acceptance — the file is part of the lock's `semantics`
     hash.)
@@ -1706,6 +1744,9 @@ an `AutoFailure`. Steps iterated to a fixpoint within the budget:
     * The wall-clock deadlines of the optimizer's searches (the driver's run, the proof builder, each decision) and the memory limits are the §15.8 safety nets, set well above these budgets. A search they stop would fall back to a weaker candidate, so a trip is never a result: it fails the build with `error[resource]` (`driver::resource_gate`, after elaboration and again after the optimizer), and nothing is emitted.
     * The output is a function of the source, the variant set, the options, `PROFILE.json`, the tuning evidence and the optimizer version.
     * A content-addressed cache under `target/` holds hints only, and the kernel re-checks every hit.
+11. **Fairness: no optimization is built around a benchmark** (the user's rule; fairness audit of 2026-10-02). The hot paths show where to look; the optimizations must be generic.
+    * **Review rule.** Every new rule, rung, template, constant or threshold states its structural justification (what shape of code it serves, in general) and its effect on the held-out set (plan step 8). A change justified only by QMDB, the corpus, codec or storage — the development set — is not merged; those numbers are regression checks that cannot on their own justify a feature. Any "faster than rustc" statement cites the held-out report, never a development-set number.
+    * **Mechanical guards** (`sandblaster/tools/gates/README.md`): optimizer code names no benchmark target (`tests/fairness_lint.rs`); Σ2 takes its constants from the loop (`tests/fairness_pool.rs`); no monorepo DSL root carries an unlisted user alternative and benchmark targets carry none (`tests/fairness_rewrites.rs`); user alternatives are reported apart (principle 3); the profile is recorded on inputs that are never timed (`tests/fairness_profile.rs`); a benchmark harness compiles every subject alike in one binary (`tools/gates/fair-baseline.sh`); and the corpus, its references, the QMDB fixture and the held-out manifest are frozen (G6, `tools/gates/g6.sh`).
 
 Full design, research and judges' scores: `docs/optimizer-design.md`; milestones O1–O20: `docs/optimizer-plan.md`.
 
@@ -2125,12 +2166,23 @@ the portable reference.
   canonical u64 ≤ 2^62, digests ≤ 122, 63-width shape search, 62 peaks.
   Both verified (887 obligations, 13 laws); 0 disagreements with Commonware
   over 12,776 corpus checks, 1.5M fuzz checks and 5M differential cases.
-  Measured (qmdb/BENCHMARKS.md): on 20 production N = 32 workloads plus 18
-  deep proofs (2^40, 2^62 − 1 including the 122-digest maximal proof, 2^62)
-  the generated verifier takes 0.65–0.77× the time of Commonware's
-  constant-N decode+verify and 0.88–1.00× the time of hand-written
-  multiversioned code. At N = 1 it is 1.54× faster than Commonware
-  (3fbd2e0e) but 8.5% slower than the pre-H1 code (≈ 24 ns per verify, from
+  Measured (qmdb/BENCHMARKS.md; development set; timed before the
+  fairness audit's profile split, J8, with the profile recorded on the
+  timed fixtures, and not re-timed since) on 20 production N = 32
+  workloads plus 18 deep proofs (2^40, 2^62 − 1 including the 122-digest
+  maximal proof, 2^62), two different comparisons:
+  * **the optimizer's share**: against the same QMDB sources compiled by
+    rustc with the same hand-written variants (hand-multiversioned on the
+    proven ARMv8 `compress_sha2`), the generated verifier takes 0.88–1.00×
+    the time (geomean 0.95 production, 0.96 deep) at N = 32, and 289 ns vs
+    318–325 ns at N = 1;
+  * **the QMDB port vs Commonware** (a different program, not an optimizer
+    result): the port — fixed-shape, one hand-made hash function per message
+    length, the hand-written `compress_sha2`, constant N — plus the optimizer
+    takes 0.65–0.77× the time of Commonware's generic constant-N
+    decode+verify at N = 32, and is 1.54× faster at N = 1.
+
+  At N = 1 the generated verifier (3fbd2e0e) is 8.5% slower than the pre-H1 code (≈ 24 ns per verify, from
   the 63-width `shape` search and the 62-entry peak buffer). Follow-up: a
   constant-time `shape` (leading-zeros/popcount lemmas, §14.3(6)) and
   copy-free bagging.
@@ -2162,7 +2214,9 @@ the portable reference.
 lines, adversarial suite), front end (loader → resolver → typeck → validate →
 HIR → canonical printer, `build.rs`/CLI in unverified mode), native QMDB port
 (all fixtures, `tests.ts` mutations, KATs, Bend differential corpora;
-`verify_sha2` estimate 315 ns vs Commonware 463 ns vs Bend 2 C 21.6 µs),
+`verify_sha2` estimate 315 ns vs Commonware 463 ns vs Bend 2 C 21.6 µs: the
+hand-written port with its hand-written `compress_sha2`, before any
+optimizer, and Commonware's generic verifier, a different program),
 target models (23 aarch64 models hardware-validated, SSE under Rosetta,
 SHA-NI pending hardware).
 
@@ -2187,7 +2241,10 @@ qmdb` is VERIFIED + OPTIMIZED — 747 obligations and all 9 laws proven, 123
 kernel-checked definitions, `compress_sha2 ≡ compress` proven by `BvRefl`
 (18 ms) and statically dispatched, 48 functions specialized, 115 definitions
 round-tripped, 6.2 s; the generated crate passes every baseline test suite;
-generated `verify` ≈ 291 ns vs Commonware 465 ns. Kernel fixes and
+generated `verify` ≈ 291 ns vs Commonware 465 ns (development set; the
+port, with its hand-written `compress_sha2`, against Commonware's generic
+verifier, a different program: not the optimizer's share, which is
+measured against the same sources compiled by rustc, §11). Kernel fixes and
 `sandblaster/kernel/AUDIT.md`.
 
 **Phase 4:** red team (kernel, fidelity, optimizer/codegen, proof-gate

@@ -21,7 +21,8 @@ use sandblaster_kernel::api::Env;
 use sandblaster_kernel::term::{GlobalId, PrimOp, Rel, Term, Tm, Width};
 use sandblaster_kernel::value::Budget;
 
-/// The bit-sum idioms (rulegen output).
+/// The bit-sum idioms (rulegen output). The rule library is this one idiom
+/// (corpus P3; fairness audit J14: one idiom deep, see `sandblaster-rulegen`).
 pub const BITSUM_CORE: &str = include_str!("../../../lemmas/rules/bitsum.core");
 /// The `cong_irr` lemmas (rulegen output).
 pub const CONG_CORE: &str = include_str!("../../../lemmas/cong.core");

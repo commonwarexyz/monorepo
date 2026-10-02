@@ -68,8 +68,8 @@
 //! ```
 
 pub mod batch;
-// rustc compiles the lowered copy of `iterator.rs` that `build.rs` writes:
-// the file with the optimizer's proven rewrites (sandblaster DESIGN.md §2.1).
+// rustc compiles the lowered copy of `iterator.rs` that `build.rs` writes (sandblaster
+// DESIGN.md §2.1); while the optimizer finds nothing cheaper, as today, it is `iterator.rs`.
 // Edit `iterator.rs`; rust-analyzer reads it through the first declaration.
 #[cfg(rust_analyzer)]
 pub mod iterator;

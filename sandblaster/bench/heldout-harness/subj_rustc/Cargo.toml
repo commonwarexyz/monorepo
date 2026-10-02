@@ -1,0 +1,15 @@
+# A subject of the held-out harness: subject/lib.rs with feature `source`
+# (see ../Cargo.toml). No build script, no profile of its own.
+[package]
+name = "subj_rustc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "../subject/lib.rs"
+
+[features]
+default = ["source"]
+source = []
+optimized = []

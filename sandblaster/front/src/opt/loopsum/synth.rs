@@ -4,9 +4,12 @@
 //!
 //! The unknowns are witness iterations (the iteration at which a
 //! `FirstMatch` payload is set, or a search exits) as functions of the ghost
-//! inputs. The grammar: the inputs and the constants `{0, 1, 2, 6, 7, 63,
-//! 64, W−1, W}`; `+ − ^ & | min max`, `<<` and `>>` by terms, `/c`, `lz`,
-//! `tz`, `popcnt`, and width casts. Two expressions with the same values on
+//! inputs. The grammar: the inputs and the constants of the loop's
+//! [`Pool`] (the width's `{0, 1, 2, W−1, W}` and the constants harvested
+//! from the loop itself: its literals and their neighbours, its shift
+//! amounts `k`, `k − 1`, `2^k`); `+ − ^ & | min max`, `<<` and `>>` by
+//! terms, `/c` for the pool's divisors (`2`, the shift amounts, the loop's
+//! literal divisors), `lz`, `tz`, `popcnt`, and width casts. Two expressions with the same values on
 //! every sample are one class (the smaller is kept), so the search space is
 //! the set of distinct behaviours. Bounds: size ≤ [`MAX_SIZE`], at most
 //! [`MAX_CANDIDATES`] classes. Deterministic: candidates are generated in a
@@ -18,6 +21,7 @@ use std::collections::HashMap;
 use sandblaster_kernel::term::{PrimOp, Width};
 
 use super::expr::{self, CE, E, Ty, Val};
+use super::pool::Pool;
 
 pub const MAX_SIZE: usize = 7;
 pub const MAX_CANDIDATES: usize = 200_000;
@@ -39,9 +43,9 @@ pub struct Found {
 /// Synthesizes an expression over the inputs (ghost `i` has width
 /// `widths[i]`; `inputs[s][i]` is its value on sample `s`) whose value on
 /// every sample is `target[s]` (of type `ty`). `extra` leaves (e.g. `lz` of
-/// an input) may be given with their values.
-pub fn synthesize(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max_size: usize) -> Option<Found> {
-    synthesize_with(widths, inputs, target, ty, max_size, &|_| true)
+/// an input) may be given with their values. `pool`: the loop's constants.
+pub fn synthesize(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max_size: usize, pool: &Pool) -> Option<Found> {
+    synthesize_with(widths, inputs, target, ty, max_size, pool, &|_| true)
 }
 
 /// Samples the enumeration runs on (a found candidate is then checked on
@@ -55,10 +59,10 @@ pub const MAX_ROUNDS: usize = 4;
 /// equivalent may still be found). The enumeration runs on a deterministic
 /// working set of at most [`WORK_SAMPLES`] samples (counterexample-guided:
 /// the result matches every sample).
-pub fn synthesize_with(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max_size: usize, accept: &dyn Fn(&E) -> bool) -> Option<Found> {
+pub fn synthesize_with(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max_size: usize, pool: &Pool, accept: &dyn Fn(&E) -> bool) -> Option<Found> {
     let n = inputs.len();
     if n <= WORK_SAMPLES {
-        return enumerate(widths, inputs, target, ty, max_size, accept);
+        return enumerate(widths, inputs, target, ty, max_size, pool, accept);
     }
     // the working set: evenly strided (profile and corner samples come first)
     let mut idx: Vec<usize> = (0..WORK_SAMPLES).map(|i| i * n / WORK_SAMPLES).collect();
@@ -66,7 +70,7 @@ pub fn synthesize_with(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], t
     for _ in 0..MAX_ROUNDS {
         let wi: Vec<Vec<u128>> = idx.iter().map(|i| inputs[*i].clone()).collect();
         let wt: Vec<Val> = idx.iter().map(|i| target[*i]).collect();
-        let f = enumerate(widths, &wi, &wt, ty, max_size, accept)?;
+        let f = enumerate(widths, &wi, &wt, ty, max_size, pool, accept)?;
         total += f.candidates;
         match (0..n).find(|s| f.expr.eval(&inputs[*s], None) != Some(target[*s])) {
             None => return Some(Found { expr: f.expr, candidates: total }),
@@ -76,7 +80,7 @@ pub fn synthesize_with(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], t
     None
 }
 
-fn enumerate(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max_size: usize, accept: &dyn Fn(&E) -> bool) -> Option<Found> {
+fn enumerate(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max_size: usize, pool: &Pool, accept: &dyn Fn(&E) -> bool) -> Option<Found> {
     let n = inputs.len();
     if n == 0 || target.len() != n {
         return None;
@@ -115,9 +119,9 @@ fn enumerate(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max
             return Some(Found { expr: c.e, candidates: count });
         }
     }
+    let divisors = pool.divisors();
     for &w in &ws {
-        let b = expr::bits(w) as u128;
-        for k in [0u128, 1, 2, 6, 7, 63, 64, b - 1, b] {
+        for k in pool.leaves(w) {
             if k <= expr::mask(w)
                 && let Some(c) = push(&mut pools, 1, expr::lit(w, k), &mut seen, &mut count)
                 && hit(&c)
@@ -162,7 +166,7 @@ fn enumerate(widths: &[Width], inputs: &[Vec<u128>], target: &[Val], ty: Ty, max
                 if w == Width::Int {
                     continue;
                 }
-                for c in [2u128, 7, 8] {
+                for &c in &divisors {
                     let e = std::rc::Rc::new(CE::DivLit(a.e.clone(), c));
                     if let Some(c) = push(&mut pools, size, e, &mut seen, &mut count)
                         && hit(&c)

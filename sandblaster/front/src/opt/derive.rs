@@ -69,7 +69,9 @@ const DERIVED_STEPS: u64 = 200_000;
 /// `reconstruct` 7,684 and `verify_decoded` 370 nodes, where the derived
 /// route took more than the proof (726k and 1.08M steps against 793k and
 /// 551k). Segment helpers (loops: the kernel stops unfolding at the
-/// recursion) are always derived.
+/// recursion) are always derived. Calibrated on QMDB only (the threshold
+/// sits between those two functions) until a second workload and the
+/// held-out set re-check it.
 const DERIVE_MIN_PROOF_NODES: usize = 10_000;
 
 /// A driven function's admitted residual and its link (recorded by

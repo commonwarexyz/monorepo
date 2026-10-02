@@ -46,8 +46,9 @@
 //! A passing build writes a header (the status — `NOT VERIFIED —
 //! DEVELOPMENT BUILD: …` for a pending-gates build, which also says that
 //! the rewrites rest on the kernel-checked links and the lifted round trip,
-//! which ran; whether rustc compiles the copy; the rewritten functions; the
-//! source's SHA-256) and then the lowering's text after the source's
+//! which ran; whether rustc compiles the copy; the rewritten functions,
+//! optimizer residuals and user-supplied `#[rewrite]` alternatives counted
+//! and marked apart; the source's SHA-256) and then the lowering's text after the source's
 //! leading `//!` lines: exactly the text the lifted round trip checked
 //! (`driver::lowered`), or the source byte for byte when nothing was
 //! cheaper. A failed build writes a `::core::compile_error!` stub instead:
@@ -454,6 +455,7 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
         o.cargo.push("cargo::warning=sandblaster: `cfg(rust_analyzer)` is set: rustc compiles the IDE twins (the in-place files as written, verified but not optimized), not the lowered copies".into());
     }
     o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_STRICT_OPT".into());
+    o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES".into());
     o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_MEM_LIMIT_GB".into());
     o.cargo.push("cargo::rerun-if-env-changed=RUSTC".into());
     let out = format!("{name}-verified.txt");
@@ -527,9 +529,14 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
         o.outputs.extend(files);
         return o;
     }
+    let by = |o: super::lowered::LowerOrigin| b.lowered_in_place.iter().any(|l| l.lowered_by(o) > 0);
     let verdict_status = match &b.verdict {
-        Some(_) if b.lowered_in_place.iter().any(|l| l.lowered() > 0) => "VERIFIED + LIFTED IN PLACE + OPTIMIZED",
-        Some(_) => "VERIFIED + LIFTED IN PLACE",
+        Some(_) => match (by(super::lowered::LowerOrigin::Optimizer), by(super::lowered::LowerOrigin::UserRewrite)) {
+            (true, false) => "VERIFIED + LIFTED IN PLACE + OPTIMIZED",
+            (false, true) => "VERIFIED + LIFTED IN PLACE + USER REWRITES",
+            (true, true) => "VERIFIED + LIFTED IN PLACE + OPTIMIZED + USER REWRITES",
+            (false, false) => "VERIFIED + LIFTED IN PLACE",
+        },
         None => "NOT VERIFIED (the build issued no verdict)",
     };
     let mut ok = b.verdict.is_some();
@@ -648,7 +655,10 @@ fn fail_closed(b: &super::gates::CrateBuild, copies: &[LoweredCopy]) -> Result<(
 /// stub: rustc never compiles a copy of a failed build.
 fn lowered_copies(b: &super::gates::CrateBuild, copies: &[LoweredCopy], out_dir: &Path, name: &str, root_display: &str, status: &str, ok: bool) -> (Vec<(PathBuf, String)>, String) {
     let mut files = Vec::new();
-    let mut index = format!("{status}\nsandblaster lowered copies of `{name}` ({root_display}): the host's in-place files with functions rewritten to their optimizer replacements (kernel-checked links, lifted round trip); one per file, on every build\n");
+    let mut index = format!(
+        "{status}\nsandblaster lowered copies of `{name}` ({root_display}): the host's in-place files, each function rewritten where a cheaper replacement passed (kernel-checked links, lifted round trip); one per file, on every build\nrewritten functions: {}\n",
+        if ok { super::lowered::origin_counts(&b.lowered_in_place) } else { "none (failed build)".to_string() }
+    );
     let pending = status == PENDING_STATUS;
     for c in copies {
         let shown_dst = c.dst.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
@@ -668,20 +678,7 @@ fn lowered_copies(b: &super::gates::CrateBuild, copies: &[LoweredCopy], out_dir:
         }
         let low = b.lowered_in_place.iter().find(|l| Path::new(&l.file) == c.source);
         let (_, src_body) = super::lifted::split_docs(&c.text);
-        let rewritten: Vec<String> = low
-            .map(|l| {
-                l.records
-                    .iter()
-                    .filter_map(|r| match &r.outcome {
-                        super::lowered::LowerOutcome::Lowered { rung, cost_source, cost_residual, via, .. } => {
-                            let via = if via.is_empty() { String::new() } else { format!("; {via}") };
-                            Some(format!("rewritten: `{}` (rung {rung}; portable cost {cost_source} -> {cost_residual} milli-cycles{via})", r.function))
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let rewritten: Vec<String> = low.map(|l| l.records.iter().filter_map(|r| super::lifted::rewritten_line(&r.function, &r.outcome, false)).collect()).unwrap_or_default();
         let body: &str = match low {
             Some(l) if !rewritten.is_empty() => &l.body,
             _ => src_body,
@@ -695,7 +692,7 @@ fn lowered_copies(b: &super::gates::CrateBuild, copies: &[LoweredCopy], out_dir:
             head.push_str(&format!("// The code below is `{}` byte for byte after its leading `//!` lines (the declaration carries them): nothing was cheaper.\n", c.shown));
         } else {
             head.push_str(&format!(
-                "// The code below is `{}` after its leading `//!` lines (the declaration carries them), except the bodies of the\n// functions listed here: each calls its replacement, appended at the end, kernel-checked equal to the function and\n// read back by the lift (the lifted round trip, DESIGN.md §2.1).\n",
+                "// The code below is `{}` after its leading `//!` lines (the declaration carries them), except the bodies of the\n// functions listed here: each calls its replacement (the optimizer's residual, or a user-supplied `#[rewrite]`\n// alternative where marked: user code), appended at the end, kernel-checked equal to the function and read back\n// by the lift (the lifted round trip, DESIGN.md §2.1).\n",
                 c.shown
             ));
             for r in &rewritten {
@@ -769,7 +766,7 @@ fn pending_outcome(mut o: BuildOutcome, b: &super::gates::CrateBuild, checked: &
     }
     o.outputs.insert(0, (out_dir.join(format!("{name}-pending.txt")), record));
     let switch = if total == 0 && b.gates.conformance.as_ref().is_some_and(|r| r.passed()) { "; every gate and the lift conformance check passed: switch to `compile_lifted` for the verdict" } else { "" };
-    o.cargo.push(format!("cargo::warning=sandblaster: `{name}` ({root}): {PENDING_STATUS} ({} obligations proven; {total} §15 gate finding(s), not enforced; lift conformance {}){switch}", st.total, if b.gates.conformance.is_none() { "not run" } else if b.gates.conformance.as_ref().is_some_and(|r| r.passed()) { "passed" } else { "FAILED" }));
+    o.cargo.push(format!("cargo::warning=sandblaster: `{name}` ({root}): {PENDING_STATUS} ({} obligations proven; {total} §15 gate finding(s), not enforced; lift conformance {}; rewritten functions: {}){switch}", st.total, if b.gates.conformance.is_none() { "not run" } else if b.gates.conformance.as_ref().is_some_and(|r| r.passed()) { "passed" } else { "FAILED" }, super::lowered::origin_counts(&b.lowered_in_place)));
     o.ok = true;
     o
 }

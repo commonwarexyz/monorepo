@@ -1,0 +1,22 @@
+# QMDB N1 fixtures, timed half (16 of 32): the fixture files of
+# `fixtures/` (`*.json` named with a leading digit) sorted by name, every
+# second one (positions 2, 4, 6, ...). The rule was fixed before any
+# measurement (fairness audit J8): `PROFILE.json` is recorded on the profile
+# half only and the benchmark times the timed half only; the two are disjoint
+# (`opt::cost::profile::Profile::check_timed`). Frozen by G6.
+../fixtures/002-leaves-007-first.json
+../fixtures/004-leaves-007-last.json
+../fixtures/006-leaves-008-middle.json
+../fixtures/008-leaves-009-first.json
+../fixtures/010-leaves-009-last.json
+../fixtures/012-leaves-015-middle.json
+../fixtures/014-leaves-016-first.json
+../fixtures/016-leaves-016-last.json
+../fixtures/018-leaves-017-middle.json
+../fixtures/020-leaves-031-first.json
+../fixtures/022-leaves-031-last.json
+../fixtures/024-leaves-032-middle.json
+../fixtures/026-leaves-033-first.json
+../fixtures/028-leaves-033-last.json
+../fixtures/030-reject-wrong-value.json
+../fixtures/032-reject-zero-leaves.json

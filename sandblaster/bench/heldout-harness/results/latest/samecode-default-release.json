@@ -1,0 +1,126 @@
+{
+ "align_up": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "base32_encoded_len": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "base64_encoded_len": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "binomial_meld_carries": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "buddy_order": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "byte_swap": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "ceil_div": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "checked_sum": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "count_words": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "crc8": {
+  "subj_rustc_aa": false,
+  "subj_opt": false
+ },
+ "decimal_digits": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "fenwick_prefix_sum": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "first_newline": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "first_printable": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "gray_decode": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "gray_encode": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "hamming_distance": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "isqrt": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "matrix_sum_4x8": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "mix64": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "next_power_of_two": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "nibble_popcount": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "parity": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "read_u32_le": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "remaining_budget": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "reverse_bits": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "ring_index": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "run_count": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "scale_sample": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "seed16_rounds20": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "trailing_ones": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ }
+}

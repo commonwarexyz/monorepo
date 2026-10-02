@@ -227,6 +227,13 @@ pub struct OptOptions {
     /// committed files). With `PROFILE.json` the only input that changes
     /// choices (its hash keys the proof cache and is reported).
     pub tuning: std::sync::Arc<cost::tuning::Tuning>,
+    /// Evaluation only (`SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES=1`): the
+    /// lowering of lifted modules leaves out every user-supplied
+    /// `#[rewrite]` alternative (`driver::lowered`), so the build measures
+    /// the optimizer's own output — the subject of any "faster than rustc"
+    /// claim (DESIGN.md principle 3). It never disables the optimizer, which
+    /// always runs; production builds keep the alternatives.
+    pub exclude_user_rewrites: bool,
     /// Test hooks ([`hooks`]; never present in a production build).
     #[cfg(any(test, feature = "opt-test-hooks"))]
     pub hooks: Option<std::sync::Arc<hooks::OptTestHooks>>,
@@ -247,6 +254,7 @@ impl Default for OptOptions {
             cache_dir: None,
             loops: loopsum::LoopConfig::default(),
             tuning: cost::tuning::Tuning::shared(),
+            exclude_user_rewrites: false,
             #[cfg(any(test, feature = "opt-test-hooks"))]
             hooks: None,
         }
@@ -254,9 +262,17 @@ impl Default for OptOptions {
 }
 
 impl OptOptions {
-    /// The defaults, with `strict` from `SANDBLASTER_STRICT_OPT=1`.
+    /// The defaults, with `strict` from `SANDBLASTER_STRICT_OPT=1` and
+    /// `exclude_user_rewrites` from `SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES=1`
+    /// (like every `SANDBLASTER_*` variable, part of the verdict cache's
+    /// identity, `driver::cache`).
     pub fn from_env() -> OptOptions {
-        OptOptions { strict: std::env::var("SANDBLASTER_STRICT_OPT").as_deref() == Ok("1"), cache_dir: cache::Cache::default_dir(), ..Default::default() }
+        OptOptions {
+            strict: std::env::var("SANDBLASTER_STRICT_OPT").as_deref() == Ok("1"),
+            exclude_user_rewrites: std::env::var("SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES").as_deref() == Ok("1"),
+            cache_dir: cache::Cache::default_dir(),
+            ..Default::default()
+        }
     }
 
     /// The installed test hooks (always `None` in a production build).
@@ -2140,9 +2156,10 @@ struct SpecOut {
     /// The residual keeps a call of a recursive user function (the driver
     /// may unroll it: static measure or structure).
     recursive_calls: bool,
-    /// The residual keeps a call of a user recursion that is static within
-    /// the driver's unroll limit (design §6.2): the driver runs too, and
-    /// its unrolled residual replaces this one when admitted.
+    /// The residual keeps a call of a user recursion that is static and
+    /// that the driver unrolls (`drive::unroll_pays`, design §6.2): the
+    /// driver runs too, and its unrolled residual replaces this one when
+    /// admitted.
     static_recursion: bool,
     /// The symbolic value of an admitted straight-line residual (the
     /// aegraph's region, plan O8).
@@ -2151,7 +2168,7 @@ struct SpecOut {
 
 /// Distinct HIR expression nodes of a body (the cost of an injected
 /// candidate, which has no residual DAG).
-fn hir_nodes(e: &Expr) -> usize {
+pub(crate) fn hir_nodes(e: &Expr) -> usize {
     struct V(usize);
     impl crate::visit::Visitor for V {
         fn expr(&mut self, e: &Expr) {

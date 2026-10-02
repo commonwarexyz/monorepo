@@ -29,14 +29,21 @@
 //!      (`value.__sandblaster_opt_size()`), which the lift reads as that
 //!      instance's impl method. All verified instances must qualify, or the
 //!      function keeps its source text;
-//!    * **an optimization alternative** named by a `#[rewrite]` lemma
+//!    * **a user-supplied alternative** named by a `#[rewrite]` lemma
 //!      `f(x̄) == g(x̄)` (proven like any lemma; `g` a function of a
-//!      `#[lift(opt)]` module, written in the host's dialect over the
-//!      original API): `g`'s own source text (and that of the alternatives
-//!      it calls), renamed, is the replacement. The link `f = g` is a new
-//!      kernel-checked definition `<f>::rewrite_equiv : Π x̄ (h̄ : Req_f).
-//!      Eq(R, f x̄ h̄, g x̄ h̄)` whose proof is the lemma applied to the
-//!      binders — the kernel checks it has exactly this statement.
+//!      `#[lift(opt)]` module, written by hand in the host's dialect over
+//!      the original API): `g`'s own source text (and that of the
+//!      alternatives it calls), renamed, is the replacement. The link `f =
+//!      g` is a new kernel-checked definition `<f>::rewrite_equiv : Π x̄ (h̄
+//!      : Req_f). Eq(R, f x̄ h̄, g x̄ h̄)` whose proof is the lemma applied to
+//!      the binders — the kernel checks it has exactly this statement. This
+//!      is **user code, not optimizer output**: its record carries
+//!      [`LowerOrigin::UserRewrite`], every summary, index and report counts
+//!      it apart from the optimizer's residuals, and the optimizer's own
+//!      residual for `f` is still built and recorded
+//!      ([`LowerRecord::optimizer_residual`]). An alternative is tried before
+//!      the residual; `OptOptions::exclude_user_rewrites` (evaluation only)
+//!      leaves every alternative out, the optimizer still running.
 //!
 //!    The replacement must be at least 3% cheaper than the source under the
 //!    portable cost model (the optimizer's selection gate,
@@ -122,15 +129,40 @@ pub const LOOP_TRIPS: u64 = 16;
 /// compiles the lowered copy fails the build on it (`driver::in_place`).
 pub const ROUND_TRIP_REJECTED: &str = "the lifted round trip";
 
+/// Where the replacement of a rewritten function comes from. Only
+/// [`LowerOrigin::Optimizer`] is optimizer output; a user alternative is
+/// hand-written code (proven equal, but never counted as the optimizer's
+/// speed: DESIGN.md principle 3, §2.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LowerOrigin {
+    /// The optimizer's residual (one per instance for a per-type dispatch).
+    Optimizer,
+    /// A user-supplied alternative named by a `#[rewrite]` lemma (a function
+    /// of a `#[lift(opt)]` module).
+    UserRewrite,
+}
+
+impl LowerOrigin {
+    /// The name in the report JSON (`origin`).
+    pub fn name(self) -> &'static str {
+        match self {
+            LowerOrigin::Optimizer => "optimizer",
+            LowerOrigin::UserRewrite => "user_rewrite",
+        }
+    }
+}
+
 /// What became of one source function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LowerOutcome {
-    /// Rewritten: the rung of the residual (or `Rewrite`), its cost and the
-    /// source's (portable model, milli-cycles, summed over the instances of
-    /// a generic function), the helpers added, and how (`via`: the
-    /// instances of a dispatch, the lemma of a rewrite; empty for a plain
-    /// residual).
-    Lowered { rung: String, cost_source: u64, cost_residual: u64, helpers: Vec<String>, via: String },
+    /// Rewritten: where the replacement comes from, the rung of the
+    /// residual (`Rewrite` for a user alternative), the replacement's cost
+    /// and the source's (portable model, milli-cycles, summed over the
+    /// instances of a generic function; `cost_residual` is the user
+    /// alternative's cost for [`LowerOrigin::UserRewrite`]), the helpers
+    /// added, and how (`via`: the instances of a dispatch, the lemma of a
+    /// rewrite; empty for a plain residual).
+    Lowered { origin: LowerOrigin, rung: String, cost_source: u64, cost_residual: u64, helpers: Vec<String>, via: String },
     /// The source text stays, and why.
     Kept(String),
 }
@@ -140,6 +172,11 @@ pub enum LowerOutcome {
 pub struct LowerRecord {
     pub function: String,
     pub outcome: LowerOutcome,
+    /// For a function with a user `#[rewrite]` alternative: what the
+    /// optimizer's own residual for it came to (built whether or not the
+    /// alternative is used or excluded), so the optimizer's share stays
+    /// visible beside the user code. `None` for every other function.
+    pub optimizer_residual: Option<String>,
 }
 
 /// The result of [`lower_lifted`].
@@ -159,9 +196,13 @@ pub struct LoweredModule {
     /// mode): nothing is lowered, the source is emitted as-is.
     pub note: Option<String>,
     /// `#[rewrite]` lemmas of the crate that name no usable replacement,
-    /// and why (the report lists them: an agent's optimization lemma that
-    /// is never used is a mistake worth seeing).
+    /// and why (the report lists them: a `#[rewrite]` lemma that is never
+    /// used is a mistake worth seeing).
     pub unused_rewrites: Vec<String>,
+    /// The build left every user `#[rewrite]` alternative out
+    /// (`OptOptions::exclude_user_rewrites`, an evaluation-only build of
+    /// the optimizer's own output).
+    pub user_rewrites_excluded: bool,
     /// Wall-clock milliseconds of the optimizer and of the lowering with
     /// its round trip (set by the build; `*-timing.json` only).
     pub optimizer_ms: u128,
@@ -188,6 +229,11 @@ impl LoweredModule {
             j.str("file", &self.file);
         }
         j.num("rewritten", self.lowered() as i64);
+        j.num("rewritten_by_optimizer", self.lowered_by(LowerOrigin::Optimizer) as i64);
+        j.num("rewritten_by_user_rewrite", self.lowered_by(LowerOrigin::UserRewrite) as i64);
+        if self.user_rewrites_excluded {
+            j.str("user_rewrites", "excluded (evaluation-only build: OptOptions::exclude_user_rewrites)");
+        }
         j.num("round_trip_compared", self.compared as i64);
         if let Some(n) = &self.note {
             j.str("note", n);
@@ -205,8 +251,9 @@ impl LoweredModule {
                 let mut o = Json::obj();
                 o.str("function", &r.function);
                 match &r.outcome {
-                    LowerOutcome::Lowered { rung, cost_source, cost_residual, helpers, via } => {
+                    LowerOutcome::Lowered { origin, rung, cost_source, cost_residual, helpers, via } => {
                         o.str("outcome", "rewritten");
+                        o.str("origin", origin.name());
                         o.str("rung", rung);
                         o.num("cost_source_mc", *cost_source as i64);
                         o.num("cost_residual_mc", *cost_residual as i64);
@@ -220,6 +267,9 @@ impl LoweredModule {
                         o.str("reason", why);
                     }
                 }
+                if let Some(r) = &r.optimizer_residual {
+                    o.str("optimizer_residual", r);
+                }
                 o
             })
             .collect();
@@ -227,15 +277,45 @@ impl LoweredModule {
         j
     }
 
-    /// The number of rewritten functions.
+    /// The number of rewritten functions (both origins).
     pub fn lowered(&self) -> usize {
         self.records.iter().filter(|r| matches!(r.outcome, LowerOutcome::Lowered { .. })).count()
+    }
+
+    /// The number of functions rewritten with a replacement of `origin`.
+    pub fn lowered_by(&self, origin: LowerOrigin) -> usize {
+        self.rewritten_by(origin).len()
+    }
+
+    /// The functions rewritten with a replacement of `origin`.
+    pub fn rewritten_by(&self, origin: LowerOrigin) -> Vec<&str> {
+        self.records.iter().filter(|r| matches!(&r.outcome, LowerOutcome::Lowered { origin: o, .. } if *o == origin)).map(|r| r.function.as_str()).collect()
     }
 
     /// The whole lowered file: docs and body.
     pub fn text(&self) -> String {
         format!("{}{}", self.docs, self.body)
     }
+}
+
+/// The two origins of the rewritten functions of `lows`, counted and named
+/// apart (the in-place build summary, the lowered-copy index header):
+/// `optimizer residuals: 0; user-supplied `#[rewrite]` alternatives (user
+/// code, not optimizer output): 1 (`crate::m::f`)`, and whether user
+/// alternatives were excluded (evaluation only).
+pub fn origin_counts(lows: &[LoweredModule]) -> String {
+    let names = |o: LowerOrigin| -> (usize, String) {
+        let fns: Vec<String> = lows.iter().flat_map(|l| l.rewritten_by(o)).map(|f| format!("`{f}`")).collect();
+        let listed = if fns.is_empty() { String::new() } else { format!(" ({})", fns.join(", ")) };
+        (fns.len(), listed)
+    };
+    let (k_opt, opt_names) = names(LowerOrigin::Optimizer);
+    let (k_user, user_names) = names(LowerOrigin::UserRewrite);
+    let mut s = format!("optimizer residuals: {k_opt}{opt_names}; user-supplied `#[rewrite]` alternatives (user code, not optimizer output): {k_user}{user_names}");
+    if lows.iter().any(|l| l.user_rewrites_excluded) {
+        s.push_str(" (user alternatives excluded: evaluation-only build)");
+    }
+    s
 }
 
 /// The buffer state of a source function (state passing, SEMANTICS.md
@@ -566,6 +646,8 @@ struct Candidate {
     dispatch: Option<Dispatch>,
     /// How (`LowerOutcome::Lowered::via`).
     via: String,
+    /// Where the replacement comes from.
+    origin: LowerOrigin,
 }
 
 /// The dispatch of a generic candidate: the method declared in the
@@ -1000,8 +1082,32 @@ fn alt_text(text: &str, name: &str, rename: &HashMap<String, String>) -> Result<
     Ok((format!("{t}\n"), f.sig.constness.is_some()))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// [`lower_lifted_body`], with the optimizer's own residual outcome of
+/// every function that has a user `#[rewrite]` alternative recorded on its
+/// record ([`LowerRecord::optimizer_residual`]).
 fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, opts: &OptOptions, info: &LiftedInfo, fault: Option<LowerFault>) -> LoweredModule {
+    let mut residuals: HashMap<String, String> = HashMap::new();
+    let mut low = lower_lifted_body(c, root, out, o, opts, info, fault, &mut residuals);
+    for r in low.records.iter_mut() {
+        r.optimizer_residual = residuals.remove(&r.function);
+    }
+    low.user_rewrites_excluded = opts.exclude_user_rewrites;
+    low
+}
+
+/// The optimizer residual's outcome as recorded beside a user alternative.
+fn residual_note(r: &Result<Candidate, String>) -> String {
+    match r {
+        Ok(cd) => {
+            let i = &cd.insts[0];
+            format!("cheaper and printable (rung {}; portable cost {} -> {} milli-cycles)", i.rung, i.cost_source, i.cost_residual)
+        }
+        Err(e) => format!("not used: {e}"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_lifted_body(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, opts: &OptOptions, info: &LiftedInfo, fault: Option<LowerFault>, residuals: &mut HashMap<String, String>) -> LoweredModule {
     let Some(src) = c.sm.get(info.file) else {
         return LoweredModule { note: Some("the lifted source is not in the source map".into()), ..Default::default() };
     };
@@ -1039,7 +1145,7 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
     }
     for sf in &fns {
         let path = sf.path(&mpath);
-        let mut keep = |why: String| records.push(LowerRecord { function: path.clone(), outcome: LowerOutcome::Kept(why) });
+        let mut keep = |why: String| records.push(LowerRecord { function: path.clone(), outcome: LowerOutcome::Kept(why), optimizer_residual: None });
         if let Some(r) = &sf.refused {
             keep(r.clone());
             continue;
@@ -1055,16 +1161,19 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
                 keep("the lifted item is not a source item".into());
                 continue;
             }
-            // an optimization alternative named by a `#[rewrite]` lemma
-            // first, then the residual
-            let alt = rw.get(&id).map(|r| rewrite_candidate(c, krate, out, &src_costs, &mpath, sf, id, r, &text));
+            // the optimizer's residual, always built (and recorded beside a
+            // user alternative); a user-supplied alternative named by a
+            // `#[rewrite]` lemma is tried first unless the build excludes
+            // user alternatives (evaluation only)
+            let residual = residual_candidate(krate, pv, out, o, &src_costs, &res_costs, &names_base, &mpath, sf, id);
+            if rw.contains_key(&id) {
+                residuals.insert(path.clone(), residual_note(&residual));
+            }
+            let alt = if opts.exclude_user_rewrites { None } else { rw.get(&id).map(|r| rewrite_candidate(c, krate, out, &src_costs, &mpath, sf, id, r, &text)) };
             match alt {
                 Some(Ok(cd)) => Ok(cd),
-                Some(Err(e_alt)) => match residual_candidate(krate, pv, out, o, &src_costs, &res_costs, &names_base, &mpath, sf, id) {
-                    Ok(cd) => Ok(cd),
-                    Err(e) => Err(format!("{e_alt}; and its residual: {e}")),
-                },
-                None => residual_candidate(krate, pv, out, o, &src_costs, &res_costs, &names_base, &mpath, sf, id),
+                Some(Err(e_alt)) => residual.map_err(|e| format!("{e_alt}; and its residual: {e}")),
+                None => residual,
             }
         };
         match r {
@@ -1106,7 +1215,7 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
             Err(e) => {
                 note = Some(format!("lifted round trip: {e}"));
                 for cd in cands.drain(..) {
-                    records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} failed: {e}")) });
+                    records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} failed: {e}")), optimizer_residual: None });
                 }
                 break;
             }
@@ -1120,14 +1229,14 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
                 for cd in cands.drain(..) {
                     match verdicts.get(&cd.src.key()) {
                         Some(Ok(_)) => keep.push(cd),
-                        Some(Err(e)) => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} rejected the lowered code: {e}")) }),
-                        None => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} did not compare it")) }),
+                        Some(Err(e)) => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} rejected the lowered code: {e}")), optimizer_residual: None }),
+                        None => records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} did not compare it")), optimizer_residual: None }),
                     }
                 }
                 if round == 1 {
                     // a second failure: nothing is lowered
                     for cd in keep.drain(..) {
-                        records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} failed twice; nothing is lowered")) });
+                        records.push(LowerRecord { function: cd.src.path(&mpath), outcome: LowerOutcome::Kept(format!("{ROUND_TRIP_REJECTED} failed twice; nothing is lowered")), optimizer_residual: None });
                     }
                 }
                 cands = keep;
@@ -1145,12 +1254,14 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
         records.push(LowerRecord {
             function: cd.src.path(&mpath),
             outcome: LowerOutcome::Lowered {
+                origin: cd.origin,
                 rung: cd.insts[0].rung.clone(),
                 cost_source: cd.insts.iter().map(|i| i.cost_source).sum(),
                 cost_residual: cd.insts.iter().map(|i| i.cost_residual).sum(),
                 helpers: cd.helpers.iter().map(|h| h.name.clone()).collect(),
                 via: cd.via.clone(),
             },
+            optimizer_residual: None,
         });
     }
     let shipped = std::mem::take(&mut out.mir_gate.shipped);
@@ -1242,11 +1353,12 @@ fn residual_candidate(krate: &Crate, pv: &Crate, out: &Output, o: &Optimized, sr
     }
     let (inst, helpers) = lower_residual(krate, pv, out, o, src_costs, res_costs, names_base, id, &name, sf.state, sf.has_result)?;
     let entry = format!("{{\n    {name}({})\n}}", sf.params.join(", "));
-    Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via: String::new() })
+    Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via: String::new(), origin: LowerOrigin::Optimizer })
 }
 
-/// A `#[rewrite]` candidate: the alternative's text and the alternatives it
-/// calls, renamed, with the kernel-checked link.
+/// A `#[rewrite]` candidate (user code, [`LowerOrigin::UserRewrite`]): the
+/// alternative's text and the alternatives it calls, renamed, with the
+/// kernel-checked link.
 #[allow(clippy::too_many_arguments)]
 fn rewrite_candidate(c: &Checked, krate: &Crate, out: &mut Output, src_costs: &Costs<'_>, mpath: &str, sf: &SourceFn, id: ItemId, r: &Rewrite, _text: &str) -> Result<Candidate, String> {
     let lemma_path = krate.item(r.lemma).path.to_string();
@@ -1302,7 +1414,7 @@ fn rewrite_candidate(c: &Checked, krate: &Crate, out: &mut Output, src_costs: &C
     let entry = format!("{{\n    {entry_name}({})\n}}", sf.params.join(", "));
     let link_name = out.env.global_name(link).map(|s| s.to_string()).unwrap_or_default();
     let inst = Inst { ty: None, orig_global: orig, target: g, entry: entry_name, rung: "Rewrite".into(), cost_source: cs, cost_residual: cg, link: Some(link_name.clone()) };
-    Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via: format!("`#[rewrite]` lemma `{lemma_path}` (`{link_name}`): `{alt_path}`") })
+    Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via: format!("user-supplied alternative `{alt_path}`, `#[rewrite]` lemma `{lemma_path}` (`{link_name}`)"), origin: LowerOrigin::UserRewrite })
 }
 
 /// A generic candidate: one lowered residual per verified instance, and
@@ -1369,7 +1481,7 @@ fn dispatch_candidate(c: &Checked, krate: &Crate, pv: &Crate, out: &Output, o: &
     }
     let entry = format!("{{\n    {}.{method}({})\n}}", sf.params[recv], others.iter().map(|(_, p)| p.as_str()).collect::<Vec<_>>().join(", "));
     let via = format!("per-type dispatch `{DISPATCH_PREFIX}{}` over {}", g.bound, insts.iter().filter_map(|i| i.ty.clone()).collect::<Vec<_>>().join(", "));
-    Ok(Candidate { src: sf.clone(), insts, helpers, entry, dispatch: Some(Dispatch { bound: g.bound.clone(), decl, impls, orig }), via })
+    Ok(Candidate { src: sf.clone(), insts, helpers, entry, dispatch: Some(Dispatch { bound: g.bound.clone(), decl, impls, orig }), via, origin: LowerOrigin::Optimizer })
 }
 
 /// `t` (Rust tokens as text) with the identifier `from` replaced by `to`.

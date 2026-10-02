@@ -137,9 +137,11 @@ pub struct LiftedInfo {
     /// `#[lift(in_place)]`: the host's own file, verified where rustc
     /// compiles it (never emitted).
     pub in_place: bool,
-    /// `#[lift(opt)]`: optimization alternatives (never emitted as a
-    /// module; their functions replace source functions only through
-    /// `#[rewrite]` lemmas and the lifted round trip, `driver::lowered`).
+    /// `#[lift(opt)]`: user-supplied alternatives (hand-written code, never
+    /// emitted as a module; their functions replace source functions only
+    /// through `#[rewrite]` lemmas and the lifted round trip,
+    /// `driver::lowered`, which reports them apart from the optimizer's
+    /// output).
     pub opt: bool,
     /// A lifted child the host's source declares by its **lowered
     /// declaration** (`mod a { include!(concat!(env!("OUT_DIR"), "/F")); }`,

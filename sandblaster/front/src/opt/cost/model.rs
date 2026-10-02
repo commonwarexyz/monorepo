@@ -25,6 +25,18 @@
 //! rung only if it is ≥ 3% cheaper"); [`top`] keeps the three cheapest
 //! candidates, and callers retry at most [`RETRIES`] times after a proof or
 //! elaboration failure. Costs are integers (milli-cycles): deterministic.
+//!
+//! **Validation** (fairness audit of 2026-10-02, J12). The inputs are
+//! generic per-CPU data (`cycle_ns`, `op.*`; the tuning file's `sha.*`,
+//! `varint.*`, `crossover.*`, `threads.*` rows are validation rows no
+//! optimizer code reads, `tests/fairness_lint.rs`). The model has been
+//! checked only against three development-set decisions (`tests/opt_cost.rs`:
+//! QMDB's NEON SHA lanes and shape rungs, the corpus varint), and its free
+//! constants — the `(CP + ΣTP) / 2` weight, `TRY_FAIL`, the 3% gate, the
+//! seeded popcount surcharge — against nothing held out. Its accuracy is to
+//! be measured on a held-out decision benchmark (candidate pairs from
+//! held-out functions, each with a measured winner; plan step 8), and model
+//! changes gated on it as well as on the QMDB regression run.
 
 use std::collections::HashMap;
 
@@ -85,7 +97,11 @@ impl SetModel {
     /// plain model charges a loop body's throughput only). The lowering of
     /// lifted code (`driver::lowered`) compares with it; the optimizer's own
     /// choices still use the plain model (moving them needs the QMDB
-    /// regression run, DESIGN.md §8.2).
+    /// regression run, DESIGN.md §8.2). Two models thus decide (fairness
+    /// audit J12): structural and symmetric (source and replacement priced
+    /// by the same tables), but to be unified with the plain model, or its
+    /// separate use justified, on the held-out decision benchmark (plan step
+    /// 8).
     pub fn fn_cost_carried(&self, krate: &Crate, f: &FnDef, callee: &dyn Fn(ItemId) -> Option<u64>) -> u64 {
         self.tables.iter().map(|t| Walker { carried: true, ..Walker::new(t, krate, callee) }.fn_cost(f)).max().unwrap_or(0)
     }

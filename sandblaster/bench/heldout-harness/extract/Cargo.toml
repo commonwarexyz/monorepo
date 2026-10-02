@@ -1,0 +1,18 @@
+# MIR extraction only (run.sh step 1): H1's src/lib.rs as module `h1` of a
+# crate whose directory holds it at `h1/` (a symlink to
+# ../../heldout/h1), so the .sbmir names the source `h1/src/lib.rs`, a
+# suffix of the path the DSL roots lift. Never built for timing; a
+# standalone workspace (the edition and overflow checks of the subjects).
+[workspace]
+
+[package]
+name = "heldout_h1_mir"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[profile.dev]
+overflow-checks = true

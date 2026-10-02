@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use sandblaster_front::driver::lowered::{LowerFault, LowerOutcome, LoweredModule};
+use sandblaster_front::driver::lowered::{LowerFault, LowerOrigin, LowerOutcome, LoweredModule};
 use sandblaster_front::driver::{self, Checked, ProverSet, VerifyOptions};
 use sandblaster_front::loader::MemFs;
 use sandblaster_front::opt::OptOptions;
@@ -846,6 +846,10 @@ fn ip_files_rt(in_place: bool, proof: &str, opt: &str, rt: &str) -> Vec<(String,
 }
 
 fn lower_ip(in_place: bool, proof: &str, opt: &str, fault: Option<LowerFault>) -> Vec<LoweredModule> {
+    lower_ip_with(in_place, proof, opt, fault, &OptOptions::default())
+}
+
+fn lower_ip_with(in_place: bool, proof: &str, opt: &str, fault: Option<LowerFault>, oopts: &OptOptions) -> Vec<LoweredModule> {
     let rt = fault.map(|f| format!("rt_{f:?}")).unwrap_or_else(|| "rt".into());
     let files = ip_files_rt(in_place, proof, opt, &rt);
     let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
@@ -855,17 +859,17 @@ fn lower_ip(in_place: bool, proof: &str, opt: &str, fault: Option<LowerFault>) -
     let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
     let lows = if in_place {
         assert!(fault.is_none());
-        let (_, lows) = driver::stage::lower_in_place(&c, root, &opts, &OptOptions::default()).unwrap();
+        let (_, lows) = driver::stage::lower_in_place(&c, root, &opts, oopts).unwrap();
         lows
     } else {
         let (_, _, low) = match fault {
-            None => driver::stage::lower_lifted(&c, root, &opts, &OptOptions::default()),
-            Some(f) => driver::stage::lower_lifted_with_fault(&c, root, &opts, &OptOptions::default(), f),
+            None => driver::stage::lower_lifted(&c, root, &opts, oopts),
+            Some(f) => driver::stage::lower_lifted_with_fault(&c, root, &opts, oopts, f),
         }
         .unwrap();
         vec![low]
     };
-    if proof == IP_PROOF {
+    if proof == IP_PROOF && !oopts.exclude_user_rewrites {
         dump_copy(Some(ip_fixture(in_place)), &rt, lows.first().and_then(|l| l.roundtrip_copy.as_ref()).map(|(_, t)| t.as_str()));
     }
     lows
@@ -888,12 +892,21 @@ fn rewrite_lemmas_replace_source_functions_in_place_and_in_module_mode() {
         println!("in place {in_place}: {}\n{:?}", low.body, low.records);
         assert!(low.note.is_none(), "{:?}", low.note);
         match outcome(low, "crate::bits::at_most_one_bit") {
-            LowerOutcome::Lowered { rung, via, .. } => {
+            LowerOutcome::Lowered { origin, rung, via, .. } => {
+                // user code, never counted as the optimizer's
+                assert_eq!(*origin, LowerOrigin::UserRewrite);
                 assert_eq!(rung, "Rewrite");
-                assert!(via.contains("`crate::proof::at_most_one_bit_is_fast`") && via.contains("crate::bits::at_most_one_bit::rewrite_equiv"), "{via}");
+                assert!(via.contains("user-supplied alternative") && via.contains("`crate::proof::at_most_one_bit_is_fast`") && via.contains("crate::bits::at_most_one_bit::rewrite_equiv"), "{via}");
             }
             other => panic!("{other:?}"),
         }
+        assert_eq!((low.lowered_by(LowerOrigin::Optimizer), low.lowered_by(LowerOrigin::UserRewrite)), (0, 1));
+        // the optimizer's own residual is still built and recorded
+        let rec = low.records.iter().find(|r| r.function == "crate::bits::at_most_one_bit").unwrap();
+        assert!(rec.optimizer_residual.is_some(), "{rec:?}");
+        assert!(low.records.iter().filter(|r| r.function != "crate::bits::at_most_one_bit" && r.function != "crate::bits::ones_plus_one").all(|r| r.optimizer_residual.is_none()), "{:?}", low.records);
+        let j = low.json().render();
+        assert!(j.contains("\"rewritten_by_optimizer\": 0") && j.contains("\"rewritten_by_user_rewrite\": 1") && j.contains("\"origin\": \"user_rewrite\"") && j.contains("\"optimizer_residual\": "), "{j}");
         kept(low, "crate::bits::ones_plus_one", "is not 3% cheaper");
         assert!(low.body.contains("pub fn at_most_one_bit(x: u8) -> bool {\n    __sandblaster_opt_at_most_one_bit_fast(x)\n}"), "{}", low.body);
         assert!(low.body.contains("/// `x` has at most one bit set: clearing its lowest set bit leaves zero.\nfn __sandblaster_opt_at_most_one_bit_fast(x: u8) -> bool {\n    x & x.wrapping_sub(1) == 0\n}"), "{}", low.body);
@@ -907,6 +920,27 @@ fn rewrite_lemmas_replace_source_functions_in_place_and_in_module_mode() {
         let out = run_ab(&dir, body, &low.body, main);
         assert!(out.contains("agree"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The evaluation-only option (`OptOptions::exclude_user_rewrites`) builds
+/// the optimizer's own output: no user alternative is used, the residual's
+/// outcome is still recorded, and the optimizer still runs (its results are
+/// there for every function).
+#[test]
+fn the_evaluation_build_excludes_user_alternatives_but_not_the_optimizer() {
+    let oopts = OptOptions { exclude_user_rewrites: true, ..Default::default() };
+    for in_place in [true, false] {
+        let lows = lower_ip_with(in_place, IP_PROOF, IP_OPT, None, &oopts);
+        let low = &lows[0];
+        println!("in place {in_place}: {:?}", low.records);
+        assert!(low.user_rewrites_excluded);
+        assert_eq!(low.lowered_by(LowerOrigin::UserRewrite), 0, "{:?}", low.records);
+        assert!(!low.body.contains("at_most_one_bit_fast"), "{}", low.body);
+        let rec = low.records.iter().find(|r| r.function == "crate::bits::at_most_one_bit").unwrap();
+        assert!(!matches!(rec.outcome, LowerOutcome::Lowered { origin: LowerOrigin::UserRewrite, .. }), "{rec:?}");
+        assert!(rec.optimizer_residual.is_some(), "{rec:?}");
+        assert!(low.json().render().contains("\"user_rewrites\": \"excluded"));
     }
 }
 

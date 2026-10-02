@@ -843,7 +843,8 @@ impl<'a> Driver<'a> {
     fn decide_filtered_in(&mut self, st: &St, c: &V) -> Option<(bool, sandblaster_kernel::term::Tm)> {
         // (a decision inside a fact-directed trial is speculative: an
         // eighth of the cap; QMDB's hopeless `len(before) + len(after) >=
-        // 62` in `reconstruct_finish` spent the whole 2M twice per caller)
+        // 62` in `reconstruct_finish` spent the whole 2M twice per caller;
+        // calibrated on QMDB only, until held-out numbers replace it)
         let div = if self.trials > 0 { 8 } else { 1 };
         match super::facts::decidable_with(st, c) {
             (super::facts::Decidable::No, _) => None,

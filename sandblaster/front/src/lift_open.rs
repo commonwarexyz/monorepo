@@ -44,10 +44,11 @@ pub struct LiftOpts {
     pub host: bool,
     /// `in_place`: the lifted source is the host's own file (`#[path]`).
     pub in_place: bool,
-    /// `opt`: optimization alternatives — agent-written Rust in the host's
+    /// `opt`: user-supplied alternatives — hand-written Rust in the host's
     /// dialect, lifted and verified like any code, never emitted as a
     /// module; `#[rewrite]` lemmas name its functions as the replacements of
-    /// source functions (`driver::lowered`).
+    /// source functions (`driver::lowered`: user code, reported apart from
+    /// the optimizer's output).
     pub opt: bool,
     /// `unverified = "u128, i16"`: sealed-trait impl types left out.
     pub unverified: Vec<String>,

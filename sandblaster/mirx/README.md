@@ -22,16 +22,15 @@ sandblaster/mirx/extract.sh commonware-codec varint codec/sandblaster/varint/var
 
 An in-place crate (storage's MMR) is extracted as a whole, with its
 lowered copies stubbed by the sources, the verifying build scripts of its
-dependencies stubbed, its open traits at their instance and its
-`#[lift(opt)]` alternatives compiled in the crate's context:
+dependencies stubbed and its open traits at their instance:
 
 ```text
-sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,opt \
+sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr \
     storage/sandblaster/mmr/mmr.sbmir \
     --stub mmr-lowered__merkle__mmr__iterator.rs=storage/src/merkle/mmr/iterator.rs \
     --stubs 'commonware_codec:varint.rs=codec/sandblaster/varint/varint.rs' \
     --instance Family=merkle::mmr::Family,Graftable=merkle::mmr::Family \
-    --skip-traits Debug,Display,Hash --inject opt=storage/sandblaster/mmr/opt.rs
+    --skip-traits Debug,Display,Hash
 ```
 
 * `--stubs crate:out.rs=src.rs;..` stubs the build scripts of workspace
@@ -39,7 +38,10 @@ sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location
 * `--instance Trait=path::Type,..` reads open traits at one instance;
 * `--skip-traits T,..` leaves out the impls of these traits (default
   `Debug,Display,Hash,PartialOrd,Ord`);
-* `--inject name=file.rs` compiles a DSL file as `mod name;` of the crate root;
+* `--inject name=file.rs` compiles a DSL file as `mod name;` of the crate root
+  (the verifier's `instances.rs` below; a crate's `#[lift(opt)]` module of
+  user alternatives, when it has one, is compiled the same way and its name
+  added to the modules);
 * `--replace src.rs=text.rs` compiles `src.rs` as if its text were
   `text.rs`'s (its recorded SHA-256 is that text's).
 
@@ -75,10 +77,13 @@ sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location
 **The lifted round trip** of a rewritten in-place file reads the MIR of its
 copy (DESIGN.md §2.1): when the build says `no MIR of the round trip's copy`
 (or the round-trip MIR is stale), extract it with the same command plus
-`--replace storage/src/merkle/mmr/iterator.rs=<OUT_DIR>/mmr-roundtrip__merkle__mmr__iterator.rs`
-into `storage/sandblaster/mmr/mmr.roundtrip__merkle__mmr__iterator.sbmir`,
-and build again. (When the source changes, extract the source first, build,
-then the round trip's copy.)
+`--replace <the source file>=<OUT_DIR>/<name>-roundtrip__<module>.rs` into
+`<stem>.roundtrip__<module>.sbmir` next to the module's `.sbmir`, and build
+again. (When the source changes, extract the source first, build, then the
+round trip's copy.) A file with no rewritten function has no round-trip
+copy; storage's MMR has none today (the optimizer finds no cheaper
+replacement), and the toolchain's fixtures exercise the round trip
+(`mir_fixtures/extract.py`).
 
 The toolchain's own test fixtures (`sandblaster/front/tests/mir_fixtures`)
 are crates of another workspace: `--manifest <their Cargo.toml>` extracts a

@@ -33,7 +33,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use sandblaster_front::driver::cache::{verifier_context, NOT_IDENTITY};
-use sandblaster_front::driver::lowered::{LowerOutcome, LowerRecord, LoweredModule};
+use sandblaster_front::driver::lowered::{LowerOrigin, LowerOutcome, LowerRecord, LoweredModule};
 use sandblaster_front::driver::{self, BuildOutcome};
 use sandblaster_front::loader::{FileProvider, MemFs};
 use sandblaster_front::target::TargetInfo;
@@ -422,7 +422,7 @@ fn the_toolchain_never_branches_on_debug_assertions() {
 // ---------------------------------------------------------------------------
 
 fn kept(f: &str, why: &str) -> LowerRecord {
-    LowerRecord { function: f.into(), outcome: LowerOutcome::Kept(why.into()) }
+    LowerRecord { function: f.into(), outcome: LowerOutcome::Kept(why.into()), optimizer_residual: None }
 }
 
 /// The summary counts the kept functions by their real reason, most
@@ -471,10 +471,22 @@ fn the_optimizer_summary_states_why_functions_were_kept() {
     assert_eq!(driver::gates::kept_reason_class("instance `u8`: not specialized: a loop"), "generic instance: not specialized (a loop)");
     // a rewritten module
     let mut low2 = low.clone();
-    low2.records.push(LowerRecord { function: "crate::v::z".into(), outcome: LowerOutcome::Lowered { rung: "Driven".into(), cost_source: 10, cost_residual: 5, helpers: vec![], via: String::new() } });
+    low2.records.push(LowerRecord { function: "crate::v::z".into(), outcome: LowerOutcome::Lowered { origin: LowerOrigin::Optimizer, rung: "Driven".into(), cost_source: 10, cost_residual: 5, helpers: vec![], via: String::new() }, optimizer_residual: None });
     low2.compared = 2;
     let s2 = driver::gates::lowering_note(&low2);
-    assert!(s2.starts_with("optimized: 1 of 9 source function(s) rewritten to their residuals (lifted round trip: 2 definition(s) compared); source kept: 3 generic with buffer state"), "{s2}");
+    assert!(s2.starts_with("optimized: 1 of 9 source function(s) rewritten to optimizer residuals (lifted round trip: 2 definition(s) compared); source kept: 3 generic with buffer state"), "{s2}");
+    // a user-supplied `#[rewrite]` alternative is counted and named apart,
+    // never as an optimizer residual (DESIGN.md principle 3)
+    let mut low4 = low.clone();
+    low4.records.push(LowerRecord { function: "crate::v::u".into(), outcome: LowerOutcome::Lowered { origin: LowerOrigin::UserRewrite, rung: "Rewrite".into(), cost_source: 10, cost_residual: 5, helpers: vec![], via: String::new() }, optimizer_residual: Some("not used: the residual is not 3% cheaper".into()) });
+    low4.compared = 2;
+    let s4 = driver::gates::lowering_note(&low4);
+    assert!(s4.starts_with("optimized: none of 9 source function(s) rewritten to optimizer residuals; 1 rewritten to user-supplied `#[rewrite]` alternatives (user code, not optimizer output: `crate::v::u`) (lifted round trip: 2 definition(s) compared)"), "{s4}");
+    assert_eq!((low4.lowered_by(LowerOrigin::Optimizer), low4.lowered_by(LowerOrigin::UserRewrite)), (0, 1));
+    let j = low4.json().render();
+    assert!(j.contains("\"rewritten_by_optimizer\": 0") && j.contains("\"rewritten_by_user_rewrite\": 1") && j.contains("\"origin\": \"user_rewrite\"") && j.contains("\"optimizer_residual\": \"not used: the residual is not 3% cheaper\""), "{j}");
+    low4.user_rewrites_excluded = true;
+    assert!(driver::gates::lowering_note(&low4).contains("; user `#[rewrite]` alternatives excluded (evaluation-only build)"));
     // an unknown reason is shown up to its details
     assert_eq!(driver::gates::kept_reason_class("the source already uses the name `x`"), "the source already uses the name `x`");
     assert_eq!(driver::gates::kept_reason_class("the residual cannot be printed as Rust: a loop"), "residual not printable as Rust");

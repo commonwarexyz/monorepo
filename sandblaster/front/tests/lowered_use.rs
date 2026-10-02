@@ -237,7 +237,7 @@ fn the_lowered_declaration_compiles_the_checked_copy() {
     assert!(copy.contains("// STATUS: NOT VERIFIED — DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES PENDING\n"), "{copy}");
     assert!(copy.contains("each rests on a kernel-checked link to the source\n//   function and on the lifted round trip, which ran in this build"), "{copy}");
     assert!(copy.contains("// COMPILED: rustc compiles this file as the module declared in `src/outer/mod.rs`, in place of `src/outer/bits.rs`."), "{copy}");
-    assert!(copy.contains("//   rewritten: `crate::outer::bits::at_most_one_bit` (rung Rewrite;"), "{copy}");
+    assert!(copy.contains("//   rewritten by user code: `crate::outer::bits::at_most_one_bit` (not optimizer output;"), "{copy}");
     assert!(copy.contains("pub fn at_most_one_bit(x: u8) -> bool {\n    __sandblaster_opt_at_most_one_bit_fast(x)\n}"), "{copy}");
     assert!(copy.contains("fn __sandblaster_opt_at_most_one_bit_fast(x: u8) -> bool {\n    x & x.wrapping_sub(1) == 0\n}"), "{copy}");
     assert!(!copy.lines().any(|l| l.starts_with("//!")), "the declaration carries the docs: {copy}");
@@ -263,6 +263,35 @@ fn the_lowered_declaration_compiles_the_checked_copy() {
     }
     assert!(!o.guarded.iter().any(|p| p.ends_with("bits-lowered.txt") || p.ends_with("bits-pending.txt")), "only the copies are guarded");
     assert!(rustc_ab(copy).contains("agree"));
+}
+
+/// Attribution (DESIGN.md principle 3, §2.1): the rewrite of
+/// `at_most_one_bit` comes from a user-supplied `#[rewrite]` alternative
+/// (`at_most_one_bit_fast`), so the build summary, the lowered-copy index
+/// header and the report JSON count it as user code — never as an optimizer
+/// residual — and the optimizer's own residual for it is still built and
+/// recorded. The negative twin: the evaluation-only build
+/// (`SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES=1`) leaves the alternative out
+/// while the optimizer still runs.
+#[test]
+fn user_alternatives_are_attributed_apart_from_the_optimizer() {
+    let o = build(&files(&outer("pub mod bits;\n"), BITS));
+    assert!(o.ok, "{}", o.stderr);
+    let counts = "rewritten functions: optimizer residuals: 0; user-supplied `#[rewrite]` alternatives (user code, not optimizer output): 1 (`crate::outer::bits::at_most_one_bit`)";
+    // the build summary
+    assert!(o.cargo.iter().any(|l| l.starts_with("cargo::warning=sandblaster: `bits`") && l.contains(counts)), "{:?}", o.cargo);
+    // the lowered-copy index header, and the copy's own header
+    let index = output(&o, "bits-lowered.txt");
+    assert!(index.contains(&format!("\n{counts}\n")), "{index}");
+    assert!(index.contains("rewritten by user code: `crate::outer::bits::at_most_one_bit` (not optimizer output;") && !index.contains("rewritten: `crate::outer::bits::at_most_one_bit`"), "{index}");
+    assert!(!index.contains("rewritten to their optimizer replacements") && !index.contains("rewritten to their residuals"), "{index}");
+    let copy = output(&o, COPY);
+    assert!(copy.contains("//   rewritten by user code: `crate::outer::bits::at_most_one_bit`") && !copy.contains("//   rewritten: `"), "{copy}");
+    // the report JSON, with the residual's own outcome
+    let report = output(&o, "bits-report.json");
+    assert!(report.contains("\"rewritten_by_optimizer\": 0") && report.contains("\"rewritten_by_user_rewrite\": 1") && report.contains("\"origin\": \"user_rewrite\""), "{report}");
+    assert!(report.contains("\"optimizer_residual\": \""), "the optimizer's residual for the function is recorded: {report}");
+    assert!(!report.contains("\"origin\": \"optimizer\""), "{report}");
 }
 
 /// The IDE twin (`#[cfg(rust_analyzer)] pub mod bits;` beside the lowered

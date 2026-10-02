@@ -11,18 +11,19 @@
 //!     requires Req_loop(f, x̄), f ≤ K;  decreases f
 //! {
 //!     let w = w₀ >> (K − f);
-//!     if f != 0 && v < w { loop__bits(min(f − 1, 63 + s₀ − lz(v)), x̄) }   // the next set bit
+//!     if f != 0 && v < w { loop__bits(min(f − 1, B − 1 + s₀ − lz(v)), x̄) }   // the next set bit
 //!     else { <the loop's body, recursing into loop__bits> }
 //! }
 //! ```
 //!
-//! (`s₀ = K − log₂ w₀`: the width at fuel `f` is `2^(f − s₀)`, so the next
+//! (`B` is the width of `v` in bits — any of `u8` … `u64` and `usize`;
+//! `s₀ = K − log₂ w₀`: the width at fuel `f` is `2^(f − s₀)`, so the next
 //! peak is at fuel `bitlen(v) − 1 + s₀`.) Two **enumeration lemmas**
 //! (`enumerate`, design §7.5 "symbolic fuel") link it to the loop, both
 //! kernel-checked:
 //!
 //! ```text
-//! <loop>::bits::idle  : Π f f₂ x̄ (f ≤ K) (f₂ ≤ f) (63 + s₀ − f₂ ≤ lz(v)) Req(f) Req(f₂).
+//! <loop>::bits::idle  : Π f f₂ x̄ (f ≤ K) (f₂ ≤ f) (B − 1 + s₀ − f₂ ≤ lz(v)) Req(f) Req(f₂).
 //!                       Eq(R, loop(f, x̄, W(f)), loop(f₂, x̄, W(f₂)))        // an idle run
 //! <loop>::bits::equiv : Π f x̄ Req_H. Eq(R, loop__bits(f, x̄), loop(f, x̄, W(f)))
 //! ```
@@ -40,7 +41,9 @@
 //! Selection: after the closed form and the early exit (a loop without a
 //! `FirstMatch` payload), or forced by `LoopConfig::prefer_set_bits`
 //! (tests); the cost model (plan O8) is to weigh it against the early exit
-//! (3.76 ns at N = 1 but 32.5 ns at N = 32 measured).
+//! (3.76 ns at N = 1 but 32.5 ns at N = 32 measured). Calibrated on QMDB
+//! only: those timings are the development set's (QMDB's `shape_go`), and
+//! the rung order awaits held-out numbers.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -118,14 +121,21 @@ pub fn plan(lp: &Loop, fuel: u32) -> Result<SetBits, String> {
             }
         }
     }
-    if expr_bits(vw) != 64 || s0 + 63 < 64 {
-        return Err("a BitDigit variable that is not 64 bits".into());
+    // any machine width: the jump and the idle lemma are stated at `B − 1`
+    // for `B` the width of `v` (`lz` and its stdlib lemmas exist per width)
+    if vw == Width::Int || uint(vw).is_none() {
+        return Err("a BitDigit variable that is not a machine integer".into());
     }
     Ok(SetBits { fuel, v, wp, w0, k, s0, fw, vw, ww })
 }
 
 fn expr_bits(w: Width) -> u32 {
     super::expr::bits(w)
+}
+
+/// `B − 1` for `B` the width of `w` in bits (the index of its top bit).
+fn top_bit(w: Width) -> u32 {
+    expr_bits(w) - 1
 }
 
 // ---------------------------------------------------------------------------
@@ -165,10 +175,10 @@ fn helper_fn(fd: &FnDef, fid: ItemId, hid: ItemId, sb: &SetBits, fault: bool, sp
     let loc = |l: LocalId, t: &Ty| Expr::new(ExprKind::Local(l), t.clone(), span);
     let bin = |op: BinOp, a: Expr, b: Expr, t: Ty| Expr::new(ExprKind::Binary(op, Box::new(a), Box::new(b)), t, span);
     let call_int = |m: crate::builtins::IntMethod, w: UintTy, args: Vec<Expr>, t: Ty| Expr::new(ExprKind::Call { callee: Callee::Builtin(crate::builtins::Builtin::Int(m, w), vec![]), args }, t, span);
-    // the jump: min(f − 1, 63 + s₀ − lz(v)); the fault (R29) one fuel too
+    // the jump: min(f − 1, B − 1 + s₀ − lz(v)); the fault (R29) one fuel too
     // far down, past the set bit
     let lz = call_int(crate::builtins::IntMethod::LeadingZeros, uint(sb.vw).unwrap(), vec![loc(vl, &vt)], Ty::u32());
-    let tgt32 = bin(BinOp::Sub, lit(sb.s0 as u128 + 63, Width::U32, span), lz, Ty::u32());
+    let tgt32 = bin(BinOp::Sub, lit(sb.s0 as u128 + top_bit(sb.vw) as u128, Width::U32, span), lz, Ty::u32());
     let tgt32 = if fault { call_int(crate::builtins::IntMethod::SaturatingSub, UintTy::U32, vec![tgt32, lit(1, Width::U32, span)], Ty::u32()) } else { tgt32 };
     let tgt = if sb.fw == Width::U32 { tgt32 } else { Expr::new(ExprKind::Cast(Box::new(tgt32), ft.clone()), ft.clone(), span) };
     let fm1 = bin(BinOp::Sub, loc(fl, &ft), lit(1, sb.fw, span), ft.clone());
@@ -496,7 +506,7 @@ impl ArmProver for IdleArms<'_> {
             let body = apps(env.global_body(self.def).ok_or(crate::auto::search::Stop::Budget)?, args.clone());
             let delta = Rc::new(Term::Delta { def: self.def, args: args.iter().map(|(_, a)| a.clone()).collect() });
             let Ok(g1) = eval_in(env, &a2.ctx, &mk::eq(ty_tm.clone(), body.clone(), rhs_tm.clone())) else { return Ok(None) };
-            // the idle test v < W(c), from 63 + s₀ − f₂ ≤ lz(v) and f₂ < c
+            // the idle test v < W(c), from B − 1 + s₀ − f₂ ≤ lz(v) and f₂ < c
             let v = match &a2.venv.0[self.v] {
                 EnvEntry::Rel(v) => v.clone(),
                 _ => return Ok(None),
@@ -706,7 +716,7 @@ impl EquivArms<'_> {
             let peak = fuel_next.as_ref().is_some_and(|f| matches!(&**f, Value::Lit { .. }));
             // (the induction hypothesis' binders: the parameters without the width)
             let ih_vals: Vec<V> = rel.iter().enumerate().filter(|(i, _)| *i != self.sb.wp as usize).map(|(_, x)| x.clone()).collect();
-            // (at the jump, the target `min(c − 1, 63 + s₀ − lz(v))`: linear
+            // (at the jump, the target `min(c − 1, B − 1 + s₀ − lz(v))`: linear
             // arithmetic reads `min` by its definition once `lz_lower` bounds
             // `lz(v)` — for the induction hypothesis' requires and decrease
             // as for `idle`'s hypotheses)
@@ -853,7 +863,7 @@ fn idle_lemma(env: &mut Env, def: GlobalId, sb: &SetBits, lp: &Loop, name: &str,
         let _ = f2_tm;
         prop(&mut st, "hle", mk::eq(mk::bool_ty(bi), Rc::new(Term::Prim { op: PrimOp::Le(fw), args: vec![f2_tm2, f_tm], proofs: vec![] }), mk::bool_lit(bi, true)))?;
         let f2_32 = if fw == Width::U32 { st.var(1) } else { Rc::new(Term::Prim { op: PrimOp::Cast { from: fw, to: Width::U32 }, args: vec![st.var(1)], proofs: vec![] }) };
-        let lhs = Rc::new(Term::Prim { op: PrimOp::WSub(Width::U32), args: vec![mk::lit(Width::U32, 63 + sb.s0), f2_32], proofs: vec![] });
+        let lhs = Rc::new(Term::Prim { op: PrimOp::WSub(Width::U32), args: vec![mk::lit(Width::U32, top_bit(sb.vw) + sb.s0), f2_32], proofs: vec![] });
         let lz = Rc::new(Term::Prim { op: PrimOp::LeadingZeros(sb.vw), args: vec![st.var(vpos as u32)], proofs: vec![] });
         prop(&mut st, "hv", mk::eq(mk::bool_ty(bi), Rc::new(Term::Prim { op: PrimOp::Le(Width::U32), args: vec![lhs, lz], proofs: vec![] }), mk::bool_lit(bi, true)))?;
         // the loop's arguments at f and at f₂

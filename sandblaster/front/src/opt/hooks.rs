@@ -20,8 +20,16 @@
 //! optimizer's own proposals.
 //!
 //! The driven route (O4) takes simulated faults (`drive_faults`, R1–R15).
-//! Rules (`#[rewrite]` laws) and parallel executors have no consumer in
-//! today's pipeline; their hooks arrive with their stages.
+//! `#[rewrite]` lemmas have one consumer, the lowering of lifted modules
+//! (`driver::lowered`): a lemma `f(x̄) == g(x̄)` with `g` in a `#[lift(opt)]`
+//! module makes `g`, a user-supplied alternative, a candidate replacement of
+//! `f`. That is user code, not optimizer output: it is recorded as
+//! `LowerOrigin::UserRewrite`, counted apart from the optimizer's residuals
+//! (whose outcome is still recorded), never counted in "faster than rustc"
+//! claims, and left out by `OptOptions::exclude_user_rewrites`
+//! (DESIGN.md principle 3). It needs no hook here: its simulated faults are
+//! `driver::lowered::LowerFault`. Parallel executors have no consumer in
+//! today's pipeline; their hooks arrive with their stage.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;

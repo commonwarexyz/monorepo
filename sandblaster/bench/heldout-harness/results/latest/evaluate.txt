@@ -1,0 +1,32 @@
+[H1] decimal_digits: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[contract]: `while` loops need a measure
+[H1] base32_encoded_len: elaboration: exec-only elaboration: Unproven (Overflow obligation Failed: Eq(Bool, #le_int(#imul(#cast_usize_int(n), #cast_usize_int(8usize)), 18446744073709551615int), true
+[H1] base64_encoded_len: elaboration: exec-only elaboration: Unproven (Overflow obligation Failed: Eq(Bool, #le_int(#imul(#cast_usize_int(__t3), #cast_usize_int(4usize)), 18446744073709551615int), t
+[H1] reverse_bits: reader: sandblaster/bench/heldout/h1/src/lib.rs:46:8: error[unsupported]: lift: MIR reading of `reverse_bits` (in `std::cmp::impls::<impl std::cmp::PartialOrd for i32>:
+[H1] gray_encode: kept: the residual is not 3% cheaper than the source (portable model: 1243 vs 1243 milli-cycles)
+[H1] gray_decode: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[contract]: `while` loops need a measure
+[H1] next_power_of_two: kept: optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Le(U32))
+[H1] isqrt: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[contract]: `while` loops need a measure
+[H1] fenwick_prefix_sum: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[contract]: `while` loops need a measure
+[H1] buddy_order: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[contract]: `while` loops need a measure
+[H1] binomial_meld_carries: reader: sandblaster/bench/heldout/h1/src/lib.rs:127:8: error[unsupported]: lift: MIR reading of `binomial_meld_carries` (in `heldout_h1_mir::h1::binomial_meld_carries`)
+[H1] hamming_distance: reader: sandblaster/bench/heldout/h1/src/lib.rs:144:8: error[unsupported]: lift: MIR reading of `hamming_distance` (in `std::slice::Iter::<'_, u8>::new`): rvalue (unsup
+[H1] run_count: reader: sandblaster/bench/heldout/h1/src/lib.rs:152:8: error[unsupported]: lift: MIR reading of `run_count` (in `core::slice::iter::<impl std::iter::IntoIterator for &[
+[H1] first_newline: reader: sandblaster/bench/heldout/h1/src/lib.rs:165:8: error[unsupported]: lift: MIR reading of `first_newline` (in `std::slice::Iter::<'_, u8>::new`): rvalue (unsuppor
+[H1] first_printable: reader: sandblaster/bench/heldout/h1/src/lib.rs:171:8: error[unsupported]: lift: MIR reading of `first_printable` (in `std::slice::Iter::<'_, u8>::new`): rvalue (unsupp
+[H1] checked_sum: reader: sandblaster/bench/heldout/h1/src/lib.rs:188:8: error[unsupported]: lift: MIR reading of `checked_sum` (in `std::slice::Iter::<'_, u32>::new`): rvalue (unsupport
+[H1] ring_index: elaboration: exec-only elaboration: Unproven (DivZero obligation Failed: Eq(Bool, #ne_usize(capacity, 0usize), true); Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cas
+[H1] align_up: elaboration: exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cast_u64_int(x), #cast_u64_int(align)
+[H1] ceil_div: elaboration: exec-only elaboration: Unproven (DivZero obligation Failed: Eq(Bool, #ne_u32(b, 0u32), true); DivZero obligation Failed: Eq(Bool, #ne_u32(b, 0u32), true); Overf
+[H1] crc8: reader: sandblaster/bench/heldout/h1/src/lib.rs:225:8: error[unsupported]: lift: MIR reading of `crc8` (in `core::slice::iter::<impl std::iter::IntoIterator for &[u8]>:
+[H1] parity: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[contract]: `while` loops need a measure
+[H1] trailing_ones: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[contract]: `while` loops need a measure
+[H1] byte_swap: reader: sandblaster/bench/heldout/h1/src/lib.rs:261:8: error[unsupported]: lift: MIR reading of `byte_swap` (in `std::cmp::impls::<impl std::cmp::PartialOrd for i32>::l
+[H1] nibble_popcount: elaboration: exec-only elaboration: Blocked("depends on `crate::h1::nibble_popcount__loop0`, which could not be elaborated: cannot infer a termination measure; add `#[decrea
+[H1] matrix_sum_4x8: reader: sandblaster/bench/heldout/h1/src/lib.rs:1:1: error[recursion]: mutual recursion is not supported: crate::h1::matrix_sum_4x8__loop0 → crate::h1::matrix_sum_4x8__
+[H1] seed16_rounds20: reader: sandblaster/bench/heldout/h1/src/lib.rs:293:8: error[unsupported]: lift: MIR reading of `seed16_rounds20` (in `core::num::<impl u32>::rotate_left`): the intrins
+[H1] count_words: reader: sandblaster/bench/heldout/h1/src/lib.rs:310:8: error[unsupported]: lift: MIR reading of `count_words` (in `core::slice::iter::<impl std::iter::IntoIterator for 
+[H1] scale_sample: reader: sandblaster/bench/heldout/h1/src/lib.rs:334:8: error[unsupported]: lift: MIR reading of `scale_sample` (in `heldout_h1_mir::h1::scale_sample`): the cast Int(tru
+[H1] remaining_budget: reader: sandblaster/bench/heldout/h1/src/lib.rs:342:8: error[unsupported]: lift: MIR reading of `remaining_budget` (in `core::slice::iter::<impl std::iter::IntoIterator
+[H1] read_u32_le: reader: sandblaster/bench/heldout/h1/src/lib.rs:351:8: error[unsupported]: lift: MIR reading of `read_u32_le` (in `<std::option::Option<u32> as std::ops::FromResidual<s
+[H2] s01 crate::rng::mix64: kept: a `const fn` (its lowered helpers would have to be `const fn` too; only a `const fn` alternative of a `#[rewrite]` lemma replaces one)
+{"h1": 30, "h2": 1, "union": true}

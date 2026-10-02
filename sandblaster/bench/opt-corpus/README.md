@@ -52,6 +52,20 @@ everything, then fails with exit 3 until the rows are re-recorded with
 appended to `recorded-history.tsv`). `run.sh --composition` only compares (exit 0
 when it matches, 3 when not; nothing is built).
 
+**Frozen references and the fair baseline** (fairness audit of 2026-10-02,
+J10/J15). G6 (`sandblaster/tools/gates/g6.sh`, run first by `run.sh`) freezes
+the corpus, `baselines/o1-gen.rs` and the hand-written references
+`ideal/src`. A reference that must change keeps its old version beside it, as
+a second column (`ideal::<fn>` and `ideal::<fn>_v1`, both timed, both ratios
+reported), and the change is recorded in `recorded-history.tsv` before the next
+measurement. (P20's reference lost its `#[inline(never)]` at O5 after the
+target was missed, 15.5 → 84.1 ns with identical generated code; the
+milestone stayed "not met", but under this rule the old reference stays as a
+column.) `run.sh` also runs the fair-baseline check
+(`sandblaster/tools/gates/fair-baseline.sh`): one profile for every subject,
+every subject in one binary, the identity check run. All of this is the
+development set: these programs are what the optimizer was built on.
+
 What a run does:
 1. emits the corpus for aarch64 and x86_64 with the front end's stage
    emitter (`cargo run -p sandblaster-front --example stage_emit`: proofs,
@@ -69,7 +83,7 @@ What a run does:
 4. x86_64: `x86_64-apple-darwin` builds at `x86-64` and `x86-64-v3` whose checks
    run under Rosetta 2, and a compile-only `x86_64-unknown-linux-gnu` build at
    `x86-64-v4` (objects generated, the link stubbed by
-   `tools/asmcheck/nolink.sh`).
+   `bench/opt-corpus/nolink.sh`).
 
 Results land in `target/opt/opt-corpus/<date>/` (emitted files, logs,
 `bench-aarch64-<layout>[-oc].json/md`, `samecode-*.json`, `e0-*.md`,

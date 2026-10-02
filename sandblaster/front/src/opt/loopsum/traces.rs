@@ -4,10 +4,13 @@
 //!
 //! * **profile inputs**: entry values recorded by `sandblaster profile` in the
 //!   crate's checked-in `PROFILE.json` (`opt::cost::profile`);
-//! * **seeded corners**: 0, 1, powers of two and their neighbours, the
-//!   maximum, the boundaries of the call's `requires` (`2^62` for QMDB's
-//!   leaf count), related pairs (`x < y`), and pseudo-random values — the
-//!   seed is the hash of the loop's name, so the traces are deterministic.
+//! * **seeded corners**: 0 and every power of two of the width with its
+//!   neighbours (`2^k − 1`, `2^k`, `2^k + 1` for every `k ≤ W`, in an order
+//!   that spreads over `k`), the boundaries of the call's `requires` and the
+//!   literals of the loop's own tests (with their neighbours; harvested from
+//!   the loop, [`super::pool`]), related pairs (`x < y`), and pseudo-random
+//!   values — the seed is the hash of the loop's name, so the traces are
+//!   deterministic. No value is picked for a particular program.
 //!
 //! Samples that violate the call's `requires` are dropped (checked by kernel
 //! evaluation). Each trace is run by the native interpreter of the classified
@@ -82,55 +85,91 @@ impl Rng {
     }
 }
 
-/// The corner values of a width (and `bound`-related ones).
-fn corners(w: Width, bounds: &[u128]) -> Vec<u128> {
+/// The exponents `0..=b` in an order that spreads over the range (the
+/// bit-reversal order of `0..2^⌈log₂(b+1)⌉`, out-of-range ones skipped):
+/// a prefix of the corner list covers small, middle and large values alike.
+fn spread_exponents(b: u32) -> Vec<u32> {
+    let n = (b + 1).next_power_of_two();
+    let bits = n.trailing_zeros();
+    let rev = |i: u32| if bits == 0 { 0 } else { i.reverse_bits() >> (32 - bits) };
+    (0..n).map(rev).filter(|k| *k <= b).collect()
+}
+
+/// The corner values of a width (see the module docs): the harvested ones
+/// first — the boundaries of the call's `requires` (`bounds`, with
+/// `x − 2`, `x − 1`, `x`, `x + 1`, `x / 2`) and the literals of the loop's
+/// tests (`literals`, with their neighbours already) — then `0` and
+/// `2^k − 1`, `2^k`, `2^k + 1` for every `k ≤ W` (`k` spread). In that
+/// order, deduplicated: the sample streams take a prefix.
+pub fn corners(w: Width, bounds: &[u128], literals: &[u128]) -> Vec<u128> {
     let m = expr::mask(w);
     let b = expr::bits(w).min(64);
-    let mut v = vec![0, 1, 2, 3, 5, 7, 8, 127, 128, 255, 256, m, m - 1, m >> 1, (m >> 1) + 1];
-    for k in [5u32, 7, 16, 31, 32, 33, 61, 62, 63] {
-        if k < b {
-            let p = 1u128 << k;
-            v.extend([p - 1, p, p + 1]);
-        }
-    }
+    let mut v: Vec<u128> = Vec::new();
     for &x in bounds {
-        v.extend([x.saturating_sub(1), x, x + 1, x >> 1, x.saturating_sub(2)]);
+        v.extend([x.saturating_sub(1), x, x.saturating_add(1), x >> 1, x.saturating_sub(2)]);
     }
-    v.retain(|x| *x <= m);
-    v.sort();
-    v.dedup();
+    v.extend(literals.iter().copied());
+    v.push(0);
+    for k in spread_exponents(b) {
+        let p = 1u128 << k;
+        v.extend([p - 1, p, p + 1]);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    v.retain(|x| *x <= m && seen.insert(*x));
     v
 }
 
-/// Literal bounds mentioned by the loop's `requires` (for corner samples).
+/// Literal bounds mentioned by the loop's `requires` (for corner samples):
+/// every literal above 16, and every **closed** subterm — a constant
+/// (`MAX_LEAVES`) or a primitive over literals (`1 << 62`) — evaluated to its
+/// literal, so a bound written as a constant expression is harvested like a
+/// literal one.
 fn requires_bounds(env: &Env, lp: &Loop) -> Vec<u128> {
     let tele = crate::opt::symex::telescope(env, lp.one.def).unwrap();
     let mut out = Vec::new();
+    fn closed(t: &sandblaster_kernel::term::Tm) -> bool {
+        !crate::elab::tm::any_node(t, &mut |n| matches!(n, Term::Var(_)))
+    }
+    fn walk(env: &Env, t: &sandblaster_kernel::term::Tm, out: &mut Vec<u128>) {
+        match &**t {
+            Term::Lit { n, .. } => {
+                if let Some(x) = n.to_u128()
+                    && x > 16
+                {
+                    out.push(x);
+                }
+                return;
+            }
+            Term::Global(g) if env.global_arity(*g) == Some(0) => {
+                let mut b = Budget { steps: 100_000 };
+                if let Ok(v) = env.eval(&VEnv::default(), Lvl(0), t, &mut b)
+                    && let Value::Lit { n, .. } = &*v
+                    && let Some(x) = n.to_u128()
+                {
+                    out.push(x);
+                }
+                return;
+            }
+            Term::Prim { .. } if closed(t) => {
+                let mut b = Budget { steps: 100_000 };
+                if let Ok(v) = env.eval(&VEnv::default(), Lvl(0), t, &mut b)
+                    && let Value::Lit { n, .. } = &*v
+                    && let Some(x) = n.to_u128()
+                    && x > 16
+                {
+                    out.push(x);
+                    return;
+                }
+            }
+            _ => {}
+        }
+        crate::elab::tm::children(t, &mut |c| walk(env, c, out));
+    }
     for (_, rel, dom) in &tele.binders {
         if *rel != Rel::Irr {
             continue;
         }
-        crate::elab::tm::any_node(dom, &mut |n| {
-            if let Term::Lit { n, .. } = n
-                && let Some(x) = n.to_u128()
-                && x > 16
-            {
-                out.push(x);
-            }
-            false
-        });
-        // global constants (e.g. `MAX_LEAVES`) evaluate to their literal
-        crate::elab::tm::any_node(dom, &mut |n| {
-            if let Term::Global(g) = n
-                && env.global_arity(*g) == Some(0)
-                && let Some(body) = env.global_body(*g)
-                && let Term::Lit { n, .. } = &*body
-                && let Some(x) = n.to_u128()
-            {
-                out.push(x);
-            }
-            false
-        });
+        walk(env, dom, &mut out);
     }
     out.sort();
     out.dedup();
@@ -221,11 +260,12 @@ pub fn samples(env: &Env, lp: &Loop, profile: &[Vec<u128>]) -> Result<Vec<Vec<CV
     let name = env.global_name(lp.one.def).map(|s| s.to_string()).unwrap_or_default();
     let mut rng = Rng::seeded(&name);
     let bounds = requires_bounds(env, lp);
+    let literals = super::pool::Pool::harvest(lp).corner_literals();
     // candidate streams, interleaved so that every kind is represented
     // within the sample budget
     let mut streams: Vec<Vec<Vec<u128>>> = Vec::new();
     streams.push(profile.iter().filter(|p| p.len() == widths.len()).cloned().collect());
-    let cs: Vec<Vec<u128>> = widths.iter().map(|w| corners(*w, &bounds)).collect();
+    let cs: Vec<Vec<u128>> = widths.iter().map(|w| corners(*w, &bounds, &literals)).collect();
     // each position through its corners, the others at 0
     for (i, c) in cs.iter().enumerate() {
         let mut st = Vec::new();

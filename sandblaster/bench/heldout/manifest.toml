@@ -1,0 +1,116 @@
+# The held-out evaluation set (fairness audit of 2026-10-02, evaluation
+# protocol items 1-3). Written before anything was measured on it, and
+# frozen by sandblaster/tools/gates/g6.sh (every file under
+# sandblaster/bench/heldout/, this one included). Nobody looks at optimizer
+# output or timings on it while building passes. An H function whose
+# result drives an optimizer change moves to the development set; its
+# replacement is drawn by the same rule (H2: the next accepted candidate
+# in h2/probe.tsv's seeded order).
+
+date = "2026-10-02"
+source_commit = "729ecd2a215bf034d1f70464a3f75730558ce505"
+
+[h1]
+# 25 idioms, 30 functions written blind from an idiom list committed first
+# (h1/idioms.md, hashed before any code), by an agent that read no optimizer
+# source, corpus or optimizer output. Not derived from the monorepo: the
+# files are pinned by their SHA-256 (written on top of source_commit, not
+# committed to git when this manifest was written).
+path = "sandblaster/bench/heldout/h1"
+idioms = "idioms.md"
+idioms_sha256 = "ce3bb0f080e5f87baedf269ffc29702279485f060410702b1495209acbe6f3ea"
+functions = 30
+
+[[h1.file]]
+path = "Cargo.toml"
+sha256 = "78732d8d1d7fce65706d05d6de23453178ca407a4f3e6edab2b4ec683ffa616e"
+
+[[h1.file]]
+path = "idioms.md"
+sha256 = "ce3bb0f080e5f87baedf269ffc29702279485f060410702b1495209acbe6f3ea"
+
+[[h1.file]]
+path = "manifest.toml"
+sha256 = "0ec690403baf0cedb941e7165a41464778125579a86d6af9eaed1ccf8709af93"
+
+[[h1.file]]
+path = "src/lib.rs"
+sha256 = "d4107a6a9cfc4bf08a44c8c3e4323f6f1fa7f1a16d8351e3b03aaf2f839fa0dd"
+
+[h2]
+# real monorepo functions sampled by rule (h2/RULE.md) from crates no
+# milestone targets; run through the exec-only path (no laws), as
+# sandblaster/front/tests/opt_qmdb.rs runs the optimizer, from the DSL
+# roots in h2/roots/ and the MIR in h2/mir/.
+path = "sandblaster/bench/heldout/h2"
+rule = "RULE.md"
+rule_sha256 = "771ad22c63b364c5e28a4449e1c42cc61b1bcea88e7313eb07a3f30413fa48c8"
+seed = "6da19874a074881c6db6d18cf32b096f"
+sample_size = 40
+sampled = 1
+candidates = 281
+probed = 281
+accepted = 1
+shortfall = 39
+# fewer than 40 candidates passed the probe: H2 is every one that did
+# (RULE.md section 4), and this rule has no replacement candidate left.
+# A wider rule is a new, versioned rule with new files beside these;
+# the coordinator decides (h2/PROBE-LOG.md).
+mir_rustc = "rustc 1.98.0-nightly (8b6558a02 2026-06-20)"
+
+[[h2.function]]
+slug = "s01"
+id = "commonware-utils::rng::mix64"
+file = "utils/src/rng.rs"
+line = 135
+file_sha256 = "7514c9b0191ebc96b8139f2024f9d791b2068976ca4714e089c6d3181b27e029"
+kernel_name = "crate::rng::mix64"
+mir = "mir/s01.sbmir"
+root = "roots/s01/mod.rs"
+seeded_rank = 145
+mir_statements = 20
+mir_loop = false
+
+[[h2.file]]
+path = "PROBE-LOG.md"
+sha256 = "62defbcf206553c1d6385898056d24f052598f8a4d8b8103bbcfc45c72610e7b"
+
+[[h2.file]]
+path = "RULE.md"
+sha256 = "771ad22c63b364c5e28a4449e1c42cc61b1bcea88e7313eb07a3f30413fa48c8"
+
+[[h2.file]]
+path = "candidates.tsv"
+sha256 = "42781da06613c00fb538152b42e40dde5c433422e8b8dcc93c69d5d006be0823"
+
+[[h2.file]]
+path = "freeze.py"
+sha256 = "5db916501bc401c462f2391979236735933a8ae94e884de3d51ea8ef1b888cfc"
+
+[[h2.file]]
+path = "mir/s01.sbmir"
+sha256 = "303ed605fee013b1808e5afa8fb550feae7aa1d9234ad85fb58e352d07f3c277"
+
+[[h2.file]]
+path = "probe.py"
+sha256 = "6fc89a4b91f9010bdae4396c948e24a47b03fc20ce350250a14fb2ee14e6d63c"
+
+[[h2.file]]
+path = "probe.tsv"
+sha256 = "ff087be8b7b9750dfc93208a2a0d014c1224466062a8b1b542241d32d212489c"
+
+[[h2.file]]
+path = "rejections.tsv"
+sha256 = "66bd6360efac6fe35dccffcc48f7330773c60eb1568378f7519f4c759a54772d"
+
+[[h2.file]]
+path = "roots/s01/mod.rs"
+sha256 = "83503c6d3512f504899932395f4d581fbdc61d611d572fea4dd5764211f12426"
+
+[[h2.file]]
+path = "sample.py"
+sha256 = "5eb72f5dc09d29b79f1c41a95617110f2701d665db0632d92878097feaa962e3"
+
+[[h2.file]]
+path = "sample.tsv"
+sha256 = "8faa7b47048f925c7c20552e8e16d1b5d804233d67583bfad9c6fc37e517800e"

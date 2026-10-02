@@ -1,0 +1,38 @@
+# The held-out evaluation harness (fairness audit of 2026-10-02, plan step 8;
+# J11): the optimizer's own output on the frozen held-out set
+# (sandblaster/bench/heldout: H1 blind programs, H2 rule-sampled monorepo
+# functions) against rustc on the unmodified source, in one binary.
+#
+# Every subject is the SAME crate source (subject/lib.rs); the package's
+# feature selects the module (`source`: the held-out files as written;
+# `optimized`: the lowered copies the exec-only optimizer wrote, run.sh).
+# subj_rustc_aa is the A/A control: the unmodified source a second time.
+# One workspace profile compiles all of them alike (opt-level, overflow
+# checks, codegen units, LTO, target features). A standalone workspace,
+# excluded from the root one; run it with ./run.sh.
+[workspace]
+members = [".", "subj_rustc", "subj_rustc_aa", "subj_opt"]
+resolver = "2"
+
+[package]
+name = "heldout-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+subj_rustc = { path = "subj_rustc" }
+subj_rustc_aa = { path = "subj_rustc_aa" }
+subj_opt = { path = "subj_opt" }
+
+# Commonware's production profile: overflow checks on (Cargo.toml of the
+# monorepo, [profile.release]); everything else is cargo's release default
+# (opt-level 3, 16 codegen units, no LTO), the same for every subject.
+[profile.release]
+overflow-checks = true
+debug = 1
+
+# The same without overflow checks (a second binary, reported separately).
+[profile.release-nooc]
+inherits = "release"
+overflow-checks = false

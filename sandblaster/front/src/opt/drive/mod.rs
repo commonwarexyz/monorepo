@@ -227,6 +227,44 @@ pub const KEPT_UNPRINTED: &[&str] = &["slice::split_last_chunk", "slice::as_chun
 /// lifted crates have these definitions.
 pub const KEPT_LIFT_MODEL: &[&str] = &["crate::__lift_model::bufmut_put_u8", "crate::__lift_model::bufmut_put_slice", "crate::__lift_model::buf_try_get_u8", "crate::__lift_model::buf_remaining"];
 
+/// Whether the driver unrolls a static user recursion `f` (item `id`) of
+/// `trips` trips — into per-level helpers or in place (design §6.2, §6.5) —
+/// rather than keep its loop: the **cost model's** decision. (Fairness audit
+/// of 2026-10-02, J7: this was a fixed limit of 10 trips, the length of a
+/// LEB128 `u64`, chosen on the corpus' varint decoder.)
+///
+/// Unrolling removes the loop's per-iteration bookkeeping — the measure's
+/// test and update and the back edge, priced as the cost model prices a
+/// loop iteration's overhead (one branch and one ALU operation, `Walker`'s
+/// `Loop` arm) — and changes nothing else in an iteration. It pays on every
+/// executed iteration alike, so the trip distribution (the profile's, or
+/// the static count) cancels out of the comparison: unrolling pays when the
+/// unrolled iterations clear the selection gate against the kept ones
+/// (`cost::model::beats`, ≥ 3% cheaper; the body priced by the portable
+/// tables of the crate's target, every table). Its price is code size: the
+/// unrolled copies — `trips` times the body's HIR nodes — must fit the
+/// residual budget of one driven function
+/// ([`DriveConfig::max_residual_nodes`], which unrolled nodes count
+/// against, design §6.2).
+pub fn unroll_pays(krate: &Crate, id: ItemId, f: &FnDef, trips: u32, cfg: &DriveConfig) -> bool {
+    let FnBody::Exec(body) = &f.body else { return false };
+    if (trips as usize).saturating_mul(crate::opt::hir_nodes(body)) > cfg.max_residual_nodes {
+        return false;
+    }
+    let tuning = crate::opt::cost::tuning::Tuning::shared();
+    let model = crate::opt::cost::model::SetModel::portable(krate.target.arch.name(), &tuning);
+    // one iteration: the body with its recursive call free (the call is the
+    // back edge, which the overhead below prices)
+    let per = model.fn_costs(krate, f, &|c| (c == id).then_some(0));
+    !per.is_empty()
+        && per.iter().zip(&model.tables).all(|((_, b), t)| {
+            use crate::opt::cost::tables::Op;
+            let overhead = t.op(Op::Branch).tp + t.op(Op::Alu).tp;
+            let n = u64::from(trips);
+            crate::opt::cost::model::beats(b.saturating_mul(n), (b + overhead).saturating_mul(n))
+        })
+}
+
 /// The crate's unfolding policy for one driven function.
 pub struct CratePolicy<'a> {
     pub env: &'a Env,
@@ -251,6 +289,8 @@ pub struct CratePolicy<'a> {
     unprinted: HashSet<GlobalId>,
     recursive: RefCell<HashMap<GlobalId, bool>>,
     small: RefCell<HashMap<GlobalId, bool>>,
+    /// [`unroll_pays`] per user recursion and trip count.
+    unroll: RefCell<HashMap<(GlobalId, u32), bool>>,
     /// Driving a polyvariant call-site specialization (design §6.5): a
     /// loop helper entered at a literal index is unrolled under the
     /// unroller's checkpoint (the constants usually decide every trip; a
@@ -296,7 +336,7 @@ impl<'a> CratePolicy<'a> {
             .filter(|n| env.lookup_global(&format!("{n}_some")).is_some() && env.lookup_global(&format!("{n}_none")).is_some())
             .filter_map(|n| env.lookup_global(&n))
             .collect();
-        CratePolicy { env, krate, cfg, root, user, inline, list: env.lookup_ind("List"), summaries: None, keep, unprinted, recursive: RefCell::new(HashMap::new()), small: RefCell::new(HashMap::new()), spec_unroll: false, fold_root: None, checked, facts_on: false, no_fact_unfold: HashSet::new(), seg_root: None }
+        CratePolicy { env, krate, cfg, root, user, inline, list: env.lookup_ind("List"), summaries: None, keep, unprinted, recursive: RefCell::new(HashMap::new()), small: RefCell::new(HashMap::new()), unroll: RefCell::new(HashMap::new()), spec_unroll: false, fold_root: None, checked, facts_on: false, no_fact_unfold: HashSet::new(), seg_root: None }
     }
 
     /// The policy with fact-directed unfolding and guard specialization on
@@ -373,6 +413,17 @@ impl<'a> CratePolicy<'a> {
     fn has_loop_helper(&self, g: GlobalId) -> bool {
         let Some(b) = self.env.global_body(g) else { return false };
         crate::elab::tm::any_node(&b, &mut |n| matches!(n, Term::Global(h) if self.env.global_kind(*h) == Some(DefKind::LoopHelper)))
+    }
+
+    /// Whether the user recursion `def` of `trips` trips is unrolled rather
+    /// than kept ([`unroll_pays`]; memoized).
+    fn unrolls(&self, def: GlobalId, trips: u32) -> bool {
+        if let Some(b) = self.unroll.borrow().get(&(def, trips)) {
+            return *b;
+        }
+        let b = self.user.get(&def).and_then(|id| self.krate.fn_def(*id).map(|f| unroll_pays(self.krate, *id, f, trips, self.cfg))).unwrap_or(false);
+        self.unroll.borrow_mut().insert((def, trips), b);
+        b
     }
 
     /// Static measure / structure of a recursive application (§6.2): the
@@ -477,7 +528,7 @@ impl CratePolicy<'_> {
 
 impl CratePolicy<'_> {
     /// Whether the value DAG `v` applies a user recursion whose measure or
-    /// structure is static within `max_static_trips` (the driver unrolls it,
+    /// structure is static and that the driver unrolls ([`unroll_pays`],
     /// design §6.2): a straight-line (tier-0) residual that keeps such a
     /// call is driven too.
     pub fn applies_static_recursion(&self, v: &sandblaster_kernel::value::V) -> bool {
@@ -497,7 +548,7 @@ impl CratePolicy<'_> {
                 Value::Neu(n) => {
                     match &n.head {
                         Head::Global { def, args } => {
-                            if self.user.contains_key(def) && self.is_recursive(*def) && self.is_static(*def, args).is_some_and(|t| t <= self.cfg.max_static_trips) {
+                            if self.user.contains_key(def) && self.is_recursive(*def) && self.is_static(*def, args).is_some_and(|t| self.unrolls(*def, t)) {
                                 return true;
                             }
                             stack.extend(args.iter().filter_map(|a| step::rel(a).cloned()));
@@ -518,7 +569,7 @@ impl CratePolicy<'_> {
     }
 
     /// Whether the value DAG `v` applies a user recursion that Σ2 may
-    /// summarize (a literal measure above `max_static_trips`, dynamic
+    /// summarize (a literal measure of 2 to 64 trips, dynamic
     /// arguments; `loopsum::candidate`): a straight-line (tier-0) residual
     /// that keeps such a loop call is driven too (plan O6).
     pub fn applies_loop_summary(&self, v: &sandblaster_kernel::value::V) -> bool {
@@ -540,7 +591,7 @@ impl CratePolicy<'_> {
                         Head::Global { def, args } => {
                             if (self.user.contains_key(def) || self.is_user_loop_helper(*def))
                                 && self.is_recursive(*def)
-                                && crate::opt::loopsum::candidate(self.env, true, self.loop_trips(*def, args), self.cfg.max_static_trips, *def, args).is_some()
+                                && crate::opt::loopsum::candidate(self.env, true, self.loop_trips(*def, args), *def, args).is_some()
                             {
                                 return true;
                             }
@@ -709,13 +760,14 @@ impl Policy for CratePolicy<'_> {
             // unrolled there, below: the helpers' trees are not summarized)
             if (self.user.contains_key(&def) || (self.is_user_loop_helper(def) && !self.spec_unroll))
                 && self.summaries.is_some()
-                && let Some(key) = crate::opt::loopsum::candidate(self.env, true, self.loop_trips(def, args), self.cfg.max_static_trips, def, args)
+                && let Some(key) = crate::opt::loopsum::candidate(self.env, true, self.loop_trips(def, args), def, args)
             {
                 return Unfold::LoopSum { key };
             }
             return match self.is_static(def, args) {
-                // a long user recursion stays a call of its loop
-                Some(trips) if self.user.contains_key(&def) && trips > self.cfg.max_static_trips => Unfold::Keep,
+                // a user recursion whose unrolling does not pay stays a
+                // call of its loop (the cost model, `unroll_pays`)
+                Some(trips) if self.user.contains_key(&def) && !self.unrolls(def, trips) => Unfold::Keep,
                 Some(trips) => match self.spec_key(def, args) {
                     // a user recursion: per-level helpers (design §6.5)
                     Some(key) => Unfold::Specialize { key },

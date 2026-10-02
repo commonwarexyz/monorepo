@@ -61,11 +61,14 @@
 //!   — a stage tool: the reference semantics. Elaborates the crate's exec
 //!   code and evaluates `fn(args)` with the kernel evaluator; prints the
 //!   value as JSON, never a verdict.
-//! * `sandblaster profile <crate-dir|root.rs> --entry <fn> --fixtures <dir>
-//!   [--fixtures <dir>…] --args <field,…> [--out <file>] [--append]
+//! * `sandblaster profile <crate-dir|root.rs> --entry <fn> --fixtures <dir|manifest>
+//!   [--fixtures <dir|manifest>…] --args <field,…> [--out <file>] [--append]
 //!   [--target <arch>]` — the profile (optimizer design §10.4): evaluates
-//!   `fn` with the reference evaluator on every fixture of the directories
-//!   (JSON objects; the named hex-string fields are the arguments, in order)
+//!   `fn` with the reference evaluator on every fixture of the directories or
+//!   split manifests (JSON objects; the named hex-string fields are the
+//!   arguments, in order; a manifest is a `.txt` file with one fixture path
+//!   per line, so the profile is recorded on a profile half and the benchmark
+//!   times the other, `Profile::check_timed`)
 //!   and records the argument values every loop head is entered with. A
 //!   stage tool: it states no verdict. Writes `PROFILE.json` next to the DSL
 //!   root's directory or `--out`; `--append` merges into the existing file
@@ -95,7 +98,7 @@ fn usage() -> ExitCode {
     eprintln!("       sandblaster eval <crate-dir|root.rs> <fn> <args-json> [--target aarch64|x86_64]");
     eprintln!("       sandblaster spec <crate-dir|root.rs> [--accept [ITEM...] [--equivalent-only] | --diff <rev-or-path> | --preview <file>] [--target aarch64|x86_64]");
     eprintln!("       sandblaster coverage <crate-dir|root.rs> [--json] [--no-sheet] [--mutants-max N] [--time-budget SECS] [--only ITEM...] [--target aarch64|x86_64]");
-    eprintln!("       sandblaster profile <crate-dir|root.rs> --entry <fn> --fixtures <dir>... --args <field,...> [--out <file>] [--append] [--target aarch64|x86_64]");
+    eprintln!("       sandblaster profile <crate-dir|root.rs> --entry <fn> --fixtures <dir|manifest>... --args <field,...> [--out <file>] [--append] [--target aarch64|x86_64]");
     eprintln!("       sandblaster conform <crate-dir|root.rs> --manifest-dir <host-crate-dir> --work-dir <dir> [--target aarch64|x86_64]");
     ExitCode::from(2)
 }

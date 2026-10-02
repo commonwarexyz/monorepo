@@ -105,6 +105,10 @@ else
     log "STALE: harness composition ${comp:0:16} differs from recorded.tsv's (${rec_comp:-unrecorded}): the recorded P15-P20 rows are not comparable (re-record with --record)"
 fi
 (cd "$here/baselines" && shasum -a 256 -c SHA256SUMS) > "$out/baselines.txt" || { cat "$out/baselines.txt"; log "FAIL: a frozen corpus baseline changed"; exit 1; }
+# the fair-baseline rule (one profile, one binary, the identity check) and G6
+# (the corpus, the O1 emission and the hand-written references are frozen)
+bash "$repo/sandblaster/tools/gates/fair-baseline.sh" "$here" | tee -a "$out/summary.md" || { log "FAIL: the fair-baseline rule"; exit 1; }
+bash "$repo/sandblaster/tools/gates/g6.sh" | tee -a "$out/summary.md" || { log "FAIL: G6 (a frozen corpus, baseline or reference file changed)"; exit 1; }
 (cd "$repo" && $H cargo build -q -j "$jobs" -p sandblaster-front --example stage_emit)
 emitter=$CARGO_TARGET_DIR/debug/examples/stage_emit
 for t in aarch64 x86_64; do

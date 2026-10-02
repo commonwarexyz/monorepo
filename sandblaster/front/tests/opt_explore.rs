@@ -11,6 +11,13 @@
 //! Each later milestone changes these expectations deliberately (and says so
 //! in its report); an accidental change fails here.
 //!
+//! **Development-set regression tests** (fairness audit of 2026-10-02,
+//! J16): QMDB and the corpus are the programs the optimizer was built on
+//! (much of the corpus restates QMDB, codec and storage shapes). These pins
+//! catch accidental changes; they are not evidence of generality, and an
+//! optimizer change justified only by moving a `today.*` entry is not
+//! merged (DESIGN.md §8.2 item 11). They pin no timing.
+//!
 //! `explore_qmdb_residuals` (ignored) is the original development harness:
 //! `OPT_EXPLORE=f,g OPT_OPAQUE=h OPT_DUMP=1 cargo test --test opt_explore -- --ignored --nocapture`.
 

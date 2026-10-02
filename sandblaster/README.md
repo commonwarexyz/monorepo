@@ -1,6 +1,6 @@
 # sandblaster
 
-**Bend 2's "everything is proven" discipline, as fast as Rust (or faster).**
+**Bend 2's "everything is proven" discipline, as fast as Rust (faster is the goal: not yet shown on held-out code).**
 
 sandblaster is a DSL embedded in Rust. You write ordinary-looking Rust — a
 restricted, provable subset — plus Bend-style laws and Verus-style inline
@@ -45,16 +45,41 @@ benchmark crates) before the toolchain moved into the monorepo:
   the 27 `tests.ts` mutation cases, prefixes/extensions/bit flips, robustness
   runs, 4500 Bend-oracle differential cases, SHA-256 known answers).
 
-Per-`verify` time, geometric mean over the 29 accepting fixtures (Apple M5 Pro):
+Per-`verify` time, geometric mean over the 29 accepting fixtures (Apple M5 Pro;
+N = 1; a development-set measurement, on the program the optimizer was
+developed against; taken before the fairness audit split the QMDB fixtures,
+when the optimizer's profile was recorded on the same fixtures that were
+timed, and not re-timed since):
 
 | implementation | ns / verify |
 | --- | ---: |
 | **sandblaster (generated, verified, optimized)** | **289** |
-| Commonware native verifier (verify only) | 430 |
-| Commonware native verifier (decode + verify) | 463 |
-| sandblaster sources compiled directly by rustc (portable) | 1,932 |
+| **the same sources compiled by rustc**, hand-multiversioned on `compress_sha2` (the fair rustc baseline) | 318–325 |
+| Commonware native verifier (verify only) — a different program: the generic verifier | 430 |
+| Commonware native verifier (decode + verify) — a different program: the generic verifier | 463 |
 | Bend 2, native C | 21,630 |
 | Bend 2, JavaScript | 248,056 |
+
+Both sandblaster rows use `compress_sha2`, a **hand-written** ARMv8 SHA-2
+kernel proven equal to the portable FIPS 180-4 `compress`; its speed is not
+the optimizer's. The optimizer's own share is the first row against the
+second (289 vs 318–325 ns; at N = 32, 0.88–1.00× of the same baseline). The
+Commonware rows compare a different program: the port is fixed-shape, with
+one hand-made hash function per message length. Without hardware SHA (the
+sources compiled by rustc with the portable `compress`) a verify takes
+1,932 ns: that gap is the hand-written kernel's, not the optimizer's.
+"Faster than rustc" is a goal with development-set evidence only.
+
+**Held-out evaluation** (`bench/heldout/REPORT.md`; fairness audit plan
+step 8): on 31 functions the optimizer was never developed on (30 written
+blind from an idiom list, and the 1 monorepo function the sampling rule
+accepted), timed against rustc on the unmodified source in one binary with
+an A/A control, the optimizer-only geomean is **1.02** (default layout;
+**1.005** aligned), with **0 of 31 functions changed**: every lowered copy is
+the source. 22 functions are refused by the MIR reader, 6 by exec-only
+elaboration, and the 3 that reach the optimizer are kept as written. On
+code it was not built for, the optimizer does nothing yet; the numbers
+above are the development set (DESIGN.md, North star).
 
 ## What the code looks like
 

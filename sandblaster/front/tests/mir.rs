@@ -824,15 +824,15 @@ fn the_storage_verifier_bodies_are_read_from_rustc_mir() {
 }
 
 /// The checked-in extraction of storage's MMR is current and the front end
-/// reads every lifted function of it (and of `opt.rs`) from rustc's MIR.
+/// reads every lifted function of it from rustc's MIR.
 #[test]
 fn the_storage_mmr_bodies_are_read_from_rustc_mir() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../storage/sandblaster/mmr/mod.rs");
     let c = sandblaster_front::driver::check(&root, &sandblaster_front::loader::RealFs, &sandblaster_front::target::TargetInfo::host());
     assert!(c.ok(), "{}", c.render());
     let read = &c.lift_facts.mir_read;
-    assert!(read.len() >= 70, "{} functions read from MIR", read.len());
-    for f in ["Family::position_to_location", "PeakIterator::next", "Position::add__u64", "to_nearest_size_fast"] {
+    assert!(read.len() >= 69, "{} functions read from MIR", read.len());
+    for f in ["Family::position_to_location", "PeakIterator::next", "Position::add__u64", "PeakIterator::to_nearest_size"] {
         assert!(read.iter().any(|(n, _, _)| n == f), "`{f}` is read from MIR: {:?}", read.iter().map(|r| &r.0).collect::<Vec<_>>());
     }
 }

@@ -1023,10 +1023,11 @@ pub struct FnDef {
     /// For `#[proof]` items: the law they prove.
     pub proves: Option<ItemId>,
     /// `#[rewrite]` on a law or lemma (§4.5): on a lemma `f(x̄) == g(x̄)`
-    /// with `f` a lifted source function and `g` an optimization
+    /// with `f` a lifted source function and `g` a user-supplied
     /// alternative (`#[lift(opt)]`), the lowering may replace `f`'s body
-    /// by a call of `g` (`driver::lowered`, kernel-checked link); elsewhere
-    /// recorded only.
+    /// by a call of `g` (`driver::lowered`, kernel-checked link; user code,
+    /// reported apart from the optimizer's output); elsewhere recorded
+    /// only.
     pub rewrite: bool,
     /// `#[induction(x)]` on a lemma/proof/inline law: the parameter `x`
     /// (§4.4).

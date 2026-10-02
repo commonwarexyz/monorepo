@@ -275,7 +275,7 @@ impl CrateBuild {
         if self.in_place && self.verdict.as_ref().is_some_and(|v| v.lifted) {
             super::lifted::LIFTED_IN_PLACE.to_string()
         } else if self.verdict.as_ref().is_some_and(|v| v.lifted) {
-            if self.lowered.as_ref().is_some_and(|l| l.lowered() > 0) { super::lifted::LIFTED_OPTIMIZED.to_string() } else { super::lifted::LIFTED.to_string() }
+            super::lifted::lifted_status(self.lowered.as_ref()).to_string()
         } else if self.verdict.is_some() {
             canon::OPTIMIZED.to_string()
         } else if self.permit.is_some() {
@@ -558,10 +558,11 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
             }
             let st = b.v.stats();
             let summary = format!(
-                "{} obligation(s) proven, {} definition(s) kernel-checked; every §15 gate passed (spec mutants: {}); {conf_summary}; lifted in place (the proven optimizer's rewrites are in the lowered copies; rustc compiles a copy where the host declares it, else the host's own file); SPEC.lock: {}",
+                "{} obligation(s) proven, {} definition(s) kernel-checked; every §15 gate passed (spec mutants: {}); {conf_summary}; lifted in place (rewritten functions in the lowered copies: {}; rustc compiles a copy where the host declares it, else the host's own file); SPEC.lock: {}",
                 st.proven,
                 b.v.defs.len(),
                 b.gates.mutation.as_ref().map(|m| format!("{} killed of {}", m.count(crate::mutate::Verdict::KilledBySpec), m.mutants.len())).unwrap_or_else(|| "none".into()),
+                super::lowered::origin_counts(&b.lowered_in_place),
                 b.spec.summary(),
             );
             let files: Vec<(String, String)> = c.lifted.iter().filter(|l| l.in_place && !l.ghost).filter_map(|l| c.sm.get(l.file).map(|f| (f.path.display().to_string(), hex(&sha256(f.text.as_bytes()))))).collect();
@@ -907,8 +908,10 @@ fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, surface
 }
 
 /// The optimizer's part of a lifted module's summary (the emitted header,
-/// the build's warning line): how many source functions were rewritten
-/// and, for every other one, **why it kept its source text**, grouped by
+/// the build's warning line): how many source functions were rewritten to
+/// the optimizer's residuals and, apart, how many to user-supplied
+/// `#[rewrite]` alternatives (user code, named, never counted as the
+/// optimizer's), and, for every other one, **why it kept its source text**, grouped by
 /// reason ([`kept_reason_class`]) and counted, most frequent first; the
 /// report's `lifted_optimizer` lists each function with its full reason.
 /// (It used to say "no residual … is cheaper and printable" whatever the
@@ -916,12 +919,24 @@ fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, surface
 /// methods, other state passing, generic functions outside the per-type
 /// dispatch.)
 pub fn lowering_note(low: &super::lowered::LoweredModule) -> String {
+    use super::lowered::LowerOrigin;
     let n = low.records.len();
+    let k_opt = low.lowered_by(LowerOrigin::Optimizer);
+    let user = low.rewritten_by(LowerOrigin::UserRewrite);
     let mut s = if low.lowered() == 0 {
         format!("optimized: none of the {n} source function(s) rewritten, the source is emitted as-is")
     } else {
-        format!("optimized: {} of {n} source function(s) rewritten to their residuals (lifted round trip: {} definition(s) compared{})", low.lowered(), low.compared, if low.shipped.is_empty() { String::new() } else { format!("; the shipped MIR's theorems: {}", low.shipped.join("; ")) })
+        let opt = if k_opt == 0 { "none".to_string() } else { k_opt.to_string() };
+        let user = if user.is_empty() {
+            String::new()
+        } else {
+            format!("; {} rewritten to user-supplied `#[rewrite]` alternatives (user code, not optimizer output: {})", user.len(), user.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", "))
+        };
+        format!("optimized: {opt} of {n} source function(s) rewritten to optimizer residuals{user} (lifted round trip: {} definition(s) compared{})", low.compared, if low.shipped.is_empty() { String::new() } else { format!("; the shipped MIR's theorems: {}", low.shipped.join("; ")) })
     };
+    if low.user_rewrites_excluded {
+        s.push_str("; user `#[rewrite]` alternatives excluded (evaluation-only build)");
+    }
     let mut groups: BTreeMap<String, usize> = BTreeMap::new();
     for r in &low.records {
         if let super::lowered::LowerOutcome::Kept(why) = &r.outcome {

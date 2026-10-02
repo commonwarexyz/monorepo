@@ -1,5 +1,10 @@
-//! The cost model reproduces the M5 decisions (docs/optimizer-plan.md O8
-//! acceptance; optimizer design §10.2, §14.1, §12.3, §7.6):
+//! Regression checks on three development-set decisions of the cost model
+//! (docs/optimizer-plan.md O8; optimizer design §10.2, §14.1, §12.3, §7.6).
+//! They were the model's O8 acceptance, but all three are decisions on the
+//! programs the model was tuned for (QMDB's SHA-256 and shape walk, the
+//! corpus varint), so they show it still decides those as measured, not that
+//! it is accurate in general: its accuracy is to be measured on the held-out
+//! decision set (fairness audit, 2026-10-02).
 //!
 //! 1. **NEON SHA lanes are rejected.** QMDB's portable `compress` lifted to
 //!    a 4-lane NEON candidate (every scalar operation one vector operation,
@@ -10,10 +15,13 @@
 //!    bit by `trailing_zeros`, three mask-and-shift compaction steps) costs
 //!    more than the unrolled byte-at-a-time decoder (measured on the M5,
 //!    design §12.3: 8.2 vs 1.46 ns for `parse`).
-//! 3. **With the QMDB profile the closed form beats set-bit iteration at
-//!    N = 32**: the loop summarizer prices `shape_go`'s rungs on the traces
-//!    of `sandblaster/fixtures/qmdb/PROFILE.json`'s N = 32 samples and keeps the closed form, ≥ 3%
-//!    cheaper than the set-bit iteration and the early exit.
+//! 3. **On the development profile the closed form beats set-bit iteration
+//!    at N = 32**: the loop summarizer prices `shape_go`'s rungs on the
+//!    traces of `sandblaster/fixtures/qmdb/PROFILE.json`'s N = 32 samples
+//!    and keeps the closed form, ≥ 3% cheaper than the set-bit iteration and
+//!    the early exit. A regression check on the development profile (J8):
+//!    the profile is QMDB's, recorded on the profile half of its fixtures
+//!    (`splits/n32-profile.txt`, never timed), not a held-out distribution.
 //!
 //! Every decision is also checked against the measured M5 tuning rows
 //! (`sandblaster/targets/evidence/tuning-aarch64-m5.json`): the model
@@ -201,8 +209,9 @@ fn shape_rung_costs(root: &str) -> Vec<(String, u64)> {
     })
 }
 
+/// A regression check on the development profile (see the module docs).
 #[test]
-fn closed_form_beats_set_bits_at_n32_with_the_qmdb_profile() {
+fn closed_form_beats_set_bits_at_n32_on_the_development_profile() {
     let costs = shape_rung_costs("mod.rs");
     let get = |r: &str| costs.iter().find(|(n, _)| n == r).map(|(_, c)| *c).unwrap_or_else(|| panic!("no {r} in {costs:?}"));
     let (closed, set_bits, early) = (get("ClosedForm"), get("SetBits"), get("EarlyExit"));

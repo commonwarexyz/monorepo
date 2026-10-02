@@ -47,8 +47,11 @@ pub const AARCH64_OPS: &[&str] = &[
     "eor3_v16b", "pmull_v1q", "aese_v16b",
 ];
 
-/// The keys the cost model reads for `arch` (all must be measured or
-/// skipped with a reason).
+/// The keys a tuning file for `arch` must record (each measured or skipped
+/// with a reason). Only `cycle_ns` and the `op.*` rows are inputs of the
+/// cost model; the `sha.*`, `threads.*`, `crossover.*`, `memory.*` and
+/// `varint.*` rows are validation rows (the tests compare the model's
+/// decisions with them) that no optimizer code reads.
 pub fn required_keys(arch: Arch) -> Vec<String> {
     let mut keys: Vec<String> = vec!["cycle_ns".into()];
     let ops = match arch {

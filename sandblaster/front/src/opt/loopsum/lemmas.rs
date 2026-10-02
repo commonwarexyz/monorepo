@@ -56,7 +56,8 @@ use super::expr::{self, CE, E};
 pub const OBLIGATION_STEPS: u64 = 20_000_000;
 /// Step budget of `auto`, the obligation's last resort (the focused route
 /// closes every obligation of the corpus and QMDB loops; a wrong candidate
-/// must fail fast).
+/// must fail fast). Calibrated on the corpus and QMDB only (fairness audit
+/// J13) until the held-out set re-checks it.
 pub const AUTO_STEPS: u64 = 2_000_000;
 /// Budget of one lemma (design §17: ≤ 5·10^6 per literal lemma is the
 /// target; the hard cap is higher so a slow lemma still closes).

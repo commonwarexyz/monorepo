@@ -412,6 +412,8 @@ pub fn plan(env: &Env, lp: Loop, traces: Traces, synth_max: usize, fault: Option
         }
     }
     let widths: Vec<Width> = ghosts.iter().map(|g| g.width).collect();
+    // the synthesis' constants: harvested from this loop (`pool`)
+    let pool = super::pool::Pool::harvest(&lp);
     let gin: Vec<Vec<u128>> = traces.traces.iter().map(trace_ghosts).collect();
     let fm: Vec<u32> = (0..lp.params.len() as u32).filter(|i| lp.classes[*i as usize] == Class::FirstMatch).collect();
     let dyn_exit = has_dynamic_exit(&lp);
@@ -463,7 +465,7 @@ pub fn plan(env: &Env, lp: Loop, traces: Traces, synth_max: usize, fault: Option
             if wt.len() < 8 {
                 return Err("too few traces set the payload".into());
             }
-            let (witness, found_n) = super::guards::witness(&widths, &wt_in, &wt, synth_max).ok_or("no witness expression found (synthesis)")?;
+            let (witness, found_n) = super::guards::witness(&widths, &wt_in, &wt, synth_max, &pool).ok_or("no witness expression found (synthesis)")?;
             let witness = orient_xor(&witness, &wt_in);
             // fault R7: the witness off by one
             let witness = if fault == Some(super::LoopFault::WitnessPlusOne) { simp(&expr::op2(PrimOp::WAdd(Width::U32), witness, expr::lit(Width::U32, 1)), None) } else { witness };
@@ -489,7 +491,7 @@ pub fn plan(env: &Env, lp: Loop, traces: Traces, synth_max: usize, fault: Option
         ([], true) => {
             // the witness: the exit iteration
             let wt: Vec<Val> = traces.traces.iter().map(|tr| Val::W(Width::U32, tr.exit_iter as u128)).collect();
-            let (witness, cands_n) = super::guards::witness(&widths, &gin, &wt, synth_max).ok_or("no witness expression found (synthesis)")?;
+            let (witness, cands_n) = super::guards::witness(&widths, &gin, &wt, synth_max, &pool).ok_or("no witness expression found (synthesis)")?;
             // the result: one exit value at the witness, or the dynamic exit
             // below K and the static one at K
             let at = |e: &super::classify::ExitPath, jj: &E| to_ghost(&e.value, &t, None, jj).map(|v| simp_sval(&v, None));

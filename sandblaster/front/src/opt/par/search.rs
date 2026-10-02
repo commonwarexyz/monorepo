@@ -1,5 +1,12 @@
 //! SIMD search lowering (plan O10, corpus P12; optimizer design §13.5).
 //!
+//! **Scope** (fairness audit of 2026-10-02, J14): one skeleton, built for
+//! corpus P12 — a byte slice, one comparison with a literal, `F` and `B` of
+//! the index alone. It is keyed on structure, not names, but it is not yet a
+//! general SIMD search: widening it (any byte predicate of comparisons and
+//! masks, any index type) and its hit count on the held-out set (plan step
+//! 8) come before any claim of generality.
+//!
 //! A **search site** is a tail-recursive byte search with an early exit:
 //!
 //! ```text

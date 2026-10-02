@@ -27,6 +27,12 @@ document and the plan. The sources read were:
 - **candidate numbers**: measurements of hand-written candidates, i.e. the
   code the optimizer is designed to emit. They are not measurements of
   emitted code. Every acceptance gate in the plan measures emitted code.
+  Outside the sections that say so, each such number is tagged inline
+  *(hand-written candidate)* or *(third-party code)*, and an emitted figure
+  *(emitted)* (fairness audit of 2026-10-02, J18). Numbers measured on
+  QMDB, the corpus, codec or storage are **development-set** numbers: the
+  optimizer was built on those programs, so they are regression evidence,
+  not evidence of generality (DESIGN.md §8.2 item 11).
 
 The scratch artifacts cited live under
 `/private/tmp/claude-501/-Users-patrickogrady-code-rust-bend/72493b40-f160-45c5-b091-0471a0b217d9/scratchpad/optdesign/`,
@@ -76,7 +82,8 @@ into the repository.
      prelude type over `Int`. The GF(2^16) lowering uses linear extensionality
      plus enumeration. Nothing else touches the kernel.
 4. **QMDB's u64-domain regression is recovered with zero source changes.** The
-   mechanisms and their measured candidates:
+   mechanisms and their measured candidates (*hand-written candidates*, on
+   QMDB: the development set, not evidence of generality):
 
    | Hot spot | Mechanism | Measured before | Measured candidate |
    | --- | --- | ---: | ---: |
@@ -123,9 +130,17 @@ The optimizer is `sandblaster/front/src/opt/`, about 3k lines.
 - Everything else is printed from the source HIR, with `get_unchecked` where
   proofs allow.
 - In practice this is total unrolling, constant folding, CSE and folding of
-  intrinsic models. It is why hashes with constant padding beat hand code:
-  N=32 generated code is 0.65–0.77× Commonware and 0.88–1.00× hand-written
-  (`qmdb/BENCHMARKS.md`).
+  intrinsic models. Its measured share (development set, `qmdb/BENCHMARKS.md`):
+  against the same QMDB source compiled by rustc with the same hand-written
+  `compress_sha2` kernel, generated code is 0.88–1.00× at N=32 (geomean 0.95
+  production, 0.96 deep) and 289 ns vs 318–325 ns at N=1 (timed before the
+  fairness audit's profile split, J8, with the profile recorded on the timed
+  fixtures; not re-timed since).
+- The often-quoted 0.65–0.77× Commonware at N=32 is **not** the optimizer's
+  number: it measures the QMDB port (a different, fixed-shape program with
+  one hand-made hash function per message length, a hand-written ARMv8
+  `compress_sha2` and constant N) plus the optimizer, against Commonware's
+  generic verifier.
 - It is also why every control function is a transliteration of the source.
   **51 of 111** QMDB functions are specialized.
 
@@ -144,8 +159,15 @@ closures that are never evaluated), no summaries, no residual control flow, no
 lemma admission for specializations, no loop transformations, no call-site
 specialization, array-only entry η, no bit-count characterization in the kernel
 (which is why `shape_closed_form`, `LAWS.rs:49`, is deferred), a node-count-only
-cost model, and `#[rewrite]` laws that are parsed (`resolve.rs:70,93`) but never
-consumed.
+cost model, and `#[rewrite]` laws that were parsed (`resolve.rs:70,93`) but never
+consumed. (Since then one consumer exists: the lowering of lifted modules,
+`driver::lowered`, takes the user-supplied `#[lift(opt)]` alternative a
+`#[rewrite]` lemma names. That is user code, not optimizer output: it is
+recorded as `LowerOrigin::UserRewrite` and counted apart from the
+optimizer's residuals, whose outcome is still recorded; it is never counted
+in "faster than rustc" claims and is not allowed on benchmark-target
+functions; `OptOptions::exclude_user_rewrites` builds without it for
+evaluation. DESIGN.md principle 3, §2.1.)
 
 ### 2.2 The regression
 
@@ -450,6 +472,21 @@ If the unroll budget predicts an explosion (the branching product exceeds it),
 the driver keeps the loop head and hands it to Σ2 (§7). `shape_go`'s 63
 data-dependent peaks are the example.
 
+**Unroll or keep** (as built; fairness audit of 2026-10-02, J7). A user
+recursion with a literal trip count goes to Σ2 first; when Σ2 fails, whether
+the driver unrolls it (per-level helpers or in place) or keeps the loop is
+the cost model's decision (`drive::unroll_pays`), formerly a fixed limit of
+10 trips (the length of a LEB128 `u64`, chosen on the corpus' varint
+decoder). Unrolling removes each iteration's loop overhead (one branch and
+one ALU operation, as the model prices a loop iteration) and nothing else,
+so it pays when that is ≥ 3% of an iteration (the selection gate; the trip
+distribution cancels out), and the unrolled copies (trip count × the body's
+HIR nodes) must fit the residual budget (`max_residual_nodes`, 4096). On the
+development set this changes the decision for the 64-trip corpus loops P1,
+P2, P4 and P11 (now "unroll" if Σ2 failed), which Σ2 summarizes first, so no
+emitted code changes; the 10- and 5-trip varint readers and `shape_go` keep
+their old decisions.
+
 ### 6.3 Stuck matches
 
 When evaluation stops at `Elim::Match` on a neutral scrutinee `c`, the driver
@@ -601,7 +638,8 @@ same time, it is back under 1.5× (`docs/opt-o6-o7-reports.md`).
 - **Uses:**
   - `shape_go(63, t, L, 2^62, 0, 0, 0, None)`;
   - consumers over segment lists (§8.2);
-  - constant multipliers (curve25519 `mul(x, A24)`: 7.7 → 5.0 ns measured);
+  - constant multipliers (curve25519 `mul(x, A24)`: 7.7 → 5.0 ns measured
+    *(hand-written candidate)*);
   - sparse operands (BLS `mul_by_014`);
   - fixed-(k, m) Reed–Solomon block encoders.
 
@@ -687,9 +725,11 @@ the residual function and `Irr` binders of its lemma. This is how P10's
     lemma) is unchanged. An array returned by a call is not eta-expanded; a
     copy from it would stay a stuck `append` and fail the link, so its reads
     stay elements.
-  - Measured on QMDB N=1 `verify` (same binary): 0.8878 → 0.8737 of H2. A
-    micro-benchmark of the class (a 40/48-byte seal message built from an
-    integer and a digest) builds the message 4.6× faster.
+  - Measured on QMDB N=1 `verify` (same binary, *emitted*, development
+    set): 0.8878 → 0.8737 of H2. A micro-benchmark of one QMDB message shape
+    (a 40/48-byte seal message built from an integer and a digest; *(hand-
+    written candidate)*, not a measurement of the class) builds the message
+    4.6× faster.
 - **Ghost arguments.** A kept call of a function with `#[ghost]` parameters
   passes their values: the components of the call's ghost bundle, printed as
   ghost `Int` expressions (`x as Int + 5`), elaborated with the residual and
@@ -740,9 +780,14 @@ with `w ≥ 1`, via `sat_sub_def`.
 - **Sources of trace inputs**, at most 256 per loop:
   - **(a) profile inputs**: fixture-derived distributions recorded in the
     crate's checked-in `PROFILE.json` (§10.4);
-  - **(b) seeded corner samples**: 0, 1, powers of two ± 1, and the `requires`
-    boundaries such as `L = 2^62`, with the seed taken from the hash of the
-    definition.
+  - **(b) seeded corner samples**: 0 and every power of two of the width
+    with its neighbours (`2^k − 1`, `2^k`, `2^k + 1`, every `k ≤ W`), the
+    `requires` boundaries (literals and constant expressions such as
+    `MAX_LEAVES = 1 << 62`, evaluated) and the literals of the loop's own
+    tests, with the seed taken from the hash of the definition. No value is
+    picked for a particular program (fairness audit of 2026-10-02, J4; the
+    synthesis' constants are likewise harvested from the loop, J3,
+    `opt::loopsum::pool`).
 - **Evaluation.** The front end's reference evaluator runs the traces; small
   cases go through `Env::eval_closed`. Traces are untrusted and only filter
   candidates.
@@ -775,7 +820,11 @@ The unknowns to synthesize are `FirstMatch` witness indices, trip counts and
 
 - **Method.** Bottom-up enumeration with observational-equivalence pruning over
   the sample vector (EUSolver/Brahma style). Grammar:
-  - inputs: entry values and the constants `{0, 1, 2, 6, 7, 63, 64, W−1, W}`;
+  - inputs: entry values and the constants of the loop's pool: the width's
+    `{0, 1, 2, W−1, W}` and the constants harvested from the loop itself
+    (its literals ± 1; its shift amounts `k`, `k − 1`, `2^k`; its literal
+    divisors) — never a fixed list of a target's constants (fairness audit
+    of 2026-10-02, J3: the list used to carry LEB128's `6` and `7`);
   - operations: `+ − ^ & | min max`, `<<` and `>>` by terms, `/c`, `%c`,
     `mask(E)`, `lz`, `tz`, `popcnt`;
   - guards: `ite(P, E, E)` with comparisons.
@@ -788,8 +837,13 @@ The unknowns to synthesize are `FirstMatch` witness indices, trip counts and
   path.
 
 As built (O6, `opt/loopsum/{synth,guards}.rs`):
+- **Constants from the loop** (`loopsum::pool`, J3): leaves as above;
+  divisors `2`, the shift amounts and the literal divisors; guard thresholds
+  the loop's own comparison literals (and `c + 1`) and the per-iteration
+  boundaries `2^(j·k)` of each shift amount `k`. `tests/fairness_pool.rs`
+  checks that a literal-free loop gets only the width's constants.
 - **Templates first** (`guards::affine_atom`). The shapes are `A + c`,
-  `c − A` and `(c − A) / k` for `2 ≤ k ≤ 8`, where `A` is `lz`, `tz` or
+  `c − A` and `(c − A) / k` for `k` one of the pool's divisors, where `A` is `lz`, `tz` or
   `popcnt` of an input, of the `^` of two inputs, or of `x | 1`. They are
   written by hand; rulegen does not produce them yet.
 - **Then enumeration**, bounded by size 7 and 2·10^5 classes. It runs on a
@@ -853,7 +907,8 @@ As built (O6, `opt/loopsum/{lemmas,enumerate}.rs`):
   obligation prover has a threshold route for them: when the facts pin a
   shift-amount variable to a literal, it rewrites that variable to the
   literal and proves the rest on literals. P13 moved from 12.9× ideal to
-  1.00×.
+  1.00× *(emitted; development set: measured on the program the feature
+  was built for)*.
 - **Exported facts** (`loopsum::facts`). For a `FirstMatch` loop whose
   payload is a struct of machine integers, the candidates are Houdini-style:
   `fᵢ ≤ c`, `fᵢ < fⱼ`, and `fᵢ + fⱼ ≤ c` (in `Int`), with the constants
@@ -1096,7 +1151,8 @@ Every rewrite is an instance of a checked lemma in the new file
   - It would need a trusted template *and* a definedness obligation, because
     reading uninitialized bytes is undefined behaviour even when the result
     does not depend on them.
-  - It buys nothing measurable: uninitialized 72.2 ns vs fused 73.1 ns.
+  - It buys nothing measurable: uninitialized 72.2 ns vs fused 73.1 ns
+    *(hand-written candidates)*.
   - Buffers that escape into an unspecializable consumer keep their zeroing.
 
 ---
@@ -1179,7 +1235,8 @@ decision point D3).
   spec with identity output views are equal: `f₁ x = s(α x) = f₂ x`. The
   optimizer derives `f₁ = f₂` mechanically and may replace one with the other
   per call site. Examples:
-  - Reed–Solomon matrix vs FFT decode (1.9–5.2× measured at n ≤ 100);
+  - Reed–Solomon matrix vs FFT decode (1.9–5.2× measured at n ≤ 100
+    *(third-party code)*);
   - the direct log-sum locator vs the 65536-point FWHT;
   - Straus vs Pippenger;
   - BLS RNS vs six-limb Montgomery implementations (§9.5).
@@ -1301,14 +1358,24 @@ Seed operation costs (x86 values are provisional until the host kit runs):
 
 Distribution-dependent choices cannot be ranked from corner-biased traces. The
 measured examples:
-- set-bit iteration: 3.76 ns at N=1, 32.5 ns at N=32;
+- set-bit iteration: 3.76 ns at N=1, 32.5 ns at N=32 *(hand-written
+  candidate, development set: QMDB's `shape`)*;
 - `pext` wins only for 5–9-byte varints;
 - SIMD search pays only for scans longer than about 32 B.
 
 **The command.** `sandblaster profile` runs the portable build (reference
 evaluator, or native instrumentation) over the crate's declared corpora: its
-`#[example]`s, its test vectors and its benchmark fixtures, e.g.
-`qmdb/fixtures`, `qmdb/fixtures-n32`.
+`#[example]`s, its test vectors and its benchmark fixtures.
+
+**Train ≠ test** (fairness audit of 2026-10-02, J8). A profile is never
+recorded on inputs a benchmark times. QMDB's fixtures are split by a rule
+fixed before any measurement (`sandblaster/fixtures/qmdb/splits/`: sorted by
+name, alternating; frozen by G6); `PROFILE.json` is recorded on the profile
+halves (`splits/n1-profile.txt`, `splits/n32-profile.txt`) and a benchmark
+times the other halves only. `Profile::check_timed` refuses a timed input
+that lies in a profile corpus (`tests/fairness_profile.rs`), results are
+reported with and without the profile, and a subject that uses the profile
+is compared with a rustc baseline that gets PGO too.
 
 **The file.** It writes a checked-in `PROFILE.json`:
 - branch probabilities keyed by the hash of the source location;
@@ -1505,7 +1572,9 @@ literal k:
 
 Today proven arithmetic prints as plain `a + b`. Under an `overflow-checks =
 true` profile, which is Commonware's release profile, rustc re-inserts the
-checks. The measured cost on curve25519's F::mul is 13.8 → 7.3 ns (1.9×):
+checks. The measured cost on curve25519's F::mul is 13.8 → 7.3 ns (1.9×;
+*(third-party code)*: Commonware's F::mul with overflow checks on vs off, not
+emitted code; the emitted P18 gain is 1.43–1.57×, bench/opt-corpus/README.md):
 229 instructions and 28 branches vs 169 instructions and 4 branches.
 
 **The rule.** Every checked `add/sub/mul/shl/shr` whose proof slot exists in the
@@ -1641,7 +1710,7 @@ target: `shape(L, t)` returns `None` when `L > 2^62`. Otherwise it calls
      about 37 lines;
    - x86 v1: `bsr` + `psadbw`, about 57 lines, still far faster than the loop.
 
-   **Measured candidate:** 2.33 / 2.26 / 2.30 ns against 24.8 / 46.0 / 61.5 ns.
+   **Measured candidate** *(hand-written candidate, development set: QMDB's `shape`)*: 2.33 / 2.26 / 2.30 ns against 24.8 / 46.0 / 61.5 ns.
 
    **Generality.** The same machinery handles P4 `find_block` (Fenwick trees,
    buddy allocators, binomial heaps) unchanged.
@@ -2105,7 +2174,7 @@ its architecture is reachable from a dispatched path.
   **no** lanes: at most 1–2% is available, and the out-of-order core already
   overlaps `hash_chunk`.
 - Subtree splitting beats per-level forks at every size: 2^16 leaves 7.1×,
-  2^20 10.2×.
+  2^20 10.2× *(hand-written candidates)*.
 
 ### 14.2 Site discovery (Σ5, bottom-up from summaries)
 
@@ -2238,10 +2307,11 @@ and the template passes it `multiplier` = the proven per-item cost.
   - BLS `MIN_PARALLEL_POINTS` = 32.
 - **Where generated code should be faster:**
   - subtree instead of level-synchronous merkleize: 1.4–2× at 2^12–2^16,
-    measured;
+    measured on a *(hand-written candidate)*, not on emitted code;
   - x16 lanes on wide MMR/BMT levels, where the hand code always uses pairs;
   - shape-specialized x16 with a constant second block;
-  - 2–4-stream shard hashing on aarch64: 1.25–1.29× measured;
+  - 2–4-stream shard hashing on aarch64: 1.25–1.29× measured on a
+    *(hand-written candidate)*;
   - thread-parallel VROOM batch maps, which PR 4811 runs sequentially;
   - automatic Straus below the Pippenger threshold (§9.4).
 
@@ -2260,7 +2330,16 @@ and the template passes it `multiplier` = the proven per-item cost.
 
 ## 15. Validation across four workloads and the corpus
 
-**Anti-overfitting matrix** (● central, ○ secondary):
+**Workload coverage of the development targets** (● central, ○ secondary).
+This was called the "anti-overfitting matrix"; it lists only the target
+workloads the features were built for, so it shows coverage, not
+generality. Every number measured on these workloads and on the corpus
+below is a development-set number. The held-out evaluation
+(`sandblaster/bench/heldout/REPORT.md`, 2026-10-02) is the generality
+evidence, and so far it is negative: 0 of 31 held-out functions changed
+(optimizer-only geomean 1.02 default layout, 1.005 aligned); none of the
+capabilities below fired on held-out code, because no held-out loop reached
+the optimizer.
 
 | Capability | QMDB | Reed–Solomon | curve25519 | BLS/VROOM |
 | --- | :-: | :-: | :-: | :-: |
@@ -2271,7 +2350,7 @@ and the template passes it `multiplier` = the proven per-item cost.
 | Σ4 algebra | ○ bvnorm (SHA) | ● GF(2)-linear → GFNI/TBL | ● E1/E2 (RingRefl), regions | ● delayed reduction, formula selection |
 | Σ4 selection via refinement | – | ● matrix vs FFT decode | ● Straus vs Pippenger | ● RNS vs Montgomery per target |
 | Σ5 parallel | ○ `verify_many`, merkleize | ● stripes, column lanes, shard x16 | ● 8 lanes, MSM tiles | ● RNS lanes, item threads |
-| E0 checked-arithmetic printing | ○ | ○ | ● (1.9× F::mul) | ● |
+| E0 checked-arithmetic printing | ○ | ○ | ● (1.9× F::mul, third-party code; emitted P18 1.43–1.57×) | ● |
 | AVX-512 models | SHA-NI, VPOPCNT/LZCNT, `pext` | GFNI, BW, VBMI | IFMA, SHA-512 lanes | IFMA, `vpermq` |
 
 **General corpus.** P1–P14 (§2.3) plus these additions:
@@ -2659,11 +2738,11 @@ It asserts three things:
 
 **Workloads:**
 - Merkle level: sequential up to 256 pairs; 1.7× at 1024 pairs; 5.7–6.5× at
-  65536.
+  65536 *(hand-written candidates)*.
 - Batch paths, K independent 20-deep paths: 1.28–1.30× from interleaving alone;
-  8.1× at K = 4096.
+  8.1× at K = 4096 *(hand-written candidates)*.
 - Subtree vs level parallelism: 1.75× (2^10) to 10.2× (2^20) for subtree;
-  level-synchronous is always worse.
+  level-synchronous is always worse *(hand-written candidates)*.
 
 **Single-proof QMDB verify.** It is a single dependent chain covering 85–90% of
 the time. Fusing the independent `hash_chunk` saves 1.5 ns (0.4%). Never use
@@ -2688,7 +2767,7 @@ There is **no AVX-512/GFNI engine**.
 - LLVM on portable nibble-table code: 1.8 GiB/s (18× slower); bit-matrix code:
   5.1 GiB/s.
 - Shard SHA-256 is 59–76% of sequential encode time. Multi-stream SHA2 gives
-  1.25–1.29×.
+  1.25–1.29× *(hand-written candidate)*.
 - Spec-shaped matrix decode: 1.9–5.2× faster than Commonware's FFT decode at
   n = 10–100. Small high-rate decodes pay about 250 µs of 65536-point FWHT.
 - Rayon(8): 2.6–5.5×.
@@ -2713,7 +2792,7 @@ algorithms:
 | X25519 | 33.5 µs | x25519-dalek 24.1 µs |
 | batch n=1 | 426 µs | – |
 
-**Overflow checks in release** cost 1.9× on F::mul.
+**Overflow checks in release** cost 1.9× on F::mul *(third-party code)*.
 
 **Level E experiment.** Four exact rewrites, bit-identical (2M field cases, 2000
 X25519 cases): E0 unchecked printing, E1 ×19 folding, E2 carry narrowing, E3

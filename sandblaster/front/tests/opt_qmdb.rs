@@ -2,6 +2,14 @@
 //! build, the test-only exec-only path skips them here), on both instance
 //! roots: `n1.rs` (N = 1, replaying the pinned fixtures and the Bend corpus)
 //! and `mod.rs` (N = 32, production, replaying `sandblaster/fixtures/qmdb/fixtures-n32`).
+//!
+//! **Development-set regression tests** (fairness audit of 2026-10-02,
+//! J16): the outcomes pinned here (rung `ClosedForm` for `shape`, the driven
+//! helpers, the facts reaching the verify path) are decisions on the
+//! program the optimizer was developed on. They catch accidental changes;
+//! they are not evidence that the optimizer is general or fast, and a
+//! change that only keeps them passing is not justified by them (DESIGN.md
+//! §8.2 item 11). They pin no timing.
 
 mod common;
 

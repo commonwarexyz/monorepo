@@ -18,7 +18,9 @@ pub struct DriveConfig {
     /// is a fallback for small differences, and a leaf it cannot close is a
     /// failure however long it searches (QMDB `verifier::verify`: 181 ms
     /// reading back the unfolded verifier before giving up), so it is
-    /// bounded well below the proof's budget.
+    /// bounded well below the proof's budget. Calibrated on QMDB only (its
+    /// `verifier::verify`; fairness audit J13) until a second workload and
+    /// the held-out set re-check it.
     pub leaf_auto_steps: u64,
     /// Process-graph nodes (unfoldings, decisions, splits) of one function.
     pub max_nodes: usize,
@@ -27,17 +29,14 @@ pub struct DriveConfig {
     /// Unfoldings of recursive globals along one path (static-measure and
     /// static-structure unrolling).
     pub max_unroll: u32,
-    /// Largest static measure of a user recursion that is unrolled (into
-    /// per-level helpers, design §6.5, or in place); a longer one stays a
-    /// call of its loop. Unrolling trades the loop for straight-line code,
-    /// which the corpus measured slower on long inputs (P5, 9–10 bytes:
-    /// 0.84–0.95× the loop) while faster on short ones.
-    pub max_static_trips: u32,
     /// Trips of a loop unrolled inside a polyvariant call-site
     /// specialization (design §6.5; under the unroller's checkpoint).
     pub max_spec_trips: u32,
     /// Residual nodes of one driven function (the unrolled nodes of design
-    /// §6.2 count here).
+    /// §6.2 count here). Also the code-size bound of unrolling a static user
+    /// recursion: whether to unroll one at all is the cost model's decision
+    /// (`drive::unroll_pays`; formerly a fixed limit of 10 trips, removed by
+    /// the fairness audit, J7).
     pub max_residual_nodes: usize,
     /// Committed-body size (term nodes) up to which a non-recursive callee
     /// kept opaque in checking mode (a reader) is unfolded by the driver.
@@ -71,7 +70,6 @@ impl Default for DriveConfig {
             max_nodes: 1024,
             max_split_depth: 96,
             max_unroll: 96,
-            max_static_trips: 10,
             max_spec_trips: 64,
             max_residual_nodes: 4096,
             inline_body_nodes: 600,

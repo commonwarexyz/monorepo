@@ -12,9 +12,14 @@ caller of a loop (`UInt<u32>::read_cfg`). Stage "cs-integrate" (plan step
 every verified build, the theorems are cached per amendment (g), and every
 one of codec's 63 lifted varint functions has its theorem kernel-checked in
 the build. Stage "cs-storage" (the rest of step 6, and step 8) is done:
-every lifted function of storage's MMR (76) and verifier set 1 (69) has
-its theorem, and the lifted round trip proves the shipped code's theorem
-of every rewritten function. Stage "cs-assurance" (steps 7 and 9, the
+every lifted function of storage's MMR (69; no MMR function is rewritten)
+and verifier set 1 (69) has its theorem, and the lifted round trip proves
+the shipped code's theorem of every rewritten function (exercised on the
+toy fixtures of `tests/lowered_use.rs` and `tests/lift_opt.rs`). The
+stage logs below that predate the fairness audit (2026-10-02) count the
+MMR at 76, with the 7 functions of the hand-written `opt.rs` alternatives
+(since removed), and report `to_nearest_size` rewritten through one of
+them: that was user code, never optimizer output (DESIGN.md principle 3). Stage "cs-assurance" (steps 7 and 9, the
 review of the trusted generator, the final validation) is done: the
 conformance check runs L against rustc, fault injection shows the theorems
 catch a mutated construct of each kind and the two historical bugs, and
@@ -510,19 +515,27 @@ first differing subterms at a tail mismatch, `CS_TRACE_ETA`,
 
 ### Stage cs-storage (rest of plan step 6, step 8), 2026-10-01
 
-**Result.** Every lifted exec function of storage's MMR (76, with the
-`#[rewrite]` alternatives of `opt.rs`) and of the verifier's first set (69)
-has its theorem `L::thm::<f>` kernel-checked in the build, and varint's 63
-still do. `sandblaster check` reports `gate mir-theorems: passed` on both
+**Result.** Every lifted exec function of storage's MMR (76 at this
+stage, counting the 7 functions of the hand-written `#[rewrite]`
+alternatives of `opt.rs`; **69 now**: those alternatives were user code,
+not optimizer output, and are removed, so no MMR function is rewritten)
+and of the verifier's first set (69) has its theorem `L::thm::<f>`
+kernel-checked in the build, and varint's 63 still do. `sandblaster check` reports `gate mir-theorems: passed` on both
 storage roots (the MMR's only §15 finding is its unaccepted lock, the
 verifier's are its examples, sections and lock, as before this stage). Step
 8 is in: the lifted round trip proves the **shipped code's theorem** of
-every rewritten function (§5.13): the MIR rustc compiles for
-`PeakIterator::to_nearest_size` (the copy delegating to the lowered
-`to_nearest_size_fast` and its five helpers) returns, at sufficient fuel,
-exactly `PeakIterator::to_nearest_size`'s structured value, by the
-copy's theorem against the alternative and the optimizer's
-`rewrite_equiv`.
+every rewritten function (§5.13): the MIR rustc compiles for a rewritten
+function (the copy delegating to its lowered replacement and helpers)
+returns, at sufficient fuel, exactly the source function's structured
+value, by the copy's theorem against the replacement and the link
+(`rewrite_equiv` for a user alternative, `..::equiv` or conversion for an
+optimizer residual). It is exercised on the toy fixtures:
+`tests/lowered_use.rs` (`at_most_one_bit` through its user alternative
+`at_most_one_bit_fast`, 3 theorems, and the `ShippedMir` negative twin) and
+`tests/lift_opt.rs` (optimizer residuals and per-type dispatch instances).
+At this stage it also ran on the MMR's `PeakIterator::to_nearest_size`
+through the hand-written alternative `opt::to_nearest_size_fast`; that
+alternative is removed, and the MMR has no rewritten function.
 
 **Why the counts were lower.** The real build had 8 MMR functions and 1
 verifier function without a theorem; `cs_proto`'s gate mode reported 9 and
@@ -569,9 +582,10 @@ instance against the source function, under the source function's
 contract, by a transport along `rewrite_equiv` (preconditions promoted with
 `eq::promote` where the link binds them as relevant). A function without
 its shipped theorem keeps its source text. The gate keeps the lemmas the
-copies need even when cached (`GateOptions::keep_keys`). The MMR's
-`to_nearest_size`: 8 theorems (5 helpers' and `to_nearest_size_fast`'s, the
-copy's, the shipped one). The same runs for an optimizer residual (its
+copies need even when cached (`GateOptions::keep_keys`). (At this stage
+the MMR's `to_nearest_size`, through the since-removed user alternative
+`to_nearest_size_fast`, had 8 theorems; the MMR now has no rewritten
+function, and `tests/lowered_use.rs`'s toy alternative has 3.) The same runs for an optimizer residual (its
 link `..::equiv : Π x̄. Eq(R, g x̄, f x̄)` read in either direction, or
 conversion; the source function's contract when the residual has none) and
 for a function lowered through a per-type dispatch (per verified instance:
@@ -602,7 +616,7 @@ rewrite, and the build that compiles the copy fails.
 
 | root | lifted | gate | check total | baseline | added |
 | --- | --- | --- | --- | --- | --- |
-| MMR | 76 of 76 (+ 6 loop lemmas, 1 model lemma) | 9.6 s cold | 244.6 s | ≈ 230 s | ≈ 4 % |
+| MMR | 76 of 76 then (+ 6 loop lemmas, 1 model lemma); 69 of 69 since the `opt.rs` alternatives were removed | 9.6 s cold | 244.6 s | ≈ 230 s | ≈ 4 % |
 | verifier | 69 of 69 | 4.4 s cold | 9.7 s | ≈ 7 s | ≈ 60 % (`reconstruct_digest`'s walk, 3.5 s) |
 | varint | 63 of 63 (+ 6, + `usize::div_ceil`) | 4.2 s cold | — | ≈ 100 s | ≈ 4 % |
 
@@ -610,13 +624,16 @@ The storage build (`compile_lifted_pending_gates`, debug profile of the
 build script, two runs): MMR gate 14.0–21.8 s, the lowering with the round
 trip and the shipped theorems 2.4–4.4 s; verifier gate 6.4–10.2 s. `cargo test -p
 commonware-storage --lib -- merkle::mmr merkle::position merkle::location
-merkle::proof merkle::hasher`: 129 passed; both roots build;
-`to_nearest_size` is still rewritten and rustc compiles the lowered copy.
+merkle::proof merkle::hasher`: 129 passed; both roots build. (At this
+stage `to_nearest_size` was rewritten to the hand-written alternative and
+rustc compiled that lowered copy; since the alternative's removal no MMR
+function is rewritten, and the lowered copy rustc compiles is
+`mmr/iterator.rs` itself.)
 `cargo test -p commonware-codec`: varint VERIFIED + LIFTED AS-IS, every §15
 gate (lock matching), 147 + 16 + 5 tests.
 
 **Tests.** `tests/theorem_gate.rs` +2 (the verifier's 69; the MMR's 76
-with the functions fixed here named, 136 s); `tests/literal.rs` +2 (data-free
+then, 69 now, with the functions fixed here named, 136 s); `tests/literal.rs` +2 (data-free
 reads with a negative twin; the core models' `erase` with a negative twin);
 `tests/lowered_use.rs` +1 and one assertion (the shipped theorems; the
 `ShippedMir` twin); `tests/lift_opt.rs` one assertion (the dispatch's
@@ -2337,9 +2354,11 @@ not the original alternative).
   checks A1/A4/A5, which the theorem cannot. It becomes cheaper to make
   meaningful: running L in the kernel on the same inputs compares L with
   rustc directly, while S vs rustc becomes a consequence of the theorem.
-* **Optimizer.** Unaffected. It rewrites S under proven `#[rewrite]`
-  lemmas. The theorem is about the source's S, and the optimized code's
-  correctness is the optimizer's own theorem, composed by transitivity.
+* **Optimizer.** Unaffected. It replaces S by its kernel-checked residuals
+  (and, apart, by user-supplied alternatives under proven `#[rewrite]`
+  lemmas: user code, reported separately, DESIGN.md principle 3). The
+  theorem is about the source's S, and the optimized code's correctness is
+  the optimizer's own theorem, composed by transitivity.
 * **Lowered round trip.** The round trip reads back a rewritten file's MIR
   (`<stem>.roundtrip__<module>.sbmir`). The same generator and walker give
   `L_roundtrip = erase(S_lowered)`. With the optimizer's `S_lowered = S`
@@ -2524,16 +2543,16 @@ Against §8.4's estimate for the verifier (2–5 s of added kernel time,
 | walks / kernel checks | 1.6 s / 2.5 s, 89,867 proof nodes (shared) |
 | gate, cold / all cached | 4.4–5.2 s / 0.3 s (baseline `sandblaster check` ≈ 100 s: ≈ 5 % / 0.3 %) |
 | largest | `write::<uN>`: 0.3 s walk, 0.24–0.34 s kernel, 5,245 nodes each (16–18 s walks before erased pairs were completed syntactically) |
-| verifier, MMR (not rolled out) | 66 of 69 (4.4 s), 67 of 76 (5.1 s) |
+| verifier, MMR (not rolled out) | 66 of 69 (4.4 s), 67 of 76 (5.1 s; the 76 counted the 7 functions of the since-removed `opt.rs` alternatives) |
 
 ### 8.7 Stage cs-storage: the MMR, the verifier, the shipped code
 
 | item | value |
 | --- | --- |
-| MMR (`sandblaster check`) | 76 of 76 theorems (6 loop lemmas, the model lemma of `u64::div_ceil`), gate 9.6 s of 244.6 s (baseline ≈ 230 s: ≈ 4 %) |
+| MMR (`sandblaster check`) | 76 of 76 theorems then (6 loop lemmas, the model lemma of `u64::div_ceil`), gate 9.6 s of 244.6 s (baseline ≈ 230 s: ≈ 4 %); **69 of 69 now**, no MMR rewrite (the 7 functions of the hand-written `opt.rs` alternatives are removed) |
 | verifier (`sandblaster check`) | 69 of 69, gate 4.4 s of 9.7 s (baseline ≈ 7 s: ≈ 60 %; `reconstruct_digest`'s walk 3.5 s) |
 | varint (cs_proto gate) | 63 of 63 (6 loop lemmas, `usize::div_ceil`'s model lemma), 4.2 s |
-| shipped code, MMR | `to_nearest_size`: 8 theorems (helpers, copy, `L::shipped`), inside the 4.4 s lowering of the debug-profile build script |
+| shipped code | then, the MMR's `to_nearest_size` through the since-removed user alternative: 8 theorems (helpers, copy, `L::shipped`), inside the 4.4 s lowering of the debug-profile build script; now no MMR function is rewritten, and the mechanism is tested on the toy fixtures (`tests/lowered_use.rs`: 3 theorems) |
 | largest new walks | `position_to_location` 2.4 s walk, 0.08 s kernel, 5,069 nodes; `to_nearest_size::loop#0` 0.17 s, 0.12 s, 4,834 nodes; `is_valid_size__loop0` 0.06 s, 0.11 s, 4,035 nodes |
 
 ---------------------------------------------------------------------------
@@ -2550,7 +2569,7 @@ tests.
 | 3 | Statement generator (`StmtSpec`, `erase`, `init`) as a reviewed module; pre-commit bodies and measures kept in `DefRecord` (replacing the prototype's side table) | 1 |
 | 4 | Walker hardening: non-tail self-calls (§5.4); fuel splits mid-walk; hash-consed motives; a `linarith`-first refutation pass; per-function budget and diagnostics (**done**, stage cs-walker: §5.6–§5.11) | 4 |
 | 5 | Driver integration: generate L per module, run the walker per lifted function in dependency order (callees, then helpers, then functions), verdict-cache keys, gate "every lifted function has its theorem" (**done**, stage cs-integrate) | 2 |
-| 6 | Roll out on varint (168 MIR functions, 84 roots), then the MMR (132), then the verifier (121); fix walker gaps as they appear (expected: more leaves, `Range` iteration, signed casts) (varint **done**: all 63 lifted functions, stage cs-integrate; the other 21 of the 84 roots are the `#[derive]`d `Clone`, `PartialEq` and `Eq` impls, which the lift generates rather than reads from MIR; the MMR's 76 and the verifier's 69 **done**, stage cs-storage) | 5 |
+| 6 | Roll out on varint (168 MIR functions, 84 roots), then the MMR (132), then the verifier (121); fix walker gaps as they appear (expected: more leaves, `Range` iteration, signed casts) (varint **done**: all 63 lifted functions, stage cs-integrate; the other 21 of the 84 roots are the `#[derive]`d `Clone`, `PartialEq` and `Eq` impls, which the lift generates rather than reads from MIR; the MMR's 76 (69 since the `opt.rs` alternatives were removed) and the verifier's 69 **done**, stage cs-storage) | 5 |
 | 7 | Conformance on L as well as S; fault-injection test per construct (each MIR construct mutated must break a theorem) (**done**, stage cs-assurance: `conform/literal.rs`, `tests/fault_injection.rs`) | 2 |
 | 8 | Lowered round trip through the same theorem (**done**, stage cs-storage: the shipped code's theorem, §5.13) | 2 |
 | 9 | Demote `read.rs` to untrusted in `AUDIT.md` and `mir-lift.md` §5; publish the TCB numbers (**done**, stage cs-assurance: DESIGN.md §1.1 item 8, AUDIT.md §21.1, `mir-lift.md` §3, §5, §6, §20) | 0.5 |
