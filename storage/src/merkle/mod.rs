@@ -17,7 +17,6 @@ mod location;
 pub mod mem;
 pub mod mmb;
 pub mod mmr;
-pub mod path;
 mod position;
 mod proof;
 mod read;

@@ -64,7 +64,7 @@ fn bench_prove_many_elements_family<F: Family>(c: &mut Criterion, family: &str) 
         for range in [2, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000] {
             c.bench_function(
                 &format!(
-                    "{}/n={n} range={range} samples={SAMPLE_SIZE} family={family}",
+                    "{}/n={n} range={range} samples={SAMPLE_SIZE} family={family} hasher=sha256",
                     module_path!(),
                 ),
                 |b| {
