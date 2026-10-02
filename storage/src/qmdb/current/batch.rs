@@ -551,7 +551,8 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        // The speculative bitmap clears committed updates that pending ancestors superseded, so
+        // the floor scan skips them without reading them.
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };
@@ -701,7 +702,8 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        // The speculative bitmap clears committed updates that pending ancestors superseded, so
+        // the floor scan skips them without reading them.
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };
@@ -766,7 +768,8 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        // The speculative bitmap clears committed updates that pending ancestors superseded, so
+        // the floor scan skips them without reading them.
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };
