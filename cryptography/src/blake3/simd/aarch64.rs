@@ -1,11 +1,12 @@
 //! NEON kernels.
 
-#[cfg(doc)]
-use super::batch;
-use super::{Digest, Words};
+use super::{Digest, Nodes, Words, batch};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN};
+use blake3::{
+    BLOCK_LEN, CHUNK_LEN, OUT_LEN,
+    hazmat::{ChainingValue, HasherExt, Mode, merge_subtrees_non_root},
+};
 use core::arch::aarch64::*;
 #[cfg(not(miri))]
 use core::arch::asm;
@@ -387,6 +388,175 @@ impl Words<LANES> for Xar {
     }
 }
 
+/// NEON words that use the SVE2 `XAR` instruction for the 12, 8, and 7 bit
+/// xor-rotates and `REV32` for the 16 bit one.
+///
+/// Eight-lane batches have enough independent work to be limited by
+/// instruction throughput rather than latency. Keeping one xor-rotate per
+/// mixing step off `XAR` balances the load on cores that issue `XAR` on fewer
+/// pipes than plain vector instructions, while still removing most of the
+/// shift sequences.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct Hybrid(uint32x4_t);
+
+impl Words<LANES> for Hybrid {
+    #[inline(always)]
+    unsafe fn splat(word: u32) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(vdupq_n_u32(word)) }
+    }
+
+    #[inline(always)]
+    unsafe fn add(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(vaddq_u32(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(veorq_u32(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate16(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(rotate16(veorq_u32(self.0, other.0))) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate12(self, other: Self) -> Self {
+        // SAFETY: The caller establishes SVE2.
+        unsafe { Self(xar::<12>(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate8(self, other: Self) -> Self {
+        // SAFETY: The caller establishes SVE2.
+        unsafe { Self(xar::<8>(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate7(self, other: Self) -> Self {
+        // SAFETY: The caller establishes SVE2.
+        unsafe { Self(xar::<7>(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn load(blocks: [&[u8; BLOCK_LEN]; LANES]) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { <uint32x4_t as Words<LANES>>::load(blocks).map(Self) }
+    }
+
+    #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; LANES], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { super::pad(inputs, start, len) }
+    }
+
+    #[inline(always)]
+    unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; LANES] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { <uint32x4_t as Words<LANES>>::store(words.map(|word| word.0)) }
+    }
+}
+
+/// Two four-lane words hashed side by side: eight messages whose independent
+/// mixing chains fill the vector pipes one four-lane chain leaves idle.
+#[derive(Clone, Copy)]
+struct Dual<W>([W; 2]);
+
+impl<W: Words<LANES>> Words<{ 2 * LANES }> for Dual<W> {
+    #[inline(always)]
+    unsafe fn splat(word: u32) -> Self {
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { Self([W::splat(word); 2]) }
+    }
+
+    #[inline(always)]
+    unsafe fn add(self, other: Self) -> Self {
+        let ([a, b], [c, d]) = (self.0, other.0);
+
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { Self([a.add(c), b.add(d)]) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor(self, other: Self) -> Self {
+        let ([a, b], [c, d]) = (self.0, other.0);
+
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { Self([a.xor(c), b.xor(d)]) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate16(self, other: Self) -> Self {
+        let ([a, b], [c, d]) = (self.0, other.0);
+
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { Self([a.xor_rotate16(c), b.xor_rotate16(d)]) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate12(self, other: Self) -> Self {
+        let ([a, b], [c, d]) = (self.0, other.0);
+
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { Self([a.xor_rotate12(c), b.xor_rotate12(d)]) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate8(self, other: Self) -> Self {
+        let ([a, b], [c, d]) = (self.0, other.0);
+
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { Self([a.xor_rotate8(c), b.xor_rotate8(d)]) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate7(self, other: Self) -> Self {
+        let ([a, b], [c, d]) = (self.0, other.0);
+
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { Self([a.xor_rotate7(c), b.xor_rotate7(d)]) }
+    }
+
+    #[inline(always)]
+    unsafe fn load(blocks: [&[u8; BLOCK_LEN]; 2 * LANES]) -> [Self; 16] {
+        let (low, high) = blocks.split_at(LANES);
+
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe {
+            let low = W::load(low.try_into().expect("half of the blocks"));
+            let high = W::load(high.try_into().expect("half of the blocks"));
+            core::array::from_fn(|word| Self([low[word], high[word]]))
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; 2 * LANES], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { super::pad(inputs, start, len) }
+    }
+
+    #[inline(always)]
+    unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; 2 * LANES] {
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe {
+            let low = W::store(words.map(|word| word.0[0]));
+            let high = W::store(words.map(|word| word.0[1]));
+            core::array::from_fn(|lane| {
+                if lane < LANES {
+                    low[lane]
+                } else {
+                    high[lane - LANES]
+                }
+            })
+        }
+    }
+}
+
 /// Hash four equal-length messages, one per NEON lane.
 ///
 /// # Safety
@@ -396,6 +566,17 @@ impl Words<LANES> for Xar {
 unsafe fn hash_x4(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
     // SAFETY: NEON is enabled for this function.
     unsafe { super::hash::<uint32x4_t, LANES>(inputs) }
+}
+
+/// Hash eight equal-length messages, two NEON vectors per word.
+///
+/// # Safety
+///
+/// The caller must establish NEON availability.
+#[target_feature(enable = "neon")]
+unsafe fn hash_x8(inputs: [&[u8]; 2 * LANES]) -> [[u8; OUT_LEN]; 2 * LANES] {
+    // SAFETY: NEON is enabled for this function.
+    unsafe { super::hash::<Dual<uint32x4_t>, { 2 * LANES }>(inputs) }
 }
 
 /// Hash four equal-length messages with SVE2 `XAR` rotations.
@@ -408,6 +589,19 @@ unsafe fn hash_x4_xar(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
     // SAFETY: NEON is enabled for this function, and the caller establishes
     // SVE2.
     unsafe { super::hash::<Xar, LANES>(inputs) }
+}
+
+/// Hash eight equal-length messages with SVE2 `XAR` for three of the four
+/// rotations.
+///
+/// # Safety
+///
+/// The caller must establish SVE2 availability.
+#[target_feature(enable = "neon")]
+unsafe fn hash_x8_xar(inputs: [&[u8]; 2 * LANES]) -> [[u8; OUT_LEN]; 2 * LANES] {
+    // SAFETY: NEON is enabled for this function, and the caller establishes
+    // SVE2.
+    unsafe { super::hash::<Dual<Hybrid>, { 2 * LANES }>(inputs) }
 }
 
 cfg_if::cfg_if! {
@@ -451,6 +645,244 @@ unsafe fn hash_quad(inputs: [&[u8]; LANES], sve2: bool) -> [[u8; OUT_LEN]; LANES
         // SAFETY: The caller establishes NEON.
         unsafe { hash_x4(inputs) }
     }
+}
+
+/// Parent chaining values with NEON words `V`.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires beyond NEON.
+#[target_feature(enable = "neon")]
+unsafe fn parents_neon<V: Words<L>, const L: usize>(
+    children: [&[u8; BLOCK_LEN]; L],
+    root: u32,
+) -> [[u8; OUT_LEN]; L] {
+    // SAFETY: NEON is enabled for this function, and the caller establishes
+    // the rest.
+    unsafe { super::parents::<V, L>(children, root) }
+}
+
+/// Non-root chaining values of one full chunk per lane, with a counter per
+/// lane, with NEON words `V`.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires beyond NEON.
+#[target_feature(enable = "neon")]
+unsafe fn leaves_neon<V: Words<L>, const L: usize>(
+    inputs: [&[u8]; L],
+    counters: [u64; L],
+) -> [[u8; OUT_LEN]; L] {
+    // SAFETY: NEON is enabled for this function, and the caller establishes
+    // the rest.
+    unsafe { super::leaves::<V, L>(inputs, counters) }
+}
+
+/// Non-root chaining values of the last chunk of every lane's message with
+/// NEON words `V`.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires beyond NEON.
+#[target_feature(enable = "neon")]
+unsafe fn tails_neon<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LEN]; L] {
+    // SAFETY: NEON is enabled for this function, and the caller establishes
+    // the rest.
+    unsafe { super::tails::<V, L>(inputs) }
+}
+
+/// Available NEON extensions. A value exists only once NEON is available.
+///
+/// More than four active lanes use eight-lane words, and the rest use
+/// four-lane words. Both use SVE2 `XAR` when available.
+#[derive(Clone, Copy)]
+struct Features {
+    sve2: bool,
+}
+
+impl Features {
+    /// Hash equal-length `messages` with their nodes packed into lanes (see
+    /// [`super::pack`]).
+    fn pack(&self, messages: &[&[u8]], digests: &mut Vec<Digest>) {
+        super::pack(self, messages, digests);
+    }
+}
+
+/// Return the first four of eight lanes.
+#[inline(always)]
+const fn half<T: Copy>(lanes: [T; 2 * LANES]) -> [T; LANES] {
+    [lanes[0], lanes[1], lanes[2], lanes[3]]
+}
+
+/// Expand to the body of a [`Nodes`] method for [`Features`], which calls
+/// `$kernel::<V, L>` with the NEON words `V` over `L` lanes that the features
+/// select for `$active` of eight lanes, and returns eight lanes of output.
+///
+/// Each bracketed argument holds eight lanes, of which the kernel receives
+/// the first `L`. The arguments after the brackets are passed unchanged.
+macro_rules! lanes {
+    ($features:expr, $active:expr, $kernel:ident, [$($lane:ident),+] $(, $arg:expr)*) => {{
+        if $active > LANES {
+            if $features.sve2 {
+                return $kernel::<Dual<Hybrid>, { 2 * LANES }>($($lane,)+ $($arg),*);
+            }
+            return $kernel::<Dual<uint32x4_t>, { 2 * LANES }>($($lane,)+ $($arg),*);
+        }
+        let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
+        $(let $lane = half($lane);)+
+        let quad = if $features.sve2 {
+            $kernel::<Xar, LANES>($($lane,)+ $($arg),*)
+        } else {
+            $kernel::<uint32x4_t, LANES>($($lane,)+ $($arg),*)
+        };
+        outputs[..LANES].copy_from_slice(&quad);
+        outputs
+    }};
+}
+
+impl Nodes<{ 2 * LANES }> for Features {
+    fn leaves(
+        &self,
+        inputs: [&[u8]; 2 * LANES],
+        counters: [u64; 2 * LANES],
+        active: usize,
+    ) -> [[u8; OUT_LEN]; 2 * LANES] {
+        // SAFETY: NEON availability was established on construction, and each
+        // extension is used only when detected.
+        unsafe { lanes!(self, active, leaves_neon, [inputs, counters]) }
+    }
+
+    fn tails(&self, inputs: [&[u8]; 2 * LANES], active: usize) -> [[u8; OUT_LEN]; 2 * LANES] {
+        // SAFETY: NEON availability was established on construction, and each
+        // extension is used only when detected.
+        unsafe { lanes!(self, active, tails_neon, [inputs]) }
+    }
+
+    fn parents(
+        &self,
+        children: [&[u8; BLOCK_LEN]; 2 * LANES],
+        root: u32,
+        active: usize,
+    ) -> [[u8; OUT_LEN]; 2 * LANES] {
+        // SAFETY: NEON availability was established on construction, and each
+        // extension is used only when detected.
+        unsafe { lanes!(self, active, parents_neon, [children], root) }
+    }
+}
+
+/// Most chunks in a [`subtree`].
+const GROUP: usize = crate::blake3::TASK_LEN / CHUNK_LEN;
+
+/// Hash the full chunks of `span`, which starts at chunk `first` of its
+/// message, into one non-root chaining value per chunk in `cvs`.
+///
+/// Chunks are hashed in lanes, and a lone chunk in a group of lanes alone.
+fn hash_chunks(features: Features, span: &[u8], first: u64, cvs: &mut [ChainingValue]) {
+    let groups = span
+        .chunks(2 * LANES * CHUNK_LEN)
+        .zip(cvs.chunks_mut(2 * LANES));
+    for (group, (span, cvs)) in groups.enumerate() {
+        let active = span.len() / CHUNK_LEN;
+        let first = first + (group * 2 * LANES) as u64;
+        if active == 1 {
+            let mut hasher = blake3::Hasher::new();
+            hasher.set_input_offset(first * CHUNK_LEN as u64);
+            hasher.update(span);
+            cvs[0] = hasher.finalize_non_root();
+            continue;
+        }
+        let mut inputs = [&span[..CHUNK_LEN]; 2 * LANES];
+        for (lane, chunk) in inputs.iter_mut().zip(span.chunks(CHUNK_LEN)) {
+            *lane = chunk;
+        }
+        let counters = core::array::from_fn(|lane| first + lane as u64);
+        let outputs = features.leaves(inputs, counters, active);
+        cvs[..active].copy_from_slice(&outputs[..active]);
+    }
+}
+
+/// Merge adjacent pairs of `cvs` in lanes, level by level in place, until one
+/// value remains at its start.
+///
+/// An odd last value moves up unchanged, which builds BLAKE3's left-balanced
+/// tree.
+fn merge(features: Features, cvs: &mut [ChainingValue]) {
+    let mut len = cvs.len();
+    while len > 1 {
+        let pairs = len / 2;
+        for start in (0..pairs).step_by(2 * LANES) {
+            let active = (pairs - start).min(2 * LANES);
+            let (group, _) = cvs[2 * start..2 * (start + active)].as_chunks::<2>();
+            if let [[left, right]] = group {
+                cvs[start] = merge_subtrees_non_root(left, right, Mode::Hash);
+                continue;
+            }
+            let mut children = [[0u8; BLOCK_LEN]; 2 * LANES];
+            for (child, [left, right]) in children.iter_mut().zip(group) {
+                child[..OUT_LEN].copy_from_slice(left);
+                child[OUT_LEN..].copy_from_slice(right);
+            }
+            let outputs = features.parents(children.each_ref(), 0, active);
+            cvs[start..start + active].copy_from_slice(&outputs[..active]);
+        }
+        if len % 2 == 1 {
+            cvs[pairs] = cvs[len - 1];
+        }
+        len = len.div_ceil(2);
+    }
+}
+
+/// Reduce `input`, which starts at chunk `first` of its message and spans at
+/// least two full chunks and at most [`GROUP`] chunks, to the non-root
+/// chaining value of its BLAKE3 subtree.
+///
+/// The full chunks hash in lanes and a partial final chunk alone, and their
+/// chaining values then merge level by level in lanes.
+///
+/// # Safety
+///
+/// The caller must establish NEON availability.
+unsafe fn reduce(input: &[u8], first: u64) -> ChainingValue {
+    let features = Features {
+        sve2: supports_sve2(),
+    };
+    let mut cvs = [[0u8; OUT_LEN]; GROUP];
+    let full = input.len() / CHUNK_LEN;
+    hash_chunks(
+        features,
+        &input[..full * CHUNK_LEN],
+        first,
+        &mut cvs[..full],
+    );
+    let mut len = full;
+    if full * CHUNK_LEN < input.len() {
+        let mut hasher = blake3::Hasher::new();
+        hasher.set_input_offset((first + full as u64) * CHUNK_LEN as u64);
+        hasher.update(&input[full * CHUNK_LEN..]);
+        cvs[len] = hasher.finalize_non_root();
+        len += 1;
+    }
+    merge(features, &mut cvs[..len]);
+    cvs[0]
+}
+
+/// Chaining value of the non-root subtree `input`, which starts at chunk
+/// `first` of its message and spans at least two full chunks and at most
+/// [`GROUP`] chunks.
+///
+/// Returns `None` when NEON is unavailable.
+pub(in crate::blake3) fn subtree(input: &[u8], first: u64) -> Option<ChainingValue> {
+    assert!(input.len() >= 2 * CHUNK_LEN, "subtree spans two chunks");
+    assert!(
+        input.len() <= GROUP * CHUNK_LEN,
+        "subtree spans at most GROUP chunks"
+    );
+    if !supported() {
+        return None;
+    }
+
+    // SAFETY: NEON availability was established above.
+    Some(unsafe { reduce(input, first) })
 }
 
 /// Bytes in an MMR node message: a position followed by two digests.
@@ -533,21 +965,44 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     if !supported() {
         return None;
     }
-    let sve2 = supports_sve2();
+    let features = Features {
+        sve2: supports_sve2(),
+    };
     if matches!(messages.len(), 3 | 4) {
         // SAFETY: NEON availability was established above, and the feature
         // snapshot records whether the four-lane SVE2 kernel is available.
-        if let Some(digests) = unsafe { hash_small(messages, sve2) } {
+        if let Some(digests) = unsafe { hash_small(messages, features.sve2) } {
             return Some(digests);
         }
     }
-    None
+    let pack = |messages: &[&[u8]], digests: &mut _| features.pack(messages, digests);
+    Some(batch(messages, pack, |inputs, active| {
+        if active > LANES {
+            if features.sve2 {
+                // SAFETY: NEON and SVE2 availability were established above.
+                return unsafe { hash_x8_xar(inputs) };
+            }
+
+            // SAFETY: NEON availability was established above.
+            return unsafe { hash_x8(inputs) };
+        }
+
+        // Spare lanes repeat the first input, so a narrower kernel takes the
+        // leading lanes and leaves the rest unused.
+        let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
+        let quad = [inputs[0], inputs[1], inputs[2], inputs[3]];
+
+        // SAFETY: NEON availability was established above, and the feature
+        // snapshot records whether SVE2 is available.
+        outputs[..LANES].copy_from_slice(&unsafe { hash_quad(quad, features.sve2) });
+        outputs
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blake3::simd::tests::check_lanes;
+    use crate::blake3::simd::tests::{check_batch, check_lanes};
 
     #[test]
     fn test_lanes_match_reference() {
@@ -555,6 +1010,9 @@ mod tests {
 
         // SAFETY: NEON availability was asserted above.
         check_lanes::<LANES>(|inputs| unsafe { hash_x4(inputs) });
+
+        // SAFETY: NEON availability was asserted above.
+        check_lanes::<{ 2 * LANES }>(|inputs| unsafe { hash_x8(inputs) });
     }
 
     #[test]
@@ -565,6 +1023,63 @@ mod tests {
 
         // SAFETY: SVE2 availability was checked above.
         check_lanes::<LANES>(|inputs| unsafe { hash_x4_xar(inputs) });
+
+        // SAFETY: SVE2 availability was checked above.
+        check_lanes::<{ 2 * LANES }>(|inputs| unsafe { hash_x8_xar(inputs) });
+    }
+
+    /// Check subtree chaining values against the reference at subtree-aligned
+    /// first chunks, with full lane groups of eight chunks, narrower tails, a
+    /// single trailing chunk, and partial final chunks, up to [`GROUP`]
+    /// chunks.
+    #[test]
+    fn test_subtree_matches_reference() {
+        let data: Vec<u8> = (0..(GROUP * CHUNK_LEN) as u32)
+            .map(|i| (i.wrapping_mul(0x0100_0193) >> 11) as u8)
+            .collect();
+        for chunks in [2, 3, 4, 5, 8, 9, 10, 16, 17, 32, 63, 64] {
+            for extra in [0, 1, CHUNK_LEN - 1] {
+                let len = chunks * CHUNK_LEN + extra;
+                if len > GROUP * CHUNK_LEN {
+                    continue;
+                }
+
+                // A subtree starting at chunk `first` spans at most the
+                // largest power of two dividing `first`, so these starts
+                // admit every tested length.
+                for first in [0u64, 256, 768] {
+                    let input = &data[..len];
+                    let mut hasher = blake3::Hasher::new();
+                    hasher.set_input_offset(first * CHUNK_LEN as u64);
+                    hasher.update(input);
+                    let expected = hasher.finalize_non_root();
+                    assert_eq!(
+                        subtree(input, first),
+                        Some(expected),
+                        "len={len} first={first}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Check batches, then packed nodes with and without SVE2 when it is
+    /// available. The reference hashes the batches that take one message per
+    /// lane.
+    #[test]
+    fn test_batch_matches_reference() {
+        assert!(supported());
+        check_batch(|messages| hash_many(messages).unwrap());
+        let reference =
+            |inputs: [&[u8]; 2 * LANES], _| inputs.map(|input| *blake3::hash(input).as_bytes());
+        for sve2 in [false, true] {
+            if sve2 && !supports_sve2() {
+                continue;
+            }
+            let features = Features { sve2 };
+            let pack = |messages: &[&[u8]], digests: &mut _| features.pack(messages, digests);
+            check_batch(|messages| batch(messages, pack, reference));
+        }
     }
 
     #[test]
