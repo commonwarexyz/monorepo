@@ -6,7 +6,7 @@ use crate::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock, coding_config_for_participants},
         },
-        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
+        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
     },
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
@@ -148,10 +148,6 @@ where
         commitment: Commitment<B, C, H>,
     ) -> Option<oneshot::Receiver<Arc<CodedBlock<B, C, H>>>> {
         Some(self.subscribe(commitment))
-    }
-
-    fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
-        Self::retire(self, update);
     }
 
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {

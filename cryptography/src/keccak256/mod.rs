@@ -24,8 +24,9 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{Array, Span};
+use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
+    cmp::Ordering,
     fmt::{Debug, Display},
     ops::Deref,
 };
@@ -72,10 +73,24 @@ impl Hasher for Keccak256 {
 }
 
 /// Digest of a Keccak-256 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, FixedArray)]
 #[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+impl Ord for Digest {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        FixedBytes::new(self.0).cmp(&FixedBytes::new(other.0))
+    }
+}
+
+impl PartialOrd for Digest {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for Digest {
@@ -216,6 +231,30 @@ mod tests {
         assert!(Digest::decode(Copying(&ABC_DIGEST[..31])).is_err());
         digest.zeroize();
         assert_eq!(digest, <Digest as crate::Digest>::EMPTY);
+    }
+
+    #[test]
+    fn test_digest_ord() {
+        let a = Digest([0; DIGEST_LENGTH]);
+        let mut b = a;
+        b.0[DIGEST_LENGTH - 1] = 1;
+
+        // The first byte decides even when the remaining bytes order the other way.
+        let mut c = a;
+        c.0[0] = 0x7f;
+        c.0[1..].fill(0xff);
+        let mut d = a;
+        d.0[0] = 0x80;
+        for (a, b, expected) in [
+            (a, a, Ordering::Equal),
+            (a, b, Ordering::Less),
+            (b, a, Ordering::Greater),
+            (c, d, Ordering::Less),
+            (d, c, Ordering::Greater),
+        ] {
+            assert_eq!(a.cmp(&b), expected);
+            assert_eq!(a.partial_cmp(&b), Some(expected));
+        }
     }
 
     #[cfg(feature = "arbitrary")]
