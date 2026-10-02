@@ -1,4 +1,4 @@
-use commonware_cryptography::{Sha256, sha256};
+use commonware_cryptography::{Blake3, Hasher, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, mem::Mem};
 use commonware_utils::test_rng;
@@ -12,44 +12,49 @@ const N_LEAVES: [usize; 2] = [10_000, 100_000];
 #[cfg(full_bench)]
 const N_LEAVES: [usize; 5] = [10_000, 100_000, 1_000_000, 5_000_000, 10_000_000];
 
-fn make_elements(n: usize) -> Vec<sha256::Digest> {
+fn make_elements<H: Hasher>(n: usize) -> Vec<H::Digest> {
     let mut elements = Vec::with_capacity(n);
     let mut sampler = test_rng();
     for _ in 0..n {
-        elements.push(sha256::Digest::random(&mut sampler));
+        elements.push(H::Digest::random(&mut sampler));
     }
     elements
 }
 
-fn bench_append_family<F: Family>(c: &mut Criterion, family: &str) {
+fn bench_append_family<F: Family, H: Hasher>(c: &mut Criterion, family: &str, hasher: &str) {
     for n in N_LEAVES {
-        c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {
-            b.iter_batched(
-                || make_elements(n),
-                |elements| {
-                    block_on(async {
-                        let h = StandardHasher::<Sha256>::new(ForwardFold);
-                        let mut mem = Mem::<F, _>::new();
-                        let batch = {
-                            let mut batch = mem.new_batch();
-                            for digest in &elements {
-                                batch = batch.add(&h, digest);
-                            }
-                            batch.merkleize(&mem, &h)
-                        };
-                        mem.apply_batch(&batch).unwrap();
-                        mem
-                    })
-                },
-                BatchSize::LargeInput,
-            );
-        });
+        c.bench_function(
+            &format!("{}/n={n} family={family} hasher={hasher}", module_path!()),
+            |b| {
+                b.iter_batched(
+                    || make_elements::<H>(n),
+                    |elements| {
+                        block_on(async {
+                            let h = StandardHasher::<H>::new(ForwardFold);
+                            let mut mem = Mem::<F, _>::new();
+                            let batch = {
+                                let mut batch = mem.new_batch();
+                                for digest in &elements {
+                                    batch = batch.add(&h, digest);
+                                }
+                                batch.merkleize(&mem, &h)
+                            };
+                            mem.apply_batch(&batch).unwrap();
+                            mem
+                        })
+                    },
+                    BatchSize::LargeInput,
+                );
+            },
+        );
     }
 }
 
 fn bench_append(c: &mut Criterion) {
-    bench_append_family::<commonware_storage::mmr::Family>(c, "mmr");
-    bench_append_family::<commonware_storage::mmb::Family>(c, "mmb");
+    bench_append_family::<commonware_storage::mmr::Family, Sha256>(c, "mmr", "sha256");
+    bench_append_family::<commonware_storage::mmb::Family, Sha256>(c, "mmb", "sha256");
+    bench_append_family::<commonware_storage::mmr::Family, Blake3>(c, "mmr", "blake3");
+    bench_append_family::<commonware_storage::mmb::Family, Blake3>(c, "mmb", "blake3");
 }
 
 criterion_group! {

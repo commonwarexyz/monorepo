@@ -47,7 +47,10 @@ fn bench_append_additional_family<F: Family>(c: &mut Criterion, family: &str) {
     for n in N_LEAVES {
         for a in [100, 1_000, 10_000, 50_000] {
             c.bench_function(
-                &format!("{}/start={n} add={a} family={family}", module_path!()),
+                &format!(
+                    "{}/start={n} add={a} family={family} hasher=sha256",
+                    module_path!()
+                ),
                 |b| {
                     b.iter_batched(
                         || setup::<F>(n, a),
