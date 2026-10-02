@@ -21,7 +21,7 @@ use commonware_utils::futures::rebind;
 use rand_core::CryptoRng;
 use std::num::{NonZeroU64, NonZeroUsize};
 
-const VERSION: u8 = 4;
+const VERSION: u8 = 1;
 const COMMITTEE_DOMAIN: &[u8] = b"_COMMONWARE_CONSENSUS_AGGREGATION_JOURNAL_COMMITTEE_V1";
 
 /// Scope and identity durably bound to an aggregation journal.

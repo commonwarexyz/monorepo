@@ -20,7 +20,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::test_traced;
 use commonware_p2p::{
-    Message, Receiver as P2pReceiver, Recipients, Sender as _,
+    LimitedSender, Message, Receiver as P2pReceiver, Recipients, Sender as _,
     simulated::{Control, Link, Network, Oracle, Receiver, Sender},
 };
 use commonware_parallel::Sequential;
@@ -42,7 +42,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 const NAMESPACE: &[u8] = b"aggregation fixed epoch test";
@@ -483,27 +483,26 @@ fn test_fixed_range_all_online() {
     all_online(scheme::bls12381_threshold::fixture::<MinSig, _>);
 }
 
-/// Records every peer that delivers a message.
-#[derive(Debug)]
-struct SenderRecorder<R: P2pReceiver> {
-    inner: R,
-    senders: Arc<Mutex<BTreeSet<R::PublicKey>>>,
+/// Rejects send attempts by a verifier-only engine.
+#[derive(Clone)]
+struct AckSender<S> {
+    inner: S,
+    signer: bool,
 }
 
-impl<R> P2pReceiver for SenderRecorder<R>
-where
-    R: P2pReceiver,
-    R::PublicKey: Ord,
-{
-    type Error = R::Error;
-    type PublicKey = R::PublicKey;
+impl<S: LimitedSender> LimitedSender for AckSender<S> {
+    type PublicKey = S::PublicKey;
+    type Checked<'a>
+        = S::Checked<'a>
+    where
+        Self: 'a;
 
-    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
-        let result = self.inner.recv().await;
-        if let Ok((peer, _)) = &result {
-            self.senders.lock().insert(peer.clone());
-        }
-        result
+    fn check(
+        &mut self,
+        recipients: Recipients<Self::PublicKey>,
+    ) -> Result<Self::Checked<'_>, SystemTime> {
+        assert!(self.signer, "verifier-only engine attempted to send an ack");
+        self.inner.check(recipients)
     }
 }
 
@@ -517,7 +516,6 @@ fn test_verifier_only_engine_certifies_without_acks() {
         let verifier = fixture.participants[3].clone();
         let (oracle, mut registrations) =
             simulation(context.child("simulation"), &fixture, true).await;
-        let senders = Arc::new(Mutex::new(BTreeSet::new()));
         let reporter = RecordingReporter::default();
         let certificates = reporter.certificates.clone();
         let mut handles = Vec::new();
@@ -544,10 +542,10 @@ fn test_verifier_only_engine_certifies_without_acks() {
                 },
             );
             let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
-            let (sender, inner) = registrations.remove(participant).unwrap();
-            let receiver = SenderRecorder {
+            let (inner, receiver) = registrations.remove(participant).unwrap();
+            let sender = AckSender {
                 inner,
-                senders: senders.clone(),
+                signer: *participant != verifier,
             };
             handles.push(engine.start((sender, receiver)));
         }
@@ -558,9 +556,6 @@ fn test_verifier_only_engine_certifies_without_acks() {
                 EngineOutcome::Completed
             );
         }
-        let senders = senders.lock();
-        assert_eq!(senders.len(), 3);
-        assert!(!senders.contains(&verifier));
         let positions: BTreeSet<_> = certificates
             .lock()
             .iter()

@@ -704,7 +704,7 @@ where
             Unreliable::Outcome(feedback) if feedback.accepted() => pending.recovering = true,
             Unreliable::Outcome(Feedback::Closed) if !self.recovery_closed => {
                 self.recovery_closed = true;
-                warn!(epoch = %self.epoch, "recovery closed; certificates now require acks");
+                warn!(epoch = %self.epoch, "certificate recovery is closed");
             }
             _ => {}
         }
