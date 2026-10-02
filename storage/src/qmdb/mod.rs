@@ -156,7 +156,7 @@ fn validate_initialization_commit<F: Family>(
     Ok(Some(floor))
 }
 
-/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// Check the selected commit before recovery discards history. Rebuilding an index from its floor
 /// additionally requires retaining that floor. Keyless only restores commit fields.
 pub(crate) async fn validate_initialization<F, E, C, H, S>(
     pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
@@ -322,6 +322,16 @@ where
 
 /// Generate a proof of the operations starting at `start_loc` when the database had `op_count`
 /// operations.
+///
+/// # Errors
+///
+/// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `op_count`
+///   exceeds the operations `log` holds or `start_loc >= op_count` (so always for a zero
+///   `op_count`).
+/// - Returns [`Error::HistoricalFloorPruned`] if the operation at `op_count - 1` is not a commit.
+/// - Returns [`Error::DataCorrupted`] if that commit's floor lies past the commit.
+/// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+///   with [`crate::merkle::Error::ElementPruned`] if a required operation or node was pruned.
 pub(crate) async fn historical_proof<F, C, M, H>(
     log: &Authenticated<C, M, H>,
     op_count: Location<F>,
@@ -382,20 +392,36 @@ pub enum Error<F: Family> {
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 
-    /// The batch was created from a different database state than the current one.
+    /// The batch cannot be merkleized or applied against the current database state.
+    ///
+    /// Causes:
+    /// - The database moved off the batch's chain. Reads report this case as
+    ///   [`Error::StaleRead`]. Apply also refuses at the batch's own tip (it is already applied),
+    ///   where reads still pass.
+    /// - Merkleize only: an unapplied ancestor was dropped, so the chain no longer reaches the live
+    ///   database. Reads stay exact, since each merkleized batch retains its ancestors' overlays.
+    /// - Current merkleize only: the batch was built against another database instance.
     ///
     /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
-    /// A batch read found that a non-ancestor batch was applied to the database (or that
-    /// it was reinitialized off the batch's chain). The caller should fork a new batch from the
-    /// current state.
+    /// A batch read found the database on none of the batch's chain states: a batch other than
+    /// this one or an ancestor was applied (or the database was reinitialized off the chain).
+    /// The caller should fork a new batch from the current state.
     #[error("stale read: a non-ancestor batch was applied")]
     StaleRead,
 
-    /// The batch's inactivity floor is lower than the database's current floor.
-    #[error("floor regressed: batch floor {0} < current floor {1}")]
+    /// A batch read asked for a location below the inactivity floor its chain commits to.
+    ///
+    /// Such locations may or may not be pruned depending on local history, so they are refused
+    /// on every node alike.
+    #[error("location below inactivity floor: {0}")]
+    BelowInactivityFloor(Location<F>),
+
+    /// The batch's inactivity floor is lower than the floor it builds on: its parent's, or the
+    /// database's for a batch with no parent.
+    #[error("floor regressed: batch floor {0} < prior floor {1}")]
     FloorRegressed(Location<F>, Location<F>),
 
     /// The batch's inactivity floor exceeds its own commit operation's location. The floor

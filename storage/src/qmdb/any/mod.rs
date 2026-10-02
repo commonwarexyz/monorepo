@@ -203,7 +203,7 @@ where
     )
     .await?;
 
-    // Snapshot replay requires both the selected commit and its floor to remain above the bitmap
+    // Index replay requires both the selected commit and its floor to remain above the bitmap
     // boundary. Current also requires every absorbed chunk pair to exist at the selected size.
     let size = pending.bounds().end;
     if bitmap
@@ -234,7 +234,7 @@ where
 
     // Rebuild the volatile index and bitmap from the selected commit's retained floor.
     let index = I::new(context.child("index"), cfg.translator);
-    let index_context = context.child("index");
+    let index_context = context.child("index_build");
     let metrics = Metrics::new(context);
     db::Db::init_from_log(
         index_context,

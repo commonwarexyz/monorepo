@@ -2,13 +2,15 @@
 
 use crate::{
     application::App,
+    bootstrap,
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
+        DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, IO_BUFFER_SIZE, ITEMS_PER_SECTION,
         LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
+        MESSAGE_RATE, MUXER_SIZE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition,
+        QMDB_CHANNEL, RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, Secrets,
+        VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -16,7 +18,10 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporters,
     marshal::{
-        self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
+        self,
+        core::Actor as MarshalActor,
+        resolver::p2p as marshal_resolver,
+        standard::{Deferred, Standard},
     },
     simplex::{
         SkipBudget,
@@ -25,13 +30,14 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{ed25519, sha256::Sha256};
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
         fence::Fence,
         orchestrator, probe, reshare,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+        types::EpochInfo,
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
@@ -39,19 +45,23 @@ use commonware_glue::{
     },
 };
 use commonware_macros::boxed;
-use commonware_p2p::authenticated::{self, discovery};
+use commonware_p2p::authenticated::{
+    self,
+    discovery::{self, Oracle},
+};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{Handle, Spawner, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
+use rand_core::CryptoRng;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
 
 /// Start a validator node.
 #[derive(Args)]
 pub struct Validator {
-    /// Validator node directory containing config, genesis, secrets, and runtime storage.
+    /// Validator node directory containing config, genesis, and runtime storage.
     #[arg(long, default_value = "./data/validator-0")]
     pub node_dir: PathBuf,
 
@@ -60,6 +70,9 @@ pub struct Validator {
     pub state_sync: bool,
 }
 
+/// Partition of the validator's [`Secrets`] store.
+pub const PARTITION: Partition = Partition::Validator;
+
 /// Start every validator actor and run until one stops.
 #[boxed]
 pub async fn run(context: tokio::Context, args: Validator) {
@@ -67,6 +80,14 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");
     network.validate().expect("invalid network config");
     let genesis_info = types::read_genesis(&args.node_dir).expect("genesis is required");
+
+    // A player's genesis comes only from its own `bootstrap`, which hands the
+    // epoch-0 share to `secrets` before writing genesis. Nothing in the
+    // bootstrap store is needed after that, so erase it.
+    Secrets::init(context.child("bootstrap"), bootstrap::PARTITION)
+        .await
+        .destroy()
+        .await;
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
     let partition_prefix = "validator";
@@ -99,10 +120,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let p2p_handle = p2p.start();
 
     let provider = DynamicProvider::default();
-    let store = FileSecretStore::load(args.node_dir.join("secrets.json"))
-        .expect("failed to load secret store");
-    let mut store_for_genesis = store.clone();
-    if let Some(share) = store_for_genesis.get_share(Epoch::zero()).await {
+    let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
+    if let Some(share) = store.get_share(Epoch::zero()).await {
         provider.register(
             Epoch::zero(),
             Scheme::signer(
@@ -172,28 +191,17 @@ pub async fn run(context: tokio::Context, args: Validator) {
         genesis_info.clone(),
         genesis_target,
     );
-    let (probe_actor, probe_mailbox) = probe::Actor::new(probe::Config {
-        context: context.child("dkg_probe"),
-        manager: oracle.clone(),
-        bootstrap: probe::Bootstrap {
-            epoch: Epoch::zero(),
-            participants: genesis_info.participants(),
-            directory: Unit,
-        },
-        verifier: Scheme::certificate_verifier(NAMESPACE, *genesis_info.output.public().public()),
-        genesis: genesis_info.clone(),
-        strategy: Sequential,
-        blocker: oracle.clone(),
-        blocks_per_epoch: BLOCKS_PER_EPOCH,
-        retry_timeout: NZDuration!(Duration::from_millis(500)),
-        mailbox_size: MAILBOX_SIZE,
-        block_codec_config: (),
-    });
-    let probe_handle = probe_actor.start(dkg_probe_network);
-
     let stateful_startup = context.child("stateful_startup");
     let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
-    let should_state_sync = plan.should_state_sync(args.state_sync);
+    let (probe_actor, probe_mailbox) = probe::Actor::new(probe_config(
+        context.child("dkg_probe"),
+        oracle.clone(),
+        &genesis_info,
+        &plan,
+    ));
+    let probe_handle = probe_actor.start(dkg_probe_network);
+
+    let should_state_sync = plan.should_sync(args.state_sync);
     let probe_artifact = if should_state_sync {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
         provider.register(
@@ -204,7 +212,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 artifact.info.output.public().clone(),
             ),
         );
-        plan = plan.with_floor(artifact.floor.clone());
+        plan = plan.set_floor(artifact.floor.clone()).await;
         Some(artifact)
     } else {
         None
@@ -221,7 +229,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),
-            prunable_items_per_section: NZU64!(10),
+            prunable_items_per_section: ITEMS_PER_SECTION,
             page_cache: page_cache.clone(),
             replay_buffer: types::IO_BUFFER_SIZE,
             key_write_buffer: types::IO_BUFFER_SIZE,
@@ -293,7 +301,11 @@ pub async fn run(context: tokio::Context, args: Validator) {
             sharing_mode: SHARING_MODE,
             reveal: REVEAL,
             mailbox_size: MAILBOX_SIZE,
+            muxer_size: MUXER_SIZE,
             partition_prefix: format!("{partition_prefix}-reshare"),
+            page_cache: page_cache.clone(),
+            write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             max_participants: MAX_PARTICIPANTS,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
             batch_verifier: PhantomData::<ed25519::Batch>,
@@ -301,7 +313,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     );
     let reshare_handle = reshare_actor.start(dkg_network);
 
-    let (stateful_actor, stateful_mailbox) = Stateful::init(
+    let (stateful_actor, stateful_mailbox) = Stateful::new(
         context.child("stateful"),
         StatefulConfig {
             application: App::new(genesis.clone()),
@@ -341,8 +353,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 mailbox_size: NZUsize!(3),
                 replay_buffer: IO_BUFFER_SIZE,
                 write_buffer: IO_BUFFER_SIZE,
-                page_cache_page_size: PAGE_SIZE,
-                page_cache_pages: PAGE_CACHE_SIZE,
+                page_cache: page_cache.clone(),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_millis(500),
@@ -358,7 +369,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             gate,
             state_sync,
             blocks_per_epoch: BLOCKS_PER_EPOCH,
-            muxer_size: 128,
+            muxer_size: MUXER_SIZE,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-orchestrator"),
         },
@@ -393,6 +404,43 @@ pub async fn run(context: tokio::Context, args: Validator) {
     }
 }
 
+/// Configure the DKG probe with `plan`'s persisted state sync floor.
+fn probe_config<E>(
+    context: E,
+    oracle: Oracle<ed25519::PublicKey>,
+    genesis: &EpochInfo<MinSig, ed25519::PublicKey>,
+    plan: &SyncPlan<E, Scheme, Standard<Block>>,
+) -> probe::Config<
+    E,
+    Oracle<ed25519::PublicKey>,
+    Scheme,
+    Standard<Block>,
+    Sequential,
+    Oracle<ed25519::PublicKey>,
+>
+where
+    E: Spawner + CryptoRng + commonware_storage::Context,
+{
+    probe::Config {
+        context,
+        manager: oracle.clone(),
+        bootstrap: probe::Bootstrap {
+            epoch: Epoch::zero(),
+            participants: genesis.participants(),
+            directory: Unit,
+        },
+        floor: plan.floor().cloned(),
+        verifier: Scheme::certificate_verifier(NAMESPACE, *genesis.output.public().public()),
+        genesis: genesis.clone(),
+        strategy: Sequential,
+        blocker: oracle,
+        blocks_per_epoch: BLOCKS_PER_EPOCH,
+        retry_timeout: NZDuration!(Duration::from_millis(500)),
+        mailbox_size: MAILBOX_SIZE,
+        block_codec_config: (),
+    }
+}
+
 fn archive_config<C>(
     prefix: &str,
     name: &str,
@@ -407,7 +455,7 @@ fn archive_config<C>(
         value_partition: format!("{prefix}-{name}-value"),
         compression: None,
         codec_config,
-        items_per_section: NZU64!(10),
+        items_per_section: ITEMS_PER_SECTION,
         key_write_buffer: IO_BUFFER_SIZE,
         value_write_buffer: IO_BUFFER_SIZE,
         replay_buffer: IO_BUFFER_SIZE,
@@ -417,10 +465,21 @@ fn archive_config<C>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::{
+        simplex::types::{Finalization, Finalize, Proposal},
+        types::{Round, View},
+    };
+    use commonware_cryptography::{Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal};
+    use commonware_glue::dkg::types::EpochOutcome;
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{N3f1, TestRng, non_empty, ordered::Set};
     use futures::{FutureExt as _, future::pending};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     struct CountDrop(Arc<AtomicUsize>);
@@ -461,5 +520,82 @@ mod tests {
             Some(Ok(()))
         ));
         assert_eq!(dropped.load(Ordering::Relaxed), 7);
+    }
+
+    /// A node restarting during state sync configures its probe with the floor
+    /// the interrupted sync persisted.
+    #[test]
+    fn probe_resumes_persisted_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            // Deal a genesis committee and sign a floor in epoch 1 with it.
+            let signers = (0..4)
+                .map(ed25519::PrivateKey::from_seed)
+                .collect::<Vec<_>>();
+            let players = Set::from_iter_dedup(signers.iter().map(|signer| signer.public_key()));
+            let (output, shares) =
+                deal::<MinSig, _, N3f1>(TestRng::new(0), SHARING_MODE, players.clone())
+                    .expect("genesis deal");
+            let schemes = shares
+                .values()
+                .iter()
+                .map(|share| {
+                    Scheme::signer(
+                        NAMESPACE,
+                        players.clone(),
+                        output.public().clone(),
+                        share.clone(),
+                    )
+                    .expect("genesis signer share")
+                })
+                .collect::<Vec<_>>();
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(1), View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"floor"]),
+            );
+            let finalizes = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
+                .collect::<Vec<_>>();
+            let floor = Finalization::from_finalizes(
+                &schemes[0],
+                non_empty![@finalizes.iter()],
+                &Sequential,
+            )
+            .expect("finalization quorum");
+            let genesis = EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: Epoch::zero(),
+                output,
+                players: players.clone(),
+                next_players: players,
+                directory: Unit,
+            };
+
+            // Persist the floor, then reload the plan as a restarted node.
+            let plan = SyncPlan::<_, Scheme, Standard<Block>>::init(context.child("plan"), "probe")
+                .await
+                .set_floor(floor.clone())
+                .await;
+            drop(plan);
+            let plan = SyncPlan::init(context.child("restart"), "probe").await;
+
+            // The probe carries the persisted floor.
+            let address = SocketAddr::from(([127, 0, 0, 1], 3000));
+            let (_, oracle) = discovery::Network::new(
+                context.child("network"),
+                discovery::Config::local(
+                    Handshake::new(signers[0].clone()),
+                    NAMESPACE,
+                    address,
+                    address,
+                    Vec::new(),
+                    NZUsize!(signers.len()),
+                    MAX_MESSAGE_SIZE,
+                ),
+            );
+            let config = probe_config(context.child("probe"), oracle, &genesis, &plan);
+            assert_eq!(config.floor, Some(floor));
+        });
     }
 }

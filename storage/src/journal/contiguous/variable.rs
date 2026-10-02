@@ -1801,10 +1801,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
     /// See [Journal::snapshot].
     pub(crate) async fn snapshot(&mut self) -> Result<Reader<'static, E, V>, Error> {
+        let (data, offsets) = futures::try_join!(self.blobs.snapshot(), self.offsets.snapshot())?;
         Ok(Reader {
-            data: self.blobs.snapshot().await?,
+            data,
             bounds: self.bounds.clone(),
-            offsets: self.offsets.snapshot().await?,
+            offsets,
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
             compressed: self.compression.is_some(),
@@ -2416,9 +2417,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends and prunes. It keeps
-    /// the journal's blobs open, so reopening a partition that still holds one of them fails
-    /// while the snapshot is alive.
+    /// creation, and the snapshot stays readable across concurrent appends and prunes.
+    ///
+    /// Capture writes buffered items to the tail blob without making them durable, first waiting
+    /// for any in-flight sync of that blob when there are buffered items to write. While the
+    /// snapshot is alive it keeps the journal's blobs open, so reopening one of them fails with
+    /// `BlobAlreadyOpen`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the journal.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, V>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))

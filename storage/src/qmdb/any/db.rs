@@ -401,6 +401,11 @@ where
     }
 
     /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(
         &self,
         loc: Location<F>,
@@ -484,7 +489,11 @@ where
     ///
     /// Returns [`crate::qmdb::Error::HistoricalFloorPruned`] if `historical_size - 1` is retained
     /// but is not a commit op, either because the caller passed a non-commit-boundary size or
-    /// because pruning removed the commit that would have governed it.
+    /// because pruning removed the commit that would have governed it. Returns
+    /// [`crate::merkle::Error::RangeOutOfBounds`] if `historical_size` exceeds the log or
+    /// `start_loc >= historical_size`, [`crate::qmdb::Error::DataCorrupted`] if the governing
+    /// commit's floor lies past it, and a pruned-data error if a required operation or node was
+    /// pruned.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.db.historical_proof",
@@ -706,6 +715,17 @@ where
 {
     /// Capture an owned immutable snapshot of the database's operations log, with bounds
     /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
+    ///
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`] describes.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
     pub async fn snapshot(
         mut self,
     ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), crate::qmdb::Error<F>> {

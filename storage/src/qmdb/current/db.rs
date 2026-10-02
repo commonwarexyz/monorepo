@@ -135,10 +135,10 @@ pub struct Db<
     /// Internal nodes are hashed using their position in the ops tree rather than their
     /// grafted position.
     ///
-    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable snapshot to the
+    /// Held in an [`Arc`] so merkleize can hand a zero-copy, immutable view to the
     /// grafted-layer hashing job running off the calling task. Mutations go through
-    /// [`Arc::make_mut`]: they are in-place while no snapshot is alive and copy-on-write
-    /// otherwise, so a snapshot never observes later mutations.
+    /// [`Arc::make_mut`]: they are in-place while no view is alive and copy-on-write
+    /// otherwise, so a view never observes later mutations.
     pub(super) grafted_tree: Arc<Mem<F, H::Digest>>,
 
     /// Persists:
@@ -312,8 +312,8 @@ where
         })
     }
 
-    /// Snapshot of the grafted tree for use in batch chains.
-    pub(super) fn grafted_snapshot(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
+    /// View of the grafted tree for use in batch chains.
+    pub(super) fn grafted_batch(&self) -> Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>> {
         merkle::batch::MerkleizedBatch::from_mem_with_strategy(
             &self.grafted_tree,
             self.strategy.clone(),
@@ -322,11 +322,7 @@ where
 
     /// Create a new speculative batch of operations with this database as its parent.
     pub fn new_batch(&self) -> super::batch::UnmerkleizedBatch<F, H, U, N, S> {
-        super::batch::UnmerkleizedBatch::new(
-            self.any.new_batch(),
-            self.grafted_snapshot(),
-            Vec::new(),
-        )
+        super::batch::UnmerkleizedBatch::new(self.any.new_batch(), self.grafted_batch(), Vec::new())
     }
 
     /// Returns a proof for the operation at `loc`.
@@ -419,6 +415,11 @@ where
     }
 
     /// Return the pinned nodes for a lower operation boundary of `loc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::RangeOutOfBounds`] if `loc` exceeds the operation count, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
         self.any.pinned_nodes_at(loc).await
     }
@@ -707,6 +708,17 @@ where
     /// frozen at capture. The snapshot includes applied-but-uncommitted operations. It serves the
     /// ops-tree proofs state sync needs. Grafted proofs require the live bitmap, which
     /// keeps no history, so those remain live-only.
+    ///
+    /// Capture writes buffered data and keeps the log's blobs open while the snapshot is alive, as
+    /// [`Snapshottable::snapshot`] describes.
+    ///
+    /// Serving from the snapshot returns [`crate::merkle::Error::ElementPruned`] for a boundary
+    /// below the Merkle structure's pruning boundary, which a sync can leave above the log's
+    /// first retained operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the capture fails, which consumes the database.
     pub async fn snapshot(
         mut self,
     ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), Error<F>> {
@@ -1461,6 +1473,8 @@ mod tests {
             // Path A. Merkleize while the parent is still pending.
             let child_pre = build(&parent);
             let read_pre = child_pre.get(&untouched, &db).await.unwrap();
+            // Key 2 falls through to its committed value.
+            assert_eq!(read_pre, Some(Sha256::hash(&[&42u64.to_be_bytes()])));
             let root_pre = child_pre.merkleize(&db, None).await.unwrap().root();
 
             // Apply the parent.
@@ -1579,6 +1593,7 @@ mod tests {
             let boundary = db.sync_boundary();
             assert!(boundary > base);
             let db = db.prune(boundary).await.unwrap();
+            assert!(*db.bounds().start > 0, "the prune must drop history");
 
             // The surviving child still merkleizes to the same root.
             let merkleized = child.merkleize(&db, None).await.unwrap();
@@ -1592,7 +1607,7 @@ mod tests {
     /// while the live database updates keys (flipping activity bits and raising the floor),
     /// commits, and prunes past it.
     #[test_traced]
-    fn test_snapshot_stable_across_bitmap_churn() {
+    fn test_snapshot_ops_proofs_stable_across_live_updates() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             let db = MmrDb::init(
@@ -1623,11 +1638,20 @@ mod tests {
             ));
 
             // Update the same keys so the live bitmap retroactively flips the captured
-            // operations' activity bits, the floor rises, and pruning discards captured
-            // operations. The snapshot must not observe any of it.
-            db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            // operations' activity bits, the floor rises past a bitmap chunk, and pruning
+            // discards every captured operation. The snapshot must not observe any of it.
+            let mut rounds = 0;
+            while db.sync_boundary() <= op_count {
+                rounds += 1;
+                assert!(
+                    rounds <= 64,
+                    "floor never rose past the captured operations"
+                );
+                db = populate_fixed_db::<mmr::Family, _>(db, 0, 20).await;
+            }
             let boundary = db.sync_boundary();
             db = db.prune(boundary).await.unwrap();
+            assert!(db.bounds().start >= op_count);
             assert_ne!(db.root(), canonical_root);
             assert_ne!(db.ops_root(), ops_root);
 
@@ -1644,11 +1668,13 @@ mod tests {
             ));
 
             // Anything above the frozen size is rejected.
-            assert!(
+            assert!(matches!(
                 crate::qmdb::historical_proof(&snapshot, op_count + 1, Location::new(0), NZU64!(1))
-                    .await
-                    .is_err()
-            );
+                    .await,
+                Err(crate::qmdb::Error::Merkle(
+                    crate::merkle::Error::RangeOutOfBounds(_)
+                ))
+            ));
 
             db.destroy().await.unwrap();
         });

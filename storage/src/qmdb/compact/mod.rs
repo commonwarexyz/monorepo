@@ -15,7 +15,8 @@ use commonware_utils::range::NonEmptyRange;
 use std::sync::Arc;
 pub use witness::Tip;
 
-/// Owned immutable snapshot of a compact database's state.
+/// Owned immutable snapshot of a compact database's state. It serves only that exact state
+/// (see [`Tip`]).
 pub type Snapshot<F, Op, D> = Arc<Tip<F, Op, D>>;
 
 /// Configuration for a compact authenticated db.

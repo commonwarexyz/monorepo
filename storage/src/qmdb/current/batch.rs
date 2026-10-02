@@ -296,14 +296,13 @@ where
 /// A `MerkleizedBatch` is a branch-scoped view rooted at a specific committed prefix of the DB. It
 /// is not an immutable snapshot.
 ///
-/// Reads through this batch, constructing child batches from it, and applying it later are
-/// only semantically correct while its ancestor chain is still the committed prefix of the DB. In
-/// other words, every successful [`apply_batch`](super::db::Db::apply_batch) since this batch was
-/// merkleized must have applied an ancestor of this batch.
+/// Reads through this batch pass only while the DB sits on one of the chain's own states: the
+/// state the chain forked from, an ancestor's tip, or this batch's own tip (once it is applied).
 ///
-/// Once a non-ancestor batch is applied, this batch and all of its descendants are stale.
-/// Reading through them refuses with [`Error::StaleRead`]. Merkleization and application
-/// are rejected with [`Error::StaleBatch`] without mutating committed state (see
+/// Once any other batch is applied (a sibling fork, or one of this batch's own descendants),
+/// this batch is stale, as is every descendant the applied batch is not an ancestor of. Reading
+/// through a stale batch refuses with [`Error::StaleRead`]. Merkleization and application are
+/// rejected with [`Error::StaleBatch`] without mutating committed state (see
 /// [`crate::qmdb::chain`]).
 ///
 /// Building a child off a batch that `apply_batch` has consumed (the just-applied
@@ -353,6 +352,10 @@ where
     }
 
     /// Read through: mutations -> ancestor diffs -> committed DB.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get<E, C, I>(
         &self,
         key: &U::Key,
@@ -373,6 +376,10 @@ where
     /// during merkleize. Use [`stage`](Self::stage) for keys that may be written. When the writable
     /// subset is known and much smaller than the full read set, call `get_many` for the read-only
     /// keys first, then [`stage`](Self::stage) only the writable keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get_many<E, C, I>(
         &self,
         keys: &[&U::Key],
@@ -1116,8 +1123,9 @@ where
 
     /// Read through: local diff -> ancestor diffs -> committed DB.
     ///
-    /// Refuses with [`Error::StaleRead`] if a non-ancestor batch was applied since `self`
-    /// was merkleized.
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get<E, C, I, H>(
         &self,
         key: &U::Key,
@@ -1135,6 +1143,10 @@ where
     /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get_many<E, C, I, H>(
         &self,
         keys: &[&U::Key],
@@ -1162,6 +1174,10 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no greater key, without wrapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get_next_key<E, C, I, H>(
         &self,
         key: &K,
@@ -1180,6 +1196,10 @@ where
     ///
     /// Includes this batch's changes and its ancestors' changes. The query key need not be
     /// active. Returns `None` if there is no smaller key, without wrapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleRead`] if `db` is not on the batch's chain.
     pub async fn get_prev_key<E, C, I, H>(
         &self,
         key: &K,
@@ -1213,7 +1233,7 @@ where
     /// reading through it (or a descendant of it) refuses with [`Error::StaleRead`]
     /// and applying it is rejected with [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
-        let grafted = self.grafted_snapshot();
+        let grafted = self.grafted_batch();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             grafted,
