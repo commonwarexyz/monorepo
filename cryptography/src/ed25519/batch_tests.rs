@@ -57,17 +57,22 @@ fn compare(items: &[Item], strategy: &impl Strategy) {
         && items
             .iter()
             .all(|(key, sig, payload)| key.verify_inner(None, payload, sig));
-    for seed in [0, 1] {
-        for verifier in [
-            BatchInner::Dalek(ed_core::batch::Verifier::new(items.len())),
-            BatchInner::Curve(curve_batch::Verifier::new(items.len())),
-        ] {
-            let mut batch = Batch { verifier };
-            for (key, sig, payload) in items {
-                batch.verifier.add_payload(payload.clone(), key, sig);
-            }
-            assert_eq!(batch.verify(&mut TestRng::new(seed), strategy), expected);
+    let batch = || {
+        let mut batch = Batch::new(items.len());
+        for (key, sig, payload) in items {
+            batch.add_payload(payload.clone(), key, sig);
         }
+        batch
+    };
+    for seed in [0, 1] {
+        assert_eq!(
+            batch().verify_dalek(&mut TestRng::new(seed), strategy),
+            expected
+        );
+        assert_eq!(
+            batch().verify_curve(&mut TestRng::new(seed), strategy),
+            expected
+        );
     }
 }
 
@@ -144,12 +149,27 @@ fn batch_dispatch_preserves_framing() {
         (b"namespace".as_slice(), b"wrong".as_slice(), false),
     ] {
         let mut batch = Batch::new(1);
-        assert_eq!(
-            matches!(batch.verifier, BatchInner::Curve(_)),
-            curve_batch::is_accelerated()
-        );
         assert!(batch.add(namespace, message, &key, &signature));
         assert_eq!(batch.verify(&mut test_rng(), &Sequential), expected);
     }
     assert!(!Batch::new(0).verify(&mut test_rng(), &Sequential));
+}
+
+#[test]
+fn batch_dispatch_uses_curve_only_for_large_batches() {
+    let accelerated = curve_batch::is_accelerated();
+    for (len, parallelism, curve) in [
+        (0, 1, false),
+        (7, 1, false),
+        (8, 1, accelerated),
+        (255, 8, false),
+        (256, 8, accelerated),
+        (100_000, 8, accelerated),
+    ] {
+        assert_eq!(
+            Batch::uses_curve(len, parallelism),
+            curve,
+            "len={len} parallelism={parallelism}"
+        );
+    }
 }
