@@ -1521,6 +1521,7 @@ where
         self,
         updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
+        strategy: &S,
     ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
         let Self {
             mut batch,
@@ -1528,14 +1529,8 @@ where
             resolutions,
         } = self;
         let mutations = mem::take(&mut batch.mutations);
-        let (mutations, staged_updates) = Self::resolve_update_parts(
-            mutations,
-            keys,
-            resolutions,
-            updates,
-            upserts,
-            batch.journal_batch.strategy(),
-        );
+        let (mutations, staged_updates) =
+            Self::resolve_update_parts(mutations, keys, resolutions, updates, upserts, strategy);
         batch.mutations = mutations;
         (batch, staged_updates)
     }
@@ -1723,7 +1718,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value> + Send,
     {
-        let (batch, staged) = self.resolve_updates(updates, upserts);
+        let (batch, staged) = self.resolve_updates(updates, upserts, db.strategy());
         let (prepared, staged) = batch
             .prepare(db)?
             .advance(staged, policy, |floor, tip, limit, out| {
@@ -1875,7 +1870,7 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.resolve_updates(updates, upserts);
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         let prepared = batch.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
@@ -1918,7 +1913,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
         P: Policy<F, K, V::Value> + Send,
     {
-        let (batch, staged) = self.resolve_updates(updates, upserts);
+        let (batch, staged) = self.resolve_updates(updates, upserts, db.strategy());
         let (prepared, staged) = batch
             .prepare(db)?
             .advance(staged, policy, |floor, tip, limit, out| {
@@ -5244,6 +5239,7 @@ mod tests {
                     (5, Some(fallback)),
                 ],
                 vec![(k2, Some(upsert))],
+                &Sequential,
             );
 
             assert_eq!(
@@ -5339,7 +5335,7 @@ mod tests {
             updates.extend([(2 * n + 1, Some(mut_new)), (2 * n + 3, Some(staged_new))]);
 
             let (batch, staged_updates) =
-                staged.resolve_updates(updates, vec![(overlapped, Some(upsert))]);
+                staged.resolve_updates(updates, vec![(overlapped, Some(upsert))], &Sequential);
 
             let mut expected = vec![(staged_newer, committed(501), (), Some(staged_new))];
             expected.extend((0..n).map(|i| {
@@ -5458,6 +5454,7 @@ mod tests {
             let (batch, staged_updates) = staged.resolve_updates(
                 vec![(0, None), (1, Some(value_a)), (2, Some(value_b))],
                 Vec::new(),
+                &Sequential,
             );
 
             assert_eq!(

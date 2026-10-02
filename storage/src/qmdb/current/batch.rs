@@ -603,7 +603,7 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged) = inner.resolve_updates(updates, upserts);
+        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let (prepared, staged) = inner
             .prepare(&db.any)?
             .advance(staged, policy, |floor, tip, limit, out| {
@@ -670,7 +670,7 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts);
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
@@ -719,7 +719,7 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged) = inner.resolve_updates(updates, upserts);
+        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let (prepared, staged) = inner
             .prepare(&db.any)?
             .advance(staged, policy, |floor, tip, limit, out| {
