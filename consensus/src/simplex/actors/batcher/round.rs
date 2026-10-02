@@ -1,6 +1,6 @@
 use super::{
     Verifier,
-    verifier::{Batch, ProposalState},
+    verifier::{Batch, ConstructJob, Constructed, ProposalState},
 };
 use crate::{
     Reporter,
@@ -364,37 +364,36 @@ impl<
         Some(proposal)
     }
 
-    /// Attempts to construct a certificate from the first ready kind (notarizes,
-    /// nullifies, then finalizes), recording it before returning it to the caller.
-    ///
-    /// Once polled, construction moves the buffered votes into the worker. Do not
-    /// cancel unless the round will also be discarded.
+    /// Starts the first ready kind (notarizes, nullifies, then finalizes).
+    /// The returned job owns its inputs; arrivals remain buffered for the next attempt.
+    pub fn begin_construct<E: CryptoRng>(
+        &mut self,
+        rng: &mut E,
+        strategy: &impl Strategy,
+    ) -> Option<ConstructJob<S, D>> {
+        self.verifier
+            .begin_construct_notarization(rng, strategy)
+            .or_else(|| self.verifier.begin_construct_nullification(rng, strategy))
+            .or_else(|| self.verifier.begin_construct_finalization(rng, strategy))
+    }
+
+    /// Reintegrates verified votes and records any completed certificate.
+    pub fn finish_construct(&mut self, result: Constructed<S, D>) -> Batch<Certificate<S, D>> {
+        let batch = self.verifier.finish_construct(result);
+        if let Some(certificate) = &batch.certificate {
+            self.record_certificate(certificate);
+        }
+        batch
+    }
+
+    #[cfg(test)]
     pub async fn try_construct<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> Option<Batch<Certificate<S, D>>> {
-        let result = if let Some(result) = self
-            .verifier
-            .try_construct_notarization(rng, strategy)
-            .await
-        {
-            result
-        } else if let Some(result) = self
-            .verifier
-            .try_construct_nullification(rng, strategy)
-            .await
-        {
-            result
-        } else {
-            self.verifier
-                .try_construct_finalization(rng, strategy)
-                .await?
-        };
-        if let Some(certificate) = &result.certificate {
-            self.record_certificate(certificate);
-        }
-        Some(result)
+        let result = self.begin_construct(rng, strategy)?.await;
+        Some(self.finish_construct(result))
     }
 
     /// Returns whether `signer` has a nullify vote.
@@ -425,5 +424,112 @@ impl<
             .map(Participant::from_usize)
             .filter(|&p| self.is_missing_voter(proposal, p))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        simplex::{
+            scheme::secp256r1,
+            types::{Finalize, Notarize},
+        },
+        types::{Epoch, View},
+    };
+    use commonware_actor::Feedback;
+    use commonware_cryptography::{
+        Hasher as _,
+        certificate::mocks::Fixture,
+        ed25519::PublicKey,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
+    use commonware_macros::test_async;
+    use commonware_parallel::Sequential;
+    use commonware_utils::test_rng;
+
+    #[derive(Clone)]
+    struct Observer;
+
+    impl Blocker for Observer {
+        type PublicKey = PublicKey;
+
+        fn block(&mut self, _: PublicKey) -> Feedback {
+            Feedback::Ok
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<PublicKey> {
+            commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1)).1
+        }
+    }
+
+    impl Reporter for Observer {
+        type Activity = Activity<secp256r1::Scheme<PublicKey>, Sha256Digest>;
+
+        fn report(&mut self, _: Self::Activity) -> Feedback {
+            Feedback::Ok
+        }
+    }
+
+    #[test_async]
+    async fn test_construct_proposal_switch_restores_buffered_finalizes() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = secp256r1::fixture(&mut rng, b"round_construct_switch", 5);
+        let round_id = Rnd::new(Epoch::zero(), View::new(1));
+        let a = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"a"]));
+        let b = Proposal::new(round_id, View::zero(), Sha256::hash(&[b"b"]));
+        let mut round = Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            Observer,
+            Observer,
+            false,
+        );
+        round.set_leader(Participant::new(0));
+        round.accept_vote(
+            Vote::Notarize(Notarize::sign(&schemes[0], a.clone()).unwrap()),
+            false,
+        );
+        // Drain the notarize attempt so the next begin takes finalizes.
+        assert!(
+            round
+                .try_construct(&mut rng, &Sequential)
+                .await
+                .unwrap()
+                .certificate
+                .is_none()
+        );
+        round.accept_vote(
+            Vote::Finalize(Finalize::sign(&schemes[0], a).unwrap()),
+            false,
+        );
+        for scheme in schemes.iter().skip(1).take(3) {
+            round.accept_vote(
+                Vote::Finalize(Finalize::sign(scheme, b.clone()).unwrap()),
+                false,
+            );
+        }
+        let job = round.begin_construct(&mut rng, &Sequential).unwrap();
+
+        // The local finalize establishes B and replays B votes filtered under A.
+        round.accept_vote(
+            Vote::Finalize(Finalize::sign(&schemes[4], b.clone()).unwrap()),
+            true,
+        );
+        assert!(round.begin_construct(&mut rng, &Sequential).is_none());
+        let batch = round.finish_construct(job.await);
+        assert!(batch.certificate.is_none());
+        let batch = round.try_construct(&mut rng, &Sequential).await.unwrap();
+        assert_eq!(batch.processed, 3);
+        assert!(batch.invalid.is_empty());
+        assert!(!batch.fallback);
+        let certificate = batch.certificate.unwrap();
+        let Certificate::Finalization(finalization) = &certificate else {
+            panic!("expected finalization");
+        };
+        assert_eq!(finalization.proposal, b);
+        assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
+        assert!(round.has_certificate(Kind::Finalization));
+        assert!(round.begin_construct(&mut rng, &Sequential).is_none());
     }
 }
