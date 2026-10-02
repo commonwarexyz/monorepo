@@ -1,10 +1,18 @@
 //! BLAKE3 kernels for merkle node pairs, independent message batches.
 
-use super::{Digest, gather};
+use super::Digest;
+#[cfg(target_arch = "x86_64")]
+use super::gather;
+#[cfg(all(not(feature = "std"), any(target_arch = "x86_64", test, doc)))]
+use alloc::vec;
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
-use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN, hazmat::HasherExt as _};
+use alloc::vec::Vec;
+#[cfg(any(target_arch = "x86_64", test, doc))]
+use blake3::hazmat::HasherExt as _;
+use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN};
 
+#[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+mod aarch64;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
@@ -312,6 +320,7 @@ unsafe fn chunk<V: Words<L>, const L: usize>(
 /// # Panics
 ///
 /// Panics if an input is shorter than [`CHUNK_LEN`].
+#[cfg(any(target_arch = "x86_64", test, doc))]
 #[inline(always)]
 unsafe fn leaves<V: Words<L>, const L: usize>(
     inputs: [&[u8]; L],
@@ -349,6 +358,7 @@ unsafe fn leaves<V: Words<L>, const L: usize>(
 /// # Safety
 ///
 /// The caller must establish the target features `V` requires.
+#[cfg(any(target_arch = "x86_64", test, doc))]
 #[inline(always)]
 unsafe fn tails<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LEN]; L] {
     let len = inputs[0].len();
@@ -366,6 +376,7 @@ unsafe fn tails<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LE
 /// # Safety
 ///
 /// The caller must establish the target features `V` requires.
+#[cfg(any(target_arch = "x86_64", test, doc))]
 #[inline(always)]
 unsafe fn parents<V: Words<L>, const L: usize>(
     children: [&[u8; BLOCK_LEN]; L],
@@ -447,6 +458,7 @@ unsafe fn hash<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LEN
 ///
 /// Returns `None` when no kernel is available, the messages differ in length,
 /// or either exceeds [`PAIR_LEN`](super::PAIR_LEN) bytes.
+#[cfg(target_arch = "x86_64")]
 #[inline]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
     cfg_if::cfg_if! {
@@ -462,10 +474,12 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
 
 /// Hash independent messages with the widest batch kernel for the current CPU.
 ///
-/// Returns `None` exactly when no kernel is available.
+/// Returns `None` when no available kernel supports the messages.
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     cfg_if::cfg_if! {
-        if #[cfg(target_arch = "x86_64")] {
+        if #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))] {
+            aarch64::hash_many(messages)
+        } else if #[cfg(target_arch = "x86_64")] {
             x86_64::hash_many(messages)
         } else {
             let _ = messages;
@@ -474,8 +488,7 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     }
 }
 
-/// Return whether [`hash_many`] has a batch kernel, which is exactly when it
-/// returns `Some`.
+/// Return whether [`hash_many`] has a general batch kernel.
 #[inline]
 // Feature detection is const only without std.
 #[allow(clippy::missing_const_for_fn)]
@@ -499,6 +512,7 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
     if messages.len() < 2 {
         return None;
     }
+    #[cfg(target_arch = "x86_64")]
     if let [left, right] = messages
         && let Some((left, right)) = hash_pair(left, right)
     {
@@ -545,6 +559,7 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
 /// are safe to call. Each call fills `L` lanes, of which the first `active`
 /// contribute output. Spare lanes hold valid inputs, and their outputs are
 /// ignored.
+#[cfg(any(target_arch = "x86_64", test, doc))]
 trait Nodes<const L: usize> {
     /// Non-root chaining values of one full chunk per lane, where lane `i`
     /// hashes `inputs[i]` as chunk `counters[i]` of its message.
@@ -566,6 +581,7 @@ trait Nodes<const L: usize> {
 
 /// Split `nodes` into groups of at most `L`, each with its number of nodes.
 /// Spare lanes of a group repeat its first node.
+#[cfg(any(target_arch = "x86_64", test, doc))]
 fn groups<T: Copy, const L: usize>(
     mut nodes: impl Iterator<Item = T>,
 ) -> impl Iterator<Item = ([T; L], usize)> {
@@ -597,6 +613,7 @@ fn groups<T: Copy, const L: usize>(
 /// # Panics
 ///
 /// Panics if the messages differ in length or span at most one chunk.
+#[cfg(any(target_arch = "x86_64", test, doc))]
 fn pack<K: Nodes<L>, const L: usize>(kernels: &K, messages: &[&[u8]], digests: &mut Vec<Digest>) {
     let count = messages.len();
     let len = messages[0].len();
@@ -680,6 +697,7 @@ fn pack<K: Nodes<L>, const L: usize>(kernels: &K, messages: &[&[u8]], digests: &
 /// messages of `full` full chunks, packing takes `ceil(count * full / L)`
 /// passes, the kernel takes `full`, and hashing individually counts one pass
 /// per message.
+#[cfg(any(target_arch = "x86_64", test, doc))]
 fn batch<const L: usize, M: AsRef<[u8]>>(
     messages: &[M],
     pack: impl Fn(&[&[u8]], &mut Vec<Digest>),
