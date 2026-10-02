@@ -2,7 +2,7 @@ use crate::{
     Epochable, Viewable,
     simplex::{
         actors::{Ask, Kind},
-        types::Certificate,
+        types::{Certificate, Notarization},
     },
     types::View,
 };
@@ -24,12 +24,12 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// The certificate.
         certificate: Certificate<S, D>,
     },
-    /// Certification result for a view.
+    /// Certification result for a notarization.
     Certified {
         /// The span carried with this message.
         span: Span,
-        /// The certified view.
-        view: View,
+        /// The notarization whose proposal was judged.
+        notarization: Notarization<S, D>,
         /// Whether certification succeeded.
         success: bool,
     },
@@ -53,7 +53,7 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
     pub(crate) fn view(&self) -> View {
         match self {
             Self::Certificate { certificate, .. } => certificate.view(),
-            Self::Certified { view, .. } => *view,
+            Self::Certified { notarization, .. } => notarization.view(),
             Self::Resolve { view, .. } => *view,
         }
     }
@@ -174,9 +174,15 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                         )
                 }
                 (
-                    Self::Certified { view: new_view, .. },
-                    Self::Certified { view: old_view, .. },
-                ) => new_view == old_view,
+                    Self::Certified {
+                        notarization: new_notarization,
+                        ..
+                    },
+                    Self::Certified {
+                        notarization: old_notarization,
+                        ..
+                    },
+                ) => new_notarization.view() == old_notarization.view(),
                 (
                     Self::Resolve {
                         proposal: new_proposal,
@@ -234,14 +240,14 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, view: View, success: bool) {
+    pub fn certified(&mut self, notarization: Notarization<S, D>, success: bool) {
         let _ = self.sender.enqueue(MailboxMessage::Certified {
             span: info_span!(
                 "simplex.resolver.mailbox.certified",
-                view = view.traced(),
+                view = notarization.view().traced(),
                 success
             ),
-            view,
+            notarization,
             success,
         });
     }
@@ -395,7 +401,10 @@ mod tests {
     use crate::{
         simplex::{
             scheme::ed25519,
-            types::{Certificate, Finalization, Finalize, Nullification, Nullify, Proposal},
+            types::{
+                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+                Nullify, Proposal,
+            },
         },
         types::{Epoch, Round},
     };
@@ -437,6 +446,17 @@ mod tests {
         )
     }
 
+    fn notarization(view: View) -> Notarization<TestScheme, Sha256Digest> {
+        let (schemes, verifier) = fixture();
+        let proposal = proposal(view);
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+            .collect();
+        Notarization::from_notarizes(&verifier, non_empty![@&votes], &Sequential)
+            .expect("notarization")
+    }
+
     fn finalization(view: View) -> Certificate<TestScheme, Sha256Digest> {
         let (schemes, verifier) = fixture();
         let proposal = proposal(view);
@@ -473,7 +493,7 @@ mod tests {
     fn certified_msg(view: View, success: bool) -> MailboxMessage<TestScheme, Sha256Digest> {
         MailboxMessage::Certified {
             span: Span::none(),
-            view,
+            notarization: notarization(view),
             success,
         }
     }
@@ -577,10 +597,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                notarization,
                 success: false,
                 ..
-            }) if view == View::new(5)
+            }) if notarization.view() == View::new(5)
         ));
     }
 
@@ -728,10 +748,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                notarization,
                 success: false,
                 ..
-            }) if view == View::new(4)
+            }) if notarization.view() == View::new(4)
         ));
     }
 
@@ -824,10 +844,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                notarization,
                 success: true,
                 ..
-            }) if view == View::new(4)
+            }) if notarization.view() == View::new(4)
         ));
     }
 }

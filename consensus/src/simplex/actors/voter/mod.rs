@@ -3960,11 +3960,15 @@ mod tests {
             loop {
                 select! {
                     message = resolver_receiver.recv() => match message.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == View::new(2) || view == View::new(3) =>
+                        MailboxMessage::Certified {
+                            notarization,
+                            success,
+                            ..
+                        } if notarization.view() == View::new(2)
+                            || notarization.view() == View::new(3) =>
                         {
                             assert!(success);
-                            certified.push(view);
+                            certified.push(notarization.view());
                         }
                         MailboxMessage::Certificate { .. }
                         | MailboxMessage::Certified { .. }
@@ -7498,8 +7502,11 @@ mod tests {
                         | batcher::Message::Constructed(_) => {}
                     },
                     message = resolver_receiver.recv() => match message.unwrap() {
-                        MailboxMessage::Certified { view: certified, success, .. }
-                            if certified == view =>
+                        MailboxMessage::Certified {
+                            notarization,
+                            success,
+                            ..
+                        } if notarization.view() == view =>
                         {
                             assert!(success);
                             break;
@@ -7642,8 +7649,8 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == view5 =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == view5 =>
                         {
                             break Some(success);
                         }
@@ -7763,8 +7770,8 @@ mod tests {
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             break Some(success);
                         }
@@ -8705,7 +8712,9 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
+                        {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
@@ -10052,8 +10061,12 @@ mod tests {
 
             let mut certified_before_sync = false;
             while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
-                if let MailboxMessage::Certified { view, success, .. } = msg
-                    && view == target_view {
+                if let MailboxMessage::Certified {
+                    notarization,
+                    success,
+                    ..
+                } = msg
+                    && notarization.view() == target_view {
                         assert!(success, "expected successful certification");
                         certified_before_sync = true;
                     }
@@ -10134,8 +10147,8 @@ mod tests {
             while !certified {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             assert!(success, "expected successful certification");
                             certified = true;
@@ -10258,7 +10271,9 @@ mod tests {
             while !(replayed_certified && advanced) {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
+                        {
                             assert!(success, "replayed certification should be successful");
                             replayed_certified = true;
                         }
@@ -10442,8 +10457,8 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             assert!(!success, "expected failed certification");
                             break;
@@ -10533,8 +10548,8 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;
