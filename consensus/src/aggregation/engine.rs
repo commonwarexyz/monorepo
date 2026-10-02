@@ -326,6 +326,19 @@ impl<
                         }
                     });
 
+                // Heights verified without signing authority have no rebroadcast deadline.
+                // Schedule one for each that is still unconfirmed once we can sign.
+                if scheme.me().is_some() {
+                    for (height, pending) in &self.pending {
+                        if matches!(pending, Pending::Verified(..))
+                            && !self.confirmed.contains_key(height)
+                            && !self.rebroadcast_deadlines.contains(height)
+                        {
+                            self.rebroadcast_deadlines.put(*height, self.context.current());
+                        }
+                    }
+                }
+
                 continue;
             },
 
@@ -617,7 +630,10 @@ impl<
                 let signed;
                 (self, signed) = self.sign_ack(height, digest).await;
                 match signed {
-                    Some(ack) => ack,
+                    Some(ack) => {
+                        (self, _) = self.handle_ack(&ack).await;
+                        ack
+                    }
                     None => return self,
                 }
             }

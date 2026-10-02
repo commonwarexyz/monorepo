@@ -38,10 +38,10 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [battleware](https://github.com/commonwarexyz/battleware): An onchain battle secured by a VRF, Timelock Encryption, and MMRs.
 * [bridge](./examples/bridge/README.md): Send succinct consensus certificates between two networks.
 * [chat](./examples/chat/README.md): Send encrypted messages to a group of friends.
+* [dkg](./examples/dkg/README.md): Generate and reshare a threshold secret over an epoched log.
 * [estimator](./examples/estimator/README.md): Simulate mechanism performance under realistic network conditions.
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
-* [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
 
 ## Miscellaneous
 
@@ -85,7 +85,7 @@ RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 
 The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
 
-x86-64 SIMD extensions (AVX2, AVX-512) are detected at runtime. AArch64 builds assume NEON.
+x86-64 builds require AVX2, BMI2, and ADX (Intel Broadwell, AMD Zen, or newer). SHA-NI and AVX-512 are detected at runtime. AArch64 builds assume NEON. Only little-endian targets are supported.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 

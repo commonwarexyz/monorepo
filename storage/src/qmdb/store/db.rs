@@ -36,7 +36,7 @@
 //!         init_buffer: NZUsize!(1 << 21),
 //!     };
 //!     let db =
-//!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config)
+//!         Db::<_, Digest, Digest, TwoCap>::init(ctx.child("store"), config, None)
 //!             .await
 //!             .unwrap();
 //!
@@ -82,9 +82,12 @@
 use crate::{
     Context,
     index::{Unordered as _, unordered::Index},
-    journal::contiguous::{
-        Contiguous, Mutable as _,
-        variable::{Config as JournalConfig, Journal},
+    journal::{
+        authenticated::{Backing as _, BackingRecovery as _},
+        contiguous::{
+            Contiguous,
+            variable::{Config as JournalConfig, Journal},
+        },
     },
     merkle::mmr::Location,
     qmdb::{
@@ -129,12 +132,6 @@ pub struct Config<T: Translator, C> {
 pub struct Changeset<K: Key, V: CodecShared + Clone> {
     diff: BTreeMap<K, Option<V>>,
     metadata: Option<V>,
-}
-
-impl<K: Key, V: CodecShared + Clone> Changeset<K, V> {
-    fn into_parts(self) -> (BTreeMap<K, Option<V>>, Option<V>) {
-        (self.diff, self.metadata)
-    }
 }
 
 impl<K: Key, V: CodecShared + Clone> FromIterator<(K, Option<V>)> for Changeset<K, V> {
@@ -367,16 +364,50 @@ where
     }
 
     /// Initializes a new [Db] with the given configuration.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    #[boxed]
     pub async fn init(
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
+        max_size: Option<Location>,
     ) -> Result<Self, Error> {
-        let log =
-            Journal::<E, Operation<crate::mmr::Family, K, V>>::init(context.child("log"), cfg.log)
-                .await?;
+        // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
+        // recovery owner unpublished until that commit and its replay floor are validated.
+        crate::qmdb::validate_initialization_bound(max_size)?;
+        let pending = Journal::<E, Operation<crate::mmr::Family, K, V>>::recover(
+            context.child("log"),
+            cfg.log,
+            max_size.map(|size| *size),
+        )
+        .await?;
+        let size = pending
+            .last_matching(max_size.map_or(u64::MAX, |size| *size), |op| op.is_commit())
+            .await?;
+        let bounds = pending.bounds();
+        let commit = if size == 0 {
+            None
+        } else {
+            Some(pending.read(size - 1).await?)
+        };
+        crate::qmdb::validate_initialization_commit(
+            bounds.start,
+            size,
+            bounds == (0..0),
+            commit.as_ref(),
+            true,
+        )?;
 
-        // Rewind log to remove uncommitted operations.
-        let (mut log, size) = log.rewind_to(|op| op.is_commit()).await?;
+        // Finishing recovery publishes the selected offset prefix before releasing later
+        // value bytes.
+        if size < bounds.end {
+            warn!(
+                journal_size = bounds.end,
+                rewound_items = bounds.end - size,
+                "rewinding journal items"
+            );
+        }
+        let mut log = pending.finish(size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
             (log, _) = log
@@ -384,25 +415,19 @@ where
                 .await?;
         }
 
-        // Sync the log to avoid having to repeat any recovery that may have been performed on next
-        // startup.
+        // Persist recovery repairs and any genesis commit so the next startup need not repeat them.
         let log = log.sync().await?;
 
         let last_commit_loc =
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
-        // Build the snapshot.
+        // Build the snapshot only from the durable selected prefix.
         let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
             let op = log.read(*last_commit_loc).await?;
             let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
-            if inactivity_floor_loc > last_commit_loc {
-                return Err(crate::qmdb::Error::DataCorrupted(
-                    "inactivity floor exceeds last commit",
-                ));
-            }
             let active_keys = build_snapshot_from_log(
                 inactivity_floor_loc,
                 &log,
@@ -450,7 +475,7 @@ where
         batch: Changeset<K, V>,
     ) -> Result<(Self, Range<Location>), Error> {
         let start_loc = self.size();
-        let (diff, metadata) = batch.into_parts();
+        let Changeset { diff, metadata } = batch;
 
         let mut steps = 0u64;
         for (key, value) in diff {
@@ -551,7 +576,7 @@ mod test {
         Hasher as _,
         blake3::{Blake3, Digest},
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_collect_traces, test_traced};
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         Runner, Spawner as _, Supervisor as _,
@@ -559,6 +584,7 @@ mod test {
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
+        telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::future::Future;
@@ -571,8 +597,10 @@ mod test {
     /// The type of the store used in tests.
     type TestStore = Db<deterministic::Context, Digest, Vec<u8>, TwoCap>;
 
-    async fn create_test_store(context: deterministic::Context) -> TestStore {
-        let cfg = Config {
+    fn test_config(
+        context: &deterministic::Context,
+    ) -> Config<TwoCap, <Operation<crate::mmr::Family, Digest, Vec<u8>> as Read>::Cfg> {
+        Config {
             log: JournalConfig {
                 partition: "journal".into(),
                 write_buffer: NZUsize!(64 * 1024),
@@ -580,13 +608,17 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
-        };
-        TestStore::init(context, cfg).await.unwrap()
+        }
+    }
+
+    async fn create_test_store(context: deterministic::Context) -> TestStore {
+        let cfg = test_config(&context);
+        TestStore::init(context, cfg, None).await.unwrap()
     }
 
     async fn apply_entries(
@@ -594,6 +626,156 @@ mod test {
         iter: impl IntoIterator<Item = (Digest, Option<Vec<u8>>)> + Send,
     ) -> (TestStore, Range<Location>) {
         db.apply_batch(iter.into_iter().collect()).await.unwrap()
+    }
+
+    #[test_traced]
+    fn test_store_bounded_initialization_commit_selection() {
+        for cap_case in 0..4 {
+            deterministic::Runner::default().start(move |context| async move {
+                // Persist two commits with distinct metadata and key state.
+                let cfg = test_config(&context);
+                let db = TestStore::init(context.child("seed"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+                let a = Blake3::hash(&[b"a"]);
+                let b = Blake3::hash(&[b"b"]);
+                let c = Blake3::hash(&[b"c"]);
+                let batch = db
+                    .new_batch()
+                    .update(a, vec![1])
+                    .update(b, vec![2])
+                    .finalize(Some(vec![10]));
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let first_size = db.size();
+                let batch = db
+                    .new_batch()
+                    .update(a, vec![3])
+                    .delete(b)
+                    .update(c, vec![4])
+                    .finalize(Some(vec![20]));
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let latest_size = db.size();
+                _ = db.sync().await.unwrap();
+
+                // Exact, in-between, equal-tip, and above-tip caps must select the latest commit at
+                // or below the bound.
+                let cap = match cap_case {
+                    0 => first_size,
+                    1 => first_size + 1,
+                    2 => latest_size,
+                    _ => Location::new(u64::MAX),
+                };
+                assert!(first_size + 1 < latest_size);
+                let old = cap_case < 2;
+                let expected_size = if old { first_size } else { latest_size };
+                let db = TestStore::init(context.child("cap"), cfg.clone(), Some(cap))
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), expected_size);
+                assert_eq!(
+                    db.get_metadata().await.unwrap(),
+                    Some(vec![if old { 10 } else { 20 }])
+                );
+                assert_eq!(
+                    db.get(&a).await.unwrap(),
+                    Some(vec![if old { 1 } else { 3 }])
+                );
+                assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
+                assert_eq!(db.get(&c).await.unwrap(), (!old).then(|| vec![4]));
+
+                // Selection is durable, and future appends continue from the selected commit.
+                drop(db);
+                let db = TestStore::init(context.child("reopen"), cfg.clone(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), expected_size);
+                assert_eq!(
+                    db.get(&a).await.unwrap(),
+                    Some(vec![if old { 1 } else { 3 }])
+                );
+                assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
+                assert_eq!(db.get(&c).await.unwrap(), (!old).then(|| vec![4]));
+                let batch = db
+                    .new_batch()
+                    .update(a, vec![5])
+                    .update(c, vec![6])
+                    .finalize(None);
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let appended_size = db.size();
+                assert!(appended_size > expected_size);
+                drop(db.commit().await.unwrap());
+                let db = TestStore::init(context.child("after_append"), cfg, None)
+                    .await
+                    .unwrap();
+                assert_eq!(db.size(), appended_size);
+                assert_eq!(db.get(&a).await.unwrap(), Some(vec![5]));
+                assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
+                assert_eq!(db.get(&c).await.unwrap(), Some(vec![6]));
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_store_bounded_initialization_rejects_zero() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_config(&context);
+            let db = TestStore::init(context.child("seed"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let key = Blake3::hash(&[b"key"]);
+            let (db, _) = apply_entries(db, [(key, Some(vec![1]))]).await;
+            let size = db.size();
+            _ = db.sync().await.unwrap();
+            assert!(matches!(
+                TestStore::init(context.child("zero"), cfg.clone(), Some(Location::new(0))).await,
+                Err(Error::InvalidInitializationBound)
+            ));
+            let db = TestStore::init(context.child("unchanged"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!(db.size(), size);
+            assert_eq!(db.get(&key).await.unwrap(), Some(vec![1]));
+        });
+    }
+
+    #[test_traced]
+    fn test_store_bounded_initialization_rejects_pruned_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            const KEYS: u64 = 64;
+            let cfg = test_config(&context);
+            let mut db = TestStore::init(context.child("seed"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
+            for value in [1, 2] {
+                (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
+            }
+            let target = db.size();
+            let target_floor = db.inactivity_floor_loc();
+            let prune_loc = target_floor + KEYS / 2;
+            assert!(prune_loc < target);
+            let mut value = 2;
+            while db.inactivity_floor_loc() < prune_loc {
+                value += 1;
+                assert!(value <= 10);
+                (db, _) = apply_entries(db, (0..KEYS).map(|i| (key(i), Some(vec![value])))).await;
+            }
+            let db = db.prune(prune_loc).await.unwrap();
+            let bounds = db.bounds();
+            assert!(bounds.start > *target_floor && bounds.start < *target);
+            _ = db.sync().await.unwrap();
+            assert!(matches!(
+                TestStore::init(context.child("cap"), cfg.clone(), Some(target)).await,
+                Err(Error::HistoricalFloorPruned(size)) if size == target
+            ));
+            let db = TestStore::init(context.child("unchanged"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!(db.bounds(), bounds);
+            for i in 0..KEYS {
+                assert_eq!(db.get(&key(i)).await.unwrap(), Some(vec![value]));
+            }
+        });
     }
 
     /// A store over a delayed-sync storage backend.
@@ -606,8 +788,7 @@ mod test {
     /// uses large pages and sections: an apply that fills the write buffer or rolls the blob
     /// over waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_store(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedStore, Error>> {
@@ -619,7 +800,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(1000),
-                page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8)),
             },
             translator: TwoCap,
             init_cache: Some(NZUsize!(1024)),
@@ -627,10 +808,11 @@ mod test {
         };
         DelayedStore::init(
             DelayedSyncContext {
-                inner: context.child(label),
+                inner: context,
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -645,7 +827,7 @@ mod test {
     fn test_store_start_sync_overlaps_work() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_store(&ctx, "delayed", "start-sync-overlap", &pending);
+            let open = open_delayed_store(ctx.child("delayed"), "start-sync-overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Blake3::hash(&[&0u64.to_be_bytes()]);
             let value0 = vec![1u8; 8];
@@ -688,7 +870,7 @@ mod test {
             let size = db.size();
             drop(db);
 
-            let db = open_delayed_store(&ctx, "reopen", "start-sync-overlap", &pending)
+            let db = open_delayed_store(ctx.child("reopen"), "start-sync-overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.size(), size);
@@ -705,7 +887,7 @@ mod test {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_store(&ctx, "delayed", "start-sync-fail", &pending)
+            let mut db = open_delayed_store(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
             db = apply_write(db, Blake3::hash(&[&0u64.to_be_bytes()]), vec![1u8; 8]).await;
@@ -733,13 +915,43 @@ mod test {
         });
     }
 
+    #[test_collect_traces("WARN")]
+    fn test_store_recovery_warns_when_discarding_uncommitted_suffix(traces: TraceStorage) {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = create_test_store(context.child("seed")).await;
+            let key = Blake3::hash(&[b"uncommitted"]);
+
+            // A crash during apply_batch can persist an update before its trailing commit.
+            (db.log, _) = db
+                .log
+                .append(&Operation::Update(Update(key, vec![7])))
+                .await
+                .unwrap();
+            db.log = db.log.sync().await.unwrap();
+            drop(db);
+
+            let db = create_test_store(context.child("recover")).await;
+            assert_eq!(*db.size(), 1);
+            assert_eq!(db.get(&key).await.unwrap(), None);
+        });
+        traces
+            .get_by_level(tracing::Level::WARN)
+            .expect_event(|event| {
+                let metadata = &event.metadata;
+                metadata.content == "rewinding journal items"
+                    && metadata.expect_field_exact("journal_size", "2").is_ok()
+                    && metadata.expect_field_exact("rewound_items", "1").is_ok()
+            })
+            .unwrap();
+    }
+
     /// State persisted via an awaited start_sync handle is recovered on reopen.
     #[test_traced]
     fn test_store_start_sync_recovery() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_store(&ctx, "delayed", "start-sync-recovery", &pending)
+            let mut db = open_delayed_store(ctx.child("delayed"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             let key = Blake3::hash(&[&0u64.to_be_bytes()]);
@@ -752,7 +964,7 @@ mod test {
             let size = db.size();
             drop(db);
 
-            let db = open_delayed_store(&ctx, "reopen", "start-sync-recovery", &pending)
+            let db = open_delayed_store(ctx.child("reopen"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.size(), size);
@@ -766,7 +978,7 @@ mod test {
     fn test_store_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_store(&ctx, "delayed", "start-sync-prune", &pending);
+            let open = open_delayed_store(ctx.child("delayed"), "start-sync-prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             // Two batches so floor-raising steps leave a non-trivial prune target.
             db = apply_write(db, Blake3::hash(&[&0u64.to_be_bytes()]), vec![1u8; 8]).await;
@@ -832,6 +1044,7 @@ mod test {
             let db = db.prune(floor).await.unwrap();
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata.clone()));
 
+            drop(db);
             let db = create_test_store(context.child("store").with_attribute("index", 2)).await;
             assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
 
@@ -857,7 +1070,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_construct_basic() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -910,6 +1122,7 @@ mod test {
             assert_eq!(*db.inactivity_floor_loc, 2);
 
             // Re-open the store
+            drop(db);
             let db = create_test_store(ctx.child("store").with_attribute("index", 2)).await;
 
             // Ensure the re-opened store retained the committed operations
@@ -966,7 +1179,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_log_replay() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let mut db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1010,7 +1222,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_build_snapshot_keys_with_shared_prefix() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1043,7 +1254,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_delete() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1107,7 +1317,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_pruning() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store")).await;
 
@@ -1286,7 +1495,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_batch() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1379,6 +1587,7 @@ mod test {
             let db = VecKeyStore::init(
                 context.child("store").with_attribute("index", 0),
                 cfg.clone(),
+                None,
             )
             .await
             .unwrap();
@@ -1396,9 +1605,10 @@ mod test {
             drop(db);
 
             // Reopen the store and verify both committed values.
-            let db = VecKeyStore::init(context.child("store").with_attribute("index", 1), cfg)
-                .await
-                .unwrap();
+            let db =
+                VecKeyStore::init(context.child("store").with_attribute("index", 1), cfg, None)
+                    .await
+                    .unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
             db.destroy().await.unwrap();

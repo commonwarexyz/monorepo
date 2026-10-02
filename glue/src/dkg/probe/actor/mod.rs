@@ -5,7 +5,12 @@ use crate::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
-use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
+use commonware_consensus::{
+    Epochable as _,
+    marshal::core::Variant,
+    simplex::{scheme::Scheme, types::Finalization},
+    types::FixedEpocher,
+};
 use commonware_cryptography::Signer;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -35,11 +40,17 @@ where
 {
     /// Runtime context.
     pub context: E,
-    /// P2P manager used to track the bootstrap participants when discovery
-    /// begins.
+    /// Peer manager that activates the bootstrap snapshot when discovery begins.
     pub manager: M,
     /// The weakly subjective checkpoint to bootstrap from.
     pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
+    /// State-sync floor persisted by an interrupted sync, if any.
+    ///
+    /// Pass it on restart so discovery ignores earlier epochs and returns info
+    /// for the later of this floor and the sampled floor. Otherwise
+    /// [`state_sync::Plan::init`](crate::dkg::state_sync::Plan::init) may panic
+    /// on a floor paired with info from an older epoch.
+    pub floor: Option<Finalization<S, V::Commitment>>,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,
     /// Public epoch information carried by genesis.
@@ -62,7 +73,8 @@ where
     pub block_codec_config: <V::ApplicationBlock as Read>::Cfg,
 }
 
-/// DKG probe actor.
+/// Discovers and serves DKG bootstrap material (see the
+/// [module docs](crate::dkg::probe)).
 pub struct Actor<E, M, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -81,6 +93,7 @@ where
     mailbox: ActorReceiver<Message<S, V>>,
     manager: M,
     bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
+    floor: Option<Finalization<S, V::Commitment>>,
     verifier: S,
     genesis: EpochInfo<
         <V::ApplicationBlock as ReshareBlock>::Variant,
@@ -108,7 +121,7 @@ where
     T: Strategy,
     B: Blocker<PublicKey = S::PublicKey>,
 {
-    /// Create a probe actor and mailbox.
+    /// Creates a probe actor and its mailbox.
     pub fn new(config: Config<E, M, S, V, T, B>) -> (Self, Mailbox<S, V>) {
         let (sender, mailbox) =
             actor_mailbox::new(config.context.child("mailbox"), config.mailbox_size);
@@ -119,6 +132,7 @@ where
                 mailbox,
                 manager: config.manager,
                 bootstrap: config.bootstrap,
+                floor: config.floor,
                 verifier: config.verifier,
                 genesis: config.genesis,
                 strategy: config.strategy,
@@ -131,12 +145,10 @@ where
         )
     }
 
-    /// Start the probe actor.
+    /// Starts the probe actor.
     ///
-    /// The boundary network is the probe request channel used to sample the
-    /// configured committee's latest finalizations, fetch the target epoch's
-    /// boundary finalization and block, and later serve the same requests to
-    /// other joining peers.
+    /// `boundaries` carries probe requests and responses in both directions:
+    /// this node's discovery and its service to other joining peers.
     pub fn start<BSE, BRE>(mut self, boundaries: (BSE, BRE)) -> Handle<()>
     where
         BSE: Sender<PublicKey = S::PublicKey>,
@@ -150,13 +162,17 @@ where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
+        // Ignore replies below the bootstrap epoch or the persisted floor's epoch.
+        let minimum = self
+            .floor
+            .map_or(self.bootstrap.epoch, |floor| floor.epoch())
+            .max(self.bootstrap.epoch);
         Discovery {
             context: self.context,
             mailbox: self.mailbox,
             manager: self.manager,
-            sample: Sample::new(self.bootstrap.epoch),
-            bootstrap_participants: self.bootstrap.participants,
-            bootstrap_directory: self.bootstrap.directory,
+            sample: Sample::new(minimum),
+            bootstrap: self.bootstrap,
             verifier: self.verifier,
             genesis: self.genesis,
             strategy: self.strategy,
