@@ -128,6 +128,11 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         })
     }
 
+    /// Return a reference to the batch's strategy.
+    pub(crate) fn strategy(&self) -> &S {
+        self.inner.strategy()
+    }
+
     /// Add caller-supplied items to the batch.
     ///
     /// # Panics

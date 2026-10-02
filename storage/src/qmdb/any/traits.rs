@@ -7,7 +7,7 @@ use crate::{
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use commonware_runtime::Handle;
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
 /// Unmerkleized batch of operations.
@@ -18,27 +18,55 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     type Metadata;
     type Merkleized: MerkleizedBatch;
     type Update: super::operation::Update<Key = Self::K, Value = Self::V>;
+    type Sweep: Sweep<
+            Db,
+            Family = Self::Family,
+            Update = Self::Update,
+            Metadata = Self::Metadata,
+            Merkleized = Self::Merkleized,
+        >;
 
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     fn write(self, key: Self::K, value: Option<Self::V>) -> Self;
 
-    /// Disable automatic floor raising for this batch.
-    fn with_manual_floor(self) -> Self;
+    /// Start a sweep that decides at most `entries` active updates and passes at most `skips`
+    /// inactive locations.
+    fn sweep(self, entries: usize, skips: u64) -> Self::Sweep;
 
-    /// Evict the next active update, skipping at most `quota` inactive operations.
-    #[allow(clippy::type_complexity)]
-    fn pop_active(
+    /// Resolve mutations, compute the new root, and return a merkleized batch.
+    fn merkleize(
         self,
         db: &Db,
-        quota: Option<NonZeroUsize>,
+        metadata: Option<Self::Metadata>,
+    ) -> impl Future<Output = Result<Self::Merkleized, Error<Self::Family>>>;
+}
+
+/// A terminal pass over a batch's active updates from its inactivity floor.
+pub trait Sweep<Db: ?Sized>: Sized {
+    type Family: Family;
+    type Update: super::operation::Update;
+    type Metadata;
+    type Merkleized: MerkleizedBatch;
+
+    /// Return the next active update, or `None` once the sweep ends.
+    #[allow(clippy::type_complexity)]
+    fn next<'a>(
+        &'a mut self,
+        db: &Db,
     ) -> impl Future<
         Output = Result<
-            (Self, super::batch::Popped<Self::Family, Self::Update>),
+            Option<super::batch::Entry<'a, Self::Family, Self::Update>>,
             Error<Self::Family>,
         >,
     >;
 
-    /// Resolve mutations, compute the new root, and return a merkleized batch.
+    /// Return the floor the batch commits unless its final state is empty.
+    fn floor(&self) -> Location<Self::Family>;
+
+    /// Return whether the floor reached the batch's original tip.
+    fn is_done(&self) -> bool;
+
+    /// End the sweep, compute the new root, and return a merkleized batch.
     fn merkleize(
         self,
         db: &Db,

@@ -29,7 +29,6 @@ use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
     cmp::Ordering,
-    num::NonZeroUsize,
     ops::{
         Bound::{Excluded, Included},
         Range,
@@ -37,7 +36,7 @@ use core::{
 };
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, hash_map},
+    collections::{BTreeMap, VecDeque, hash_map},
     iter, mem,
     sync::{Arc, Weak},
 };
@@ -72,20 +71,20 @@ where
 /// values have already been consumed by a rewrite. Candidate keys remain unchanged.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
-/// Where a staged read resolved: in the committed snapshot, or in an uncommitted
-/// ancestor's diff. Either way, the resolved location orders the staged write among this
-/// batch's emitted operations. The variants differ in which committed location the write
-/// supersedes: `Committed` supersedes the resolved location itself, while `Ancestor`
-/// supersedes the committed location it recorded at stage time. The recorded base stays
-/// valid while the resolving ancestor is alive at merkleize, because the ancestor's diff
-/// travels with this batch and `apply_batch` re-resolves the base if the ancestor commits
-/// first. If the ancestor instead commits and is freed before merkleize, its apply has
-/// made `loc` the key's committed location, so merkleize supersedes `loc` whenever it lies
-/// below the merkleize-time committed boundary.
+/// Where a staged read or a sweep decision resolved its key's live operation: in the
+/// committed DB, or in an uncommitted ancestor's diff. Either way, the resolved
+/// location orders the staged write among this batch's emitted operations. The variants
+/// differ in which committed location the write supersedes: `Committed` supersedes the
+/// resolved location itself, while `Ancestor` supersedes the committed location it recorded
+/// when it was resolved. The recorded base stays valid while the resolving ancestor is alive
+/// at merkleize, because the ancestor's diff travels with this batch and `apply_batch`
+/// re-resolves the base if the ancestor commits first. If the ancestor instead commits and
+/// is freed before merkleize, its apply has made `loc` the key's committed location, so
+/// merkleize supersedes `loc` whenever it lies below the merkleize-time committed boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StagedLoc<F: Family> {
-    /// Resolved directly in the committed DB snapshot. The location doubles as the
-    /// superseded committed location.
+    /// Resolved in the committed DB. The location doubles as the superseded committed
+    /// location.
     Committed(Location<F>),
     /// Resolved in an uncommitted ancestor's diff at `loc`, superseding the key's committed
     /// snapshot location `base_old_loc` (`None` when an ancestor created the key).
@@ -100,6 +99,16 @@ impl<F: Family> StagedLoc<F> {
     const fn loc(&self) -> Location<F> {
         match self {
             Self::Committed(loc) | Self::Ancestor { loc, .. } => *loc,
+        }
+    }
+
+    /// The committed location a write at this resolution supersedes, where `boundary` is the
+    /// committed boundary at merkleize.
+    fn superseded(&self, boundary: Location<F>) -> Option<Location<F>> {
+        match *self {
+            Self::Committed(loc) => Some(loc),
+            Self::Ancestor { loc, .. } if loc < boundary => Some(loc),
+            Self::Ancestor { base_old_loc, .. } => base_old_loc,
         }
     }
 }
@@ -182,16 +191,14 @@ fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool 
     items.get(*cursor) == Some(target)
 }
 
-/// Merge two key-sorted diffs with disjoint keys into one sorted diff.
-fn merge_sorted_diffs<K: Ord, F: Family, V>(
-    a: DiffVec<K, F, V>,
-    b: DiffVec<K, F, V>,
-) -> DiffVec<K, F, V> {
+/// Merge `a` and `b`, each sorted by `less`, into one sorted vector. On ties, the element from
+/// `b` comes first.
+fn merge_by<T>(a: Vec<T>, b: Vec<T>, less: impl Fn(&T, &T) -> bool) -> Vec<T> {
     let mut merged = Vec::with_capacity(a.len() + b.len());
     let mut a = a.into_iter().peekable();
     let mut b = b.into_iter().peekable();
     while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
-        if x.0 < y.0 {
+        if less(x, y) {
             merged.push(a.next().expect("peeked"));
         } else {
             merged.push(b.next().expect("peeked"));
@@ -276,46 +283,25 @@ where
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
 
-    /// Explicit floor selected by the caller, disabling the automatic raise for this batch.
-    manual_floor: Option<Location<F>>,
+    /// The floor and kept updates of the sweep that ended this batch. Merkleize relocates the
+    /// kept updates in place of the automatic raise.
+    frozen: Option<Frozen<F, U>>,
 
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 }
 
-/// An active update evicted by [`UnmerkleizedBatch::pop_active`].
-pub struct ActiveEntry<F: Family, U: update::Update> {
-    /// The update's location prior to eviction.
-    pub location: Location<F>,
-    /// The evicted update.
-    pub update: U,
+/// The floor a sweep reached and the updates it kept.
+struct Frozen<F: Family, U: update::Update> {
+    floor: Location<F>,
+    /// Kept updates in ascending location order. Each was active when the sweep returned it.
+    kept: Vec<(Location<F>, U)>,
 }
 
-/// The outcome of one [`UnmerkleizedBatch::pop_active`] call.
-pub enum Popped<F: Family, U: update::Update> {
-    /// The next active update was evicted, and the batch records its deletion.
-    Evicted(ActiveEntry<F, U>),
-    /// The call skipped its quota of inactive operations before finding an active update. The
-    /// batch retains the advanced floor, so a later call resumes the scan there.
-    QuotaReached,
-    /// The scan reached the batch's original tip, so no active update remains before it.
-    Done,
-}
-
-impl<F: Family, U: update::Update> Popped<F, U> {
-    /// Returns the evicted entry, if this call evicted one.
-    pub fn into_evicted(self) -> Option<ActiveEntry<F, U>> {
-        match self {
-            Self::Evicted(entry) => Some(entry),
-            Self::QuotaReached | Self::Done => None,
-        }
-    }
-}
-
-/// Pending mutations whose old locations were already resolved by staged reads, sorted
-/// by location. Each value is `Some` for an update and `None` for a delete. Only the unordered
-/// path stages deletes (an ordered delete cannot skip the deleted key's predecessor-bucket scan,
-/// so its deletes fall back to normal mutations).
+/// Pending mutations whose old locations were already resolved by staged reads or sweep
+/// decisions, sorted by location. Each value is `Some` for an update and `None` for a delete.
+/// Only the unordered path stages deletes (an ordered delete cannot skip the deleted key's
+/// predecessor-bucket scan, so its deletes fall back to normal mutations).
 pub(crate) type StagedUpdates<F, U> = Vec<StagedUpdate<F, U>>;
 
 /// A staged read slot's resolution: the location and cached payload the read resolved to,
@@ -338,6 +324,68 @@ where
     batch: UnmerkleizedBatch<F, H, U, S>,
     keys: Vec<U::Key>,
     resolutions: Vec<StagedResolution<F, U>>,
+}
+
+/// A terminal pass over a batch's active updates from its inactivity floor, in location order.
+///
+/// Returned by [`UnmerkleizedBatch::sweep`] and [`Staged::sweep`]. The caller keeps, evicts, or
+/// replaces each update [`next`](Sweep::next) returns, and [`merkleize`](Sweep::merkleize)
+/// commits the floor the sweep reached. Kept updates move to the tip as the automatic floor raise
+/// moves them. The sweep owns its batch and takes the database per call.
+pub struct Sweep<F: Family, H, U, S: Strategy>
+where
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    batch: UnmerkleizedBatch<F, H, U, S>,
+    /// Writes resolved by staged reads before the sweep, sorted by location.
+    staged: StagedUpdates<F, U>,
+    cursor: Cursor<F, U>,
+}
+
+/// A sweep's position, budgets, read-ahead, and decisions.
+struct Cursor<F: Family, U: update::Update> {
+    /// Every location below the floor is inactive or decided.
+    floor: Location<F>,
+    /// The scan position. Every location in `[floor, scan)` is inactive or buffered.
+    scan: Location<F>,
+    /// The read window's end. No location at or past it is read.
+    end: Location<F>,
+    /// The batch's base size.
+    tip: Location<F>,
+    /// Entries left to decide.
+    entries: usize,
+    /// Inactive locations left to pass.
+    skips: u64,
+    /// Active updates read ahead, ascending.
+    buffer: VecDeque<(StagedLoc<F>, U)>,
+    /// Ascending locations in the read window superseded by writes made before the sweep,
+    /// including collision siblings. Computed by the first read.
+    gathered: Option<Vec<Location<F>>>,
+    /// Whether an entry was returned and not yet decided.
+    served: bool,
+    /// Kept updates, ascending.
+    kept: Vec<(Location<F>, U)>,
+    /// Evictions (`None`) and replacements at their keys' resolved locations, ascending.
+    swept: StagedUpdates<F, U>,
+}
+
+/// The outcome of one sweep read, committed to the cursor once the read completes.
+struct Lookahead<F: Family, U: update::Update> {
+    found: Vec<(StagedLoc<F>, U)>,
+    scan: Location<F>,
+    end: Location<F>,
+    gathered: Option<Vec<Location<F>>>,
+}
+
+/// An active update returned by [`Sweep::next`].
+///
+/// Deciding it advances the floor past its location. Dropping it undecided ends the sweep with
+/// the floor at its location.
+#[must_use = "dropping an entry ends the sweep"]
+pub struct Entry<'a, F: Family, U: update::Update> {
+    cursor: &'a mut Cursor<F, U>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -408,9 +456,6 @@ pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
 /// Result of merkleizing a batch.
 type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
 
-/// Result of [`UnmerkleizedBatch::pop_active`]: the batch and the [`Popped`] outcome.
-pub(crate) type PopActiveResult<B, F, U> = Result<(B, Popped<F, U>), crate::qmdb::Error<F>>;
-
 /// Result of a prepared merkleization: the batch and the ancestors retained while building it.
 pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
     (
@@ -450,7 +495,7 @@ where
     base_state: Commitment<F, H::Digest>,
     db_state: Commitment<F, H::Digest>,
     base_inactivity_floor_loc: Location<F>,
-    manual_floor: Option<Location<F>>,
+    frozen: Option<Frozen<F, U>>,
     base_active_keys: usize,
 }
 
@@ -492,12 +537,30 @@ fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy
     None
 }
 
-/// Outcome of classifying one floor-raise candidate against the batch diff, ancestor
-/// diffs, and committed snapshot.
+/// Resolve `key`'s operation at `loc` against the ancestor chain (immediate parent first).
+/// Returns `None` when an ancestor resolves `key` to another location. When no ancestor writes
+/// `key`, `loc` must have its committed bit set, and the result is [`StagedLoc::Committed`].
+fn locate<F: Family, D: Digest, U: update::Update, S: Strategy>(
+    ancestors: &[AncestorBatch<F, D, U, S>],
+    loc: Location<F>,
+    key: &U::Key,
+) -> Option<StagedLoc<F>> {
+    let Some(entry) = resolve_in_ancestors(ancestors, key) else {
+        return Some(StagedLoc::Committed(loc));
+    };
+    (entry.loc() == Some(loc)).then(|| StagedLoc::Ancestor {
+        loc,
+        base_old_loc: entry.base_old_loc(),
+    })
+}
+
+/// Outcome of classifying one floor-raise candidate against the batch diff and the ancestor
+/// diffs. A keyed candidate is active when the nearest diff entry for its key points at it, or
+/// when no diff holds its key.
 ///
 /// Classification is a pure function of the pre-raise state: at most one candidate per key
-/// can be active (the bitmap holds exactly one set bit per committed key, and each diff or
-/// ancestor entry resolves a key to a single location), and a move only rewrites the moved
+/// can be active (the committed bitmap holds exactly one set bit per active key, and each diff
+/// or ancestor entry resolves a key to a single location), and a move only rewrites the moved
 /// key's own diff entry to a location above the scan tip. Classifying all candidates
 /// against a single snapshot of the diff therefore yields the same outcomes as the
 /// interleaved sequential walk, which lets the per-candidate work run sharded across the
@@ -798,6 +861,70 @@ fn read_op_from_ancestors<F: Family, D: Digest, U: update::Update, S: Strategy>(
     unreachable!("location {loc} not found in ancestor chain (db_size={db_size})")
 }
 
+/// Gather existing-key locations for all keys in `mutations`.
+///
+/// For each mutation key, checks the ancestor diffs first (returning the uncommitted
+/// location for Active entries, skipping Deleted entries). Keys not in the ancestor diffs
+/// fall back to the committed DB snapshot.
+///
+/// When `include_active_collision_siblings` is true, Active entries also scan the snapshot
+/// bucket for collision siblings (other keys sharing the same translated-key bucket). The
+/// ordered path needs these so their `next_key` pointers are rewritten when a sibling is
+/// deleted; the unordered path can skip them.
+fn gather_existing_locations<F, E, C, I, H, U, const N: usize, S>(
+    ancestors: &[AncestorBatch<F, H::Digest, U, S>],
+    mutations: &BTreeMap<U::Key, Option<U::Value>>,
+    db: &Db<F, E, C, I, H, U, N, S>,
+    include_active_collision_siblings: bool,
+) -> Vec<Location<F>>
+where
+    F: Family,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: update::Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
+    // location per key.
+    let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
+    if ancestors.is_empty() {
+        for key in mutations.keys() {
+            locations.extend(db.snapshot.get(key).copied());
+        }
+    } else {
+        let mut ancestors = DiffCursors::new(ancestors.iter().map(|a| a.diff.as_slice()));
+        for key in mutations.keys() {
+            match ancestors.resolve(key) {
+                Some(DiffEntry::Deleted { .. }) => {
+                    // No live operation remains. resolve_creates handles any recreation.
+                }
+                Some(DiffEntry::Active {
+                    loc, base_old_loc, ..
+                }) => {
+                    locations.push(*loc);
+                    if include_active_collision_siblings {
+                        locations.extend(
+                            db.snapshot
+                                .get(key)
+                                .copied()
+                                .filter(move |loc| Some(*loc) != *base_old_loc),
+                        );
+                    }
+                }
+                None => {
+                    locations.extend(db.snapshot.get(key).copied());
+                }
+            }
+        }
+    }
+    db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
+    locations.dedup();
+    locations
+}
+
 /// Read helpers on [`Merkleizer`].
 ///
 /// # Operation-location model
@@ -957,16 +1084,8 @@ where
         Ok(vec![self.read_ops(locations, batch_ops, reader).await?])
     }
 
-    /// Gather existing-key locations for all keys in `mutations`.
-    ///
-    /// For each mutation key, checks the ancestor diffs first (returning the uncommitted
-    /// location for Active entries, skipping Deleted entries). Keys not in the ancestor diffs
-    /// fall back to the committed DB snapshot.
-    ///
-    /// When `include_active_collision_siblings` is true, Active entries also scan the snapshot
-    /// bucket for collision siblings (other keys sharing the same translated-key bucket). The
-    /// ordered path needs these so their `next_key` pointers are rewritten when a sibling is
-    /// deleted; the unordered path can skip them.
+    /// Gather existing-key locations for all keys in `mutations` through this merkleizer's
+    /// ancestors. See [`gather_existing_locations`].
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
@@ -978,42 +1097,12 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
-        // location per key.
-        let mut locations = Vec::with_capacity(mutations.len() * 3 / 2);
-        if self.ancestors.is_empty() {
-            for key in mutations.keys() {
-                locations.extend(db.snapshot.get(key).copied());
-            }
-        } else {
-            let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
-            for key in mutations.keys() {
-                match ancestors.resolve(key) {
-                    Some(DiffEntry::Deleted { .. }) => {
-                        // No live operation remains. resolve_creates handles any recreation.
-                    }
-                    Some(DiffEntry::Active {
-                        loc, base_old_loc, ..
-                    }) => {
-                        locations.push(*loc);
-                        if include_active_collision_siblings {
-                            locations.extend(
-                                db.snapshot
-                                    .get(key)
-                                    .copied()
-                                    .filter(move |loc| Some(*loc) != *base_old_loc),
-                            );
-                        }
-                    }
-                    None => {
-                        locations.extend(db.snapshot.get(key).copied());
-                    }
-                }
-            }
-        }
-        db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
-        locations.dedup();
-        locations
+        gather_existing_locations(
+            &self.ancestors,
+            mutations,
+            db,
+            include_active_collision_siblings,
+        )
     }
 
     /// Resolve remaining mutations into creates in key order. Re-created keys inherit
@@ -1035,6 +1124,68 @@ where
         })
     }
 
+    /// Classify the operation on `key` at `loc` against the key-sorted batch `diff` and the
+    /// ancestor diffs (see [`FloorOutcome`]).
+    fn classify(
+        &self,
+        diff: &DiffSlice<U::Key, F, U::Value>,
+        loc: Location<F>,
+        key: &U::Key,
+    ) -> FloorOutcome<F> {
+        match diff.binary_search_by(|(k, _)| k.cmp(key)) {
+            Ok(idx) if diff[idx].1.loc() == Some(loc) => FloorOutcome::MoveExisting {
+                idx,
+                base_old_loc: diff[idx].1.base_old_loc(),
+            },
+            Ok(_) => FloorOutcome::Inactive,
+            Err(_) => locate(&self.ancestors, loc, key).map_or(FloorOutcome::Inactive, |sloc| {
+                FloorOutcome::MoveNew {
+                    base_old_loc: sloc.superseded(self.db_state.size),
+                }
+            }),
+        }
+    }
+
+    /// Append `op` at the tip as `outcome` directs, recording its new location in `diff` or
+    /// `floor_diff`. Returns whether `op` moved.
+    fn relocate(
+        &self,
+        ops: &mut Vec<Operation<F, U>>,
+        diff: &mut DiffSlice<U::Key, F, U::Value>,
+        floor_diff: &mut DiffVec<U::Key, F, U::Value>,
+        op: Operation<F, U>,
+        outcome: FloorOutcome<F>,
+    ) -> bool {
+        match outcome {
+            FloorOutcome::Inactive => return false,
+            FloorOutcome::MoveExisting { idx, base_old_loc } => {
+                let new_loc = self.base_state.size + ops.len() as u64;
+                let value = extract_update_value(&op);
+                ops.push(op);
+                diff[idx].1 = DiffEntry::Active {
+                    value,
+                    loc: new_loc,
+                    base_old_loc,
+                };
+            }
+            FloorOutcome::MoveNew { base_old_loc } => {
+                let key = op.key().cloned().expect("moved op has a key");
+                let new_loc = self.base_state.size + ops.len() as u64;
+                let value = extract_update_value(&op);
+                ops.push(op);
+                floor_diff.push((
+                    key,
+                    DiffEntry::Active {
+                        value,
+                        loc: new_loc,
+                        base_old_loc,
+                    },
+                ));
+            }
+        }
+        true
+    }
+
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
     ///
@@ -1043,9 +1194,12 @@ where
     /// superseded by `diff` (every `Some` `base_old_loc`), in any order. The floor raise
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
     /// caller gathered and read ahead of time, consumed by the raise before scanning live.
+    ///
+    /// A swept batch skips the raise: its floor stays where the sweep left it, and each kept
+    /// update is classified and moved as the raise would move it.
     #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, const N: usize>(
-        self,
+        mut self,
         mut ops: Vec<Operation<F, U>>,
         mut diff: DiffVec<U::Key, F, U::Value>,
         mut superseded_locs: Vec<Location<F>>,
@@ -1065,7 +1219,10 @@ where
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
         let total_steps = user_steps + 1;
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
-        let mut floor = self.manual_floor.unwrap_or(self.base_inactivity_floor_loc);
+        let frozen = self.frozen.take();
+        let mut floor = frozen
+            .as_ref()
+            .map_or(self.base_inactivity_floor_loc, |frozen| frozen.floor);
 
         // Key-sort the diff as one job on the strategy: candidate classification (after the
         // first floor-raise read below) is the earliest consumer that needs it sorted, so the
@@ -1084,7 +1241,7 @@ where
 
         // New diff entries for keys moved by the floor raise, merged into `diff` below.
         let mut floor_diff = Vec::new();
-        if total_active_keys > 0 && self.manual_floor.is_none() {
+        if total_active_keys > 0 && frozen.is_none() {
             // Floor raise: advance the inactivity floor by `total_steps` active operations.
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let strategy = db.strategy();
@@ -1179,53 +1336,16 @@ where
                         diff = job.await;
                     }
 
-                    // Classify read candidates against the pre-raise state (see
-                    // [`FloorOutcome`]). Revalidation is required even for candidates whose
-                    // committed bitmap bit is set: an uncommitted ancestor diff may supersede
-                    // the committed location, and that is not reflected in the bitmap.
-                    let classify = |candidate: Location<F>, op: &Operation<F, U>| {
-                        let Some(key) = op.key() else {
-                            return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
-                        };
-                        match diff.binary_search_by(|(k, _)| k.cmp(key)) {
-                            Ok(idx) => {
-                                let entry = &diff[idx].1;
-                                if entry.loc() == Some(candidate) {
-                                    FloorOutcome::MoveExisting {
-                                        idx,
-                                        base_old_loc: entry.base_old_loc(),
-                                    }
-                                } else {
-                                    FloorOutcome::Inactive
-                                }
-                            }
-                            Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
-                                || {
-                                    if db.snapshot.get(key).any(|&l| l == candidate) {
-                                        FloorOutcome::MoveNew {
-                                            base_old_loc: Some(candidate),
-                                        }
-                                    } else {
-                                        FloorOutcome::Inactive
-                                    }
-                                },
-                                |entry| {
-                                    if entry.loc() == Some(candidate) {
-                                        FloorOutcome::MoveNew {
-                                            base_old_loc: entry.base_old_loc(),
-                                        }
-                                    } else {
-                                        FloorOutcome::Inactive
-                                    }
-                                },
-                            ),
-                        }
-                    };
-
-                    // Classify each candidate against the pre-raise state, in candidate order.
+                    // Classify each candidate against the pre-raise state (see
+                    // [`FloorOutcome`]), in candidate order. CommitFloor and other non-keyed
+                    // ops are inactive.
                     let outcomes: Vec<FloorOutcome<F>> = strategy.map_collect_vec(
                         zip_eq(read_candidates.iter(), resolved.iter().flatten()),
-                        |(loc, op)| classify(*loc, op),
+                        |(loc, op)| {
+                            op.key().map_or(FloorOutcome::Inactive, |key| {
+                                self.classify(&diff, *loc, key)
+                            })
+                        },
                     );
                     (resolved, outcomes)
                 };
@@ -1243,32 +1363,8 @@ where
                     }
                     let op = reads.next().expect("one read per candidate");
                     let outcome = outcomes.next().expect("one outcome per read candidate");
-                    match outcome {
-                        FloorOutcome::Inactive => continue,
-                        FloorOutcome::MoveExisting { idx, base_old_loc } => {
-                            let new_loc = self.base_state.size + ops.len() as u64;
-                            let value = extract_update_value(&op);
-                            ops.push(op);
-                            diff[idx].1 = DiffEntry::Active {
-                                value,
-                                loc: new_loc,
-                                base_old_loc,
-                            };
-                        }
-                        FloorOutcome::MoveNew { base_old_loc } => {
-                            let key = op.key().cloned().expect("moved op has a key");
-                            let new_loc = self.base_state.size + ops.len() as u64;
-                            let value = extract_update_value(&op);
-                            ops.push(op);
-                            floor_diff.push((
-                                key,
-                                DiffEntry::Active {
-                                    value,
-                                    loc: new_loc,
-                                    base_old_loc,
-                                },
-                            ));
-                        }
+                    if !self.relocate(&mut ops, &mut diff, &mut floor_diff, op, outcome) {
+                        continue;
                     }
                     moved += 1;
                     if moved >= total_steps {
@@ -1280,6 +1376,29 @@ where
             // DB is empty after this batch; raise floor to tip.
             floor = self.base_state.size + ops.len() as u64;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
+        } else if let Some(Frozen { kept, .. }) = frozen {
+            // Move each kept update that is still active, in location order, as the raise
+            // would move it. Classification is pure per update (see [`FloorOutcome`]).
+            assert!(kept.is_sorted_by(|a, b| a.0 < b.0));
+            assert!(kept.last().is_none_or(|(loc, _)| *loc < floor));
+            if let Some(job) = diff_sort.take() {
+                diff = job.await;
+            }
+            let outcomes: Vec<FloorOutcome<F>> =
+                db.strategy().map_collect_vec(kept.iter(), |(loc, update)| {
+                    self.classify(&diff, *loc, update.key())
+                });
+            ops.reserve(kept.len() + 1);
+            floor_diff.reserve(kept.len());
+            for ((_, update), outcome) in zip_eq(kept, outcomes) {
+                self.relocate(
+                    &mut ops,
+                    &mut diff,
+                    &mut floor_diff,
+                    Operation::Update(update),
+                    outcome,
+                );
+            }
         }
 
         // The floor raise may have exited without classifying any candidate (or been skipped
@@ -1300,7 +1419,7 @@ where
             diff_merge = Some(db.strategy().spawn(merge_len, move |strategy| {
                 let mut floor_diff = floor_diff;
                 strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
-                let diff = merge_sorted_diffs(diff, floor_diff);
+                let diff = merge_by(diff, floor_diff, |a, b| a.0 < b.0);
                 assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
                 diff
             }));
@@ -1428,6 +1547,25 @@ where
         Ok((start..end, values, self))
     }
 
+    /// Record updates for staged reads and upserts for unread keys, then start a sweep.
+    ///
+    /// The writes resolve as in [`merkleize`](Staged::merkleize) and precede the sweep. See
+    /// [`UnmerkleizedBatch::sweep`] for `entries` and `skips`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    pub fn sweep(
+        self,
+        updates: Vec<(usize, Option<U::Value>)>,
+        upserts: Vec<(U::Key, Option<U::Value>)>,
+        entries: usize,
+        skips: u64,
+    ) -> Sweep<F, H, U, S> {
+        let (batch, staged) = self.resolve_updates(updates, upserts);
+        Sweep::new(batch, staged, entries, skips)
+    }
+
     fn apply_upserts(
         mut mutations: BTreeMap<U::Key, Option<U::Value>>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
@@ -1464,7 +1602,6 @@ where
         self,
         updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
-        strategy: &S,
     ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
         let Self {
             mut batch,
@@ -1472,8 +1609,14 @@ where
             resolutions,
         } = self;
         let mutations = mem::take(&mut batch.mutations);
-        let (mutations, staged_updates) =
-            Self::resolve_update_parts(mutations, keys, resolutions, updates, upserts, strategy);
+        let (mutations, staged_updates) = Self::resolve_update_parts(
+            mutations,
+            keys,
+            resolutions,
+            updates,
+            upserts,
+            batch.journal_batch.strategy(),
+        );
         batch.mutations = mutations;
         (batch, staged_updates)
     }
@@ -1631,8 +1774,7 @@ where
     /// Resolve the caller's updates on the strategy pool while gathering and reading the
     /// committed prefix of the floor-raise candidates, overlapping the two. Returns the
     /// prepared batch, the staged updates, and the prefetched candidates to seed its floor scan
-    /// with. Manual-floor batches return an empty prefetch. Preparation validates and retains
-    /// the live chain before any supplied-database read.
+    /// with. Preparation validates and retains the live chain before any supplied-database read.
     ///
     /// `fill_candidates` must be the same candidate source the subsequent floor raise
     /// scans, so the prefetched prefix continues seamlessly into the live scan (see
@@ -1672,31 +1814,27 @@ where
         } = self;
         let mut prepared = batch.prepare(db)?;
 
-        let steps_bound = if prepared.merkleizer.manual_floor.is_some() {
-            0
-        } else {
-            // Bound the steps the floor raise can take: only emitted ops consume steps, and an
-            // op is emitted per location-resolved update plus per upsert or prior mutation on a
-            // key alive in the committed snapshot. Fresh-key creates never consume a step, so
-            // unresolved update slots and writes missing from the snapshot are excluded (one
-            // in-memory probe per key). The bound is approximate in both directions. Surplus
-            // candidates (a translated-key collision, or a key an ancestor already deleted) are
-            // dropped by the raise once it moves enough ops, and a shortfall (a write resolving
-            // only through an ancestor diff) makes the raise fall back to the live scan when
-            // the prefetched prefix runs out.
-            let resolved_updates = updates
-                .iter()
-                .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
-                .count()
-                .min(keys.len());
-            let existing_writes = upserts
-                .iter()
-                .map(|(key, _)| key)
-                .chain(prepared.mutations.keys())
-                .filter(|&key| db.snapshot.get(key).next().is_some())
-                .count();
-            resolved_updates + existing_writes + 1
-        };
+        // Bound the steps the floor raise can take: only emitted ops consume steps, and an
+        // op is emitted per location-resolved update plus per upsert or prior mutation on a
+        // key alive in the committed snapshot. Fresh-key creates never consume a step, so
+        // unresolved update slots and writes missing from the snapshot are excluded (one
+        // in-memory probe per key). The bound is approximate in both directions. Surplus
+        // candidates (a translated-key collision, or a key an ancestor already deleted) are
+        // dropped by the raise once it moves enough ops, and a shortfall (a write resolving
+        // only through an ancestor diff) makes the raise fall back to the live scan when
+        // the prefetched prefix runs out.
+        let resolved_updates = updates
+            .iter()
+            .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
+            .count()
+            .min(keys.len());
+        let existing_writes = upserts
+            .iter()
+            .map(|(key, _)| key)
+            .chain(prepared.mutations.keys())
+            .filter(|&key| db.snapshot.get(key).next().is_some())
+            .count();
+        let steps_bound = resolved_updates + existing_writes + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
         // committed-prefix candidate set depends only on the base floor, the candidate
@@ -1770,7 +1908,7 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
+        let (batch, staged_updates) = self.resolve_updates(updates, upserts);
         let prepared = batch.prepare(db)?;
         let (batch, _retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
@@ -1795,119 +1933,19 @@ where
         self
     }
 
-    /// Disable automatic floor raising for this batch.
+    /// Start a sweep that decides at most `entries` active updates and passes at most `skips`
+    /// inactive locations, beginning at the inherited inactivity floor.
     ///
-    /// The floor stays at its inherited boundary until [`Self::pop_active`] advances it.
-    /// If the final state is empty, merkleization sets the floor to the new commit location.
-    /// New batches created from the merkleized result use the automatic policy by default.
-    pub fn with_manual_floor(mut self) -> Self {
-        self.manual_floor
-            .get_or_insert_with(|| self.base.inactivity_floor_loc());
-        self
-    }
-
-    /// Evict the next active update, skipping inactive operations.
-    ///
-    /// `quota` limits the number of inactive operations skipped in this call; `None` is unlimited.
-    /// Reaching the quota returns [`Popped::QuotaReached`] immediately, retaining the advanced floor
-    /// so a subsequent call resumes there. Reaching the batch's original tip returns
-    /// [`Popped::Done`], which takes precedence when both occur together. New writes and
-    /// reinserts are outside the scan. Pending writes and deletions make old updates inactive;
-    /// deletes and commits are always inactive for floor raising.
-    ///
-    /// Calling this method selects [`Self::with_manual_floor`], even when it evicts nothing.
-    /// Merkleization performs no additional automatic moves; an empty final state sets the floor to
-    /// the new commit location. Eviction records a deletion; write the returned update's key and
-    /// value back to preserve it, or write a replacement value. Changes remain speculative until
-    /// the batch is applied.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain. Reading
-    /// an operation can also return a journal error. Cancellation or an error consumes the batch
-    /// without modifying `db`.
-    pub async fn pop_active<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, U, N, S>,
-        quota: Option<NonZeroUsize>,
-    ) -> PopActiveResult<Self, F, U>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        self.pop_active_with(db, quota, |from, end| db.bitmap.first_one(from, end))
-            .await
-    }
-
-    /// [`Self::pop_active`] with committed candidates drawn from `first_candidate`, which returns
-    /// the first location in `[from, end)` that may hold an active update. Every candidate is
-    /// still checked against this batch and its ancestors, so the source may over-report but must
-    /// not skip an active committed update.
-    pub(crate) async fn pop_active_with<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, U, N, S>,
-        quota: Option<NonZeroUsize>,
-        mut first_candidate: impl FnMut(u64, u64) -> Option<u64>,
-    ) -> PopActiveResult<Self, F, U>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        let ancestors = self.validate_commitment(db.commitment())?;
-        let mut batch = self.with_manual_floor();
-        let mut location = batch.manual_floor.expect("manual floor selected");
-        let tip = batch.base.base_state().size;
-        let db_size = db.log.size();
-
-        // Every operation passed before returning an active update consumes one skip.
-        let scan_end = Location::new(quota.map_or(*tip, |quota| {
-            (*location).saturating_add(quota.get() as u64).min(*tip)
-        }));
-        while location < scan_end {
-            if location < db_size {
-                let end = *scan_end.min(db_size);
-                // The final commit has a set bit but is not a live update.
-                let candidate = first_candidate(*location, end.min(*db_size - 1));
-                location = Location::new(candidate.unwrap_or(end));
-                if candidate.is_none() {
-                    continue;
-                }
-            }
-            let operation = if location < db_size {
-                Cow::Owned(db.log.read(*location).await?)
-            } else {
-                Cow::Borrowed(read_op_from_ancestors(&ancestors, *location, *db_size))
-            };
-            if let Operation::Update(update) = operation.as_ref() {
-                let key = update::Update::key(update);
-
-                // A committed candidate's set bit already proves snapshot activity.
-                let active = !batch.mutations.contains_key(key)
-                    && resolve_in_ancestors(&ancestors, key)
-                        .map_or(location < db_size, |entry| entry.loc() == Some(location));
-                if active {
-                    batch.mutations.insert(key.clone(), None);
-                    let Operation::Update(update) = operation.into_owned() else {
-                        unreachable!("active operation is an update");
-                    };
-                    batch.manual_floor = Some(location + 1);
-                    return Ok((batch, Popped::Evicted(ActiveEntry { location, update })));
-                }
-            }
-            location += 1;
-        }
-
-        // Ancestors must remain alive until every operation read has completed.
-        drop(ancestors);
-        batch.manual_floor = Some(location);
-        let popped = if location < tip {
-            Popped::QuotaReached
-        } else {
-            Popped::Done
-        };
-        Ok((batch, popped))
+    /// The sweep ends the batch: every write precedes it, and [`Sweep::merkleize`] merkleizes
+    /// the batch. The floor advances only past inactive locations and decided updates, so
+    /// `sweep(0, 0)` keeps the inherited floor unless the final state is empty. Reads stay below
+    /// the batch's original tip and below `entries + skips` locations past the inherited floor,
+    /// and the read-ahead holds at most `entries` updates. Each read round decodes up to
+    /// `entries` candidate locations plus those sharing a translated-key bucket with keys
+    /// written before the sweep, so `entries = usize::MAX` reads every reachable candidate in
+    /// one round.
+    pub fn sweep(self, entries: usize, skips: u64) -> Sweep<F, H, U, S> {
+        Sweep::new(self, Vec::new(), entries, skips)
     }
 
     /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
@@ -1948,7 +1986,7 @@ where
             base_state: self.base.base_state(),
             db_state,
             base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
-            manual_floor: self.manual_floor,
+            frozen: self.frozen,
             base_active_keys: self.base.active_keys(),
         };
         (self.mutations, m)
@@ -2214,6 +2252,402 @@ where
     }
 }
 
+impl<F: Family, H, U, S: Strategy> Sweep<F, H, U, S>
+where
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Start a sweep of `batch` from its inherited floor, after the writes in `batch` and
+    /// `staged`.
+    fn new(
+        batch: UnmerkleizedBatch<F, H, U, S>,
+        staged: StagedUpdates<F, U>,
+        entries: usize,
+        skips: u64,
+    ) -> Self {
+        let floor = batch.base.inactivity_floor_loc();
+        let tip = batch.base.base_state().size;
+        let reach = (*floor)
+            .saturating_add(skips)
+            .saturating_add(entries as u64);
+        Self {
+            batch,
+            staged,
+            cursor: Cursor {
+                floor,
+                scan: floor,
+                end: Location::new(reach).min(tip),
+                tip,
+                entries,
+                skips,
+                buffer: VecDeque::new(),
+                gathered: None,
+                served: false,
+                kept: Vec::new(),
+                swept: Vec::new(),
+            },
+        }
+    }
+
+    /// Return the next active update, advancing the floor past the inactive locations before it.
+    ///
+    /// Returns `None` once `entries` updates are decided, the next active update lies more than
+    /// the remaining skips past the floor, the floor reaches the batch's original tip, or a
+    /// returned entry was dropped undecided. When the skips run out first, the floor advances by
+    /// the remaining skips.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Reading an operation can also return a journal error. An error or cancellation leaves the
+    /// sweep unchanged.
+    pub async fn next<E, C, I, const N: usize>(
+        &mut self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Option<Entry<'_, F, U>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        self.next_with(db, |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
+        })
+        .await
+    }
+
+    /// [`Self::next`] with candidates drawn from `fill`, which must meet the candidate contract
+    /// of [`Prepared::merkleize_with_floor_scan`].
+    pub(crate) async fn next_with<E, C, I, const N: usize>(
+        &mut self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+        fill: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+    ) -> Result<Option<Entry<'_, F, U>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let ancestors = self.batch.validate_commitment(db.commitment())?;
+        if self.cursor.served || self.cursor.entries == 0 {
+            return Ok(None);
+        }
+
+        // Read ahead through `&self`, then commit the read once it completes.
+        if self.cursor.buffer.is_empty() && self.cursor.scan < self.cursor.end {
+            let read = self.read(db, &ancestors, fill).await?;
+            drop(ancestors);
+            let cursor = &mut self.cursor;
+            if read.gathered.is_some() {
+                cursor.gathered = read.gathered;
+            }
+            cursor.buffer = VecDeque::from(read.found);
+            cursor.scan = read.scan;
+            cursor.end = read.end;
+        }
+
+        // Every location between the floor and the frontier is inactive, and passing each one
+        // costs a skip. The floor therefore depends only on exact classification, never on how
+        // far the sweep read ahead.
+        let cursor = &mut self.cursor;
+        let frontier = cursor
+            .buffer
+            .front()
+            .map_or(cursor.scan, |(sloc, _)| sloc.loc());
+        let gap = *frontier - *cursor.floor;
+        if gap > cursor.skips {
+            cursor.floor += cursor.skips;
+            cursor.skips = 0;
+            return Ok(None);
+        }
+        cursor.floor = frontier;
+        cursor.skips -= gap;
+        if cursor.buffer.is_empty() {
+            return Ok(None);
+        }
+        cursor.served = true;
+        Ok(Some(Entry { cursor }))
+    }
+
+    /// Read rounds of candidates from the scan position until one holds an active update or
+    /// the window ends.
+    ///
+    /// A round gathers candidates until `entries` of them may be active, skipping locations
+    /// [`Cursor::gathered`] already accounts for. It stops early at the first candidate the
+    /// floor cannot reach even if every earlier candidate is active, and that candidate becomes
+    /// the window's end. Committed candidates are read in one batch, and ancestor candidates
+    /// resolve in memory.
+    async fn read<E, C, I, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+        ancestors: &[AncestorBatch<F, H::Digest, U, S>],
+        mut fill: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+    ) -> Result<Lookahead<F, U>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let cursor = &self.cursor;
+        let computed = cursor
+            .gathered
+            .is_none()
+            .then(|| self.gather(db, ancestors));
+        let gathered = computed
+            .as_deref()
+            .or(cursor.gathered.as_deref())
+            .expect("gathered by the first read");
+        let mutations = &self.batch.mutations;
+        let db_size = db.log.size();
+
+        let mut scan = cursor.scan;
+        let mut end = cursor.end;
+        let mut found = Vec::new();
+        let mut gathered_at = gathered.partition_point(|loc| *loc < scan);
+        let mut staged_at = self
+            .staged
+            .partition_point(|(_, sloc, _, _)| sloc.loc() < scan);
+        loop {
+            // The parent's commit at `tip - 1` is inactive, so candidates stop before it.
+            let last = end.min(cursor.tip - 1);
+            if scan >= last {
+                scan = end;
+                break;
+            }
+
+            // Every location in `[floor, scan)` is inactive here, so only this round's
+            // candidates may hold active updates. A `gathered` location may hold an active
+            // collision sibling, so it counts as possibly active for reachability but not
+            // toward `need`.
+            let mut candidates = Vec::new();
+            let mut need = cursor.entries;
+            while need > 0 && scan < last {
+                let start = candidates.len();
+                let next = fill(scan, *last, start.saturating_add(need), &mut candidates);
+                let mut cut = None;
+                for (at, loc) in candidates.iter().enumerate().skip(start) {
+                    if **loc - *cursor.floor - at as u64 > cursor.skips {
+                        cut = Some(at);
+                        break;
+                    }
+                    if !sorted_contains(gathered, &mut gathered_at, loc) {
+                        need -= 1;
+                    }
+                }
+                if let Some(at) = cut {
+                    // Later candidates stay out of reach whatever the earlier ones hold.
+                    end = candidates[at];
+                    scan = end;
+                    candidates.truncate(at);
+                    break;
+                }
+                scan = next;
+            }
+
+            // Staged writes supersede their resolved locations, so those need no read.
+            candidates.retain(|loc| {
+                while self
+                    .staged
+                    .get(staged_at)
+                    .is_some_and(|(_, sloc, _, _)| sloc.loc() < *loc)
+                {
+                    staged_at += 1;
+                }
+                self.staged
+                    .get(staged_at)
+                    .is_none_or(|(_, sloc, _, _)| sloc.loc() != *loc)
+            });
+            let split = candidates.partition_point(|loc| *loc < db_size);
+            let positions: Vec<u64> = candidates[..split].iter().map(|loc| **loc).collect();
+            let shards = db.log.read_many_sharded(&positions).await?;
+
+            // Classify against this batch's writes, then the ancestor diffs. A committed
+            // candidate that neither resolves is active.
+            let memory: Vec<&Operation<F, U>> = candidates[split..]
+                .iter()
+                .map(|loc| read_op_from_ancestors(ancestors, **loc, *db_size))
+                .collect();
+            let ops: Vec<(Location<F>, &Operation<F, U>)> = zip_eq(
+                candidates.iter().copied(),
+                shards.iter().flatten().chain(memory.iter().copied()),
+            )
+            .collect();
+            let outcomes: Vec<Option<StagedLoc<F>>> =
+                db.strategy().map_collect_vec(ops, |(loc, op)| match op {
+                    Operation::Update(update) if !mutations.contains_key(update.key()) => {
+                        locate(ancestors, loc, update.key())
+                    }
+                    _ => None,
+                });
+
+            // Move committed active updates out of the read and clone in-memory ones. Active
+            // collision siblings can outnumber the remaining entries, so the read-ahead stops
+            // at the first active update past them.
+            let mut owned = shards.into_iter().flatten();
+            for (i, (loc, outcome)) in zip_eq(&candidates, outcomes).enumerate() {
+                let op = (i < split).then(|| owned.next().expect("one read per candidate"));
+                let Some(sloc) = outcome else {
+                    continue;
+                };
+                if found.len() == cursor.entries {
+                    scan = *loc;
+                    break;
+                }
+                let op = op.unwrap_or_else(|| memory[i - split].clone());
+                let Operation::Update(update) = op else {
+                    unreachable!("active operations are updates");
+                };
+                found.push((sloc, update));
+            }
+            if !found.is_empty() {
+                break;
+            }
+        }
+        Ok(Lookahead {
+            found,
+            scan,
+            end,
+            gathered: computed,
+        })
+    }
+
+    /// Return the ascending read-window locations superseded by writes made before the sweep.
+    /// Snapshot collision siblings are included, so an entry may still be active.
+    fn gather<E, C, I, const N: usize>(
+        &self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+        ancestors: &[AncestorBatch<F, H::Digest, U, S>],
+    ) -> Vec<Location<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let mut gathered = if self.batch.mutations.is_empty() {
+            Vec::new()
+        } else {
+            gather_existing_locations(ancestors, &self.batch.mutations, db, false)
+        };
+        if !self.staged.is_empty() {
+            let staged = self
+                .staged
+                .iter()
+                .map(|(_, sloc, _, _)| sloc.loc())
+                .collect();
+            gathered = merge_by(gathered, staged, |a, b| a < b);
+            gathered.dedup();
+        }
+        let (scan, end) = (self.cursor.scan, self.cursor.end);
+        gathered.retain(|loc| scan <= *loc && *loc < end);
+        gathered.shrink_to_fit();
+        gathered
+    }
+
+    /// Return the floor [`merkleize`](Sweep::merkleize) commits unless the final state is
+    /// empty.
+    pub const fn floor(&self) -> Location<F> {
+        self.cursor.floor
+    }
+
+    /// Return whether the floor reached the batch's original tip.
+    pub fn is_done(&self) -> bool {
+        self.cursor.floor >= self.cursor.tip
+    }
+
+    /// End the sweep and validate the batch against `db`, returning the prepared batch with its
+    /// decisions and the staged writes for merkleize to consume.
+    ///
+    /// Evictions become deletes. Those the update kind cannot stage fall back to batch
+    /// mutations, which no earlier write shares because the sweep skips written keys.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prepare<'a, E, C, I, const N: usize>(
+        self,
+        db: &'a Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(Prepared<'a, F, E, C, I, H, U, N, S>, StagedUpdates<F, U>), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let Self {
+            mut batch,
+            staged,
+            cursor,
+        } = self;
+        let mut swept = Vec::with_capacity(cursor.swept.len());
+        for (key, sloc, cached, value) in cursor.swept {
+            if value.is_some() || U::STAGES_DELETES {
+                swept.push((key, sloc, cached, value));
+            } else {
+                batch.mutations.insert(key, None);
+            }
+        }
+        batch.frozen = Some(Frozen {
+            floor: cursor.floor,
+            kept: cursor.kept,
+        });
+        let staged = merge_by(staged, swept, |a, b| a.1.loc() < b.1.loc());
+        Ok((batch.prepare(db)?, staged))
+    }
+}
+
+impl<F: Family, U: update::Update> Cursor<F, U> {
+    /// Decide the served entry, advancing the floor past it.
+    fn decide(&mut self) -> (StagedLoc<F>, U) {
+        let (sloc, update) = self.buffer.pop_front().expect("an entry is served");
+        self.entries -= 1;
+        self.served = false;
+        self.floor = sloc.loc() + 1;
+        (sloc, update)
+    }
+
+    /// Decide the served entry by writing `value` for its key, returning its prior value.
+    fn record(&mut self, value: Option<U::Value>) -> U::Value {
+        let (sloc, update) = self.decide();
+        let cached = update.cached();
+        self.swept.push((update.key().clone(), sloc, cached, value));
+        update.into_value()
+    }
+}
+
+impl<F: Family, U: update::Update> Entry<'_, F, U> {
+    fn head(&self) -> &(StagedLoc<F>, U) {
+        self.cursor.buffer.front().expect("an entry is served")
+    }
+
+    /// Return the update's location.
+    pub fn location(&self) -> Location<F> {
+        self.head().0.loc()
+    }
+
+    /// Return the update's key.
+    pub fn key(&self) -> &U::Key {
+        self.head().1.key()
+    }
+
+    /// Return the update's value.
+    pub fn value(&self) -> &U::Value {
+        self.head().1.value()
+    }
+
+    /// Keep the update. Merkleize moves it to the tip as the automatic floor raise would.
+    pub fn keep(self) {
+        let (sloc, update) = self.cursor.decide();
+        self.cursor.kept.push((sloc.loc(), update));
+    }
+
+    /// Delete the key and return its value.
+    pub fn evict(self) -> U::Value {
+        self.cursor.record(None)
+    }
+
+    /// Write `value` for the key and return the prior value.
+    pub fn replace(self, value: U::Value) -> U::Value {
+        self.cursor.record(Some(value))
+    }
+}
+
 // Unordered-specific methods.
 impl<F: Family, K, V, H, S: Strategy> UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>
 where
@@ -2256,6 +2690,48 @@ where
     }
 }
 
+impl<F: Family, K, V, H, S: Strategy> Sweep<F, H, update::Unordered<K, V>, S>
+where
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, update::Unordered<K, V>>: Codec,
+{
+    /// End the sweep, resolve the batch's writes and decisions, and return the merkleized
+    /// batch.
+    ///
+    /// Kept updates move to the tip as the automatic floor raise moves them. The batch commits
+    /// [`floor`](Sweep::floor), or the new commit location if the final state is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    #[tracing::instrument(
+        name = "qmdb.any.unordered.sweep.merkleize",
+        level = "info",
+        skip_all,
+        fields(kept = self.cursor.kept.len() as u64, swept = self.cursor.swept.len() as u64),
+    )]
+    pub async fn merkleize<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let (prepared, staged) = self.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged, None, |floor, tip, limit, out| {
+                fill_candidates(&db.bitmap, floor, tip, limit, out)
+            })
+            .await?;
+        Ok(batch)
+    }
+}
+
 impl<'a, F, K, V, E, C, I, H, const N: usize, S>
     Prepared<'a, F, E, C, I, H, update::Unordered<K, V>, N, S>
 where
@@ -2270,17 +2746,17 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Complete a prepared merkleization, consuming staged updates recorded by
-    /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
-    /// otherwise require) and accepting the floor-raise candidate source, optionally seeded
-    /// with prefetched committed-prefix candidates that must come from the same floor and
-    /// the same candidate source the callback scans (see [`PrefetchedCandidates`]).
+    /// [`Staged::merkleize`] or [`Sweep::merkleize`] (loaded keys skip the journal re-read
+    /// their resolution would otherwise require) and accepting the floor-raise candidate
+    /// source, optionally seeded with prefetched committed-prefix candidates that must come
+    /// from the same floor and the same candidate source the callback scans (see
+    /// [`PrefetchedCandidates`]).
     ///
     /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// and across successive calls (the floor raise asserts this). It must yield every location
+    /// that may hold an active update in this chain, and below the committed boundary only
+    /// locations whose committed bit is set. A keyed candidate is active when the nearest diff
+    /// entry for its key points at it, or when no diff holds its key.
     pub(crate) async fn merkleize_with_floor_scan(
         self,
         metadata: Option<V::Value>,
@@ -2354,11 +2830,6 @@ where
         // produce. Resolutions whose ancestor is still alive keep their recorded base. If
         // that ancestor commits before this batch is applied, `apply_batch` resolves the
         // key in the ancestor's traveling diff and supersedes its entry's location instead.
-        let staged_base_old_loc = |sloc: StagedLoc<F>| match sloc {
-            StagedLoc::Committed(loc) => Some(loc),
-            StagedLoc::Ancestor { loc, .. } if *loc < m.db_state.size => Some(loc),
-            StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
-        };
         let mut cached = staged_updates.into_iter().peekable();
         for (op, &old_loc) in zip_eq(results, &locations) {
             while cached
@@ -2366,7 +2837,7 @@ where
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
             {
                 let (key, sloc, (), mutation) = cached.next().expect("peeked entry exists");
-                emit(key, staged_base_old_loc(sloc), mutation);
+                emit(key, sloc.superseded(m.db_state.size), mutation);
             }
 
             let key = op.into_key().expect("updates should have a key");
@@ -2395,7 +2866,7 @@ where
             emit(key, base_old_loc, mutation);
         }
         for (key, sloc, (), mutation) in cached {
-            emit(key, staged_base_old_loc(sloc), mutation);
+            emit(key, sloc.superseded(m.db_state.size), mutation);
         }
 
         // Process all creates in key order, including parent-deleted keys being
@@ -2475,6 +2946,48 @@ where
     }
 }
 
+impl<F: Family, K, V, H, S: Strategy> Sweep<F, H, update::Ordered<K, V>, S>
+where
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// End the sweep, resolve the batch's writes and decisions, and return the merkleized
+    /// batch.
+    ///
+    /// Kept updates move to the tip as the automatic floor raise moves them. The batch commits
+    /// [`floor`](Sweep::floor), or the new commit location if the final state is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    #[tracing::instrument(
+        name = "qmdb.any.ordered.sweep.merkleize",
+        level = "info",
+        skip_all,
+        fields(kept = self.cursor.kept.len() as u64, swept = self.cursor.swept.len() as u64),
+    )]
+    pub async fn merkleize<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        let (prepared, staged) = self.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged, |floor, tip, limit, out| {
+                fill_candidates(&db.bitmap, floor, tip, limit, out)
+            })
+            .await?;
+        Ok(batch)
+    }
+}
+
 impl<'a, F, K, V, E, C, I, H, const N: usize, S>
     Prepared<'a, F, E, C, I, H, update::Ordered<K, V>, N, S>
 where
@@ -2489,16 +3002,16 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Complete a prepared merkleization, consuming staged updates recorded by
-    /// [`Staged::merkleize`] (loaded keys skip the index probe and journal re-read their
-    /// resolution would otherwise require: the caller's new value and the cached next key feed
-    /// op generation directly) and accepting the floor-raise candidate source.
+    /// [`Staged::merkleize`] or [`Sweep::merkleize`] (loaded keys skip the index probe and
+    /// journal re-read their resolution would otherwise require: the caller's new value and the
+    /// cached next key feed op generation directly) and accepting the floor-raise candidate
+    /// source.
     ///
     /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// and across successive calls (the floor raise asserts this). It must yield every location
+    /// that may hold an active update in this chain, and below the committed boundary only
+    /// locations whose committed bit is set. A keyed candidate is active when the nearest diff
+    /// entry for its key points at it, or when no diff holds its key.
     pub(crate) async fn merkleize_with_floor_scan(
         self,
         metadata: Option<V::Value>,
@@ -2568,12 +3081,12 @@ where
         // journal read would have. No prev-candidate value is stored: it is only consumed when
         // the predecessor-rewrite loop emits an op for the key, and that loop skips every key
         // present in `updated`. The ordered path never stages deletes (see
-        // `Staged::resolve_updates`), so every staged entry carries a value.
+        // `Staged::resolve_updates`), so every staged entry carries a value. An
+        // ancestor-resolved entry's superseded base is re-resolved through the live ancestor
+        // diffs when its update is emitted below.
         for (key, sloc, old_next, value) in staged_updates {
             let value = value.expect("ordered path never stages deletes");
-            let StagedLoc::Committed(loc) = sloc else {
-                unreachable!("ordered path never stages ancestor resolutions")
-            };
+            let loc = sloc.loc();
             next_candidates.push(old_next);
             prev_candidates.push((key.clone(), (None, loc)));
             updated.push((key, value, loc));
@@ -3031,7 +3544,7 @@ where
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
-            manual_floor: None,
+            frozen: None,
             base: Base::Child(Arc::clone(self)),
         }
     }
@@ -3190,7 +3703,7 @@ where
         UnmerkleizedBatch {
             journal_batch: self.log.new_batch(),
             mutations: BTreeMap::new(),
-            manual_floor: None,
+            frozen: None,
             base: Base::Db {
                 state: self.commitment(),
                 inactivity_floor_loc: self.inactivity_floor_loc,
@@ -3389,7 +3902,7 @@ mod trait_impls {
     use super::*;
     use crate::qmdb::any::traits::{
         ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-        UnmerkleizedBatch as UnmerkleizedBatchTrait,
+        Sweep as SweepTrait, UnmerkleizedBatch as UnmerkleizedBatchTrait,
     };
     use std::future::Future;
 
@@ -3413,21 +3926,58 @@ mod trait_impls {
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
         type Update = update::Unordered<K, V>;
+        type Sweep = Sweep<F, H, update::Unordered<K, V>, S>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        fn with_manual_floor(self) -> Self {
-            Self::with_manual_floor(self)
+        fn sweep(self, entries: usize, skips: u64) -> Self::Sweep {
+            Self::sweep(self, entries, skips)
         }
 
-        async fn pop_active(
+        fn merkleize(
             self,
             db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-            quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, Popped<F, Self::Update>), crate::qmdb::Error<F>> {
-            Self::pop_active(self, db, quota).await
+            metadata: Option<V::Value>,
+        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
+            self.merkleize(db, metadata)
+        }
+    }
+
+    impl<F, K, V, H, E, C, I, const N: usize, S>
+        SweepTrait<Db<F, E, C, I, H, update::Unordered<K, V>, N, S>>
+        for Sweep<F, H, update::Unordered<K, V>, S>
+    where
+        F: Family,
+        K: Key,
+        V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        S: Strategy,
+        Operation<F, update::Unordered<K, V>>: Codec,
+    {
+        type Family = F;
+        type Update = update::Unordered<K, V>;
+        type Metadata = V::Value;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
+
+        fn next<'a>(
+            &'a mut self,
+            db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        ) -> impl Future<Output = Result<Option<Entry<'a, F, Self::Update>>, crate::qmdb::Error<F>>>
+        {
+            Self::next(self, db)
+        }
+
+        fn floor(&self) -> Location<F> {
+            Self::floor(self)
+        }
+
+        fn is_done(&self) -> bool {
+            Self::is_done(self)
         }
 
         fn merkleize(
@@ -3459,21 +4009,58 @@ mod trait_impls {
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
         type Update = update::Ordered<K, V>;
+        type Sweep = Sweep<F, H, update::Ordered<K, V>, S>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        fn with_manual_floor(self) -> Self {
-            Self::with_manual_floor(self)
+        fn sweep(self, entries: usize, skips: u64) -> Self::Sweep {
+            Self::sweep(self, entries, skips)
         }
 
-        async fn pop_active(
+        fn merkleize(
             self,
             db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-            quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, Popped<F, Self::Update>), crate::qmdb::Error<F>> {
-            Self::pop_active(self, db, quota).await
+            metadata: Option<V::Value>,
+        ) -> impl Future<Output = Result<Self::Merkleized, crate::qmdb::Error<F>>> {
+            self.merkleize(db, metadata)
+        }
+    }
+
+    impl<F, K, V, H, E, C, I, const N: usize, S>
+        SweepTrait<Db<F, E, C, I, H, update::Ordered<K, V>, N, S>>
+        for Sweep<F, H, update::Ordered<K, V>, S>
+    where
+        F: Family,
+        K: Key,
+        V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        S: Strategy,
+        Operation<F, update::Ordered<K, V>>: Codec,
+    {
+        type Family = F;
+        type Update = update::Ordered<K, V>;
+        type Metadata = V::Value;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
+
+        fn next<'a>(
+            &'a mut self,
+            db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        ) -> impl Future<Output = Result<Option<Entry<'a, F, Self::Update>>, crate::qmdb::Error<F>>>
+        {
+            Self::next(self, db)
+        }
+
+        fn floor(&self) -> Location<F> {
+            Self::floor(self)
+        }
+
+        fn is_done(&self) -> bool {
+            Self::is_done(self)
         }
 
         fn merkleize(
@@ -3610,8 +4197,9 @@ mod tests {
         }
     }
 
+    /// A sweep over a pending ancestor's operations clones only the active update it returns.
     #[test]
-    fn pop_active_clones_only_returned_ancestor_update() {
+    fn sweep_clones_only_returned_ancestor_update() {
         deterministic::Runner::default().start(|context| async move {
             type TestDb = UnorderedFixedDb<
                 mmr::Family,
@@ -3622,34 +4210,88 @@ mod tests {
                 OneCap,
                 Sequential,
             >;
-            let config = fixed_db_config::<OneCap>("pop-clones", &context);
+            let config = fixed_db_config::<OneCap>("sweep-clones", &context);
             let db = TestDb::init(context, config, None).await.unwrap();
             let clones = Arc::new(AtomicUsize::new(0));
             let first = sha256::Digest::from([0; 32]);
             let second = sha256::Digest::from([1; 32]);
+
+            // A pending parent writes both keys and holds the floor.
             let parent = db
                 .new_batch()
-                .with_manual_floor()
                 .write(first, Some(CountedValue(clones.clone())))
                 .write(second, Some(CountedValue(clones.clone())))
+                .sweep(0, 0)
                 .merkleize(&db, Some(CountedValue(clones.clone())))
                 .await
                 .unwrap();
-            let child = parent.new_batch::<Sha256>().write(first, None);
+
+            // The child deletes the first key, so only the second key's update is active.
+            let mut sweep = parent
+                .new_batch::<Sha256>()
+                .write(first, None)
+                .sweep(usize::MAX, u64::MAX);
             clones.store(0, AtomicOrdering::Relaxed);
-            let (child, popped) = child.pop_active(&db, None).await.unwrap();
-            assert_eq!(
-                *update::Update::key(&popped.into_evicted().unwrap().update),
-                second
-            );
-            assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
-            let (_, popped) = child
-                .pop_active(&db, Some(NonZeroUsize::MAX))
+            let entry = sweep
+                .next(&db)
                 .await
-                .unwrap();
-            assert!(matches!(popped, Popped::Done));
+                .unwrap()
+                .expect("second key is active");
+            assert_eq!(*entry.key(), second);
+            entry.keep();
+            assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
+
+            // The sweep then reaches the tip without cloning another update.
+            assert!(sweep.next(&db).await.unwrap().is_none());
+            assert!(sweep.is_done());
             assert_eq!(clones.load(AtomicOrdering::Relaxed), 1);
             drop(parent);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A sweep reads ahead at most its remaining entries when a write before it shares a
+    /// translated-key bucket with every active update.
+    #[test]
+    fn sweep_reads_ahead_at_most_entries() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("sweep-read-ahead", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+
+            // Seed four colliding keys at 1..5 with a held floor.
+            let keys: Vec<_> = (0..4).map(|i| colliding_digest(0xAA, i)).collect();
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .sweep(0, 0)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            // Deleting the last key before a two-entry sweep leaves three active updates in
+            // its bucket, and the sweep holds at most its remaining entries ahead.
+            let mut sweep = db.new_batch().write(keys[3], None).sweep(2, u64::MAX);
+            for key in &keys[..2] {
+                let entry = sweep.next(&db).await.unwrap().expect("active update");
+                assert_eq!(entry.key(), key);
+                assert!(entry.cursor.buffer.len() <= entry.cursor.entries);
+                entry.keep();
+            }
+
+            // The sweep ends one past the second update.
+            assert!(sweep.next(&db).await.unwrap().is_none());
+            assert_eq!(sweep.floor(), loc(3));
+            drop(sweep);
             db.destroy().await.unwrap();
         });
     }
@@ -3773,9 +4415,9 @@ mod tests {
         }
     }
 
-    /// `merge_sorted_diffs` matches `extend` + `sort_by_key` for disjoint, sorted diffs.
+    /// `merge_by` on keys matches `extend` + `sort_by_key` for disjoint, sorted diffs.
     #[test]
-    fn merge_sorted_diffs_matches_sort() {
+    fn merge_by_matches_sort() {
         let mut rng = test_rng();
         for _ in 0..50 {
             // Disjoint key sets: evens on one side, odds on the other.
@@ -3794,7 +4436,7 @@ mod tests {
             reference.extend(b.clone());
             reference.sort_by_key(|x| x.0);
 
-            let merged = merge_sorted_diffs(a, b);
+            let merged = merge_by(a, b, |x, y| x.0 < y.0);
             assert_eq!(merged.len(), reference.len());
             for ((mk, me), (rk, re)) in merged.iter().zip(&reference) {
                 assert_eq!(mk, rk);
@@ -4681,7 +5323,6 @@ mod tests {
                     (5, Some(fallback)),
                 ],
                 vec![(k2, Some(upsert))],
-                &Sequential,
             );
 
             assert_eq!(
@@ -4777,7 +5418,7 @@ mod tests {
             updates.extend([(2 * n + 1, Some(mut_new)), (2 * n + 3, Some(staged_new))]);
 
             let (batch, staged_updates) =
-                staged.resolve_updates(updates, vec![(overlapped, Some(upsert))], &Sequential);
+                staged.resolve_updates(updates, vec![(overlapped, Some(upsert))]);
 
             let mut expected = vec![(staged_newer, committed(501), (), Some(staged_new))];
             expected.extend((0..n).map(|i| {
@@ -4896,7 +5537,6 @@ mod tests {
             let (batch, staged_updates) = staged.resolve_updates(
                 vec![(0, None), (1, Some(value_a)), (2, Some(value_b))],
                 Vec::new(),
-                &Sequential,
             );
 
             assert_eq!(

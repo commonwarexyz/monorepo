@@ -582,6 +582,9 @@ pub(crate) mod test {
         is_send(db.get_all(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
+        let mut sweep = db.new_batch().sweep(1, 1);
+        is_send(sweep.next(db));
+        is_send(db.new_batch().sweep(1, 1).merkleize(db, None));
     }
 
     /// Parent inserts a key, child inserts another; commit parent then

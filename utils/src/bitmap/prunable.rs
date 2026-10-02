@@ -1381,8 +1381,8 @@ mod tests {
         check_ones_iter_ranges::<32>();
         check_ones_iter_ranges::<64>();
     }
+
     #[test]
-    #[cfg(target_pointer_width = "64")]
     fn test_ones_iter_range_near_max() {
         let mut bitmap = Prunable::<8>::new_with_pruned_chunks((u64::MAX / 64) as usize).unwrap();
         let from = bitmap.pruned_bits();

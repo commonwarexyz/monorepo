@@ -1950,6 +1950,9 @@ pub(crate) mod test {
         is_send(reader.get_many(&[&key], db));
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None));
+        let mut sweep = db.new_batch().sweep(1, 1);
+        is_send(sweep.next(db));
+        is_send(db.new_batch().sweep(1, 1).merkleize(db, None));
         is_send(db.get_with_loc(&key));
     }
 

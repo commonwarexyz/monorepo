@@ -15,7 +15,7 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, PopActiveResult, Staged as AnyStaged, StagedUpdates},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
             operation::{Operation, update},
         },
         bitmap::{Shared, fill_from},
@@ -35,7 +35,7 @@ use commonware_utils::{
     Widen,
     bitmap::{self, Readable as _},
 };
-use core::{num::NonZeroUsize, ops::Range};
+use core::ops::Range;
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay.
@@ -142,11 +142,10 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 }
 
-/// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Fills `out` with up to
-/// `limit` floor-raise candidates in `[floor, tip)`, returning the next `floor`. Skips
-/// locations where the layered bitmap bit is unset (including locations superseded by
-/// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
-/// sequence as repeatedly calling the `next_candidate` test oracle over the chain.
+/// Floor scan over a layered `BitmapBatch` chain. Fills `out` with up to `limit` floor-raise
+/// candidates in `[floor, tip)`, returning the next `floor`. Candidates are the set bits of the
+/// layered bitmap, then every location at or past its length. Produces the same sequence as
+/// repeatedly calling the `next_candidate` test oracle over the chain.
 ///
 /// One scan iterator serves the whole batch: overlay chunks resolve lock-free and the
 /// committed base is locked once per untouched chunk, rather than several times per
@@ -301,6 +300,22 @@ where
     bitmap_parent: BitmapBatch<N>,
 }
 
+/// A terminal pass over a batch's active updates from its inactivity floor, drawing candidates
+/// from the speculative bitmap.
+///
+/// Returned by [`UnmerkleizedBatch::sweep`] and [`Staged::sweep`]. See [`any::batch::Sweep`].
+pub struct Sweep<F, H, U, const N: usize, S: Strategy>
+where
+    F: Graftable,
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    inner: any::batch::Sweep<F, H, U, S>,
+    grafted_parent: Arc<merkle::batch::MerkleizedBatch<F, H::Digest, S>>,
+    bitmap_parent: BitmapBatch<N>,
+}
+
 /// A speculative batch of operations whose root digest has been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 ///
@@ -378,61 +393,19 @@ where
         self
     }
 
-    /// Disable automatic floor advancement for this batch. [`pop_active`](Self::pop_active)
-    /// advances through the original prefix; an empty final state moves the floor to the
-    /// new commit location.
-    pub fn with_manual_floor(mut self) -> Self {
-        self.inner = self.inner.with_manual_floor();
-        self
-    }
-
-    /// Evict the next active update, skipping inactive operations.
-    ///
-    /// `quota` limits inactive skips per call; `None` is unlimited. Returns
-    /// [`any::batch::Popped::QuotaReached`] upon reaching the quota and [`any::batch::Popped::Done`]
-    /// upon reaching the original tip, retaining the advanced floor for the next call. New writes
-    /// and reinserts are outside the scan. Write the evicted update's key and value back to
-    /// preserve it. See [`any::batch::UnmerkleizedBatch::pop_active`].
-    ///
-    /// Calling this method selects manual floor advancement even when it evicts nothing.
-    /// Merkleization performs no additional automatic moves; an empty final state sets the floor
-    /// to the new commit location.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StaleBatch`] when `db` is not the batch's live database instance or
-    /// its parent bitmap does not match the committed database.
-    pub async fn pop_active<E, C, I>(
-        self,
-        db: &super::db::Db<F, E, C, I, H, U, N, S>,
-        quota: Option<NonZeroUsize>,
-    ) -> PopActiveResult<Self, F, U>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+    /// Start a sweep over the speculative bitmap. See
+    /// [`any::batch::UnmerkleizedBatch::sweep`].
+    pub fn sweep(self, entries: usize, skips: u64) -> Sweep<F, H, U, N, S> {
         let Self {
             inner,
             grafted_parent,
             bitmap_parent,
         } = self;
-        // The speculative bitmap already clears committed updates that pending ancestors
-        // superseded, so those are skipped without reading them.
-        let (inner, entry) = inner
-            .pop_active_with(&db.any, quota, |from, end| {
-                bitmap_parent.ones_iter_range(from..end).next()
-            })
-            .await?;
-        Ok((
-            Self {
-                inner,
-                grafted_parent,
-                bitmap_parent,
-            },
-            entry,
-        ))
+        Sweep {
+            inner: inner.sweep(entries, skips),
+            grafted_parent,
+            bitmap_parent,
+        }
     }
 
     /// Read through: mutations -> ancestor diffs -> committed DB.
@@ -549,6 +522,80 @@ where
                 bitmap_parent,
             },
         ))
+    }
+
+    /// Record updates for staged reads and upserts for unread keys, then start a sweep. See
+    /// [`any::batch::Staged::sweep`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if any update's `read_index` is out of the staged read range.
+    pub fn sweep(
+        self,
+        updates: Vec<(usize, Option<U::Value>)>,
+        upserts: Vec<(U::Key, Option<U::Value>)>,
+        entries: usize,
+        skips: u64,
+    ) -> Sweep<F, H, U, N, S> {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        Sweep {
+            inner: inner.sweep(updates, upserts, entries, skips),
+            grafted_parent,
+            bitmap_parent,
+        }
+    }
+}
+
+impl<F, H, U, const N: usize, S: Strategy> Sweep<F, H, U, N, S>
+where
+    F: Graftable,
+    U: update::Update,
+    H: Hasher,
+    Operation<F, U>: Codec,
+{
+    /// Return the next active update. See [`any::batch::Sweep::next`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch. Reading an operation can also return a journal
+    /// error. An error or cancellation leaves the sweep unchanged.
+    pub async fn next<E, C, I>(
+        &mut self,
+        db: &super::db::Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Option<any::batch::Entry<'_, F, U>>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            bitmap_parent,
+            ..
+        } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let bitmap = &*bitmap_parent;
+        inner
+            .next_with(&db.any, |floor, tip, limit, out| {
+                fill_candidates(bitmap, floor, tip, limit, out)
+            })
+            .await
+    }
+
+    /// Return the floor [`merkleize`](Sweep::merkleize) commits unless the final state is
+    /// empty.
+    pub const fn floor(&self) -> Location<F> {
+        self.inner.floor()
+    }
+
+    /// Return whether the floor reached the batch's original tip.
+    pub fn is_done(&self) -> bool {
+        self.inner.is_done()
     }
 }
 
@@ -673,7 +720,7 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
+        let (inner, staged_updates) = inner.resolve_updates(updates, upserts);
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
@@ -782,6 +829,100 @@ where
                 StagedUpdates::<F, update::Ordered<K, V>>::new(),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
+            .await?;
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
+    }
+}
+
+impl<F, K, V, H, const N: usize, S: Strategy> Sweep<F, H, update::Unordered<K, V>, N, S>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, update::Unordered<K, V>>: Codec,
+{
+    /// End the sweep and return the merkleized batch. See [`any::batch::Sweep::merkleize`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    #[tracing::instrument(
+        name = "qmdb.current.unordered.sweep.merkleize",
+        level = "info",
+        skip_all
+    )]
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let (prepared, staged_updates) = inner.prepare(&db.any)?;
+        let (inner, retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged_updates, None, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
+            .await?;
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
+    }
+}
+
+impl<F, K, V, H, const N: usize, S: Strategy> Sweep<F, H, update::Ordered<K, V>, N, S>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// End the sweep and return the merkleized batch. See [`any::batch::Sweep::merkleize`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    #[tracing::instrument(
+        name = "qmdb.current.ordered.sweep.merkleize",
+        level = "info",
+        skip_all
+    )]
+    pub async fn merkleize<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        metadata: Option<V::Value>,
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        let Self {
+            inner,
+            grafted_parent,
+            bitmap_parent,
+        } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let (prepared, staged_updates) = inner.prepare(&db.any)?;
+        let (inner, retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
+            })
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -1343,7 +1484,7 @@ mod trait_impls {
         journal::contiguous::Mutable,
         qmdb::any::traits::{
             ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-            UnmerkleizedBatch as UnmerkleizedBatchTrait,
+            Sweep as SweepTrait, UnmerkleizedBatch as UnmerkleizedBatchTrait,
         },
     };
     use std::future::Future;
@@ -1371,21 +1512,59 @@ mod trait_impls {
         type Update = update::Unordered<K, V>;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
+        type Sweep = Sweep<F, H, update::Unordered<K, V>, N, S>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        fn with_manual_floor(self) -> Self {
-            Self::with_manual_floor(self)
+        fn sweep(self, entries: usize, skips: u64) -> Self::Sweep {
+            Self::sweep(self, entries, skips)
         }
 
-        async fn pop_active(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-            quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, any::batch::Popped<F, Self::Update>), Error<F>> {
-            Self::pop_active(self, db, quota).await
+            metadata: Option<V::Value>,
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            self.merkleize(db, metadata).await
+        }
+    }
+
+    impl<F, K, V, H, E, C, I, const N: usize, S>
+        SweepTrait<CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>>
+        for Sweep<F, H, update::Unordered<K, V>, N, S>
+    where
+        F: Graftable,
+        K: Key,
+        V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        S: Strategy,
+        Operation<F, update::Unordered<K, V>>: Codec,
+    {
+        type Family = F;
+        type Update = update::Unordered<K, V>;
+        type Metadata = V::Value;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
+
+        fn next<'a>(
+            &'a mut self,
+            db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        ) -> impl Future<
+            Output = Result<Option<any::batch::Entry<'a, F, Self::Update>>, crate::qmdb::Error<F>>,
+        > {
+            Self::next(self, db)
+        }
+
+        fn floor(&self) -> Location<F> {
+            Self::floor(self)
+        }
+
+        fn is_done(&self) -> bool {
+            Self::is_done(self)
         }
 
         async fn merkleize(
@@ -1417,21 +1596,59 @@ mod trait_impls {
         type Update = update::Ordered<K, V>;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
+        type Sweep = Sweep<F, H, update::Ordered<K, V>, N, S>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
         }
 
-        fn with_manual_floor(self) -> Self {
-            Self::with_manual_floor(self)
+        fn sweep(self, entries: usize, skips: u64) -> Self::Sweep {
+            Self::sweep(self, entries, skips)
         }
 
-        async fn pop_active(
+        async fn merkleize(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-            quota: Option<NonZeroUsize>,
-        ) -> Result<(Self, any::batch::Popped<F, Self::Update>), Error<F>> {
-            Self::pop_active(self, db, quota).await
+            metadata: Option<V::Value>,
+        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
+            self.merkleize(db, metadata).await
+        }
+    }
+
+    impl<F, K, V, H, E, C, I, const N: usize, S>
+        SweepTrait<CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>>
+        for Sweep<F, H, update::Ordered<K, V>, N, S>
+    where
+        F: Graftable,
+        K: Key,
+        V: ValueEncoding + 'static,
+        H: Hasher,
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+        S: Strategy,
+        Operation<F, update::Ordered<K, V>>: Codec,
+    {
+        type Family = F;
+        type Update = update::Ordered<K, V>;
+        type Metadata = V::Value;
+        type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
+
+        fn next<'a>(
+            &'a mut self,
+            db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        ) -> impl Future<
+            Output = Result<Option<any::batch::Entry<'a, F, Self::Update>>, crate::qmdb::Error<F>>,
+        > {
+            Self::next(self, db)
+        }
+
+        fn floor(&self) -> Location<F> {
+            Self::floor(self)
+        }
+
+        fn is_done(&self) -> bool {
+            Self::is_done(self)
         }
 
         async fn merkleize(
@@ -1964,8 +2181,7 @@ mod tests {
 
             // Prefetch-then-live handoff: the prefetch is clamped to the committed
             // boundary and the live scan resumes from the continuation with the
-            // post-batch tip. Nothing the raise must revalidate may be lost across the
-            // handoff (false negatives are forbidden): every set bit in `[floor, len)`
+            // post-batch tip. The handoff emits exactly every set bit in `[floor, len)`
             // and every location in `[len, tip)`.
             let tip = len + 3;
             let cap = tip as usize;
@@ -1974,14 +2190,11 @@ mod tests {
                 let mut got = Vec::new();
                 let next = fill_candidates(&chain, Location::new(floor), committed, cap, &mut got);
                 fill_candidates(&chain, next, tip, cap, &mut got);
-                assert!(got.is_sorted_by(|a, b| a < b), "{name} floor={floor}");
-                for loc in floor..tip {
-                    let must_emit = loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc);
-                    assert!(
-                        !must_emit || got.contains(&Location::new(loc)),
-                        "{name} floor={floor} lost {loc}"
-                    );
-                }
+                let want: Vec<Location> = (floor..tip)
+                    .filter(|&loc| loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc))
+                    .map(Location::new)
+                    .collect();
+                assert_eq!(got, want, "{name} floor={floor}");
             }
         }
     }
