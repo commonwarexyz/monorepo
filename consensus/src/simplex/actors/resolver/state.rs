@@ -380,30 +380,6 @@ impl State {
     }
 }
 
-/// Read access to resolver state for the actor tests.
-#[cfg(test)]
-impl State {
-    pub(super) const fn floor(&self) -> View {
-        self.floor
-    }
-
-    pub(super) const fn nullifications(&self) -> &BTreeMap<View, Bytes> {
-        &self.nullifications
-    }
-
-    pub(super) const fn pending_notarizations(&self) -> &BTreeSet<View> {
-        &self.pending_notarizations
-    }
-
-    pub(super) const fn certified_notarizations(&self) -> &BTreeMap<View, Bytes> {
-        &self.certified_notarizations
-    }
-
-    pub(super) const fn uncertifiable_notarizations(&self) -> &BTreeSet<View> {
-        &self.uncertifiable_notarizations
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{super::test_helpers::*, *};
@@ -723,6 +699,156 @@ mod tests {
             state.produce(View::new(3)),
             Some(TestCertificate::Notarization(notarization_v3).encode())
         );
+    }
+
+    /// A verdict carries its notarization, so recording the notarization and
+    /// its verdict leaves the same state in either order.
+    #[test]
+    fn verdict_and_notarization_commute() {
+        let notarization_v7 = notarization(7);
+        for success in [true, false] {
+            // Record the notarization, then its verdict.
+            let mut first = State::new(TermLength::new(NZU32!(5)));
+            let mut first_outstanding = BTreeSet::new();
+            let effects = first.handle(Certificate::Notarization(notarization_v7.clone()));
+            apply_effects(&mut first_outstanding, &effects);
+            let effects = first.handle_certified(notarization_v7.clone(), success);
+            apply_effects(&mut first_outstanding, &effects);
+
+            // Record the verdict, then its notarization.
+            let mut second = State::new(TermLength::new(NZU32!(5)));
+            let mut second_outstanding = BTreeSet::new();
+            let effects = second.handle_certified(notarization_v7.clone(), success);
+            apply_effects(&mut second_outstanding, &effects);
+            let effects = second.handle(Certificate::Notarization(notarization_v7.clone()));
+            apply_effects(&mut second_outstanding, &effects);
+
+            // Both orders leave the same caches, construction floor, and
+            // fetches. Only a successful verdict makes the notarization
+            // servable and the floor.
+            assert_eq!(first.pending_notarizations, second.pending_notarizations);
+            assert_eq!(
+                first.certified_notarizations,
+                second.certified_notarizations
+            );
+            assert_eq!(
+                first.uncertifiable_notarizations,
+                second.uncertifiable_notarizations
+            );
+            assert_eq!(first.floor, second.floor);
+            assert_eq!(first_outstanding, second_outstanding);
+            for probe in (1..=8).map(View::new) {
+                assert_eq!(first.produce(probe), second.produce(probe));
+            }
+            assert_eq!(
+                first.certified_notarizations.contains_key(&View::new(7)),
+                success
+            );
+            assert_eq!(first.floor == View::new(7), success);
+        }
+    }
+
+    /// Recording a certificate again opens no fetch and does not recache a
+    /// notarization that failed certification, whatever arrived between the
+    /// two copies.
+    #[test]
+    fn reapplied_certificates_emit_no_fetches() {
+        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let nullification_v20 = nullification(20);
+        let notarization_v22 = notarization(22);
+        let finalization_v23 = finalization(23);
+
+        // Record each certificate once, with a failed verdict in between.
+        state.handle(nullification_v20.clone());
+        state.handle(Certificate::Notarization(notarization_v22.clone()));
+        state.handle_certified(notarization_v22.clone(), false);
+
+        // Above finalization, copies open no fetch and the failed
+        // notarization stays uncached.
+        assert_eq!(
+            state.handle(nullification_v20.clone()),
+            vec![settled(Kind::Nullification, 20, 20)]
+        );
+        assert!(
+            state
+                .handle(Certificate::Notarization(notarization_v22.clone()))
+                .is_empty()
+        );
+        assert!(!state.pending_notarizations.contains(&View::new(22)));
+        assert!(!state.certified_notarizations.contains_key(&View::new(22)));
+
+        // After finalization prunes them, copies still open no fetch.
+        state.handle(finalization_v23.clone());
+        assert_eq!(
+            state.handle(finalization_v23),
+            vec![Effect::Finalized(View::new(23))]
+        );
+        assert!(state.handle(nullification_v20).is_empty());
+        assert!(
+            state
+                .handle(Certificate::Notarization(notarization_v22))
+                .is_empty()
+        );
+        assert!(state.nullifications.is_empty());
+        assert!(state.pending_notarizations.is_empty());
+    }
+
+    /// A copy of a certified notarization settles its ask again without being
+    /// recorded as pending, since no second verdict would ever clear it.
+    #[test]
+    fn certified_notarization_copy_is_not_pending() {
+        let mut state = State::new(TermLength::ONE);
+        let notarization_v3 = notarization(3);
+        state.handle(Certificate::Notarization(notarization_v3.clone()));
+        state.handle_certified(notarization_v3.clone(), true);
+
+        let effects = state.handle(Certificate::Notarization(notarization_v3));
+        assert_eq!(effects, vec![settled(Kind::Notarization, 3, 3)]);
+        assert!(state.pending_notarizations.is_empty());
+    }
+
+    /// A verdict that arrives after a covering finalization promotes nothing.
+    #[test]
+    fn late_verdict_after_finalization_promotes_nothing() {
+        let mut state = State::new(TermLength::new(NZU32!(5)));
+        let notarization_v5 = notarization(5);
+        state.handle(Certificate::Notarization(notarization_v5.clone()));
+        assert!(state.pending_notarizations.contains(&View::new(5)));
+
+        // A covering finalization prunes the view awaiting its verdict.
+        state.handle(finalization(6));
+        assert!(state.pending_notarizations.is_empty());
+
+        // The late verdict finds nothing to promote: a notarization at or
+        // below finalization never becomes servable.
+        state.handle_certified(notarization_v5, true);
+        assert!(state.certified_notarizations.is_empty());
+    }
+
+    /// A finalization prunes every retained certificate at or below it.
+    #[test]
+    fn finalization_prunes_retained_certificates() {
+        let mut state = State::new(TermLength::new(NZU32!(5)));
+
+        // Retain a nullification and a notarization in each verdict state.
+        state.handle(nullification(2));
+        let (pending, certified, failed) = (notarization(6), notarization(7), notarization(8));
+        for notarization in [&pending, &certified, &failed] {
+            state.handle(Certificate::Notarization(notarization.clone()));
+        }
+        state.handle_certified(certified, true);
+        state.handle_certified(failed, false);
+        assert_eq!(state.nullifications.len(), 1);
+        assert_eq!(state.pending_notarizations.len(), 1);
+        assert_eq!(state.certified_notarizations.len(), 1);
+        assert_eq!(state.uncertifiable_notarizations.len(), 1);
+
+        // A finalization above all of them prunes them.
+        state.handle(finalization(10));
+        assert!(state.nullifications.is_empty());
+        assert!(state.pending_notarizations.is_empty());
+        assert!(state.certified_notarizations.is_empty());
+        assert!(state.uncertifiable_notarizations.is_empty());
     }
 
     #[test]
