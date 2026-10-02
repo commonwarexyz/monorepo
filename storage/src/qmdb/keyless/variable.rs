@@ -15,7 +15,7 @@ pub type Db<F, E, V, H, S> =
     super::Keyless<F, E, VariableEncoding<V>, variable::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for variable-length data.
-pub type CompactDb<F, E, V, H, C, S> = super::CompactDb<F, E, VariableEncoding<V>, H, C, S>;
+pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, VariableEncoding<V>, H, S>;
 
 /// Configuration for a variable-size [keyless](super) authenticated db.
 pub type Config<C, S> = super::Config<JournalConfig<C>, S>;
@@ -74,14 +74,7 @@ mod tests {
     }
 
     type TestDb<F> = Db<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type TestCompactDb<F> = CompactDb<
-        F,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type TestCompactDb<F> = CompactDb<F, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
@@ -105,12 +98,11 @@ mod tests {
                 partition: "compact-keyless-variable-witness".into(),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((0..=10000usize).into(), ()),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((0..=10000usize).into(), ()),
         };
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }

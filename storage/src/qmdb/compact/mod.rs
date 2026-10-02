@@ -1,17 +1,55 @@
-//! Shared compact QMDB helpers.
+//! A compact authenticated db that discards historical operations, retaining only a witness
+//! for each applied state.
+//!
+//! One [`Db`] serves the keyless and immutable dbs through the sealed [`Operation`] trait.
+//! [`crate::qmdb::keyless`] and [`crate::qmdb::immutable`] pin the operation type through
+//! aliases and add `append` and `set`, respectively.
+//!
+//! Mirrors the API of the full dbs ([`crate::qmdb::keyless::Keyless`],
+//! [`crate::qmdb::immutable::Immutable`]): `new_batch -> merkleize -> apply_batch -> commit /
+//! sync / start_sync`, pipelined batch chains, `StaleBatch` validation. It is backed by the
+//! peak-only [`crate::merkle::compact`]. Because history is discarded, the db has no `get` /
+//! `proof` / `bounds` methods. A merkleized batch can prove only its own operations, and only
+//! until it is applied. Use a full db for historical proofs.
+//!
+//! # Witness journal
+//!
+//! The witness journal is the single durable source of truth. Each entry is a complete witness
+//! of one applied state, so bounded [`Db::init`] can restore a retained applied state
+//! (history is bounded by [`Db::prune`]). Initialization selects an entry by size, then decodes
+//! its commit operation with the witness journal's codec config and rebuilds the in-memory Merkle
+//! from the entry's pinned nodes and commit. The commits of entries it does not select are never
+//! decoded. An entry the journal cannot decode, or a selected entry whose commit fails to decode,
+//! fails the open with [`Error::Journal`](crate::qmdb::Error::Journal). A selected entry that
+//! decodes but cannot rebuild fails it with
+//! [`Error::DataCorrupted`](crate::qmdb::Error::DataCorrupted). The witness is also what lets
+//! compact nodes serve compact sync without retaining historical operations. A compact-sync
+//! import is journaled by its first apply or durability operation, which replaces the
+//! partition's previous witnesses without decoding them.
+//!
+//! Entries are strictly increasing in committed size, so a size uniquely identifies an
+//! initialization or prune target. An appended entry becomes durable when [`Db::commit`],
+//! [`Db::sync`], or [`Db::prune`] returns, or, for [`Db::start_sync`], when the returned handle
+//! completes. Before that point recovery may fall back to the previous entry. The first entry of
+//! a compact-sync import has none: a crash that loses it leaves an interrupted import, which
+//! fails to open until a re-sync replaces it. The tip entry is never pruned.
+//!
+//! # Inactivity floor
+//!
+//! Commits carry the inactivity floor so the compact db's commit leaves and root match the full
+//! db's: the root is computed over the peaks the floor leaves active.
 
-pub(crate) mod batch;
-pub(crate) mod witness;
+mod batch;
+pub(crate) mod db;
+mod operation;
+mod sync;
+mod witness;
 
-use crate::{
-    Context,
-    journal::contiguous::variable,
-    merkle::{Family, Location},
-    qmdb::{Error, sync::journal::Memory},
-};
-use commonware_cryptography::Digest;
+use crate::journal::contiguous::variable;
 use commonware_parallel::Strategy;
-use commonware_utils::range::NonEmptyRange;
+pub use db::{Db, MerkleizedBatch, UnmerkleizedBatch, initial_root};
+pub use operation::Operation;
+pub(in crate::qmdb) use operation::sealed;
 
 /// Configuration for a compact authenticated db.
 #[derive(Clone)]
@@ -19,43 +57,7 @@ pub struct Config<C, S: Strategy> {
     /// Strategy used to parallelize merkleization.
     pub strategy: S,
 
-    /// Configuration for the journal that persists the witness.
-    pub witness: variable::Config<()>,
-
-    /// Codec config used to decode the persisted last commit operation on reopen.
-    pub commit_codec_config: C,
-}
-
-/// Build a compact db from state fetched by the sync engine.
-/// Returns [`Error::UnexpectedData`] if the log has more than the commit operation.
-pub(crate) async fn from_sync_result<E, F, D, C, S, Op, DB>(
-    context: E,
-    config: Config<C, S>,
-    log: Memory<F, E, Op>,
-    pinned_nodes: Option<Vec<D>>,
-    range: NonEmptyRange<Location<F>>,
-    init: impl FnOnce(S, witness::Journal<E, F, D>, C, Location<F>, Vec<D>, Op) -> Result<DB, Error<F>>,
-) -> Result<DB, Error<F>>
-where
-    E: Context,
-    F: Family,
-    D: Digest,
-    S: Strategy,
-{
-    let last_commit_loc = range.start();
-    let (start, ops) = log.into_parts();
-    let (Ok([op]), true) = (<[Op; 1]>::try_from(ops), start == last_commit_loc) else {
-        return Err(Error::UnexpectedData(last_commit_loc));
-    };
-
-    let journal = variable::Journal::init(context.child("witness"), config.witness).await?;
-    init(
-        config.strategy,
-        journal,
-        config.commit_codec_config,
-        last_commit_loc,
-        // None only happens at genesis, where nothing is pinned.
-        pinned_nodes.unwrap_or_default(),
-        op,
-    )
+    /// Configuration for the witness journal. Its codec config decodes the commit operations the
+    /// witnesses hold.
+    pub witness: variable::Config<C>,
 }

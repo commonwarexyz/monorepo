@@ -1292,14 +1292,8 @@ mod compact_variable_mmr {
     use commonware_parallel::Sequential;
 
     type SourceDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type ClientDb = variable::CompactDb<
-        mmr::Family,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type ClientDb =
+        variable::CompactDb<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     fn source_config(
         suffix: &str,
@@ -1338,12 +1332,11 @@ mod compact_variable_mmr {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((0..=10000).into(), ()),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((0..=10000).into(), ()),
         }
     }
 
@@ -2003,22 +1996,29 @@ mod compact_variable_mmr {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-root-mismatch-{}", context.next_u64());
 
-            // Seed the destination partition with durable state that a failed import must not
-            // replace.
+            // Seed the destination partition with two durable commits whose metadata the
+            // client's tightened limit rejects. A failed import must neither decode nor replace
+            // them.
             let client_cfg = client_config(&suffix, &context);
-            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
+            let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
                 .await
                 .unwrap();
-            let batch = seeded
-                .new_batch()
-                .append(vec![1])
-                .merkleize(&seeded, Some(vec![1]), Location::new(0))
-                .await
-                .unwrap();
-            let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
-            let seeded = seeded.sync().await.unwrap();
-            let original_target = seeded.target();
+            let mut seeded_targets = Vec::new();
+            for i in 1u8..=2 {
+                let floor = seeded.inactivity_floor_loc();
+                let batch = seeded
+                    .new_batch()
+                    .append(vec![i])
+                    .merkleize(&seeded, Some(vec![i; 3]), floor)
+                    .await
+                    .unwrap();
+                (seeded, _) = seeded.apply_batch(batch).await.unwrap();
+                seeded = seeded.sync().await.unwrap();
+                seeded_targets.push(seeded.target());
+            }
             drop(seeded);
+            let mut restrictive_cfg = client_cfg.clone();
+            restrictive_cfg.witness.codec_config = ((0..=2).into(), ());
 
             // Build a compact boundary response from a valid source state.
             let source = SourceDb::init(
@@ -2082,7 +2082,7 @@ mod compact_variable_mmr {
                     root: noncanonical_root,
                     size,
                 },
-                client_cfg.clone(),
+                restrictive_cfg,
             ))
             .await;
             assert!(matches!(
@@ -2090,11 +2090,21 @@ mod compact_variable_mmr {
                 Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
             ));
 
-            // Reopening the destination must recover the original durable state.
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
+            // Reopening the destination with its original limit recovers the original durable
+            // state and the history below it.
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg.clone(), None)
                 .await
                 .unwrap();
-            assert_eq!(reopened.target(), original_target);
+            assert_eq!(reopened.target(), seeded_targets[1]);
+            drop(reopened);
+            let reopened = ClientDb::init(
+                context.child("reopen_history"),
+                client_cfg,
+                Some(seeded_targets[0].size),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.target(), seeded_targets[0]);
 
             reopened.destroy().await.unwrap();
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
@@ -2158,16 +2168,9 @@ mod compact_variable_mmr {
             else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            let journal = crate::journal::contiguous::variable::Journal::init(
-                context.child("import"),
-                client_cfg.witness.clone(),
-            )
-            .await
-            .unwrap();
             let imported = ClientDb::init_from_sync(
-                client_cfg.strategy.clone(),
-                journal,
-                client_cfg.commit_codec_config,
+                context.child("import"),
+                client_cfg.clone(),
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -2178,38 +2181,82 @@ mod compact_variable_mmr {
             // Drop the unpersisted import. It must not replace the previous durable witness.
             drop(imported);
 
-            // Pruning requires a persisted import; rebuild the pending import to check rejection.
-            let response = fetch_compact_state(&source, target_b.clone())
-                .await
-                .unwrap();
-            let sync::Response::Boundary {
-                op, pinned_nodes, ..
-            } = response
-            else {
-                unreachable!("boundary fetch returns a boundary response");
-            };
-            let journal = crate::journal::contiguous::variable::Journal::init(
-                context.child("import").with_attribute("index", 2),
-                client_cfg.witness.clone(),
-            )
-            .await
-            .unwrap();
-            let imported = ClientDb::init_from_sync(
-                client_cfg.strategy.clone(),
-                journal,
-                client_cfg.commit_codec_config,
-                target_b.size - 1,
-                pinned_nodes,
-                op,
-            )
-            .unwrap();
-            assert!(imported.prune(target_b.size).await.is_err());
-
-            // The dropped imports never touched the journal: state A is still there.
+            // The dropped import never touched the journal: state A is still there.
             let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), target_a);
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Build a committed source holding one append, returning it and its compact target.
+    async fn committed_source(
+        context: deterministic::Context,
+        suffix: &str,
+    ) -> (SourceDb, sync::CompactTarget<mmr::Family, sha256::Digest>) {
+        let config = source_config(suffix, &context);
+        let source = SourceDb::init(context, config, None).await.unwrap();
+        let batch = source
+            .new_batch()
+            .append(vec![9])
+            .merkleize(&source, Some(vec![9]), Location::new(0))
+            .await
+            .unwrap();
+        let (source, _) = source.apply_batch(batch).await.unwrap();
+        let source = source.commit().await.unwrap();
+        let target = sync::CompactTarget {
+            root: source.root(),
+            size: source.bounds().end,
+        };
+        (source, target)
+    }
+
+    /// Compact sync replaces a destination whose witnesses no longer decode under the client's
+    /// codec config, here a tightened metadata limit.
+    #[test_traced("WARN")]
+    fn test_compact_sync_replaces_undecodable_witnesses() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-keyless-undecodable-{}", context.next_u64());
+
+            // Persist metadata at the original limit, then tighten it below that length.
+            let client_cfg = client_config(&suffix, &context);
+            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
+                .await
+                .unwrap();
+            let batch = seeded
+                .new_batch()
+                .append(vec![1])
+                .merkleize(&seeded, Some(vec![1, 2, 3]), Location::new(0))
+                .await
+                .unwrap();
+            let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
+            drop(seeded.sync().await.unwrap());
+            let mut restrictive_cfg = client_cfg;
+            restrictive_cfg.witness.codec_config = ((0..=2).into(), ());
+            assert!(matches!(
+                ClientDb::init(context.child("reject"), restrictive_cfg.clone(), None).await,
+                Err(qmdb::Error::Journal(crate::journal::Error::Codec(
+                    commonware_codec::Error::InvalidLength(3)
+                )))
+            ));
+
+            let (source, target) = committed_source(context.child("source"), &suffix).await;
+            let synced: ClientDb = sync::sync(compact_engine_config(
+                context.child("client"),
+                Arc::new(source),
+                target.clone(),
+                restrictive_cfg.clone(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(synced.target(), target);
+            drop(synced);
+
+            let reopened = ClientDb::init(context.child("reopen"), restrictive_cfg, None)
+                .await
+                .unwrap();
+            assert_eq!(reopened.target(), target);
             reopened.destroy().await.unwrap();
         });
     }
@@ -2225,14 +2272,8 @@ mod compact_variable_mmb {
     use commonware_parallel::Sequential;
 
     type SourceDb = variable::Db<mmb::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
-    type ClientDb = variable::CompactDb<
-        mmb::Family,
-        deterministic::Context,
-        Vec<u8>,
-        Sha256,
-        (commonware_codec::RangeCfg<usize>, ()),
-        Sequential,
-    >;
+    type ClientDb =
+        variable::CompactDb<mmb::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
 
     fn source_config(
         suffix: &str,
@@ -2271,12 +2312,11 @@ mod compact_variable_mmb {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((0..=10000).into(), ()),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((0..=10000).into(), ()),
         }
     }
 

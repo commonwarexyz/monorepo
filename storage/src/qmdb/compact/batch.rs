@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// task. If the caller is cancelled mid-job, the job still runs to completion against its snapshot
 /// and the result is discarded.
 #[allow(clippy::type_complexity)]
-pub(crate) async fn merkleize_ops<F, H, S, Op>(
+pub(super) async fn merkleize_ops<F, H, S, Op>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     batch: compact::UnmerkleizedBatch<F, H::Digest, S>,
     ops: impl Into<Arc<Vec<Op>>>,

@@ -1267,7 +1267,6 @@ mod compact_variable_mmr {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        CodecConfig,
         Sequential,
     >;
 
@@ -1308,12 +1307,11 @@ mod compact_variable_mmr {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ((0..=10000).into(), ())),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((), ((0..=10000).into(), ())),
         }
     }
 
@@ -1945,16 +1943,9 @@ mod compact_variable_mmr {
             else {
                 unreachable!("boundary fetch returns a boundary response");
             };
-            let journal = crate::journal::contiguous::variable::Journal::init(
-                context.child("import"),
-                client_cfg.witness.clone(),
-            )
-            .await
-            .unwrap();
             let imported = ClientDb::init_from_sync(
-                client_cfg.strategy.clone(),
-                journal,
-                client_cfg.commit_codec_config,
+                context.child("import"),
+                client_cfg.clone(),
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -1965,34 +1956,7 @@ mod compact_variable_mmr {
             // Drop the unpersisted import. It must not replace the previous durable witness.
             drop(imported);
 
-            // Pruning requires a persisted import; rebuild the pending import to check rejection.
-            let response = fetch_compact_state(&source, target_b.clone())
-                .await
-                .unwrap();
-            let sync::Response::Boundary {
-                op, pinned_nodes, ..
-            } = response
-            else {
-                unreachable!("boundary fetch returns a boundary response");
-            };
-            let journal = crate::journal::contiguous::variable::Journal::init(
-                context.child("import").with_attribute("index", 2),
-                client_cfg.witness.clone(),
-            )
-            .await
-            .unwrap();
-            let imported = ClientDb::init_from_sync(
-                client_cfg.strategy.clone(),
-                journal,
-                client_cfg.commit_codec_config,
-                target_b.size - 1,
-                pinned_nodes,
-                op,
-            )
-            .unwrap();
-            assert!(imported.prune(target_b.size).await.is_err());
-
-            // The dropped imports never touched the journal: state A is still there.
+            // The dropped import never touched the journal: state A is still there.
             let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
@@ -2029,7 +1993,6 @@ mod compact_variable_mmb {
         sha256::Digest,
         Vec<u8>,
         Sha256,
-        CodecConfig,
         Sequential,
     >;
 
@@ -2070,12 +2033,11 @@ mod compact_variable_mmb {
                 partition: format!("compact-{suffix}-witness"),
                 items_per_section: NZU64!(64),
                 compression: None,
-                codec_config: (),
+                codec_config: ((), ((0..=10000).into(), ())),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: ((), ((0..=10000).into(), ())),
         }
     }
 
