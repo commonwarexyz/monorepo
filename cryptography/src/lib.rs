@@ -350,11 +350,21 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_utils::test_rng;
+    use std::collections::HashSet;
 
     fn test_validate<C: PrivateKey>() {
-        let private_key = C::random(test_rng());
+        let mut rng = test_rng();
+        let private_key = C::random(&mut rng);
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
+        let decoded = C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).unwrap();
+        assert_eq!(public_key, decoded);
+        assert_eq!(public_key.cmp(&decoded), core::cmp::Ordering::Equal);
+
+        let other = C::random(&mut rng).public_key();
+        assert_ne!(public_key, other);
+        let mut keys = HashSet::from([public_key]);
+        assert!(!keys.insert(decoded));
+        assert!(keys.insert(other));
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
