@@ -16,6 +16,7 @@ use crate::{Block, simplex::scheme::Scheme, types::Round};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, marker::PhantomData, sync::Arc};
 
@@ -84,11 +85,13 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
     /// The configuration may bind `expected` and reuse trusted commitment material.
+    /// Untrusted commitment material is recomputed with `strategy`.
     /// Decoding need not check every component, so callers requiring a full commitment
     /// match must compare it after decoding.
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
+        strategy: &impl Strategy,
     ) -> <Self::Block as Read>::Cfg;
 
     /// Converts a working block to a shared application block without copying the payload.

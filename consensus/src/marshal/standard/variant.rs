@@ -16,6 +16,7 @@ use commonware_broadcast::buffered;
 use commonware_codec::Read;
 use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
 
@@ -63,6 +64,7 @@ where
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         _expected: ExpectedCommitment<Self::Commitment>,
+        _strategy: &impl Strategy,
     ) -> <Self::Block as Read>::Cfg {
         block_cfg.clone()
     }

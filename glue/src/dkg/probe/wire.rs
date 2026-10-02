@@ -9,6 +9,7 @@ use commonware_consensus::{
     simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
+use commonware_parallel::Sequential;
 
 /// First byte of a DKG probe message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -244,7 +245,11 @@ pub(crate) fn read_block<V>(
 where
     V: Variant,
 {
-    let block_cfg = V::block_cfg(block_codec_config, ExpectedCommitment::Trusted(commitment));
+    let block_cfg = V::block_cfg(
+        block_codec_config,
+        ExpectedCommitment::Trusted(commitment),
+        &Sequential,
+    );
     V::Block::decode_cfg(reader, &block_cfg)
 }
 

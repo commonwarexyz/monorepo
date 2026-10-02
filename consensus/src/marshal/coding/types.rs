@@ -8,7 +8,7 @@ use crate::{
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
-use commonware_parallel::{Sequential, Strategy};
+use commonware_parallel::Strategy;
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{
     marker::PhantomData,
@@ -316,6 +316,16 @@ impl<B: Block, C: Scheme, H: Hasher> EncodeSize for CodedBlock<B, C, H> {
     }
 }
 
+type EncodeFn<C> = Arc<
+    dyn Fn(
+            &CodingConfig,
+            &[u8],
+        )
+            -> Result<(<C as Scheme>::Commitment, Vec<<C as Scheme>::Shard>), <C as Scheme>::Error>
+        + Send
+        + Sync,
+>;
+
 /// Codec configuration for decoding a [`CodedBlock`] from the wire.
 ///
 /// Decoding checks the expected digest and coding configuration.
@@ -327,6 +337,24 @@ pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     pub inner: <B as Read>::Cfg,
     /// The expected commitment and its certification evidence.
     pub expected: ExpectedCommitment<Commitment<B, C, H>>,
+    /// Recomputes the coding root for [`ExpectedCommitment::Untrusted`].
+    encode: EncodeFn<C>,
+}
+
+impl<B: Block, C: Scheme, H: Hasher> CodedBlockCfg<B, C, H> {
+    /// Creates a configuration that recomputes untrusted coding roots with `strategy`.
+    pub fn new(
+        inner: <B as Read>::Cfg,
+        expected: ExpectedCommitment<Commitment<B, C, H>>,
+        strategy: &impl Strategy,
+    ) -> Self {
+        let strategy = strategy.clone();
+        Self {
+            inner,
+            expected,
+            encode: Arc::new(move |config, data| C::encode(config, data, &strategy)),
+        }
+    }
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
@@ -334,6 +362,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
         Self {
             inner: self.inner.clone(),
             expected: self.expected,
+            encode: self.encode.clone(),
         }
     }
 }
@@ -378,10 +407,9 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
         let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
         inner.write(&mut buf);
         config.write(&mut buf);
-        let (commitment, shards) =
-            C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
-                commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
-            })?;
+        let (commitment, shards) = (cfg.encode)(&config, buf.as_slice()).map_err(|_| {
+            commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
+        })?;
         if commitment != expected.root() {
             return Err(commonware_codec::Error::Invalid(
                 "CodedBlock",
@@ -611,8 +639,10 @@ mod test {
     use commonware_codec::{Decode, Encode, Error};
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
     use commonware_utils::NZUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
 
@@ -727,14 +757,45 @@ mod test {
         let encoded = coded_block.encode();
         let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded,
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Untrusted(coded_block.commitment()),
-            },
+            &CodedBlockCfg::new(
+                (),
+                ExpectedCommitment::Untrusted(coded_block.commitment()),
+                &Sequential,
+            ),
         )
         .unwrap();
 
         assert!(coded_block == decoded);
+    }
+
+    #[test]
+    fn test_coded_block_reencoding_uses_configured_encoder_only_when_untrusted() {
+        let config = coding_config_for_participants(4);
+        let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1234);
+        let coded = CodedBlock::<TestBlock, RS, H>::new(block, config, &Sequential);
+        let strategy = Rayon::new(NZUsize!(2)).unwrap();
+        let mut cfg = CodedBlockCfg::new(
+            (),
+            ExpectedCommitment::Untrusted(coded.commitment()),
+            &strategy,
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let encode = cfg.encode.clone();
+        let observed = calls.clone();
+        cfg.encode = Arc::new(move |config, data| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            encode(config, data)
+        });
+        let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(coded.encode(), &cfg).unwrap();
+        assert!(decoded == coded);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        cfg.expected = ExpectedCommitment::Trusted(coded.commitment());
+        let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(coded.encode(), &cfg).unwrap();
+        assert_eq!(decoded.commitment(), coded.commitment());
+        assert_eq!(decoded.inner, coded.inner);
+        assert!(decoded.shard(0).is_none());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -756,10 +817,7 @@ mod test {
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded,
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Untrusted(expected),
-            },
+            &CodedBlockCfg::new((), ExpectedCommitment::Untrusted(expected), &Sequential),
         ) else {
             panic!("config mismatch should be rejected");
         };
@@ -794,10 +852,7 @@ mod test {
         // commitment.
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             coded.encode(),
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Untrusted(expected),
-            },
+            &CodedBlockCfg::new((), ExpectedCommitment::Untrusted(expected), &Sequential),
         ) else {
             panic!("coding root mismatch should be rejected");
         };
@@ -819,10 +874,11 @@ mod test {
         let coded = CodedBlock::<TestBlock, RS, H>::new(block, CONFIG, &Sequential);
         let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             coded.encode(),
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Trusted(coded.commitment()),
-            },
+            &CodedBlockCfg::new(
+                (),
+                ExpectedCommitment::Trusted(coded.commitment()),
+                &Sequential,
+            ),
         )
         .unwrap();
 
@@ -851,10 +907,7 @@ mod test {
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded,
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Trusted(expected),
-            },
+            &CodedBlockCfg::new((), ExpectedCommitment::Trusted(expected), &Sequential),
         ) else {
             panic!("config mismatch should be rejected");
         };
@@ -880,10 +933,7 @@ mod test {
 
         let Err(err) = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             encoded,
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Trusted(expected),
-            },
+            &CodedBlockCfg::new((), ExpectedCommitment::Trusted(expected), &Sequential),
         ) else {
             panic!("block digest mismatch should be rejected");
         };
@@ -915,10 +965,7 @@ mod test {
         ));
         let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
             coded.encode(),
-            &CodedBlockCfg {
-                inner: (),
-                expected: ExpectedCommitment::Trusted(expected),
-            },
+            &CodedBlockCfg::new((), ExpectedCommitment::Trusted(expected), &Sequential),
         )
         .unwrap();
 

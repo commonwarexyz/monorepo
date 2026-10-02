@@ -15,6 +15,7 @@ use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
+use commonware_parallel::Strategy;
 use commonware_utils::channel::oneshot;
 use std::{future::Future, sync::Arc};
 
@@ -94,11 +95,9 @@ where
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: ExpectedCommitment<Self::Commitment>,
+        strategy: &impl Strategy,
     ) -> <Self::Block as Read>::Cfg {
-        CodedBlockCfg {
-            inner: block_cfg.clone(),
-            expected,
-        }
+        CodedBlockCfg::new(block_cfg.clone(), expected, strategy)
     }
 
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
