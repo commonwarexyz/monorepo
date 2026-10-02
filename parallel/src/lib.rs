@@ -108,6 +108,17 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<S> Manual<S> {
+        /// Wraps `strategy` for manually partitioned work planned at `parallelism`.
+        ///
+        /// Crate-private: [Manual] is only constructible through this crate's [Strategy]
+        /// implementations, which strip any adaptive state before wrapping themselves.
+        pub(crate) const fn new(strategy: S, parallelism: usize) -> Self {
+            Self {
+                strategy,
+                parallelism,
+            }
+        }
+
         /// Returns the parallelism to use for manually partitioned work.
         pub const fn parallelism(&self) -> usize {
             self.parallelism
@@ -190,6 +201,11 @@ commonware_macros::stability_scope!(BETA {
     /// This trait abstracts over sequential and parallel execution, allowing algorithms
     /// to be written generically and then executed with different strategies depending
     /// on the use case (e.g., sequential for testing/debugging, parallel for production).
+    ///
+    /// This trait cannot be implemented outside this crate: [`manual`](Self::manual)
+    /// returns a [`Manual`], which only this crate constructs. Dependent crates that
+    /// need a test double use the `mocks` module (available with the `test-utils`
+    /// feature).
     pub trait Strategy: Clone + Send + Sync + fmt::Debug + 'static {
         /// Returns a strategy wrapper for manually partitioned work.
         fn manual(&self) -> Manual<Self>
@@ -753,10 +769,7 @@ commonware_macros::stability_scope!(BETA {
 
     impl<S: Strategy> Strategy for Manual<S> {
         fn manual(&self) -> Manual<Self> {
-            Manual {
-                strategy: self.clone(),
-                parallelism: self.parallelism,
-            }
+            Manual::new(self.clone(), self.parallelism)
         }
 
         #[track_caller]
@@ -965,10 +978,7 @@ commonware_macros::stability_scope!(BETA {
 
     impl Strategy for Sequential {
         fn manual(&self) -> Manual<Self> {
-            Manual {
-                strategy: Self,
-                parallelism: 1,
-            }
+            Manual::new(Self, 1)
         }
 
         fn spawn<F, T>(
@@ -1187,14 +1197,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
 
     impl Strategy for Rayon {
         fn manual(&self) -> Manual<Self> {
-            Manual {
-                strategy: Self {
+            // Manual planning bypasses adaptive decisions, so the wrapped strategy drops the
+            // adaptive policy.
+            Manual::new(
+                Self {
                     thread_pool: self.thread_pool.clone(),
                     parallelism: self.parallelism,
                     policy: None,
                 },
-                parallelism: self.parallelism,
-            }
+                self.parallelism,
+            )
         }
 
         #[track_caller]
