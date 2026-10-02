@@ -273,7 +273,7 @@ jobs:
         MIRIFLAGS: "-Zmiri-disable-isolation"
       run: |
         cargo miri nextest run -p commonware-cryptography --lib --partition hash:${{matrix.partition}}/12 --no-tests=pass \
-          -E 'test(/^blake3::simd::x86_64::(tests::test_(masked_gather|pair|partial_blocks)_)/)'
+          -E 'test(/^blake3::simd::x86_64::(tests::test_(masked_gather|pair|partial_blocks|packed_trees)_)/)'
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

@@ -229,6 +229,10 @@ impl Hasher for Blake3 {
         if P == 1 {
             return Self::hash_many(messages.as_flattened());
         }
+        #[cfg(target_arch = "x86_64")]
+        if let Some(digests) = simd::hash_many_parts(messages) {
+            return digests;
+        }
         let mut digests = Vec::with_capacity(messages.len());
         crate::hash_pairs::<Self, P>(messages, &mut digests);
         digests
