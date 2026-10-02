@@ -6,8 +6,8 @@
 //! by the [`sync_tests_for_harness!`] macro.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{self, Location, full::Config as MerkleConfig},
+    journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous},
+    merkle::{self, Location},
     qmdb::{
         self,
         immutable::{self, variable::Operation},
@@ -873,13 +873,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -1165,9 +1162,12 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
 
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the frontier and operation journal independently, as the sync engine does.
         drop(db);
-        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
+        let state = <DbOf<H> as qmdb::sync::Database>::begin_sync(&context, &config)
+            .await
+            .unwrap();
+        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::open(
             context.child("journal"),
             qmdb::sync::DatabaseConfig::journal_config(&config),
             non_empty_range!(local_start, local_end),
@@ -1181,7 +1181,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_stale"),
+                &state,
                 &config,
                 &stale_target,
                 &journal,
@@ -1197,7 +1197,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_matching"),
+                &state,
                 &config,
                 &matching_target,
                 &journal,
@@ -1275,13 +1275,10 @@ mod compact_variable_mmr {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -2037,13 +2034,10 @@ mod compact_variable_mmb {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),

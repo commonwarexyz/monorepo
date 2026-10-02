@@ -28,7 +28,7 @@ pub use metrics::Metrics;
 
 mod database;
 pub use database::Database;
-pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
+pub(crate) use database::{Config as DatabaseConfig, local_pinned_nodes, open_sync_journal};
 
 pub mod source;
 pub use source::{Feedback, Request, Response, ResponseOf, Source};

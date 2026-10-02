@@ -2,10 +2,7 @@ use crate::{
     Context,
     index::unordered::Index,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Family, Location,
-        full::{self, Merkle},
-    },
+    merkle::{Family, Location},
     qmdb::{
         self, Error,
         any::ValueEncoding,
@@ -41,18 +38,40 @@ where
     type Config = immutable::Config<T, C::Config, S>;
     type Digest = H::Digest;
     type Context = E;
+    type SyncState = authenticated::Frontier<F, E, H::Digest>;
+
+    async fn begin_sync(
+        context: &Self::Context,
+        config: &Self::Config,
+    ) -> Result<Self::SyncState, Error<F>> {
+        Ok(
+            authenticated::Frontier::begin_import(context.child("journal"), &config.merkle_config)
+                .await?,
+        )
+    }
+
+    async fn open_sync_journal(
+        state: Self::SyncState,
+        context: Self::Context,
+        config: &Self::Config,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Result<(Self::SyncState, Self::Journal), Error<F>> {
+        sync::open_sync_journal(state, context, config.log.clone(), range).await
+    }
+
+    async fn stage_sync_frontier(
+        state: Self::SyncState,
+        location: Location<F>,
+        pins: Vec<Self::Digest>,
+    ) -> Result<Self::SyncState, Error<F>> {
+        Ok(state.stage(location, pins).await?)
+    }
 
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
-    /// # Behavior
-    ///
-    /// This method handles different initialization scenarios based on existing data:
-    /// - If the Merkle journal is empty or the last item is before the range start, it creates a
-    ///   fresh Merkle structure from the provided `pinned_nodes`
-    /// - If the Merkle journal has data but is incomplete (has length < range end), missing
-    ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
-    ///   sync target
+    /// The operations are authenticated by replaying them from the staged frontier, which must be
+    /// the boundary the engine received for `range`. Nothing is persisted until
+    /// [sync::Database::persist_sync_result].
     ///
     /// # Returns
     ///
@@ -63,6 +82,7 @@ where
         context: Self::Context,
         db_config: Self::Config,
         log: Self::Journal,
+        state: Self::SyncState,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
@@ -70,18 +90,18 @@ where
         let hasher = qmdb::hasher::<H>();
 
         // Initialize Merkle structure for sync
-        let merkle = Merkle::<F, _, _, S>::init_sync(
-            context.child("merkle"),
-            full::SyncConfig {
-                config: db_config.merkle_config.clone(),
-                range: range.clone(),
-                pinned_nodes,
-            },
-        )
-        .await?;
+        // The staged frontier must be the boundary the engine authenticated.
+        let expected = pinned_nodes.unwrap_or_default();
+        let boundary = state
+            .candidate()
+            .ok_or(authenticated::Error::MissingFrontier)?;
+        if boundary.location != range.start() || boundary.digests != expected {
+            return Err(crate::merkle::Error::InvalidPinnedNodes.into());
+        }
 
-        let journal = authenticated::Journal::<_, _, _, _, S>::from_components(
-            merkle,
+        let journal = authenticated::Journal::<F, _, _, _, S>::from_components(
+            state,
+            db_config.merkle_config.clone(),
             log,
             hasher,
             apply_batch_size,
@@ -119,37 +139,27 @@ where
         };
         db.update_metrics();
 
-        db.sync().await
+        Ok(db)
     }
 
-    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, Error<F>> {
+        self.journal = self.journal.activate().await?;
         Ok(self)
     }
 
+    async fn reject_sync_result(self) -> Result<(), Error<F>> {
+        self.journal.frontier.reject().await?;
+        Ok(())
+    }
+
     async fn local_pinned_nodes(
-        context: Self::Context,
+        state: &Self::SyncState,
         config: &Self::Config,
         target: &sync::Target<F, Self::Digest>,
         journal: &Self::Journal,
     ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !sync::journal_covers_range(journal.bounds(), &target.range)
-        {
-            return Ok(None);
-        }
-
-        // The inactivity floor is carried by the last commit operation rather than being
-        // the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
-
-        sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle_config.clone(),
-            target,
-            inactivity_floor,
-        )
-        .await
+        sync::local_pinned_nodes::<F, _, H, S, _>(state, &config.merkle_config, journal, target)
+            .await
     }
 
     fn root(&self) -> Self::Digest {
@@ -176,11 +186,40 @@ where
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
+    type SyncState = ();
+
+    async fn begin_sync(
+        _context: &Self::Context,
+        _config: &Self::Config,
+    ) -> Result<Self::SyncState, Error<F>> {
+        Ok(())
+    }
+
+    async fn open_sync_journal(
+        state: Self::SyncState,
+        context: Self::Context,
+        _config: &Self::Config,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Result<(Self::SyncState, Self::Journal), Error<F>> {
+        Ok((
+            state,
+            <Self::Journal as sync::Journal<F>>::open(context, (), range).await?,
+        ))
+    }
+
+    async fn stage_sync_frontier(
+        state: Self::SyncState,
+        _location: Location<F>,
+        _pins: Vec<Self::Digest>,
+    ) -> Result<Self::SyncState, Error<F>> {
+        Ok(state)
+    }
 
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         log: Self::Journal,
+        _state: Self::SyncState,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: NonZeroU64,
@@ -200,8 +239,12 @@ where
         self.sync().await
     }
 
+    async fn reject_sync_result(self) -> Result<(), Error<F>> {
+        Ok(())
+    }
+
     async fn local_pinned_nodes(
-        _context: Self::Context,
+        _state: &Self::SyncState,
         _config: &Self::Config,
         _target: &sync::Target<F, Self::Digest>,
         _journal: &Self::Journal,

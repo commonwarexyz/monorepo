@@ -213,8 +213,8 @@ pub fn grafted_to_ops_pos<F: Graftable>(
 /// Both the grafted structure and ops structure use the same family `F`. The grafted
 /// structure's leaves correspond 1:1 with bitmap chunks. This adapter intercepts
 /// [`HasherTrait::node_digest`] and [`HasherTrait::node_digest_pair`] to convert each grafted
-/// position to the corresponding ops-space position via [`Graftable::leftmost_leaf`] and
-/// [`Graftable::subtree_root_position`], ensuring hash pre-images use ops-space positions for
+/// position to the corresponding ops-space position via [`crate::merkle::Family::leftmost_leaf`] and
+/// [`crate::merkle::Family::subtree_root_position`], ensuring hash pre-images use ops-space positions for
 /// domain separation.
 #[derive(Clone)]
 pub(super) struct GraftedHasher<F: Graftable, H: HasherTrait<F>> {

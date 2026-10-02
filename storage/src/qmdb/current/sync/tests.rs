@@ -615,11 +615,14 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 
         assert!(local_start > crate::merkle::Location::new(0));
 
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the frontier and operation journal independently, as the sync engine does.
         drop(db);
+        let state = <Db as SyncDatabase>::begin_sync(&context, &config)
+            .await
+            .unwrap();
         let journal = <<Db as SyncDatabase>::Journal as crate::qmdb::sync::Journal<
             crate::merkle::mmr::Family,
-        >>::new(
+        >>::open(
             context.child("journal"),
             crate::qmdb::sync::DatabaseConfig::journal_config(&config),
             non_empty_range!(local_start, local_end),
@@ -632,15 +635,10 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
-                context.child("probe_stale"),
-                &config,
-                &stale_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_none()
+            <Db as SyncDatabase>::local_pinned_nodes(&state, &config, &stale_target, &journal,)
+                .await
+                .unwrap()
+                .is_none()
         );
 
         let matching_target = crate::qmdb::sync::Target {
@@ -648,15 +646,10 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
-                context.child("probe_matching"),
-                &config,
-                &matching_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_some()
+            <Db as SyncDatabase>::local_pinned_nodes(&state, &config, &matching_target, &journal,)
+                .await
+                .unwrap()
+                .is_some()
         );
         drop(journal);
     });

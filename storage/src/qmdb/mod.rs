@@ -30,7 +30,8 @@
 //!
 //! `commit()` makes applied state durable. `start_sync()` is its pipelined form, which also
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
-//! durable and guarantees no recovery is needed on startup after a crash.
+//! durable and advances the operation journal's recovery watermark. Full databases rebuild their
+//! Merkle digests from retained operations at every startup.
 //!
 //! # Initialization bounds
 //!
@@ -184,7 +185,7 @@ where
 /// Select a QMDB commit before validating variant-specific reconstruction state.
 pub(crate) async fn prepare_initialization<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: crate::journal::authenticated::Config<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
 ) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
@@ -211,7 +212,7 @@ where
 #[commonware_macros::boxed]
 pub(crate) async fn init_journal<F, E, C, H, S>(
     context: E,
-    merkle: crate::merkle::full::Config<S>,
+    merkle: crate::journal::authenticated::Config<S>,
     journal: C::Config,
     max_size: Option<Location<F>>,
     replay_from_floor: bool,
@@ -322,6 +323,9 @@ pub enum Error<F: Family> {
     #[error("merkle error: {0}")]
     Merkle(#[from] crate::merkle::Error<F>),
 
+    #[error("authenticated journal error: {0}")]
+    Authenticated(crate::journal::authenticated::Error<F>),
+
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
 
@@ -378,6 +382,8 @@ impl<F: Family> From<crate::journal::authenticated::Error<F>> for Error<F> {
         match e {
             crate::journal::authenticated::Error::Journal(j) => Self::Journal(j),
             crate::journal::authenticated::Error::Merkle(m) => Self::Merkle(m),
+            crate::journal::authenticated::Error::Metadata(m) => Self::Metadata(m),
+            other => Self::Authenticated(other),
         }
     }
 }

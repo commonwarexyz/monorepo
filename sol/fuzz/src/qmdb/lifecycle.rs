@@ -9,8 +9,8 @@ use commonware_cryptography::{Digest, Hasher, Keccak256, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{Graftable, PendingChunk as _, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig},
+    merkle::{Graftable, PendingChunk as _, mmb, mmr},
     qmdb::{
         self,
         any::{ordered::fixed::Update, value::FixedEncoding},
@@ -63,13 +63,10 @@ fn config(context: &deterministic::Context) -> FixedConfig<OneCap, Sequential> {
     let page_cache = CacheRef::from_pooler(context, NZU16!(4096), NZUsize!(8));
     FixedConfig {
         merkle_config: MerkleConfig {
-            journal_partition: "lifecycle-merkle-journal".into(),
             metadata_partition: "lifecycle-merkle-metadata".into(),
-            items_per_blob: NZU64!(11),
-            write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: Default::default(),
         },
         journal_config: JournalConfig {
             partition: "lifecycle-operations".into(),
