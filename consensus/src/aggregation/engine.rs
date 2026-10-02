@@ -37,7 +37,7 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     cmp::max,
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map::Entry},
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -405,15 +405,17 @@ impl<
                 };
 
                 // Handle the ack
+                let epoch = ack.epoch;
+                let height = ack.item.height;
                 let accepted;
-                (self, accepted) = self.handle_ack(&ack).await;
+                (self, accepted) = self.handle_ack(ack).await;
                 if !accepted {
                     guard.set(Status::Failure);
                     continue;
                 }
 
                 // Update the metrics
-                debug!(?sender, epoch = %ack.epoch, height = %ack.item.height, "ack");
+                debug!(?sender, %epoch, %height, "ack");
                 guard.set(Status::Success);
             },
 
@@ -463,8 +465,8 @@ impl<
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a certificate if enough acks are present. Only process acks
         // that match the verified digest.
-        for epoch_acks in acks.values() {
-            for epoch_ack in epoch_acks.values() {
+        for epoch_acks in acks.into_values() {
+            for epoch_ack in epoch_acks.into_values() {
                 // Drop acks that don't match the verified digest
                 if epoch_ack.item.digest != digest {
                     continue;
@@ -491,7 +493,7 @@ impl<
             .put(height, self.context.current() + self.rebroadcast_timeout);
 
         // Handle ack as if it was received over the network
-        (self, _) = self.handle_ack(&ack).await;
+        (self, _) = self.handle_ack(ack.clone()).await;
 
         // Send ack over the network.
         self.broadcast(ack, sender);
@@ -504,7 +506,7 @@ impl<
     /// Returns whether the ack was accepted. An ack is rejected if it is invalid or
     /// inapplicable (e.g. unknown scheme, non-pending height, digest mismatch).
     /// Duplicate acks are accepted as no-ops.
-    async fn handle_ack(mut self, ack: &Ack<P::Scheme, D>) -> (Self, bool) {
+    async fn handle_ack(mut self, ack: Ack<P::Scheme, D>) -> (Self, bool) {
         // Get the quorum (from scheme participants for the ack's epoch)
         let scheme = match self.scheme(ack.epoch) {
             Ok(scheme) => scheme,
@@ -537,10 +539,11 @@ impl<
 
         // Add the attestation (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.attestation.signer) {
+        let Entry::Vacant(entry) = acks.entry(ack.attestation.signer) else {
             return (self, true);
-        }
-        acks.insert(ack.attestation.signer, ack.clone());
+        };
+        let digest = ack.item.digest;
+        entry.insert(ack);
 
         // A matching quorum is impossible with fewer than quorum unique signers.
         if acks.len() < quorum {
@@ -551,7 +554,7 @@ impl<
             // Every retained ack matches the application digest.
             Certificate::from_acks(&*scheme, non_empty![@acks.values()], &self.strategy)
         } else {
-            let matching = acks.values().filter(|a| a.item.digest == ack.item.digest);
+            let matching = acks.values().filter(|a| a.item.digest == digest);
             if matching.clone().count() < quorum {
                 return (self, true);
             }
@@ -579,7 +582,7 @@ impl<
 
         // Journal and notify the automaton
         let certified = Activity::Certified(certificate);
-        self = self.record(certified.clone()).await.sync(height).await;
+        self = self.record(&certified).await.sync(height).await;
         self.reporter.report(certified);
 
         // Increase the tip if needed
@@ -635,7 +638,7 @@ impl<
                 (self, signed) = self.sign_ack(height, digest).await;
                 match signed {
                     Some(ack) => {
-                        (self, _) = self.handle_ack(&ack).await;
+                        (self, _) = self.handle_ack(ack.clone()).await;
                         ack
                     }
                     None => return self,
@@ -772,7 +775,7 @@ impl<
 
         // Journal the ack
         self = self
-            .record(Activity::Ack(ack.clone()))
+            .record(&Activity::Ack(ack.clone()))
             .await
             .sync(height)
             .await;
@@ -828,7 +831,7 @@ impl<
             .retain(|height, _| *height >= activity_threshold);
 
         // Add tip to journal
-        self = self.record(Activity::Tip(tip)).await.sync(tip).await;
+        self = self.record(&Activity::Tip(tip)).await.sync(tip).await;
         self.reporter.report(Activity::Tip(tip));
 
         // Prune journal with buffer
@@ -974,15 +977,15 @@ impl<
     }
 
     /// Appends an activity to the journal.
-    async fn record(mut self, activity: Activity<P::Scheme, D>) -> Self {
+    async fn record(mut self, activity: &Activity<P::Scheme, D>) -> Self {
         let height = match activity {
-            Activity::Ack(ref ack) => ack.item.height,
-            Activity::Certified(ref certificate) => certificate.item.height,
-            Activity::Tip(h) => h,
+            Activity::Ack(ack) => ack.item.height,
+            Activity::Certified(certificate) => certificate.item.height,
+            Activity::Tip(h) => *h,
         };
         let section = self.get_journal_section(height);
         rebind(&mut self.journal, |journal| {
-            journal.append(section, &activity)
+            journal.append(section, activity)
         })
         .await
         .expect("unable to append to journal");
@@ -1033,22 +1036,28 @@ mod tests {
         }
     }
 
-    type TestEngine = Engine<
+    type TestEngine<S> = Engine<
         deterministic::Context,
-        mocks::Provider<ed25519::Scheme>,
+        mocks::Provider<S>,
         commonware_cryptography::sha256::Digest,
         mocks::Application,
-        mocks::ReporterMailbox<ed25519::Scheme, commonware_cryptography::sha256::Digest>,
+        mocks::ReporterMailbox<S, commonware_cryptography::sha256::Digest>,
         mocks::Monitor,
         NoopBlocker,
         Sequential,
     >;
 
-    async fn test_engine(
+    async fn test_engine<S>(
         context: deterministic::Context,
         epoch: Epoch,
-        scheme: ed25519::Scheme,
-    ) -> TestEngine {
+        scheme: S,
+    ) -> TestEngine<S>
+    where
+        S: scheme::Scheme<
+                commonware_cryptography::sha256::Digest,
+                PublicKey = commonware_cryptography::ed25519::PublicKey,
+            >,
+    {
         let provider = mocks::Provider::new();
         assert!(provider.register(epoch, scheme.clone()));
         assert!(provider.register(epoch.next(), scheme.clone()));
@@ -1059,7 +1068,7 @@ mod tests {
             JConfig {
                 partition: "quorum".to_string(),
                 compression: None,
-                codec_config: ed25519::Scheme::certificate_codec_config_unbounded(),
+                codec_config: S::certificate_codec_config_unbounded(),
                 page_cache: page_cache.clone(),
                 write_buffer: NZUsize!(4096),
             },
@@ -1133,7 +1142,7 @@ mod tests {
                     for scheme in schemes.iter().take(2) {
                         let ack = Ack::sign(scheme, epoch, Item { height, digest }).unwrap();
                         let accepted;
-                        (engine, accepted) = engine.handle_ack(&ack).await;
+                        (engine, accepted) = engine.handle_ack(ack).await;
                         assert!(accepted);
                         assert!(engine.confirmed.is_empty());
                     }
@@ -1155,7 +1164,7 @@ mod tests {
                 assert!(ack.verify(&mut context, &verifier, &Sequential));
                 let incoming_digest = ack.item.digest;
                 let accepted;
-                (engine, accepted) = engine.handle_ack(&ack).await;
+                (engine, accepted) = engine.handle_ack(ack.clone()).await;
                 assert_eq!(accepted, !digest_known || agrees);
                 if accepted {
                     retained.entry(ack.attestation.signer).or_insert(ack);
@@ -1227,11 +1236,11 @@ mod tests {
             ];
             for (signer, digest) in records {
                 let ack = Ack::sign(&schemes[signer], epoch, Item { height, digest }).unwrap();
-                engine = engine.record(Activity::Ack(ack)).await;
+                engine = engine.record(&Activity::Ack(ack)).await;
             }
             if digest_known || recovered_quorum {
                 let ack = Ack::sign(&schemes[0], epoch, Item { height, digest }).unwrap();
-                engine = engine.record(Activity::Ack(ack)).await;
+                engine = engine.record(&Activity::Ack(ack)).await;
             }
             engine = engine.sync(height).await;
             let journal = engine.journal.take().unwrap();
@@ -1256,7 +1265,7 @@ mod tests {
             for signer in [0, 3] {
                 let ack = Ack::sign(&schemes[signer], epoch, Item { height, digest }).unwrap();
                 let accepted;
-                (engine, accepted) = engine.handle_ack(&ack).await;
+                (engine, accepted) = engine.handle_ack(ack).await;
                 assert!(accepted);
                 assert_eq!(engine.confirmed.contains_key(&height), signer == 3);
             }
@@ -1294,7 +1303,7 @@ mod tests {
                 .insert(height, Pending::Unverified(BTreeMap::new()));
             for (signer, digest) in [(1, digest), (2, other_digest), (3, digest)] {
                 let ack = Ack::sign(&schemes[signer], epoch, Item { height, digest }).unwrap();
-                (engine, _) = engine.handle_ack(&ack).await;
+                (engine, _) = engine.handle_ack(ack).await;
                 assert!(engine.confirmed.is_empty());
             }
             let (sender, _) = inert_channel(participants);
@@ -1327,41 +1336,14 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
         runner.start(|mut context| async move {
             let epoch = Epoch::new(111);
-            let Fixture {
-                schemes, verifier, ..
-            } = ed25519::fixture(&mut context, b"aggregation-recovery-failure", 4);
-            let provider = mocks::Provider::new();
-            assert!(provider.register(
+            let Fixture { schemes, .. } =
+                ed25519::fixture(&mut context, b"aggregation-recovery-failure", 4);
+            let mut engine = test_engine(
+                context.child("engine"),
                 epoch,
                 WrappedScheme::new(schemes[0].clone(), Behavior::RecoveryFailure),
-            ));
-            let (_, reporter) = mocks::Reporter::new(
-                context.child("reporter"),
-                WrappedScheme::new(verifier, Behavior::Honest),
-            );
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
-            let mut engine = Engine::new(
-                context.child("engine"),
-                Config {
-                    monitor: mocks::Monitor::new(epoch),
-                    provider,
-                    automaton: mocks::Application::new(mocks::Strategy::Correct),
-                    reporter,
-                    blocker: NoopBlocker,
-                    priority_acks: false,
-                    rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
-                    epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
-                    window: NonZeroU64::new(1).unwrap(),
-                    activity_timeout: HeightDelta::new(10),
-                    journal_partition: "aggregation-recovery-failure".to_string(),
-                    journal_write_buffer: NZUsize!(4096),
-                    journal_replay_buffer: NZUsize!(4096),
-                    journal_heights_per_section: NonZeroU64::new(6).unwrap(),
-                    journal_compression: None,
-                    journal_page_cache: page_cache,
-                    strategy: Sequential,
-                },
-            );
+            )
+            .await;
 
             let height = Height::new(0);
             let digest = Sha256::hash(&[b"payload"]);
@@ -1377,7 +1359,7 @@ mod tests {
             for scheme in schemes.iter().take(3) {
                 let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
                 let ack = Ack::sign(&scheme, epoch, Item { height, digest }).unwrap();
-                (engine, _) = engine.handle_ack(&ack).await;
+                (engine, _) = engine.handle_ack(ack).await;
             }
         });
     }
