@@ -93,15 +93,18 @@ fn valid_parent(r, v, (c', v')) -> bool {
     return notarization(c', v') ∈ r.proofs[v']
 }
 
-// Replica `r` enters view `next` if greater than the current view
+// Replica `r` enters view `next` if it is the next view, then advances again if it already holds some `proof(next)`
 fn enter_view(r, next) {
-    if r.view >= next {
+    if next != r.view + 1 {
         return;
     }
     r.view = next;
     r.notarized = ⊥;
     r.nullified = false;
     r.timer = 2Δ;
+    if proof(next) ∈ r.proofs[next] {
+        enter_view(r, next + 1);
+    }
 }
 
 // Replica `r` records a message, `m`, received from a replica `r'`
@@ -226,7 +229,7 @@ _If you are in view `v` and have already broadcast `notarize(c, v)` for a `c` th
     - A crash-faulty leader can delay the network by at most `3Δ`. Let's assume that all honest replicas enter view `v` by time `t'` and set a `2Δ` timer. If the leader is faulty and sends no proposal, all timers will expire by `t' + 2Δ`, causing honest replicas to broadcast `nullify(v)`. These messages will be seen by all other honest replicas by `t' + 3Δ`, allowing them to form a `nullification(v)` and enter view `v+1`.
     - A Byzantine leader can delay the network by at most `4Δ`. This can happen if the leader equivocates by sending different proposals to different replicas, causing them to broadcast `notarize(*, v)` for different blocks. To see why, again assume all honest replicas enter view `v` by time `t'`. The first round of `notarize` messages are sent and received by `t' + 3Δ`. At this point, all honest replicas observe the conflicting votes and broadcast `nullify(v)`. This "second-round" vote is received by `t' + 4Δ`, allowing a `nullification(v)` to be created, allowing them to enter `v+1`.
     - These latency bounds are competitive despite the possibility of two rounds of voting. This is due to the timer being set to `2Δ`. For comparison, a protocol like Simplex with a `3Δ` timer would see replicas advance to the next view by `t' + 4Δ` regardless of whether the leader is crash-faulty or Byzantine.
-- Every view `v` eventually produces at least one certificate `proof(v)`. As soon as a replica sees any `proof(v)` (as fast as `M` messages), it moves to view `v + 1`. If the network is partitioned in two, replicas in each half of the partition may continue to enter successive views (on different `proof(v)`s) but will never be able to finalize such blocks. To bound the depth of forks in a partition, replicas can wait to enter some view `v + k` until they have seen `L` messages in view `v`.
+- Every view `v` eventually produces at least one certificate `proof(v)`. As soon as a replica in view `v` sees any `proof(v)` (as fast as `M` messages), it moves to view `v + 1`. If the network is partitioned in two, replicas in each half of the partition may continue to enter successive views (on different `proof(v)`s) but will never be able to finalize such blocks. To bound the depth of forks in a partition, replicas can wait to enter some view `v + k` until they have seen `L` messages in view `v`.
 
 ## 10. Extensions
 
