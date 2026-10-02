@@ -30,15 +30,19 @@
 //! All validators must run the same wrapper for all views in a given epoch. Validators can switch
 //! between [`Inline`] and [`Deferred`] at the same epoch boundary.
 //!
-//! [`Inline`] votes to notarize after application verification. Certification receives only the
-//! round and digest of a notarized block, and [`Inline`] blocks need not embed the consensus
-//! context. A validator that did not verify the block, because it never received the proposal or
-//! restarted, cannot run application verification at certification. [`Inline`] certifies without
-//! it and relies on the notarizing quorum having verified the block.
+//! [`Inline`] runs application verification before voting to notarize. Application verification
+//! needs the consensus context of the proposal (its round, leader, and parent). Certification
+//! receives only the round and digest of the notarized block, and [`Inline`] blocks need not embed
+//! the consensus context. A validator that did not verify the block before certification, because
+//! it never received the proposal or restarted, has no context to verify it against. [`Inline`]
+//! therefore certifies a notarized block once it has the block, trusting that the honest validators
+//! in the notarizing quorum verified it.
 //!
-//! [`Deferred`] votes to notarize after checking the block's embedded context and certifies with
-//! the application's verdict, using the embedded context when it did not verify the block. Its
-//! notarize vote does not attest to application validity.
+//! [`Deferred`] votes to notarize after checking only the block's embedded context, before
+//! application verification completes. It certifies with the application's verdict, recovering
+//! the consensus context from the block when it did not verify the block. A notarization formed by
+//! [`Deferred`] votes does not imply that the block passed application verification, which is the
+//! assumption [`Inline`] certification relies on.
 
 commonware_macros::stability_scope!(ALPHA {
     mod deferred;
@@ -2663,6 +2667,129 @@ mod tests {
                     certify_result,
                     "{kind:?}: height-1 block should certify with genesis as parent"
                 );
+            });
+        }
+    }
+
+    /// Switching wrappers at an epoch boundary finalizes and delivers the chain across it.
+    ///
+    /// Each round is routed to a wrapper by its epoch: the old wrapper handles epoch 0 and the new
+    /// wrapper handles epoch 1, starting from the epoch 0 boundary block.
+    #[test_traced("WARN")]
+    fn test_standard_switch_wrapper_at_epoch_boundary() {
+        for (old, new) in [
+            (WrapperKind::Inline, WrapperKind::Deferred),
+            (WrapperKind::Deferred, WrapperKind::Inline),
+        ] {
+            let runner = deterministic::Runner::timed(Duration::from_secs(60));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let me = participants[0].clone();
+                let setup = StandardHarness::setup_validator(
+                    context.child("validator"),
+                    &mut oracle,
+                    me.clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                )
+                .await;
+                let app = setup.application;
+                let mut marshal = setup.mailbox;
+                let mut wrappers = [
+                    Wrapper::new(
+                        old,
+                        context.child("old"),
+                        MockVerifyingApp::new(),
+                        marshal.clone(),
+                    ),
+                    Wrapper::new(
+                        new,
+                        context.child("new"),
+                        MockVerifyingApp::new(),
+                        marshal.clone(),
+                    ),
+                ];
+
+                // Verify, certify, and finalize every block of epoch 0 and the first blocks of
+                // epoch 1. Views restart in epoch 1, whose first block builds on the epoch 0
+                // boundary block.
+                let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+                let boundary = epocher.last(Epoch::zero()).unwrap();
+                let tip = boundary.next().next();
+                let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+                let mut parent = (View::zero(), genesis.digest());
+                let mut epoch = Epoch::zero();
+                let mut view = View::zero();
+                let mut chain = vec![genesis.digest()];
+                for height in (1..=tip.get()).map(Height::new) {
+                    let next = epocher.containing(height).unwrap().epoch();
+                    if next != epoch {
+                        epoch = next;
+                        view = View::zero();
+                        parent.0 = View::zero();
+                    }
+                    view = view.next();
+                    let round = Round::new(epoch, view);
+                    let block_context = Ctx {
+                        round,
+                        leader: me.clone(),
+                        parent,
+                    };
+                    let block =
+                        B::new::<Sha256>(block_context.clone(), parent.1, height, height.get());
+                    let digest = block.digest();
+                    assert!(marshal.verified(round, block).await);
+
+                    let wrapper = &mut wrappers[usize::from(!epoch.is_zero())];
+                    assert!(
+                        wrapper
+                            .verify(block_context, digest)
+                            .await
+                            .await
+                            .expect("verify result missing"),
+                        "{old:?} -> {new:?}: block at {height} should verify"
+                    );
+                    assert!(
+                        wrapper
+                            .certify(round, digest)
+                            .await
+                            .await
+                            .expect("certify result missing"),
+                        "{old:?} -> {new:?}: block at {height} should certify"
+                    );
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal {
+                            round,
+                            parent: parent.0,
+                            payload: digest,
+                        },
+                        &schemes,
+                        QUORUM,
+                    );
+                    StandardHarness::report_finalization(&mut marshal, finalization).await;
+                    parent = (view, digest);
+                    chain.push(digest);
+                }
+
+                // The application receives the whole chain, from genesis, in height order.
+                while !app.blocks().contains_key(&tip) {
+                    context.sleep(Duration::from_millis(50)).await;
+                }
+                let delivered: Vec<_> = app.blocks().values().map(|block| block.digest()).collect();
+                assert_eq!(delivered, chain, "{old:?} -> {new:?}");
             });
         }
     }
