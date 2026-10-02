@@ -49,6 +49,8 @@ path = "benches/batch_verify.rs"
 
 [features]
 default = [ "std" ]
+# Force scalar arithmetic for backend comparisons and deployments without SIMD.
+portable = []
 arbitrary = [
 	"commonware-codec/arbitrary",
 	"commonware-math/arbitrary",

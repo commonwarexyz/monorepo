@@ -9,6 +9,7 @@ use alloc::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_cryptography_curve25519::batch as curve_batch;
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -27,6 +28,10 @@ const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
+
+#[cfg(test)]
+#[path = "batch_tests.rs"]
+mod batch_tests;
 
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
@@ -322,7 +327,23 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
 /// Ed25519 Batch Verifier.
 pub struct Batch {
-    verifier: ed_core::batch::Verifier<Vec<u8>>,
+    verifier: BatchInner,
+}
+
+enum BatchInner {
+    Dalek(ed_core::batch::Verifier<Vec<u8>>),
+    Curve(curve_batch::Verifier<Vec<u8>>),
+}
+
+impl BatchInner {
+    fn add_payload(&mut self, payload: Vec<u8>, public_key: &PublicKey, signature: &Signature) {
+        match self {
+            Self::Dalek(verifier) => verifier.add_payload(payload, public_key, signature),
+            Self::Curve(verifier) => {
+                verifier.queue(*public_key.key.as_bytes(), signature.raw, payload);
+            }
+        }
+    }
 }
 
 impl BatchVerifier for Batch {
@@ -330,7 +351,11 @@ impl BatchVerifier for Batch {
 
     fn new(capacity: usize) -> Self {
         Self {
-            verifier: ed_core::batch::Verifier::new(capacity),
+            verifier: if curve_batch::is_accelerated() {
+                BatchInner::Curve(curve_batch::Verifier::new(capacity))
+            } else {
+                BatchInner::Dalek(ed_core::batch::Verifier::new(capacity))
+            },
         }
     }
 
@@ -341,17 +366,16 @@ impl BatchVerifier for Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        // Keep argument construction here so the signature can be written directly into the queue.
-        self.verifier.queue(
-            public_key.key,
-            ed_core::Signature::from(signature.raw),
-            union_unique(namespace, message),
-        );
+        self.verifier
+            .add_payload(union_unique(namespace, message), public_key, signature);
         true
     }
 
     fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        self.verifier.verify(rng, strategy).is_ok()
+        match self.verifier {
+            BatchInner::Dalek(verifier) => verifier.verify(rng, strategy).is_ok(),
+            BatchInner::Curve(verifier) => verifier.verify(rng, strategy),
+        }
     }
 }
 

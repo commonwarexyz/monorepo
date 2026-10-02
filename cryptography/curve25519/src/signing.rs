@@ -20,10 +20,13 @@
 //! [this post]: https://hdevalence.ca/blog/2020-10-04-its-25519am
 //! [ZIP215]: https://zips.z.cash/zip-0215
 
-mod core;
-
-use self::core::Scalar;
-use crate::curve::{G, GAffine};
+use crate::{
+    batch::{
+        Verifier,
+        core::{self, Scalar},
+    },
+    curve::{G, GAffine},
+};
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
@@ -409,19 +412,9 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
-/// Inputs retained for batch verification.
-///
-/// The encoded key is the batch pipeline's authoritative identity. Its optional decoded point is
-/// an individual-verification cache and is not part of the queued state.
-struct BatchItem {
-    message: Vec<u8>,
-    public_key: core::VerifyingKeyBytes,
-    signature: core::Signature,
-}
-
 /// A batch verification context.
 pub struct BatchVerifier {
-    items: Vec<BatchItem>,
+    verifier: Verifier<Vec<u8>>,
 }
 
 impl BatchVerifier {
@@ -431,7 +424,7 @@ impl BatchVerifier {
     /// them here.
     pub fn new(capacity: usize) -> Self {
         Self {
-            items: Vec::with_capacity(capacity),
+            verifier: Verifier::new(capacity),
         }
     }
 
@@ -447,11 +440,11 @@ impl BatchVerifier {
         public_key: &VerifyingKey,
         signature: &Signature,
     ) {
-        self.items.push(BatchItem {
-            message: union_unique(namespace, message),
-            public_key: public_key.bytes,
-            signature: core::Signature::from_bytes(signature.bytes),
-        });
+        self.verifier.queue(
+            *public_key.bytes.as_bytes(),
+            signature.bytes,
+            union_unique(namespace, message),
+        );
     }
 
     /// Queues an unframed message for raw Ed25519 test-vector checks.
@@ -462,11 +455,11 @@ impl BatchVerifier {
         public_key: &VerifyingKey,
         signature: &Signature,
     ) {
-        self.items.push(BatchItem {
-            message: message.to_vec(),
-            public_key: public_key.bytes,
-            signature: core::Signature::from_bytes(signature.bytes),
-        });
+        self.verifier.queue(
+            *public_key.bytes.as_bytes(),
+            signature.bytes,
+            message.to_vec(),
+        );
     }
 
     /// Checks all the signatures in the batch.
@@ -481,27 +474,15 @@ impl BatchVerifier {
     /// `rng` lets an attacker construct an invalid batch that passes verification.
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
-        let items = self
-            .items
-            .iter()
-            .map(|item| (&item.public_key, &item.signature, item.message.as_slice()));
-        core::verify_batch_bytes(rng, items, strategy)
+        self.verifier.verify(rng, strategy)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchItem, BatchVerifier, SigningKey};
+    use super::{BatchVerifier, SigningKey};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
-
-    #[test]
-    fn batch_items_do_not_retain_decoded_key_cache() {
-        assert_eq!(
-            core::mem::size_of::<BatchItem>(),
-            core::mem::size_of::<(Vec<u8>, [u8; 32], super::core::Signature)>(),
-        );
-    }
 
     #[test]
     fn empty_batch_is_invalid() {

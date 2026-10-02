@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use commonware_parallel::Strategy;
 use msm::Term;
 use rand_core::CryptoRng;
-pub(super) use scalar::Scalar;
+pub(crate) use scalar::Scalar;
 use sha2::{Digest, Sha512};
 
 /// The exact byte encoding used to identify an Ed25519 verifying key.

@@ -8,3 +8,10 @@ Perform Curve25519 field/group arithmetic, Ed25519 signing and verification, and
 ## Status
 
 Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
+
+The `batch` module is BETA and verifies Ed25519 signatures over already-framed payloads
+using ZIP215 rules. The `signing` and `key_exchange` modules remain ALPHA.
+
+Batch verification selects AVX-512F/IFMA on supported x86-64 CPUs, NEON on AArch64, and
+portable arithmetic elsewhere. The `portable` feature forces portable arithmetic for
+backend comparisons. `batch::is_accelerated()` reports the effective dispatch choice.

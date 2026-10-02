@@ -1,12 +1,14 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use commonware_codec::DecodeExt as _;
 use commonware_cryptography::{
     BatchVerifier, Signer, Verifier,
     ed25519::{self, Batch as Ed25519Batch},
 };
+use commonware_cryptography_curve25519::batch;
 use commonware_parallel::Sequential;
-use commonware_utils::TestRng;
+use commonware_utils::{TestRng, union_unique};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -21,6 +23,13 @@ enum BatchOperation {
         wrong_private_key_seed: u64,
         namespace: Vec<u8>,
         message: Vec<u8>,
+    },
+    AddMutatedEd25519 {
+        private_key_seed: u64,
+        namespace: Vec<u8>,
+        message: Vec<u8>,
+        position: u8,
+        mask: u8,
     },
     VerifyEd25519,
 }
@@ -51,6 +60,7 @@ fn fuzz(input: FuzzInput) {
     let mut rng = TestRng::new(input.rng_seed);
 
     let mut ed25519_batch = Ed25519Batch::new(0);
+    let mut curve_batch = batch::Verifier::new(0);
     let mut expected_ed25519_result = None;
 
     for op in input.operations {
@@ -70,6 +80,11 @@ fn fuzz(input: FuzzInput) {
                 let added =
                     ed25519_batch.add(namespace.as_slice(), &message, &public_key, &signature);
                 assert!(added, "Valid signature should be added to batch");
+                curve_batch.queue(
+                    public_key.as_ref().try_into().unwrap(),
+                    signature.as_ref().try_into().unwrap(),
+                    union_unique(&namespace, &message),
+                );
                 expected_ed25519_result = Some(expected_ed25519_result.unwrap_or(true));
             }
 
@@ -99,11 +114,39 @@ fn fuzz(input: FuzzInput) {
                     if added {
                         expected_ed25519_result = Some(false);
                     }
+                    curve_batch.queue(
+                        wrong_public_key.as_ref().try_into().unwrap(),
+                        signature.as_ref().try_into().unwrap(),
+                        union_unique(&namespace, &message),
+                    );
                 }
+            }
+
+            BatchOperation::AddMutatedEd25519 {
+                private_key_seed,
+                namespace,
+                message,
+                position,
+                mask,
+            } => {
+                let private_key = ed25519::PrivateKey::from_seed(private_key_seed);
+                let public_key = private_key.public_key();
+                let mut bytes = private_key.sign(&namespace, &message).as_ref().to_vec();
+                bytes[position as usize % 64] ^= mask;
+                let signature = ed25519::Signature::decode(bytes).unwrap();
+                let valid = public_key.verify(&namespace, &message, &signature);
+                expected_ed25519_result = Some(expected_ed25519_result.unwrap_or(true) && valid);
+                assert!(ed25519_batch.add(&namespace, &message, &public_key, &signature));
+                curve_batch.queue(
+                    public_key.as_ref().try_into().unwrap(),
+                    signature.as_ref().try_into().unwrap(),
+                    union_unique(&namespace, &message),
+                );
             }
 
             BatchOperation::VerifyEd25519 => {
                 let result = ed25519_batch.verify(&mut rng, &Sequential);
+                assert_eq!(curve_batch.verify(&mut rng, &Sequential), result);
                 assert_eq!(
                     result,
                     expected_ed25519_result.unwrap_or(false),
@@ -112,6 +155,7 @@ fn fuzz(input: FuzzInput) {
 
                 // Reset batch and expectation after verification
                 ed25519_batch = Ed25519Batch::new(0);
+                curve_batch = batch::Verifier::new(0);
                 expected_ed25519_result = None;
             }
         }
@@ -119,6 +163,7 @@ fn fuzz(input: FuzzInput) {
 
     // Final verification of any remaining items
     let ed25519_result = ed25519_batch.verify(&mut rng, &Sequential);
+    assert_eq!(curve_batch.verify(&mut rng, &Sequential), ed25519_result);
     assert_eq!(
         ed25519_result,
         expected_ed25519_result.unwrap_or(false),

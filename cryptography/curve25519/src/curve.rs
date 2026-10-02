@@ -880,7 +880,10 @@ pub trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {}
+pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {
+    /// Whether this backend uses SIMD instructions.
+    const IS_ACCELERATED: bool;
+}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
@@ -904,11 +907,20 @@ pub mod montgomery;
 pub mod msm;
 
 // Now, a module for each backend.
-#[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
+#[cfg(all(
+    target_arch = "x86_64",
+    any(feature = "std", test),
+    not(feature = "portable")
+))]
 mod avx512;
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", not(feature = "portable")))]
 mod neon;
-#[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
+#[cfg(any(
+    test,
+    feature = "fuzz",
+    feature = "portable",
+    not(target_arch = "aarch64")
+))]
 mod portable;
 #[cfg(any(test, feature = "fuzz"))]
 pub mod test;
@@ -925,7 +937,11 @@ pub fn test_backend() -> impl Backend {
 /// Every use is forced through this single gate so an accelerated backend is only constructed
 /// where its instructions are guaranteed to be available.
 pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
-    #[cfg(all(target_arch = "x86_64", any(feature = "std", test)))]
+    #[cfg(all(
+        target_arch = "x86_64",
+        any(feature = "std", test),
+        not(feature = "portable")
+    ))]
     {
         if let Some(backend) = avx512::Backend::new() {
             // SAFETY: constructing `backend` confirmed that the CPU supports every target
@@ -933,11 +949,11 @@ pub fn with_backend<F: WithBackend>(f: F) -> F::Output {
             return unsafe { backend.call(f) };
         }
     }
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", not(feature = "portable")))]
     {
         f.call(neon::Backend::new())
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(any(feature = "portable", not(target_arch = "aarch64")))]
     {
         // Portable fallback, available everywhere.
         f.call(portable::Backend::new())
