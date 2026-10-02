@@ -2727,6 +2727,8 @@ mod tests {
                 let mut epoch = Epoch::zero();
                 let mut view = View::zero();
                 let mut missed = false;
+                let mut rejected = [0; 2];
+                let mut skipped = 0;
                 let mut chain = vec![genesis.digest()];
                 for height in (1..=tip.get()).map(Height::new) {
                     let next = epocher.containing(height).unwrap().epoch();
@@ -2771,7 +2773,9 @@ mod tests {
                             // between verifying the proposal and skipping verification, and
                             // certification returns the application's verdict either way.
                             WrapperKind::Deferred => {
-                                if !missed {
+                                if missed {
+                                    skipped += 1;
+                                } else {
                                     assert!(
                                         wrapper
                                             .verify(block_context, digest)
@@ -2803,6 +2807,7 @@ mod tests {
                                 missed = !missed;
                             }
                         }
+                        rejected[epoch.get() as usize] += 1;
                         view = view.next();
                     }
 
@@ -2853,6 +2858,11 @@ mod tests {
                 }
                 let delivered: Vec<_> = app.blocks().values().map(|block| block.digest()).collect();
                 assert_eq!(delivered, chain, "{old:?} -> {new:?}");
+
+                // Every Byzantine view was rejected: seven in epoch 0 and two in epoch 1. The
+                // Deferred epoch certified at least one without verifying it first.
+                assert_eq!(rejected, [7, 2], "{old:?} -> {new:?}");
+                assert!(skipped > 0, "{old:?} -> {new:?}");
             });
         }
     }
