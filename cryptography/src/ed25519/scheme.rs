@@ -125,6 +125,9 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
+///
+/// Equality, ordering, and hashing use the original encoding. Distinct encodings of the same
+/// curve point are distinct keys.
 #[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
 pub struct PublicKey {
     key: ed_core::VerificationKey,

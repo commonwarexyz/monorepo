@@ -152,10 +152,16 @@ impl crate::Verifier for PublicKey {
 }
 
 /// BLS12-381 public key.
-#[derive(Clone, Eq, PartialEq, FixedArray)]
+#[derive(Clone, Eq, FixedArray)]
 pub struct PublicKey {
     raw: [u8; <MinPk as Variant>::Public::SIZE],
     key: <MinPk as Variant>::Public,
+}
+
+impl PartialEq for PublicKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
 }
 
 impl From<PrivateKey> for PublicKey {
