@@ -429,7 +429,7 @@ pub(super) struct Storage<
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest>,
-    S: StorageTrait<F, Digest = H::Digest>,
+    S: StorageTrait<Family = F, Digest = H::Digest>,
 > {
     grafted_tree: &'a G,
     grafting_height: u32,
@@ -442,7 +442,7 @@ impl<
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest>,
-    S: StorageTrait<F, Digest = H::Digest>,
+    S: StorageTrait<Family = F, Digest = H::Digest>,
 > Storage<'a, F, H, G, S>
 {
     /// Creates a new [Storage] instance.
@@ -494,9 +494,10 @@ impl<
     F: Graftable,
     H: Hasher,
     G: Readable<Family = F, Digest = H::Digest>,
-    S: StorageTrait<F, Digest = H::Digest>,
-> StorageTrait<F> for Storage<'_, F, H, G, S>
+    S: StorageTrait<Family = F, Digest = H::Digest>,
+> StorageTrait for Storage<'_, F, H, G, S>
 {
+    type Family = F;
     type Digest = H::Digest;
 
     fn size(&self) -> Position<F> {
@@ -1209,7 +1210,7 @@ mod tests {
     /// The combined storage's `get_nodes` must agree with `get_node` on every available
     /// position and name the lowest position `get_node` reports as absent.
     async fn assert_get_nodes_matches_get_node(
-        combined: &impl StorageTrait<mmr::Family, Digest = sha256::Digest>,
+        combined: &impl StorageTrait<Family = mmr::Family, Digest = sha256::Digest>,
     ) {
         let all: Vec<Position> = (0..*combined.size()).map(Position::new).collect();
         let mut available = Vec::new();

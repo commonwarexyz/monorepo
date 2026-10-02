@@ -775,13 +775,13 @@ where
             }
         }
 
-        // Keys from the first batch (before the floor) should NOT be in the snapshot.
+        // Keys from the first batch (before the floor) should NOT be in the index.
         for op in &early_ops {
             if let Some((key, _)) = H::op_kv(op) {
                 assert_eq!(
                     H::lookup(&synced_db, key).await,
                     None,
-                    "key from before floor should not be in synced snapshot"
+                    "key from before floor should not be in synced index"
                 );
             }
         }
@@ -1954,7 +1954,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -1984,7 +1983,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,

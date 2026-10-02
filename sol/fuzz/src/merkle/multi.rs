@@ -124,7 +124,7 @@ impl MultiArgs {
     }
 }
 
-fn prove<F: Family, H: Hasher, S: Storage<F, Digest = H::Digest>>(
+fn prove<F: Family, H: Hasher, S: Storage<Family = F, Digest = H::Digest>>(
     tree: &S,
     policy: Policy,
     locations: &[Location<F>],
@@ -247,7 +247,8 @@ impl<F: Family, D: commonware_cryptography::Digest> SparseTree<F, D> {
     }
 }
 
-impl<F: Family, D: commonware_cryptography::Digest> Storage<F> for SparseTree<F, D> {
+impl<F: Family, D: commonware_cryptography::Digest> Storage for SparseTree<F, D> {
+    type Family = F;
     type Digest = D;
 
     fn size(&self) -> Position<F> {
@@ -262,7 +263,8 @@ impl<F: Family, D: commonware_cryptography::Digest> Storage<F> for SparseTree<F,
 /// Encodes node positions as digests so Commonware supplies the canonical witness order.
 struct PositionStore<F: Family>(Position<F>);
 
-impl<F: Family> Storage<F> for PositionStore<F> {
+impl<F: Family> Storage for PositionStore<F> {
+    type Family = F;
     type Digest = Digest;
 
     fn size(&self) -> Position<F> {

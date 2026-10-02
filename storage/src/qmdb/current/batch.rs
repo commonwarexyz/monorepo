@@ -172,7 +172,7 @@ struct BatchStorageAdapter<
     F: Graftable,
     D: Digest,
     R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
+    S: MerkleStorage<Family = F, Digest = D>,
 > {
     batch: &'a R,
     base: &'a S,
@@ -184,7 +184,7 @@ impl<
     F: Graftable,
     D: Digest,
     R: Readable<Family = F, Digest = D>,
-    S: MerkleStorage<F, Digest = D>,
+    S: MerkleStorage<Family = F, Digest = D>,
 > BatchStorageAdapter<'a, F, D, R, S>
 {
     const fn new(batch: &'a R, base: &'a S) -> Self {
@@ -196,9 +196,14 @@ impl<
     }
 }
 
-impl<F: Graftable, D: Digest, R: Readable<Family = F, Digest = D>, S: MerkleStorage<F, Digest = D>>
-    MerkleStorage<F> for BatchStorageAdapter<'_, F, D, R, S>
+impl<
+    F: Graftable,
+    D: Digest,
+    R: Readable<Family = F, Digest = D>,
+    S: MerkleStorage<Family = F, Digest = D>,
+> MerkleStorage for BatchStorageAdapter<'_, F, D, R, S>
 {
+    type Family = F;
     type Digest = D;
 
     fn size(&self) -> Position<F> {
@@ -1306,7 +1311,7 @@ where
     /// reading through it (or a descendant of it) refuses with [`Error::StaleRead`]
     /// and applying it is rejected with [`Error::StaleBatch`].
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, N, S>> {
-        let grafted = self.grafted_snapshot();
+        let grafted = self.grafted_batch();
         Arc::new(MerkleizedBatch {
             inner: self.any.to_batch(),
             grafted,

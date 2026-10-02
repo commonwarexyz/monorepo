@@ -175,7 +175,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             Schedule::PendingParent => {
                 // Build a parent batch, then build the child while the parent is still
                 // pending so the child must resolve through base_diff plus the stale
-                // committed snapshot.
+                // committed index.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 let parent = batch.merkleize(&db, None).await.unwrap();
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
