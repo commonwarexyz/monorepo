@@ -14,8 +14,9 @@
   scheme provider, not a scheme, and a provider lookup is not a read: an application may
   count lookups against the scope it serves and retire it, as the standard tests'
   `RetiringProvider` and the shards engine tests' `ChurningProvider` do, so a lookup of
-  yours can turn a later one of the implementation's into `None`. Never call `scoped` or
-  `scheme` on a provider yourself. In marshal `me` has exactly one source,
+  yours can turn a later one of the implementation's into `None`. Never look a provider up
+  yourself, whether by calling `scoped` or `scheme` or a method of the implementation that
+  does, such as `Actor::scoped_for_height`. In marshal `me` has exactly one source,
   `crate::simplex::statelens::provider_me(&provider, epoch)`: for the `ConstantProvider`
   every harness uses it reads the index without an effect, and for any other provider it
   looks nothing up and returns `None`, an unknown index. The scope is not used, so pass any
@@ -38,10 +39,13 @@
   - `Some(me)` is the index to pass, including `Some(None)` for a scheme with no signer: the
     replica is known not to be a participant. `None` is not an index. Guard the site with
     `if let Some(me) = ...`, so that under any other provider it stays uninstrumented at run
-    time, as rule 3 requires for an index you could not obtain. Never pass `None` in its
-    place, and never convert it with `.flatten()`, `.unwrap_or(None)` or
-    `.and_then(|me| me)`: each turns an unknown index into "not a participant", and the
-    Byzantine guard off. A type error at a macro means the guard is missing.
+    time, as rule 3 requires for an index you could not obtain. Where the site yields a
+    value, such as a `with_ghost` read whose result you keep, write
+    `me.and_then(|me| crate::simplex::statelens::with_ghost(me, ...))`: it yields `None`, as
+    a skipped replica does. Never pass `None` in its place, and never convert it with
+    `.flatten()`, `.unwrap_or(None)` or `.and_then(|me| me)`: each turns an unknown index
+    into "not a participant", and the Byzantine guard off. A type error at a macro,
+    `with_ghost`, `with_global` or a helper that takes `me` means the guard is missing.
   - Say in each plan section that its sites take `me` from `provider_me`.
   - The backfill resolver, the application gates and validation, `ancestry.rs` and
     `store.rs` have no identity of their own. Instrument them at their call sites in the
