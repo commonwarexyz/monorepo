@@ -469,6 +469,11 @@ where
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
     /// make the applied state durable.
+    ///
+    /// Before its commit, the batch moves one active update to the tip for each operation it makes
+    /// inactive: each update it supersedes, each delete it appends, and the previous commit. This
+    /// keeps the inactivity floor at most `3 * (n + 1)` operations behind the tip, where `n` is the
+    /// number of active keys. If the batch leaves the store empty, the floor moves to its commit.
     #[boxed]
     pub async fn apply_batch(
         mut self,
@@ -510,14 +515,15 @@ where
                 .await?;
                 if deleted.is_some() {
                     (self.log, _) = self.log.append(&Operation::Delete(key)).await?;
-                    steps += 1;
+                    steps += 2;
                     self.active_keys -= 1;
                 }
             }
         }
 
-        // Raise the inactivity floor by `steps` steps, plus 1 to account for the previous
-        // commit becoming inactive.
+        // Raise the inactivity floor by one step for each operation the batch makes inactive.
+        // `steps` counts the updates it supersedes and the deletes it appends, and the previous
+        // commit adds one.
         if self.is_empty() {
             self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
@@ -1344,6 +1350,122 @@ mod test {
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_c);
             assert_eq!(db.get(&k_b).await.unwrap().unwrap(), v_a);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Apply `writes` as one batch, replay its operations into `live`, and assert that the floor
+    /// trails the tip by at most `3 * (n + 1)` operations, where `n` is the number of live keys.
+    async fn bounded(
+        db: TestStore,
+        live: &mut BTreeMap<Digest, Location>,
+        writes: &[(Digest, Option<Vec<u8>>)],
+    ) -> TestStore {
+        let (db, range) = apply_entries(db, writes.iter().cloned()).await;
+        for loc in *range.start..*range.end {
+            let loc = Location::new(loc);
+            match db.get_op(loc).await.unwrap() {
+                Operation::Update(Update(key, _)) => {
+                    live.insert(key, loc);
+                }
+                Operation::Delete(key) => {
+                    live.remove(&key);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(live.len(), db.active_keys);
+        let gap = *db.size() - *db.inactivity_floor_loc();
+        let bound = 3 * (live.len() as u64 + 1);
+        assert!(
+            gap <= bound,
+            "the floor trails the tip by {gap} with {} live keys",
+            live.len(),
+        );
+        db
+    }
+
+    /// Return deletes of the `n` live keys with the highest locations.
+    fn newest(live: &BTreeMap<Digest, Location>, n: usize) -> Vec<(Digest, Option<Vec<u8>>)> {
+        let mut keys: Vec<_> = live.iter().map(|(key, loc)| (*loc, *key)).collect();
+        keys.sort_unstable_by(|a, b| b.cmp(a));
+        keys.into_iter()
+            .take(n)
+            .map(|(_, key)| (key, None))
+            .collect()
+    }
+
+    /// Every batch keeps the floor at most `3 * (n + 1)` operations behind the tip, where `n` is
+    /// the number of live keys, across a large batch of creates, hot-key updates, delete and
+    /// recreate churn, shrinking by deleting the newest keys, bursts of creates followed by deletes
+    /// of the newest keys, and large mixed batches.
+    #[test_traced("WARN")]
+    fn test_store_floor_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
+            let value = |i: u64| i.to_be_bytes().to_vec();
+            let mut live = BTreeMap::new();
+
+            // Create 256 keys in one batch.
+            let db = create_test_store(context.child("store")).await;
+            let writes: Vec<_> = (0..256).map(|i| (key(i), Some(value(i)))).collect();
+            let mut db = bounded(db, &mut live, &writes).await;
+
+            // Update four hot keys in each of 64 batches.
+            for round in 0..64 {
+                let writes: Vec<_> = (0..4)
+                    .map(|i| (key(i), Some(value(1000 + round))))
+                    .collect();
+                db = bounded(db, &mut live, &writes).await;
+            }
+
+            // Delete eight keys, then delete the next eight in each of 64 batches while
+            // recreating the eight the previous batch deleted.
+            let window = |round: u64| (8 * round..8 * round + 8).map(move |i| key(i % 256));
+            let writes: Vec<_> = window(0).map(|key| (key, None)).collect();
+            db = bounded(db, &mut live, &writes).await;
+            for round in 0..64 {
+                let writes: Vec<_> = window(round)
+                    .map(|key| (key, Some(value(2000 + round))))
+                    .chain(window(round + 1).map(|key| (key, None)))
+                    .collect();
+                db = bounded(db, &mut live, &writes).await;
+            }
+
+            // Delete the eight newest keys in each batch until eight keys remain.
+            while live.len() > 8 {
+                let writes = newest(&live, 8);
+                db = bounded(db, &mut live, &writes).await;
+            }
+
+            // Four times, create a burst of 64 keys and then delete the eight newest keys in each
+            // of eight batches.
+            for burst in 0..4 {
+                let start = 1000 + 64 * burst;
+                let writes: Vec<_> = (start..start + 64)
+                    .map(|i| (key(i), Some(value(i))))
+                    .collect();
+                db = bounded(db, &mut live, &writes).await;
+                for _ in 0..8 {
+                    let writes = newest(&live, 8);
+                    db = bounded(db, &mut live, &writes).await;
+                }
+            }
+
+            // Create 512 keys in one batch, then delete 64 keys, update 128, and create 32 in
+            // each of four batches.
+            let writes: Vec<_> = (2000..2512).map(|i| (key(i), Some(value(i)))).collect();
+            db = bounded(db, &mut live, &writes).await;
+            for round in 0..4 {
+                let keys: Vec<_> = live.keys().copied().collect();
+                let start = 3000 + 32 * round;
+                let deletes = keys[..64].iter().map(|&key| (key, None));
+                let updates = keys[64..192].iter().map(|&key| (key, Some(value(round))));
+                let creates = (start..start + 32).map(|i| (key(i), Some(value(i))));
+                let writes: Vec<_> = deletes.chain(updates).chain(creates).collect();
+                db = bounded(db, &mut live, &writes).await;
+            }
             db.destroy().await.unwrap();
         });
     }
