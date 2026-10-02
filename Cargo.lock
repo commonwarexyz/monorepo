@@ -2319,6 +2319,7 @@ dependencies = [
  "commonware-macros",
  "dashmap",
  "futures",
+ "libc",
  "proptest",
  "rayon",
 ]
