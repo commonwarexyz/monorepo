@@ -3,7 +3,7 @@
 use crate::{
     Heightable,
     aggregation::scheme,
-    types::{Epoch, Height},
+    types::{Epoch, Height, Participant},
 };
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
@@ -52,6 +52,9 @@ pub enum Error {
     /// Duplicate acknowledgment for the same height
     #[error("Duplicate ack from sender {0} for height {1}")]
     AckDuplicate(String, Height),
+    /// The acknowledgment's signer already sent an invalid ack in this epoch
+    #[error("Ack from invalid signer {1} in epoch {0}")]
+    AckSignerInvalid(Epoch, Participant),
     /// The acknowledgement is for a height that already has a certificate
     #[error("Ack for height {0} already has been certified")]
     AckCertified(Height),
