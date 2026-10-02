@@ -437,6 +437,8 @@ fuzz target *args:
         *)                      break ;;
       esac
     done
+    # `cargo fuzz run` takes libFuzzer flags only after `--`, which the loop consumed.
+    if [ $# -gt 0 ]; then set -- -- "$@"; fi
     case "$target" in
       simplex|marshal)   profile="$target"; every=yes ;;
       simplex_*)         profile=simplex;   every=no ;;
