@@ -51,6 +51,9 @@ use core::{
 use rand_core::CryptoRng;
 use zeroize::Zeroize;
 
+#[cfg(target_arch = "x86_64")]
+mod simd;
+
 /// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
 pub type CoreBlake3 = blake3::Hasher;
 
@@ -204,6 +207,10 @@ impl Hasher for Blake3 {
 
     #[inline]
     fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(pair) = simd::hash_pair(left, right) {
+            return pair;
+        }
         (Self::hash(left), Self::hash(right))
     }
 

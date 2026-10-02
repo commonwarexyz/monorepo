@@ -265,6 +265,15 @@ jobs:
       run: |
         cd runtime
         just miri iouring::task::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
+    # Static target features let Miri interpret the AVX-512 kernels and the AVX2 pair kernels. The
+    # kernel tests load from exactly sized allocations, so a read past those inputs is reported.
+    - name: Run miri tests for cryptography::blake3::simd::x86_64
+      env:
+        RUSTFLAGS: "-Ctarget-feature=+avx2,+avx512f,+avx512bw,+avx512vl"
+        MIRIFLAGS: "-Zmiri-disable-isolation"
+      run: |
+        cargo miri nextest run -p commonware-cryptography --lib --partition hash:${{matrix.partition}}/12 --no-tests=pass \
+          -E 'test(/^blake3::simd::x86_64::(tests::test_(masked_gather|pair)_)/)'
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
