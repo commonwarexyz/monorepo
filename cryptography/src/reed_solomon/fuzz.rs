@@ -3,7 +3,7 @@
 #[cfg(target_arch = "aarch64")]
 use super::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use super::engine::{Avx2, Avx512, Ssse3};
+use super::engine::{Avx2, Avx512};
 use super::{
     Decoder, Error, Plan,
     engine::{
@@ -33,9 +33,6 @@ macro_rules! each_engine {
             }
             if std::arch::is_x86_feature_detected!("avx2") {
                 $runner::<Avx2>($($arg,)* Avx2::new);
-            }
-            if std::arch::is_x86_feature_detected!("ssse3") {
-                $runner::<Ssse3>($($arg,)* Ssse3::new);
             }
         }
         #[cfg(target_arch = "aarch64")]

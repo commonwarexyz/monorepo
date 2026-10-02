@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
-use commonware_utils::vec::NonEmptyVec;
+use commonware_utils::{futures::Aborter, vec::NonEmptyVec};
 
 /// Marshal's durable processed height and the stored block that backs it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,6 +45,11 @@ pub struct Floor {
 }
 
 impl Floor {
+    /// Creates a floor from its independent processed position and round floor.
+    pub(super) const fn new(processed: Option<Processed>, round: Round) -> Self {
+        Self { processed, round }
+    }
+
     /// Returns the latest durably processed position, if any.
     pub const fn processed(&self) -> Option<Processed> {
         self.processed
@@ -56,39 +61,43 @@ impl Floor {
     }
 }
 
-/// Durable floor state plus any update awaiting its anchor block.
+/// A floor finalization awaiting its anchor block.
+///
+/// Dropping the pending floor aborts its buffer waiter, if one exists.
+struct Pending<S: Scheme, C: Digest> {
+    finalization: Finalization<S, C>,
+    _aborter: Option<Aborter>,
+}
+
+/// Durable floor state, the configured floor until startup takes it, and any update
+/// awaiting its anchor block.
 pub(super) struct State<S: Scheme, C: Digest> {
     processed: Option<Processed>,
     round: Round,
-    pending: Option<Finalization<S, C>>,
+    configured: Option<Finalization<S, C>>,
+    pending: Option<Pending<S, C>>,
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
-    pub(super) const fn resolved(processed: Option<Processed>, round: Round) -> Self {
+    /// Creates floor state from the configured floor, if any, and the restored floor.
+    pub(super) const fn new(configured: Option<Finalization<S, C>>, floor: Floor) -> Self {
         Self {
-            processed,
-            round,
+            processed: floor.processed,
+            round: floor.round,
+            configured,
             pending: None,
         }
     }
 
-    pub(super) const fn awaiting_anchor(
-        processed: Option<Processed>,
-        round: Round,
-        finalization: Finalization<S, C>,
-    ) -> Self {
-        Self {
-            processed,
-            round,
-            pending: Some(finalization),
-        }
+    /// Takes the configured floor, if any.
+    #[must_use]
+    pub(super) const fn take_configured(&mut self) -> Option<Finalization<S, C>> {
+        self.configured.take()
     }
 
+    /// Returns the durable floor, without the configured or pending floor.
     pub(super) const fn snapshot(&self) -> Floor {
-        Floor {
-            processed: self.processed,
-            round: self.round,
-        }
+        Floor::new(self.processed, self.round)
     }
 
     /// Returns the durable processed position, if any.
@@ -118,7 +127,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.processed = Some(processed);
     }
 
-    pub(super) const fn set_processed_round(&mut self, round: Round) {
+    pub(super) const fn set_round(&mut self, round: Round) {
         self.round = round;
     }
 
@@ -128,33 +137,42 @@ impl<S: Scheme, C: Digest> State<S, C> {
     }
 
     /// Returns true if a pending floor already supersedes the candidate floor round.
-    pub(super) fn has_pending_anchor_at_or_after(&self, round: Round) -> bool {
-        matches!(&self.pending, Some(pending) if pending.round() >= round)
-    }
-
-    /// Returns true when `commitment` is the awaited anchor.
-    pub(super) fn matches_pending_anchor(&self, commitment: C) -> bool {
-        matches!(&self.pending, Some(pending) if pending.proposal.payload == commitment)
+    pub(super) fn pending_supersedes(&self, round: Round) -> bool {
+        matches!(&self.pending, Some(pending) if pending.finalization.round() >= round)
     }
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.
-    pub(super) fn await_anchor(&mut self, finalization: Finalization<S, C>) {
-        self.pending = Some(finalization);
+    ///
+    /// Taking or replacing the pending floor drops `aborter`, which aborts its
+    /// buffer waiter.
+    pub(super) fn set_pending(
+        &mut self,
+        finalization: Finalization<S, C>,
+        aborter: Option<Aborter>,
+    ) {
+        self.pending = Some(Pending {
+            finalization,
+            _aborter: aborter,
+        });
     }
 
-    /// Takes the pending anchor finalization, if any.
+    /// Takes the pending floor if `commitment` is its payload.
     #[must_use]
-    pub(super) const fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
-        self.pending.take()
+    pub(super) fn take_matching(&mut self, commitment: C) -> Option<Finalization<S, C>> {
+        self.pending
+            .take_if(|pending| pending.finalization.proposal.payload == commitment)
+            .map(|pending| pending.finalization)
     }
 
-    /// Takes the pending anchor if the processed round floor now covers its round.
+    /// Takes the pending floor if the processed round floor now covers its round.
     ///
     /// Finalized rounds and heights increase together along the finalized chain, so
     /// an anchor at or below the round floor sits at or below the processed height.
     #[must_use]
-    pub(super) fn take_superseded_anchor(&mut self, round: Round) -> Option<Finalization<S, C>> {
-        self.pending.take_if(|pending| pending.round() <= round)
+    pub(super) fn take_superseded(&mut self, round: Round) -> Option<Finalization<S, C>> {
+        self.pending
+            .take_if(|pending| pending.finalization.round() <= round)
+            .map(|pending| pending.finalization)
     }
 
     /// Returns true when the resolver request is above all processed floors.
@@ -332,7 +350,10 @@ mod tests {
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
-        State::resolved(Some(Processed::Block(Height::new(5))), round(5))
+        State::new(
+            None,
+            Floor::new(Some(Processed::Block(Height::new(5))), round(5)),
+        )
     }
 
     #[test]
@@ -468,7 +489,7 @@ mod tests {
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
+        let floor = State::<TestScheme, TestDigest>::new(None, Floor::new(None, round(5)));
         let mut resolver = TestResolver::default();
 
         assert!(matches!(

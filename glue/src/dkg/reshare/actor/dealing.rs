@@ -52,11 +52,18 @@ where
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    /// Run the early dealing phase for `epoch`.
+    /// Runs the dealing window of `epoch`.
     ///
-    /// The phase processes inbound dealer messages and acknowledgements while
-    /// finalized blocks remain in [`EpochPhase::Early`]. It returns after the
-    /// final early block is acknowledged.
+    /// Exchanges dealings and acknowledgements with peers, resending this
+    /// node's unacknowledged dealings on each finalized block. Dealer-log
+    /// requests receive no log and final-block requests receive
+    /// [`EpochInfoResponse::Pending`].
+    ///
+    /// Returns `Continue` after the last block before the midpoint is
+    /// acknowledged, and `Break` on shutdown or when the mailbox or the epoch's
+    /// P2P channel closes. Panics as described on [`Self::covered`], or if an
+    /// unapplied finalized block lies outside the [`EpochPhase::Early`] part of
+    /// `epoch`.
     pub(super) async fn dealing<SE, RE>(
         &mut self,
         epoch: Epoch,
@@ -99,6 +106,10 @@ where
                     block,
                     response,
                 } => {
+                    if self.covered(&block) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.dealing.finalized",
@@ -133,6 +144,7 @@ where
                             .midpoint(epoch)
                             .and_then(|midpoint| midpoint.previous())
                             == Some(block.height());
+                        self.advance(&block);
                         response.acknowledge();
                         done
                     }
@@ -260,7 +272,10 @@ where
                         );
                     }
                     Err(DkgAckError::InvalidAck) => {
-                        // The authenticated sender acknowledged a transcript this actor never sent.
+                        // This dealer sends one public message per epoch (its seed is
+                        // persisted) and the channel authenticates the sender, so an
+                        // acknowledgement that does not match it cannot come from an
+                        // honest player.
                         commonware_p2p::block!(self.blocker, from, ?epoch, "invalid ack signature");
                     }
                 }
@@ -414,17 +429,20 @@ mod tests {
                     sharing_mode: Mode::NonZeroCounter,
                     reveal: Reveal::V1,
                     mailbox_size: NZUsize!(16),
+                    muxer_size: 16,
                     partition_prefix: "dealing-priority-actor".into(),
+                    page_cache: mocks::page_cache(&context),
+                    write_buffer: mocks::IO_BUFFER,
+                    replay_buffer: mocks::IO_BUFFER,
                     max_participants: NZU32!(16),
                     blocks_per_epoch: NZU64!(2),
                     batch_verifier: PhantomData::<ed25519::Batch>,
                 },
             );
 
-            let mut store = Store::init(
+            let mut store = mocks::store(
                 context.child("store"),
                 "dealing-priority-store",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;
@@ -487,10 +505,9 @@ mod tests {
                 NZU64!(8),
             )
             .await;
-            let mut store = Store::init(
+            let mut store = mocks::store(
                 context.child("store"),
                 "authenticated-fault-store",
-                NZU32!(16),
                 MemorySecretStore::default(),
             )
             .await;

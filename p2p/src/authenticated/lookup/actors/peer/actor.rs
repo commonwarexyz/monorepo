@@ -51,7 +51,6 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
     rate_limited: CounterFamily<metrics::Message<C>>,
-    _phantom: std::marker::PhantomData<C>,
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Actor<E, C> {
@@ -68,7 +67,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
-                _phantom: std::marker::PhantomData,
             },
             control_sender,
             relay,
@@ -191,7 +189,7 @@ mod tests {
     use crate::authenticated::router;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        Signer,
+        ChaCha20Poly1305, Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{
@@ -199,7 +197,10 @@ mod tests {
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
     use commonware_stream::{
-        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
+        SakeCups, Upgrader as _,
+        cups::{self, Cups},
+        sake::{self, Sake},
+        utils::Timeout,
     };
     use commonware_utils::NZUsize;
     use std::{
@@ -243,15 +244,17 @@ mod tests {
         }
     }
 
-    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
-        Timeout::new(
-            StreamHandshake {
+    fn handshake<S: Signer>(signer: S) -> Timeout<SakeCups<S, ChaCha20Poly1305>> {
+        let handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
             },
-            Duration::from_secs(10),
-        )
+            cups::Version::V1,
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {

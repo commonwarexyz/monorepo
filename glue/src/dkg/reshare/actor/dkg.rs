@@ -3,10 +3,10 @@ use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     network::Manager,
     reshare::{Actor, EpochInfoResponse, Message, actor::Mode, metrics::Phase, store::Store},
-    types::Participants,
+    types::{EpochInfo, Participants, Payload},
 };
 use commonware_consensus::{
-    marshal::core::Variant as MarshalVariant,
+    marshal::{Identifier, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, Height},
 };
@@ -15,7 +15,7 @@ use commonware_cryptography::{
     certificate::Scheme,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::MuxHandle};
+use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
@@ -42,45 +42,50 @@ where
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    pub(super) async fn run_dkg<SE, RE>(
+    pub(super) async fn run_dkg<SE>(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        dealing_mux: &mut MuxHandle<SE, RE>,
+        dealing_mux: &mut MuxHandle<SE>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
-        RE: Receiver<PublicKey = C::PublicKey>,
     {
         let epoch = Epoch::zero();
+        let completion = self.dkg_completion();
 
-        // The one-shot DKG is never resumed or re-run. If this node already
-        // persisted its epoch-zero threshold share, the ceremony completed in a
-        // prior run and its artifacts were durably written then. Fail loudly
-        // rather than re-running the ceremony (which would misreport the completed
-        // DKG as a fresh failure once the chain has finalized past epoch zero).
-        if store.share(epoch).await.is_some() {
-            panic!(
-                "epoch-zero DKG already completed: this node's threshold share is \
-                 persisted, so the ceremony finished in a prior run and does not run \
-                 again. If the genesis artifact was not written, recover it from a peer \
-                 instead of re-running the DKG."
-            );
+        // Activate the epoch-zero peer set on every start, including restarts
+        // after completion, so this node can fetch and serve the one-shot chain.
+        let tracked = self.track_dkg();
+
+        // A persisted share or a tip at the final height means a prior run
+        // applied the final block, which marshal stores before delivering it.
+        // The bootstrap chain is never pruned or floored, so the block is still
+        // stored. Report its outcome instead of running the ceremony again.
+        let last = self
+            .epocher
+            .last(epoch)
+            .expect("epocher must know epoch zero");
+        if self.tip.is_some_and(|tip| tip.height >= last) || store.share(epoch).await.is_some() {
+            if let Err(error) = tracked {
+                warn!(epoch = %epoch, %error, "failed to activate DKG peer set after completion");
+            }
+            let info = self.final_info(last).await;
+            if let Some(completion) = completion {
+                completion(info);
+            }
+            self.terminal().await;
+            return;
         }
 
-        let completion = self.dkg_completion();
-        let mut prepared = match self.setup_dkg(store).await {
-            Ok(Some(prepared)) => prepared,
-            Ok(None) => {
-                self.complete_dkg(completion, store);
-                self.terminal().await;
-                return;
-            }
+        let snapshot = match tracked {
+            Ok(snapshot) => snapshot,
             Err(error) => {
-                warn!(epoch = %epoch, %error, "failed to activate DKG peer set, shutting down");
+                warn!(epoch = %epoch, %error, "failed to activate DKG peer set");
                 self.complete_dkg(completion, store);
                 self.terminal().await;
                 return;
             }
         };
+        let mut prepared = self.setup_dkg(store, snapshot).await;
 
         let chan = dealing_mux
             .register(epoch.get())
@@ -115,50 +120,27 @@ where
     async fn setup_dkg(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-    ) -> Result<Option<PreparedEpoch<V, C>>, M::Error> {
+        snapshot: Participants<C::PublicKey>,
+    ) -> PreparedEpoch<V, C> {
         self.metrics.set_phase(Phase::Setup);
 
-        let height = self
-            .marshal
-            .get_processed()
-            .await
-            .map_or_else(Height::zero, |processed| processed.height().next());
+        let height = self.tip.map_or_else(Height::zero, |tip| tip.height.next());
         let bounds = self
             .epocher
             .containing(height)
             .expect("epocher must know of block height");
-        if bounds.epoch() != Epoch::zero() {
-            return Ok(None);
-        }
-
-        let participants = self
-            .dkg_participants()
-            .expect("DKG setup requires DKG mode");
-        let snapshot = Participants {
-            dealers: participants.clone(),
-            players: participants.clone(),
-            next_players: Set::default(),
-        };
-        snapshot
-            .validate::<V>(self.max_participants, None, 0)
-            .expect("DKG participants must be valid");
-        snapshot
-            .validate_epoch_capacity::<V>(self.blocks_per_epoch, None)
-            .expect("DKG epoch must have enough dealer-log slots");
-
-        // Activate the complete epoch-zero snapshot with its configured
-        // directory before the channel is registered or any dealings can be
-        // sent.
-        let directory = self.dkg_directory().expect("DKG setup requires DKG mode");
-        self.manager
-            .track(Epoch::zero(), snapshot.tracked_peers(), &directory)?;
+        assert_eq!(
+            bounds.epoch(),
+            Epoch::zero(),
+            "DKG setup requires a tip before the final block"
+        );
 
         let seed = store
             .seed_or_random(Epoch::zero(), self.context.as_present_mut())
             .await;
         store.put_seed(Epoch::zero(), seed).await;
 
-        Ok(Some(self.prepare_epoch(
+        self.prepare_epoch(
             store,
             EpochPreparation {
                 epoch: Epoch::zero(),
@@ -168,9 +150,69 @@ where
                 share: None,
                 seed,
             },
-        )))
+        )
     }
 
+    /// Validates the configured participants and tracks them for epoch zero,
+    /// returning them as both dealers and players.
+    ///
+    /// Returns the manager's error if tracking fails. Panics outside DKG mode
+    /// or if the participants exceed `max_participants` or the epoch's
+    /// dealer-log capacity.
+    fn track_dkg(&mut self) -> Result<Participants<C::PublicKey>, M::Error> {
+        let participants = self
+            .dkg_participants()
+            .expect("DKG setup requires DKG mode");
+        let snapshot = Participants {
+            dealers: participants.clone(),
+            players: participants,
+            next_players: Set::default(),
+        };
+        snapshot
+            .validate::<V>(self.max_participants, None, 0)
+            .expect("DKG participants must be valid");
+        snapshot
+            .validate_epoch_capacity::<V>(self.blocks_per_epoch, None)
+            .expect("DKG epoch must have enough dealer-log slots");
+        let directory = self.dkg_directory().expect("DKG setup requires DKG mode");
+        self.manager
+            .track(Epoch::zero(), snapshot.tracked_peers(), &directory)?;
+        Ok(snapshot)
+    }
+
+    /// Returns the outcome carried by the stored final DKG block (`None` for a
+    /// failed DKG).
+    ///
+    /// Panics if marshal does not store the block.
+    async fn final_info(
+        &mut self,
+        last: Height,
+    ) -> Option<EpochInfo<V, C::PublicKey, B::Directory>> {
+        let block = self
+            .marshal
+            .get_block(Identifier::Height(last))
+            .await
+            .map(MV::into_shared)
+            .expect(
+                "epoch-zero DKG outcome was applied, but marshal does not store the final \
+                 DKG block: bootstrap storage does not match the secret store",
+            );
+
+        // Final-block verification admits only the derived EpochInfo or no payload.
+        match block.payload() {
+            Some(Payload::EpochInfo(info)) => Some(info),
+            None => None,
+            Some(Payload::DealerLog(_)) => unreachable!("final DKG block carries a dealer log"),
+        }
+    }
+
+    /// Serves requests and acknowledges finalized blocks once the ceremony's
+    /// outcome is reported, until shutdown or the mailbox closes.
+    ///
+    /// No payload is derived here, so a dealer-log request receives no log and
+    /// a final-block request receives [`EpochInfoResponse::Following`]. A
+    /// finalized block has no effects here, so it is acknowledged without
+    /// checking it against the tip.
     async fn terminal(&mut self) {
         select_loop! {
             self.context,
@@ -198,7 +240,7 @@ where
                         "dkg.reshare.actor.dkg_terminal.epoch_info"
                     );
                     process.in_scope(|| {
-                        let _ = response.send(EpochInfoResponse::Available(None));
+                        let _ = response.send(EpochInfoResponse::Following);
                     });
                 }
                 Message::Finalized {
