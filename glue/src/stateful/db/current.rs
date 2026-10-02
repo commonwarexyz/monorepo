@@ -5,8 +5,9 @@
 //! snapshot taken when the batch was created.
 
 use crate::stateful::db::{
-    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
+    BatchContext, InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared,
+    StateSyncDb, SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    validate_initialization,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -502,6 +503,8 @@ where
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot =
+        LogSnapshot<F, E, FixedJournal<E, Operation<F, unordered::Update<K, FixedEncoding<V>>>>, H>;
 
     async fn init(
         context: E,
@@ -545,8 +548,18 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -605,6 +618,8 @@ where
     type Error = Error<F>;
     type Config = FixedConfig<T, S>;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot =
+        LogSnapshot<F, E, FixedJournal<E, Operation<F, ordered::Update<K, FixedEncoding<V>>>>, H>;
 
     async fn init(
         context: E,
@@ -648,8 +663,18 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -782,6 +807,12 @@ where
         S,
     >;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<
+        F,
+        E,
+        VariableJournal<E, Operation<F, unordered::Update<K, VariableEncoding<V>>>>,
+        H,
+    >;
 
     async fn init(
         context: E,
@@ -825,8 +856,18 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -890,6 +931,12 @@ where
         S,
     >;
     type SyncTarget = CurrentSyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<
+        F,
+        E,
+        VariableJournal<E, Operation<F, ordered::Update<K, VariableEncoding<V>>>>,
+        H,
+    >;
 
     async fn init(
         context: E,
@@ -933,8 +980,18 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -1179,7 +1236,7 @@ mod tests {
         batch: D::Merkleized,
     ) -> D {
         let db = D::apply(db, batch).await.unwrap();
-        let (db, sync) = D::finalize(db).await.unwrap();
+        let (db, _snapshot, sync) = D::finalize(db).await.unwrap();
         sync.await.expect("database sync failed");
         db
     }
@@ -1875,6 +1932,7 @@ mod tests {
                     assert!(
                         <DbSet as DatabaseSet<_>>::finalize(&databases)
                             .await
+                            .1
                             .durable()
                             .await
                     );

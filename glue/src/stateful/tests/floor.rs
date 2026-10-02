@@ -5,7 +5,7 @@ use super::{
 };
 use crate::stateful::{
     Application, Config, Stateful, SyncPlan,
-    db::{DatabaseSet, SyncEngineConfig},
+    db::{DatabaseSet, Publisher, SyncEngineConfig},
 };
 use commonware_actor::Feedback;
 use commonware_consensus::{
@@ -137,6 +137,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     },
                 )
                 .await;
+            let publication_context = context.child("publication");
             let (stateful, mut application) = Stateful::new(
                 context.child("stateful"),
                 Config {
@@ -147,6 +148,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     mailbox_size: NZUsize!(8),
                     plan,
                     resolvers: NoopQmdbResolver,
+                    snapshot_publisher: Publisher::new(&publication_context).0,
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
                         apply_batch_size: NZU64!(1),

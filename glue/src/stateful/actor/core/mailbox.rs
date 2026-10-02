@@ -221,8 +221,8 @@ where
 
     /// Returns the database set once startup completes.
     ///
-    /// Resolves after the set is attached to the resolvers that serve peers (and after state sync,
-    /// if it runs). After startup, each call resolves when the actor reaches it in mailbox order.
+    /// Resolves after state sync, if it runs, hands off the database set. After startup, each call
+    /// resolves when the actor reaches it in mailbox order.
     ///
     /// Holders MUST NOT prune these databases. [`Stateful`](super::Stateful) prunes according to
     /// [`Config::prune_config`](crate::stateful::Config::prune_config) and never past the history
