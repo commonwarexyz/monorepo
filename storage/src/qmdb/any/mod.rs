@@ -87,11 +87,12 @@
 //!     fn limits(&self) -> Limits {
 //!         Limits::Fixed { entries: 8, skips: 16 }
 //!     }
-//!     fn decide<'a>(&mut self, entry: Entry<'a, F, Key, Value>) -> Decision<'a, Key, Value> {
+//!     fn decide<'a>(&mut self, entry: Entry<'a, F, Key, Value>) -> Decision<'a, Value> {
 //!         if entry.value().expiry > self.now {
 //!             return entry.stop();
 //!         }
-//!         let (decision, key, value) = entry.evict();
+//!         let key = entry.key().clone();
+//!         let (decision, value) = entry.evict();
 //!         self.expired.push((key, value));
 //!         decision
 //!     }
@@ -2475,10 +2476,7 @@ pub(crate) mod test {
             self.limits
         }
 
-        fn decide<'a>(
-            &mut self,
-            entry: Entry<'a, F, Digest, Digest>,
-        ) -> Decision<'a, Digest, Digest> {
+        fn decide<'a>(&mut self, entry: Entry<'a, F, Digest, Digest>) -> Decision<'a, Digest> {
             self.visited
                 .push((entry.location(), *entry.key(), *entry.value()));
             match (self.decide)(entry.key()) {

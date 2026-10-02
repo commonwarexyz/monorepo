@@ -48,13 +48,13 @@ pub trait Policy<F: Family, K, V> {
     /// Decide `entry`, the active update at the floor.
     ///
     /// The decision must depend only on the entry and the policy's own state.
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, K, V>;
+    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V>;
 }
 
 /// An active update at the floor, handed to [`Policy::decide`].
 ///
-/// `'a` is unique to one call of [`Policy::decide`], so the [`Decision`] an entry makes can only
-/// be returned from that call.
+/// The entry borrows the update's key for `'a` and owns its value. `'a` is unique to one call of
+/// [`Policy::decide`], so the [`Decision`] an entry makes can only be returned from that call.
 ///
 /// # Examples
 ///
@@ -71,7 +71,7 @@ pub trait Policy<F: Family, K, V> {
 ///         Limits::Fixed { entries: 1, skips: 0 }
 ///     }
 ///
-///     fn decide<'a>(&mut self, entry: Entry<'a, F, u64, u64>) -> Decision<'a, u64, u64> {
+///     fn decide<'a>(&mut self, entry: Entry<'a, F, u64, u64>) -> Decision<'a, u64> {
 ///         entry.evict().0
 ///     }
 /// }
@@ -90,7 +90,7 @@ pub trait Policy<F: Family, K, V> {
 ///         Limits::Fixed { entries: 1, skips: 0 }
 ///     }
 ///
-///     fn decide<'a>(&mut self, entry: Entry<'a, F, u64, u64>) -> Decision<'a, u64, u64> {
+///     fn decide<'a>(&mut self, entry: Entry<'a, F, u64, u64>) -> Decision<'a, u64> {
 ///         match self.0.replace(entry) {
 ///             Some(stashed) => stashed.keep(),
 ///             None => unreachable!(),
@@ -101,14 +101,14 @@ pub trait Policy<F: Family, K, V> {
 #[derive(Debug)]
 pub struct Entry<'a, F: Family, K, V> {
     location: Location<F>,
-    key: K,
+    key: &'a K,
     value: V,
     brand: Brand<'a>,
 }
 
 impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
     /// Return an entry for the update of `key` to `value` at `location`.
-    pub(crate) const fn new(location: Location<F>, key: K, value: V) -> Self {
+    pub(crate) const fn new(location: Location<F>, key: &'a K, value: V) -> Self {
         Self {
             location,
             key,
@@ -124,7 +124,7 @@ impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
 
     /// The updated key.
     pub const fn key(&self) -> &K {
-        &self.key
+        self.key
     }
 
     /// The updated value.
@@ -133,40 +133,37 @@ impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
     }
 
     /// Move the update to the tip.
-    pub fn keep(self) -> Decision<'a, K, V> {
-        Decision::new(Action::Keep(self.key, self.value))
+    pub fn keep(self) -> Decision<'a, V> {
+        Decision::new(Action::Keep(self.value))
     }
 
     /// Leave the update in place. The floor stays at its location and no further update is
     /// decided.
-    pub fn stop(self) -> Decision<'a, K, V> {
+    pub fn stop(self) -> Decision<'a, V> {
         Decision::new(Action::Stop)
     }
 
     /// Write `value` for the key at the tip.
-    pub fn replace(self, value: V) -> Decision<'a, K, V> {
-        Decision::new(Action::Replace(self.key, value))
+    pub fn replace(self, value: V) -> Decision<'a, V> {
+        Decision::new(Action::Replace(value))
     }
 
-    /// Delete the key, returning the decision with the owned key and value.
-    pub fn evict(self) -> (Decision<'a, K, V>, K, V)
-    where
-        K: Clone,
-    {
-        let decision = Decision::new(Action::Evict(self.key.clone()));
-        (decision, self.key, self.value)
+    /// Delete the key, returning the decision with the owned value. A policy that needs the key
+    /// clones [`key`](Self::key) first.
+    pub fn evict(self) -> (Decision<'a, V>, V) {
+        (Decision::new(Action::Evict), self.value)
     }
 }
 
 /// What a policy does with an [`Entry`]. Only the entry's methods construct it.
 #[derive(Debug)]
-pub struct Decision<'a, K, V> {
-    action: Action<K, V>,
+pub struct Decision<'a, V> {
+    action: Action<V>,
     brand: Brand<'a>,
 }
 
-impl<K, V> Decision<'_, K, V> {
-    const fn new(action: Action<K, V>) -> Self {
+impl<V> Decision<'_, V> {
+    const fn new(action: Action<V>) -> Self {
         Self {
             action,
             brand: PhantomData,
@@ -174,30 +171,31 @@ impl<K, V> Decision<'_, K, V> {
     }
 
     /// Return the action the decided update resolves to.
-    pub(crate) fn into_action(self) -> Action<K, V> {
+    pub(crate) fn into_action(self) -> Action<V> {
         self.action
     }
 }
 
 /// What the policy pass does with a decided update.
 #[derive(Debug)]
-pub(crate) enum Action<K, V> {
-    /// Move the update, rebuilt from the key and value, to the tip.
-    Keep(K, V),
+pub(crate) enum Action<V> {
+    /// Move the update, rebuilt from its key and the value, to the tip.
+    Keep(V),
     /// Leave the update in place and end the pass.
     Stop,
-    /// Write the value for the key at the tip.
-    Replace(K, V),
-    /// Delete the key.
-    Evict(K),
+    /// Write the value for the update's key at the tip.
+    Replace(V),
+    /// Delete the update's key.
+    Evict,
 }
 
 /// Advances the floor in proportion to the operations a batch supersedes.
 ///
 /// Every operation a batch supersedes, and its previous commit, becomes inactive and cannot be
 /// pruned until the floor passes it. Moving one active update to the tip for each of them keeps
-/// the inactive operations retained ahead of the floor within a constant multiple of the active
-/// operations in expectation.
+/// the floor within about twice the active keys behind the tip when batches only update keys. A
+/// delete makes both the superseded update and the delete operation inactive for one move, so
+/// deletes can leave the floor further behind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Proportional;
 
@@ -207,7 +205,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Proportional {
     }
 
     /// Not called under [`Limits::Proportional`].
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, K, V> {
+    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
         entry.keep()
     }
 }
@@ -226,7 +224,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Hold {
     }
 
     /// Not called with zero `entries`.
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, K, V> {
+    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
         entry.stop()
     }
 }
@@ -248,7 +246,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Compact {
         }
     }
 
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, K, V> {
+    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
         entry.keep()
     }
 }

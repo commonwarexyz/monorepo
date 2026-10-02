@@ -2250,11 +2250,11 @@ where
                 break;
             };
             let (key, value, cached) = update.into_parts();
-            let decision = policy.decide(Entry::new(sloc.loc(), key, value));
+            let decision = policy.decide(Entry::new(sloc.loc(), &key, value));
             match decision.into_action() {
-                Action::Keep(key, value) => cursor.keep(sloc, U::from_parts(key, value, cached)),
-                Action::Replace(key, value) => cursor.record(sloc, key, cached, Some(value)),
-                Action::Evict(key) => cursor.record(sloc, key, cached, None),
+                Action::Keep(value) => cursor.keep(sloc, U::from_parts(key, value, cached)),
+                Action::Replace(value) => cursor.record(sloc, key, cached, Some(value)),
+                Action::Evict => cursor.record(sloc, key, cached, None),
                 Action::Stop => break,
             }
         }
@@ -3915,7 +3915,7 @@ mod tests {
         fn decide<'a>(
             &mut self,
             entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
-        ) -> Decision<'a, sha256::Digest, CountedValue> {
+        ) -> Decision<'a, CountedValue> {
             self.decided
                 .push((*entry.key(), self.clones.load(AtomicOrdering::Relaxed)));
             entry.keep()
@@ -3998,10 +3998,11 @@ mod tests {
         fn decide<'a>(
             &mut self,
             entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
-        ) -> Decision<'a, sha256::Digest, CountedValue> {
+        ) -> Decision<'a, CountedValue> {
             let location = entry.location();
+            let key = *entry.key();
             let before = entry.value().clones();
-            let (decision, key, value) = entry.evict();
+            let (decision, value) = entry.evict();
             let after = value.clones();
             self.evicted.push((location, key, value, before, after));
             decision
@@ -4009,8 +4010,8 @@ mod tests {
     }
 
     /// A policy that evicts committed, pending-parent, and colliding-key updates owns each
-    /// evicted key and value, receives them in location order with no clone beyond the parent's
-    /// read, and the evicted keys read `None` once the batch applies.
+    /// evicted value, receives them in location order with no clone beyond the parent's read,
+    /// and the evicted keys read `None` once the batch applies.
     async fn policy_evicts_owned<D>(db: D, child: fn(&D::Merkleized) -> D::Batch)
     where
         D: DbAny<mmr::Family, Key = sha256::Digest, Value = CountedValue>,
@@ -4316,7 +4317,7 @@ mod tests {
         fn decide<'a>(
             &mut self,
             entry: Entry<'a, mmr::Family, sha256::Digest, sha256::Digest>,
-        ) -> Decision<'a, sha256::Digest, sha256::Digest> {
+        ) -> Decision<'a, sha256::Digest> {
             self.decided += 1;
             entry.keep()
         }
