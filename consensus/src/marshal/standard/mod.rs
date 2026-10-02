@@ -30,19 +30,17 @@
 //! All validators must run the same wrapper for all views in a given epoch. Validators can switch
 //! between [`Inline`] and [`Deferred`] at the same epoch boundary.
 //!
-//! [`Inline`] runs application verification before voting to notarize. Application verification
-//! needs the consensus context of the proposal (its round, leader, and parent). Certification
-//! receives only the round and digest of the notarized block, and [`Inline`] blocks need not embed
-//! the consensus context. A validator that did not verify the block before certification, because
-//! it never received the proposal or restarted, has no context to verify it against. [`Inline`]
-//! therefore certifies a notarized block once it has the block, trusting that the honest validators
-//! in the notarizing quorum verified it.
+//! [`Inline`] runs application verification before voting to notarize and trusts the notarization
+//! at certification. Certification receives only the block's round and digest, and [`Inline`]
+//! blocks aren't required to embed the consensus context needed for application verification.
+//! Without that context, a validator that missed the proposal or restarted cannot verify the
+//! block itself, so it relies on the honest validators in the notarizing quorum having verified it.
 //!
-//! [`Deferred`] votes to notarize after checking only the block's embedded context, before
-//! application verification completes. It certifies with the application's verdict, recovering
-//! the consensus context from the block when it did not verify the block. A notarization formed by
-//! [`Deferred`] votes does not imply that the block passed application verification, which is the
-//! assumption [`Inline`] certification relies on.
+//! [`Deferred`] checks that the block's embedded context matches the proposal before voting to
+//! notarize, without waiting for application verification. It certifies only after application
+//! verification succeeds, using the embedded context if the validator missed the proposal or
+//! restarted. Its notarizations therefore do not guarantee application validity and cannot
+//! safely be trusted by [`Inline`] validators.
 
 commonware_macros::stability_scope!(ALPHA {
     mod deferred;
