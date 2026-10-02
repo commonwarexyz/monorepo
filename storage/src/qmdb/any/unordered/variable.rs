@@ -158,7 +158,7 @@ pub(crate) mod test {
         buffer::paged::CacheRef,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
+    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, bitmap, sync::Mutex};
     use rand::Rng;
     use std::{
         num::{NonZeroU16, NonZeroUsize},
@@ -784,6 +784,35 @@ pub(crate) mod test {
         });
     }
 
+    /// Drop the caller's ancestor references when candidate prefetch first reads the bitmap.
+    struct ReleaseOnRead<'a, B, T> {
+        bitmap: &'a B,
+        retained: Mutex<Option<T>>,
+    }
+
+    impl<B: bitmap::Readable<N>, T, const N: usize> bitmap::Readable<N> for ReleaseOnRead<'_, B, T> {
+        fn complete_chunks(&self) -> usize {
+            self.bitmap.complete_chunks()
+        }
+
+        fn get_chunk(&self, chunk: usize) -> [u8; N] {
+            self.bitmap.get_chunk(chunk)
+        }
+
+        fn last_chunk(&self) -> ([u8; N], u64) {
+            self.bitmap.last_chunk()
+        }
+
+        fn pruned_chunks(&self) -> usize {
+            self.bitmap.pruned_chunks()
+        }
+
+        fn len(&self) -> u64 {
+            drop(self.retained.lock().take());
+            self.bitmap.len()
+        }
+    }
+
     #[test_traced("WARN")]
     fn test_prepared_staged_merkleize_retains_ancestors() {
         deterministic::Runner::default().start(|context| async move {
@@ -827,32 +856,24 @@ pub(crate) mod test {
                 .unwrap();
             assert_eq!(values, vec![Some(to_bytes(1_000))]);
             let weak_grandparent = Arc::downgrade(&grandparent);
-            let mut caller_ancestors = Some((grandparent, parent));
+            let bitmap = ReleaseOnRead {
+                bitmap: &db.bitmap,
+                retained: Mutex::new(Some((grandparent, parent))),
+            };
             let (prepared, updates, prefetched) = staged
                 .resolve_updates_prefetched(
                     vec![(0, Some(to_bytes(3_000)))],
                     vec![(key(101), Some(to_bytes(3_001)))],
                     &db,
-                    |floor, tip, limit, out| {
-                        // Preparation must retain the chain before prefetch starts.
-                        drop(caller_ancestors.take());
-                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
-                    },
+                    &bitmap,
                 )
                 .await
                 .unwrap();
-            assert!(caller_ancestors.is_none());
+            assert!(bitmap.retained.lock().is_none());
             assert!(weak_grandparent.upgrade().is_some());
 
             let (batch, retained_ancestors) = prepared
-                .merkleize_with_floor_scan(
-                    None,
-                    updates,
-                    Some(prefetched),
-                    |floor, tip, limit, out| {
-                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
-                    },
-                )
+                .merkleize_with_floor_scan(None, updates, Some(prefetched), &db.bitmap)
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);
