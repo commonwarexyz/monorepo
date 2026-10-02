@@ -504,8 +504,7 @@ mod tests {
         test_fixed_batch_empty_batch => run_batch_empty_batch, open;
         test_fixed_batch_chained_merkleized_get => run_batch_chained_merkleized_get, open;
         test_fixed_batch_large => run_batch_large, open;
-        test_fixed_batch_chained_key_override => run_batch_chained_key_override, open;
-        test_fixed_batch_sequential_key_override => run_batch_sequential_key_override, open_small_sections;
+        test_fixed_prune_collision_bucket => run_prune_collision_bucket, open_small_sections;
         test_fixed_batch_metadata => run_batch_metadata, open;
         test_fixed_stale_batch_rejected => run_stale_batch_rejected, open;
         test_fixed_stale_batch_chained => run_stale_batch_chained, open;
@@ -529,19 +528,13 @@ mod tests {
         test_fixed_bounded_initialization_after_reopen_partial_floor_gap =>
             run_bounded_initialization_after_reopen_partial_floor_gap, open_with_max;
         test_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, open;
+        test_fixed_partial_ancestor_commit => run_partial_ancestor_commit, open;
         test_fixed_prune_after_uncommitted_apply_batch_recovery => run_prune_after_uncommitted_apply_batch_recovery, open;
         test_fixed_bounded_initialization_preserves_collision_bucket =>
             run_bounded_initialization_preserves_collision_bucket, open_with_max;
         test_fixed_get_many => run_get_many, open;
         test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
-        test_fixed_bounded_initialization_after_reopen_repeated_key_gap =>
-            run_bounded_initialization_after_reopen_repeated_key_gap, open_with_max;
-        test_fixed_bounded_initialization_after_reopen_mixed_gap_retained =>
-            run_bounded_initialization_after_reopen_mixed_gap_retained, open_with_max;
-        test_fixed_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
-        test_fixed_bounded_initialization_after_reopen_repeated_key_retained =>
-            run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
     }
 
     #[boxed]

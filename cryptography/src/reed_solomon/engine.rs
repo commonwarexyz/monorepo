@@ -20,8 +20,6 @@
 //!     - Optimized engine that takes advantage of the x86(-64) AVX2 SIMD instructions.
 //! - `Avx512`
 //!     - Optimized engine that takes advantage of the x86(-64) AVX-512F and GFNI instructions.
-//! - `Ssse3`
-//!     - Optimized engine that takes advantage of the x86(-64) SSSE3 SIMD instructions.
 //! - `Neon`
 //!     - Optimized engine that takes advantage of the `AArch64` Neon SIMD instructions.
 //! - [`DefaultEngine`]
@@ -50,15 +48,11 @@ mod cpu_features {
     cpufeatures::new!(has_avx512, "avx512f", "gfni");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx2, "avx2");
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    cpufeatures::new!(has_ssse3, "ssse3");
     #[cfg(target_arch = "aarch64")]
     cpufeatures::new!(has_neon, "neon");
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub(super) use self::{
-        has_avx2::get as avx2, has_avx512::get as avx512, has_ssse3::get as ssse3,
-    };
+    pub(super) use self::{has_avx2::get as avx2, has_avx512::get as avx512};
     #[cfg(target_arch = "aarch64")]
     pub(super) use has_neon::get as neon;
 }
@@ -67,7 +61,7 @@ mod cpu_features {
 pub use self::engine_neon::Neon;
 pub(crate) use self::shards::Shards;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub use self::{engine_avx2::Avx2, engine_avx512::Avx512, engine_ssse3::Ssse3};
+pub use self::{engine_avx2::Avx2, engine_avx512::Avx512};
 pub use self::{
     engine_default::DefaultEngine, engine_naive::Naive, engine_scalar::Scalar, shards::ShardsRefMut,
 };
@@ -81,8 +75,6 @@ mod engine_scalar;
 mod engine_avx2;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod engine_avx512;
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-mod engine_ssse3;
 
 #[cfg(target_arch = "aarch64")]
 mod engine_neon;
@@ -232,9 +224,6 @@ mod tests {
             if cpu_features::avx2() {
                 engines.push(Box::new(Avx2::new()));
             }
-            if cpu_features::ssse3() {
-                engines.push(Box::new(Ssse3::new()));
-            }
         }
         #[cfg(target_arch = "aarch64")]
         if cpu_features::neon() {
@@ -335,8 +324,6 @@ mod tests {
             (Avx2::eval_poly, cpu_features::avx2()),
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             (Avx512::eval_poly, cpu_features::avx512()),
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            (Ssse3::eval_poly, cpu_features::ssse3()),
             #[cfg(target_arch = "aarch64")]
             (Neon::eval_poly, cpu_features::neon()),
         ];
