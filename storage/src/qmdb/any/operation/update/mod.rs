@@ -35,6 +35,10 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// mutations.
     const STAGES_ANCESTORS: Option<Self::Cached>;
 
+    /// Whether merkleize gathers the snapshot collision siblings of written keys that are active
+    /// in an ancestor's diff.
+    const SIBLINGS: bool;
+
     /// The updated key.
     fn key(&self) -> &Self::Key;
 
@@ -52,6 +56,16 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
 
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+
+/// Splits an update into its owned key, value, and cached payload, and rebuilds it from them.
+pub(crate) trait Parts: Update {
+    /// Consumes the update and returns its owned key, value, and [`cached`](Update::cached)
+    /// payload.
+    fn into_parts(self) -> (Self::Key, Self::Value, Self::Cached);
+
+    /// Rebuilds the update that [`into_parts`](Self::into_parts) split.
+    fn from_parts(key: Self::Key, value: Self::Value, cached: Self::Cached) -> Self;
 }
 
 #[cfg(test)]

@@ -10,7 +10,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{FixedConfig as Config, unordered::fixed::Db},
+        any::{FixedConfig as Config, floor::Proportional, unordered::fixed::Db},
         sync,
     },
     translator::TwoCap,
@@ -204,7 +204,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch
-                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)), &mut Proportional)
                         .await
                         .unwrap();
                     let (db, _) = db
@@ -231,7 +231,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                         batch = batch.write(k, v);
                     }
                     let merkleized = batch
-                        .merkleize(&db, Some(FixedBytes::new(commit_id)))
+                        .merkleize(&db, Some(FixedBytes::new(commit_id)), &mut Proportional)
                         .await
                         .unwrap();
                     let (db, _) = db
@@ -283,7 +283,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db
             .apply_batch(merkleized)
             .await

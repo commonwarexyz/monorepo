@@ -12,6 +12,7 @@ use commonware_storage::{
     qmdb::any::{
         FixedConfig as Config,
         db::Db as AnyDb,
+        floor::Proportional,
         ordered::{Operation, Update},
         value::FixedEncoding,
     },
@@ -72,7 +73,10 @@ async fn commit_pending<F: MerkleFamily>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, metadata).await.unwrap();
+    let merkleized = batch
+        .merkleize(&db, metadata, &mut Proportional)
+        .await
+        .unwrap();
     let (db, _) = db
         .apply_batch(merkleized)
         .await

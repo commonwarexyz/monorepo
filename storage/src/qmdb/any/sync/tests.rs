@@ -2176,7 +2176,7 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb},
-        qmdb::any::value::VariableEncoding,
+        qmdb::any::{floor::Proportional, value::VariableEncoding},
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -2340,7 +2340,11 @@ mod harnesses {
             >,
         ) -> Self::Db {
             let db = crate::qmdb::any::ordered::fixed::test::apply_ops(db, ops).await;
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
@@ -2404,7 +2408,7 @@ mod harnesses {
             let db = crate::qmdb::any::ordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -2464,7 +2468,11 @@ mod harnesses {
             >,
         ) -> Self::Db {
             let db = crate::qmdb::any::unordered::fixed::test::apply_ops(db, ops).await;
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
@@ -2532,7 +2540,7 @@ mod harnesses {
             let db = crate::qmdb::any::unordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -2612,9 +2620,16 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
@@ -2697,11 +2712,14 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -2781,9 +2799,16 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
@@ -2867,11 +2892,14 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();

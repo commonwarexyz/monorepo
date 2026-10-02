@@ -13,6 +13,7 @@ use commonware_storage::{
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
+            floor::Proportional,
             unordered::{Operation, Update},
             value::FixedEncoding,
         },
@@ -73,7 +74,7 @@ async fn commit_pending<F: MerkleFamily>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
     let (db, _) = db
         .apply_batch(merkleized)
         .await
@@ -262,7 +263,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 }
             }
 
-            let batch = db.new_batch().merkleize(&db, None).await.unwrap();
+            let batch = db.new_batch().merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db
                 .apply_batch(batch)
                 .await

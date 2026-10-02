@@ -156,6 +156,7 @@ pub(crate) mod test {
     use crate::{
         mmr,
         qmdb::any::{
+            floor::{Compact, Proportional},
             ordered::test::{
                 test_ordered_any_db_basic, test_ordered_any_db_empty,
                 test_ordered_any_update_collision_edge_case,
@@ -235,14 +236,14 @@ pub(crate) mod test {
             let seed_a = db_a
                 .new_batch()
                 .write(Sha256::hash(&[b"a"]), Some(vec![1]))
-                .merkleize(&db_a, None)
+                .merkleize(&db_a, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
             let seed_b = db_b
                 .new_batch()
                 .write(Sha256::hash(&[b"b"]), Some(vec![2]))
-                .merkleize(&db_b, None)
+                .merkleize(&db_b, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
@@ -252,7 +253,7 @@ pub(crate) mod test {
 
             let batch = db_a.new_batch().write(Sha256::hash(&[b"a"]), Some(vec![3]));
             assert!(matches!(
-                batch.merkleize(&db_b, None).await,
+                batch.merkleize(&db_b, None, &mut Proportional).await,
                 Err(Error::StaleBatch)
             ));
         });
@@ -297,7 +298,7 @@ pub(crate) mod test {
                 let v = vec![(i % 251) as u8; (i % 40 + 1) as usize];
                 batch = batch.write(k, Some(v));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
 
@@ -311,7 +312,7 @@ pub(crate) mod test {
                 let k = Sha256::hash(&[&i.to_be_bytes()]);
                 batch = batch.write(k, None);
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let db = db.commit().await.unwrap();
             let db = db.sync().await.unwrap();
@@ -407,7 +408,7 @@ pub(crate) mod test {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db
     }
@@ -469,7 +470,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val))
                 .write(key3.clone(), Some(val))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -482,7 +483,7 @@ pub(crate) mod test {
             let merkleized = db
                 .new_batch()
                 .write(key2.clone(), Some(val))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -521,7 +522,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -530,7 +531,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), None)
                 .write(key2.clone(), Some(val2))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -550,7 +551,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key1.clone(), Some(val1))
                 .write(key3.clone(), Some(val3))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -559,7 +560,7 @@ pub(crate) mod test {
                 .new_batch()
                 .write(key2.clone(), Some(val2))
                 .write(key3.clone(), None)
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -582,15 +583,15 @@ pub(crate) mod test {
         is_send(db.get_all(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
-        let mut policy = crate::qmdb::any::floor::Compact {
+        let mut policy = Compact {
             entries: 1,
             skips: 1,
         };
-        is_send(db.new_batch().merkleize_with(db, None, &mut policy));
+        is_send(db.new_batch().merkleize(db, None, &mut policy));
         is_send(async move {
             let (_, staged) = db.new_batch().stage(&[&key], db).await?;
             staged
-                .merkleize_with(Vec::new(), Vec::new(), None, db, &mut policy)
+                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
                 .await
         });
     }
@@ -616,7 +617,7 @@ pub(crate) mod test {
             let parent_batch = base
                 .new_batch::<Sha256>()
                 .write(key_a, Some(val_a.clone()))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -626,7 +627,7 @@ pub(crate) mod test {
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
                 .write(key_b, Some(val_b.clone()))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -664,14 +665,14 @@ pub(crate) mod test {
             let parent_batch = base
                 .new_batch::<Sha256>()
                 .write(key_x, Some(val_x.clone()))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
                 .write(key_x, None)
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -708,7 +709,7 @@ pub(crate) mod test {
             let parent_batch = base
                 .new_batch::<Sha256>()
                 .write(key_x, Some(val_a.clone()))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -716,7 +717,7 @@ pub(crate) mod test {
             let child_batch = parent_batch
                 .new_batch::<Sha256>()
                 .write(key_x, Some(val_b.clone()))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 

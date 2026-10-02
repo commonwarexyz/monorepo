@@ -12,6 +12,7 @@ use commonware_storage::{
     qmdb::any::{
         FixedConfig as Config,
         batch::{MerkleizedBatch, UnmerkleizedBatch},
+        floor::Proportional,
         ordered::{Update, fixed::Db as AnyDb},
         value::FixedEncoding as FixedEncodingGeneric,
     },
@@ -239,7 +240,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             );
             model.insert(key_from_seed(write.key), value_from_bytes(write.value));
         }
-        let initial = batch.merkleize(&db, None).await.unwrap();
+        let initial = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         assert_batch_neighbors(&db, &initial, &model).await;
         let (db, _) = db.apply_batch(initial).await.unwrap();
         let db = db.commit().await.unwrap();
@@ -252,11 +253,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // trigger: the ordered classifier must not consume the deleted key's stale
                 // committed location via the sibling's snapshot-bucket scan.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
-                let parent = batch.merkleize(&db, None).await.unwrap();
+                let parent = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.parent);
                 assert_batch_neighbors(&db, &parent, &model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
-                let pending_child = batch.merkleize(&db, None).await.unwrap();
+                let pending_child = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.child);
                 assert_batch_neighbors(&db, &pending_child, &model).await;
 
@@ -266,7 +267,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.child);
-                let committed_child = batch.merkleize(&db, None).await.unwrap();
+                let committed_child = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 assert_batch_neighbors(&db, &committed_child, &model).await;
                 assert_batch_neighbors(&db, &pending_child, &model).await;
 
@@ -291,11 +292,11 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // Build A -> B, then commit and drop A before merkleizing C. C must retain only B
                 // and position that suffix relative to the now-committed A.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
-                let a = batch.merkleize(&db, None).await.unwrap();
+                let a = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.parent);
                 assert_batch_neighbors(&db, &a, &model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
-                let b = batch.merkleize(&db, None).await.unwrap();
+                let b = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.child);
                 assert_batch_neighbors(&db, &b, &model).await;
 
@@ -304,15 +305,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(b.new_batch::<Sha256>(), &input.grandchild);
-                let retained_child = batch.merkleize(&db, None).await.unwrap();
+                let retained_child = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.grandchild);
                 assert_batch_neighbors(&db, &retained_child, &model).await;
 
                 // Rebuild B -> C from the committed A state as a reference.
                 let batch = apply_mutations(db.new_batch(), &input.child);
-                let rebuilt_b = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_b = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let batch = apply_mutations(rebuilt_b.new_batch::<Sha256>(), &input.grandchild);
-                let rebuilt_child = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_child = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 assert_batch_neighbors(&db, &rebuilt_child, &model).await;
 
                 assert_eq!(
@@ -340,15 +341,16 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // (closest-first shadowing). This is the only schedule that checks a
                 // multi-diff ancestor walk against a committed-only reference.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
-                let parent = batch.merkleize(&db, None).await.unwrap();
+                let parent = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.parent);
                 assert_batch_neighbors(&db, &parent, &model).await;
                 let batch = apply_mutations(parent.new_batch::<Sha256>(), &input.child);
-                let child = batch.merkleize(&db, None).await.unwrap();
+                let child = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.child);
                 assert_batch_neighbors(&db, &child, &model).await;
                 let batch = apply_mutations(child.new_batch::<Sha256>(), &input.grandchild);
-                let pending_grandchild = batch.merkleize(&db, None).await.unwrap();
+                let pending_grandchild =
+                    batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.grandchild);
                 assert_batch_neighbors(&db, &pending_grandchild, &model).await;
 
@@ -360,7 +362,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(db.new_batch(), &input.grandchild);
-                let committed_grandchild = batch.merkleize(&db, None).await.unwrap();
+                let committed_grandchild =
+                    batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 assert_batch_neighbors(&db, &committed_grandchild, &model).await;
                 assert_batch_neighbors(&db, &pending_grandchild, &model).await;
 
@@ -388,15 +391,15 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 // combines multi-ancestor shadowing with a dropped prefix. C reuses the parent
                 // mutations so the chain re-deletes and re-creates the same colliding keys.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
-                let a = batch.merkleize(&db, None).await.unwrap();
+                let a = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.parent);
                 assert_batch_neighbors(&db, &a, &model).await;
                 let batch = apply_mutations(a.new_batch::<Sha256>(), &input.child);
-                let b = batch.merkleize(&db, None).await.unwrap();
+                let b = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.child);
                 assert_batch_neighbors(&db, &b, &model).await;
                 let batch = apply_mutations(b.new_batch::<Sha256>(), &input.parent);
-                let c = batch.merkleize(&db, None).await.unwrap();
+                let c = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.parent);
                 assert_batch_neighbors(&db, &c, &model).await;
 
@@ -405,17 +408,17 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 let db = db.commit().await.unwrap();
 
                 let batch = apply_mutations(c.new_batch::<Sha256>(), &input.grandchild);
-                let retained_d = batch.merkleize(&db, None).await.unwrap();
+                let retained_d = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 apply_to_model(&mut model, &input.grandchild);
                 assert_batch_neighbors(&db, &retained_d, &model).await;
 
                 // Rebuild B -> C -> D from the committed A state as a reference.
                 let batch = apply_mutations(db.new_batch(), &input.child);
-                let rebuilt_b = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_b = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let batch = apply_mutations(rebuilt_b.new_batch::<Sha256>(), &input.parent);
-                let rebuilt_c = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_c = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let batch = apply_mutations(rebuilt_c.new_batch::<Sha256>(), &input.grandchild);
-                let rebuilt_d = batch.merkleize(&db, None).await.unwrap();
+                let rebuilt_d = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 assert_batch_neighbors(&db, &rebuilt_d, &model).await;
 
                 assert_eq!(

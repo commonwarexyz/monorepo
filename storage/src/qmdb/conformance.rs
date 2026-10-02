@@ -13,6 +13,7 @@ use crate::{
     qmdb::{
         any::{
             self,
+            floor::Proportional,
             traits::{DbAny, UnmerkleizedBatch as _},
         },
         current, immutable,
@@ -306,7 +307,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
     for (k, v) in writes {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
     let (db, _) = db.apply_batch(merkleized).await.unwrap();
     db
 }

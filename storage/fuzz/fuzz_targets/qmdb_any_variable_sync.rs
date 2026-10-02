@@ -10,7 +10,7 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{VariableConfig as Config, unordered::variable::Db},
+        any::{VariableConfig as Config, floor::Proportional, unordered::variable::Db},
         verify_proof,
     },
     translator::TwoCap,
@@ -206,7 +206,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, metadata_bytes.clone()).await.unwrap();
+                    let merkleized = batch
+                        .merkleize(&db, metadata_bytes.clone(), &mut Proportional)
+                        .await
+                        .unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -237,7 +240,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -267,7 +270,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -301,7 +304,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -326,7 +329,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     for (k, v) in pending_writes.drain(..) {
                         batch = batch.write(k, v);
                     }
-                    let merkleized = batch.merkleize(&db, None).await.unwrap();
+                    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                     let (db, _) = db
                         .apply_batch(merkleized)
                         .await
@@ -361,7 +364,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         for (k, v) in pending_writes.drain(..) {
             batch = batch.write(k, v);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db
             .apply_batch(merkleized)
             .await

@@ -15,8 +15,8 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
-            floor::Policy,
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
+            floor::{Limits, Policy},
             operation::{Operation, update},
         },
         bitmap::{Shared, fill_from},
@@ -143,10 +143,11 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 }
 
-/// Floor scan over a layered `BitmapBatch` chain. Fills `out` with up to `limit` floor-raise
-/// candidates in `[floor, tip)`, returning the next `floor`. Candidates are the set bits of the
-/// layered bitmap, then every location at or past its length. Produces the same sequence as
-/// repeatedly calling the `next_candidate` test oracle over the chain.
+/// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Fills `out` with up to
+/// `limit` floor-raise candidates in `[floor, tip)`, returning the next `floor`. Skips
+/// locations where the layered bitmap bit is unset (including locations superseded by
+/// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
+/// sequence as repeatedly calling the `next_candidate` test oracle over the chain.
 ///
 /// One scan iterator serves the whole batch: overlay chunks resolve lock-free and the
 /// committed base is locked once per untouched chunk, rather than several times per
@@ -503,14 +504,17 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with `policy`, then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// is committed with the returned batch. `policy` chooses how the floor advances (see
+    /// [`floor`](any::floor)). Pass [`Proportional`](any::floor::Proportional) for the default
+    /// compaction.
     ///
     /// # Errors
     ///
@@ -526,64 +530,7 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
-        self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-
-        // Overlap the update resolution with a committed-prefix candidate prefetch.
-        // Candidates come from the speculative `bitmap_parent` (the same source the floor
-        // raise scans below), clamped to the committed prefix inside the helper.
-        let (prepared, staged_updates, prefetched) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
-        let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                staged_updates,
-                Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
-            .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
-    }
-
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with `policy`, then merkleize. See [`any::batch::Staged::merkleize_with`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any update's `read_index` is out of the staged read range.
-    #[tracing::instrument(
-        name = "qmdb.current.unordered.batch.merkleize.staged.policy",
-        level = "info",
-        skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
-    )]
-    pub async fn merkleize_with<E, C, I, P>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
@@ -603,17 +550,31 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
-        let (prepared, staged) = inner
-            .prepare(&db.any)?
-            .advance(staged, policy, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
+
+        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
+        let (prepared, staged, prefetched) = match policy.limits() {
+            Limits::Proportional => {
+                // Overlap the update resolution with a candidate prefetch, which the helper
+                // clamps to the committed prefix.
+                let (prepared, staged, prefetched) = inner
+                    .resolve_updates_prefetched(updates, upserts, &db.any, fill)
+                    .await?;
+                (prepared, staged, Some(prefetched))
+            }
+            Limits::Fixed { entries, skips } => {
+                let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
+                let (prepared, staged) = inner
+                    .prepare(&db.any)?
+                    .advance(staged, policy, entries, skips, fill)
+                    .await?;
+                (prepared, staged, None)
+            }
+        };
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, None, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(metadata, staged, prefetched, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -629,14 +590,17 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with `policy`, then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// is committed with the returned batch. `policy` chooses how the floor advances (see
+    /// [`floor`](any::floor)). Pass [`Proportional`](any::floor::Proportional) for the default
+    /// compaction.
     ///
     /// # Errors
     ///
@@ -652,54 +616,7 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
-        self,
-        updates: Vec<(usize, Option<V::Value>)>,
-        upserts: Vec<(K, Option<V::Value>)>,
-        metadata: Option<V::Value>,
-        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
-        let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
-    }
-
-    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with `policy`, then merkleize. See [`any::batch::Staged::merkleize_with`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
-    ///
-    /// # Panics
-    ///
-    /// Panics if any update's `read_index` is out of the staged read range.
-    #[tracing::instrument(
-        name = "qmdb.current.ordered.batch.merkleize.staged.policy",
-        level = "info",
-        skip_all,
-        fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
-    )]
-    pub async fn merkleize_with<E, C, I, P>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
@@ -719,17 +636,21 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
         let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
-        let (prepared, staged) = inner
-            .prepare(&db.any)?
-            .advance(staged, policy, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
+        let prepared = inner.prepare(&db.any)?;
+        let (prepared, staged) = match policy.limits() {
+            Limits::Proportional => (prepared, staged),
+            Limits::Fixed { entries, skips } => {
+                prepared
+                    .advance(staged, policy, entries, skips, fill)
+                    .await?
+            }
+        };
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -746,7 +667,11 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// `policy` chooses how the floor advances (see [`floor`](any::floor)). Pass
+    /// [`Proportional`](any::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///
@@ -757,51 +682,7 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
-        self,
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
-    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
-        let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Unordered<K, V>>::new(),
-                None,
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
-            .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
-    }
-
-    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
-    /// and return an `Arc<MerkleizedBatch>`. See
-    /// [`any::batch::UnmerkleizedBatch::merkleize_with`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
-    #[tracing::instrument(
-        name = "qmdb.current.unordered.batch.merkleize.policy",
-        level = "info",
-        skip_all
-    )]
-    pub async fn merkleize_with<E, C, I, P>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
@@ -819,16 +700,22 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (prepared, staged) = inner
-            .prepare(&db.any)?
-            .advance(Vec::new(), policy, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
+
+        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
+        let prepared = inner.prepare(&db.any)?;
+        let (prepared, staged) = match policy.limits() {
+            Limits::Proportional => (prepared, Vec::new()),
+            Limits::Fixed { entries, skips } => {
+                prepared
+                    .advance(Vec::new(), policy, entries, skips, fill)
+                    .await?
+            }
+        };
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, None, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(metadata, staged, None, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -845,7 +732,11 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// `policy` chooses how the floor advances (see [`floor`](any::floor)). Pass
+    /// [`Proportional`](any::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///
@@ -856,50 +747,7 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
-        self,
-        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
-    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: crate::index::Ordered<Value = Location<F>> + 'static,
-    {
-        let Self {
-            inner,
-            grafted_parent,
-            bitmap_parent,
-        } = self;
-        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
-        let prepared = inner.prepare(&db.any)?;
-        let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Ordered<K, V>>::new(),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
-            .await?;
-        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
-        drop(retained_ancestors);
-        result
-    }
-
-    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
-    /// and return an `Arc<MerkleizedBatch>`. See
-    /// [`any::batch::UnmerkleizedBatch::merkleize_with`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
-    /// database instance that created the batch.
-    #[tracing::instrument(
-        name = "qmdb.current.ordered.batch.merkleize.policy",
-        level = "info",
-        skip_all
-    )]
-    pub async fn merkleize_with<E, C, I, P>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
@@ -917,16 +765,22 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (prepared, staged) = inner
-            .prepare(&db.any)?
-            .advance(Vec::new(), policy, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
+
+        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
+        let prepared = inner.prepare(&db.any)?;
+        let (prepared, staged) = match policy.limits() {
+            Limits::Proportional => (prepared, Vec::new()),
+            Limits::Fixed { entries, skips } => {
+                prepared
+                    .advance(Vec::new(), policy, entries, skips, fill)
+                    .await?
+            }
+        };
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -1520,21 +1374,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
-            self,
-            db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-            metadata: Option<V::Value>,
-        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
-        }
-
-        async fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
             policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize_with(db, metadata, policy).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 
@@ -1562,21 +1408,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
-            self,
-            db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-            metadata: Option<V::Value>,
-        ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
-        }
-
-        async fn merkleize_with<P: Policy<F, K, V::Value> + Send>(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
             policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize_with(db, metadata, policy).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 
