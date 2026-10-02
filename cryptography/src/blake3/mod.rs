@@ -128,6 +128,19 @@ fn subtree(
         return merge_subtrees_non_root(&left, &right, Mode::Hash);
     }
 
+    // A subtree within one part hashes its chunks and parents in SIMD lanes.
+    #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+    if len >= 2 * blake3::CHUNK_LEN
+        && let Some(part) = parts.first()
+        && offset + len <= base + part.len()
+        && let Some(cv) = simd::subtree(
+            &part[offset - base..offset - base + len],
+            (offset / blake3::CHUNK_LEN) as u64,
+        )
+    {
+        return cv;
+    }
+
     let mut hasher = CoreBlake3::new();
     hasher.set_input_offset(offset as u64);
     let end = offset + len;
