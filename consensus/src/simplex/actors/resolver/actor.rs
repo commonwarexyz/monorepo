@@ -151,7 +151,7 @@ impl<
                 );
                 let _guard = span.entered();
                 match message {
-                    MailboxMessage::Certificate { certificate, .. } => {
+                    MailboxMessage::Updated { certificate, .. } => {
                         self.updated(&mut resolver, certificate);
                     }
                     MailboxMessage::Certified {

@@ -567,7 +567,7 @@ mod tests {
                     }
                 },
                 msg = resolver_receiver.recv() => {
-                    if let resolver::MailboxMessage::Certificate {
+                    if let resolver::MailboxMessage::Updated {
                         certificate: Certificate::Finalization(finalization),
                         ..
                     } = msg.expect("resolver mailbox closed")
@@ -1026,7 +1026,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1081,7 +1081,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1281,7 +1281,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1305,7 +1305,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -1333,7 +1333,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -1377,7 +1377,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1477,7 +1477,7 @@ mod tests {
             let mut finalized_view = None;
             while let Some(message) = resolver_receiver.recv().await {
                 match message {
-                    MailboxMessage::Certificate {
+                    MailboxMessage::Updated {
                         certificate: Certificate::Finalization(finalization),
                         ..
                     } => {
@@ -1616,7 +1616,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -1742,7 +1742,7 @@ mod tests {
             // Verify the certificate was accepted
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -1930,7 +1930,7 @@ mod tests {
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(n),
                     ..
                 } => {
@@ -2333,7 +2333,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.recv().await.unwrap();
             match finalization {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -2415,7 +2415,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.recv().await.unwrap();
             match finalization {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -3922,7 +3922,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_3));
             assert!(matches!(
                 resolver_receiver.recv().await.unwrap(),
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } if notarization.view() == View::new(3)
@@ -3970,7 +3970,7 @@ mod tests {
                             assert!(success);
                             certified.push(notarization.view());
                         }
-                        MailboxMessage::Certificate { .. }
+                        MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
@@ -7367,14 +7367,14 @@ mod tests {
                     .await
                     .expect("expected resolver msg");
                 match msg {
-                    MailboxMessage::Certificate {
+                    MailboxMessage::Updated {
                         certificate: Certificate::Finalization(f),
                         ..
                     } => {
                         assert_eq!(f.view(), view5);
                         break;
                     }
-                    MailboxMessage::Certificate { .. } => continue,
+                    MailboxMessage::Updated { .. } => continue,
                     MailboxMessage::Resolve { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
@@ -7511,7 +7511,7 @@ mod tests {
                             assert!(success);
                             break;
                         }
-                        MailboxMessage::Certificate { .. }
+                        MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
@@ -7655,7 +7655,7 @@ mod tests {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. }
-                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Updated { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
@@ -7776,7 +7776,7 @@ mod tests {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. }
-                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Updated { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
@@ -8719,7 +8719,7 @@ mod tests {
                             break;
                         }
                         MailboxMessage::Certified { .. }
-                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Updated { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
@@ -10841,7 +10841,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certificate {
+                        MailboxMessage::Updated {
                             certificate: Certificate::Nullification(n),
                             ..
                         } if n.view() == target_view => {
