@@ -1,3 +1,11 @@
+            movi.2d v4, #0
+            movi.2d v5, #0
+            movi.2d v6, #0
+            movi.2d v7, #0
+            movi.2d v8, #0
+            movi.2d v9, #0
+            movi.2d v10, #0
+            movi.2d v11, #0
             ld1.8b {{v4}}, [{left_right}]
             ld1.8b {{v8}}, [{right_right}]
             mov {tmp:w}, #0x80
