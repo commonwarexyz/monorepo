@@ -14,7 +14,7 @@ campaign *args:
 run target *args:
     cd .. && just run "$@"
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--parallel] [--tmux] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--no-campaign] [--parallel] [--tmux] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -25,10 +25,14 @@ fuzz target *args:
     target="$1"
     shift
     # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
+    # --no-campaign fuzzes the targets a campaign already built in this checkout,
+    # whatever its result, because a campaign refuses an instrumented checkout.
     parallel=no
     windows=no
+    campaign=yes
     while [ $# -gt 0 ]; do
       case "$1" in
+        --no-campaign)          campaign=no; shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --)                     shift; break ;;
@@ -42,7 +46,9 @@ fuzz target *args:
       *) echo "just fuzz: $target is not a profile or a simplex_/marshal_ target" >&2
          exit 1 ;;
     esac
-    just campaign --profile "$profile"
+    if [ "$campaign" = yes ]; then
+        just campaign --profile "$profile"
+    fi
     if [ "$every" = no ]; then
         just run "$target" "$@"
         exit 0

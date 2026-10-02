@@ -10,16 +10,27 @@
 
   They exchange messages through mailboxes. They use the backfill resolver (`resolver/`),
   the application gates and validation (`application/`), `ancestry.rs` and `store.rs`.
-- Replica index: the participant index of the replica's own signing scheme, which marshal
-  gets from its scheme provider.
-  - Core actor: derive it once when the actor is created, from the scheme its provider
-    returns for the epoch it starts in. Keep it in a `// [statelens] me` field of type
-    `Option<crate::simplex::statelens::Participant>`. When the actor creates its mailbox,
-    copy it into a `// [statelens] me` field of the mailbox, so that every holder of a
-    mailbox clone can read it.
-  - Standard adapters: read it from the core mailbox they hold.
-  - Coding adapter and shards engine: take it from the scheme their scheme provider
-    returns for the epoch of the round in hand.
+- Replica index: the participant index of the replica's own signing scheme. Marshal holds a
+  scheme provider, not a scheme, and a provider lookup is not a read: `Provider::scheme`
+  calls `Provider::scoped`, and an application may count lookups against the scope it
+  serves and then retire it (the standard tests' `RetiringProvider` allows exactly one), so
+  a lookup of yours can turn one of the implementation's into `None`. Never call the
+  provider, or anything that calls it, to learn `me`. Read it from a scheme the
+  implementation has already obtained, where it obtained it: `scheme.me()`, or for a
+  `Scoped`, `scoped.clone().into_scheme()` and then `me()` (a clone of a `Scoped` is a
+  read).
+  - Coding adapter and shards engine: every site that needs a scheme already looks one up
+    for the round in hand; read `me` from that one.
+  - Core actor: it looks a scheme up only while it works, never when it is created. Give it
+    a `// [statelens] me` cell of type
+    `Arc<std::sync::OnceLock<Option<crate::simplex::statelens::Participant>>>`, shared with
+    every clone of its mailbox, and set it from the first scheme the actor obtains. It is
+    StateLens state, so setting it later is allowed, and the standard adapters, which never
+    look a scheme up, read it through the mailbox they hold. It keeps the first epoch's
+    index, which the harnesses' `ConstantProvider` never changes.
+  - Until the cell is set the index is not obtained, so guard a site that needs it with
+    `if let Some(&me) = cell.get()` instead of passing `None`, which means "not a
+    participant" and turns the Byzantine guard off.
   - The backfill resolver, the application gates and validation, `ancestry.rs` and
     `store.rs` have no identity of their own. Instrument them at their call sites in the
     components above, never inside them.

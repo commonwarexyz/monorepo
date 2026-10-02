@@ -405,7 +405,7 @@ campaign *args:
 run target *args:
     cd .. && just run "$@"
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--parallel] [--tmux] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--no-campaign] [--parallel] [--tmux] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -416,10 +416,14 @@ fuzz target *args:
     target="$1"
     shift
     # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
+    # --no-campaign fuzzes the targets a campaign already built in this checkout,
+    # whatever its result, because a campaign refuses an instrumented checkout.
     parallel=no
     windows=no
+    campaign=yes
     while [ $# -gt 0 ]; do
       case "$1" in
+        --no-campaign)          campaign=no; shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --)                     shift; break ;;
@@ -433,7 +437,9 @@ fuzz target *args:
       *) echo "just fuzz: $target is not a profile or a simplex_/marshal_ target" >&2
          exit 1 ;;
     esac
-    just campaign --profile "$profile"
+    if [ "$campaign" = yes ]; then
+        just campaign --profile "$profile"
+    fi
     if [ "$every" = no ]; then
         just run "$target" "$@"
         exit 0
@@ -1110,6 +1116,12 @@ Log to `SL/campaign/logs/test.log`. On failure, print the `FAIL` lines and every
 `[statelens][` line, write the summary (section 7.9), and exit with code 4. The whole
 gate is 240 tests and took 125 s on 16 cores at the verified commit. The `marshal`
 profile adds the marshal tests (section 8.3, step 6).
+
+The fuzz targets are built before the gate runs, so a failed gate leaves them in place. A
+failure without a `[statelens][` line is a test the instrumentation broke rather than an
+invariant it caught, and the operator judges whether it reaches the targets: a test double
+the harnesses do not use cannot. `just fuzz <profile|target> --no-campaign` then fuzzes the
+built targets without a new campaign, which would refuse the instrumented checkout.
 
 ### 7.8 Step 7: hand-over
 
@@ -1860,7 +1872,8 @@ probes that tell the fuzzer when an execution reached a new internal state.
    existing variables, fields or collections, whether directly, through `&mut` methods,
    or through interior mutability (`Cell`, `RefCell`, atomics), and do not call methods
    whose reads change state that any code, tests included, can observe (for example an
-   LRU `get` that changes the eviction order). Exception: you may force a memoized
+   LRU `get` that changes the eviction order, or a scheme-provider lookup, which an
+   application may count against the scope it serves). Exception: you may force a memoized
    decode, such as `Lazy::get` or `==` on a `Lazy`, even on original values. No other
    cache is exempt: filling `CodedBlock::shards`, for example, runs an erasure encode,
    can panic, and changes what `shard()` returns. Do not add a `return`, `break`,
@@ -2366,16 +2379,27 @@ Last lines of its output:
 
   They exchange messages through mailboxes. They use the backfill resolver (`resolver/`),
   the application gates and validation (`application/`), `ancestry.rs` and `store.rs`.
-- Replica index: the participant index of the replica's own signing scheme, which marshal
-  gets from its scheme provider.
-  - Core actor: derive it once when the actor is created, from the scheme its provider
-    returns for the epoch it starts in. Keep it in a `// [statelens] me` field of type
-    `Option<crate::simplex::statelens::Participant>`. When the actor creates its mailbox,
-    copy it into a `// [statelens] me` field of the mailbox, so that every holder of a
-    mailbox clone can read it.
-  - Standard adapters: read it from the core mailbox they hold.
-  - Coding adapter and shards engine: take it from the scheme their scheme provider
-    returns for the epoch of the round in hand.
+- Replica index: the participant index of the replica's own signing scheme. Marshal holds a
+  scheme provider, not a scheme, and a provider lookup is not a read: `Provider::scheme`
+  calls `Provider::scoped`, and an application may count lookups against the scope it
+  serves and then retire it (the standard tests' `RetiringProvider` allows exactly one), so
+  a lookup of yours can turn one of the implementation's into `None`. Never call the
+  provider, or anything that calls it, to learn `me`. Read it from a scheme the
+  implementation has already obtained, where it obtained it: `scheme.me()`, or for a
+  `Scoped`, `scoped.clone().into_scheme()` and then `me()` (a clone of a `Scoped` is a
+  read).
+  - Coding adapter and shards engine: every site that needs a scheme already looks one up
+    for the round in hand; read `me` from that one.
+  - Core actor: it looks a scheme up only while it works, never when it is created. Give it
+    a `// [statelens] me` cell of type
+    `Arc<std::sync::OnceLock<Option<crate::simplex::statelens::Participant>>>`, shared with
+    every clone of its mailbox, and set it from the first scheme the actor obtains. It is
+    StateLens state, so setting it later is allowed, and the standard adapters, which never
+    look a scheme up, read it through the mailbox they hold. It keeps the first epoch's
+    index, which the harnesses' `ConstantProvider` never changes.
+  - Until the cell is set the index is not obtained, so guard a site that needs it with
+    `if let Some(&me) = cell.get()` instead of passing `None`, which means "not a
+    participant" and turns the Byzantine guard off.
   - The backfill resolver, the application gates and validation, `ancestry.rs` and
     `store.rs` have no identity of their own. Instrument them at their call sites in the
     components above, never inside them.

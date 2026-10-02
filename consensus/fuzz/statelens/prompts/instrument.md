@@ -59,7 +59,8 @@ probes that tell the fuzzer when an execution reached a new internal state.
    existing variables, fields or collections, whether directly, through `&mut` methods,
    or through interior mutability (`Cell`, `RefCell`, atomics), and do not call methods
    whose reads change state that any code, tests included, can observe (for example an
-   LRU `get` that changes the eviction order). Exception: you may force a memoized
+   LRU `get` that changes the eviction order, or a scheme-provider lookup, which an
+   application may count against the scope it serves). Exception: you may force a memoized
    decode, such as `Lazy::get` or `==` on a `Lazy`, even on original values. No other
    cache is exempt: filling `CodedBlock::shards`, for example, runs an erasure encode,
    can panic, and changes what `shard()` returns. Do not add a `return`, `break`,

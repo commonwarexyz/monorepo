@@ -173,10 +173,14 @@ them one after another; `--parallel` runs them together and writes each one's ou
 their output stays live and separate. Nothing bounds a run unless you pass
 `-max_total_time`, so a target runs until it stops. The sequential form warns about that,
 because there the first target would be the only one to run. With several targets at once,
-divide `-fork` between them rather than giving each the whole machine:
+divide `-fork` between them rather than giving each the whole machine. `--no-campaign`
+skips the campaign and fuzzes the targets one already built in this checkout, whatever its
+result -- the way to keep going after a campaign that built its targets and then stopped,
+since a new campaign refuses an instrumented checkout:
 
 ```
 just fuzz simplex --tmux -- -fork=5
+just fuzz marshal --no-campaign --parallel --tmux
 just fuzz simplex --parallel -- -max_total_time=600 -fork=5
 STATELENS_JOBS=4 just fuzz marshal --parallel -- -max_total_time=600
 
