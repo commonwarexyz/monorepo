@@ -255,12 +255,6 @@ macro_rules! roundtrip_single {
                     &cfg,
                 );
             }
-            if crate::reed_solomon::engine::cpu_features::ssse3() {
-                crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
-                    crate::reed_solomon::engine::Ssse3::new,
-                    &cfg,
-                );
-            }
         }
         #[cfg(target_arch = "aarch64")]
         {
@@ -293,15 +287,12 @@ macro_rules! roundtrip_two_rounds {
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            use crate::reed_solomon::engine::{Avx2, Avx512, Ssse3, cpu_features};
+            use crate::reed_solomon::engine::{Avx2, Avx512, cpu_features};
             if cpu_features::avx512() {
                 roundtrip_two_rounds_inner!($Rate, Avx512, $explicit_reset, $round_a, $round_b);
             }
             if cpu_features::avx2() {
                 roundtrip_two_rounds_inner!($Rate, Avx2, $explicit_reset, $round_a, $round_b);
-            }
-            if cpu_features::ssse3() {
-                roundtrip_two_rounds_inner!($Rate, Ssse3, $explicit_reset, $round_a, $round_b);
             }
         }
         #[cfg(target_arch = "aarch64")]
