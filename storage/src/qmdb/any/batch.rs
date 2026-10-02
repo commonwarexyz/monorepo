@@ -838,16 +838,6 @@ where
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
-        // Fast path: a strictly ascending batch entirely within the committed region needs no
-        // in-memory resolution, reordering, or per-location bookkeeping, so the positions can
-        // be handed to the reader directly. Depth-0 mutation reads take this path. Floor-raise
-        // candidate reads hit the same predicate in read_ops_sharded and reach here only when
-        // candidates cross into the uncommitted region.
-        if self.all_committed_ascending(locations) {
-            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
-            return Ok(reader.read_many(&positions).await?);
-        }
-
         // Resolve the in-memory regions synchronously.
         let mut results: Vec<Option<Operation<F, U>>> = locations
             .iter()
@@ -899,9 +889,10 @@ where
 
     /// Like [`read_ops`](Self::read_ops), but returns chunk-partitioned results whose
     /// concatenation preserves `locations` order. A strictly ascending batch entirely
-    /// within the committed region (the typical floor-raise candidate read) stays
-    /// partitioned as the reader probed it, skipping serial reassembly on the calling
-    /// task. Other shapes resolve through [`read_ops`](Self::read_ops) as a single chunk.
+    /// within the committed region (depth-0 mutation reads and the typical floor-raise
+    /// candidate read) stays partitioned as the reader probed it, skipping serial reassembly
+    /// on the calling task. Other shapes resolve through [`read_ops`](Self::read_ops) as a
+    /// single chunk.
     async fn read_ops_sharded<E, C>(
         &self,
         locations: &[Location<F>],
@@ -2138,7 +2129,7 @@ where
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
-        let results = m.read_ops(&locations, &[], &db.log).await?;
+        let results = m.read_ops_sharded(&locations, &[], &db.log).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
@@ -2202,7 +2193,7 @@ where
             StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
-        for (op, &old_loc) in zip_eq(results, &locations) {
+        for (op, &old_loc) in zip_eq(results.into_iter().flatten(), &locations) {
             while cached
                 .peek()
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
@@ -2364,7 +2355,8 @@ where
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
-        for (op, &old_loc) in zip_eq(m.read_ops(&locations, &[], &db.log).await?, &locations) {
+        let results = m.read_ops_sharded(&locations, &[], &db.log).await?;
+        for (op, &old_loc) in zip_eq(results.into_iter().flatten(), &locations) {
             let update::Ordered {
                 key,
                 value,
@@ -2448,9 +2440,9 @@ where
         prev_locations.sort();
         prev_locations.dedup();
 
-        let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
+        let prev_results = m.read_ops_sharded(&prev_locations, &[], &db.log).await?;
 
-        for (op, &old_loc) in zip_eq(prev_results, &prev_locations) {
+        for (op, &old_loc) in zip_eq(prev_results.into_iter().flatten(), &prev_locations) {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
