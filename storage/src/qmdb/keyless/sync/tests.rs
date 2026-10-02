@@ -111,7 +111,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
 
         let result: Result<DbOf<H>, _> = sync::sync(config).await;
@@ -150,7 +149,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 0,
         }
     }
 
@@ -315,7 +313,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -376,7 +373,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -427,7 +423,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -499,7 +494,6 @@ where
                 update_rx: Some(update_receiver),
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 1,
             };
             let mut client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
             loop {
@@ -573,7 +567,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -627,7 +620,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -679,7 +671,6 @@ where
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         };
         let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
 
@@ -726,7 +717,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
@@ -784,7 +774,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
@@ -853,7 +842,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
 
         update_sender
@@ -910,7 +898,6 @@ where
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 1,
         };
 
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
@@ -1281,7 +1268,6 @@ where
         update_rx: None,
         finish_rx: None,
         reached_target_tx: None,
-        max_retained_roots: 1,
     }
 }
 
@@ -1424,7 +1410,6 @@ mod compact_variable_mmr {
                 update_rx: None,
                 finish_rx: None,
                 reached_target_tx: None,
-                max_retained_roots: 8,
             })
             .await
             .unwrap();
@@ -1903,21 +1888,18 @@ mod compact_variable_mmr {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright because the witness serves
-            // only its latest commit.
-            let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+            // A target below the tip is served from its retained witness.
+            let stale: ClientDb = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),
                 target1.clone(),
                 client_config(&format!("{suffix}-stale"), &context),
             ))
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Source(qmdb::Error::Journal(
-                    crate::journal::Error::ItemPruned(_)
-                )))
-            ));
+            .await
+            .unwrap();
+            assert_eq!(stale.root(), target1.root);
+            assert_eq!(stale.get_metadata(), Some(metadata1.clone()));
+            stale.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
@@ -2761,21 +2743,18 @@ mod compact_variable_mmb {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright because the witness serves
-            // only its latest commit.
-            let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+            // A target below the tip is served from its retained witness.
+            let stale: ClientDb = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),
                 target1.clone(),
                 client_config(&format!("{suffix}-stale"), &context),
             ))
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Source(qmdb::Error::Journal(
-                    crate::journal::Error::ItemPruned(_)
-                )))
-            ));
+            .await
+            .unwrap();
+            assert_eq!(stale.root(), target1.root);
+            assert_eq!(stale.get_metadata(), Some(metadata1.clone()));
+            stale.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();

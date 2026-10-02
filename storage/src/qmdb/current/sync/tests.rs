@@ -543,7 +543,6 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
-            max_retained_roots: 8,
         })
         .await
         .unwrap();
@@ -797,6 +796,20 @@ macro_rules! current_sync_tests_for_harness {
             #[test_traced]
             fn test_local_pinned_nodes_below_floor() {
                 crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_target_update_derives_pinned_nodes_within_journal() {
+                crate::qmdb::any::sync::tests::test_target_update_derives_pinned_nodes_within_journal::<
+                    $harness,
+                >();
+            }
+
+            #[test_traced]
+            fn test_target_update_derives_pinned_nodes_from_unpruned_target() {
+                crate::qmdb::any::sync::tests::test_target_update_derives_pinned_nodes_from_unpruned_target::<
+                    $harness,
+                >();
             }
         }
     };

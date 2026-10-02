@@ -22,6 +22,21 @@ where
     },
 }
 
+/// The outcome of [`Mailbox::retarget`].
+pub(crate) enum Outcome<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// The sync coordinator recorded the target.
+    Recorded,
+    /// The sync coordinator accepts no more targets. The converged [`Artifact`] follows on
+    /// completion.
+    Refused,
+    /// State sync converged.
+    Converged(Artifact<E, A>),
+}
+
 impl<E, A> Overflow<Message<E, A>> for Option<Message<E, A>>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -75,32 +90,35 @@ where
         Self { sender }
     }
 
-    /// Sends a target update and waits until the sync coordinator records it.
+    /// Sends a target update and waits until the sync coordinator handles it.
     ///
-    /// Returns `None` once the update is recorded, or the converged [`Artifact`] if state sync
-    /// finished first.
+    /// Returns [`Outcome::Recorded`] once the update is recorded, [`Outcome::Refused`] once it is
+    /// refused, or the converged [`Artifact`] if state sync finished first.
     ///
     /// Panics if the syncer stops without responding.
     pub async fn retarget(
         &self,
         anchor: Anchor<BlockDigest<A, E>>,
         targets: SyncTargets<A, E>,
-    ) -> Option<Artifact<E, A>> {
+    ) -> Outcome<E, A> {
         loop {
             let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
             let (response, receiver) = oneshot::channel();
             let _ = self.sender.enqueue(Message::Retarget { update, response });
 
             match receiver.await.expect("Syncer should respond to retarget") {
-                Some(artifact) => return Some(artifact),
+                Some(artifact) => return Outcome::Converged(artifact),
                 None => {
-                    // Enqueueing can race with convergence, so wait for the coordinator to record it.
-                    if observed.await.is_ok() {
-                        return None;
-                    }
+                    // Enqueueing can race with convergence. Wait for the coordinator to handle
+                    // the update.
+                    match observed.await {
+                        Ok(true) => return Outcome::Recorded,
+                        Ok(false) => return Outcome::Refused,
 
-                    // The update was dropped unrecorded. Retry until it is recorded or the
-                    // converged artifact is returned.
+                        // The update was dropped unhandled. Retry until it is handled or the
+                        // converged artifact is returned.
+                        Err(_) => {}
+                    }
                 }
             }
         }
@@ -109,7 +127,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Mailbox, Message};
+    use super::{Mailbox, Message, Outcome};
     use crate::stateful::{
         actor::syncer::Artifact,
         tests::mocks::{TestApp, anchor, test_databases},
@@ -151,11 +169,10 @@ mod tests {
                 "response receiver should be alive"
             );
 
-            let result = retarget.await;
-            assert_eq!(
-                result.expect("retry should return artifact").anchor,
-                expected.anchor
-            );
+            let Outcome::Converged(result) = retarget.await else {
+                panic!("retry should return artifact");
+            };
+            assert_eq!(result.anchor, expected.anchor);
         });
     }
 
@@ -180,7 +197,7 @@ mod tests {
 
             update.record(|_, _| {});
 
-            assert!(retarget.await.is_none());
+            assert!(matches!(retarget.await, Outcome::Recorded));
         });
     }
 }

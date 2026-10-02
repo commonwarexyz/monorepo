@@ -1,7 +1,7 @@
 use super::{
     Producer,
     config::Config,
-    fetcher::{Config as FetcherConfig, Fetcher},
+    fetcher::{Config as FetcherConfig, Fetcher, Rejected},
     inflight::Inflight,
     ingress::{FetchKey, Mailbox, Message},
     metrics, wire,
@@ -195,6 +195,12 @@ where
                     Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
                     None => Either::Right(future::pending()),
                 };
+
+                // Get hedge deadline (if any)
+                let deadline_hedge = match self.fetcher.get_hedge_deadline() {
+                    Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
+                    None => Either::Right(future::pending()),
+                };
             },
             on_stopped => {
                 debug!("shutdown");
@@ -229,6 +235,10 @@ where
                     self.metrics.fetch.inc(Status::Failure);
                     self.fetcher.add_retry(key);
                 }
+            },
+            // Handle hedge deadline
+            _ = deadline_hedge => {
+                self.fetcher.hedge(&mut sender);
             },
             // Handle completed consumer deliveries before accepting new work:
             // a fetch issued in reaction to a delivery's outcome must find the
@@ -423,14 +433,20 @@ where
         trace!(?peer, ?id, "peer response: data");
 
         // Get the key associated with the response, if any
-        let Some((key, elapsed)) = self.fetcher.pop_response(id, &peer) else {
-            // It's possible that the key does not exist if the request was pruned.
+        let Some((key, elapsed, response)) = self.fetcher.pop_response(id, &peer, response) else {
+            // The request may have been pruned, or the consumer is judging another response for
+            // the key.
             return;
         };
+        self.deliver(peer, key, elapsed, response);
+    }
 
+    /// Deliver a response for the consumer to judge.
+    fn deliver(&mut self, peer: P, key: Key, elapsed: std::time::Duration, response: Bytes) {
         let Some(subscribers) = self.subscribers.pending(&key) else {
             warn!(?key, "response for fetch with no subscribers");
             self.inflight.cancel(&key);
+            self.fetcher.finish(&key);
             return;
         };
         let delivery = Delivery { key, subscribers };
@@ -470,7 +486,7 @@ where
                 self.metrics.fetch.inc(Status::Dropped);
             }
             self.inflight.cancel(&key);
-            self.fetcher.clear_targets(&key);
+            self.fetcher.finish(&key);
             return;
         };
 
@@ -480,6 +496,11 @@ where
 
         match outcome {
             Outcome::Complete => {
+                // Cancel the other requests for the key once its response is first accepted.
+                if !already_accepted {
+                    self.fetcher.resolve(&key);
+                }
+
                 // Remove only the subscribers that accepted this response. If other
                 // subscribers still need the key, deliver the same accepted response
                 // locally with the remaining annotations.
@@ -500,16 +521,16 @@ where
                         self.metrics.fetch.inc(Status::Success);
                     }
                     self.inflight.complete(self.context.as_ref(), &key);
-                    self.fetcher.clear_targets(&key);
+                    self.fetcher.finish(&key);
                 }
             }
             Outcome::Ambiguous => {
                 // The peer served valid data for the wire key, but local
                 // subscribers still need different evidence. Do not cache the
-                // response or penalize the peer; retry the same key.
+                // response or penalize the peer. Try another response for the key.
                 self.metrics.fetch.inc(Status::Ambiguous);
                 self.inflight.discard_response(&key);
-                self.fetcher.add_retry(key);
+                self.reject(key);
             }
             Outcome::Invalid => {
                 // A previously accepted response is only redelivered locally to subscribers that
@@ -524,17 +545,17 @@ where
                     self.metrics.fetch.inc(Status::Failure);
                     self.inflight.complete(self.context.as_ref(), &key);
                     self.subscribers.remove(&key);
-                    self.fetcher.clear_targets(&key);
+                    self.fetcher.finish(&key);
                     return;
                 }
 
-                // If the data is invalid, block the peer and try again. The network
-                // reports the block through the blocked subscription, which is what
+                // If the data is invalid, block the peer and try another response. The
+                // network reports the block through the blocked subscription, which is what
                 // makes the peer ineligible until it is unblocked.
                 commonware_p2p::block!(self.blocker, peer, "invalid data received");
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
-                self.fetcher.add_retry(key);
+                self.reject(key);
             }
             Outcome::Ignored => {
                 // The consumer no longer needs the key. Retire the entire fetch without
@@ -542,8 +563,20 @@ where
                 self.metrics.fetch.inc(Status::Dropped);
                 self.inflight.cancel(&key);
                 self.subscribers.remove(&key);
-                self.fetcher.clear_targets(&key);
+                self.fetcher.finish(&key);
             }
+        }
+    }
+
+    /// Judge the response held during a rejected judgment, or retry the key once no request for it
+    /// remains.
+    fn reject(&mut self, key: Key) {
+        match self.fetcher.reject(&key) {
+            Rejected::Judge(peer, elapsed, response) => {
+                self.deliver(peer, key, elapsed, response);
+            }
+            Rejected::Wait => {}
+            Rejected::Retry => self.fetcher.add_retry(key),
         }
     }
 
@@ -553,7 +586,7 @@ where
 
         // Get the key associated with the response, if any
         let Some(key) = self.fetcher.pop_missing(id, &peer) else {
-            // It's possible that the key does not exist if the request was pruned.
+            // The request may have been pruned, or another request for the key remains active.
             return;
         };
 

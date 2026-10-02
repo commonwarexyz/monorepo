@@ -23,7 +23,7 @@ mod actor;
 pub(crate) use actor::{Config, Syncer};
 
 pub(crate) mod mailbox;
-pub(crate) use mailbox::Mailbox;
+pub(crate) use mailbox::{Mailbox, Outcome};
 
 mod plan;
 pub use plan::SyncPlan;

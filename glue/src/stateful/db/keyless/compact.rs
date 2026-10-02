@@ -512,7 +512,6 @@ mod tests {
             apply_batch_size: NZU64!(1),
             max_outstanding_requests: 1,
             update_channel_size: NZUsize!(1),
-            max_retained_roots: 0,
         }
     }
 
@@ -887,6 +886,8 @@ mod tests {
         });
     }
 
+    /// A stale compact boundary that never completes holds back one update. The next update
+    /// supersedes it, and sync completes at that update's target.
     #[test]
     fn state_sync_supersedes_in_flight_stale_compact_target() {
         deterministic::Runner::default().start(|context| async move {
@@ -908,6 +909,17 @@ mod tests {
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = source.target();
+
+            let floor = source.inactivity_floor_loc();
+            let batch = source
+                .new_batch()
+                .append(U64::new(6))
+                .merkleize(&source, Some(U64::new(11)), floor)
+                .await
+                .unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
+            let middle_target = source.target();
 
             let floor = source.inactivity_floor_loc();
             let batch = source
@@ -948,6 +960,10 @@ mod tests {
                 })
                 .await
                 .expect("sync should request the stale target first");
+
+            // The first update waits behind the stale boundary. The next one is adopted at once
+            // and cancels it.
+            update_tx.send(middle_target).await.unwrap();
             update_tx.send(latest_target.clone()).await.unwrap();
 
             let synced = context

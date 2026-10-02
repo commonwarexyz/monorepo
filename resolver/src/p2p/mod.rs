@@ -59,11 +59,11 @@
 //!
 //! While a response is being validated, its key remains in flight, so no further request is sent.
 //! New fetches for the key only attach subscribers or targets. A complete outcome retires the
-//! delivered subscribers, an ambiguous outcome retries the key, an invalid outcome retries the key
-//! after blocking the serving peer, and an ignored outcome retires the entire key without scoring
-//! the serving peer. When a peer-visible key admits multiple valid responses, a consumer should
-//! return an ambiguous outcome if the delivered response does not satisfy every subscriber,
-//! allowing the resolver to try another response.
+//! delivered subscribers, an ambiguous outcome tries another response for the key, an invalid
+//! outcome does the same after blocking the serving peer, and an ignored outcome retires the
+//! entire key without scoring the serving peer. When a peer-visible key admits multiple valid
+//! responses, a consumer should return an ambiguous outcome if the delivered response does not
+//! satisfy every subscriber, allowing the resolver to try another response.
 //!
 //! # Scheduling
 //!
@@ -71,6 +71,16 @@
 //! each ordered by their next attempt time.
 //!
 //! # Peer Selection
+//!
+//! A fetch is first sent to the best-performing eligible peer. Each retry is sent to a random
+//! eligible peer not yet tried for the key, or to a tried peer when no untried peer accepts the
+//! send. Once every eligible peer has been tried, the rotation starts over.
+//!
+//! A request sent while its fetch has no other request in flight is hedged after half the timeout:
+//! the fetch is also sent to another eligible peer. The other request keeps running while the
+//! consumer judges a response. A response the consumer accepts cancels the other request, which is
+//! scored as a timeout if it was sent first. After an invalid or ambiguous response, the other
+//! request continues.
 //!
 //! Outbound fetches are only sent to peers in `latest.primary` (see [commonware_p2p::Provider]) but inbound
 //! requests are handled for all connected peers. Thus, callers that still expect a key to be fetchable after
@@ -130,7 +140,7 @@ mod tests {
     };
     use commonware_runtime::{
         Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
-        telemetry::metrics::count_running_tasks,
+        reschedule, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
         NZU32, NZUsize,
@@ -1522,6 +1532,182 @@ mod tests {
             let (key_actual, value) = cons_out1.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, Bytes::from("data for key 3"));
+        });
+    }
+
+    /// Serves `answered` and holds every request for another key without answering.
+    #[derive(Clone)]
+    struct StallingProducer {
+        answered: (Key, Bytes),
+        stalled: Arc<Mutex<Vec<oneshot::Sender<Bytes>>>>,
+    }
+
+    impl crate::p2p::Producer for StallingProducer {
+        type Key = Key;
+
+        fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
+            let (sender, receiver) = oneshot::channel();
+            if key == self.answered.0 {
+                sender.send_lossy(self.answered.1.clone());
+            } else {
+                self.stalled.lock().push(sender);
+            }
+            receiver
+        }
+    }
+
+    /// A fetch that stalls at the best-performing peer is hedged to another peer, which resolves
+    /// it without a requester timeout.
+    #[test_traced]
+    fn test_stalled_fetch_is_hedged_to_another_peer() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let warm = Key(1);
+            let stalled = Key(2);
+            let held = Arc::new(Mutex::new(Vec::new()));
+            let stalling = StallingProducer {
+                answered: (warm.clone(), Bytes::from("warm")),
+                stalled: held.clone(),
+            };
+            let mut serving = Producer::default();
+            serving.insert(stalled.clone(), Bytes::from("stalled"));
+
+            let (cons1, mut cons_out1) = consumer();
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                stalling,
+            );
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                serving,
+            );
+
+            // Only the stalling peer serves the first key. It then ranks first.
+            mailbox1.fetch(warm.clone());
+            let (key, _) = cons_out1.recv().await.unwrap();
+            assert_eq!(key, warm);
+            let failures = status_metric_total(&context.encode(), "actor_fetch_total", "Failure");
+
+            // The second key stalls at the stalling peer and is resolved by the other peer
+            // without another failure.
+            mailbox1.fetch(stalled.clone());
+            let (key, value) = cons_out1.recv().await.unwrap();
+            assert_eq!(key, stalled);
+            assert_eq!(value, Bytes::from("stalled"));
+            assert_eq!(held.lock().len(), 1);
+            assert_eq!(
+                status_metric_total(&context.encode(), "actor_fetch_total", "Failure"),
+                failures
+            );
+        });
+    }
+
+    /// A hedge peer that answers a stalled fetch with invalid data is blocked without cancelling
+    /// the earlier request, whose valid answer then resolves the fetch.
+    #[test_traced]
+    fn test_invalid_hedge_answer_keeps_earlier_request() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2, 3]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
+
+            let warm = Key(1);
+            let stalled = Key(2);
+            let valid = Bytes::from("valid");
+            let held = Arc::new(Mutex::new(Vec::new()));
+            let stalling = StallingProducer {
+                answered: (warm.clone(), Bytes::from("warm")),
+                stalled: held.clone(),
+            };
+            let mut invalid = Producer::default();
+            invalid.insert(stalled.clone(), Bytes::from("invalid"));
+
+            let (mut cons1, mut cons_out1) = consumer();
+            cons1.add_expected(stalled.clone(), valid.clone());
+            let scheme = schemes.remove(0);
+            let mut mailbox1 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                cons1,
+                Producer::default(),
+            );
+            let scheme = schemes.remove(0);
+            let _mailbox2 = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                stalling,
+            );
+            let scheme = schemes.remove(0);
+            let _mailbox3 = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                invalid,
+            );
+
+            // Only the stalling peer serves the first key. It then receives the second key first.
+            mailbox1.fetch(warm.clone());
+            let (key, _) = cons_out1.recv().await.unwrap();
+            assert_eq!(key, warm);
+
+            // The second key stalls at the first peer and is hedged to the other peer, which
+            // answers with invalid data and is blocked.
+            mailbox1.fetch(stalled.clone());
+            wait_for_blocked(&context, &oracle, &peers[0], &peers[2]).await;
+            assert_eq!(held.lock().len(), 1);
+
+            // The earlier request is still outstanding. Its valid answer resolves the fetch
+            // before any other request reaches the first peer.
+            let sender = held.lock().pop().unwrap();
+            sender.send_lossy(valid.clone());
+            loop {
+                if let Ok((key, value)) = cons_out1.try_recv() {
+                    assert_eq!(key, stalled);
+                    assert_eq!(value, valid);
+                    break;
+                }
+                assert!(held.lock().is_empty(), "earlier request was cancelled");
+                reschedule().await;
+            }
         });
     }
 
