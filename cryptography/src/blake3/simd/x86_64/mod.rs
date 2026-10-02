@@ -1,6 +1,6 @@
 //! BLAKE3 kernels for x86_64 with AVX2 and AVX-512.
 
-use super::{Digest, batch};
+use super::{Digest, Nodes, batch};
 use crate::blake3::PAIR_LEN;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -87,6 +87,34 @@ fn gather(parts: &[&[u8]], buffer: &mut [u8; PAIR_LEN]) -> Option<usize> {
     Some(len)
 }
 
+/// AVX2 kernels. A value exists only once AVX2 is available.
+struct Avx2(());
+
+impl Avx2 {
+    /// Hash equal-length `messages` with their nodes packed into lanes (see
+    /// [`super::pack`]).
+    fn pack(&self, messages: &[&[u8]], digests: &mut Vec<Digest>) {
+        super::pack(self, messages, digests);
+    }
+}
+
+impl Nodes<8> for Avx2 {
+    fn leaves(&self, inputs: [&[u8]; 8], counters: [u64; 8], _: usize) -> [[u8; OUT_LEN]; 8] {
+        // SAFETY: AVX2 availability was established on construction.
+        unsafe { avx2::leaves_x8(inputs, counters) }
+    }
+
+    fn tails(&self, inputs: [&[u8]; 8], _: usize) -> [[u8; OUT_LEN]; 8] {
+        // SAFETY: AVX2 availability was established on construction.
+        unsafe { avx2::tails_x8(inputs) }
+    }
+
+    fn parents(&self, children: [&[u8; BLOCK_LEN]; 8], root: u32, _: usize) -> [[u8; OUT_LEN]; 8] {
+        // SAFETY: AVX2 availability was established on construction.
+        unsafe { avx2::parents_x8(children, root) }
+    }
+}
+
 /// Hash independent messages in batches of 8 (AVX2).
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     if let [left, right] = messages
@@ -96,7 +124,8 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         return Some(digests);
     }
     if supports_avx2() {
-        return Some(batch(messages, |inputs, active| {
+        let pack = |messages: &[&[u8]], digests: &mut _| Avx2(()).pack(messages, digests);
+        return Some(batch(messages, pack, |inputs, active| {
             pair_batch(inputs, active).unwrap_or_else(|| {
                 // SAFETY: AVX2 availability was established above.
                 unsafe { avx2::hash_x8(inputs) }
@@ -133,7 +162,11 @@ fn pair_batch<const L: usize>(inputs: [&[u8]; L], active: usize) -> Option<[[u8;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blake3::{gather, simd::tests::check_lanes};
+    use crate::blake3::{
+        gather,
+        simd::tests::{check_batch, check_lanes},
+    };
+    use blake3::CHUNK_LEN;
     use commonware_utils::{iter::zip_eq, test_rng};
     use rand::Rng as _;
 
@@ -173,6 +206,21 @@ mod tests {
         }
     }
 
+    /// Check two exactly sized messages of three chunks and one byte, whose full
+    /// chunks, final partial chunks, and parents pack into lanes, against the
+    /// reference.
+    #[test]
+    fn test_packed_trees_match_reference() {
+        if !supports_avx2() {
+            return;
+        }
+        let messages = random(2, 3 * CHUNK_LEN + 1);
+        let actual = super::hash_many(&messages).unwrap();
+        for (digest, message) in zip_eq(&actual, &messages) {
+            assert_eq!(digest.as_ref(), reference(&[message]));
+        }
+    }
+
     #[test]
     fn test_avx2_lanes_match_reference() {
         if !supports_avx2() {
@@ -181,6 +229,22 @@ mod tests {
 
         // SAFETY: AVX2 availability was checked above.
         check_lanes::<8>(|inputs| unsafe { avx2::hash_x8(inputs) });
+    }
+
+    #[test]
+    fn test_avx2_batch_matches_reference() {
+        if !supports_avx2() {
+            return;
+        }
+        let pack = |messages: &[&[u8]], digests: &mut _| Avx2(()).pack(messages, digests);
+        check_batch(|messages| {
+            batch(messages, pack, |inputs, active| {
+                pair_batch(inputs, active).unwrap_or_else(|| {
+                    // SAFETY: AVX2 availability was checked above.
+                    unsafe { avx2::hash_x8(inputs) }
+                })
+            })
+        });
     }
 
     #[test]
