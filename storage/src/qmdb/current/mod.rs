@@ -531,6 +531,7 @@ pub mod tests {
                     test_any_policy_hold, test_any_policy_keep_evict_and_recover,
                     test_any_policy_limits, test_any_policy_limits_after_colliding_writes,
                     test_any_policy_matches_raise, test_any_policy_stop,
+                    test_any_proportional_bound,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -5693,6 +5694,22 @@ pub mod tests {
     }
 
     test_for_all_variants!(test_current_policy_freed_ancestors, "WARN");
+
+    /// [`test_any_proportional_bound`] on a current database, whose raise draws candidates from
+    /// the speculative bitmap.
+    async fn test_current_proportional_bound<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "bound".into()).await;
+        test_any_proportional_bound(context, db, val).await;
+    }
+
+    test_for_all_variants!(test_current_proportional_bound, "WARN");
 
     /// [`test_any_policy_matches_raise`] on a current database, whose raise and policy draw
     /// candidates from the speculative bitmap.

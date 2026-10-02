@@ -1158,8 +1158,8 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        // Floor raise.
-        // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
+        // Floor raise: one step per operation the batch makes inactive. `user_steps` counts the
+        // updates it supersedes and the deletes it appends, and the previous commit adds one.
         let total_steps = user_steps + 1;
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
         let frozen = self.frozen.take();
@@ -1747,26 +1747,29 @@ where
         } = self;
         let mut prepared = batch.prepare(db)?;
 
-        // Bound the steps the floor raise can take: only emitted ops consume steps, and an
-        // op is emitted per location-resolved update plus per upsert or prior mutation on a
-        // key alive in the committed snapshot. Fresh-key creates never consume a step, so
-        // unresolved update slots and writes missing from the snapshot are excluded (one
-        // in-memory probe per key). The bound is approximate in both directions. Surplus
-        // candidates (a translated-key collision, or a key an ancestor already deleted) are
-        // dropped by the raise once it moves enough ops, and a shortfall (a write resolving
-        // only through an ancestor diff) makes the raise fall back to the live scan when
-        // the prefetched prefix runs out.
+        // Bound the steps the floor raise can take: only emitted ops consume steps (one per
+        // update, two per delete), and an op is emitted per location-resolved update plus per
+        // upsert or prior mutation on a key alive in the committed snapshot. Fresh-key creates
+        // never consume a step, so unresolved update slots and writes missing from the
+        // snapshot are excluded (one in-memory probe per key). The bound is approximate in both
+        // directions. Surplus candidates (a translated-key collision, or a key an ancestor
+        // already deleted) are dropped by the raise once it moves enough ops, and a shortfall
+        // (a write resolving only through an ancestor diff) makes the raise fall back to the
+        // live scan when the prefetched prefix runs out.
+        let steps = |value: &Option<V::Value>| if value.is_some() { 1 } else { 2 };
         let resolved_updates = updates
             .iter()
             .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
-            .count()
-            .min(keys.len());
-        let existing_writes = upserts
+            .map(|(_, value)| steps(value))
+            .sum::<usize>()
+            .min(2 * keys.len());
+        let existing_writes: usize = upserts
             .iter()
-            .map(|(key, _)| key)
-            .chain(prepared.mutations.keys())
-            .filter(|&key| db.snapshot.get(key).next().is_some())
-            .count();
+            .map(|(key, value)| (key, value))
+            .chain(&prepared.mutations)
+            .filter(|&(key, _)| db.snapshot.get(key).next().is_some())
+            .map(|(_, value)| steps(value))
+            .sum();
         let steps_bound = resolved_updates + existing_writes + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
@@ -2615,14 +2618,15 @@ where
                             base_old_loc,
                         },
                     ));
+                    user_steps += 1;
                 }
                 None => {
                     ops.push(Operation::Delete(key.clone()));
                     diff.push((key, DiffEntry::Deleted { base_old_loc }));
                     active_keys_delta -= 1;
+                    user_steps += 2;
                 }
             }
-            user_steps += 1;
         };
 
         // Process updates/deletes of existing keys in location order, merging staged entries
@@ -3035,7 +3039,7 @@ where
 
             diff.push((key, DiffEntry::Deleted { base_old_loc }));
             active_keys_delta -= 1;
-            user_steps += 1;
+            user_steps += 2;
         }
         let deleted_range = 0..diff.len();
 

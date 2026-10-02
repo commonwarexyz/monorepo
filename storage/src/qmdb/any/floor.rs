@@ -28,8 +28,9 @@ type Brand<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
 /// How far a policy advances the floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limits {
-    /// Move up to one active update to the tip for each operation the batch supersedes, plus one
-    /// for its previous commit. [`Policy::decide`] is not called.
+    /// Move up to one active update to the tip for each operation the batch makes inactive: each
+    /// update it supersedes, each delete it appends, and its previous commit. [`Policy::decide`]
+    /// is not called.
     Proportional,
     /// Decide at most `entries` active updates and pass at most `skips` inactive locations.
     Fixed {
@@ -189,13 +190,12 @@ pub(crate) enum Action<V> {
     Evict,
 }
 
-/// Advances the floor in proportion to the operations a batch supersedes.
+/// Advances the floor in proportion to the operations a batch makes inactive.
 ///
-/// Every operation a batch supersedes, and its previous commit, becomes inactive and cannot be
-/// pruned until the floor passes it. Moving one active update to the tip for each of them keeps
-/// the floor within about twice the active keys behind the tip when batches only update keys. A
-/// delete makes both the superseded update and the delete operation inactive for one move, so
-/// deletes can leave the floor further behind.
+/// Each update a batch supersedes, each delete it appends, and its previous commit become
+/// inactive and cannot be pruned until the floor passes them. Moving one active update to the tip
+/// for each of them keeps the floor at most `3 * (n + 1)` operations behind the tip, where `n` is
+/// the number of active keys, when every batch uses it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Proportional;
 
