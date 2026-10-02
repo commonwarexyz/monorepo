@@ -258,6 +258,7 @@ pub fn view_route<P: Clone + PartialEq>(
 pub struct Elector<C> {
     fallback: C,
     round_leaders: Arc<[Participant]>,
+    early_election: bool,
 }
 
 impl<C: Default> Default for Elector<C> {
@@ -265,6 +266,7 @@ impl<C: Default> Default for Elector<C> {
         Self {
             fallback: C::default(),
             round_leaders: Arc::from(Vec::new()),
+            early_election: false,
         }
     }
 }
@@ -290,7 +292,15 @@ impl<C> Elector<C> {
         Self {
             fallback,
             round_leaders: Arc::from(round_leaders),
+            early_election: false,
         }
+    }
+
+    /// Enables certificate-independent election for scripted leaders, delegating
+    /// to the fallback elector after the prefix. Disabled by default.
+    pub const fn with_early_election(mut self) -> Self {
+        self.early_election = true;
+        self
     }
 }
 
@@ -299,6 +309,7 @@ impl<C> Elector<C> {
 pub struct ElectorState<E> {
     fallback: E,
     round_leaders: Arc<[Participant]>,
+    early_election: bool,
 }
 
 impl<S, C> elector::Config<S> for Elector<C>
@@ -312,6 +323,7 @@ where
         ElectorState {
             fallback: self.fallback.build(participants),
             round_leaders: self.round_leaders,
+            early_election: self.early_election,
         }
     }
 }
@@ -336,6 +348,17 @@ where
         // campaigns should not prevent the protocol from timing out in
         // later views (if a twin is elected).
         self.fallback.elect(round, certificate)
+    }
+
+    fn elect_without_certificate(&self, round: Round) -> Option<Participant> {
+        if !self.early_election {
+            return None;
+        }
+        let idx = term_index(round.view(), self.fallback.terms().length());
+        self.round_leaders
+            .get(idx)
+            .copied()
+            .or_else(|| self.fallback.elect_without_certificate(round))
     }
 }
 
@@ -2293,6 +2316,28 @@ mod tests {
             ),
             &participants,
         );
+
+        let early = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
+            Elector::new(
+                RoundRobin::<Sha256>::default().with_term(
+                    term_length,
+                    Duration::from_secs(10),
+                    ViewDelta::new(0),
+                ),
+                &scenario,
+                3,
+            )
+            .with_early_election(),
+            &participants,
+        );
+        for view in 1..=20 {
+            let round = Round::new(Epoch::new(333), View::new(view));
+            assert_eq!(twins.elect_without_certificate(round), None);
+            assert_eq!(
+                early.elect_without_certificate(round),
+                Some(twins.elect(round, None))
+            );
+        }
 
         for view in 1..=3 {
             let round = Round::new(Epoch::new(0), View::new(view));

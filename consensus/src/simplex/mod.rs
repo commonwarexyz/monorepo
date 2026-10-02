@@ -776,8 +776,8 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, non_empty, ordered::Set, probability,
-        sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, channel::fallible::OneshotExt as _,
+        non_empty, ordered::Set, probability, sync::Mutex, test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -8169,6 +8169,32 @@ mod tests {
         mode: twins::Mode,
         max_cases: usize,
         trailing_finalizations: usize,
+        // Opt into both scripted early election and application handoffs.
+        handoffs: bool,
+    }
+
+    // Count returned prefix candidates separately for honest and twin apps.
+    fn configure_twins_handoff(
+        actor: &mut mocks::application::Application<deterministic::Context, Sha256, PublicKey>,
+        prefix_end: View,
+        prefix_handoffs: Arc<Mutex<[usize; 2]>>,
+        side: usize,
+    ) {
+        actor.set_handoff(Some(HandoffPublication::AllowBeforeCertification));
+        let requested_view = Arc::new(Mutex::new(View::new(0)));
+        let observed_view = requested_view.clone();
+        actor.set_propose_observer(Box::new(move |context| {
+            *observed_view.lock() = context.view();
+        }));
+        actor.set_handoff_propose_controller(Box::new(move |proposal, response| {
+            if *requested_view.lock() <= prefix_end {
+                prefix_handoffs.lock()[side] += 1;
+                response.send_lossy(proposal);
+            } else {
+                // Suffix deferral isolates early publication evidence to prefix views.
+                response.send_lossy(crate::HandoffProposal::AwaitCertification);
+            }
+        }));
     }
 
     fn twins_campaign<S, F, L>(
@@ -8182,6 +8208,8 @@ mod tests {
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
+        let prefix_handoffs = Arc::new(Mutex::new([0usize; 2]));
+        let early_publications = Arc::new(Mutex::new(0u64));
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
         let cases = twins::cases(
@@ -8213,6 +8241,8 @@ mod tests {
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
             let elector = elector.clone();
+            let prefix_handoffs = prefix_handoffs.clone();
+            let early_publications = early_publications.clone();
             let mut case_fixture =
                 |ctx: &mut deterministic::Context, ns: &[u8], n: u32| fixture(ctx, ns, n);
             let rng: deterministic::BoxDynRng = Box::new(StdRng::from_rng(&mut *rng));
@@ -8247,6 +8277,12 @@ mod tests {
                     &scenario,
                     n as usize,
                 );
+                let elector = if campaign.handoffs {
+                    elector.with_early_election()
+                } else {
+                    elector
+                };
+                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
@@ -8363,10 +8399,13 @@ mod tests {
                             certify_latency: (10.0, 5.0),
                             should_certify: mocks::application::Certifier::Always,
                         };
-                        let (actor, application) = mocks::application::Application::new(
+                        let (mut actor, application) = mocks::application::Application::new(
                             context.child("application"),
                             application_cfg,
                         );
+                        if campaign.handoffs {
+                            configure_twins_handoff(&mut actor, prefix_end, prefix_handoffs.clone(), 1);
+                        }
                         actor.start();
 
                         let blocker = oracle.control(validator.clone());
@@ -8435,10 +8474,13 @@ mod tests {
                         certify_latency: (10.0, 5.0),
                         should_certify: mocks::application::Certifier::Always,
                     };
-                    let (actor, application) = mocks::application::Application::new(
+                    let (mut actor, application) = mocks::application::Application::new(
                         context.child("application"),
                         application_cfg,
                     );
+                    if campaign.handoffs {
+                        configure_twins_handoff(&mut actor, prefix_end, prefix_handoffs.clone(), 0);
+                    }
                     actor.start();
 
                     let blocker = oracle.control(validator.clone());
@@ -8499,7 +8541,6 @@ mod tests {
                 //
                 // Each scripted round drives one full leader term, so the
                 // adversarial prefix spans `rounds * term_length` views.
-                let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
                 let mut finalizers = Vec::new();
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;
@@ -8517,6 +8558,17 @@ mod tests {
                     ));
                 }
                 join_all(finalizers).await;
+                if campaign.handoffs {
+                    *early_publications.lock() += context
+                        .encode()
+                        .lines()
+                        .filter(|line| {
+                            line.contains("_handoff_events_total{")
+                                && line.contains("event=\"PublishedBeforeCertification\"")
+                        })
+                        .map(|line| line.split_once(' ').unwrap().1.parse::<u64>().unwrap())
+                        .sum::<u64>();
+                }
 
                 // Verify safety: no conflicting finalizations across honest reporters.
                 let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
@@ -8607,6 +8659,21 @@ mod tests {
                 }
             });
         }
+        if campaign.handoffs {
+            assert!(
+                *early_publications.lock() > 0,
+                "campaign must publish prefix handoffs before certification"
+            );
+            let counts = prefix_handoffs.lock();
+            assert!(
+                counts[0] > 0,
+                "honest apps must return handoffs during the adversarial prefix"
+            );
+            assert!(
+                counts[1] > 0,
+                "twin apps must return handoffs during the adversarial prefix"
+            );
+        }
     }
 
     const TWINS_CAMPAIGN: TwinsCampaign = TwinsCampaign {
@@ -8615,6 +8682,7 @@ mod tests {
         mode: twins::Mode::Sampled,
         max_cases: 20,
         trailing_finalizations: 10,
+        handoffs: false,
     };
 
     const TWINS_LINK: Link = Link {
@@ -8647,6 +8715,18 @@ mod tests {
     #[test_traced("INFO")]
     fn test_twins_sampled() {
         twins_campaign_all_links(TWINS_CAMPAIGN, RoundRobin::default());
+    }
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_twins_pipelined_handoff() {
+        twins_campaign_all_links(
+            TwinsCampaign {
+                handoffs: true,
+                ..TWINS_CAMPAIGN
+            },
+            RoundRobin::default(),
+        );
     }
 
     #[test_group("slow")]
