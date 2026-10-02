@@ -255,8 +255,6 @@ where
                 .append(0, &Record::Header(VERSION, identity))
                 .await?;
             journal = next.sync(0).await?;
-        } else if !header {
-            return Err(JournalError::MissingHeader);
         }
         Ok((
             Self {

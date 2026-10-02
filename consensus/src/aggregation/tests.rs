@@ -12,10 +12,10 @@ use bytes::Bytes;
 use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::{Decode as _, Encode};
 use commonware_cryptography::{
-    Hasher, Sha256,
+    Hasher, Sha256, Signer as _,
     bls12381::primitives::variant::{MinPk, MinSig},
     certificate::{Scheme as _, Verifier as _, mocks::Fixture},
-    ed25519::PublicKey,
+    ed25519::{PrivateKey, PublicKey},
     sha256::Digest as Sha256Digest,
 };
 use commonware_macros::test_traced;
@@ -237,21 +237,29 @@ async fn simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
     fixture: &Fixture<S>,
     connect: bool,
 ) -> (Oracle<PublicKey, Context>, Registrations) {
+    simulation_with_peers(context, fixture.participants.clone(), connect).await
+}
+
+async fn simulation_with_peers(
+    context: Context,
+    peers: Vec<PublicKey>,
+    connect: bool,
+) -> (Oracle<PublicKey, Context>, Registrations) {
     let (network, oracle) = Network::new_with_peers(
         context.child("network"),
         commonware_p2p::simulated::Config {
             max_size: 1024 * 1024,
-            max_peers_per_set: NZUsize!(fixture.participants.len()),
+            max_peers_per_set: NZUsize!(peers.len()),
             disconnect_on_block: true,
             tracked_peer_sets: NZUsize!(1),
         },
-        fixture.participants.clone(),
+        peers.clone(),
     )
     .await;
     network.start();
 
     let mut registrations = BTreeMap::new();
-    for participant in &fixture.participants {
+    for participant in &peers {
         let registration = oracle
             .control(participant.clone())
             .register(0, QUOTA)
@@ -260,8 +268,8 @@ async fn simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         registrations.insert(participant.clone(), registration);
     }
     if connect {
-        for first in &fixture.participants {
-            for second in &fixture.participants {
+        for first in &peers {
+            for second in &peers {
                 if first != second {
                     oracle
                         .add_link(first.clone(), second.clone(), LINK.clone())
@@ -784,16 +792,20 @@ fn test_ack_validation_ignores_non_blockable_inputs() {
 }
 
 #[test_traced("INFO")]
-fn test_ack_validation_blocks_peer_mismatch_and_invalid_signature() {
+fn test_ack_validation_blocks_hostile_peers() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
         let epoch = Epoch::new(82);
         let position = Height::new(420);
         let victim = fixture.participants[0].clone();
+        let malformed_peer = fixture.participants[1].clone();
         let mismatched_peer = fixture.participants[2].clone();
         let forging_peer = fixture.participants[3].clone();
+        let outsider = PrivateKey::from_seed(u64::MAX).public_key();
+        let mut peers = fixture.participants.clone();
+        peers.push(outsider.clone());
         let (oracle, mut registrations) =
-            simulation(context.child("simulation"), &fixture, true).await;
+            simulation_with_peers(context.child("simulation"), peers, true).await;
         let application = PendingApplication::default();
         let requested = application.requested.clone();
         let cfg = config(
@@ -817,6 +829,17 @@ fn test_ack_validation_blocks_peer_mismatch_and_invalid_signature() {
             context.sleep(Duration::from_millis(1)).await;
         }
 
+        let (mut malformed_sender, _) = registrations.remove(&malformed_peer).unwrap();
+        malformed_sender.send(Recipients::One(victim.clone()), vec![0xFF; 8], false);
+        while !oracle
+            .blocked()
+            .await
+            .unwrap()
+            .contains(&(victim.clone(), malformed_peer.clone()))
+        {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
         let mismatched = Ack::sign(
             &fixture.schemes[1],
             Item {
@@ -826,12 +849,28 @@ fn test_ack_validation_blocks_peer_mismatch_and_invalid_signature() {
         )
         .unwrap();
         let (mut mismatched_sender, _) = registrations.remove(&mismatched_peer).unwrap();
-        mismatched_sender.send(Recipients::One(victim.clone()), mismatched.encode(), false);
+        mismatched_sender.send(
+            Recipients::One(victim.clone()),
+            mismatched.clone().encode(),
+            false,
+        );
         while !oracle
             .blocked()
             .await
             .unwrap()
             .contains(&(victim.clone(), mismatched_peer.clone()))
+        {
+            context.sleep(Duration::from_millis(1)).await;
+        }
+
+        // A non-participant relaying a valid share is still blocked.
+        let (mut outsider_sender, _) = registrations.remove(&outsider).unwrap();
+        outsider_sender.send(Recipients::One(victim.clone()), mismatched.encode(), false);
+        while !oracle
+            .blocked()
+            .await
+            .unwrap()
+            .contains(&(victim.clone(), outsider.clone()))
         {
             context.sleep(Duration::from_millis(1)).await;
         }
