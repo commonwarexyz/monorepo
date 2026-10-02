@@ -34,8 +34,8 @@
 //!   and byte offset.
 //!
 //! - `Writable` owns the files: the contiguous sealed blobs plus the one writable tail. When the
-//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync
-//!   along with any started sync of the new tail.
+//!   tail fills, it is sealed and an fsync of it begins. `Writable` tracks that in-flight sync,
+//!   and its tail writer tracks any started sync of the new tail.
 //!
 //! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, recovery
 //!   watermark, staged clear target) consulted before trusting blob state on startup.
@@ -423,43 +423,21 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         max_size: Option<u64>,
     ) -> Result<Self, Error> {
         let ceiling = max_size.unwrap_or(u64::MAX);
-        let items_per_blob = cfg.items_per_blob.get();
         if let Some(target) = checkpoint.clear_target() {
             warn!(
                 clear_target = target,
                 "crash repair: completing interrupted clear"
             );
+            let recovery = Self::complete_clear(context, cfg, checkpoint, target).await?;
 
-            // A persisted reset is authoritative even when an open requests another cap.
-            let new_partition = format!("{}-blobs", cfg.partition);
-            Partition::<E>::remove_all(&context, &cfg.partition).await?;
-            Partition::<E>::remove_all(&context, &new_partition).await?;
-            let partition = Partition::new(
-                context.child("blobs"),
-                new_partition,
-                cfg.page_cache.clone(),
-                cfg.write_buffer,
-            );
-            let tail = super::position_to_blob(target, items_per_blob);
-            let mut pending = BTreeMap::new();
-            pending.insert(tail, partition.open_recovery(tail).await?);
-            let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
+            // A persisted reset is authoritative even when the open requests another cap. The cap
+            // is only checked against the reset size afterwards.
             if ceiling < target {
                 return Err(Error::ItemPruned(ceiling));
             }
-            return Ok(Self {
-                context,
-                cfg,
-                checkpoint,
-                partition,
-                pending,
-                discarded: Vec::new(),
-                bounds: target..target,
-                watermark: target,
-                bounded: max_size.is_some(),
-                _marker: PhantomData,
-            });
+            return Ok(recovery);
         }
+        let items_per_blob = cfg.items_per_blob.get();
 
         // Select the active partition and reconcile its oldest blob with the checkpoint's retained
         // start before excluding any suffix.
@@ -519,7 +497,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             } else {
                 0
             };
-            let writer = pending.get_mut(&blob).expect("suspect blob is present");
+            let writer = pending.get(&blob).expect("suspect blob is present");
             let required_items = ceiling
                 .saturating_sub(first_in_blob(pruning_boundary, blob, items_per_blob)?)
                 .min(items_per_blob);
@@ -559,7 +537,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                 size = writer.size(),
                 "truncating to recoverable item prefix"
             );
-            writer.truncate(valid).await?;
+            let writer = pending.remove(&blob).expect("suspect blob is present");
+            pending.insert(blob, writer.truncate(valid).await?);
         }
 
         let RecoveredBounds {
@@ -588,6 +567,71 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         })
     }
 
+    /// Complete the reset to `target` staged in `checkpoint` without opening any stored blob.
+    async fn complete_clear(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        target: u64,
+    ) -> Result<Self, Error> {
+        let items_per_blob = cfg.items_per_blob.get();
+        let new_partition = format!("{}-blobs", cfg.partition);
+        Partition::<E>::remove_all(&context, &cfg.partition).await?;
+        Partition::<E>::remove_all(&context, &new_partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            new_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+
+        // Recreate the target tail before the checkpoint publishes reset completion.
+        let tail = super::position_to_blob(target, items_per_blob);
+        let mut pending = BTreeMap::new();
+        pending.insert(tail, partition.open_recovery(tail).await?);
+        let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
+        Ok(Self {
+            context,
+            cfg,
+            checkpoint,
+            partition,
+            pending,
+            discarded: Vec::new(),
+            bounds: target..target,
+            watermark: target,
+
+            // finish_clear persisted `target` as the watermark, so publication has no selected end
+            // to raise.
+            bounded: false,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Stage a reset to `size` in `checkpoint`, await `clear_dependents`, then complete the reset
+    /// without opening any stored blob. A crash after staging leaves an intent that the next open
+    /// completes.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn open_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        size: u64,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        // A journal sized at `u64::MAX` can never accept an append (the successor size
+        // overflows), so reject it before staging any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        let checkpoint = checkpoint.stage_clear(size).await?;
+        clear_dependents().await?;
+        Self::complete_clear(context, cfg, checkpoint, size).await
+    }
+
     /// Open recovery while completing any previously staged reset callback.
     pub(super) async fn init_cleared<F, Fut>(
         context: E,
@@ -604,6 +648,30 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             clear_dependents().await?;
         }
         Self::open(context, cfg, checkpoint, max_size).await
+    }
+
+    /// Positions the stored blobs may hold, from blob names and the checkpoint without opening
+    /// their contents. The end is an upper bound based on the newest blob's capacity. A staged
+    /// clear has not yet been applied.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn span(
+        context: &E,
+        cfg: &Config,
+        checkpoint: &Checkpoint<E>,
+    ) -> Result<Range<u64>, Error> {
+        let per_blob = cfg.items_per_blob.get();
+        let (_, names) = Partition::select(context, &cfg.partition).await?;
+        let indices = Partition::<E>::indices(names)?;
+        let start = Inner::<E, A>::recover_pruning_boundary(
+            checkpoint.boundary_hint(),
+            indices.first().copied(),
+            per_blob,
+        )?;
+        let end = match indices.last() {
+            Some(&newest) => super::blob_first_position(newest, per_blob)?.saturating_add(per_blob),
+            None => start,
+        };
+        Ok(start..end)
     }
 
     /// Exclusive recovered item end.
@@ -651,19 +719,32 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let pos = self.bounds.end;
         let end = pos.checked_add(1).ok_or(Error::SizeOverflow)?;
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
-        let writer = match self.pending.entry(blob) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(self.partition.open_recovery(blob).await?),
-        };
-        let mut bytes = Vec::with_capacity(A::SIZE);
-        item.write(&mut bytes);
-        writer.append(&bytes).await?;
 
-        // Completed blobs remain open until publication. Flush them here so each retains at most a
-        // partial page while recovery continues appending. Keep the checkpoint unchanged: flushing
-        // a blob alone does not establish that this prefix is ready to publish.
-        if end.is_multiple_of(self.cfg.items_per_blob.get()) {
-            writer.sync().await?;
+        // Encode directly into the write buffer when the item fits.
+        let appended = self
+            .pending
+            .get_mut(&blob)
+            .is_some_and(|writer| writer.try_append_value(item).is_some());
+
+        let completed = end.is_multiple_of(self.cfg.items_per_blob.get());
+
+        // Take the writer only to open it, append through the owned fallback, or flush it. The
+        // owned fallback handles flushing and items larger than the buffer.
+        if !appended || completed {
+            let mut writer = match self.pending.remove(&blob) {
+                Some(writer) => writer,
+                None => self.partition.open_recovery(blob).await?,
+            };
+            if !appended && writer.try_append_value(item).is_none() {
+                (writer, _) = writer.append_owned(item.encode_mut().into()).await?;
+            }
+
+            // Completed blobs stay open until publication. Flush them to bound retained buffers,
+            // without advancing the checkpoint before the recovered prefix is ready to publish.
+            if completed {
+                writer = writer.sync().await?;
+            }
+            self.pending.insert(blob, writer);
         }
         self.bounds.end = end;
         Ok(self)
@@ -706,9 +787,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             // An empty prefix needs a durable boundary blob before its last backing blob is
             // removed.
             if let Entry::Vacant(entry) = self.pending.entry(tail_blob) {
-                let mut writer = self.partition.open_recovery(tail_blob).await?;
-                writer.sync().await?;
-                entry.insert(writer);
+                let writer = self.partition.open_recovery(tail_blob).await?;
+                entry.insert(writer.sync().await?);
             }
             self.discarded.retain(|&blob| blob != tail_blob);
         }
@@ -729,22 +809,34 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 
         // A truncated tail is made durable by truncation. An appended tail needs an explicit
         // barrier before publication can raise the watermark.
-        if let Some(writer) = self.pending.get_mut(&tail_blob) {
-            if bytes < writer.size() {
-                writer.truncate(bytes).await?;
+        if let Some(writer) = self.pending.remove(&tail_blob) {
+            let writer = if bytes < writer.size() {
+                writer.truncate(bytes).await?
             } else {
-                writer.sync().await?;
-            }
+                writer.sync().await?
+            };
+            self.pending.insert(tail_blob, writer);
         }
         self.bounds.end = size;
         Ok(self)
     }
 
+    /// Make every recovered blob durable. Clean blobs stay in place. An error drops the extracted
+    /// blobs.
+    async fn sync_pending(&mut self) -> Result<(), Error> {
+        let futures: Vec<_> = self
+            .pending
+            .extract_if(.., |_, writer| writer.needs_sync())
+            .map(|(blob, writer)| async move { writer.sync().await.map(|writer| (blob, writer)) })
+            .collect();
+        let synced = try_join_all(futures).await?;
+        self.pending.extend(synced);
+        Ok(())
+    }
+
     /// Flush recovery data and publish the current end as the watermark.
     pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
-        for writer in self.pending.values_mut() {
-            writer.sync().await?;
-        }
+        self.sync_pending().await?;
         self.watermark = self.bounds.end;
         self.checkpoint = self
             .checkpoint
@@ -778,9 +870,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         }
 
         // The retained anchor must be durable before any older blob is removed.
-        for writer in self.pending.values_mut() {
-            writer.sync().await?;
-        }
+        self.sync_pending().await?;
         while let Some((&oldest, _)) = self.pending.first_key_value() {
             if oldest >= blob {
                 break;
@@ -794,16 +884,13 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 
     /// Complete a reset while recovery owns the blobs.
     pub(crate) async fn clear_to_size(self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
-        if size == u64::MAX {
-            return Err(Error::SizeOverflow);
-        }
         self.clear_to_size_cleared(size, || async { Ok(()) }).await
     }
 
     /// Stage one durable reset intent, run the reset callback, and replace all journal blobs.
     /// Recovery may preserve an exhausted journal at `u64::MAX`. Explicit resets reject it.
     pub(super) async fn clear_to_size_cleared<F, Fut>(
-        mut self: Box<Self>,
+        self: Box<Self>,
         size: u64,
         clear_dependents: F,
     ) -> Result<Box<Self>, Error>
@@ -811,34 +898,33 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
+        // A journal sized at `u64::MAX` can never accept an append, so reject it before staging
+        // any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        let Self {
+            context,
+            cfg,
+            checkpoint,
+            partition,
+            pending,
+            ..
+        } = *self;
+
+        // Release the recovered blob handles and their partition before the reset recreates both.
+        drop(pending);
+        drop(partition);
+
         // The durable intent makes `size` authoritative across every later crash cut.
-        self.checkpoint = self.checkpoint.stage_clear(size).await?;
+        let checkpoint = checkpoint.stage_clear(size).await?;
 
         // Dependent state is cleared under the same intent before either journal partition is
         // removed.
         clear_dependents().await?;
-        Partition::<E>::remove_all(&self.context, &self.cfg.partition).await?;
-        Partition::<E>::remove_all(&self.context, &format!("{}-blobs", self.cfg.partition)).await?;
-        self.pending.clear();
-
-        // Recreate the target tail before the checkpoint publishes reset completion.
-        self.partition = Partition::new(
-            self.context.child("blobs"),
-            format!("{}-blobs", self.cfg.partition),
-            self.cfg.page_cache.clone(),
-            self.cfg.write_buffer,
-        );
-        let blob = super::position_to_blob(size, self.cfg.items_per_blob.get());
-        self.pending
-            .insert(blob, self.partition.open_recovery(blob).await?);
-        self.discarded.clear();
-        self.bounds = size..size;
-        self.watermark = size;
-        self.checkpoint = self
-            .checkpoint
-            .finish_clear(self.cfg.items_per_blob.get(), size)
-            .await?;
-        Ok(self)
+        Ok(Box::new(
+            Self::complete_clear(context, cfg, checkpoint, size).await?,
+        ))
     }
 
     /// Select a retained prefix and finish it before creating a live journal.
@@ -913,15 +999,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::init].
     pub(crate) async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        Self::init_with_checkpoint(context, cfg, checkpoint).await
-    }
-
-    /// Finish initialization using an already-open checkpoint.
-    async fn init_with_checkpoint(
-        context: E,
-        cfg: Config,
-        checkpoint: Checkpoint<E>,
-    ) -> Result<Self, Error> {
         Recovery::<E, A>::open(context, cfg, checkpoint, None)
             .await?
             .publish(u64::MAX)
@@ -1101,46 +1178,28 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Fail before writing intent if existing blob partitions are already inconsistent.
         Partition::select(&context, &cfg.partition).await?;
-        Self::init_at_size_cleared(context, cfg, size, || async { Ok(()) }).await
-    }
 
-    /// Like [Self::init_at_size], but awaits `clear_dependents` after the reset intent is durably
-    /// staged and before it completes.
-    ///
-    /// Callers that key dependent state off this journal use this to discard that state atomically
-    /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
-    /// [Recovery::init_cleared]) finishes.
-    #[commonware_macros::stability(ALPHA)]
-    pub(in crate::journal::contiguous) async fn init_at_size_cleared<F, Fut>(
-        context: E,
-        cfg: Config,
-        size: u64,
-        clear_dependents: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(), Error>>,
-    {
         // A journal sized at `u64::MAX` can never accept an append (the successor size
-        // overflows), so reject it before staging any reset intent.
+        // overflows), so reject it before opening the checkpoint.
         if size == u64::MAX {
             return Err(Error::SizeOverflow);
         }
-
-        // Stage the reset intent durably. `init_with_checkpoint` will detect the intent and
-        // complete the clear before recovering bounds.
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        let checkpoint = checkpoint.stage_clear(size).await?;
-        clear_dependents().await?;
-        Self::init_with_checkpoint(context, cfg, checkpoint).await
+        Recovery::<E, A>::open_cleared(context, cfg, checkpoint, size, || async { Ok(()) })
+            .await?
+            .publish(u64::MAX)
+            .await
     }
 
     /// Begin durably persisting the data blobs.
-    pub(super) async fn start_data_sync(mut self: Box<Self>) -> (Box<Self>, Handle<()>) {
-        let handle = self.blobs.start_sync().await;
+    pub(super) async fn start_data_sync(
+        mut self: Box<Self>,
+    ) -> Result<(Box<Self>, Handle<()>), Error> {
+        let (blobs, handle) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
         let completion: SyncCompletion = handle.boxed().shared();
         self.barrier.record(self.bounds.end, completion.clone());
-        (self, Handle::from_future(completion))
+        Ok((self, Handle::from_future(completion)))
     }
 
     /// Begin raising the recovery watermark toward `size`, capped at the barrier.
@@ -1157,9 +1216,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::start_sync].
     pub(crate) async fn start_sync(self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
-        let (mut journal, data) = self.start_data_sync().await;
+
+        // Start data durability, then cap watermark publication at the completed barrier.
+        let (mut journal, data) = self.start_data_sync().await?;
         let size = journal.barrier.boundary();
         let (journal, watermark) = journal.start_watermark_sync(size).await?;
+
+        // Completion requires both the data and the selected watermark to be durable.
         let handle = Handle::from_future(async move {
             data.await?;
             watermark.await
@@ -1172,7 +1235,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
         let size = self.bounds.end;
-        let handle = self.blobs.start_sync().await;
+        let (blobs, handle) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
         handle.await?;
         self.barrier.mark_durable(size);
         Ok(self)
@@ -1182,10 +1246,15 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
+
+        // Complete data durability before advancing the checkpoint that acknowledges it.
         let size = self.bounds.end;
-        let handle = self.blobs.start_sync().await;
+        let (blobs, handle) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
         handle.await?;
         self.barrier.mark_durable(size);
+
+        // Publish the durable prefix as the recovery watermark.
         self.checkpoint = self
             .checkpoint
             .persist(self.items_per_blob.get(), self.bounds.start, size)
@@ -1194,14 +1263,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::snapshot].
-    pub(crate) async fn snapshot(&mut self) -> Result<Reader<'static, E, A>, Error> {
-        Ok(Reader {
-            blobs: self.blobs.snapshot().await?,
+    pub(crate) async fn snapshot(
+        mut self: Box<Self>,
+    ) -> Result<(Box<Self>, Reader<'static, E, A>), Error> {
+        let (blobs, snapshot) = self.blobs.snapshot().await?;
+        self.blobs = blobs;
+        let reader = Reader {
+            blobs: snapshot,
             bounds: self.bounds.clone(),
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
-        })
+        };
+        Ok((self, reader))
     }
 
     /// A reader borrowing the journal's live state.
@@ -1222,28 +1296,35 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::append].
-    pub(crate) async fn append(&mut self, item: &A) -> Result<u64, Error> {
+    pub(crate) async fn append(mut self: Box<Self>, item: &A) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
         let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
-        if self.blobs.tail_writer().try_append_value(item).is_none() {
+        if self.blobs.try_append_value(item).is_none() {
             return self
                 .append_many_inner(Many::Flat(std::slice::from_ref(item)))
                 .await;
         }
-        self.advance_tail(new_size).await?;
-        Ok(self.finish_append())
+        self = self.advance_tail(new_size).await?;
+        let position = self.finish_append();
+        Ok((self, position))
     }
 
     /// See [Journal::append_many].
-    pub(crate) async fn append_many<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
+    pub(crate) async fn append_many(
+        self: Box<Self>,
+        items: Many<'_, A>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_many_timer();
         self.metrics.append_many_calls.inc();
         self.append_many_inner(items).await
     }
 
     // Shared implementation for `append` and `append_many`; public wrappers record metrics.
-    async fn append_many_inner<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
+    async fn append_many_inner(
+        self: Box<Self>,
+        items: Many<'_, A>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let prepared = self.prepare_append(items);
         self.write_encoded(prepared).await
     }
@@ -1275,16 +1356,19 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// See [Journal::append_prepared].
     pub(crate) async fn append_prepared(
-        &mut self,
+        self: Box<Self>,
         prepared: PreparedAppend<A>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_prepared_timer();
         self.metrics.append_prepared_calls.inc();
         self.write_encoded(prepared).await
     }
 
     // Write pre-encoded items; shared by all append paths. Records no call metrics.
-    async fn write_encoded(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+    async fn write_encoded(
+        mut self: Box<Self>,
+        prepared: PreparedAppend<A>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let items_buf = prepared.buf;
         let items_count = items_buf.len() / A::SIZE;
         if items_count == 0 {
@@ -1299,6 +1383,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
 
+        // Split the batch at blob boundaries so each full tail can be sealed before continuing.
         let mut written = 0;
         while written < items_count {
             let batch_count = super::batch_count_to_blob_boundary(
@@ -1308,27 +1393,31 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             );
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
-            // Overflow checked above.
             let new_size = self.bounds.end + batch_count as u64;
 
-            self.blobs
-                .tail_writer()
-                .append_owned(items_buf.slice(start..end))
-                .await?;
-            self.advance_tail(new_size).await?;
+            // Buffer a batch in place when it fits. Otherwise own the writer across the flush.
+            if self
+                .blobs
+                .try_append(&items_buf.as_ref()[start..end])
+                .is_none()
+            {
+                (self.blobs, _) = self.blobs.append_owned(items_buf.slice(start..end)).await?;
+            }
+            self = self.advance_tail(new_size).await?;
             written += batch_count;
         }
 
-        Ok(self.finish_append())
+        let position = self.finish_append();
+        Ok((self, position))
     }
 
     // Advance appended bounds and rotate a full tail. Both append paths use the same ordering.
-    async fn advance_tail(&mut self, new_size: u64) -> Result<(), Error> {
+    async fn advance_tail(mut self: Box<Self>, new_size: u64) -> Result<Box<Self>, Error> {
         self.bounds.end = new_size;
         if new_size.is_multiple_of(self.items_per_blob.get()) {
-            self.blobs.seal_tail().await?;
+            self.blobs = self.blobs.seal_tail().await?;
         }
-        Ok(())
+        Ok(self)
     }
 
     // Record state metrics once after a successful append, including multi-blob batches.
@@ -1368,12 +1457,13 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // survivors above the boundary: removal may be interrupted, and recovery truncates at
         // the first torn item, so an unsynced survivor could discard every synced blob
         // behind it.
-        let sync = self.blobs.start_sync().await;
+        let (blobs, sync) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
         sync.await?;
         self.barrier.mark_durable(self.bounds.end);
 
         let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
-        self.blobs.prune(min_blob).await?;
+        self.blobs = self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
         self.metrics.update(
@@ -1420,7 +1510,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.checkpoint = self.checkpoint.stage_clear(new_size).await?;
 
         // Remove every blob, then start fresh at the new size.
-        self.blobs
+        self.blobs = self
+            .blobs
             .clear(super::position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.bounds = new_size..new_size;
@@ -1504,8 +1595,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// A cap above the recovered end preserves that end. A cap below the retained start returns
     /// [Error::ItemPruned]. Successful initialization durably discards the suffix. Subsequent
-    /// appends may exceed the cap. All handles into these partitions must be dropped before
-    /// reopening them.
+    /// appends may exceed the cap.
     pub async fn init_at_most(context: E, cfg: Config, max_size: u64) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         let recovery = Recovery::<E, A>::open(context, cfg, checkpoint, Some(max_size)).await?;
@@ -1549,16 +1639,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
     /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
-    /// At most one data sync and one watermark sync are in flight at a time: this call waits
-    /// for the prior call's syncs before starting new ones. It does not wait for a pending
-    /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
-    /// pending when this call returns. Reads always proceed while the returned handle is
-    /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
-    /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
-    /// journal. A failed recovery-watermark sync is not observed by commit and
-    /// resurfaces on the next sync.
+    /// At most one data sync and one watermark sync are in flight at a time: this call waits for
+    /// the prior call's syncs before starting new ones. It does not wait for a pending rollover
+    /// fsync: the returned handle joins it, so an earlier call's handle may still be pending when
+    /// this call returns. Reads proceed while the returned handle is pending, and appends proceed
+    /// while they fit in the write buffer.
+    ///
+    /// Flush errors are returned directly. Dropping the handle does not cancel the sync or lose its
+    /// failure: a later operation reports it, no later than the next [Self::sync].
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -1575,11 +1663,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
-    /// creation, and the snapshot stays readable across concurrent appends and prunes.
-    ///
-    /// Close storage-backed snapshots before reopening these partitions for bounded initialization.
+    /// creation, and the snapshot stays readable across concurrent appends and prunes. It keeps
+    /// the journal's blobs open, so reopening a partition that still holds one of them fails
+    /// while the snapshot is alive.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
-        let reader = self.0.snapshot().await?;
+        let (inner, reader) = self.0.snapshot().await?;
+        self.0 = inner;
         Ok((self, reader))
     }
 
@@ -1595,7 +1684,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn append(mut self, item: &A) -> Result<(Self, u64), Error> {
-        let position = self.0.append(item).await?;
+        let (inner, position) = self.0.append(item).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -1603,7 +1693,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Returns [Error::EmptyAppend] if items is empty.
     pub async fn append_many(mut self, items: Many<'_, A>) -> Result<(Self, u64), Error> {
-        let position = self.0.append_many(items).await?;
+        let (inner, position) = self.0.append_many(items).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -1623,7 +1714,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         mut self,
         prepared: PreparedAppend<A>,
     ) -> Result<(Self, u64), Error> {
-        let position = self.0.append_prepared(prepared).await?;
+        let (inner, position) = self.0.append_prepared(prepared).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -2019,6 +2111,25 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
         Recovery::open(context, cfg, checkpoint, max_size).await
     }
 
+    async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+
+        // A staged clear already owns both blob partitions. Otherwise fail before writing intent
+        // if they are inconsistent.
+        if checkpoint.clear_target().is_none() {
+            Partition::select(&context, &cfg.partition).await?;
+        }
+        Recovery::open_cleared(context, cfg, checkpoint, size, || async { Ok(()) }).await
+    }
+
+    async fn span(context: E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        match checkpoint.clear_target() {
+            Some(target) => Ok(target..target),
+            None => Recovery::<E, A>::span(&context, cfg, &checkpoint).await,
+        }
+    }
+
     type Config = Config;
 }
 
@@ -2064,8 +2175,9 @@ impl<E: crate::Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Test helper: Make one blob durable (sealed history or the tail).
-    pub(crate) async fn test_sync_blob(&mut self, blob: u64) -> Result<(), Error> {
-        self.blobs.sync_blob(blob).await
+    pub(crate) async fn test_sync_blob(mut self: Box<Self>, blob: u64) -> Result<Box<Self>, Error> {
+        self.blobs = self.blobs.sync_blob(blob).await?;
+        Ok(self)
     }
 
     /// Test helper: Set and persist the recovery watermark directly.
@@ -2111,8 +2223,9 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Test helper: Make one blob durable (sealed history or the tail).
-    pub(crate) async fn test_sync_blob(&mut self, blob: u64) -> Result<(), Error> {
-        self.0.test_sync_blob(blob).await
+    pub(crate) async fn test_sync_blob(mut self, blob: u64) -> Result<Self, Error> {
+        self.0 = self.0.test_sync_blob(blob).await?;
+        Ok(self)
     }
 
     /// Test helper: Set and persist the recovery watermark directly.
@@ -2148,7 +2261,7 @@ mod tests {
         deterministic::{self, Context},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
-            drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
+            drive_pending_syncs, fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
@@ -2193,8 +2306,8 @@ mod tests {
                 .await
                 .unwrap();
             let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
-            writer.append(&[1; 32]).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&[1; 32]).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
             corrupt_page(
                 &context,
@@ -2446,7 +2559,10 @@ mod tests {
     #[test]
     fn test_recovery_rebuilds_pending_gap() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            // The two-page write buffer holds two digests, so the third digest in each blob takes
+            // the owned fallback during recovery.
+            let mut cfg = test_cfg(&context, NZU64!(5));
+            cfg.write_buffer = NZUsize!(88);
             let mut journal = Journal::<_, Digest>::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
@@ -2454,7 +2570,7 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
             for blob in 0..3 {
-                journal.test_sync_blob(blob).await.unwrap();
+                journal = journal.test_sync_blob(blob).await.unwrap();
             }
             drop(journal);
 
@@ -2713,7 +2829,7 @@ mod tests {
             let mut journal = Box::new(Inner::<_, u64>::init(context, cfg).await.unwrap());
 
             // Rollover starts a predecessor sync.
-            journal
+            (journal, _) = journal
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
@@ -2747,7 +2863,7 @@ mod tests {
             let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
             // Nothing proven while the first sync is parked: the watermark must not move.
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 0);
 
@@ -2756,7 +2872,7 @@ mod tests {
 
             // The first sync is proven, so the next call advances the watermark to its size,
             // one interval behind the tip.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
             drive_pending_syncs(&pending, h2).await.unwrap();
@@ -2778,12 +2894,14 @@ mod tests {
         });
     }
 
+    /// A failed sync never advances the watermark. A failed sealed-blob sync leaves the next
+    /// `start_sync` successful, and a failed tail sync fails it.
     #[test_traced]
     fn test_start_sync_failure_blocks_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let cfg = test_cfg(&context, NZU64!(100));
+            let cfg = test_cfg(&context, NZU64!(3));
             let mut journal = Box::new(
                 Inner::<_, u64>::init(
                     DelayedSyncContext {
@@ -2796,16 +2914,33 @@ mod tests {
                 .unwrap(),
             );
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (journal, h1) = journal.start_sync().await.unwrap();
-            fail_pending_syncs(&pending);
+            // Filling the first blob seals it and starts its sync. The next start_sync syncs
+            // the fresh tail.
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
+
+            // Fail the sealed blob's sync and let the tail sync land.
+            next_pending_sync(&pending)
+                .release
+                .send(Err(RuntimeError::Io(
+                    std::io::Error::other("injected sync failure").into(),
+                )))
+                .unwrap();
+            release_pending_syncs(&pending);
             assert!(h1.await.is_err());
 
-            // The failed sync proves nothing: the watermark must not advance, and the retained
-            // failure resurfaces on the next call's handle.
-            let (journal, h2) = journal.start_sync().await.unwrap();
+            // The failed sync proves nothing. The next call succeeds because the tail sync
+            // landed, but it must not advance the watermark past the lost blob.
+            assert_eq!(journal.barrier.boundary(), 0);
+            let (mut journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 0);
             assert!(h2.await.is_err());
+
+            // A failed tail sync fails the next call.
+            (journal, _) = journal.append(&4).await.unwrap();
+            let (journal, _) = journal.start_sync().await.unwrap();
+            fail_pending_syncs(&pending);
+            assert!(journal.start_sync().await.is_err());
         });
     }
 
@@ -2826,13 +2961,13 @@ mod tests {
             };
             let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
 
             // This parks the metadata sync advancing the watermark to 3.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
 
@@ -2872,10 +3007,10 @@ mod tests {
 
             // Prove three items durable (watermark 3), then one more so the next call has an
             // advance to start.
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             h1.await.unwrap();
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let journal = journal.commit().await.unwrap();
 
             // The advance's inline metadata writes fail: the call fails, consuming the
@@ -2912,7 +3047,7 @@ mod tests {
                 .unwrap(),
             );
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
@@ -2925,7 +3060,7 @@ mod tests {
 
             // An advance at or below the staged value is skipped, so the next handle succeeds:
             // the failure is observed only by the next checkpoint write.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let (journal, h3) = journal.start_sync().await.unwrap();
             drive_pending_syncs(&pending, h3).await.unwrap();
 
@@ -2961,7 +3096,7 @@ mod tests {
                 )
             };
             let mut journal = Box::new(make(faults.clone()).await.unwrap());
-            journal
+            (journal, _) = journal
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
@@ -2998,7 +3133,7 @@ mod tests {
                 .await
                 .unwrap(),
             );
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
             assert_eq!(journal.recovery_watermark(), 3);
 
@@ -3007,7 +3142,7 @@ mod tests {
             let mut journal = drive_pending_syncs(&pending, journal.test_truncate(2))
                 .await
                 .unwrap();
-            journal.append(&9).await.unwrap();
+            (journal, _) = journal.append(&9).await.unwrap();
             let (journal, handle) = journal.start_sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 2);
 
@@ -3017,11 +3152,9 @@ mod tests {
         });
     }
 
-    /// A flush failure inside `start_sync` is retained by the tail writer and by the tail sync
-    /// slot. A rollover must surface the retained failure, not discard it:
-    /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
+    /// A failed flush inside `start_sync` returns an error.
     #[test_traced]
-    fn test_fixed_dropped_failed_start_sync_surfaces_after_rollover() {
+    fn test_fixed_start_sync_flush_failure_returns_err() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(3));
@@ -3031,9 +3164,10 @@ mod tests {
                     .unwrap(),
             );
 
-            // Buffer an item, then fail the flush inside start_sync, dropping the returned
-            // handle unobserved.
-            journal.append(&0).await.unwrap();
+            // Buffer an item so start_sync must flush it.
+            (journal, _) = journal.append(&0).await.unwrap();
+
+            // The flush inside start_sync fails.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: probability!(1.0),
@@ -3042,18 +3176,90 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let (mut journal, handle) = journal.start_sync().await.unwrap();
-            drop(handle);
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
-
-            // Appending through the blob boundary must surface the retained failure.
-            assert!(matches!(
-                journal.append_many(Many::Flat(&[1, 2, 3])).await,
-                Err(Error::Runtime(_))
-            ));
+            assert!(matches!(journal.start_sync().await, Err(Error::Runtime(_))));
         });
     }
 
+    /// The operation that must observe the failed sync.
+    enum Boundary {
+        Rollover,
+        Clear,
+        Destroy,
+    }
+
+    /// The unobserved sync that fails.
+    enum FailedSync {
+        /// The live tail's started sync, whose handle is dropped.
+        Tail,
+        /// The sync started when the previous tail was sealed.
+        Predecessor,
+    }
+
+    /// A failed sync nobody observed prevents data blob creation and removal.
+    #[rstest::rstest]
+    #[test_traced]
+    fn test_fixed_dropped_failed_start_sync_blocks_blob_changes(
+        #[values(FailedSync::Tail, FailedSync::Predecessor)] failed: FailedSync,
+        #[values(Boundary::Rollover, Boundary::Clear, Boundary::Destroy)] boundary: Boundary,
+    ) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(3));
+            let data_partition = blob_partition(&cfg);
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(context.child("journal"), cfg)
+                    .await
+                    .unwrap(),
+            );
+            let fail_syncs = |rate| {
+                *context.storage_fault_config().write() = deterministic::FaultConfig {
+                    sync_rate: Some(rate),
+                    ..Default::default()
+                };
+            };
+
+            // Fail a sync without observing it: either the tail's started sync, whose handle is
+            // dropped, or the sync started by the rollover that seals the first blob.
+            let blobs = match failed {
+                FailedSync::Tail => {
+                    (journal, _) = journal.append(&0).await.unwrap();
+                    fail_syncs(probability!(1.0));
+                    let handle;
+                    (journal, handle) = journal.start_sync().await.unwrap();
+                    drop(handle);
+                    1
+                }
+                FailedSync::Predecessor => {
+                    (journal, _) = journal.append_many(Many::Flat(&[0, 1])).await.unwrap();
+                    fail_syncs(probability!(1.0));
+                    (journal, _) = journal.append(&2).await.unwrap();
+                    2
+                }
+            };
+            fail_syncs(probability!(0.0));
+
+            // The failure must surface before the operation changes the data blob namespace.
+            // Clearing may persist its checkpoint intent before reaching this boundary.
+            let size = journal.size();
+            let result = match boundary {
+                Boundary::Rollover => journal
+                    .append_many(Many::Flat(&[size, size + 1, size + 2]))
+                    .await
+                    .map(|_| ()),
+                Boundary::Clear => journal.clear_to_size(size).await.map(|_| ()),
+                Boundary::Destroy => journal.destroy().await,
+            };
+            assert!(matches!(result, Err(Error::Runtime(_))));
+            let mut names = scan_partition(&context, &data_partition).await;
+            names.sort();
+            let expected: Vec<_> = (0..blobs)
+                .map(|blob: u64| blob.to_be_bytes().to_vec())
+                .collect();
+            assert_eq!(names, expected);
+        });
+    }
+
+    /// A failed tail sync whose handle was dropped surfaces on the next in-blob flush.
     #[test_traced]
     fn test_fixed_dropped_failed_start_sync_surfaces_before_rollover() {
         let executor = deterministic::Runner::default();
@@ -3066,27 +3272,20 @@ mod tests {
             );
 
             // Prove one item durable, then buffer more so the next start_sync rewrites the
-            // tail page. Fail that flush and drop the returned handle unobserved. The failed
-            // completion leaves the barrier unchanged, so no watermark write is attempted.
-            journal.append(&0).await.unwrap();
-            let (mut journal, handle) = journal.start_sync().await.unwrap();
-            handle.await.unwrap();
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            // tail page. Fail the sync it starts and drop the returned handle unobserved.
+            (journal, _) = journal.append(&0).await.unwrap();
+            journal = journal.sync().await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             *context.storage_fault_config().write() = deterministic::FaultConfig {
-                write_rate: Some(deterministic::WriteConfig {
-                    failure_rate: probability!(1.0),
-                    retention_rate: probability!(0.0),
-                    mode: deterministic::PartialWriteMode::Prefix,
-                }),
+                sync_rate: Some(probability!(1.0)),
                 ..Default::default()
             };
-            let (mut journal, handle) = journal.start_sync().await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
             drop(handle);
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
 
-            // An in-blob flush never consults the tail sync slot, so the tail writer alone must
-            // surface the retained failure: the append fails instead of treating the failed
-            // flush's checksum as durable and overwriting the slot that still is.
+            // The flush must observe the failed sync before reusing a checksum slot that still
+            // protects the durable prefix.
             let overflow = vec![0u64; 300];
             assert!(matches!(
                 journal.append_many(Many::Flat(&overflow[..])).await,
@@ -3162,6 +3361,7 @@ mod tests {
                 .await
                 .expect("Failed to write legacy blob");
 
+            drop(legacy_blob);
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -3466,6 +3666,7 @@ mod tests {
                 .expect("Failed to write bad bytes");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -3606,6 +3807,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            drop(blob);
             let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -3817,6 +4019,7 @@ mod tests {
             blob.resize(size - 1).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -3842,9 +4045,9 @@ mod tests {
             let mut journal = journal.sync().await.unwrap();
             assert_eq!(journal.0.recovery_watermark(), 15);
 
-            // Persist the recovered metadata (watermark=9) as init_with_checkpoint does before
-            // applying the truncate repair. This simulates a crash after metadata sync but before
-            // the repair removes stale blobs.
+            // Persist the recovered metadata (watermark=9) as init does before applying the
+            // truncate repair. This simulates a crash after metadata sync but before the repair
+            // removes stale blobs.
             journal.0.checkpoint = journal
                 .0
                 .checkpoint
@@ -3864,7 +4067,7 @@ mod tests {
                 let mut append = PagedRecovery::open(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 1");
-                append
+                append = append
                     .truncate(4 * Digest::SIZE as u64)
                     .await
                     .expect("failed to shorten blob 1");
@@ -3977,8 +4180,8 @@ mod tests {
                 .unwrap();
             let mut append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
             let extra = test_digest(999);
-            append.append(extra.as_ref()).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(extra.as_ref()).await.unwrap();
+            append = append.sync().await.unwrap();
             drop(append);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
@@ -4028,6 +4231,7 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to corrupt blob");
             blob.sync().await.expect("failed to sync blob");
 
+            drop(blob);
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to recover journal");
@@ -4083,7 +4287,7 @@ mod tests {
                 let mut append = PagedRecovery::open(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 2");
-                append
+                append = append
                     .truncate(2 * Digest::SIZE as u64)
                     .await
                     .expect("failed to shorten anchored blob");
@@ -4382,7 +4586,7 @@ mod tests {
                 let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 0");
-                append
+                (append, _) = append
                     .append(extra.as_ref())
                     .await
                     .expect("failed to append extra item");
@@ -4437,6 +4641,7 @@ mod tests {
             .expect("Failed to extend blob");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -5079,9 +5284,9 @@ mod tests {
             for value in values {
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
-            writer.append(&bytes).await.unwrap();
-            writer.truncate(30).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&bytes).await.unwrap();
+            writer = writer.truncate(30).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
 
             // Five-byte integrity pages crossed by eight-byte journal items:
@@ -5140,9 +5345,9 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(writer.size(), 16);
-            writer.append(&[0; 4]).await.unwrap();
+            (writer, _) = writer.append(&[0; 4]).await.unwrap();
             assert_eq!(writer.size(), 20);
-            writer.sync().await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
 
             let journal = Journal::<_, u64>::init(context.child("recover"), cfg)
@@ -5181,8 +5386,8 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(writer.size(), 24);
-            writer.append(&44u64.to_be_bytes()[..3]).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&44u64.to_be_bytes()[..3]).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
 
             // Recovery floors to whole items and the journal appends aligned afterward.
@@ -5240,8 +5445,8 @@ mod tests {
             for value in [33u64, 44] {
                 bytes.extend_from_slice(&value.to_be_bytes());
             }
-            writer.append(&bytes).await.unwrap();
-            writer.sync().await.unwrap();
+            (writer, _) = writer.append(&bytes).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
             corrupt_page(
                 &context,
@@ -5379,10 +5584,10 @@ mod tests {
                 PAGE_SIZE.get() as u64,
             )
             .await;
-            let (_, size_before) = context
-                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_before = context
+                .logical_blob(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -5390,10 +5595,10 @@ mod tests {
 
             // Adoption must not mutate the torn blob. Items on the torn page fail lazily at
             // read while every item beyond the damaged blob remains readable.
-            let (_, size_after) = context
-                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_after = context
+                .logical_blob(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size_after, size_before,
                 "adoption must preserve the evidence"
@@ -5415,10 +5620,10 @@ mod tests {
             let _ = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
-            let (_, size_retry) = context
-                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_retry = context
+                .logical_blob(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(size_retry, size_before);
         });
     }
@@ -5594,12 +5799,11 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
 
-            // Explicitly sync blobs 0 and 1 (redundant under the rollover pipeline, but keeps
-            // the durable set independent of it) and drop without flushing blob 2, losing its
-            // buffered items.
+            // Wait for blobs 0 and 1 to become durable, then drop without flushing
+            // blob 2's buffered items.
             {
-                journal.test_sync_blob(0).await.unwrap();
-                journal.test_sync_blob(1).await.unwrap();
+                journal = journal.test_sync_blob(0).await.unwrap();
+                journal = journal.test_sync_blob(1).await.unwrap();
             }
             drop(journal);
 
@@ -5608,7 +5812,7 @@ mod tests {
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 3);
             for (blob, name) in names.iter().enumerate() {
-                let (_blob, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
+                let (_, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
                 if blob < 2 {
                     assert!(size > 0, "blob {blob} should be durable");
                 } else {
@@ -5668,7 +5872,7 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
             {
-                journal.test_sync_blob(2).await.unwrap();
+                journal = journal.test_sync_blob(2).await.unwrap();
             }
             drop(journal);
             let (blob, _) = context
@@ -5677,13 +5881,14 @@ mod tests {
                 .unwrap();
             blob.resize(0).await.unwrap();
             blob.sync().await.unwrap();
+            drop(blob);
 
             // Durable state: blob 0 (10 items), blob 1 (empty gap), blob 2 (8 items).
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 3);
             let mut sizes = Vec::new();
             for name in &names {
-                let (_blob, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
+                let (_, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
                 sizes.push(size);
             }
             assert!(sizes[0] > 0, "blob 0 should be durable");
@@ -5790,6 +5995,7 @@ mod tests {
             blob0.resize(0).await.unwrap();
             blob0.sync().await.unwrap();
 
+            drop(blob0);
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -6929,13 +7135,13 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
+            drop(journal);
             let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
                 .await
                 .unwrap();
             checkpoint.set_clear_target(100);
             let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
-            drop(journal);
 
             let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -6995,13 +7201,13 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
+            drop(journal);
             let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
                 .await
                 .unwrap();
             checkpoint.set_clear_target(15);
             let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
-            drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -7018,6 +7224,74 @@ mod tests {
             (journal, pos) = journal.append(&test_digest(100)).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), test_digest(100));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::lower(7)]
+    #[case::same(50)]
+    #[case::higher(60)]
+    #[test_traced]
+    fn test_fixed_journal_init_sync_after_interrupted_clear(#[case] start: u64) {
+        // State sync is the first open after a clear crashed with its intent staged. The cases
+        // start below, at, and above the staged target 50.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+
+            // Sync 30 items across three blobs.
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..30u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Stage a clear to 50 and crash before any blob is removed. The blobs still hold all
+            // 30 synced items.
+            Journal::<_, Digest>::test_stage_clear(context.child("intent"), &cfg.partition, 50)
+                .await
+                .unwrap();
+
+            // A staged clear spans only its target. Any other start replaces the intent without
+            // recovering the stale blobs. A start at 50 completes it.
+            let mut journal = authenticated::init_sync::<_, Journal<_, Digest>>(
+                context.child("sync"),
+                cfg.clone(),
+                start..start + 20,
+            )
+            .await
+            .expect("init_sync must complete or replace the staged clear");
+            assert_eq!(journal.bounds(), start..start);
+
+            // Appends begin at the sync start. Digests of 100 onward differ from every stale item,
+            // so the reads below tell new items from stale ones.
+            for i in 0..3u64 {
+                let pos;
+                (journal, pos) = journal.append(&test_digest(100 + i)).await.unwrap();
+                assert_eq!(pos, start + i);
+            }
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with an ordinary init. A surviving intent would clear the new items, and stale
+            // blobs would surface below the start or in place of the new items.
+            let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), start..start + 3);
+
+            // For start 7, the pruned position 6 held a stale item before the clear.
+            assert!(matches!(
+                journal.read(start - 1).await,
+                Err(Error::ItemPruned(pos)) if pos == start - 1
+            ));
+            for i in 0..3u64 {
+                assert_eq!(journal.read(start + i).await.unwrap(), test_digest(100 + i));
+            }
             journal.destroy().await.unwrap();
         });
     }
@@ -7045,6 +7319,7 @@ mod tests {
             let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let result = Journal::<_, Digest>::init(context.child("crash"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -7073,6 +7348,7 @@ mod tests {
             let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let result = Journal::<_, Digest>::init(context.child("crash"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });

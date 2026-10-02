@@ -5,4 +5,4 @@ pub mod reservation;
 pub mod ring;
 pub mod tracked;
 
-pub use tokio::sync::{mpsc, oneshot};
+pub use tokio::sync::{mpsc, oneshot, watch};
