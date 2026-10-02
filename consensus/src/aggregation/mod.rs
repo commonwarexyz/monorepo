@@ -7,11 +7,13 @@
 //! same digest for a position across clones and restarts. Shares are not durable; after restart, a
 //! signing engine requests the canonical digest and signs it again. Certificates are journaled and
 //! synced before reporting.
+//!
 //! A position is an application-defined sequence number. It need not be a block height. For
 //! example, an application that checkpoints every 1000 blocks can assign position `k` to the
 //! checkpoint at height `1000k + 999`. If that application also starts each epoch at a multiple
 //! of 1000 and makes each epoch's length a multiple of 1000, the epoch's last block is a
 //! checkpoint. Discovering the newest certificate is the application's responsibility.
+//!
 //! The engine keeps a bounded window anchored at the lowest uncertified position. It returns
 //! `Completed` only after the entire range is certified; shutdown returns `Stopped`. A durable
 //! header binds the journal to its committee, epoch, and range. Replay revalidates each
@@ -28,10 +30,11 @@
 //!
 //! Active engines can schedule missing certificates through a shared [`RecoveryCoordinator`]. The
 //! coordinator bounds and deduplicates logical resolver requests across engine scopes; it does not
-//! decode, verify, archive, or route certificates. A resolver consumer decodes each response and
-//! passes it to [`Mailbox::submit`] with the requested key. The engine checks the key, range, and
-//! signature. The engine does not serve certificates to peers. A resolver producer serves them
-//! from the application's archive.
+//! decode, verify, archive, or route certificates. A resolver consumer decodes each response with
+//! the scheme's bounded `certificate_codec_config()` and passes it to [`Mailbox::submit`] with the
+//! requested key. It returns `Ignored` for a key that names no running engine. The engine checks
+//! the key, range, and signature. The engine does not serve certificates to peers. A resolver
+//! producer serves them from the application's archive.
 //!
 //! ## Retirement
 //!

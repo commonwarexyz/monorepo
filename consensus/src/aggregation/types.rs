@@ -82,7 +82,8 @@ impl CertificateNamespace for Namespace {
 }
 
 impl Namespace {
-    pub(crate) fn recovery_namespace(&self) -> RecoveryNamespace {
+    /// Returns the recovery namespace for this signing namespace.
+    pub fn recovery_namespace(&self) -> RecoveryNamespace {
         RecoveryNamespace::from_signing_namespace(&self.0)
     }
 }
@@ -385,7 +386,8 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Verifies that this certificate belongs to an engine and has a valid signature.
     ///
     /// The epoch and range checks happen before cryptographic verification because epoch is
-    /// unsigned lookup metadata. Active engines and historical recovery use this same function.
+    /// unsigned lookup metadata. Active engines and historical certificate verification use this
+    /// function.
     pub fn verify_for<R>(
         &self,
         rng: &mut R,

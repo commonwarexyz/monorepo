@@ -22,7 +22,8 @@ use commonware_cryptography::{Digest, certificate};
 ///
 /// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type while
 /// retaining the certificate scheme's fault model. A custom scheme must implement
-/// [`Self::recovery_namespace`].
+/// [`Self::recovery_namespace`]. A scheme that signs under a [`Namespace`](super::types::Namespace)
+/// returns [`Namespace::recovery_namespace`](super::types::Namespace::recovery_namespace).
 pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {
     /// Returns the recovery identity derived from this scheme's signing namespace.
     fn recovery_namespace(&self) -> RecoveryNamespace;

@@ -58,6 +58,8 @@ pub struct Config<
     /// Also bounds the certificate mailbox. Changing `window` across restarts is safe.
     pub window: NonZeroU64,
     /// Journal partition.
+    ///
+    /// Each engine scope needs its own partition.
     pub journal_partition: String,
     /// Journal write-buffer size.
     pub journal_write_buffer: NonZeroUsize,

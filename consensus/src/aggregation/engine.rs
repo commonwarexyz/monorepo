@@ -11,7 +11,7 @@ use crate::{
     types::{Epoch, Height, Participant},
 };
 use commonware_actor::{
-    Unreliable,
+    Feedback, Unreliable,
     mailbox::{
         self, UnreliablePolicy, UnreliableReceiver as MailboxReceiver,
         UnreliableSender as MailboxSender,
@@ -146,8 +146,8 @@ impl Stopper {
 impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
     /// Validates and applies a certificate recovered for `key`.
     ///
-    /// When processed by the engine, a `key` that does not name the certificate's namespace,
-    /// epoch, and position returns [`CertificateOutcome::Invalid`]. A full mailbox returns
+    /// When processed by the engine, a `key` other than this engine's key for the certificate's
+    /// position returns [`CertificateOutcome::Invalid`]. A full mailbox returns
     /// [`CertificateOutcome::Backpressured`]. A stopped engine returns
     /// [`CertificateOutcome::Ignored`].
     pub async fn submit(
@@ -203,6 +203,7 @@ where
     recovery_after_rebroadcasts: u64,
     recovery_namespace: RecoveryNamespace,
     recoverer: R,
+    recovery_closed: bool,
     journal: Option<Journal<E, S, D>>,
     journal_config: JournalConfig,
     priority_acks: bool,
@@ -264,6 +265,7 @@ where
             rebroadcast_deadlines: PrioritySet::new(),
             recovery_after_rebroadcasts: cfg.recovery_after_rebroadcasts.get(),
             recovery_namespace,
+            recovery_closed: false,
             recoverer: cfg.recoverer,
             journal: None,
             journal_config,
@@ -279,6 +281,11 @@ where
     ///
     /// `network` must carry only this engine's epoch, for example through a per-epoch mux
     /// subchannel.
+    ///
+    /// # Panics
+    ///
+    /// The engine task panics if the journal partition belongs to another scope, has an
+    /// unsupported format, or holds a certificate that fails verification.
     pub fn start(
         self,
         network: (
@@ -690,11 +697,16 @@ where
             .pending
             .get_mut(&position)
             .expect("recovery requested for an inactive position");
-        if !pending.recovering {
-            pending.recovering = matches!(
-                self.recoverer.fetch(key),
-                Unreliable::Outcome(feedback) if feedback.accepted()
-            );
+        if pending.recovering {
+            return;
+        }
+        match self.recoverer.fetch(key) {
+            Unreliable::Outcome(feedback) if feedback.accepted() => pending.recovering = true,
+            Unreliable::Outcome(Feedback::Closed) if !self.recovery_closed => {
+                self.recovery_closed = true;
+                warn!(epoch = %self.epoch, "recovery closed; certificates now require acks");
+            }
+            _ => {}
         }
     }
 

@@ -483,6 +483,93 @@ fn test_fixed_range_all_online() {
     all_online(scheme::bls12381_threshold::fixture::<MinSig, _>);
 }
 
+/// Records every peer that delivers a message.
+#[derive(Debug)]
+struct SenderRecorder<R: P2pReceiver> {
+    inner: R,
+    senders: Arc<Mutex<BTreeSet<R::PublicKey>>>,
+}
+
+impl<R> P2pReceiver for SenderRecorder<R>
+where
+    R: P2pReceiver,
+    R::PublicKey: Ord,
+{
+    type Error = R::Error;
+    type PublicKey = R::PublicKey;
+
+    async fn recv(&mut self) -> Result<Message<Self::PublicKey>, Self::Error> {
+        let result = self.inner.recv().await;
+        if let Ok((peer, _)) = &result {
+            self.senders.lock().insert(peer.clone());
+        }
+        result
+    }
+}
+
+#[test_traced("INFO")]
+fn test_verifier_only_engine_certifies_without_acks() {
+    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 4);
+        let epoch = Epoch::new(11);
+        let first = Height::new(30);
+        let last = Height::new(34);
+        let verifier = fixture.participants[3].clone();
+        let (oracle, mut registrations) =
+            simulation(context.child("simulation"), &fixture, true).await;
+        let senders = Arc::new(Mutex::new(BTreeSet::new()));
+        let reporter = RecordingReporter::default();
+        let certificates = reporter.certificates.clone();
+        let mut handles = Vec::new();
+
+        for (index, participant) in fixture.participants.iter().enumerate() {
+            let child = context.child("validator").with_attribute("index", index);
+            let (scheme, reporter) = if *participant == verifier {
+                (fixture.verifier.clone(), reporter.clone())
+            } else {
+                (fixture.schemes[index].clone(), RecordingReporter::default())
+            };
+            let cfg = config(
+                &child,
+                scheme,
+                ImmediateApplication::default(),
+                reporter,
+                oracle.control(participant.clone()),
+                EngineScope {
+                    partition: format!("aggregation-verifier-only-{index}"),
+                    epoch,
+                    first,
+                    last,
+                    window: 5,
+                },
+            );
+            let (engine, _mailbox) = Engine::new(child.child("engine"), cfg);
+            let (sender, inner) = registrations.remove(participant).unwrap();
+            let receiver = SenderRecorder {
+                inner,
+                senders: senders.clone(),
+            };
+            handles.push(engine.start((sender, receiver)));
+        }
+
+        for result in join_all(handles).await {
+            assert_eq!(
+                result.expect("aggregation engine failed"),
+                EngineOutcome::Completed
+            );
+        }
+        let senders = senders.lock();
+        assert_eq!(senders.len(), 3);
+        assert!(!senders.contains(&verifier));
+        let positions: BTreeSet<_> = certificates
+            .lock()
+            .iter()
+            .map(|certificate| certificate.item.position.get())
+            .collect();
+        assert!(positions.into_iter().eq(first.get()..=last.get()));
+    });
+}
+
 #[test_traced("INFO")]
 fn test_delayed_digest_broadcasts_quorum_share() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
