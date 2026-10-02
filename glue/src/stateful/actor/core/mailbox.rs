@@ -3,7 +3,7 @@
 use crate::stateful::{Application, actor::core::verifications::Request};
 use commonware_actor::{
     Feedback,
-    mailbox::{Overflow, Policy, Sender},
+    mailbox::{Live, Policy, Sender, Stale},
 };
 use commonware_consensus::{
     Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
@@ -20,10 +20,7 @@ use commonware_utils::{
     sync::Mutex,
 };
 use rand_core::Rng;
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Weak},
-};
+use std::sync::{Arc, Weak};
 use tracing::{Span, info_span};
 
 /// Re-enqueues live verification requests after finalization or pruning stops
@@ -101,12 +98,12 @@ where
     },
 }
 
-impl<E, A> Message<E, A>
+impl<E, A> Stale for Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    fn is_obsolete(&self) -> bool {
+    fn is_stale(&self) -> bool {
         match self {
             Self::Propose { response, .. } => response.is_closed(),
             Self::Verify(request) => request.verification.is_cancelled(),
@@ -116,62 +113,15 @@ where
     }
 }
 
-/// FIFO overflow for reliable messages that do not fit in the bounded mailbox.
-///
-/// Caller-scoped requests are discarded after their response channel closes.
-pub(super) struct Pending<E, A>(VecDeque<Message<E, A>>)
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>;
-
-impl<E, A> Default for Pending<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    fn default() -> Self {
-        Self(VecDeque::new())
-    }
-}
-
-impl<E, A> Overflow<Message<E, A>> for Pending<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn drain<F>(&mut self, mut push: F)
-    where
-        F: FnMut(Message<E, A>) -> Option<Message<E, A>>,
-    {
-        while let Some(message) = self.0.pop_front() {
-            if message.is_obsolete() {
-                continue;
-            }
-
-            if let Some(message) = push(message) {
-                self.0.push_front(message);
-                break;
-            }
-        }
-    }
-}
-
 impl<E, A> Policy for Message<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
 {
-    type Overflow = Pending<E, A>;
+    type Overflow = Live<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if message.is_obsolete() {
-            return;
-        }
-        overflow.0.push_back(message);
+        overflow.push(message);
     }
 }
 

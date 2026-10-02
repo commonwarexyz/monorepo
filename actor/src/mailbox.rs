@@ -88,6 +88,57 @@ impl<T> Overflow<T> for VecDeque<T> {
     }
 }
 
+/// A message that can become obsolete while it waits for the receiver, for example a request
+/// whose response channel has closed.
+pub trait Stale {
+    /// Return whether the message no longer needs to be delivered.
+    fn is_stale(&self) -> bool;
+}
+
+/// FIFO overflow that discards [`Stale`] messages when they are retained and again when they are
+/// drained.
+#[derive(Debug)]
+pub struct Live<T>(VecDeque<T>);
+
+impl<T> Live<T> {
+    /// Retain `message` at the back of the queue unless it is already stale.
+    pub fn push(&mut self, message: T)
+    where
+        T: Stale,
+    {
+        if !message.is_stale() {
+            self.0.push_back(message);
+        }
+    }
+}
+
+impl<T> Default for Live<T> {
+    fn default() -> Self {
+        Self(VecDeque::new())
+    }
+}
+
+impl<T: Stale> Overflow<T> for Live<T> {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn drain<F>(&mut self, mut push: F)
+    where
+        F: FnMut(T) -> Option<T>,
+    {
+        while let Some(message) = self.0.pop_front() {
+            if message.is_stale() {
+                continue;
+            }
+            if let Some(message) = push(message) {
+                self.0.push_front(message);
+                break;
+            }
+        }
+    }
+}
+
 /// Overflow behavior for actor messages when an inbox is full.
 pub trait Policy: Sized {
     /// Overflow storage used by this policy.
@@ -935,6 +986,42 @@ mod tests {
         fn wake_by_ref(arc_self: &Arc<Self>) {
             arc_self.wakes.fetch_add(1, Ordering::AcqRel);
         }
+    }
+
+    struct Request {
+        id: u8,
+        stale: bool,
+    }
+
+    impl Stale for Request {
+        fn is_stale(&self) -> bool {
+            self.stale
+        }
+    }
+
+    #[test]
+    fn live_overflow_discards_stale_messages_on_push_and_drain() {
+        let request = |id, stale| Request { id, stale };
+        let mut overflow = Live::default();
+        overflow.push(request(1, true));
+        overflow.push(request(2, false));
+        overflow.push(request(3, false));
+        overflow.push(request(4, false));
+        assert!(!Overflow::is_empty(&overflow));
+
+        // Messages that go stale while retained are skipped, and a rejected message is kept.
+        overflow.0[1].stale = true;
+        let mut drained = Vec::new();
+        Overflow::drain(&mut overflow, |message| {
+            if drained.is_empty() {
+                drained.push(message.id);
+                None
+            } else {
+                Some(message)
+            }
+        });
+        assert_eq!(drained, [2]);
+        assert_eq!(overflow.0.iter().map(|m| m.id).collect::<Vec<_>>(), [4]);
     }
 
     #[test]

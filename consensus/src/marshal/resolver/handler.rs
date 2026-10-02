@@ -1,13 +1,12 @@
 use crate::types::{Height, Round};
-use bytes::{BufMut, Bytes};
-use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
+use bytes::BufMut;
+use commonware_actor::mailbox;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
+use commonware_resolver::{Fetch as ResolverFetch, handler};
 use commonware_runtime::Metrics;
-use commonware_utils::{Span, channel::oneshot};
+use commonware_utils::Span;
 use std::{
-    collections::VecDeque,
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     num::NonZeroUsize,
@@ -20,102 +19,12 @@ const BLOCK_REQUEST: u8 = 0;
 const FINALIZED_REQUEST: u8 = 1;
 const NOTARIZED_REQUEST: u8 = 2;
 
-/// Messages sent from the resolver's [Consumer]/[Producer] implementation
+/// Messages sent from the resolver's [Consumer](commonware_resolver::Consumer)/[Producer](commonware_resolver::p2p::Producer) implementation
 /// to the marshal actor.
-pub(crate) enum Message<D: Digest> {
-    /// A request to deliver a value for a given key.
-    Deliver {
-        /// The delivery metadata attached to the resolved value.
-        delivery: Delivery<Key<D>, Annotation>,
-        /// The value being delivered.
-        value: Bytes,
-        /// A channel to send the result of the delivery.
-        response: oneshot::Sender<bool>,
-    },
-    /// A request to produce a value for a given key.
-    Produce {
-        /// The key of the value to produce.
-        key: Key<D>,
-        /// A channel to send the produced value.
-        response: oneshot::Sender<Bytes>,
-    },
-}
-
-impl<D: Digest> Message<D> {
-    /// Returns true if the requester has stopped waiting for this response.
-    pub(crate) fn response_closed(&self) -> bool {
-        match self {
-            Self::Deliver { response, .. } => response.is_closed(),
-            Self::Produce { response, .. } => response.is_closed(),
-        }
-    }
-}
-
-/// Deliveries retained while the ready queue is full.
-pub(crate) struct Pending<D: Digest>(VecDeque<Message<D>>);
-
-impl<D: Digest> Default for Pending<D> {
-    fn default() -> Self {
-        Self(VecDeque::new())
-    }
-}
-
-impl<D: Digest> Overflow<Message<D>> for Pending<D> {
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn drain<F>(&mut self, mut push: F)
-    where
-        F: FnMut(Message<D>) -> Option<Message<D>>,
-    {
-        while let Some(message) = self.0.pop_front() {
-            if message.response_closed() {
-                continue;
-            }
-
-            if let Some(message) = push(message) {
-                self.0.push_front(message);
-                break;
-            }
-        }
-    }
-}
-
-impl<D: Digest> Policy for Message<D> {
-    type Overflow = Pending<D>;
-
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        // Drop produce requests so the serve backlog stays bounded by the ready
-        // queue. We prefer handling our own responses over serving peers, who can
-        // ask a less loaded peer instead.
-        if matches!(message, Self::Produce { .. }) {
-            return;
-        }
-
-        // Retain deliveries that still have a waiting requester.
-        if message.response_closed() {
-            return;
-        }
-        overflow.0.push_back(message);
-    }
-}
+pub(crate) type Message<D> = handler::Message<Key<D>, Annotation>;
 
 /// A handler that forwards requests from the resolver to the marshal actor.
-///
-/// This struct implements the [Consumer] and [Producer] traits from the
-/// resolver, and acts as a bridge to the main actor loop.
-#[derive(Clone)]
-pub struct Handler<D: Digest> {
-    sender: Sender<Message<D>>,
-}
-
-impl<D: Digest> Handler<D> {
-    /// Creates a new handler.
-    pub(crate) const fn new(sender: Sender<Message<D>>) -> Self {
-        Self { sender }
-    }
-}
+pub type Handler<D> = handler::Handler<Key<D>, Annotation>;
 
 /// Creates a resolver receiver and handler pair.
 pub fn init<D: Digest>(metrics: impl Metrics, capacity: NonZeroUsize) -> (Receiver<D>, Handler<D>) {
@@ -139,37 +48,6 @@ impl<D: Digest> Receiver<D> {
 
     pub(crate) fn try_recv(&mut self) -> Result<Message<D>, TryRecvError> {
         self.inner.try_recv()
-    }
-}
-
-impl<D: Digest> Consumer for Handler<D> {
-    type Key = Key<D>;
-    type Value = Bytes;
-    type Subscriber = Annotation;
-    type Outcome = bool;
-
-    fn deliver(
-        &mut self,
-        delivery: Delivery<Self::Key, Self::Subscriber>,
-        value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Deliver {
-            delivery,
-            value,
-            response,
-        });
-        receiver
-    }
-}
-
-impl<D: Digest> Producer for Handler<D> {
-    type Key = Key<D>;
-
-    fn produce(&mut self, key: Self::Key) -> oneshot::Receiver<Bytes> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Produce { key, response });
-        receiver
     }
 }
 
@@ -561,71 +439,9 @@ mod tests {
         Hasher as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
-    use commonware_utils::vec::NonEmptyVec;
     use std::collections::BTreeSet;
 
     type D = Sha256Digest;
-
-    #[test]
-    fn handle_retains_open_deliveries_only() {
-        let mut overflow = Pending::<D>::default();
-        let deliver = |height: u64, response| Message::Deliver {
-            delivery: Delivery {
-                key: Key::Finalized {
-                    height: Height::new(height),
-                },
-                subscribers: NonEmptyVec::new((
-                    Annotation::Finalized(Finalized::ByHeight {
-                        height: Height::new(height),
-                    }),
-                    tracing::Span::none(),
-                )),
-            },
-            value: Bytes::new(),
-            response,
-        };
-
-        // An overflowed produce request is dropped and its requester sees the
-        // closed response.
-        let (response, mut produce) = oneshot::channel();
-        Message::handle(
-            &mut overflow,
-            Message::Produce {
-                key: Key::Finalized {
-                    height: Height::new(1),
-                },
-                response,
-            },
-        );
-        assert!(matches!(
-            produce.try_recv(),
-            Err(oneshot::error::TryRecvError::Closed)
-        ));
-
-        // Deliveries are retained, and drain skips one whose requester left.
-        let (response, closed) = oneshot::channel();
-        Message::handle(&mut overflow, deliver(2, response));
-        let (response, _open) = oneshot::channel();
-        Message::handle(&mut overflow, deliver(3, response));
-        drop(closed);
-
-        let mut messages = Vec::new();
-        Overflow::drain(&mut overflow, |message| {
-            messages.push(message);
-            None
-        });
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(
-            messages.pop(),
-            Some(Message::Deliver {
-                delivery: Delivery {
-                    key: Key::Finalized { height },
-                    ..
-                },
-                ..
-            }) if height == Height::new(3)
-        ));
-    }
 
     #[test]
     fn test_cross_variant_hash_differs() {

@@ -7,7 +7,11 @@ use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
-use commonware_resolver::{Delivery, Fetch, Resolver, p2p};
+use commonware_resolver::{
+    Delivery, Fetch, Resolver,
+    handler::{Handler, Message as HandlerMessage},
+    p2p,
+};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, status},
@@ -146,7 +150,7 @@ where
     ) {
         let (handler_tx, mut handler_rx) =
             actor_mailbox::new(self.context.child("handler"), self.config.mailbox_size);
-        let handler = handler::Handler::new(handler_tx);
+        let handler = Handler::new(handler_tx);
         let (engine, mut resolver_mailbox) = p2p::Engine::new(
             self.context.as_present().child("resolver"),
             p2p::Config {
@@ -189,14 +193,14 @@ where
             Some(message) = handler_rx.recv() else {
                 return;
             } => match message {
-                handler::EngineMessage::Deliver {
+                HandlerMessage::Deliver {
                     delivery,
                     value,
                     response,
                 } => {
                     self.handle_deliver(delivery, value, response);
                 }
-                handler::EngineMessage::Produce { key, response } => {
+                HandlerMessage::Produce { key, response } => {
                     self.handle_produce(key, response);
                 }
             },
@@ -1024,7 +1028,7 @@ mod tests {
                 .unwrap();
             let (handler_tx, _handler_rx) =
                 actor_mailbox::new(context.child("handler"), NZUsize!(8));
-            let handler = handler::Handler::<mmr::Family, TestResponse>::new(handler_tx);
+            let handler = Handler::<_, TestSubscriber, bool>::new(handler_tx);
             let (engine, mut resolver) = p2p::Engine::new(
                 context.child("resolver"),
                 p2p::Config {

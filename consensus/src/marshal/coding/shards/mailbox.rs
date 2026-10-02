@@ -5,11 +5,11 @@ use crate::{
     marshal::coding::types::CodedBlock,
     types::{Round, coding::Commitment},
 };
-use commonware_actor::mailbox::{Overflow, Policy, Sender};
+use commonware_actor::mailbox::{Live, Policy, Sender, Stale};
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, sync::Arc};
+use std::sync::Arc;
 
 /// A message that can be sent to the coding [`Engine`].
 ///
@@ -96,14 +96,14 @@ where
     },
 }
 
-impl<B, C, H, P> Message<B, C, H, P>
+impl<B, C, H, P> Stale for Message<B, C, H, P>
 where
     B: CertifiableBlock,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
 {
-    pub(crate) fn response_closed(&self) -> bool {
+    fn is_stale(&self) -> bool {
         match self {
             Self::GetByCommitment { response, .. } | Self::GetByDigest { response, .. } => {
                 response.is_closed()
@@ -116,54 +116,6 @@ where
     }
 }
 
-pub(crate) struct Pending<B, C, H, P>(VecDeque<Message<B, C, H, P>>)
-where
-    B: CertifiableBlock,
-    C: CodingScheme,
-    H: Hasher,
-    P: PublicKey;
-
-impl<B, C, H, P> Default for Pending<B, C, H, P>
-where
-    B: CertifiableBlock,
-    C: CodingScheme,
-    H: Hasher,
-    P: PublicKey,
-{
-    fn default() -> Self {
-        Self(VecDeque::new())
-    }
-}
-
-impl<B, C, H, P> Overflow<Message<B, C, H, P>> for Pending<B, C, H, P>
-where
-    B: CertifiableBlock,
-    C: CodingScheme,
-    H: Hasher,
-    P: PublicKey,
-{
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn drain<F>(&mut self, mut push: F)
-    where
-        F: FnMut(Message<B, C, H, P>) -> Option<Message<B, C, H, P>>,
-    {
-        while let Some(message) = self.0.pop_front() {
-            if message.response_closed() {
-                continue;
-            }
-
-            if let Some(message) = push(message) {
-                self.0.push_front(message);
-                break;
-            }
-        }
-    }
-}
-
-/// Retains overflowed messages in FIFO order.
 impl<B, C, H, P> Policy for Message<B, C, H, P>
 where
     B: CertifiableBlock,
@@ -171,14 +123,10 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    type Overflow = Pending<B, C, H, P>;
+    type Overflow = Live<Self>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        if message.response_closed() {
-            return;
-        }
-
-        overflow.0.push_back(message);
+        overflow.push(message);
     }
 }
 
@@ -336,6 +284,7 @@ mod tests {
         marshal::{coding::types::coding_config_for_participants, mocks::block::EmptyBlock},
         types::{Epoch, Height, View},
     };
+    use commonware_actor::mailbox::Overflow;
     use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         Committable, Digest as _, Sha256, ed25519, sha256::Digest as Sha256Digest,
@@ -357,7 +306,7 @@ mod tests {
         let commitment = block.commitment();
         let round = Round::new(Epoch::zero(), View::new(1));
 
-        let mut overflow = Pending::default();
+        let mut overflow = Live::default();
         <TestMessage as Policy>::handle(&mut overflow, Message::Notarized { commitment, round });
         let (response, _get_rx) = oneshot::channel();
         <TestMessage as Policy>::handle(

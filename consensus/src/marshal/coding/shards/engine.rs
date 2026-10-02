@@ -159,7 +159,7 @@ use crate::{
     },
     types::{Epoch, Round, coding::Commitment},
 };
-use commonware_actor::mailbox;
+use commonware_actor::mailbox::{self, Stale};
 use commonware_codec::{Decode, EncodeSize, Error as CodecError, FixedSize};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
@@ -776,7 +776,7 @@ where
                 debug!("shard mailbox closed, stopping shard engine");
                 return;
             } => {
-                if message.response_closed() {
+                if message.is_stale() {
                     continue;
                 }
 

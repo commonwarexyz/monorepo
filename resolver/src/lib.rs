@@ -12,6 +12,7 @@ commonware_macros::stability_scope!(BETA {
     use core::cmp::Ordering;
 
     pub mod delivery;
+    pub mod handler;
     mod ingress;
     pub mod opaque;
     pub mod p2p;

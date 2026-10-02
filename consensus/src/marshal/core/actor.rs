@@ -26,7 +26,7 @@ use crate::{
     types::{Epoch, Epocher, Height, Round, ViewDelta},
 };
 use bytes::Bytes;
-use commonware_actor::mailbox;
+use commonware_actor::mailbox::{self, Stale};
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
     Digestible,
@@ -970,7 +970,7 @@ where
             .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
             .take(self.max_repair.get())
         {
-            if msg.response_closed() {
+            if msg.is_stale() {
                 continue;
             }
             handled = true;

@@ -14,7 +14,7 @@ use crate::{
     types::{Epoch, View},
 };
 use bytes::Bytes;
-use commonware_actor::mailbox;
+use commonware_actor::mailbox::{self, Stale};
 use commonware_codec::{Decode, Encode};
 use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
@@ -196,7 +196,7 @@ impl<
                 }
             },
             Some(message) = handler_rx.recv() else break => {
-                if message.response_closed() {
+                if message.is_stale() {
                     continue;
                 }
                 self.handle_resolver(message, &mut voter, &mut resolver);
@@ -543,12 +543,13 @@ impl<
     ) {
         match message {
             HandlerMessage::Deliver {
-                span,
-                view,
-                data,
-                asks,
+                delivery,
+                value: data,
                 response,
             } => {
+                let view = View::new(delivery.key.into());
+                let (_, span) = delivery.subscribers.first().clone();
+                let asks = delivery.subscribers.map_into(|(ask, _)| ask);
                 let span = info_span!(
                     parent: span,
                     "simplex.resolver.deliver",
@@ -610,7 +611,8 @@ impl<
                 };
                 response.send_lossy(outcome);
             }
-            HandlerMessage::Produce { view, response } => {
+            HandlerMessage::Produce { key, response } => {
+                let view = View::new(key.into());
                 let span = info_span!(
                     "simplex.resolver.produce",
                     epoch = self.epoch.traced(),
@@ -779,6 +781,22 @@ mod tests {
                 self.fetch_targeted(fetch, targets);
             }
             Feedback::Ok
+        }
+    }
+
+    fn deliver(
+        view: View,
+        data: Bytes,
+        asks: NonEmptyVec<Ask>,
+        response: oneshot::Sender<Outcome>,
+    ) -> HandlerMessage {
+        HandlerMessage::Deliver {
+            delivery: commonware_resolver::Delivery {
+                key: U64::new(view.get()),
+                subscribers: asks.map_into(|ask| (ask, tracing::Span::none())),
+            },
+            value: data,
+            response,
         }
     }
 
@@ -1657,13 +1675,12 @@ mod tests {
             let mut requester_resolver = RecordingResolver::default();
             let (response, receiver) = oneshot::channel();
             requester.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
+                deliver(
+                    requested,
                     data,
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut requester_resolver,
             );
@@ -1688,13 +1705,12 @@ mod tests {
 
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+                deliver(
                     view,
-                    data: encoded.clone(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    encoded.clone(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -1909,16 +1925,15 @@ mod tests {
             // nothing left to retrieve and must not stay open waiting for it.
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+                deliver(
                     view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
-                        build_notarization(&schemes, &verifier, EPOCH, view),
-                    )
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(build_notarization(
+                        &schemes, &verifier, EPOCH, view,
+                    ))
                     .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -1997,14 +2012,12 @@ mod tests {
             // verdict settles the ask, so the fetch still completes.
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+                deliver(
                     view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
-                        .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(notarization).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2046,14 +2059,12 @@ mod tests {
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(3));
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: View::new(4),
-                    data: Certificate::<TestScheme, Sha256Digest>::Nullification(nullification)
-                        .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                deliver(
+                    View::new(4),
+                    Certificate::<TestScheme, Sha256Digest>::Nullification(nullification).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2083,14 +2094,12 @@ mod tests {
             actor.certified(&mut resolver, View::new(6), true);
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
-                        .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                deliver(
+                    requested,
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(notarization).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2116,14 +2125,12 @@ mod tests {
             let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(6));
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: View::new(4),
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
-                        .encode(),
-                    asks: non_empty_vec![Ask::backfill()],
+                deliver(
+                    View::new(4),
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(notarization).encode(),
+                    non_empty_vec![Ask::backfill()],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2169,13 +2176,12 @@ mod tests {
             // the resolver response must be completed immediately.
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+                deliver(
                     view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(alternate).encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(alternate).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2202,20 +2208,22 @@ mod tests {
             let requested = View::new(4);
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Certificate::<TestScheme, Sha256Digest>::Finalization(
-                        build_finalization(&schemes, &verifier, EPOCH, View::new(6)),
-                    )
+                deliver(
+                    requested,
+                    Certificate::<TestScheme, Sha256Digest>::Finalization(build_finalization(
+                        &schemes,
+                        &verifier,
+                        EPOCH,
+                        View::new(6),
+                    ))
                     .encode(),
-                    asks: non_empty_vec![
+                    non_empty_vec![
                         Ask::backfill(),
                         Ask::ancestry(Kind::Nullification),
                         Ask::ancestry(Kind::Notarization),
                     ],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2252,17 +2260,16 @@ mod tests {
             // decoding, verification, or peer penalty.
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Bytes::from_static(b"unverifiable"),
-                    asks: non_empty_vec![
+                deliver(
+                    requested,
+                    Bytes::from_static(b"unverifiable"),
+                    non_empty_vec![
                         Ask::backfill(),
                         Ask::ancestry(Kind::Nullification),
                         Ask::ancestry(Kind::Notarization),
                     ],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2303,13 +2310,12 @@ mod tests {
 
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Bytes::from_static(b"unverifiable"),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Nullification)],
+                deliver(
+                    requested,
+                    Bytes::from_static(b"unverifiable"),
+                    non_empty_vec![Ask::ancestry(Kind::Nullification)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2342,13 +2348,12 @@ mod tests {
 
             let (response, receiver) = oneshot::channel();
             actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Bytes::from_static(b"unverifiable"),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                deliver(
+                    requested,
+                    Bytes::from_static(b"unverifiable"),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
