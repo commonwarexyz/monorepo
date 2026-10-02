@@ -1103,9 +1103,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns work for the lowest locally admissible tracked proposal awaiting
     /// verification.
     ///
-    /// Requests missing ancestry from the proposal's elected leader. A
-    /// term-start immediate predecessor's notarization may come from any validator
-    /// because the pipelined proposer might not hold it. [`Self::resolve_ancestry`] decides
+    /// Requests missing ancestry from the proposal's elected leader. At a term start,
+    /// the immediate predecessor's notarization may come from any validator because
+    /// the pipelined proposer might not hold it. [`Self::resolve_ancestry`] decides
     /// whether an error justifies a fetch.
     pub fn try_verify(&mut self) -> Verify<S, D> {
         // Bound the scan as in [`Self::try_propose`].

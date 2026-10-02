@@ -131,7 +131,7 @@ enum ProposalState<D> {
     /// The automaton has not responded yet.
     Awaiting(ProposalReceiver<D>),
     /// A handoff the application declined until its parent certifies. An
-    /// ordinary request for the same context follows certification.
+    /// ordinary request for the same context follows exact parent certification.
     Deferred,
     /// A volatile build result awaiting durable parent certification.
     Held(D),
@@ -356,9 +356,9 @@ impl<
     ///
     /// Called after construction and before publication so every appended artifact
     /// is durable by the end of the iteration. Proposal builds may start before
-    /// this sync, but their responses and child certification wait until the next
-    /// iteration, so a durable child certification implies its parent anchor is
-    /// durable. A single sync coalesces all appends.
+    /// this sync, but the voter consumes their responses and dispatches child
+    /// certification only in the next iteration, so a durable child certification
+    /// implies its parent anchor is durable. A single sync coalesces all appends.
     async fn sync_journal(mut self) -> Self {
         let Some(view) = self.dirty_section else {
             return self;

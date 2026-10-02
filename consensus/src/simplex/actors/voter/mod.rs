@@ -4569,7 +4569,7 @@ mod tests {
                     break;
                 }
             }
-            fixture.wait_for_replacement(&context).await;
+            assert_eq!(fixture.requests_for(View::new(3)), 2);
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4602,7 +4602,7 @@ mod tests {
             fixture.release_certification(release).await;
             fixture.wait_for_replacement(&context).await;
             context.sleep(Duration::from_millis(50)).await;
-            fixture.wait_for_replacement(&context).await;
+            assert_eq!(fixture.requests_for(View::new(3)), 2);
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4626,7 +4626,7 @@ mod tests {
             fixture.defer();
             fixture.wait_for_replacement(&context).await;
             context.sleep(Duration::from_millis(50)).await;
-            fixture.wait_for_replacement(&context).await;
+            assert_eq!(fixture.requests_for(View::new(3)), 2);
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
