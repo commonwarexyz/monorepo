@@ -515,19 +515,22 @@ pub mod tests {
         VariableConfig, batch, db, grafting, ordered, unordered,
     };
     use crate::{
-        index::Unordered as UnorderedIndex,
+        index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
         journal::contiguous::Mutable,
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
+                ValueEncoding,
                 floor::{Compact, Hold, Proportional},
+                operation::update,
                 test::{
-                    Choice, Inspect, Script, assert_exact, build, colliding_digest, counter, keep,
-                    live, test_any_activity_depths, test_any_policy_decisions_match_writes,
-                    test_any_policy_freed_ancestors, test_any_policy_hold,
-                    test_any_policy_keep_evict_and_recover, test_any_policy_limits,
-                    test_any_policy_limits_after_colliding_writes, test_any_policy_matches_raise,
-                    test_any_policy_stop,
+                    Choice, Inspect, Links, Script, assert_exact, build, colliding_digest, counter,
+                    keep, live, test_any_activity_depths,
+                    test_any_ordered_policy_evictions_keep_links,
+                    test_any_policy_decisions_match_writes, test_any_policy_freed_ancestors,
+                    test_any_policy_hold, test_any_policy_keep_evict_and_recover,
+                    test_any_policy_limits, test_any_policy_limits_after_colliding_writes,
+                    test_any_policy_matches_raise, test_any_policy_stop,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -5627,6 +5630,37 @@ pub mod tests {
         }
     }
 
+    impl<F, C, I, V, const N: usize, S> Links<F>
+        for db::Db<F, Context, C, I, Sha256, update::Ordered<Digest, V>, N, S>
+    where
+        F: merkle::Graftable,
+        C: Mutable<Item = Operation<F, update::Ordered<Digest, V>>>,
+        I: OrderedIndex<Value = Location<F>> + 'static,
+        V: ValueEncoding<Value = Digest>,
+        S: Strategy,
+        Operation<F, update::Ordered<Digest, V>>: Codec,
+        Self: Inspect<F>,
+    {
+        async fn assert_link(&self, key: Digest, value: Digest, next: Digest) {
+            assert_eq!(self.get(&key).await.unwrap(), Some(value), "{key} diverged");
+            let proof = self.key_value_proof(key).await.unwrap();
+            assert_eq!(proof.next_key, next, "{key} links to the wrong key");
+            assert!(
+                proof.verify::<Sha256, V>(key, value, &self.root()),
+                "{key} fails to prove its link",
+            );
+        }
+
+        async fn assert_absent(&self, key: Digest) {
+            assert_eq!(self.get(&key).await.unwrap(), None, "{key} is live");
+            let proof = self.exclusion_proof(&key).await.unwrap();
+            assert!(
+                proof.verify::<Sha256>(&key, &self.root()),
+                "{key} fails to prove its exclusion",
+            );
+        }
+    }
+
     /// [`test_any_activity_depths`] on a current database, whose raise and policy draw candidates
     /// from the speculative bitmap.
     async fn test_current_activity_depths<M, C, F, Fut>(context: Context, open_db: F)
@@ -5775,4 +5809,22 @@ pub mod tests {
     }
 
     test_for_all_variants!(test_current_policy_keep_evict_and_recover, "WARN");
+
+    /// [`test_any_ordered_policy_evictions_keep_links`] on a current database, which also proves
+    /// each link and each evicted key's exclusion.
+    async fn test_current_ordered_policy_evictions_keep_links<M, C, F, Fut>(
+        context: Context,
+        open_db: F,
+    ) where
+        M: merkle::Graftable,
+        C: Links<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "links".into()).await;
+        test_any_ordered_policy_evictions_keep_links(context, db, val).await;
+    }
+
+    test_for_ordered_variants!(test_current_ordered_policy_evictions_keep_links, "WARN");
 }

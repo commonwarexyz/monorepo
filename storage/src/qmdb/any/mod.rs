@@ -2221,6 +2221,20 @@ pub(crate) mod test {
         };
     }
 
+    // Defines the ordered variants (MMR + MMB).
+    macro_rules! with_ordered_variants {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, of, OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, ov, OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, ovp1, OrderedVariableP1, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, ofp2, OrderedFixedP2, mmr::Family, fixed_db_config_partitioned);
+            $cb!($($args)*, ovp2, OrderedVariableP2, mmr::Family, variable_db_config_partitioned);
+            $cb!($($args)*, of_mmb, MmbOrderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, ov_mmb, MmbOrderedVariable, mmb::Family, variable_db_config);
+        };
+    }
+
     // Emit one `#[test_group("slow")] #[test_traced]` test per variant, named
     // `<f>_<variant_label>`. `with_reopen` hands the test a db plus a reopen
     // closure, `with_make_value` hands it just the db.
@@ -2354,6 +2368,9 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_policy_after_ancestor_applied, "WARN");
     test_for_all_variants!(with_reopen: test_any_activity_depths, "WARN");
     test_for_all_variants!(with_make_value: test_any_policy_freed_ancestors, "WARN");
+    with_ordered_variants!(
+        test_for_variant!(with_make_value: test_any_ordered_policy_evictions_keep_links, "WARN")
+    );
     test_for_variant!(
         with_reopen: test_any_policy_reads_in_one_read,
         "WARN",
@@ -3469,6 +3486,39 @@ pub(crate) mod test {
         }
     }
 
+    /// Ordered database access the link tests need beyond [`Inspect`].
+    pub(crate) trait Links<F: Family>: Inspect<F> {
+        /// Assert that `key` holds `value` and links to `next`.
+        async fn assert_link(&self, key: Digest, value: Digest, next: Digest);
+
+        /// Assert that `key` is absent.
+        async fn assert_absent(&self, key: Digest);
+    }
+
+    impl<F, C, I, V, const N: usize, S> Links<F>
+        for Db<F, Context, C, I, Sha256, operation::update::Ordered<Digest, V>, N, S>
+    where
+        F: Family,
+        C: Mutable<Item = Operation<F, operation::update::Ordered<Digest, V>>>,
+        I: crate::index::Ordered<Value = GenericLocation<F>> + 'static,
+        V: ValueEncoding<Value = Digest>,
+        S: Strategy,
+        Operation<F, operation::update::Ordered<Digest, V>>: Codec,
+        Self: Inspect<F>,
+    {
+        async fn assert_link(&self, key: Digest, value: Digest, next: Digest) {
+            assert_eq!(
+                self.get_all(&key).await.unwrap(),
+                Some((value, next)),
+                "{key} diverged from its value and link",
+            );
+        }
+
+        async fn assert_absent(&self, key: Digest) {
+            assert_eq!(self.get_all(&key).await.unwrap(), None, "{key} is live");
+        }
+    }
+
     /// Assert that two merkleized batches of `db` append the same operations under the same floor
     /// and root.
     fn assert_same<F, D>(_: &D, a: &D::Merkleized, b: &D::Merkleized)
@@ -3806,6 +3856,208 @@ pub(crate) mod test {
         let db = db.apply_batch(last).await.unwrap().0;
         assert_values(&db, &model).await;
         db.assert_exact().await;
+        db.destroy().await.unwrap();
+    }
+
+    /// Assert that `db` holds exactly the `live` keys with their values, that each links to the
+    /// next live key and the largest to the smallest, that every `absent` key is absent, and that
+    /// the activity bitmap is exact (see [`assert_exact`]).
+    async fn assert_links<F: Family, D: Links<F>>(
+        db: &D,
+        live: &BTreeMap<Digest, Digest>,
+        absent: &[Digest],
+    ) {
+        assert!(db.live().await.keys().eq(live.keys()), "live keys diverged");
+        let next = live.keys().cycle().skip(1);
+        for ((key, value), next) in live.iter().zip(next) {
+            db.assert_link(*key, *value, *next).await;
+        }
+        for key in absent {
+            db.assert_absent(*key).await;
+        }
+        db.assert_exact().await;
+    }
+
+    /// Merkleize a batch of `db`, or a child of the pending `parent`, under a policy that evicts
+    /// `evicted`, stops at `stop`, and keeps every other update, then apply the chain. Returns
+    /// the database and the decided updates.
+    ///
+    /// The batch matches a twin that deletes `evicted` under the same policy, which decides the
+    /// same updates except the evicted ones. The batch writes each `live` key once and deletes
+    /// each evicted key once, and the applied state links the `live` keys (see
+    /// [`assert_links`]).
+    async fn evict<F: Family, D: Links<F>>(
+        db: D,
+        parent: Option<D::Merkleized>,
+        evicted: &[Digest],
+        stop: Option<Digest>,
+        live: &BTreeMap<Digest, Digest>,
+    ) -> (D, Vec<(GenericLocation<F>, Digest, Digest)>)
+    where
+        Operation<F, D::Update>: Codec,
+    {
+        let start = || parent.as_ref().map_or_else(|| db.new_batch(), D::child);
+        let choose = |key: &Digest| {
+            if evicted.contains(key) {
+                Choice::Evict
+            } else if stop == Some(*key) {
+                Choice::Stop
+            } else {
+                Choice::Keep
+            }
+        };
+
+        // Evict, then delete the evicted keys in a twin under the same policy.
+        let mut policy = Script::new(usize::MAX, u64::MAX, choose);
+        let evicting = merkleize(&db, start(), &mut policy).await.unwrap();
+        let deleting = evicted
+            .iter()
+            .fold(start(), |batch, key| batch.write(*key, None));
+        let mut twin_policy = Script::new(usize::MAX, u64::MAX, choose);
+        let twin = merkleize(&db, deleting, &mut twin_policy).await.unwrap();
+
+        // The policy decides every evicted update, the twin's policy decides the rest, and the
+        // batches match.
+        for key in evicted {
+            assert!(
+                policy.visited.iter().any(|(_, k, _)| k == key),
+                "{key} is not evicted",
+            );
+        }
+        let rest: Vec<_> = policy
+            .visited
+            .iter()
+            .filter(|(_, key, _)| !evicted.contains(key))
+            .copied()
+            .collect();
+        assert_eq!(twin_policy.visited, rest);
+        assert_same(&db, &evicting, &twin);
+        drop(twin);
+
+        // Apply the parent, then the batch. The applied state links the live keys.
+        let (_, ops) = D::ops(&evicting);
+        let db = match parent {
+            Some(parent) => db.apply_batch(parent).await.unwrap().0,
+            None => db,
+        };
+        let db = db.apply_batch(evicting).await.unwrap().0;
+        assert_links(&db, live, evicted).await;
+
+        // The batch writes each live key once and deletes each evicted key once.
+        let mut updates = BTreeMap::new();
+        let mut deletes = Vec::new();
+        for op in ops.iter() {
+            match op {
+                Operation::Update(update) => *updates.entry(*update.key()).or_insert(0) += 1,
+                Operation::Delete(key) => deletes.push(*key),
+                Operation::CommitFloor(..) => {}
+            }
+        }
+        let once: BTreeMap<_, _> = live.keys().map(|key| (*key, 1)).collect();
+        assert_eq!(updates, once, "the batch must write each live key once");
+        deletes.sort();
+        let mut expected = evicted.to_vec();
+        expected.sort();
+        assert_eq!(deletes, expected);
+        (db, policy.visited)
+    }
+
+    /// Ordered evictions under a fixed policy rewrite each evicted key's predecessor to link to
+    /// the evicted key's successor, from the database and from a child of a pending parent. The
+    /// predecessors include one the policy stops at, kept ones, one sharing the evicted key's
+    /// translated-key bucket, the largest key's predecessor (which links to the smallest key),
+    /// and the largest key itself when the smallest two keys are evicted together. Each is
+    /// rewritten once with its value, and every batch matches a twin that deletes the evicted keys.
+    pub(crate) async fn test_any_ordered_policy_evictions_keep_links<F, D>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        F: Family,
+        D: Links<F>,
+        Operation<F, D::Update>: Codec,
+    {
+        // Seed eight keys in key order with a held floor. The third and fourth share a
+        // translated-key bucket, and every other key has its own.
+        let keys = [
+            (0x10, 0),
+            (0x20, 0),
+            (0x30, 0),
+            (0x30, 1),
+            (0x40, 0),
+            (0x50, 0),
+            (0x60, 0),
+            (0x70, 0),
+        ]
+        .map(|(prefix, suffix)| colliding_digest(prefix, suffix));
+        assert!(keys.is_sorted());
+        let seed: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (*key, Some(make_value(i as u64))))
+            .collect();
+        let db = hold(db, &seed).await;
+
+        // Update the smallest key so its update lies above every other update.
+        let db = hold(db, &[(keys[0], Some(make_value(100)))]).await;
+
+        // Depth 0: the policy evicts the second, fourth, sixth, and largest keys and keeps the
+        // third, fifth, and seventh. It stops at the smallest key without keeping it.
+        let evicted = [keys[1], keys[3], keys[5], keys[7]];
+        let live = BTreeMap::from([
+            (keys[0], make_value(100)),
+            (keys[2], make_value(2)),
+            (keys[4], make_value(4)),
+            (keys[6], make_value(6)),
+        ]);
+        let (db, visited) = evict(db, None, &evicted, Some(keys[0]), &live).await;
+        let order: Vec<_> = visited.iter().map(|(_, key, _)| *key).collect();
+        assert_eq!(order, [&keys[1..], &keys[..1]].concat());
+
+        // Recreate the evicted keys, then update the fifth key in a pending parent.
+        let recreate = [1, 3, 5, 7].map(|i| (keys[i], Some(make_value(i as u64))));
+        let db = hold(db, &recreate).await;
+        let parent = hold_batch(&db, db.new_batch(), &[(keys[4], Some(make_value(104)))]).await;
+        let (start, _) = D::ops(&parent);
+
+        // Depth 1: a child of the parent evicts the same keys and keeps every other update,
+        // including the parent's update of the fifth key.
+        let live = BTreeMap::from([
+            (keys[0], make_value(100)),
+            (keys[2], make_value(2)),
+            (keys[4], make_value(104)),
+            (keys[6], make_value(6)),
+        ]);
+        let (db, visited) = evict(db, Some(parent), &evicted, None, &live).await;
+        assert!(visited.contains(&(start, keys[4], make_value(104))));
+
+        // Recreate the evicted keys, then evict the smallest two keys together. Both share the
+        // largest key as their predecessor, which wraps to link to the third key and is rewritten
+        // once.
+        let db = hold(db, &recreate).await;
+        let live = BTreeMap::from([
+            (keys[2], make_value(2)),
+            (keys[3], make_value(3)),
+            (keys[4], make_value(104)),
+            (keys[5], make_value(5)),
+            (keys[6], make_value(6)),
+            (keys[7], make_value(7)),
+        ]);
+        let (db, _) = evict(db, None, &[keys[0], keys[1]], None, &live).await;
+
+        // A child of a pending parent evicts the parent's update of the fourth key, so the third
+        // key links to the fifth.
+        let parent = hold_batch(&db, db.new_batch(), &[(keys[3], Some(make_value(203)))]).await;
+        let (start, _) = D::ops(&parent);
+        let live = BTreeMap::from([
+            (keys[2], make_value(2)),
+            (keys[4], make_value(104)),
+            (keys[5], make_value(5)),
+            (keys[6], make_value(6)),
+            (keys[7], make_value(7)),
+        ]);
+        let (db, visited) = evict(db, Some(parent), &[keys[3]], None, &live).await;
+        assert!(visited.contains(&(start, keys[3], make_value(203))));
         db.destroy().await.unwrap();
     }
 
