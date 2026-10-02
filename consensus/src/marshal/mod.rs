@@ -42,6 +42,10 @@
 //! knowledge of finalized blocks, it will request the missing blocks from its peers. This ensures
 //! that the actor can catch up to the rest of the network if it falls behind.
 //!
+//! The finalized block and certificate storage sit behind a fair read/write lock shared with a
+//! queued backfill server. The server is polled concurrently with the actor loop, so slow peer
+//! reads do not stall unrelated mailbox work. Both futures share the actor's cancellation lifetime.
+//!
 //! ## Storage
 //!
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
