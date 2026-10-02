@@ -120,6 +120,7 @@ impl Mailbox {
     }
 
     /// Whether the mailbox still accepts messages.
+    #[cfg(test)]
     pub fn is_open(&self) -> bool {
         self.inbox.lock().open
     }

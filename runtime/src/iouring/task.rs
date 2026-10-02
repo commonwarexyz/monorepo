@@ -1499,7 +1499,7 @@ pub mod tests {
         assert!(ready.is_empty());
         let retired = set.teardown();
         assert_eq!(retired.len(), 3);
-        assert!(set.drain(0).next().is_none());
+        assert!(set.drain().next().is_none());
         assert_eq!(drops.load(Ordering::Relaxed), 0);
 
         // Clearing each detached task drops its future once, even when repeated.

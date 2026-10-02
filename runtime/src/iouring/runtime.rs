@@ -52,7 +52,7 @@
 //!
 //! ```text
 //! ordinary spawn:
-//!   check origin --> factory --> Tasks::register
+//!   check Tasks --> factory --> Tasks::register
 //!                                  +-- owning thread --> Ready
 //!                                  `-- other thread --> Mailbox --> Ready
 //!
@@ -89,7 +89,7 @@
 //! destroy root (TLS and mailbox still available)
 //!   |
 //!   v
-//! close worker registry and ordinary mailbox
+//! close worker registry, task set, and ordinary mailbox
 //!   |
 //!   v
 //! abort spawned tasks through the supervision tree
@@ -709,14 +709,14 @@ impl crate::Spawner for Context {
 
         // Dedicated and blocking spawns reserve a one-off worker before the
         // factory runs, so shutdown waits for them. Ordinary spawns only check
-        // that their worker still accepts tasks.
+        // that the task set still accepts tasks.
         let reservation = if matches!(execution, Execution::Dedicated | Execution::Shared(true)) {
             let Some(reservation) = shared.workers.reserve() else {
                 return Handle::closed(metric);
             };
             Some(reservation)
         } else {
-            if !Local::is_open(&origin) {
+            if shared.tasks.is_closed() {
                 return Handle::closed(metric);
             }
             None
@@ -1029,19 +1029,6 @@ impl Local {
         // The weak reference preserves allocation identity without retaining a worker.
         let matches = ptr::eq(Arc::as_ptr(&local.borrow().mailbox), mailbox.as_ptr());
         matches.then_some(local)
-    }
-
-    /// Whether the worker behind `mailbox` currently accepts tasks.
-    ///
-    /// This does not reserve a place. Registration checks again after construction.
-    pub fn is_open(mailbox: &Weak<Mailbox>) -> bool {
-        if let Some(local) = Self::owner(mailbox) {
-            // The owning thread can check closure without locking the mailbox.
-            return !local.borrow().closing;
-        }
-
-        // Foreign callers use the mailbox's acceptance state.
-        mailbox.upgrade().is_some_and(|mailbox| mailbox.is_open())
     }
 
     /// Release an operation or timer on its worker, directly or through its mailbox.
@@ -1426,17 +1413,16 @@ impl Worker {
     }
 
     /// Close local registration and mailbox publication, retaining queued messages.
-    /// Repeated calls leave the worker closed and preserve its existing inbox.
+    /// The ordinary worker also closes the task set. Repeated calls leave the
+    /// worker closed and preserve its existing inbox.
     fn begin_close(&mut self) {
         let mailbox = {
             let mut local = self.local.borrow_mut();
             local.closing = true;
 
-            // The ordinary worker hosts every task, so it also refuses
-            // registration here, and a spawn after this point is rejected on
-            // its caller. Closing the set before the mailbox means a token the
-            // mailbox refuses belongs to a task accepted before closure.
-            // Cleanup drains the set once the caller has cancelled the tasks.
+            // The ordinary worker hosts every task, so it also closes the set
+            // here, and a spawn from then on is refused and disposed of on its
+            // caller. Cleanup drains the set.
             if self.ordinary {
                 local.shared.tasks.close();
             }
@@ -1483,7 +1469,7 @@ impl Worker {
         self.local.borrow_mut().ready.clear();
         if self.ordinary {
             let shared = self.local.borrow().shared.clone();
-            for task in shared.tasks.drain(0) {
+            for task in shared.tasks.drain() {
                 Panics::contain(|| task.clear());
             }
         }

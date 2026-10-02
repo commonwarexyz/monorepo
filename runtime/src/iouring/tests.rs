@@ -797,22 +797,17 @@ fn test_aborted_context_skips_factories_for_every_placement() {
 }
 
 #[test]
-fn test_closed_origin_skips_local_and_foreign_factories() {
+fn test_closed_task_set_skips_local_and_foreign_factories() {
     for foreign in [false, true] {
         Runner::new(config()).start(|context| async move {
-            if foreign {
-                let mailbox = context.origin.upgrade().unwrap();
-                drop(mailbox.close());
-            } else {
-                // The local spawn check must see closure without consulting
-                // the mailbox, which remains open until worker shutdown.
-                Local::current().unwrap().borrow_mut().closing = true;
-            }
+            // Close only the set, leaving the worker and its mailbox open, so
+            // the refusal comes from the spawn's check of the set.
+            context.shared.tasks.close();
 
-            // Test the caller-local check and the foreign mailbox check separately.
+            // Spawn from the worker's thread and from another thread.
             let spawn = move || {
                 context.spawn(|_| -> Ready<()> {
-                    panic!("a closed origin must not invoke its factory");
+                    panic!("a closed task set must not invoke its factory");
                 })
             };
             let handle = if foreign {
@@ -1782,6 +1777,8 @@ fn test_shutdown_cancels_tasks_before_destruction() {
     }
 }
 
+/// A foreign spawn's task joins the set before its worker takes the first
+/// token, and leaves it on completion.
 #[test]
 fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
     Runner::new(config()).start(|context| async move {
@@ -1802,6 +1799,8 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
     });
 }
 
+/// Shutdown between a foreign registration and delivery of its first token
+/// clears the task without polling it.
 #[test]
 fn test_shutdown_between_registration_and_first_token_clears_the_task() {
     let drops = Arc::new(AtomicUsize::new(0));
@@ -1843,6 +1842,8 @@ fn test_shutdown_between_registration_and_first_token_clears_the_task() {
     assert!(!polled.load(Ordering::Relaxed));
 }
 
+/// A spawn the task set refuses after its factory ran is disposed of on its
+/// caller, on the worker's thread and on another thread.
 #[test]
 fn test_spawn_refused_by_the_closed_task_set_is_disposed_on_its_caller() {
     /// Record the thread that drops a future.
@@ -1859,19 +1860,24 @@ fn test_spawn_refused_by_the_closed_task_set_is_disposed_on_its_caller() {
         Runner::new(config()).start(|context| {
             let drops = drops.clone();
             async move {
-                // Close the set as the worker does when it begins closing,
-                // leaving the origin open so the factory runs and only
-                // registration can refuse the task.
-                context.shared.tasks.close();
+                let shared = context.shared.clone();
                 let spawner = context.child("refused");
                 let spawn = move || {
                     let payload = ThreadDrop(drops.clone());
-                    let handle = spawner.spawn(move |_| async move {
-                        let _payload = payload;
-                        pending::<()>().await;
+                    let handle = spawner.spawn(move |context| {
+                        // Close the set while the factory runs, as the worker
+                        // can when it begins closing, so only registration
+                        // can refuse the task.
+                        context.shared.tasks.close();
+                        async move {
+                            let _payload = payload;
+                            pending::<()>().await;
+                        }
                     });
 
-                    // The caller disposed of the future before spawn returned.
+                    // The factory ran, and the caller disposed of the future
+                    // before spawn returned.
+                    assert!(shared.tasks.is_closed());
                     assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
                     assert_eq!(*drops.lock(), [thread::current().id()]);
                 };
@@ -1886,6 +1892,8 @@ fn test_spawn_refused_by_the_closed_task_set_is_disposed_on_its_caller() {
     }
 }
 
+/// Teardown drops every idle or queued future, spawned locally or from
+/// another thread, while the worker's timers are still registered.
 #[test]
 fn test_teardown_drops_every_future_before_clearing_timers() {
     /// Record whether the worker still holds timers when a future is dropped.
