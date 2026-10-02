@@ -1,5 +1,6 @@
-//! S-expressions: the syntax of `.sbmir` files (untrusted parsing; a
-//! malformed file is an error, never a guess).
+//! S-expressions: the syntax of `.sbmir` files. TRUSTED (it feeds the
+//! literal reading through [`super::ir`], `docs/checked-structuring.md`
+//! amendment (d)); a malformed file is an error, never a guess.
 
 /// One S-expression.
 #[derive(Clone, Debug, PartialEq, Eq)]

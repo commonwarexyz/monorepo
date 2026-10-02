@@ -87,7 +87,7 @@ fn conformance(c: &Checked, cfg: &Config) -> Report {
     let info = driver::lifted::emitted_module(&c.lifted).expect("one lifted module").expect("a lifted module").clone();
     let k = c.krate.as_ref().unwrap();
     let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
-    driver::stage::with_elaboration(k, &opts, |out| {
+    driver::stage::with_elaboration_mut(k, &opts, |out| {
         let bad: Vec<String> = out.defs.iter().filter(|d| !matches!(d.status, DefStatus::Checked | DefStatus::Deferred(_))).map(|d| d.name.clone()).collect();
         assert!(bad.is_empty(), "definitions not checked: {bad:?}");
         conform::check(out, k, c, &info, cfg)
@@ -136,6 +136,35 @@ fn the_lift_agrees_with_rustc_on_a_small_codec() {
     assert!(entry(&r, "crate::w::take2").classes >= 3, "{:?}", entry(&r, "crate::w::take2"));
     assert!(entry(&r, "crate::w::Acc::add").classes >= 2);
     assert!(r.cases > 500, "{}", r.summary());
+    // the literal reading of every function read from MIR is compared with
+    // rustc too (amendment (f) of `docs/checked-structuring.md`), on the
+    // first inputs of each, the invariant-carrying state's included
+    for l in ["crate::w::Acc::add", "crate::w::put_pair", "crate::w::take2", "crate::w::SPrim__i32__zz"] {
+        let e = entry(&r, l);
+        assert!(e.literal > 0 && e.literal <= conform::LITERAL_CASES, "{l}: {e:?}");
+    }
+    assert!(r.literal_cases > 100, "{}", r.summary());
+    let _ = std::fs::remove_dir_all(&cfg.work_dir);
+}
+
+/// The literal reading against rustc: a misreading of L alone (one operator
+/// of `put_pair`'s MIR as L reads it; S, read before, is unchanged) is a
+/// mismatch of the check, which names the literal reading, and only that.
+#[test]
+fn a_misreading_of_the_literal_reading_is_caught_against_rustc() {
+    let mut c = check(&files(), None);
+    let mut loaded = (*c.lift_facts.mir_loaded[0].loaded).clone();
+    let f = loaded.m.fns.get_mut("fx_conf_w::w::put_pair::<&mut [u8]>").expect("put_pair's MIR");
+    match &mut f.blocks[0].stmts[0] {
+        sandblaster_front::mir::ir::Stmt::Assign(_, sandblaster_front::mir::ir::Rvalue::Bin(op, _, _), _) if op == "xor" => *op = "or".into(),
+        other => panic!("{other:?}"),
+    }
+    c.lift_facts.mir_loaded[0].loaded = std::sync::Arc::new(loaded);
+    let cfg = config("literal");
+    let r = conformance(&c, &cfg);
+    assert!(!r.passed(), "the misread literal reading went unnoticed: {}", r.summary());
+    assert!(r.mismatches.iter().all(|m| m.lifted == "crate::w::put_pair" && m.model.starts_with("the literal reading of rustc's MIR gives")), "{:#?}", r.mismatches);
+    assert!(!cfg.work_dir.join("conformance.key").exists(), "a failure left a cache key");
     let _ = std::fs::remove_dir_all(&cfg.work_dir);
 }
 
@@ -182,7 +211,7 @@ fn a_pass_is_cached_by_its_key() {
     // twin: a malformed or foreign record is a miss (the check runs again)
     let key_file = cfg.work_dir.join("conformance.key");
     let good = std::fs::read_to_string(&key_file).unwrap();
-    for bad in [good.replacen("\ncases ", "\ncases x", 1), good.replacen(&r1.key, &"0".repeat(64), 1), good.replace("sandblaster-lift-conformance/3", "sandblaster-lift-conformance/2"), format!("{good}garbage\n")] {
+    for bad in [good.replacen("\ncases ", "\ncases x", 1), good.replacen(&r1.key, &"0".repeat(64), 1), good.replace(conform::VERSION, "sandblaster-lift-conformance/2"), format!("{good}garbage\n")] {
         std::fs::write(&key_file, &bad).unwrap();
         let r = conformance(&c, &cfg);
         assert!(r.passed() && !r.cached, "{bad}");
@@ -326,7 +355,7 @@ fn pilot() {
     cfg.edition = std::env::var("LIFT_CONFORM_EDITION").unwrap_or_else(|_| "2024".into());
     let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
     let t = std::time::Instant::now();
-    let r = driver::stage::with_elaboration(k, &opts, |out| {
+    let r = driver::stage::with_elaboration_mut(k, &opts, |out| {
         eprintln!("elaboration: {:?}", t.elapsed());
         conform::check(out, k, &c, &info, &cfg)
     });
@@ -381,7 +410,7 @@ fn in_place_conformance(dir: &Path, hook: Option<test_hook::WrongRule>, cfg: &Co
     let k = c.krate.as_ref().unwrap();
     let infos: Vec<&sandblaster_front::lift::LiftedInfo> = c.lifted.iter().filter(|l| l.in_place && !l.ghost).collect();
     let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
-    driver::stage::with_elaboration(k, &opts, |out| conform::check_in_place(out, k, &c, &infos, cfg))
+    driver::stage::with_elaboration_mut(k, &opts, |out| conform::check_in_place(out, k, &c, &infos, cfg))
 }
 
 fn in_place_config(dir: &Path, name: &str) -> Config {
@@ -400,6 +429,8 @@ fn an_in_place_module_agrees_with_rustc_through_a_copy_of_its_crate() {
     for l in ["crate::a::Acc::new", "crate::a::Acc::add", "crate::a::inc", "crate::a::half"] {
         let e = entry(&r, l);
         assert!(e.skipped.is_none() && e.cases > 0, "{l}: {e:?}");
+        // in place too, the literal reading is compared with rustc
+        assert!(e.literal > 0, "{l}: {e:?}");
     }
     // the precondition is decided by its checker: inputs that break it are
     // not compared (the original would overflow on `u32::MAX`)

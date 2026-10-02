@@ -427,7 +427,7 @@ impl Gen<'_> {
 /// Runs the check for the in-place lifted modules `infos` of the checked
 /// crate `c` on its elaboration `out`: one harness, a copy of the host
 /// crate (module docs).
-pub fn check_in_place(out: &elab::Output, krate: &Crate, c: &Checked, infos: &[&LiftedInfo], cfg: &Config) -> Report {
+pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos: &[&LiftedInfo], cfg: &Config) -> Report {
     let t0 = Instant::now();
     let mut rep = Report { edition: cfg.edition.clone(), ..Default::default() };
     if let Some(h) = c.lift_facts.test_hook {
@@ -554,7 +554,8 @@ pub fn check_in_place(out: &elab::Output, krate: &Crate, c: &Checked, infos: &[&
         k.push_str(&format!("host {} {}\n", l.name, hex(&sha256(c.sm.get(l.file).map(|f| f.text.as_bytes()).unwrap_or_default()))));
     }
     k.push_str(&format!("entries {}\n", hex(&sha256(format!("{entries:?}{:?}{:?}{:?}", c.lift_facts.instances, c.lift_facts.open_instances, c.lift_facts.test_hook).as_bytes()))));
-    k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED}\n"));
+    k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED} {}\n", super::LITERAL_CASES));
+    k.push_str(&super::literal_key(c));
     rep.key = hex(&sha256(k.as_bytes()));
     let key_path = cfg.work_dir.join("conformance.key");
     if std::fs::read_to_string(&key_path).is_ok_and(|t| t == format!("{VERSION}\npassed {}\n", rep.key)) {
@@ -569,6 +570,8 @@ pub fn check_in_place(out: &elab::Output, krate: &Crate, c: &Checked, infos: &[&
     // the precondition checkers (a filtered elaboration of a copy of the crate)
     let (pk, pmap) = precondition_checkers(krate, &entries);
     let pre_out = if pmap.is_empty() { None } else { Some(elaborate_checkers(&pk, &pmap)) };
+    // the literal reading of every function read from MIR (amendment (f))
+    let lits = super::literal::prepare(out, c, &entries, &mut rep);
     let first = infos[0];
     let mut g = Gen::new(out, krate, c, first);
     g.ip = Some(ip);
@@ -587,7 +590,10 @@ pub fn check_in_place(out: &elab::Output, krate: &Crate, c: &Checked, infos: &[&
     rep.cases = cases.len();
     if rep.errors.is_empty() {
         match harness_in_place(&g, &plans, &cases, &files, &tree, &host, cfg) {
-            Ok(outputs) => compare(&g, &plans, &cases, &outputs, &mut rep),
+            Ok(outputs) => {
+                let rustc = compare(&g, &plans, &cases, &outputs, &mut rep);
+                super::literal::compare(&g, &plans, &cases, &rustc, &lits, &mut rep);
+            }
             Err(e) => rep.errors.push(e),
         }
     }

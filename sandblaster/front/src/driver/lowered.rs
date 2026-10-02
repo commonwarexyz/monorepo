@@ -172,6 +172,10 @@ pub struct LoweredModule {
     /// name; the build writes it to `OUT_DIR/<name>-roundtrip__<module>.rs`
     /// for the extraction (`sandblaster/mirx/extract.sh --replace`).
     pub roundtrip_copy: Option<(String, String)>,
+    /// A module read from MIR: the theorems of the shipped code (the
+    /// copies' and helpers' MIR) the round trip proved, one note per
+    /// rewritten function.
+    pub shipped: Vec<String>,
 }
 
 impl LoweredModule {
@@ -187,6 +191,9 @@ impl LoweredModule {
         j.num("round_trip_compared", self.compared as i64);
         if let Some(n) = &self.note {
             j.str("note", n);
+        }
+        if !self.shipped.is_empty() {
+            j.put("shipped_theorems", Json::Arr(self.shipped.iter().map(|n| Json::string(n)).collect()));
         }
         if !self.unused_rewrites.is_empty() {
             j.put("unused_rewrite_lemmas", Json::Arr(self.unused_rewrites.iter().map(|n| Json::string(n)).collect()));
@@ -542,6 +549,9 @@ struct Inst {
     rung: String,
     cost_source: u64,
     cost_residual: u64,
+    /// The optimizer's link between the source function and the
+    /// replacement: a lemma's name (`None`: by conversion).
+    link: Option<String>,
 }
 
 /// A candidate after lowering (before the round trip).
@@ -641,6 +651,10 @@ pub enum LowerFault {
     /// The dispatch impl of the first two verified instance types call
     /// each other's helper.
     SwapDispatch,
+    /// The MIR the build ships is not the MIR the round trip read: the
+    /// first integer constant of the first helper's MIR changes by one in
+    /// the literal reading only (the shipped code's theorem must fail).
+    ShippedMir,
     /// The dispatch impl of the first verified instance type calls the
     /// original generic code (equal in meaning, but not the checked
     /// delegation to its residual).
@@ -674,6 +688,8 @@ fn inject(fault: LowerFault, cands: &mut [Candidate]) {
         }
     }
     match fault {
+        // (the copies' text is right: the fault is in the MIR the round trip reads, `round_trip`)
+        LowerFault::ShippedMir => {}
         LowerFault::FlipComparison => first_in_helpers(cands, " < ", " <= "),
         LowerFault::WrongConstant => first_in_helpers(cands, "1u32", "2u32"),
         LowerFault::WrongAlternative => first_in_helpers(cands, "wrapping_sub(1)", "wrapping_sub(2)"),
@@ -1086,7 +1102,7 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
         if info.mir.is_some() {
             rt_copy = Some((mpath.trim_start_matches("crate::").replace("::", "__"), assemble(&text, &cands, true)));
         }
-        match round_trip(c, root, out, &text, &mpath, info, &cands) {
+        match round_trip(c, root, out, &text, &mpath, info, &cands, fault) {
             Err(e) => {
                 note = Some(format!("lifted round trip: {e}"));
                 for cd in cands.drain(..) {
@@ -1137,7 +1153,8 @@ fn lower_lifted_impl(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
             },
         });
     }
-    LoweredModule { file: file.clone(), body: body[docs_len..].to_string(), docs: docs.clone(), records: sorted(records), compared, note, unused_rewrites: unused.borrow().clone(), roundtrip_copy: rt_copy, ..Default::default() }
+    let shipped = std::mem::take(&mut out.mir_gate.shipped);
+    LoweredModule { file: file.clone(), body: body[docs_len..].to_string(), docs: docs.clone(), records: sorted(records), compared, note, unused_rewrites: unused.borrow().clone(), roundtrip_copy: rt_copy, shipped, ..Default::default() }
 }
 
 /// The residual of lifted item `id` lowered: its entry helper `name` and
@@ -1201,7 +1218,11 @@ fn lower_residual(krate: &Crate, pv: &Crate, out: &Output, o: &Optimized, src_co
         let (refer, compare) = if *h == id { (residual_global, residual_global) } else { *o.targets.get(h).ok_or_else(|| format!("the helper `{}` has no optimized definition", pv.item(*h).path))? };
         out_helpers.push(Helper { name: n.clone(), text: printed.text, refer, compare });
     }
-    let inst = Inst { ty: None, orig_global, target: residual_global, entry: name.to_string(), rung: rep.rung.map(|r| r.name().to_string()).unwrap_or_default(), cost_source: cs, cost_residual: cr };
+    let link = match &rep.link {
+        Some(crate::opt::Link::Lemma(l)) => Some(l.clone()),
+        _ => None,
+    };
+    let inst = Inst { ty: None, orig_global, target: residual_global, entry: name.to_string(), rung: rep.rung.map(|r| r.name().to_string()).unwrap_or_default(), cost_source: cs, cost_residual: cr, link };
     Ok((inst, out_helpers))
 }
 
@@ -1280,7 +1301,7 @@ fn rewrite_candidate(c: &Checked, krate: &Crate, out: &mut Output, src_costs: &C
     let entry_name = rename[&krate.item(r.alt).name].clone();
     let entry = format!("{{\n    {entry_name}({})\n}}", sf.params.join(", "));
     let link_name = out.env.global_name(link).map(|s| s.to_string()).unwrap_or_default();
-    let inst = Inst { ty: None, orig_global: orig, target: g, entry: entry_name, rung: "Rewrite".into(), cost_source: cs, cost_residual: cg };
+    let inst = Inst { ty: None, orig_global: orig, target: g, entry: entry_name, rung: "Rewrite".into(), cost_source: cs, cost_residual: cg, link: Some(link_name.clone()) };
     Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via: format!("`#[rewrite]` lemma `{lemma_path}` (`{link_name}`): `{alt_path}`") })
 }
 
@@ -1570,7 +1591,12 @@ fn check_copy(text: &str, cd: &Candidate) -> String {
 
 /// Runs the lifted round trip on `cands`; per source function key, `Ok`
 /// or the first failure. `Err` fails the whole step.
-fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &str, info: &LiftedInfo, cands: &[Candidate]) -> Result<(BTreeMap<String, Result<(), String>>, usize), String> {
+/// Per source function key, `Ok` or the first failure; and the number of
+/// definitions compared.
+type Verdicts = (BTreeMap<String, Result<(), String>>, usize);
+
+#[allow(clippy::too_many_arguments)]
+fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &str, info: &LiftedInfo, cands: &[Candidate], fault: Option<LowerFault>) -> Result<Verdicts, String> {
     // 1. the source (with the dispatch declarations), the copies, the
     // helpers and dispatch impls, read by the same front end
     let check_text = assemble(text, cands, true);
@@ -1582,9 +1608,11 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
     // a module read from rustc's MIR: the copy's bodies are rustc's MIR of
     // the copy (extracted from this text; the load checks its SHA-256), which
     // every module sharing the MIR file then reads
+    let mut rt_text: Option<String> = None;
     if let Some(mir) = &info.mir {
         let want = crate::lift::roundtrip_mir_path(mir, mpath);
         let found = info.mir_roundtrip.as_ref().and_then(|p| c.sm.files().find(|(_, f)| f.path == *p).map(|(_, f)| f.text.clone()));
+        rt_text = found.clone();
         let Some(rt) = found else {
             return Err(format!("no MIR of the round trip's copy: extract `{}` from this build's copy `OUT_DIR/<name>-roundtrip__{}.rs` (`sandblaster/mirx/extract.sh .. --replace <the source>=<that file>`, docs/mir-lift.md §20.1)", want.display(), mpath.trim_start_matches("crate::").replace("::", "__")));
         };
@@ -1717,7 +1745,108 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
             }
         }
     }
+    // a module read from MIR: the shipped code's theorems (the copies'
+    // and helpers' MIR, the code rustc compiles, against what the laws are
+    // about; docs/checked-structuring.md step 8) — a function without them
+    // keeps its source text
+    if let Some(rt) = &rt_text {
+        let mut rt_m = crate::mir::ir::parse(rt).map_err(|e| format!("the round trip's MIR: {e}"))?;
+        let mir_mpath = format!("{}{}", rt_m.krate, mpath.strip_prefix("crate").unwrap_or(mpath));
+        if fault == Some(LowerFault::ShippedMir)
+            && let Some(h) = cands.first().and_then(|cd| cd.helpers.first())
+        {
+            shipped_mir_fault(&mut rt_m, &format!("{mir_mpath}::{}", h.name));
+        }
+        let name = |g: GlobalId| out.env.global_name(g).map(|n| n.to_string()).unwrap_or_default();
+        let mut rfs = Vec::new();
+        let mut keys = Vec::new();
+        let passing: Vec<&Candidate> = cands.iter().filter(|cd| verdicts.get(&cd.src.key()).is_some_and(|v| v.is_ok())).collect();
+        for cd in passing {
+            let key = cd.src.key();
+            let helpers: Vec<(String, String)> = cd.helpers.iter().map(|h| (format!("{mir_mpath}::{}", h.name), name(h.compare))).collect();
+            for inst in &cd.insts {
+                let (source, target) = (name(inst.orig_global), name(inst.target));
+                let equiv = inst.link.clone().filter(|l| out.env.lookup_global(l).is_some());
+                let (copy_key, dispatch_key) = match (&cd.dispatch, &inst.ty) {
+                    (None, _) => (format!("{mir_mpath}::{CHECK_PREFIX}{key}"), None),
+                    // the copy at the instance type calls the dispatch impl method of that type
+                    (Some(d), Some(ty)) => {
+                        let m = rt_m.fns.keys().find(|k| k.contains(&format!("{DISPATCH_PREFIX}{} for {ty}>::{HELPER_PREFIX}{key}", d.bound))).cloned();
+                        (format!("{mir_mpath}::{CHECK_PREFIX}{key}::<{ty}>"), m)
+                    }
+                    (Some(_), None) => {
+                        fail(&mut verdicts, &key, "a dispatch instance without its type".to_string());
+                        continue;
+                    }
+                };
+                if cd.dispatch.is_some() && dispatch_key.is_none() {
+                    fail(&mut verdicts, &key, format!("no MIR of the dispatch impl method of `{key}` in the round trip's extraction"));
+                    continue;
+                }
+                rfs.push(crate::mir::checked::RoundTripFn { source, target, copy_key, dispatch_key, helpers: helpers.clone(), equiv });
+                keys.push(key.clone());
+            }
+        }
+        if !rfs.is_empty() {
+            let opts = crate::mir::checked::GateOptions { cache: c.cache.as_deref(), ..Default::default() };
+            let outs = crate::mir::checked::prove_roundtrip(out, &c.lift_facts, &rt_m.module, &rt_m, &rfs, &opts);
+            // (per source function: every instance's theorems)
+            let mut per: BTreeMap<String, (usize, usize, usize, String)> = BTreeMap::new();
+            for (o, key) in outs.into_iter().zip(keys) {
+                match o.result {
+                    Ok(ps) => {
+                        let e = per.entry(key).or_insert((0, 0, 0, o.source.clone()));
+                        let cached = ps.iter().any(|(_, p)| p.stats == "cached");
+                        if cached {
+                            e.2 += 1;
+                        } else {
+                            e.0 += ps.len();
+                            e.1 += ps.iter().filter(|(_, p)| p.kind == "shipped theorem").count();
+                        }
+                    }
+                    Err(e) => fail(&mut verdicts, &key, format!("the shipped code's theorem: {e}")),
+                }
+            }
+            for (key, (n, shipped, cached, source)) in per {
+                if verdicts.get(&key).is_some_and(|v| v.is_ok()) {
+                    let src = cands.iter().find(|cd| cd.src.key() == key).map(|cd| cd.src.path(mpath)).unwrap_or(source);
+                    let from_cache = if cached > 0 { format!("; {cached} instance(s) from the verdict cache") } else { String::new() };
+                    out_notes_push(out, format!("`{src}`: {n} theorem(s) of the shipped MIR ({shipped} against the source function{from_cache})"));
+                }
+            }
+        }
+    }
     Ok((verdicts, expect.len() + delegations.len()))
+}
+
+/// [`LowerFault::ShippedMir`]: the first integer constant of `key`'s MIR
+/// statements changes by one.
+fn shipped_mir_fault(m: &mut crate::mir::ir::Sbmir, key: &str) {
+    use crate::mir::ir::{Const, Operand, Rvalue, Stmt};
+    let Some(f) = m.fns.get_mut(key) else { return };
+    for st in f.blocks.iter_mut().flat_map(|b| b.stmts.iter_mut()) {
+        let Stmt::Assign(_, rv, _) = st else { continue };
+        let ops: Vec<&mut Operand> = match rv {
+            Rvalue::Bin(_, a, b) | Rvalue::Checked(_, a, b) => vec![a, b],
+            Rvalue::Use(a) => vec![a],
+            _ => vec![],
+        };
+        for o in ops {
+            if let Operand::Const(c) = o
+                && let Const::Int(t, x) = c.value().clone()
+                && !matches!(t, crate::mir::ir::Ty::Bool)
+            {
+                *c = Const::Int(t, x + 1);
+                return;
+            }
+        }
+    }
+}
+
+/// Records a note of the round trip's theorems on the environment's
+/// gate memory (read into the lowering record).
+fn out_notes_push(out: &mut Output, note: String) {
+    out.mir_gate.shipped.push(note);
 }
 
 /// `t` with every relevant `let x = v; x` replaced by `v` (bottom-up): the

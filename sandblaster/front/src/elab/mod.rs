@@ -223,6 +223,20 @@ pub struct DefRecord {
     pub span: Span,
 }
 
+/// A measure-recursive definition as the kernel checked it, before its
+/// commit replaced the recursive calls (`Rec`) by the definition itself and
+/// dropped their decrease proofs: the body with its `Rec` nodes, and the
+/// measure. The checked-structuring walker proves a loop lemma by measure
+/// recursion with these very decrease proofs (docs/checked-structuring.md
+/// §5.1). Kept next to the [`DefRecord`]s, keyed by the definition's
+/// global (a `DefRecord` crosses threads in `driver::Verification`; kernel
+/// terms do not).
+#[derive(Clone, Debug)]
+pub struct PreCommit {
+    pub body: Tm,
+    pub measure: Tm,
+}
+
 /// A law and how it ended.
 #[derive(Clone, Debug)]
 pub struct LawRecord {
@@ -267,12 +281,19 @@ pub struct Output {
     /// recorded, and enforced by the §15.8 gate
     /// [`law_rules::spec15_gate_laws`].
     pub law_rules: Vec<law_rules::LawRuleRecord>,
+    /// The pre-commit body and measure of every measure-recursive
+    /// definition the kernel accepted ([`PreCommit`]).
+    pub pre_commit: HashMap<GlobalId, PreCommit>,
+    /// What the theorem gate generated and proved per MIR module (the
+    /// literal reading's state and the callee lemmas), for the lifted
+    /// round trip's theorems (`mir::checked::prove_roundtrip`).
+    pub mir_gate: crate::mir::checked::GateMemory,
 }
 
 impl Output {
     /// An output with no records (elaboration could not start).
     pub fn empty(env: Env, diags: Diagnostics) -> Output {
-        Output { env, defs: vec![], obligations: vec![], laws: vec![], diags, fn_globals: HashMap::new(), adts: HashMap::new(), deferred: vec![], refinements: vec![], examples: vec![], sections: vec![], coverage: vec![], spec_closure: vec![], established: vec![], law_rules: vec![] }
+        Output { env, defs: vec![], obligations: vec![], laws: vec![], diags, fn_globals: HashMap::new(), adts: HashMap::new(), deferred: vec![], refinements: vec![], examples: vec![], sections: vec![], coverage: vec![], spec_closure: vec![], established: vec![], law_rules: vec![], pre_commit: HashMap::new(), mir_gate: Default::default() }
     }
 
     /// Whether every definition was checked, every obligation proven and
@@ -507,6 +528,8 @@ pub struct Elab<'a> {
     /// Derived equality functions and their lemmas (§7.7).
     pub eq_fns: HashMap<ItemId, eqs::EqGlobals>,
     pub defs: Vec<DefRecord>,
+    /// [`Output::pre_commit`].
+    pub pre_commit: HashMap<GlobalId, PreCommit>,
     pub obligations: Vec<ObligationRecord>,
     pub laws: Vec<LawRecord>,
     pub diags: Diagnostics,
@@ -625,6 +648,7 @@ pub fn elaborate(krate: &Crate, prover: &mut ProverChain, opts: &Options) -> Out
         globals: HashMap::new(),
         eq_fns: HashMap::new(),
         defs: vec![],
+        pre_commit: HashMap::new(),
         obligations: vec![],
         laws: vec![],
         diags,
@@ -672,6 +696,8 @@ pub fn elaborate(krate: &Crate, prover: &mut ProverChain, opts: &Options) -> Out
         spec_closure: s1.closure,
         established: s1.established.into_iter().collect(),
         law_rules,
+        pre_commit: el.pre_commit,
+        mir_gate: Default::default(),
     }
 }
 

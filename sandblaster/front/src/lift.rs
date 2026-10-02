@@ -196,6 +196,60 @@ pub struct LiftFacts {
     /// the field a newtype is read as)`. The in-place conformance harness
     /// spells and converts host-model values with them.
     pub mir_host_types: Vec<(String, String, Option<String>)>,
+    /// Every `#[lift(mir = ..)]` module's MIR as the lift loaded it (with
+    /// its names): the input of the literal reading (`crate::mir::literal`)
+    /// and of the per-function theorems (docs/checked-structuring.md).
+    pub mir_loaded: Vec<MirModule>,
+    /// The declared contract of every lifted function whose body was read
+    /// from MIR (`crate::mir::stmt`): a theorem's preconditions come from
+    /// here, never from the reading of the body.
+    pub mir_contracts: Vec<MirContract>,
+    /// The loop helpers the (untrusted) reading of the bodies built, with
+    /// what their loop lemmas are stated over (`crate::mir::checked`).
+    pub mir_helpers: Vec<MirHelper>,
+}
+
+/// A loop helper of a lifted function read from MIR: a hint for its
+/// (untrusted) loop lemma, never part of a trusted statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirHelper {
+    /// The helper's kernel name (`crate::varint::read__u32__loop0`).
+    pub global: String,
+    /// The MIR instance of the function it was split from.
+    pub key: String,
+    /// The loop header's block.
+    pub header: usize,
+    /// The MIR locals its parameters carry, in order.
+    pub params: Vec<usize>,
+    /// A `while` loop: the elaborator's helper (`<f>::loop#k`), whose
+    /// parameters are named by the source names; `local_names` names each
+    /// MIR local of the function as the reading did.
+    pub while_loop: bool,
+    pub local_names: Vec<String>,
+}
+
+/// One `#[lift(mir = ..)]` module's loaded MIR.
+#[derive(Clone, Debug)]
+pub struct MirModule {
+    /// The DSL path of the module (`crate::varint`).
+    pub dsl: String,
+    pub loaded: std::sync::Arc<crate::mir::Loaded>,
+}
+
+/// The contract a lifted function declares in its skeleton and its
+/// attachments (what a human or agent wrote and a reviewer reads): the
+/// only source of the preconditions of its theorem (`crate::mir::stmt`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MirContract {
+    /// The lifted function's kernel name (`crate::varint::Decoder__u32::feed`).
+    pub global: String,
+    /// Its MIR instance.
+    pub key: String,
+    /// Its `requires(..)` clauses, in order (token text).
+    pub requires: Vec<String>,
+    /// It declares a depth bound (`decreases(e, max = C)`: one more
+    /// precondition, `e <= C`).
+    pub depth_bound: bool,
 }
 
 /// How the original function takes one parameter (receiver included), for
@@ -278,6 +332,20 @@ pub mod test_hook {
         SignedShrLogical,
         /// An index by `RangeToInclusive` (`&a[..=j]`) read as `&a[..j]`.
         InclusiveRangeAsExclusive,
+        /// Historical structuring bug 1 (`docs/mir-lift.md` §6 step 5): before
+        /// a variable changes in place (a field or element written), its own
+        /// entry is snapshotted with the values that read it, so later reads
+        /// of the variable restore its value from before the write.
+        SnapshotOwnValue,
+        /// Historical structuring bug 2: an enum whose matched field is
+        /// written through a `&mut` (`if let Some(v) = &mut collected {
+        /// v.push(..) }`) is snapshotted before the field changes and written
+        /// back from that copy, losing the pushes.
+        WritebackSnapshot,
+        /// A structured reading that adds a precondition (`requires(true)`)
+        /// to every private free function it reads: the theorem's statement
+        /// must refuse it, the declared contract not stating it (amendment (b)).
+        ExtraRequires,
     }
 
     thread_local! {
@@ -458,6 +526,9 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
                     syn::Item::Struct(st) if matches!(st.fields, syn::Fields::Unit) => {
                         mir_host.structs.insert(st.ident.to_string(), format!("{}::{}", s.module_path, st.ident));
                     }
+                    syn::Item::Enum(e) => {
+                        mir_host.enums.insert(e.ident.to_string(), format!("{}::{}", s.module_path, e.ident));
+                    }
                     _ => {}
                 }
             }
@@ -512,6 +583,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             match crate::mir::load(text, &lookup, names, suffix) {
                 Ok(l) => {
                     facts.mir_rustc = Some(l.m.rustc.clone());
+                    facts.mir_loaded.push(MirModule { dsl: format!("crate::{suffix}"), loaded: std::sync::Arc::new(l.clone()) });
                     for t in l.names.host_types(&l.m) {
                         if !facts.mir_host_types.contains(&t) {
                             facts.mir_host_types.push(t);
@@ -586,6 +658,8 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     facts.dropped = std::mem::take(&mut cx.dropped);
     facts.conform = std::mem::take(&mut cx.conform);
     facts.mir_read = std::mem::take(&mut cx.mir_read);
+    facts.mir_contracts = std::mem::take(&mut cx.mir_contracts);
+    facts.mir_helpers = std::mem::take(&mut cx.mir_helpers);
     facts.instances = std::mem::take(&mut cx.instances);
     facts.sealed_impls = std::mem::take(&mut cx.sealed_impl_types);
     facts.test_hook = test_hook::get();
@@ -756,6 +830,10 @@ struct Ctx {
     cur_host: bool,
     /// [`LiftFacts::mir_read`].
     mir_read: Vec<(String, String, Vec<(usize, String)>)>,
+    /// [`LiftFacts::mir_contracts`].
+    mir_contracts: Vec<MirContract>,
+    /// [`LiftFacts::mir_helpers`].
+    mir_helpers: Vec<MirHelper>,
 }
 
 impl Ctx {
@@ -1792,11 +1870,26 @@ impl Ctx {
         f.block = Box::new(block);
         drop(rw);
         let mut helpers = Vec::new();
+        let mut mir_key: Option<String> = None;
+        // the declared contract: the skeleton's attributes now, the
+        // attachments' below (never what the reading of the body adds)
+        let n_skeleton = f.attrs.len();
         if use_mir {
-            let (b, h) = self.mir_body(&mut f, &orig_name, self_ty.as_ref(), &state_names, &state_tys);
+            let n = self.mir_read.len();
+            let (b, h) = self.mir_body(&mut f.sig, &orig_name, self_ty.as_ref(), &state_names, &state_tys);
             f.block = Box::new(b);
             helpers = h;
+            mir_key = self.mir_read.get(n).map(|r| r.1.clone());
+            // (`test_hook`: a structured reading that adds a precondition, which
+            // the reading cannot do — it sees the signature only — so that the
+            // statement's refusal of a precondition the contract lacks is tested)
+            // (a private free function: a public one with a precondition is
+            // refused at the boundary before any theorem)
+            if test_hook::get() == Some(test_hook::WrongRule::ExtraRequires) && self.cur_impl.is_none() && matches!(f.vis, syn::Visibility::Inherited) {
+                f.attrs.push(syn::parse_quote!(#[requires(true)]));
+            }
         }
+        let n_read = f.attrs.len();
         if let Some(at) = self.attach_fn.get(&orig_name).cloned() {
             self.attach_used.insert(format!("fn {orig_name}"));
             let sigma2: HashMap<String, syn::Type> = self.attach_sigma.clone();
@@ -1888,6 +1981,19 @@ impl Ctx {
                 Err(msg) => self.errors.push((at.span, msg, vec![])),
             }
         }
+        // the declared contract (skeleton and attachments: the reading of
+        // the body adds no attribute), for the theorem's preconditions
+        if let Some(key) = mir_key {
+            let declared: Vec<&syn::Attribute> = f.attrs[..n_skeleton].iter().chain(&f.attrs[n_read..]).collect();
+            let requires: Vec<String> = declared.iter().filter(|a| a.path().is_ident("requires")).map(|a| a.meta.to_token_stream().to_string()).collect();
+            let depth_bound = declared.iter().any(|a| a.path().is_ident("decreases") && a.meta.to_token_stream().to_string().contains("max"));
+            let mp = self.conform_module_path();
+            let global = match self_ty.as_ref().and_then(type_name) {
+                Some(st) if !is_prim(&st) => format!("{mp}::{st}::{}", f.sig.ident),
+                _ => format!("{mp}::{}", f.sig.ident),
+            };
+            self.mir_contracts.push(MirContract { global, key, requires, depth_bound });
+        }
         if !ghost {
             // loop helpers have no original: they are compared through the
             // function they were split from
@@ -1929,22 +2035,25 @@ impl Ctx {
     }
 
     /// The body of a lifted function of a `#[lift(mir = ..)]` module, read
-    /// from rustc's MIR ([`crate::mir::read`]), with its loop helpers. `f` has
-    /// the lifted signature; parameters bound by `_` get a name.
-    fn mir_body(&mut self, f: &mut syn::ItemFn, orig_name: &str, self_ty: Option<&syn::Type>, state_names: &[String], state_tys: &[(String, syn::Type)]) -> (syn::Block, Vec<syn::Item>) {
+    /// from rustc's MIR ([`crate::mir::read`]), with its loop helpers. `sig`
+    /// is the lifted signature; parameters bound by `_` get a name. The
+    /// structured reading sees the signature only, never the function's
+    /// attributes: it cannot add to or change the declared contract, which
+    /// alone states the theorem's preconditions (`mir::stmt`).
+    fn mir_body(&mut self, sig: &mut syn::Signature, orig_name: &str, self_ty: Option<&syn::Type>, state_names: &[String], state_tys: &[(String, syn::Type)]) -> (syn::Block, Vec<syn::Item>) {
         let empty: syn::Block = syn::parse_quote!({ unreachable!() });
         let Some(ld) = self.cur_mir.clone() else { return (empty, vec![]) };
         let lifted = match self_ty.and_then(type_name) {
-            Some(st) if !is_prim(&st) => format!("{st}::{}", f.sig.ident),
-            _ => f.sig.ident.to_string(),
+            Some(st) if !is_prim(&st) => format!("{st}::{}", sig.ident),
+            _ => sig.ident.to_string(),
         };
         let Some(key) = ld.by_lifted.get(&lifted).cloned() else {
-            self.err(f.sig.ident.span(), format!("MIR: rustc's MIR has no instance for the lifted function `{lifted}` (re-run the extraction, or the item is not extracted)"));
+            self.err(sig.ident.span(), format!("MIR: rustc's MIR has no instance for the lifted function `{lifted}` (re-run the extraction, or the item is not extracted)"));
             return (empty, vec![]);
         };
         let mut params: Vec<String> = Vec::new();
         let mut states: Vec<usize> = Vec::new();
-        for (i, a) in f.sig.inputs.iter_mut().enumerate() {
+        for (i, a) in sig.inputs.iter_mut().enumerate() {
             match a {
                 syn::FnArg::Receiver(_) => {
                     if state_names.iter().any(|n| n == "self") {
@@ -1964,7 +2073,7 @@ impl Ctx {
             }
         }
         let has_ret = {
-            let out_parts = match &f.sig.output {
+            let out_parts = match &sig.output {
                 syn::ReturnType::Default => 0,
                 syn::ReturnType::Type(_, t) => match &**t {
                     syn::Type::Tuple(tt) if tt.elems.is_empty() => 0,
@@ -1974,7 +2083,7 @@ impl Ctx {
             };
             out_parts > states.len()
         };
-        let out_ty: syn::Type = match &f.sig.output {
+        let out_ty: syn::Type = match &sig.output {
             syn::ReturnType::Default => syn::parse_quote!(()),
             syn::ReturnType::Type(_, t) => (**t).clone(),
         };
@@ -1983,7 +2092,7 @@ impl Ctx {
         let locals = match crate::mir::read::root_locals(&ld.m, &ld.names, &key, &params) {
             Ok(l) => l,
             Err(e) => {
-                self.err(f.sig.ident.span(), format!("MIR: {e}"));
+                self.err(sig.ident.span(), format!("MIR: {e}"));
                 return (empty, vec![]);
             }
         };
@@ -2001,23 +2110,32 @@ impl Ctx {
             let la = self.mir_loop_attach(&at, &locals, self_ty, state_tys);
             loops.insert(k, la);
         }
-        let ref_params: Vec<usize> = f.sig.inputs.iter().enumerate().filter(|(_, a)| matches!(a, syn::FnArg::Typed(pt) if matches!(&*pt.ty, syn::Type::Reference(_)))).map(|(i, _)| i).collect();
+        let ref_params: Vec<usize> = sig.inputs.iter().enumerate().filter(|(_, a)| matches!(a, syn::FnArg::Typed(pt) if matches!(&*pt.ty, syn::Type::Reference(_)))).map(|(i, _)| i).collect();
         let spec = crate::mir::read::Spec { key: &key, lifted_name: &lifted, params: params.clone(), states, has_ret, out_ty, loops, ref_params };
         match crate::mir::read::read(&ld.m, &ld.names, &spec) {
             Ok(o) => {
                 // a parameter the body assigns is `mut` (it changes no meaning)
                 for i in &o.assigned_params {
-                    if let Some(syn::FnArg::Typed(pt)) = f.sig.inputs.iter_mut().nth(*i)
+                    if let Some(syn::FnArg::Typed(pt)) = sig.inputs.iter_mut().nth(*i)
                         && let syn::Pat::Ident(pi) = &mut *pt.pat
                     {
                         pi.mutability = Some(Default::default());
                     }
                 }
-                self.mir_read.push((lifted, key, o.loops.clone()));
+                self.mir_read.push((lifted.clone(), key.clone(), o.loops.clone()));
+                let mp = self.conform_module_path();
+                for h in &o.helper_info {
+                    let global = match self_ty.and_then(type_name) {
+                        _ if h.while_loop => format!("{mp}::{lifted}::{}", h.name),
+                        Some(st) if h.method && !is_prim(&st) => format!("{mp}::{st}::{}", h.name),
+                        _ => format!("{mp}::{}", h.name),
+                    };
+                    self.mir_helpers.push(MirHelper { global, key: key.clone(), header: h.header, params: h.params.clone(), while_loop: h.while_loop, local_names: h.local_names.clone() });
+                }
                 (o.body, o.helpers)
             }
             Err(e) => {
-                self.err(f.sig.ident.span(), e);
+                self.err(sig.ident.span(), e);
                 (empty, vec![])
             }
         }

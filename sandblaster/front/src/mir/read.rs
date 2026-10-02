@@ -1,5 +1,13 @@
-//! The MIR reading (TRUSTED; `docs/mir-lift.md` §20): one monomorphized MIR
-//! body to exec-subset Rust.
+//! The structured reading S of a MIR body (UNTRUSTED since
+//! `docs/checked-structuring.md`; `docs/mir-lift.md` §20.3): one
+//! monomorphized MIR body to exec-subset Rust. It only proposes S: every
+//! verified build checks, for each lifted function, the kernel theorem
+//! `L::thm::f` that the literal reading L of the same MIR (`literal.rs`,
+//! trusted) returns S's value (`driver::gates::theorem_gate`). A bug here
+//! makes a theorem unprovable and the build fail; it cannot change what a
+//! verified module means. It cannot reach the function's contract either:
+//! it sees the signature only, and the theorem's preconditions are the
+//! declared contract's (`stmt.rs`).
 //!
 //! The reading is a walk of the control-flow graph from the entry block
 //! that follows its edges exactly:
@@ -146,6 +154,25 @@ pub struct ReadOut {
     pub loops: Vec<(usize, String)>,
     /// Parameters the body assigns (`mut` in the signature).
     pub assigned_params: Vec<usize>,
+    /// Each loop helper (innermost first): what its loop lemma is stated
+    /// over (`crate::mir::checked`; a hint, never trusted).
+    pub helper_info: Vec<HelperInfo>,
+}
+
+/// A loop helper as the reading built it: its name, whether it is a method
+/// of the impl, the loop header's block and the MIR locals its parameters
+/// carry (in order). A `while` loop (the elaborator's helper `loop#k`, `k`
+/// its index among the function's `while` loops) has no parameters here:
+/// the elaborator's helper names its parameters by the source names, which
+/// `local_names` gives per MIR local.
+#[derive(Clone, Debug)]
+pub struct HelperInfo {
+    pub name: String,
+    pub method: bool,
+    pub header: usize,
+    pub params: Vec<usize>,
+    pub while_loop: bool,
+    pub local_names: Vec<String>,
 }
 
 /// The names and subset types of the root function's locals (the lift
@@ -354,6 +381,7 @@ struct Reader<'m> {
     helpers: Vec<syn::Item>,
     loop_forms: Vec<(usize, String)>,
     assigned_params: BTreeSet<usize>,
+    helper_info: Vec<HelperInfo>,
 }
 
 fn ident(s: &str) -> syn::Ident {
@@ -1037,11 +1065,15 @@ impl<'m> Reader<'m> {
 
     /// Before variable `name` changes: carried values that read it are bound.
     fn invalidate(&mut self, fr: usize, name: &str, except: Option<Key>, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+        // (`lift::test_hook` re-injects the two historical bugs of this step,
+        // for the theorems to catch; never set by a build)
+        let hook = crate::lift::test_hook::get();
         // a variable's own entry (its value is itself) stays: it still is
-        let own = |k: &Key, v: &Val| -> bool { matches!(v, Val::E(syn::Expr::Path(pp)) if pp.path.is_ident(&self.frames[k.0].names[k.1])) };
+        let own = |k: &Key, v: &Val| -> bool { hook != Some(crate::lift::test_hook::WrongRule::SnapshotOwnValue) && matches!(v, Val::E(syn::Expr::Path(pp)) if pp.path.is_ident(&self.frames[k.0].names[k.1])) };
         // (a variable of `Env::writeback` holds its field variable as a place,
         // not as a value: it is rebuilt from the field's current value)
-        let keys: Vec<Key> = env.vals.iter().filter(|(k, v)| Some(**k) != except && !own(k, v) && !env.writeback.contains(*k) && val_mentions(v, name)).map(|(k, _)| *k).collect();
+        let wb = |k: &Key| hook != Some(crate::lift::test_hook::WrongRule::WritebackSnapshot) && env.writeback.contains(k);
+        let keys: Vec<Key> = env.vals.iter().filter(|(k, v)| Some(**k) != except && !own(k, v) && !wb(k) && val_mentions(v, name)).map(|(k, _)| *k).collect();
         for k in keys {
             let v = env.vals[&k].clone();
             let e = self.materialize(fr, &v)?;
@@ -2442,7 +2474,9 @@ impl<'m> Reader<'m> {
             } else {
                 return self.err(0, "a loop test with both targets in the loop");
             };
+            let widx = self.loop_forms.iter().filter(|x| x.1 == "while").count();
             self.loop_forms.push((k, "while".into()));
+            self.helper_info.push(HelperInfo { name: format!("loop#{widx}"), method: false, header: h, params: vec![], while_loop: true, local_names: self.frames[0].names.clone() });
             let mut bo: Vec<syn::Stmt> = Vec::new();
             let mut head: Vec<syn::Stmt> = Vec::new();
             for i in &at.invariants {
@@ -2627,6 +2661,7 @@ impl<'m> Reader<'m> {
             fn #name(#(#inputs),*) -> #out_ty { #(#hb)* }
         );
         self.helpers.push(syn::Item::Fn(item));
+        self.helper_info.push(HelperInfo { name: name.to_string(), method, header: h, params: params.clone(), while_loop: false, local_names: vec![] });
         Ok(Flow::Diverge)
     }
 
@@ -2761,7 +2796,7 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
         return Err(format!("`{}`: rustc's MIR has {} parameters, the lifted signature {}", spec.lifted_name, f.argc, spec.params.len()));
     }
     let cfg = Cfg::new(f);
-    let mut r = Reader { m, nm, spec, frames: Vec::new(), cfg, fresh: 0, helpers: Vec::new(), loop_forms: Vec::new(), assigned_params: BTreeSet::new() };
+    let mut r = Reader { m, nm, spec, frames: Vec::new(), cfg, fresh: 0, helpers: Vec::new(), loop_forms: Vec::new(), assigned_params: BTreeSet::new(), helper_info: Vec::new() };
     let fr = r.new_frame(f, true);
     let mut env = Env::default();
     let mut out = Vec::new();
@@ -2806,5 +2841,5 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
     if let Flow::Fall(_) = flow {
         return Err(format!("`{}`: the reading fell off the end", spec.lifted_name));
     }
-    Ok(ReadOut { body: syn::Block { brace_token: Default::default(), stmts: out }, helpers: r.helpers, loops: r.loop_forms, assigned_params: r.assigned_params.into_iter().collect() })
+    Ok(ReadOut { body: syn::Block { brace_token: Default::default(), stmts: out }, helpers: r.helpers, loops: r.loop_forms, assigned_params: r.assigned_params.into_iter().collect(), helper_info: r.helper_info })
 }

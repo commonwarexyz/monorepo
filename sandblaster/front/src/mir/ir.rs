@@ -1,5 +1,9 @@
-//! The MIR of a `.sbmir` file as data (untrusted parsing of what
-//! `sandblaster-mirx` printed; anything malformed is an error).
+//! The MIR of a `.sbmir` file as data: the parse of what
+//! `sandblaster-mirx` printed. TRUSTED (`docs/checked-structuring.md`,
+//! amendment (d)): the literal reading L ([`super::literal`]) reads bodies
+//! from this parse, so a misparse changes what L means. Anything malformed
+//! is an error, never a guess (no defaults for indices, discriminants or
+//! the expected value of an assertion).
 
 use std::collections::BTreeMap;
 
@@ -306,7 +310,7 @@ fn konst(e: &Sx) -> Result<Const, String> {
     Ok(match e.head() {
         Some("int") => {
             let tt = ty(&t[0])?;
-            let v = if tt == Ty::Bool { int_value(&t[1])? } else { int_value(&t[1])? };
+            let v = int_value(&t[1])?;
             Const::Int(tt, v)
         }
         Some("zst") => Const::Zst(ty(&t[0])?),
@@ -403,7 +407,15 @@ fn term(e: &Sx) -> Result<Term, String> {
         Some("resume") => Term::Resume,
         Some("abort") => Term::Abort,
         Some("drop") => Term::Drop(place(&t[0])?, t[1].atom() != Some("no-glue"), n(2)?),
-        Some("assert") => Term::Assert(operand(&t[0])?, t[1].atom() == Some("true"), t[2].atom().unwrap_or("?").to_string(), n(3)?),
+        Some("assert") => {
+            // the expected value is `true` or `false`, nothing else (L guards on it)
+            let expected = match t[1].atom() {
+                Some("true") => true,
+                Some("false") => false,
+                _ => return Err(err("assert's expected value", e)),
+            };
+            Term::Assert(operand(&t[0])?, expected, t[2].atom().unwrap_or("?").to_string(), n(3)?)
+        }
         Some("call") => {
             let c = callee(&t[0])?;
             let args = t[1].tail().iter().map(operand).collect::<Result<_, _>>()?;
@@ -445,6 +457,10 @@ fn function(e: &Sx) -> Result<Fn, String> {
             Some("locals") => {
                 for l in x.tail() {
                     let v = l.tail_all();
+                    // locals are listed in order (L's slot `i` is local `i`)
+                    if v.first().and_then(Sx::num) != Some(f.locals.len() as u128) || v.len() < 2 {
+                        return Err(err("locals out of order", l));
+                    }
                     f.locals.push((ty(&v[1])?, v.get(2).and_then(Sx::atom) == Some("mut")));
                 }
             }
@@ -458,7 +474,7 @@ fn function(e: &Sx) -> Result<Fn, String> {
             Some("debug-other") => {}
             Some("bb") => {
                 let bt = x.tail();
-                if bt.first().and_then(Sx::num) != Some(f.blocks.len() as u128) {
+                if bt.len() < 2 || bt.first().and_then(Sx::num) != Some(f.blocks.len() as u128) {
                     return Err(err("blocks out of order", x));
                 }
                 let mut stmts = Vec::new();
@@ -505,7 +521,14 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
                         Some("args") => d.args = x.tail().first().map(|a| a.tail_all().iter().map(ty).collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default(),
                         Some("variant") => {
                             let v = x.tail();
-                            let mut var = Variant { idx: v[0].num().unwrap_or(0) as usize, name: v[1].str().unwrap_or("").to_string(), discr: v[2].atom().and_then(|a| a.parse().ok()).unwrap_or(0), fields: vec![], no_glue: false };
+                            // variants are listed in order (MIR's variant index is
+                            // the position), each with its discriminant
+                            let idx = v.first().and_then(Sx::num).ok_or_else(|| err("variant index", x))? as usize;
+                            if idx != d.variants.len() {
+                                return Err(err("variants out of order", x));
+                            }
+                            let discr = v.get(2).and_then(Sx::atom).and_then(|a| a.parse().ok()).ok_or_else(|| err("variant discriminant", x))?;
+                            let mut var = Variant { idx, name: v.get(1).and_then(Sx::str).ok_or_else(|| err("variant name", x))?.to_string(), discr, fields: vec![], no_glue: false };
                             for f in &v[3..] {
                                 match f.head() {
                                     Some("field") => var.fields.push((f.tail()[0].str().unwrap_or("").to_string(), ty(&f.tail()[1])?)),

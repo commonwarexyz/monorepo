@@ -1372,3 +1372,77 @@ runs on the build host, not the target (the lifted widths are fixed; both
 are 64-bit). The host-model *meaning* beyond variant names and payload
 types (for example that the host's `Error::InvalidVarint(n)` carries what
 the model says) is not checked.
+
+### 21.1 Function bodies: the literal reading of rustc's MIR
+
+Function bodies of lifted exec modules are read only from rustc's MIR
+(`#[lift(mir = "m.sbmir")]`, `docs/mir-lift.md` §20). Since
+`docs/checked-structuring.md`, the **trusted** reading of a body is the
+literal reading L, and the structured reading S that the laws and proofs
+are about is checked against it by a kernel theorem per lifted function.
+
+**Trusted code** (code lines: no blank lines, comments or tests).
+
+| File | Code lines | Role |
+| --- | --- | --- |
+| `front/src/mir/literal.rs` | 1,474 | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally |
+| `front/src/mir/literal.core` | 139 | L's library: the option monad, checked/unchecked/division operators per width, signed comparisons and sign extension of bits, `bswap`, array get/set under the bound test, the leaves' models |
+| `front/src/mir/stmt.rs` | 225 | the statement `L::thm::f`: `S_f`'s telescope, `init`, `erase`; preconditions only from the declared contract |
+| `front/src/mir/ir.rs`, `sexp.rs` | 482, 131 | the parse L reads; malformed input is an error, never a default |
+| `front/src/mir/mod.rs` | 480 | names (`kernel_adt`, `is_transparent`, `host_model_method`) and the load checks |
+| `sandblaster/mirx` | 1,131 | the printer (rustc's data, transcribed) |
+| the gate's bookkeeping | ≈ 650 | `driver::gates::theorem_gate`; in `mir::checked`, planning every recorded function, accepting a theorem only as `L::thm::<f>` with `stmt`'s statement or from the verdict cache under its full key; `driver::lowered`'s requirement of the shipped theorems |
+| the lift glue | ≈ 260 | loading, signature checks, the declared contracts (`lift::MirContract`: the skeleton's attributes before the body is read and the attachments' after; the body reader sees the signature only) |
+
+**Untrusted**: `front/src/mir/read.rs` (2,433, the structurer), `cfg.rs`
+(235), the walker `simproof.rs` (4,565) and the rest of `checked.rs`. A
+bug there makes a theorem unprovable and the build fail.
+
+**What an auditor checks.** Construct by construct, that L's reading of
+each MIR construct (the tables of `docs/mir-lift.md` §20.4) gives a value
+only where rustc's semantics gives that value, and `None` for a panic,
+undefined behaviour or anything not modeled: wrapping `Add`/`Sub`/`Mul`,
+checked operations as (wrapped, flag), `Shl`/`Shr` with the amount masked
+(the kernel's `#wshl` is `x << (y mod w)`), unchecked shifts undefined at
+or above the width with the amount compared at its own type, sign
+extension only from signed types, `Transmute` to little-endian bytes,
+discriminants at the destination's type, moves leaving the slot (not read
+again in borrow-checked MIR), drops with glue only for variants without
+drop code, shared references as snapshots and `&mut` as reference codes
+written back after each call (exclusivity, A3 of the design note). The
+statement: that `init` places each parameter in its slot and `erase` maps
+S's value to L's componentwise, and that an S precondition the declared
+contract lacks is refused.
+
+**Review findings of stage cs-assurance, fixed with tests**
+(`tests/literal.rs` `readings_the_review_found_wrong_are_none_where_rust_differs`,
+`the_parse_refuses_what_it_would_have_guessed`): `u128`/`i128` were read as
+64-bit words (now not modeled); `ShlUnchecked`/`ShrUnchecked` by an amount
+of another width tested only the amount's low 32 bits (a `u64` amount of
+`2^32` read as a shift by 0); a zero-sized constant of an ADT with several
+variants was read as its first variant; the parse defaulted a malformed
+discriminant to 0, an assertion's malformed expected value to `false`, and
+did not check that variants and locals are listed in order; a library
+type and an index leaf's range were recognized by a path *suffix*
+(`ops::RangeTo` also matched a crate's `myops::RangeTo`, and a crate named
+`option` would have had its `Option` read as core's): both now match the
+exact path under `std::`/`core::` (`bytes::TryGetError` as written).
+
+**Assumptions recorded, not checked by the theorems**: rustc compiles the
+MIR `mirx` printed (the extraction has overflow checks on, so the build
+must too); `RuntimeChecks(ub)` is read as `false` (where a library
+precondition check would fail, the operation it guards is undefined
+behaviour, which L reads as `None`); a module type's fields are in
+declaration order in both the MIR and the subset's declaration (the
+kernel's field names are positional); the host models and leaves mean the
+host functions (as for S).
+
+*Pinned by:* `tests/literal.rs` (each construct evaluated by the kernel
+with negative twins), `tests/theorem_gate.rs` (the gate on varint, the MMR
+and the verifier; wrong rules of the structured reading caught),
+`tests/fault_injection.rs` (a mutated MIR construct of each kind breaks a
+theorem; the two historical structuring bugs re-injected into `read.rs`
+break theorems; a precondition the contract lacks is refused),
+`tests/lift_conformance.rs` (L compared with rustc in the conformance
+check, module mode and in place), `tests/walker.rs`, `tests/lowered_use.rs`
+(the shipped theorems of the lifted round trip).

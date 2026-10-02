@@ -81,10 +81,12 @@ use crate::mutate::eval::{self as meval, Hints, Rng, Val};
 use crate::surface::{hex, sha256};
 
 mod in_place;
+mod literal;
 pub use in_place::check_in_place;
+pub use literal::LITERAL_CASES;
 
 /// This check's version (part of the cache key).
-pub const VERSION: &str = "sandblaster-lift-conformance/3";
+pub const VERSION: &str = "sandblaster-lift-conformance/4";
 /// The buffer model in Rust (the harness's crate `bytes`).
 pub const BYTES_SHIM: &str = include_str!("../lift/conform_bytes.rs");
 /// The host traits the lift knows (the harness root).
@@ -216,6 +218,9 @@ pub struct EntryReport {
     pub reference: usize,
     /// Why the function was not checked (it is reached through its callers).
     pub skipped: Option<String>,
+    /// Inputs on which the literal reading L of its MIR was compared with
+    /// rustc's build too ([`literal`]).
+    pub literal: usize,
 }
 
 /// A difference between the lifted model and `rustc`'s build.
@@ -244,6 +249,8 @@ pub struct Report {
     pub errors: Vec<String>,
     pub notes: Vec<String>,
     pub cases: usize,
+    /// Inputs on which the literal reading L was compared with rustc.
+    pub literal_cases: usize,
     pub elapsed: Duration,
 }
 
@@ -265,6 +272,7 @@ impl Report {
         self.errors.extend(o.errors);
         self.notes.extend(o.notes);
         self.cases += o.cases;
+        self.literal_cases += o.literal_cases;
         self.elapsed += o.elapsed;
     }
 
@@ -277,7 +285,8 @@ impl Report {
     /// same whether the check ran or its recorded pass was replayed).
     pub fn summary(&self) -> String {
         let checked = self.entries.iter().filter(|e| e.skipped.is_none()).count();
-        format!("lift conformance: {} input(s) on {checked} function(s) ({} skipped), {} mismatch(es), rustc {} edition {}", self.cases, self.entries.len() - checked, self.mismatches.len(), self.rustc, self.edition)
+        let lit_fns = self.entries.iter().filter(|e| e.literal > 0).count();
+        format!("lift conformance: {} input(s) on {checked} function(s) ({} skipped), the literal reading of the MIR on {} input(s) of {lit_fns} function(s), {} mismatch(es), rustc {} edition {}", self.cases, self.entries.len() - checked, self.literal_cases, self.mismatches.len(), self.rustc, self.edition)
     }
 
     /// The line the emitted module's header carries (deterministic: the
@@ -306,6 +315,7 @@ impl Report {
         j.str("rustc", &self.rustc);
         j.str("edition", &self.edition);
         j.num("cases", self.cases as i64);
+        j.num("literal_cases", self.literal_cases as i64);
         j.put(
             "functions",
             Json::Arr(
@@ -319,6 +329,7 @@ impl Report {
                         o.num("outcome_classes", e.classes as i64);
                         o.num("rejected_by_invariant", e.rejected as i64);
                         o.num("reference_evaluations", e.reference as i64);
+                        o.num("literal_cases", e.literal as i64);
                         if let Some(s) = &e.skipped {
                             o.str("skipped", s);
                         }
@@ -339,7 +350,7 @@ impl Report {
 
 /// Runs the check for the lifted module `info` of the checked crate `c`
 /// on its elaboration `out` (every definition kernel-checked).
-pub fn check(out: &elab::Output, krate: &Crate, c: &Checked, info: &LiftedInfo, cfg: &Config) -> Report {
+pub fn check(out: &mut elab::Output, krate: &Crate, c: &Checked, info: &LiftedInfo, cfg: &Config) -> Report {
     let t0 = Instant::now();
     let mut rep = Report { edition: cfg.edition.clone(), ..Default::default() };
     if let Some(h) = c.lift_facts.test_hook {
@@ -393,7 +404,8 @@ pub fn check(out: &elab::Output, krate: &Crate, c: &Checked, info: &LiftedInfo, 
     }
     k.push_str(&format!("shims {} {}\n", hex(&sha256(BYTES_SHIM.as_bytes())), hex(&sha256(HOST_SHIM.as_bytes()))));
     k.push_str(&format!("entries {}\n", hex(&sha256(format!("{entries:?}{:?}{:?}", c.lift_facts.instances, c.lift_facts.test_hook).as_bytes()))));
-    k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED}\n"));
+    k.push_str(&format!("budget {INITIAL} {EVALS} {ROUNDS} {STEPS} {SEED} {LITERAL_CASES}\n"));
+    k.push_str(&literal_key(c));
     rep.key = hex(&sha256(k.as_bytes()));
     let key_path = cfg.work_dir.join("conformance.key");
     if let Some(r) = std::fs::read_to_string(&key_path).ok().and_then(|t| Record::parse(&t, &rep.key)) {
@@ -407,13 +419,18 @@ pub fn check(out: &elab::Output, krate: &Crate, c: &Checked, info: &LiftedInfo, 
         rep.errors.push(format!("cannot create `{}`: {e}", cfg.work_dir.display()));
         return rep;
     }
+    // the literal reading of every function read from MIR (amendment (f))
+    let lits = literal::prepare(out, c, &entries, &mut rep);
     let mut g = Gen::new(out, krate, c, info);
     let plans = g.plans(&entries, &mut rep);
     let cases = g.run(&plans, &mut rep);
     rep.cases = cases.len();
     if rep.errors.is_empty() {
         match harness(&g, &plans, &cases, &src, &hosts, cfg) {
-            Ok(outputs) => compare(&g, &plans, &cases, &outputs, &mut rep),
+            Ok(outputs) => {
+                let rustc = compare(&g, &plans, &cases, &outputs, &mut rep);
+                literal::compare(&g, &plans, &cases, &rustc, &lits, &mut rep);
+            }
             Err(e) => rep.errors.push(e),
         }
     }
@@ -432,6 +449,7 @@ pub struct Record {
     pub key: String,
     pub rustc: String,
     pub cases: usize,
+    pub literal_cases: usize,
     pub notes: Vec<String>,
     pub entries: Vec<EntryReport>,
 }
@@ -461,18 +479,18 @@ fn unesc(s: &str) -> String {
 impl Record {
     /// The record of a passing report.
     pub fn of(r: &Report) -> Record {
-        Record { key: r.key.clone(), rustc: r.rustc.clone(), cases: r.cases, notes: r.notes.clone(), entries: r.entries.clone() }
+        Record { key: r.key.clone(), rustc: r.rustc.clone(), cases: r.cases, literal_cases: r.literal_cases, notes: r.notes.clone(), entries: r.entries.clone() }
     }
 
     /// The file text: the version and the key first (a record of another
     /// version or key is a miss), then one line per field.
     pub fn render(&self) -> String {
-        let mut t = format!("{VERSION}\npassed {}\nrustc {}\ncases {}\n", self.key, esc(&self.rustc), self.cases);
+        let mut t = format!("{VERSION}\npassed {}\nrustc {}\ncases {}\nliteral {}\n", self.key, esc(&self.rustc), self.cases, self.literal_cases);
         for n in &self.notes {
             t.push_str(&format!("note {}\n", esc(n)));
         }
         for e in &self.entries {
-            t.push_str(&format!("entry {}\t{}\t{}\t{}\t{}\t{}\t{}\n", esc(&e.lifted), esc(&e.callee), e.cases, e.classes, e.rejected, e.reference, e.skipped.as_deref().map(|s| format!("+{}", esc(s))).unwrap_or_else(|| "-".into())));
+            t.push_str(&format!("entry {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", esc(&e.lifted), esc(&e.callee), e.cases, e.classes, e.rejected, e.reference, e.literal, e.skipped.as_deref().map(|s| format!("+{}", esc(s))).unwrap_or_else(|| "-".into())));
         }
         t
     }
@@ -486,18 +504,19 @@ impl Record {
         }
         let rustc = unesc(lines.next()?.strip_prefix("rustc ")?);
         let cases = lines.next()?.strip_prefix("cases ")?.parse().ok()?;
-        let mut r = Record { key: key.to_string(), rustc, cases, notes: Vec::new(), entries: Vec::new() };
+        let literal_cases = lines.next()?.strip_prefix("literal ")?.parse().ok()?;
+        let mut r = Record { key: key.to_string(), rustc, cases, literal_cases, notes: Vec::new(), entries: Vec::new() };
         for l in lines {
             if let Some(n) = l.strip_prefix("note ") {
                 r.notes.push(unesc(n));
             } else {
                 let f: Vec<&str> = l.strip_prefix("entry ")?.split('\t').collect();
-                let [lifted, callee, cases, classes, rejected, reference, skipped]: [&str; 7] = f.try_into().ok()?;
+                let [lifted, callee, cases, classes, rejected, reference, literal, skipped]: [&str; 8] = f.try_into().ok()?;
                 let skipped = match skipped {
                     "-" => None,
                     s => Some(unesc(s.strip_prefix('+')?)),
                 };
-                r.entries.push(EntryReport { lifted: unesc(lifted), callee: unesc(callee), cases: cases.parse().ok()?, classes: classes.parse().ok()?, rejected: rejected.parse().ok()?, reference: reference.parse().ok()?, skipped });
+                r.entries.push(EntryReport { lifted: unesc(lifted), callee: unesc(callee), cases: cases.parse().ok()?, classes: classes.parse().ok()?, rejected: rejected.parse().ok()?, reference: reference.parse().ok()?, literal: literal.parse().ok()?, skipped });
             }
         }
         Some(r)
@@ -507,6 +526,7 @@ impl Record {
     pub fn replay(self, rep: &mut Report) {
         rep.rustc = self.rustc;
         rep.cases = self.cases;
+        rep.literal_cases = self.literal_cases;
         rep.notes = self.notes;
         rep.entries = self.entries;
     }
@@ -1917,8 +1937,11 @@ fn run_harness(exe: &Path, dir: &Path, n: usize) -> Result<Vec<String>, String> 
     Ok(outs)
 }
 
-fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], outputs: &[String], rep: &mut Report) {
+/// Compares the lifted model with rustc's outputs; returns rustc's outputs
+/// read (by case) for the comparison of the literal reading.
+fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], outputs: &[String], rep: &mut Report) -> Vec<Result<Vec<J>, String>> {
     let _ = g;
+    let mut read = Vec::new();
     for (c, o) in cases.iter().zip(outputs) {
         let p = &plans[c.plan];
         let input = format!("({})", c.args.iter().map(J::render).collect::<Vec<_>>().join(", "));
@@ -1943,5 +1966,19 @@ fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], outputs: &[String], 
         if !same {
             rep.mismatches.push(Mismatch { lifted: p.e.lifted.clone(), callee: p.callee.clone(), input, model: show(&model), rustc: show(&rustc) });
         }
+        read.push(rustc);
     }
+    read
+}
+
+/// The part of the cache key the literal reading's comparison adds: the
+/// generator of L and its library (`mir::checked::generator_hash`) and the
+/// MIR it reads.
+fn literal_key(c: &Checked) -> String {
+    let mut k = format!("literal-generator {}\n", crate::mir::checked::generator_hash());
+    for mm in &c.lift_facts.mir_loaded {
+        k.push_str(&format!("mir {} {}\n", mm.loaded.m.module, hex(&sha256(format!("{:?}{:?}", mm.loaded.m.fns, mm.loaded.m.adts).as_bytes()))));
+    }
+    k.push_str(&format!("contracts {}\n", hex(&sha256(format!("{:?}", c.lift_facts.mir_contracts).as_bytes()))));
+    k
 }

@@ -237,17 +237,44 @@ green, speed of the result and the human review load.
    gives the item skeleton and the ghost language. A lifted exec module
    without `mir = ".."` is refused (the error names
    `sandblaster/mirx/extract.sh`). Its parts:
-   * **the bodies: the MIR reading** (`sandblaster/front/src/mir`,
-     `docs/mir-lift.md` §20) — rustc's own monomorphized MIR (macros
+   * **the bodies: the literal reading of rustc's MIR**
+     (`sandblaster/front/src/mir`, `docs/mir-lift.md` §20.3–§20.7,
+     `docs/checked-structuring.md`) — rustc's own monomorphized MIR (macros
      expanded, `?`, closures, operators, iterators, loops and constants in
-     bodies already lowered by the compiler) read by a translation over a
-     fixed set of MIR constructs that does not grow with surface features:
-     `mir/read.rs` (2,417 code lines) and the names in `mir/mod.rs` (434),
-     plus the printer `sandblaster/mirx` (1,131: a rustc driver on the
-     pinned nightly of the stable release, whose output is checked in with
-     the sources' SHA-256) — 3,982 code lines; and its glue in `lift.rs`
-     (≈ 0.2k: loading the extraction, the signature checks, the loop
-     attachments read with the MIR's locals typed, `mir_body`);
+     bodies already lowered by the compiler) read **literally**, one kernel
+     definition per MIR instance with one arm per basic block and no
+     structuring, by a table-driven translation of a fixed set of MIR
+     constructs: the generator `mir/literal.rs` (1,474 code lines) and its
+     library `mir/literal.core` (139); the statement of each lifted
+     function's theorem `mir/stmt.rs` (225: the telescope, `init`, `erase`,
+     and the rule that preconditions come from the declared contract only);
+     the parse L reads, `mir/ir.rs` (482) and `mir/sexp.rs` (131); the
+     names and load checks of `mir/mod.rs` (480); the printer
+     `sandblaster/mirx` (1,131: a rustc driver on the pinned nightly of the
+     stable release, whose output is checked in with the sources'
+     SHA-256) — **4,062 code lines**; the gate's bookkeeping (≈ 0.65k:
+     `driver::gates::theorem_gate` and its report, `mir::checked`'s
+     planning, cache keys and acceptance of `L::thm::<f>` with the trusted
+     statement, the lifted round trip's requirement of the shipped
+     theorems in `driver::lowered`); and its glue in `lift.rs` (≈ 0.26k:
+     loading the extraction, the signature checks, the loop attachments
+     read with the MIR's locals typed, the declared contracts). The
+     structured reading S that the laws and proofs are about is
+     **untrusted**: `mir/read.rs` (2,433) proposes it, `mir/cfg.rs` (235)
+     steers it, and every verified build checks, per lifted function, the
+     kernel theorem `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0
+     (Some init(x̄)) = Some(erase(S_f x̄))` (total correctness, including the
+     final `&mut` referents), proven by the untrusted walker
+     (`mir/simproof.rs`, 4,565, and the rest of `mir/checked.rs`) and
+     checked by the kernel, or the module is not verified (the theorem
+     gate; varint 63 of 63, the MMR 76 of 76, the verifier's set 1 69 of
+     69). Before this step the structurer was trusted: `read.rs` 2,417 +
+     `mod.rs` 434 + `mirx` 1,131 = 3,982, with the parse counted
+     untrusted. The count is about the same; its kind changed — local,
+     construct-by-construct translations, each checkable against the MIR
+     reference, replace 2.4k lines of symbolic structuring (joins, loop
+     forms, carried values, write-backs), where both bugs ever found in the
+     reading were;
    * **the item skeleton** — `sandblaster/front/src/lift.rs`:
      `macro_rules!` expansion of item macros (≈ 0.3k), flattening of inline
      modules, sealed-trait monomorphization, state passing in signatures
@@ -298,10 +325,12 @@ green, speed of the result and the human review load.
    `lift_open.rs` 1,138, prelude 108, model 59), down from 7,443 before
    the source's reading of bodies was deleted (`docs/mir-lift.md` §6 step
    3: `lift.rs` 4,443, `lift_open.rs` 2,665, the combinator templates 131,
-   prelude 145, model 59); the MIR reading is 3,982 and its glue 202. The
-   skeleton's next step is to come from the MIR too (§6 step 4); the
-   reading's trust is to shrink to a literal reading checked against the
-   structured one (§6 step 5). commonware-codec's varint is verified this
+   prelude 145, model 59); the bodies' trusted reading is 4,062 (the
+   literal reading, its statement and parse, the names, the printer) plus
+   the gate's bookkeeping (≈ 650) and the glue (≈ 260). The skeleton's next
+   step is to come from the MIR too (`docs/mir-lift.md` §6 step 4); the
+   reading's trust was shrunk to a literal reading checked against the
+   structured one (§6 step 5, done). commonware-codec's varint is verified this
    way with its laws and proofs unchanged, commonware-storage's MMR in
    place (with its `#[rewrite]` alternatives and the lifted round trip of
    its lowered copy, whose bodies are rustc's MIR of the copy) with its
@@ -315,8 +344,13 @@ green, speed of the result and the human review load.
    evaluated by the kernel and the original is compiled by the build's
    `rustc` (overflow checks on) and run, on deterministic, seeded,
    coverage-driven inputs from the parameter types; outputs, errors and
-   buffer states must agree, or the build fails with the input. The
-   harness links the buffer model in Rust (`lift/conform_bytes.rs`), which
+   buffer states must agree, or the build fails with the input. For a
+   function read from MIR the literal reading L is run too and compared
+   with rustc directly (the first 64 inputs per function: `L::<f>::run`
+   from the theorem's `init` against `erase` of rustc's output,
+   `docs/mir-lift.md` §20.8), so the trusted reading itself is tested
+   against the compiler, not only the structured reading the theorem
+   relates it to. The harness links the buffer model in Rust (`lift/conform_bytes.rs`), which
    the varint pilot's `vshim` compares with the real `bytes` crate. It is a
    test, not a proof: a misreading on inputs it never generates stays
    possible. The lift records every exec function it produces for the
@@ -333,9 +367,15 @@ green, speed of the result and the human review load.
    the MIR behind the lift's test hook — a signed `Shr` read as a logical
    shift, an index by `RangeToInclusive` read as an exclusive one — is
    caught, in module mode and in place) show it catches the kind of
-   misreading the MIR reading risks. Further mitigations: `docs/mir-lift.md`
+   misreading the MIR reading risks. Fault injection
+   (`tests/fault_injection.rs`, `docs/mir-lift.md` §20.8) shows the
+   theorems catch a mutated MIR construct (one of each kind L reads) and
+   the two historical structuring bugs re-injected into `read.rs`, and that
+   a structured reading adding a precondition is refused. Further mitigations: `docs/mir-lift.md`
    §20, the refusal of every construct the lift does not know,
-   `tests/mir.rs` (each MIR construct on hand-written MIR, with negative
+   `tests/literal.rs` (each construct of L evaluated by the kernel on
+   hand-written MIR against rustc's semantics, with negative twins),
+   `tests/mir.rs` (the structured reading of each MIR construct, with negative
    twins), `tests/aug_int_toolchain.rs` and `tests/lift.rs` (kernel against
    rustc for signed operations and `div_ceil`), and the MIR fixtures of the
    front end's tests (`front/tests/mir_fixtures`, extracted by `mirx`).
@@ -345,7 +385,10 @@ Not trusted: parsing, name resolution, surface typing, the elaborator's
 obligation generation for exec code (a missing obligation is caught because
 the kernel requires the proof slot; this backstop does not cover the
 *statements* of §15 items, hence item 6), automation, scripts, optimizer,
-codegen printer, the front end's reference evaluator, diagnostics, the lift
+codegen printer, the front end's reference evaluator, diagnostics, the
+structured reading of MIR bodies (`mir/read.rs`, `mir/cfg.rs`) and the
+walker that proves its theorems (`mir/simproof.rs`, `mir/checked.rs` but
+for the gate's bookkeeping: item 8), the lift
 conformance check (a mitigation: it can only fail a build; its shims
 decide what it compares against, so a wrong shim could hide a misreading,
 never create one).

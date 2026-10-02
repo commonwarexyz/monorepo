@@ -185,6 +185,10 @@ pub enum DiagKind {
     /// killed only by budget): its verdict is incomplete, never a pass
     /// (§15.9; S4, additive).
     MutationIncomplete,
+    /// A lifted function read from rustc's MIR without a kernel-checked
+    /// theorem relating the literal reading of its MIR to its structured
+    /// reading (`docs/checked-structuring.md`, amendment (e); additive).
+    MirTheorem,
 }
 
 impl DiagKind {
@@ -249,6 +253,7 @@ impl DiagKind {
             SpecMutantSurvived => "spec-mutant-survived",
             LawInsensitive => "law-insensitive",
             MutationIncomplete => "mutation-incomplete",
+            MirTheorem => "mir-theorem",
         }
     }
 }

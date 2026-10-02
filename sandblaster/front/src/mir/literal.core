@@ -1,0 +1,206 @@
+-- The literal reading's fixed library (docs/mir-lift.md §20.4,
+-- docs/checked-structuring.md §2.6). TRUSTED: each definition is the meaning
+-- of one MIR construct. Every definition is total; undefined behaviour and
+-- panics are `None`, which can only make the literal reading fail, never
+-- give it a wrong value. The leaves at the end are emitted into a module's
+-- reading where it calls them (they name the lift's models).
+
+-- MIR types without a counterpart in the subset, and the slot type of a
+-- local whose type the reading does not model (every use of it is `None`).
+inductive mir::Infallible { }
+inductive mir::Tuple1 (A0 : Type) { | tuple1(x0 : A0) }
+inductive mir::ControlFlow (B : Type) (C : Type) { | Continue(c : C) | Break(b : B) }
+inductive mir::Unmodeled { | unmodeled }
+-- a string constant (`&str`, a panic message): a token without contents
+-- (anything that would read its contents is not modeled, so `None`)
+inductive mir::Str { | str }
+
+-- A projection of a place, stored in a reference code: a field, a variant
+-- (downcast), an array element (the index's value when the place was
+-- evaluated). `Deref` is never stored: a place through a reference
+-- continues from the reference's own root and path.
+inductive mir::Proj { | PField(i : Usize) | PDown(v : Usize) | PIndex(i : Usize) }
+
+-- A reference code: its root (a local or cell of the frame) and its path.
+def[prelude] rc::fst : (R : Type) -> (q : Tuple2(R, List(mir::Proj))) -> R :=
+  fun (R : Type) (q : Tuple2(R, List(mir::Proj))) => match q : Tuple2(R, List(mir::Proj)) as _ return R with | tuple2(r, p) => r end
+def[prelude] rc::snd : (R : Type) -> (q : Tuple2(R, List(mir::Proj))) -> List(mir::Proj) :=
+  fun (R : Type) (q : Tuple2(R, List(mir::Proj))) => match q : Tuple2(R, List(mir::Proj)) as _ return List(mir::Proj) with | tuple2(r, p) => p end
+
+-- Signed comparisons of two's complement bits (`isize` and `i8` are read
+-- as their bits, `i16`..`i64` as the lift's bit models): flipping the sign
+-- bit makes them unsigned ones.
+def[prelude] mir::slt_u64 : (a : U64) -> (b : U64) -> Bool :=
+  fun (a : U64) (b : U64) => #lt_u64(#xor_u64(a, 9223372036854775808u64), #xor_u64(b, 9223372036854775808u64))
+def[prelude] mir::sle_u64 : (a : U64) -> (b : U64) -> Bool :=
+  fun (a : U64) (b : U64) => #le_u64(#xor_u64(a, 9223372036854775808u64), #xor_u64(b, 9223372036854775808u64))
+def[prelude] mir::slt_u32 : (a : U32) -> (b : U32) -> Bool :=
+  fun (a : U32) (b : U32) => #lt_u32(#xor_u32(a, 2147483648u32), #xor_u32(b, 2147483648u32))
+def[prelude] mir::sle_u32 : (a : U32) -> (b : U32) -> Bool :=
+  fun (a : U32) (b : U32) => #le_u32(#xor_u32(a, 2147483648u32), #xor_u32(b, 2147483648u32))
+def[prelude] mir::slt_u16 : (a : U16) -> (b : U16) -> Bool :=
+  fun (a : U16) (b : U16) => #lt_u16(#xor_u16(a, 32768u16), #xor_u16(b, 32768u16))
+def[prelude] mir::sle_u16 : (a : U16) -> (b : U16) -> Bool :=
+  fun (a : U16) (b : U16) => #le_u16(#xor_u16(a, 32768u16), #xor_u16(b, 32768u16))
+def[prelude] mir::slt_u8 : (a : U8) -> (b : U8) -> Bool :=
+  fun (a : U8) (b : U8) => #lt_u8(#xor_u8(a, 128u8), #xor_u8(b, 128u8))
+def[prelude] mir::sle_u8 : (a : U8) -> (b : U8) -> Bool :=
+  fun (a : U8) (b : U8) => #le_u8(#xor_u8(a, 128u8), #xor_u8(b, 128u8))
+
+-- `IntToInt` casts from a signed type to a wider one: sign extension of the
+-- bits (`#cast` alone extends with zeros).
+def[prelude] mir::sext_u8_u16 : (x : U8) -> U16 :=
+  fun (x : U8) => if #lt_u8(x, 128u8) return U16 then #cast_u8_u16(x) else #or_u16(#cast_u8_u16(x), 65280u16)
+def[prelude] mir::sext_u8_u32 : (x : U8) -> U32 :=
+  fun (x : U8) => if #lt_u8(x, 128u8) return U32 then #cast_u8_u32(x) else #or_u32(#cast_u8_u32(x), 4294967040u32)
+def[prelude] mir::sext_u8_u64 : (x : U8) -> U64 :=
+  fun (x : U8) => if #lt_u8(x, 128u8) return U64 then #cast_u8_u64(x) else #or_u64(#cast_u8_u64(x), 18446744073709551360u64)
+def[prelude] mir::sext_u16_u32 : (x : U16) -> U32 :=
+  fun (x : U16) => if #lt_u16(x, 32768u16) return U32 then #cast_u16_u32(x) else #or_u32(#cast_u16_u32(x), 4294901760u32)
+def[prelude] mir::sext_u16_u64 : (x : U16) -> U64 :=
+  fun (x : U16) => if #lt_u16(x, 32768u16) return U64 then #cast_u16_u64(x) else #or_u64(#cast_u16_u64(x), 18446744073709486080u64)
+def[prelude] mir::sext_u32_u64 : (x : U32) -> U64 :=
+  fun (x : U32) => if #lt_u32(x, 2147483648u32) return U64 then #cast_u32_u64(x) else #or_u64(#cast_u32_u64(x), 18446744069414584320u64)
+-- an arithmetic right shift of two's complement bits (`Shr` of a signed type)
+def[prelude] mir::sar_u64 : (a : U64) -> (s : U32) -> U64 :=
+  fun (a : U64) (s : U32) => if #lt_u64(a, 9223372036854775808u64) return U64 then #wshr_u64(a, s) else #not_u64(#wshr_u64(#not_u64(a), s))
+def[prelude] mir::sar_u32 : (a : U32) -> (s : U32) -> U32 :=
+  fun (a : U32) (s : U32) => if #lt_u32(a, 2147483648u32) return U32 then #wshr_u32(a, s) else #not_u32(#wshr_u32(#not_u32(a), s))
+def[prelude] mir::sar_u8 : (a : U8) -> (s : U32) -> U8 :=
+  fun (a : U8) (s : U32) => if #lt_u8(a, 128u8) return U8 then #wshr_u8(a, s) else #not_u8(#wshr_u8(#not_u8(a), s))
+def[prelude] mir::sar_u16 : (a : U16) -> (s : U32) -> U16 :=
+  fun (a : U16) (s : U32) => if #lt_u16(a, 32768u16) return U16 then #wshr_u16(a, s) else #not_u16(#wshr_u16(#not_u16(a), s))
+
+-- The option monad of the reading (a failing statement fails the rest).
+def[prelude] mir::bind : (A : Type) -> (B : Type) -> (o : Option(A)) -> (f : A -> Option(B)) -> Option(B) :=
+  fun (A : Type) (B : Type) (o : Option(A)) (f : A -> Option(B)) =>
+    match o : Option(A) as _ return Option(B) with | None => None[B] | Some(x) => f x end
+def[prelude] mir::map : (A : Type) -> (B : Type) -> (o : Option(A)) -> (f : A -> B) -> Option(B) :=
+  fun (A : Type) (B : Type) (o : Option(A)) (f : A -> B) =>
+    match o : Option(A) as _ return Option(B) with | None => None[B] | Some(x) => Some[B](f x) end
+-- `assert(c == expected)`, `assume(c)`: the state, or failure.
+def[prelude] mir::guard : (S : Type) -> (c : Bool) -> (s : S) -> Option(S) :=
+  fun (S : Type) (c : Bool) (s : S) => match c : Bool as _ return Option(S) with | false => None[S] | true => Some[S](s) end
+
+%for W in u8 u16 u32 u64 usize
+-- `CheckedAdd(a, b)` and friends: (the wrapped result, the overflow flag).
+def[prelude] mir::checked_add_$w : (a : $W) -> (b : $W) -> Tuple2($W, Bool) :=
+  fun (a : $W) (b : $W) => tuple2[$W, Bool](#wadd_$w(a, b), bool::not #le_int(#iadd(#cast_$w_int(a), #cast_$w_int(b)), $MAXint))
+def[prelude] mir::checked_sub_$w : (a : $W) -> (b : $W) -> Tuple2($W, Bool) :=
+  fun (a : $W) (b : $W) => tuple2[$W, Bool](#wsub_$w(a, b), bool::not #le_$w(b, a))
+def[prelude] mir::checked_mul_$w : (a : $W) -> (b : $W) -> Tuple2($W, Bool) :=
+  fun (a : $W) (b : $W) => tuple2[$W, Bool](#wmul_$w(a, b), bool::not #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint))
+-- `AddUnchecked` and friends, `Div`, `Rem`: undefined behaviour or a zero
+-- divisor is failure.
+def[prelude] mir::add_unchecked_$w : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #le_int(#iadd(#cast_$w_int(a), #cast_$w_int(b)), $MAXint) return Option($W) then Some[$W](#wadd_$w(a, b)) else None[$W]
+def[prelude] mir::sub_unchecked_$w : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #le_$w(b, a) return Option($W) then Some[$W](#wsub_$w(a, b)) else None[$W]
+def[prelude] mir::mul_unchecked_$w : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint) return Option($W) then Some[$W](#wmul_$w(a, b)) else None[$W]
+def[prelude] mir::div_$w : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #ne_$w(b, 0$w) as .h return Option($W) then Some[$W](#div_$w(a, b; h)) else None[$W]
+def[prelude] mir::rem_$w : (a : $W) -> (b : $W) -> Option($W) :=
+  fun (a : $W) (b : $W) => if #ne_$w(b, 0$w) as .h return Option($W) then Some[$W](#rem_$w(a, b; h)) else None[$W]
+-- `ShlUnchecked`/`ShrUnchecked`: undefined behaviour at or above the width.
+def[prelude] mir::shl_unchecked_$w : (a : $W) -> (s : U32) -> Option($W) :=
+  fun (a : $W) (s : U32) => if #lt_u32(s, $BITSu32) return Option($W) then Some[$W](#wshl_$w(a, s)) else None[$W]
+def[prelude] mir::shr_unchecked_$w : (a : $W) -> (s : U32) -> Option($W) :=
+  fun (a : $W) (s : U32) => if #lt_u32(s, $BITSu32) return Option($W) then Some[$W](#wshr_$w(a, s)) else None[$W]
+-- `BinOp::Cmp`: core's `Ordering`
+def[prelude] mir::cmp_$w : (a : $W) -> (b : $W) -> crate::__lift::Ordering :=
+  fun (a : $W) (b : $W) =>
+    if #lt_$w(a, b) return crate::__lift::Ordering then crate::__lift::Ordering::Less else
+    if #eq_$w(a, b) return crate::__lift::Ordering then crate::__lift::Ordering::Equal else crate::__lift::Ordering::Greater
+-- `Cast(IntToInt)` of a `bool`
+def[prelude] mir::bool_as_$w : (b : Bool) -> $W :=
+  fun (b : Bool) => match b : Bool as _ return $W with | false => 0$w | true => 1$w end
+%end
+-- an array element through an index (failure past the end)
+def[prelude] mir::array_get : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> Option(T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) =>
+    if #lt_usize(i, N) as .c return Option(T) then Some[T](array::index T N a i .c) else None[T]
+-- an array element update through an index (failure past the end)
+def[prelude] mir::array_set : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> (v : T) -> Option(Array T N) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) (v : T) =>
+    if #lt_usize(i, N) as .c return Option(Array T N) then Some[Array T N](array::set T N a i v .c) else None[Array T N]
+-- an array as a slice (`Unsize`, `&a[..]`), failure past `isize::MAX`
+def[prelude] mir::as_slice : (T : Type) -> (N : Usize) -> (a : Array T N) -> Option(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) =>
+    if #le_int(#cast_usize_int(N), ISIZE_MAX) as .h return Option(Slice T) then Some[Slice T](array::as_slice T N a .h) else None[Slice T]
+-- the first `k` elements of a slice (failure past its length)
+def[prelude] mir::prefix : (T : Type) -> (s : Slice T) -> (k : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (k : Usize) =>
+    mir::map Tuple2(Slice T, Slice T) (Slice T) (slice::split_at_checked T s k) (fun (p : Tuple2(Slice T, Slice T)) => match p : Tuple2(Slice T, Slice T) as _ return Slice T with | tuple2(a, b) => a end)
+-- the elements from `k` on (failure past its length)
+def[prelude] mir::suffix : (T : Type) -> (s : Slice T) -> (k : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (k : Usize) =>
+    mir::map Tuple2(Slice T, Slice T) (Slice T) (slice::split_at_checked T s k) (fun (p : Tuple2(Slice T, Slice T)) => match p : Tuple2(Slice T, Slice T) as _ return Slice T with | tuple2(a, b) => b end)
+-- `bswap` (the byte-order swap intrinsic): its bytes reversed, by shifts and
+-- masks (so that the word normalizer sees through it)
+def[prelude] mir::bswap_u16 : (x : U16) -> U16 :=
+  fun (x : U16) => #or_u16(#wshl_u16(x, 8u32), #wshr_u16(x, 8u32))
+def[prelude] mir::bswap_u32 : (x : U32) -> U32 :=
+  fun (x : U32) => #or_u32(#or_u32(#wshl_u32(#and_u32(x, 255u32), 24u32), #wshl_u32(#and_u32(x, 65280u32), 8u32)),
+                           #or_u32(#and_u32(#wshr_u32(x, 8u32), 65280u32), #wshr_u32(x, 24u32)))
+def[prelude] mir::bswap_u64 : (x : U64) -> U64 :=
+  fun (x : U64) => #or_u64(#or_u64(#or_u64(#wshl_u64(#and_u64(x, 255u64), 56u32), #wshl_u64(#and_u64(x, 65280u64), 40u32)),
+                                   #or_u64(#wshl_u64(#and_u64(x, 16711680u64), 24u32), #wshl_u64(#and_u64(x, 4278190080u64), 8u32))),
+                           #or_u64(#or_u64(#and_u64(#wshr_u64(x, 8u32), 4278190080u64), #and_u64(#wshr_u64(x, 24u32), 16711680u64)),
+                                   #or_u64(#and_u64(#wshr_u64(x, 40u32), 65280u64), #wshr_u64(x, 56u32))))
+def[prelude] mir::bswap_usize : (x : Usize) -> Usize :=
+  fun (x : Usize) => #cast_u64_usize(mir::bswap_u64 (#cast_usize_u64(x)))
+
+-- LEAVES (each emitted into a reading that calls it; a leaf with a `&mut`
+-- argument takes its referent and returns the new referent with the result)
+
+-- `bytes::Buf::try_get_u8(&mut buf)`: the buffer model (the bytes not yet read)
+def[prelude] leaf::buf_try_get_u8 : (b : List(U8)) -> Tuple2(List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError)) :=
+  fun (b : List(U8)) => crate::__lift_model::buf_try_get_u8 b
+
+-- `bytes::BufMut::put_u8(&mut buf, x)`: the buffer model (the bytes put so far)
+def[prelude] leaf::bufmut_put_u8 : (b : List(U8)) -> (x : U8) -> Tuple2(List(U8), Unit) :=
+  fun (b : List(U8)) (x : U8) => tuple2[List(U8), Unit](crate::__lift_model::bufmut_put_u8 b x, tt)
+
+-- `bytes::BufMut::put_slice(&mut buf, s)`
+def[prelude] leaf::bufmut_put_slice : (b : List(U8)) -> (s : Slice U8) -> Tuple2(List(U8), Unit) :=
+  fun (b : List(U8)) (s : Slice U8) => tuple2[List(U8), Unit](crate::__lift_model::bufmut_put_slice b s, tt)
+
+-- `Vec::<T, Global>::push(&mut v, x)`: `Vec<T>` is the list of its elements
+def[prelude] leaf::vec_push : (T : Type) -> (v : List(T)) -> (x : T) -> Tuple2(List(T), Unit) :=
+  fun (T : Type) (v : List(T)) (x : T) => tuple2[List(T), Unit](crate::__lift_model::vec_push T v x, tt)
+
+-- `Iterator::next(&mut it)` at `Copied<slice::Iter<&[u8]>>`: the byte strings not yet yielded
+def[prelude] leaf::bytes_iter_next : (it : Slice (Slice U8)) -> Tuple2(Slice (Slice U8), Option(Slice U8)) :=
+  fun (it : Slice (Slice U8)) => crate::__lift::bytes_iter_next it
+
+-- `<[T; N] as Index<RangeToInclusive<usize>>>::index(&a, ..=j)`: `&a[..j + 1]` (a panic past the end;
+-- `j + 1` cannot overflow below `N`: the checked sum, its test always true there)
+def[prelude] leaf::array_index_to_inclusive : (T : Type) -> (N : Usize) -> (a : Array T N) -> (j : Usize) -> Option(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (j : Usize) =>
+    if #lt_usize(j, N) return Option(Slice T) then
+      (if #le_int(#iadd(#cast_usize_int(j), #cast_usize_int(1usize)), 18446744073709551615int) as .h return Option(Slice T)
+       then mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::prefix T s (#add_usize(j, 1usize; h)))
+       else None[Slice T])
+    else None[Slice T]
+
+-- `<[T; N] as Index<RangeTo<usize>>>::index(&a, ..j)`: `&a[..j]`
+def[prelude] leaf::array_index_to : (T : Type) -> (N : Usize) -> (a : Array T N) -> (j : Usize) -> Option(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (j : Usize) =>
+    mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::prefix T s j)
+
+-- `<[T; N] as Index<RangeFrom<usize>>>::index(&a, i..)`: `&a[i..]`
+def[prelude] leaf::array_index_from : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> Option(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) =>
+    mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::suffix T s i)
+
+-- `<[T; N] as Index<Range<usize>>>::index(&a, i..j)`: `&a[i..j]` (a panic unless `i <= j <= N`)
+def[prelude] leaf::array_index_range : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> (j : Usize) -> Option(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) (j : Usize) =>
+    if #le_usize(i, j) return Option(Slice T) then
+      mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::bind (Slice T) (Slice T) (mir::prefix T s j) (fun (p : Slice T) => mir::suffix T p i))
+    else None[Slice T]
+
+-- `Deref::deref(&d)` of a library newtype of bytes read as its field (SHA-256's `Digest`): `&d[..]`
+def[prelude] leaf::bytes_deref : (N : Usize) -> (a : Array U8 N) -> Option(Slice U8) :=
+  fun (N : Usize) (a : Array U8 N) => mir::as_slice U8 N a

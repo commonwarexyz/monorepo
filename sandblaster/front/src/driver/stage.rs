@@ -147,6 +147,16 @@ pub fn with_elaboration<T: Send>(krate: &Crate, opts: &VerifyOptions, f: impl Fn
     })
 }
 
+/// [`with_elaboration`], with the elaboration mutable (a step that extends
+/// its environment: the lift conformance check loads the literal reading).
+pub fn with_elaboration_mut<T: Send>(krate: &Crate, opts: &VerifyOptions, f: impl FnOnce(&mut elab::Output) -> T + Send) -> T {
+    elab::with_big_stack(|| {
+        let mut chain = opts.chain();
+        let mut out = elab::elaborate(krate, &mut chain, &opts.elab_options());
+        f(&mut out)
+    })
+}
+
 /// The lift conformance check of a crate's in-place modules on its own (a
 /// stage tool, `sandblaster conform`; never a verdict): elaborates the
 /// crate and runs [`crate::conform::check_in_place`], whatever the proofs
@@ -158,7 +168,7 @@ pub fn conform_in_place(c: &Checked, cfg: &crate::conform::Config) -> Result<cra
         return Err("the crate has no `#[lift(in_place)]` module".into());
     }
     let opts = VerifyOptions { provers: super::ProverSet::Standard, exec_only: false };
-    Ok(with_elaboration(k, &opts, |out| crate::conform::check_in_place(out, k, c, &infos, cfg)))
+    Ok(with_elaboration_mut(k, &opts, |out| crate::conform::check_in_place(out, k, c, &infos, cfg)))
 }
 
 /// Elaborates and checks the crate: every definition, obligation and law,

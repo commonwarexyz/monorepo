@@ -204,6 +204,7 @@ fn rebuild<'a>(out: &mut Output, krate: &'a Crate, prover: &'a mut ProverChain, 
         globals,
         eq_fns,
         defs: std::mem::take(&mut out.defs),
+        pre_commit: std::mem::take(&mut out.pre_commit),
         obligations: std::mem::take(&mut out.obligations),
         laws: std::mem::take(&mut out.laws),
         diags: std::mem::take(&mut out.diags),
@@ -226,6 +227,7 @@ fn rebuild<'a>(out: &mut Output, krate: &'a Crate, prover: &'a mut ProverChain, 
 fn finish(el: Elab<'_>, out: &mut Output) {
     out.env = el.env;
     out.defs = el.defs;
+    out.pre_commit = el.pre_commit;
     out.obligations = el.obligations;
     out.laws = el.laws;
     out.diags = el.diags;

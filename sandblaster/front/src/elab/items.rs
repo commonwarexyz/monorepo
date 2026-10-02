@@ -232,10 +232,18 @@ impl<'a> Elab<'a> {
         // the written code: it is added (its dependents are still
         // elaborated and reported) but is blocked, never checked
         let stand_in = self.stand_in_used(&ty, &body);
+        // (the pre-commit body keeps the decrease proofs the commit drops)
+        let pre_commit = match &recursion {
+            Recursion::Measure { measure } => Some(super::PreCommit { body: body.clone(), measure: measure.clone() }),
+            _ => None,
+        };
         let d = DefDecl { name: Rc::from(name), kind, ty: ty.clone(), body, recursion, arity, opaque };
         let mut b = Budget { steps: self.opts.def_budget };
         match self.env.add_def(d, &mut b) {
             Ok(g) => {
+                if let Some(pc) = pre_commit {
+                    self.pre_commit.insert(g, pc);
+                }
                 let status = match stand_in {
                     Some(p) => {
                         self.s1.stand_in_users.insert(g, p.clone());

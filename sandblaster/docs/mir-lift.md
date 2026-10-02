@@ -93,9 +93,11 @@ and lifted names, exactly as before.
  source ──rustc (pinned nightly)──► sandblaster-mirx ──► m.sbmir (checked in, SHA-256 of sources, rustc version)
                                                              │
  DSL root: #[lift(mir = "m.sbmir")] mod m;                   ▼
-   lift (skeleton: items, names, signatures, attachments) + mir::read (bodies) ──► exec subset ──► elaborator ──► kernel
+   lift (skeleton: items, names, signatures, attachments) + mir::read (bodies, untrusted: S) ──► exec subset ──► elaborator ──► kernel
+                                                             │                                                        ▲
+   mir::literal (L, trusted: one kernel definition per instance) + mir::stmt (L::thm::f) ── theorem gate: walker proofs ┘
                                                              │
-                           lift conformance check: kernel evaluation vs the build's rustc, every build
+                           lift conformance check: kernel evaluation of S and of L vs the build's rustc, every build
 ```
 
 * `mirx` (trusted printer): S-expressions of every reachable instance —
@@ -103,11 +105,19 @@ and lifted names, exactly as before.
   callee classification (module function / library function / closure /
   shim / leaf / intrinsic / diverging), ADT definitions with variants,
   discriminants and field types, constants destructured by rustc.
-* `front/src/mir/ir.rs`, `sexp.rs` (untrusted): parsing.
+* `front/src/mir/ir.rs`, `sexp.rs` (trusted since `docs/checked-structuring.md`:
+  they feed the literal reading): parsing; anything malformed is an error,
+  never a default.
 * `front/src/mir/cfg.rs` (untrusted): reachability, back edges and natural
   loops, post-dominators ignoring diverging paths, liveness. It only
   decides shape: the reading follows every edge whatever it says.
-* `front/src/mir/read.rs` (trusted): the reading of `docs/mir-lift.md` §20.2 —
+* `front/src/mir/literal.rs`, `literal.core` (trusted): the literal reading
+  L of §20.4, one kernel definition per MIR instance; `stmt.rs` (trusted):
+  the statement of each lifted function's theorem (§20.5);
+  `checked.rs`/`simproof.rs` (untrusted, but for the gate's bookkeeping):
+  the walker that proves the theorems and the gate's driver (§20.6).
+* `front/src/mir/read.rs` (untrusted since `docs/checked-structuring.md`: a
+  proposer of the structured reading S, checked against L by the theorems): the reading of `docs/mir-lift.md` §20.2 —
   a symbolic walk of the CFG with values that are pure expressions or
   known constructors; library calls and closures inlined with their
   returns continuing the caller; module functions called by name with state
@@ -225,9 +235,9 @@ and lifted names, exactly as before.
 
 | | source lift | MIR path |
 | --- | --- | --- |
-| trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884** | `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
+| trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884** | after §6 step 5 (checked structuring): L's generator `mir/literal.rs` 1,474 + `literal.core` 139 + `mir/stmt.rs` 225 + `mir/mod.rs` 480 + the parse `ir.rs` 482 + `sexp.rs` 131 = **2,931**, printer `mirx` 1,131 → **4,062**, plus the gate's bookkeeping ≈ 650 and the lift glue ≈ 260 (`read.rs` untrusted); before it: `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
 | grows with | every surface feature (each port added ~2k) | new MIR constructs only (the MMR survey added intrinsics, `Cmp`, unsizing, reference constants, iterator models: ≈ 0.2k; moving the MMR ≈ 0.5k; moving the verifier ≈ 0.3k: host models, open-trait instances and items in the printer, `Option<&mut T>` states, field write-back) |
-| untrusted support | — | `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
+| untrusted support | — | after §6 step 5: the structurer `read.rs` 2,433, `cfg.rs` 235, the walker `simproof.rs` 4,565 and `checked.rs` 1,707 (≈ 500 of it the gate's trusted bookkeeping); before: `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
 | MMR laws / proof lines adapted | 10 laws, PROOF.rs 4,074 lines | LAWS.rs unchanged; PROOF.rs: one lemma's `ensures` (`ptl_pick`, the candidate tests of `position_to_location`) restated in the MIR's shape, 9 lines replaced by 16 (+2 comment lines); `opt.rs`: the host file's imports (`use crate::merkle::Family as _`, 3 lines → 6 with a comment), so that rustc compiles it |
 | MMR obligations / definitions / laws | 5,589 / 724 / 10 | 5,602 / 724 / 10 (every obligation and law proven) |
 | MMR `sandblaster check` (proofs, gates up to the missing lock) | 226 s | 231 s |
@@ -357,13 +367,29 @@ does not declare (the lift reads them).
    leave the source lift (another ≈ 2k lines). What remains of `lift.rs`
    is the ghost language's monomorphization over the families (laws and
    proofs), which is TCB item 6 anyway.
-5. **Shrink the reader's trust**: the structuring (joins, loop forms,
-   carried values) is where a bug would change meaning (one was found and
-   fixed while prototyping: a value snapshot restored a variable after an
-   in-place write). Replace it by a checked step: a literal CPS reading
-   (every block a function, no carrying) that is obviously MIR, plus a
-   kernel-checked equality between it and the structured reading, so only
-   the literal reading (~0.5k lines) stays trusted.
+5. **Shrink the reader's trust** (done: `docs/checked-structuring.md`).
+   The structuring (joins, loop forms, carried values) is where a bug
+   would change meaning (two were found: a value snapshot restored a
+   variable after an in-place write; a field write-back copied a state
+   before two pushes, losing them). It is replaced by a checked step: the
+   literal reading L of §20.4 (one kernel definition per MIR instance,
+   one arm per block, no structuring) is the trusted meaning of a body, and
+   a kernel-checked theorem per lifted function (§20.5) equates it with the
+   structured reading, which `read.rs` now only proposes. Every verified
+   build checks every lifted function's theorem (the gate, §20.6: varint
+   63 of 63, the MMR 76 of 76, the verifier's set 1 69 of 69), the lifted
+   round trip proves the shipped copy's theorem (§20.7), the theorems are
+   cached in the verdict cache, the lift conformance check runs L against
+   rustc as well as S (§20.8), and fault injection shows the theorems catch
+   a mutated MIR construct and the two historical bugs re-injected into
+   `read.rs` (§20.8). Trusted lines (code lines, no comments/tests): before,
+   `read.rs` 2,417 + `mod.rs` 434 + `mirx` 1,131 = 3,982 (the parse
+   untrusted); after, L's generator 1,474 + `literal.core` 139 + `stmt.rs`
+   225 + `mod.rs` 480 + `ir.rs` 482 + `sexp.rs` 131 + `mirx` 1,131 = 4,062,
+   plus the gate's bookkeeping (≈ 0.65k) and the lift glue (≈ 0.26k); the
+   structurer `read.rs` (2,433), `cfg.rs` (235), the walker `simproof.rs`
+   (4,565) and the rest of `checked.rs` left the trusted base
+   (DESIGN.md §1.1 item 8 has the accounting).
 
 ## Appendix: `docs/mir-lift.md` §20 (text pending the next lock acceptance)
 
@@ -471,7 +497,7 @@ file replaced by the copy the build writes (`OUT_DIR/<name>-roundtrip__<module>.
 it is checked like the module's own file (every source's SHA-256), so a
 round-trip MIR of another copy fails the round trip.
 
-#### 20.2 The reading (`crate::mir::read`, trusted)
+#### 20.2 The structured reading (`crate::mir::read`, untrusted: checked by §20.5's theorems, §20.6)
 
 The reading walks the control-flow graph from the entry block and follows
 its edges exactly. Where two paths rejoin is taken from post-dominators
@@ -542,6 +568,26 @@ read from MIR keeps none of its `use` leaves that no lifted item names
 
 #### 20.3 What is trusted
 
+A body's trusted reading is L (§20.4) and the statement of §20.5: every
+verified build checks every lifted function's theorem (the gate of §20.6),
+so the structured reading of §20.2 (`read.rs`), the control-flow analyses
+(`cfg.rs`), the walker that proves the theorems (`crate::mir::simproof`)
+and its driver (`crate::mir::checked`, but for the gate's bookkeeping
+below) are untrusted proposers: a misreading there fails a theorem, never
+a verdict. Trusted: L's generator (`mir/literal.rs`) and library
+(`mir/literal.core`), the statement generator (`mir/stmt.rs`), the parse
+L reads (`mir/ir.rs`, `mir/sexp.rs`), the names and load checks of
+`mir/mod.rs`, the printer `sandblaster-mirx`, the lift glue that records
+each function's MIR instance and declared contract (`lift::MirContract`),
+and the gate's bookkeeping: that every recorded function's theorem is
+kernel-checked with §20.5's statement or recalled from the verdict cache
+under the keys of §20.6, and that a rewritten function of the lifted round
+trip is lowered only with its shipped theorem (§20.7). The lift prelude's
+definitions that S uses for core's functions (`elab/lift.core`, the
+models of `lift/prelude.rs`) stay trusted as they were; a model lemma
+(§20.6) relating one to core's MIR is an untrusted step. The text below, written when the structured
+reading was the trusted one, still describes what the theorems relate S to.
+
 The reading (`crate::mir::read`), the type and constructor names
 (`crate::mir::ModuleNames`, with the names of lifted constants and of
 host models: a host model is named by its crate path, `crate::merkle::Error`;
@@ -557,8 +603,311 @@ trusted as it already is (it compiles the code); the fidelity argument is
 that the MIR comes from the same release as the compiler that builds the
 crate, and the lift conformance check (§1.1 item 8) compares every read
 function with that compiler's build of the source on generated inputs. The
-S-expression parser, the control-flow analyses (`cfg.rs`) and the matching
-of lifted names to MIR instances are not trusted (a wrong one is a refusal,
+control-flow analyses (`cfg.rs`) and the matching of lifted names to MIR
+instances are not trusted (the S-expression parser is, since L reads its
+output: §20.3's first paragraph) (a wrong one is a refusal,
 a name error or a type error; a free function generic over an open trait,
 or over a byte-string iterator, is matched without its instance's name,
 as the lift erases that parameter).
+
+The build gate of §20.6 is in place: the reading above is the structured
+reading the theorems check, not a trusted one.
+
+#### 20.4 The literal reading L (`crate::mir::literal`, trusted)
+
+Every MIR instance with a body is read as kernel definitions, written as
+core text by `mir/literal.rs` over the fixed library `mir/literal.core` and
+checked by the kernel like any definition (types, and the termination of
+`run`). Nothing is structured: one arm per basic block, every jump a call
+of `run`. `None` means a panic, undefined behaviour, running out of fuel,
+or a construct L does not model; it never is a value, so a construct read
+as `None` can only make a theorem unprovable. The reading of each
+construct is local; the generator records every construct it reads as
+`None` other than a panic (`LFn::faults`, naming the MIR construct).
+
+**Per instance** `f` (`L::<id>`; a comment line names its MIR key):
+
+| item | meaning |
+| --- | --- |
+| `Root` | one constructor `r<i>` per local, `rc<j>` per cell: the roots of reference codes |
+| `St` | one field `l<i> : Option(T_i)` per local (`None`: not initialized, or moved out of), then `c<j> : Option(C_j)` per cell |
+| `g<i>`, `s<i>` | get and set of slot `i` |
+| `Blk` | `b<k>` per block, `d<k>` its switch's dispatcher |
+| `rank` | `2·post(k) + 2` for `b<k>`, one less for `d<k>` (`post`: the depth-first post-order from the entry); a target of a depth-first back edge is a **loop header** |
+| `run : (fuel : List(Unit)) -> (b : Blk) -> (os : Option(St)) -> Option(Out)` | `None` on `None`; else the arm of `b`; by measure recursion on `len(fuel)·65536 + rank(b)`, the decrease of every call proven by `linarith` from the arm's path equations |
+| `Out` | each cell's final value (an optional cell's as an `Option`), then the return place unless it is `()`; one component is itself |
+
+A **cell** is the referent of a `&mut T` parameter, or of an
+`Option<&mut T>` parameter when it is `Some` (an optional cell), held in
+the frame (state passing). A cell whose referent itself holds a `&mut U`
+or an `Option<&mut U>` has a nested cell for `U` (one level). The
+referent of `&mut &[u8]` / `&mut &mut [u8]` is the buffer model's
+`List(U8)` (SEMANTICS.md §19.1).
+
+**Jumps and fuel.** A jump to a block of lower rank that is not a loop
+header is `rec(fuel, b, os)`; a jump to a loop header, and a self-call,
+consume one unit: `match fuel with Nil => None | Cons(u, f1) => rec(f1, ..)`.
+Fuel only bounds termination: if `run n b σ = Some(v)` for some `n`, the
+MIR execution from `b` in `σ` terminates with `v`.
+
+**Types**
+
+| MIR | L |
+| --- | --- |
+| `bool`, `u8`..`u64`, `usize`, `()`, `!` | `Bool`, `U8`..`U64`, `Usize`, `Unit`, `Empty` |
+| `i8`, `isize` | their bits, `U8`, `U64` |
+| `i16`, `i32`, `i64` | the lift's bit models `crate::__lift::I16(U16)` .. (SEMANTICS.md §19.3) |
+| tuples | `Unit`, `mir::Tuple1(T)`, `Tuple<n>(..)` |
+| `[T; N]`, `&[T]` | `Array T N`, `Slice T` |
+| `&T` | `T` (a snapshot: no interior mutability in the subset) |
+| `&mut T` | the instance's code type `Tuple2(Root, List(mir::Proj))` |
+| `&str` | `mir::Str`, a token without contents (a panic message; anything that reads contents is not modeled) |
+| closures, function items | the tuple of the captures, `Unit` |
+| `Option`, `Result`, `ControlFlow`, `Infallible`, `bytes::TryGetError`, `Ordering`, `PhantomData`, `Range` (by exact path: under `std::` or `core::`, `bytes::TryGetError` as written; a crate's own `option::Option` is not core's) | `Option`, `crate::__lift::Result`, `mir::ControlFlow`, `mir::Infallible`, `crate::__lift::TryGetError`, `crate::__lift::Ordering`, `crate::__lift::PhantomData`, `crate::__lift::Range` |
+| a module type, a host model enum, a host model unit struct that an open trait's declared instance is | the subset's declaration (`ModuleNames::kernel_adt`: the lifted name in its DSL module; a host enum where its model declares it), constructors matched by variant name (a struct's one constructor is its one variant); a variant the model does not declare is `None` when built |
+| a module type whose subset declaration carries invariant proofs | L's own **mirror** (an inductive of its MIR fields) |
+| `Vec<T, Global>`, `Copied<slice::Iter<&[u8]>>`, a library newtype of a host model alias (`Digest([u8; 32])`) | the models `List(T)`, `Slice (Slice U8)`, the field's type |
+| any other library ADT | L's own inductive (constructors `v<i>_<Name>`, MIR field types) |
+| `u128`, `i128`, `char`, anything else (raw pointers, function pointers, trait objects) | not modeled: the local's slot is `mir::Unmodeled` and every use of it `None` (before stage cs-assurance, `u128`/`i128` were read as 64-bit words) |
+
+**Data-free values.** A read of a place whose type holds no data (`()`,
+the empty tuple, a closure without captures, a function item) is that
+type's one value, whatever the slot holds: rustc's `RemoveZsts` drops the
+assignments of such values, so MIR reads them unassigned (`let f = |n| ..;
+f(x)` borrows the closure's local `_29` without ever assigning it).
+
+**Places and references.** A place is its local with its projections
+(`Field`, `Downcast` then `Field`, `Index` by a local), read through the
+slot and written by rebuilding the value (a field of another variant is
+`None`; an array index past the end is `None`). `Deref` of a shared
+reference is the snapshot itself. `Deref` of a `&mut` continues from the
+**reference code** it holds: a root and a path of `mir::Proj` steps
+(`PField(i)`, `PDown(v)`, `PIndex(i)`, an index's value taken when the
+place is evaluated). Reading and writing through a code
+(`deref__<T>`/`write__<T>`) follows the path in the root's current value,
+each step a field match or an array element, and is `None` on a path that
+does not lead to a `T`. `&mut place` is the code of the place; `&mut *r`
+extends the code `r` holds; `&place` is the value of the place.
+
+**Statements and rvalues**
+
+| MIR | L |
+| --- | --- |
+| `StorageLive`/`StorageDead`, fake borrows, nops | nothing |
+| `place = rv` | `rv`'s value written to `place` |
+| `Assume(c)` | `None` unless `c` |
+| `copy p`, `move p` | the value of `p` (a moved-out slot is not read again in borrow-checked MIR) |
+| constants | their values (integers at their width, as bits for signed types; aggregates; `&c` is `c`; a constant item its value; a zero-sized constant of an ADT is its one variant, and is not modeled for a type of several variants) |
+| `RuntimeChecks(overflow)`, `RuntimeChecks(ub)` | `true` (the extraction has overflow checks, §20.1), `false`; other runtime checks are not modeled. `ub` as `false` skips the library's precondition checks: where one would fail, the operation it guards is undefined behaviour, which L reads as `None` for every operation it models (unchecked arithmetic and shifts, `Assume`, indexing), so no value is read where a build with the checks panics. A library-UB precondition (`check_library_ub`) guards operations L does not model (raw pointers, transmutes into types with a niche), which are `None` anyway; in the three extractions the one `ub` check guards `unchecked_shl` (core's `u64::checked_shl`) |
+| `Add`/`Sub`/`Mul` | wrapping (`#wadd`..) on the bits |
+| `AddUnchecked`/`SubUnchecked`/`MulUnchecked`, `Div`, `Rem` (unsigned) | `None` on overflow / a zero divisor (`mir::*_unchecked_w`, `mir::div_w`, `mir::rem_w`) |
+| `CheckedAdd/Sub/Mul` (unsigned) | (the wrapped value, the overflow flag) (`mir::checked_*_w`) |
+| `Shl`/`Shr` | the amount masked (`#wshl`, `#wshr`; `Shr` of a signed type is arithmetic, `mir::sar_w`) |
+| `ShlUnchecked`/`ShrUnchecked` | `None` at or above the width, the amount compared at its own type (a `u64` amount of `2^32` is undefined behaviour, not a shift by its low 32 bits) |
+| `BitAnd/Or/Xor`, `Eq/Ne` | the bits' primitive |
+| `Lt/Le/Gt/Ge` | unsigned, or signed on the bits of a signed type (`mir::slt_w`, `mir::sle_w`) |
+| `Cmp` (unsigned) | `mir::cmp_w`, an `Ordering` |
+| signed `Div`, `Rem`, unchecked or checked operations | not modeled |
+| `Not`, `Neg` (signed) | `#not`, `#wneg` on the bits |
+| `PtrMetadata` of `&[T]` | its length |
+| `IntToInt` | the bits truncated, zero-extended from an unsigned type, sign-extended (`mir::sext`) from a signed one; a `bool` is 0 or 1 |
+| `Transmute` of `u16`/`u32`/`u64` to `[u8; n]` | its little-endian bytes (the targets) |
+| `Unsize` of `&[T; N]` to `&[T]` | the slice (`None` past `isize::MAX`) |
+| `Discriminant(p)` | the variant's discriminant at the destination's type (`-1i8` is `255`) |
+| `Aggregate` | the constructor (tuple, struct, variant, closure); an array is its list with its length |
+| `Repeat(x, N)` | `N` copies |
+| `Ref(shared)`, `Ref(mut)` | the value, the code |
+| other casts, `Len`, raw borrows, anything else | not modeled |
+
+**Terminators**
+
+| MIR | L |
+| --- | --- |
+| `Goto` | the jump |
+| `SwitchInt(v, ..)` | a jump to the dispatcher, which compares `v` (its bits) with each arm's value and jumps |
+| `Assert(c, expected)` | `None` unless `c == expected`, then the jump |
+| `Return` | `Some(Out)`, each part read from its slot (`None` if not initialized) |
+| `Drop` without glue | the jump |
+| `Drop` with glue of an ADT value | the jump when its variant runs no drop code (`no-glue`), else not modeled |
+| `Unreachable`, `UnwindResume`, `Abort`, a call that does not return | `None`; so is every block from which every path ends in one (a panic) |
+| `Call` of an instance with MIR | its `run` on the same fuel (a self-call: `rec` on one unit less, the continuation too) from its initial state: the parameters in their slots (a closure's spread from the tuple its callers pass), each callee cell holding the referent read through the caller's code for it (a nested cell: through the code its parent's referent holds; a held code in the callee's terms is the nested cell's own); after `Some(out)`, each cell's final value written back through that code, then the result to the destination. A code the callee returns, in a cell or its result (`&mut T`, `Option<&mut T>`), rooted at a callee cell, is the caller's code for that cell extended by its path; rooted at a callee local (dangling) it is `None` |
+| `Call` of a leaf | its model, below |
+| intrinsics `ctlz`, `cttz`, `ctpop`, `bswap`, `saturating_add/sub`, `*_with_overflow`, `cold_path` | their primitives (`bswap` by shifts and masks, so the word normalizer sees through it); `cold_path` is nothing |
+| `Deref::deref` of a library newtype of bytes without MIR | its bytes as a slice |
+| a call not extracted, mutual recursion | not modeled |
+
+**Leaves** (`literal.core`'s `leaf::*`, emitted where called; a leaf with
+a `&mut` argument reads the referent through its code, applies the model
+and writes the new referent back):
+
+| leaf | model |
+| --- | --- |
+| `Buf::try_get_u8` | `crate::__lift_model::buf_try_get_u8` on the buffer |
+| `BufMut::put_u8`, `put_slice` | `bufmut_put_u8`, `bufmut_put_slice` on the buffer |
+| `Vec::push` | `vec_push` on the list |
+| `Iterator::next` at `Copied<slice::Iter<&[u8]>>` | `crate::__lift::bytes_iter_next` |
+| `<[T; N] as Index<RangeToInclusive / RangeTo / RangeFrom / Range>>::index` (core's range types, by exact path) | the subslice, `None` past the end (`&a[..j + 1]` .. `&a[i..j]`) |
+| a method of a host model's declared instance (`<Sha256 as Hasher>::hash`) | the host model's function (`crate::merkle::host::Sha256::hash`) |
+
+These are the models S uses (SEMANTICS.md §19.10, A5 of
+`docs/checked-structuring.md`).
+
+#### 20.5 The theorem of a lifted function (`crate::mir::stmt`, trusted)
+
+For a lifted function whose body is read from the MIR instance `f`, with
+structured reading `S_f` (`x̄ .h̄`: its telescope):
+
+```text
+L::thm::<f> : Π x̄ (.h̄ : pre). Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
+    Eq(Option(Out), L::<f>::run n b0 (Some(init(x̄))), Some(erase(S_f x̄ .h̄)))
+```
+
+For every input satisfying the preconditions there is a fuel bound after
+which L returns `Some` of S's value: the MIR run terminates without a
+panic or undefined behaviour, with S's return value and S's final `&mut`
+referents. This is total correctness of the MIR against S, the object the
+laws and proofs are about.
+
+* **Preconditions** come from the function's **declared contract** only:
+  its `requires(..)` clauses in the skeleton and attachments (and a
+  declared depth bound), recorded by the lift (`lift::MirContract`), never
+  from the reading of the body: the structured reading sees the lifted
+  signature only (`lift.rs`'s `mir_body` takes `&mut Signature`), so it
+  cannot add, drop or change a clause, and the contract is taken from the
+  skeleton's attributes before the body is read and the attachments' after
+  it. Every irrelevant binder of `S_f`'s type must be one of them
+  (`h_req<i>` for the `i`-th clause, `h_depth` for the bound); otherwise
+  the statement is refused (`tests/fault_injection.rs`: a reading that
+  adds `requires(true)` to every function gets no theorem). The relevant
+  parameters are the instance's parameters, in order.
+* **`init(x̄)`**: a parameter's slot holds `Some(erase(x_i))`; a `&mut`
+  parameter's slot holds the code `(rc<j>, [])` and its cell
+  `Some(erase(x_i))`; an `Option<&mut T>` parameter's slot holds `None` or
+  `Some((rc<j>, []))` as `x_i` is `None` or `Some`, its cell `erase(x_i)`;
+  every other local is `None`.
+* **`erase`** is the identity on the types L and S share. A module type
+  whose S declaration carries invariant proofs is read as L's mirror: a
+  struct as the mirror's constructor of S's own projections of its
+  relevant fields, an enum by a match. A core type that S models by a
+  lift-prelude struct (SEMANTICS.md §19.9; `stmt::MODELS`) is L's value
+  built from S's projections of the struct's fields, each at the MIR
+  field path it models: `RangeInclusive<u32/u64>` as `RangeInclusiveU32/U64
+  { start, end, exhausted }` field for field, `Once<T>` as `Once { v }` at
+  `inner.inner.opt` (`Once { inner: IntoIter { inner: Item { opt } } }`).
+  S's result (its states in parameter order, then its return value) is
+  erased component by component into `Out`.
+
+#### 20.6 The gate
+
+Every verified build (`compile_module`, `compile_lifted`, crate mode and
+`sandblaster check`) runs the gate after the §15 gates, in the environment
+of the module's structured reading: for every lifted exec function read
+from MIR, its theorem `L::thm::<f>` of §20.5 is kernel-checked, or the
+build reports `error[mir-theorem]` naming the function and why (a walk that
+failed, a theorem it needs that failed, the literal reading not accepted,
+a recursion L does not read), and the module is not verified. The
+pending-gates development build (`compile_lifted_pending_gates`) reports
+the same findings without enforcing them.
+
+* L is generated and checked once per extraction, for the instances the
+  module's lifted functions run.
+* The theorems are proven in dependency order: the lifted functions a
+  function's MIR calls (directly or through library code), then its loop
+  helpers' lemmas, then the function. A loop helper the structured reading
+  built as a tail-recursive function has a lemma from its header to the
+  function's return; a `while` loop (the elaborator's `<f>::loop#k`) has a
+  lemma from its header to its exit that hands the literal state to a
+  continuation (`docs/checked-structuring.md` §5.12). These lemmas are
+  untrusted steps: only the theorems' statements are trusted.
+* A library function with MIR that the lift prelude models
+  (`core::num::<impl uN>::div_ceil` against `uN::div_ceil`) gets an
+  untrusted **model lemma**: its literal reading returns the model's value
+  (the model's own preconditions; `stmt::model_statement`, never a
+  theorem). The walks of the functions that call it use it as a callee
+  lemma, so both readings hold the model's call; a model lemma that fails
+  blocks nothing (the walk then reads the library function's run). The
+  prelude's `uN::div_ceil` transcribes core's test for test (`r > 0`).
+* A theorem is recalled from the verdict cache when its key matches: the
+  toolchain, the generator (`literal.rs`, `stmt.rs`, `mod.rs`, `ir.rs`,
+  `sexp.rs`, `literal.core`), the structured reading of the function and
+  of every definition it refers to (callees and helpers included), its
+  declared contract, the MIR text of its instance and of every instance its
+  literal reading runs, and the names the reading uses.
+* The report's `mir_theorems` section lists, per module, every theorem and
+  loop lemma, proven or not and why.
+
+#### 20.7 The shipped code: the lifted round trip's theorems
+
+The lifted round trip (DESIGN.md §2.1) of a module read from MIR reads its
+copy's bodies from the copy's MIR (`<stem>.roundtrip__<module>.sbmir`);
+the emitted file is the copy's text, so that MIR is the code rustc builds.
+For every rewritten function `f` and each of its verified instances
+(replacement `g`, the optimizer's link: `<f>::rewrite_equiv : Π x̄ h̄. Eq(R,
+f x̄ h̄, g x̄ h̄)` of a `#[rewrite]`, a residual's `..::equiv : Π x̄. Eq(R, g x̄,
+f x̄)`, or conversion), after the round trip's comparisons pass:
+
+* L is read for the copy's new instances, continuing the gate's reading
+  of the module; an instance both extractions hold must be the same MIR in
+  both, else no theorem is proven.
+* Each helper `__sandblaster_opt_<h>` gets `L::thm::<id>` of §20.5
+  against the verified definition the round trip compared it with, under
+  that definition's declared contract; the check copy
+  `__sandblaster_check__<f>` (per instance type, and before it the
+  dispatch impl method it calls, for a function lowered through a per-type
+  dispatch) gets `L::thm::<id>` against `g`, its structured side the call
+  of `g` (the delegation the round trip checked). A replacement without a
+  declared contract (the optimizer's residual) is stated under the source
+  function's.
+* From it, by a transport along `equiv`, the **shipped theorem**
+  `L::shipped::<id>`: §20.5's statement of the copy's MIR instance against
+  `f`, with `f`'s declared contract. The code rustc compiles returns, at
+  sufficient fuel, exactly the value of the function the laws are about.
+
+A function whose shipped theorem fails keeps its source text (the
+round trip rejects it; a host compiling the lowered copy fails its
+build). The lowering record lists the theorems (`shipped_theorems`). They
+are recalled from the verdict cache under a key of the generator, the
+structured readings of `f`, `g`, the helpers' definitions and the link,
+the declared contracts, and the round trip's MIR of every instance the
+copy's, the dispatch method's and the helpers' readings run. A lowering
+run without a preceding gate (a stage tool) reads and proves the module's
+instances the copy needs first.
+
+
+#### 20.8 Checks of L itself: conformance and fault injection
+
+The theorems relate L to S; what makes L the meaning of the shipped code
+is trusted (the generator, its library, the parse, the printer). Two
+checks test it, and test that the theorems catch what they should:
+
+* **Conformance against rustc.** The lift conformance check (DESIGN.md
+  §1.1 item 8, `crate::conform`) runs L as well as S, in module mode and
+  in place: for each lifted function read from MIR, on the first 64 inputs
+  it compares S on, the kernel evaluates `L::<f>::run` at fuel `2^16` from
+  §20.5's `init` of the input and compares it, by the kernel's conversion,
+  with `Some(erase(r))`, `r` rustc's output read back at S's result type
+  (`crate::conform::literal`). L is compared with rustc directly, not
+  through S. A difference fails the build like any mismatch; the counts
+  are in the report (`literal_cases`) and the check's cached record, whose
+  key covers the generator and the MIR.
+* **Fault injection** (`tests/fault_injection.rs`). One construct of the
+  MIR L reads is changed, S (read from the unchanged MIR) is not: the
+  theorem of the function that runs it fails for its own reason, and the
+  module's other theorems hold — an integer constant, a comparison, a bit
+  operation, a checked operation, an assertion's expected value, a
+  switch's targets, an aggregate's variant, a `&mut` borrow's place, a
+  call's arguments, a statement, a `goto`, the return place, an unsigned
+  and a signed shift and an intrinsic in library MIR, a discriminant's
+  switch in library MIR, a unary operator, a cast, a leaf call's argument.
+  The two historical structuring bugs, re-injected into `read.rs` behind
+  `lift::test_hook`, make theorems fail. `WritebackSnapshot` (a matched
+  field's write-back taken from a copy before two pushes) fails the
+  verifier's `reconstruct_digest` and nothing else, although its proofs
+  pass on that misreading (no law speaks of `collected`).
+  `SnapshotOwnValue` (a variable's own value snapshotted before an
+  in-place write, then restored) fails varint's `write::<uN>` (its loop
+  lemma, the structured loop helper's own proofs failing too) and the
+  functions that call it, nothing else; the MMR and the verifier have no
+  in-place write it changes. A reading that adds a precondition the
+  contract lacks (`ExtraRequires`, on the private free functions) is
+  refused (§20.5).

@@ -22,19 +22,29 @@
 //! constant evaluation of `T::SIZE`) are deleted (`docs/mir-lift.md` §6
 //! step 3).
 //!
-//! Trusted (TCB item 8, "the reading"): `read.rs` (the reading of MIR
-//! constructs), the type and constructor names below, the builtin leaves
-//! (`read::builtin_leaf`: `Ord::max`/`min`, `div_ceil`), and the printer
-//! `sandblaster-mirx` (it transcribes rustc's data). Untrusted: the
-//! S-expression parser, `cfg.rs` (it only chooses the shape), the matching
-//! of lifted functions to MIR instances (a mismatch is a name or type
-//! error). The lift conformance check compares every read function with
-//! rustc's build of the source.
+//! Trusted (TCB item 8, "the reading", `docs/checked-structuring.md`
+//! amendment (d)): the literal reading L (`literal.rs` and its library
+//! `literal.core`), the statement of each function's theorem (`stmt.rs`),
+//! the parse L reads (`ir.rs`, `sexp.rs`), the names and load checks below
+//! (`load`, `ModuleNames::kernel_adt`, `is_transparent`,
+//! `host_model_method`), the printer `sandblaster-mirx` (it transcribes
+//! rustc's data), and the gate's bookkeeping in `checked.rs` (which
+//! theorems are planned and accepted). Untrusted: the structured reading
+//! `read.rs` (a proposer of S, checked by the theorems), `cfg.rs`, the
+//! walker `simproof.rs` and the rest of `checked.rs` (they build proof
+//! terms the kernel checks), the matching of lifted functions to MIR
+//! instances (a mismatch is a name or type error). The lift conformance
+//! check compares every read function, and the literal reading of it,
+//! with rustc's build of the source.
 
 pub mod cfg;
+pub mod checked;
 pub mod ir;
+pub mod literal;
 pub mod read;
 pub mod sexp;
+pub mod simproof;
+pub mod stmt;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,8 +61,32 @@ const HOST_TRAITS: &[&str] = &["Write", "Read", "EncodeSize", "Default", "FixedS
 const OP_TRAITS: &[&str] = &["Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor", "Shl", "Shr", "AddAssign", "SubAssign", "MulAssign", "DivAssign", "RemAssign", "BitAndAssign", "BitOrAssign", "BitXorAssign", "ShlAssign", "ShrAssign", "PartialEq", "PartialOrd", "Ord", "From", "TryFrom"];
 const METHOD_TRAITS: &[&str] = &["Deref", "AsRef", "Iterator"];
 
+/// The DSL module whose function is being read (set by the lift before
+/// each reading; a lock, so that the names can travel with the lift's facts
+/// to the elaboration thread). (The toolchain's crates do not depend on
+/// `commonware_utils`.)
+#[allow(clippy::disallowed_types)]
+#[derive(Debug, Default)]
+pub struct Current(std::sync::Mutex<String>);
+
+impl Current {
+    pub fn borrow(&self) -> std::sync::MutexGuard<'_, String> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    pub fn replace(&self, s: String) -> String {
+        std::mem::replace(&mut *self.borrow(), s)
+    }
+}
+
+impl Clone for Current {
+    #[allow(clippy::disallowed_types)]
+    fn clone(&self) -> Self {
+        Current(std::sync::Mutex::new(self.borrow().clone()))
+    }
+}
+
 /// The names of a lifted module in the subset.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ModuleNames {
     /// `commonware_codec::varint`.
     pub module: String,
@@ -72,7 +106,7 @@ pub struct ModuleNames {
     /// an item of another lifted module is named by its path there.
     pub dsl_modules: Vec<String>,
     /// The DSL module whose function is being read (set by the lift).
-    pub current: std::cell::RefCell<String>,
+    pub current: Current,
     /// The lifted associated constants of open-trait impls: `(self type,
     /// constant)` → whether it is a constant function (`Family__MAX_NODES()`)
     /// rather than a constant (SEMANTICS.md §19.6).
@@ -95,6 +129,9 @@ pub struct HostModels {
     /// Unit structs whose impls are models: name → DSL path. A leaf call of
     /// a method at a library type `T` is the model's method `path::m`.
     pub structs: BTreeMap<String, String>,
+    /// Enums of host models: name → DSL path (where the model declares it;
+    /// the crate may re-export it elsewhere).
+    pub enums: BTreeMap<String, String>,
 }
 
 fn sanitize(s: &str) -> String {
@@ -220,6 +257,46 @@ impl ModuleNames {
         // (an array length is printed `32usize` here, `32` in the model)
         let norm = |s: String| s.replace(' ', "").replace("usize]", "]");
         (norm(quote::ToTokens::to_token_stream(&ft).to_string()) == norm(target.clone())).then(|| dsl.clone())
+    }
+
+    /// The kernel name of the subset's declaration a library or module ADT
+    /// instance of rustc's MIR is read as, for the literal reading
+    /// (`literal.rs`): a module type by its lifted name in its DSL module
+    /// (`crate::varint::Decoder__u32`), a host-model enum by its crate path
+    /// (`crate::error::Error`), the declared instance of an open trait that
+    /// is a host model's unit struct (`crate::merkle::host::Sha256`).
+    pub fn kernel_adt(&self, m: &Sbmir, key: &str) -> Option<String> {
+        let d = m.adts.get(key)?;
+        if self.local(&d.path) {
+            let name = self.local_adt_name(m, d).ok()?;
+            let krate = self.module.split("::").next().unwrap_or("");
+            let dsl = self.dsl_modules.iter().filter(|dm| d.path.starts_with(&format!("{krate}{}::", dm.trim_start_matches("crate")))).max_by_key(|dm| dm.len())?;
+            return Some(format!("{dsl}::{name}"));
+        }
+        if self.host_enums.contains_key(&self.adt_base(&d.path)) {
+            // where the crate's model declares it, under the module the crate
+            // path names (`crate::merkle::host::Error` for `merkle::Error`)
+            let hp = quote::ToTokens::to_token_stream(&self.host_path(&d.path).ok()?).to_string().replace(' ', "");
+            let parent = hp.rsplit_once("::").map(|p| p.0).unwrap_or("crate");
+            let same_crate = d.path.split("::").next() == self.module.split("::").next();
+            return Some(self.host.enums.get(&self.adt_base(&d.path)).filter(|p| same_crate && p.starts_with(&format!("{parent}::"))).cloned().unwrap_or(hp));
+        }
+        self.host_instance(m, key).filter(|p| self.host.structs.values().any(|s| s == p))
+    }
+
+    /// A library newtype read as its one field (a host model alias of the
+    /// field's type, SHA-256's `Digest`).
+    pub fn is_transparent(&self, m: &Sbmir, key: &str) -> bool {
+        self.transparent_path(m, key).is_some()
+    }
+
+    /// The host model's function for a leaf method of a library type that
+    /// is a host model's declared instance (`<Sha256 as Hasher>::hash` →
+    /// `crate::merkle::host::Sha256::hash`).
+    pub fn host_model_method(&self, m: &Sbmir, self_ty: &Ty, method: &str) -> Option<String> {
+        let Ty::Adt(k) = self_ty else { return None };
+        let p = self.host_instance(m, k)?;
+        self.host.structs.values().any(|s| *s == p).then(|| format!("{p}::{method}"))
     }
 
     /// The lifted name of a module ADT instance: `Decoder<u16>` →
@@ -535,7 +612,7 @@ fn release_series(v: &str) -> String {
 }
 
 /// A parsed `.sbmir` with its lifted-name index.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Loaded {
     pub m: Sbmir,
     pub names: ModuleNames,

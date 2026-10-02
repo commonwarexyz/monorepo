@@ -241,6 +241,10 @@ fn the_lowered_declaration_compiles_the_checked_copy() {
     assert!(copy.contains("pub fn at_most_one_bit(x: u8) -> bool {\n    __sandblaster_opt_at_most_one_bit_fast(x)\n}"), "{copy}");
     assert!(copy.contains("fn __sandblaster_opt_at_most_one_bit_fast(x: u8) -> bool {\n    x & x.wrapping_sub(1) == 0\n}"), "{copy}");
     assert!(!copy.lines().any(|l| l.starts_with("//!")), "the declaration carries the docs: {copy}");
+    // the shipped code's theorems (docs/checked-structuring.md step 8): the
+    // helper's and the copy's MIR against the definitions the round trip
+    // compared them with, and the copy's against the source function
+    assert!(output(&o, "bits-report.json").contains("`crate::outer::bits::at_most_one_bit`: 3 theorem(s) of the shipped MIR (1 against the source function)"), "{}", output(&o, "bits-report.json"));
     // a kept function whose reason mentions the round trip without being
     // its rejection does not fail the build
     assert!(output(&o, "bits-report.json").contains("its signature names `Self` (the round trip's copy is a free function)"));
@@ -297,6 +301,17 @@ fn a_rewrite_the_round_trip_rejects_fails_the_build_that_compiles_the_copy() {
     assert!(copy.contains("// NOT COMPILED") && copy.contains("nothing was cheaper") && !copy.contains("rewritten:"), "{copy}");
     // nothing rewritten: the source byte for byte after its docs
     assert!(copy.ends_with(driver::lifted::split_docs(BITS).1), "{copy}");
+}
+
+/// Negative twin of the shipped code's theorem: when the MIR the build
+/// ships is not the code the round trip compared (one constant of the
+/// helper's MIR, in the literal reading only), its theorem fails and the
+/// rewrite is rejected, so the build that compiles the copy fails.
+#[test]
+fn a_shipped_mir_that_is_not_the_compared_code_fails_its_theorem() {
+    let o = build_with(&files(&outer(&lowered_decl(BITS_DOCS, COPY)), BITS), Some(LowerFault::ShippedMir));
+    refused(&o, "the lifted round trip rejected the rewrite of `crate::outer::bits::at_most_one_bit`");
+    assert!(o.stderr.contains("the shipped code's theorem"), "{}", o.stderr);
 }
 
 /// A failed proof fails the build and writes stubs: rustc never compiles a

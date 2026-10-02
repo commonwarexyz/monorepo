@@ -141,6 +141,9 @@ pub struct GateReport {
     pub elapsed: Duration,
     /// The lift conformance check of a lifted module ([`crate::conform`]).
     pub conformance: Option<crate::conform::Report>,
+    /// The theorems of the lifted functions read from rustc's MIR
+    /// ([`theorem_gate`]), per lifted MIR module.
+    pub theorems: Vec<crate::mir::checked::ModuleTheorems>,
 }
 
 impl GateReport {
@@ -206,6 +209,9 @@ impl GateReport {
         }
         if let Some(r) = &self.conformance {
             j.put("lift_conformance", r.json());
+        }
+        if !self.theorems.is_empty() {
+            j.put("mir_theorems", theorems_json(&self.theorems));
         }
         j.put("emission_chain", Json::Arr(self.chain.iter().map(|x| Json::string(x)).collect()));
         let mut e = Json::obj();
@@ -475,6 +481,10 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
         }
         let tg = Instant::now();
         run_gates(&out, krate, c, &b.spec, &b.changes, lock, &mut b.gates);
+        // the theorem of every lifted function read from MIR, in this very
+        // environment (after the other gates: it extends the environment
+        // with the literal reading and the theorems)
+        theorem_gate(&mut out, krate, c, &mut b.gates);
         // a safety net that tripped while the gates ran (examples of
         // mutants, law checkers) fails the build like any other
         resource_gate(&mut b.v);
@@ -537,7 +547,7 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
             // the lift conformance check (DESIGN.md §1.1 item 8) of every
             // in-place module, before the record is sealed
             let infos: Vec<&crate::lift::LiftedInfo> = c.lifted.iter().filter(|l| l.in_place && !l.ghost).collect();
-            let conf = crate::conform::check_in_place(&out, krate, c, &infos, &cfg);
+            let conf = crate::conform::check_in_place(&mut out, krate, c, &infos, &cfg);
             b.gates.results.push(GateResult { gate: "lift-conformance", ran: true, errors: conf.failures().len(), warnings: 0, note: conf.summary() });
             let conf_ok = conf.passed();
             let conf_summary = conf.header_line();
@@ -597,7 +607,7 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
                     b.gates.chain.push(format!("lifted module `{}`: crate mode cannot emit a lifted module", info.name));
                     return b;
                 };
-                let conf = crate::conform::check(&out, krate, c, info, &cfg);
+                let conf = crate::conform::check(&mut out, krate, c, info, &cfg);
                 b.gates.results.push(GateResult { gate: "lift-conformance", ran: true, errors: conf.failures().len(), warnings: 0, note: conf.summary() });
                 let conf_ok = conf.passed();
                 let conf_summary = conf.header_line();
@@ -744,6 +754,96 @@ pub(super) fn splice_json_field(text: &str, key: &str, value: &str) -> String {
     format!("{head}{sep}\n  \"{key}\": {value}\n{tail}")
 }
 
+/// The theorem gate (`docs/checked-structuring.md`, amendment (e)): every
+/// lifted exec function whose body was read from rustc's MIR must have its
+/// theorem `L::thm::f` kernel-checked — the literal reading of its MIR
+/// returns, at sufficient fuel, exactly the structured reading's value —
+/// or the build has an error and the module is not verified. A crate with
+/// no lifted MIR module records nothing.
+pub fn theorem_gate(out: &mut elab::Output, krate: &crate::hir::Crate, c: &Checked, rep: &mut GateReport) {
+    if c.lift_facts.mir_loaded.is_empty() || c.lift_facts.mir_contracts.is_empty() {
+        return;
+    }
+    let t = Instant::now();
+    // (the lifted round trip's copies call the module's functions: their
+    // lemmas are needed later, so they are walked even when cached)
+    let mut keep_keys = Vec::new();
+    for info in c.lifted.iter() {
+        let Some(rt_path) = &info.mir_roundtrip else { continue };
+        let Some(text) = c.sm.files().find(|(_, f)| f.path == *rt_path).map(|(_, f)| f.text.clone()) else { continue };
+        let Ok(rt) = crate::mir::ir::parse(&text) else { continue };
+        for k in rt.fns.keys().filter(|k| k.contains(super::lowered::HELPER_PREFIX) || k.contains(super::lowered::CHECK_PREFIX)) {
+            keep_keys.extend(crate::mir::checked::mir_closure(&rt, k));
+        }
+    }
+    let opts = crate::mir::checked::GateOptions { cache: c.cache.as_deref(), keep_keys, ..Default::default() };
+    let reports = crate::mir::checked::prove_lifted(out, &c.lift_facts, &opts);
+    let mut d = Diagnostics::new();
+    let span_of = |g: &str| krate.items.iter().find(|it| format!("crate::{}", it.path.0.join("::")) == g).map(|it| it.span).unwrap_or(crate::span::Span::DUMMY);
+    let (mut total, mut proven, mut cached) = (0, 0, 0);
+    for r in &reports {
+        total += r.functions();
+        proven += r.proven();
+        cached += r.cached();
+        for (g, why) in &r.missing {
+            let key = r.outcomes.iter().find(|o| &o.global == g).map(|o| o.key.clone()).unwrap_or_default();
+            let mut msg = format!("`{g}` has no kernel-checked theorem relating rustc's MIR (`{key}`) to the structured reading its laws and proofs are about: {}", trunc_msg(why, 4000));
+            msg.push_str(" (docs/checked-structuring.md: without it the reading of the body is not checked, and the module is not verified)");
+            d.push(crate::diag::Diagnostic::error(crate::diag::DiagKind::MirTheorem, span_of(g), msg));
+        }
+    }
+    let note = format!("{proven} of {total} lifted function(s) read from MIR with a kernel-checked theorem ({cached} from the verdict cache), {:.1}s", t.elapsed().as_secs_f64());
+    let warnings = 0;
+    rep.results.push(GateResult { gate: "mir-theorems", ran: true, errors: d.error_count(), warnings, note });
+    rep.diags.extend(d);
+    rep.theorems = reports;
+}
+
+fn trunc_msg(s: &str, n: usize) -> String {
+    if s.len() > n { format!("{}..", &s[..s.floor_char_boundary(n)]) } else { s.to_string() }
+}
+
+/// The report's `mir_theorems` section (deterministic: no times).
+fn theorems_json(reports: &[crate::mir::checked::ModuleTheorems]) -> Json {
+    Json::Arr(
+        reports
+            .iter()
+            .map(|r| {
+                let mut o = Json::obj();
+                o.str("module", &r.dsl);
+                o.num("functions", r.functions() as i64);
+                o.num("proven", r.proven() as i64);
+                o.num("literal_functions", r.literal_fns as i64);
+                o.num("literal_items", r.literal_items as i64);
+                o.put(
+                    "theorems",
+                    Json::Arr(
+                        r.outcomes
+                            .iter()
+                            .map(|x| {
+                                let mut t = Json::obj();
+                                t.str("function", &x.global);
+                                t.str("mir", &x.key);
+                                t.str("kind", x.kind);
+                                match &x.result {
+                                    Ok(_) => t.bool("proven", true),
+                                    Err(e) => {
+                                        t.bool("proven", false);
+                                        t.str("why", &trunc_msg(e, 600));
+                                    }
+                                }
+                                t
+                            })
+                            .collect(),
+                    ),
+                );
+                o.put("missing", Json::Arr(r.missing.iter().map(|(g, _)| Json::string(g)).collect()));
+                o
+            })
+            .collect(),
+    )
+}
+
 /// Runs the six §15 gates in order (see the module docs) and records each
 /// one's outcome.
 fn run_gates(out: &elab::Output, krate: &crate::hir::Crate, c: &Checked, spec: &LockStatus, changes: &[crate::specdiff::Change], lock: LockUse, rep: &mut GateReport) {
@@ -808,7 +908,7 @@ pub fn lowering_note(low: &super::lowered::LoweredModule) -> String {
     let mut s = if low.lowered() == 0 {
         format!("optimized: none of the {n} source function(s) rewritten, the source is emitted as-is")
     } else {
-        format!("optimized: {} of {n} source function(s) rewritten to their residuals (lifted round trip: {} definition(s) compared)", low.lowered(), low.compared)
+        format!("optimized: {} of {n} source function(s) rewritten to their residuals (lifted round trip: {} definition(s) compared{})", low.lowered(), low.compared, if low.shipped.is_empty() { String::new() } else { format!("; the shipped MIR's theorems: {}", low.shipped.join("; ")) })
     };
     let mut groups: BTreeMap<String, usize> = BTreeMap::new();
     for r in &low.records {

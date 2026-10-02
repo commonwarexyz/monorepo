@@ -605,6 +605,10 @@ fn generic_functions_are_lowered_through_a_per_type_dispatch() {
         LowerOutcome::Lowered { via, .. } => assert!(via.contains("per-type dispatch `__sandblaster_dispatch_Prim` over u16, u32"), "{via}"),
         other => panic!("`clamp_low`: {other:?}"),
     }
+    // the shipped code's theorems, per verified instance: the helper's, the
+    // dispatch impl method's, the copy's and the one against the source
+    // instance (docs/checked-structuring.md step 8)
+    assert!(low.shipped.iter().any(|n| n.contains("`crate::bits::clamp_low`") && n.contains("(2 against the source function)")), "{:?}", low.shipped);
     // (the twice-clamped one: rustc's MIR leaves nothing cheaper)
     kept(&low, "crate::bits::clamp_low_plus", "not 3% cheaper");
     let b = &low.body;
