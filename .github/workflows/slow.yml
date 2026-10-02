@@ -299,14 +299,16 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: cargo-nextest@0.9.133
-    # Miri cannot run the SVE2 table lookups, and the full lane tests are too slow for it.
+    # The static SHA-3 target feature lets Miri interpret the NEON pair kernels. Miri cannot run the
+    # SVE2 table lookups, and the full lane tests are too slow for it.
     # Including runtime also checks cryptography as a non-test dependency.
     - name: Run miri tests for cryptography::blake3::simd::aarch64
       env:
+        RUSTFLAGS: "-Ctarget-feature=+sha3"
         MIRIFLAGS: "-Zmiri-disable-isolation"
       run: |
         cargo miri nextest run --target aarch64-unknown-linux-gnu -p commonware-cryptography -p commonware-runtime --lib \
-          -E 'test(/^blake3::simd::aarch64::tests::test_xar_encoding/)'
+          -E 'test(/^blake3::simd::aarch64::(tests::test_(dup_|pair_batch|xar_encoding))/)'
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

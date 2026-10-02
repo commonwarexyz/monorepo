@@ -557,6 +557,147 @@ impl<W: Words<LANES>> Words<{ 2 * LANES }> for Dual<W> {
     }
 }
 
+/// Two messages per NEON vector, each 32-bit word duplicated across a 64-bit
+/// lane.
+///
+/// Rotating a 64-bit lane that holds a 32-bit word twice rotates both copies
+/// by the same amount, so the SHA-3 extension's 64-bit `XAR` performs each
+/// fused xor-rotate in one instruction. Additions and exclusive-ors act on
+/// the copies independently and keep them equal.
+#[derive(Clone, Copy)]
+struct Dup(uint32x4_t);
+
+impl Words<2> for Dup {
+    #[inline(always)]
+    unsafe fn splat(word: u32) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(vdupq_n_u32(word)) }
+    }
+
+    #[inline(always)]
+    unsafe fn add(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(vaddq_u32(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(veorq_u32(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate16(self, other: Self) -> Self {
+        // SAFETY: The caller establishes the SHA-3 extension.
+        unsafe { self.xar::<16>(other) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate12(self, other: Self) -> Self {
+        // SAFETY: The caller establishes the SHA-3 extension.
+        unsafe { self.xar::<12>(other) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate8(self, other: Self) -> Self {
+        // SAFETY: The caller establishes the SHA-3 extension.
+        unsafe { self.xar::<8>(other) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate7(self, other: Self) -> Self {
+        // SAFETY: The caller establishes the SHA-3 extension.
+        unsafe { self.xar::<7>(other) }
+    }
+
+    #[inline(always)]
+    unsafe fn load(blocks: [&[u8; BLOCK_LEN]; 2]) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON, and each 16-byte load starts at
+        // offset 0, 16, 32, or 48 of a 64-byte block.
+        unsafe {
+            let mut words = [Self(vdupq_n_u32(0)); 16];
+            for quarter in 0..4 {
+                let offset = quarter * 16;
+                let left = vld1q_u32(blocks[0][offset..].as_ptr().cast());
+                let right = vld1q_u32(blocks[1][offset..].as_ptr().cast());
+
+                // Pair the messages' words, then duplicate each pair member.
+                let low = vzip1q_u32(left, right);
+                let high = vzip2q_u32(left, right);
+                words[4 * quarter] = Self(vzip1q_u32(low, low));
+                words[4 * quarter + 1] = Self(vzip2q_u32(low, low));
+                words[4 * quarter + 2] = Self(vzip1q_u32(high, high));
+                words[4 * quarter + 3] = Self(vzip2q_u32(high, high));
+            }
+            words
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; 2], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { super::pad(inputs, start, len) }
+    }
+
+    #[inline(always)]
+    unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; 2] {
+        // SAFETY: The caller establishes NEON, and each 16-byte store starts
+        // at offset 0 or 16 of a 32-byte output.
+        unsafe {
+            let mut outputs = [[0u8; OUT_LEN]; 2];
+            for half in 0..2 {
+                // Keep one copy of each word, then separate the messages.
+                let w = &words[4 * half..4 * half + 4];
+                let low = vuzp1q_u32(w[0].0, w[1].0);
+                let high = vuzp1q_u32(w[2].0, w[3].0);
+                let left = vuzp1q_u32(low, high);
+                let right = vuzp2q_u32(low, high);
+                vst1q_u8(
+                    outputs[0][16 * half..].as_mut_ptr(),
+                    vreinterpretq_u8_u32(left),
+                );
+                vst1q_u8(
+                    outputs[1][16 * half..].as_mut_ptr(),
+                    vreinterpretq_u8_u32(right),
+                );
+            }
+            outputs
+        }
+    }
+}
+
+impl Dup {
+    /// Exclusive-or with `other` and rotate each 64-bit lane right by `R`
+    /// bits, which rotates both duplicated 32-bit copies right by `R`.
+    #[inline(always)]
+    unsafe fn xar<const R: i32>(self, other: Self) -> Self {
+        cfg_if::cfg_if! {
+            if #[cfg(miri)] {
+                // Miri does not implement `XAR`.
+                // SAFETY: The caller establishes NEON. Both types are 16
+                // bytes, and every bit pattern is valid for both.
+                let mut lanes: [u64; 2] =
+                    unsafe { core::mem::transmute(veorq_u32(self.0, other.0)) };
+                for lane in &mut lanes {
+                    *lane = lane.rotate_right(R as u32);
+                }
+
+                // SAFETY: Both types are 16 bytes, and every bit pattern is
+                // valid for both.
+                Self(unsafe { core::mem::transmute::<[u64; 2], uint32x4_t>(lanes) })
+            } else {
+                // SAFETY: The caller establishes the SHA-3 extension.
+                unsafe {
+                    Self(vreinterpretq_u32_u64(vxarq_u64::<R>(
+                        vreinterpretq_u64_u32(self.0),
+                        vreinterpretq_u64_u32(other.0),
+                    )))
+                }
+            }
+        }
+    }
+}
+
 /// Hash four equal-length messages, one per NEON lane.
 ///
 /// # Safety
@@ -604,6 +745,18 @@ unsafe fn hash_x8_xar(inputs: [&[u8]; 2 * LANES]) -> [[u8; OUT_LEN]; 2 * LANES] 
     unsafe { super::hash::<Dual<Hybrid>, { 2 * LANES }>(inputs) }
 }
 
+/// Hash two equal-length messages with duplicated words and SHA-3 `XAR`
+/// rotations.
+///
+/// # Safety
+///
+/// The caller must establish NEON and SHA-3 extension availability.
+#[target_feature(enable = "neon,sha3")]
+unsafe fn hash_x2_dup(inputs: [&[u8]; 2]) -> [[u8; OUT_LEN]; 2] {
+    // SAFETY: NEON and the SHA-3 extension are enabled for this function.
+    unsafe { super::hash::<Dup, 2>(inputs) }
+}
+
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
         /// Return whether NEON is available.
@@ -617,6 +770,12 @@ cfg_if::cfg_if! {
         fn supports_sve2() -> bool {
             std::arch::is_aarch64_feature_detected!("sve2")
         }
+
+        /// Return whether the SHA-3 extension is available.
+        #[inline]
+        fn supports_sha3() -> bool {
+            std::arch::is_aarch64_feature_detected!("sha3")
+        }
     } else {
         /// Return whether NEON is statically enabled.
         pub(super) const fn supported() -> bool {
@@ -626,6 +785,11 @@ cfg_if::cfg_if! {
         /// Return whether SVE2 is statically enabled.
         const fn supports_sve2() -> bool {
             cfg!(target_feature = "sve2")
+        }
+
+        /// Return whether the SHA-3 extension is statically enabled.
+        const fn supports_sha3() -> bool {
+            cfg!(target_feature = "sha3")
         }
     }
 }
@@ -645,6 +809,27 @@ unsafe fn hash_quad(inputs: [&[u8]; LANES], sve2: bool) -> [[u8; OUT_LEN]; LANES
         // SAFETY: The caller establishes NEON.
         unsafe { hash_x4(inputs) }
     }
+}
+
+/// Return whether the two-message kernels are available: NEON with the SHA-3
+/// extension, whose 64-bit `XAR` rotates the duplicated words.
+#[inline]
+// Feature detection is const only without std.
+#[allow(clippy::missing_const_for_fn)]
+pub(super) fn supports_pair() -> bool {
+    supported() && supports_sha3()
+}
+
+/// Hash two equal-length messages with duplicated words.
+///
+/// # Panics
+///
+/// Panics if [`supports_pair`] does not hold.
+pub(super) fn hash_pair(inputs: [&[u8]; 2]) -> [[u8; OUT_LEN]; 2] {
+    assert!(supports_pair(), "two-message kernels are unavailable");
+
+    // SAFETY: NEON and SHA-3 extension availability were asserted above.
+    unsafe { hash_x2_dup(inputs) }
 }
 
 /// Parent chaining values with NEON words `V`.
@@ -960,6 +1145,36 @@ unsafe fn hash_small<M: AsRef<[u8]>>(messages: &[M], sve2: bool) -> Option<Vec<D
     )
 }
 
+/// Hash a batch whose only active lanes are the first two, with duplicated
+/// words when `sha3` is true and otherwise one at a time with the [blake3]
+/// crate. Spare outputs are zero.
+///
+/// Returns `None` when `active` is not two.
+///
+/// # Safety
+///
+/// The caller must establish NEON availability. If `sha3` is true, it must
+/// also establish SHA-3 extension availability.
+#[inline]
+unsafe fn pair_batch(
+    inputs: [&[u8]; 2 * LANES],
+    active: usize,
+    sha3: bool,
+) -> Option<[[u8; OUT_LEN]; 2 * LANES]> {
+    if active != 2 {
+        return None;
+    }
+    let pair = if sha3 {
+        // SAFETY: The caller establishes NEON and the SHA-3 extension.
+        unsafe { hash_x2_dup([inputs[0], inputs[1]]) }
+    } else {
+        [inputs[0], inputs[1]].map(|input| *blake3::hash(input).as_bytes())
+    };
+    let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
+    outputs[..2].copy_from_slice(&pair);
+    Some(outputs)
+}
+
 /// Hash independent messages with NEON batch kernels.
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     if !supported() {
@@ -968,6 +1183,7 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     let features = Features {
         sve2: supports_sve2(),
     };
+    let sha3 = supports_sha3();
     if matches!(messages.len(), 3 | 4) {
         // SAFETY: NEON availability was established above, and the feature
         // snapshot records whether the four-lane SVE2 kernel is available.
@@ -985,6 +1201,12 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
 
             // SAFETY: NEON availability was established above.
             return unsafe { hash_x8(inputs) };
+        }
+
+        // SAFETY: NEON availability was established above, and `sha3` records
+        // whether the SHA-3 extension is available.
+        if let Some(outputs) = unsafe { pair_batch(inputs, active, sha3) } {
+            return outputs;
         }
 
         // Spare lanes repeat the first input, so a narrower kernel takes the
@@ -1026,6 +1248,20 @@ mod tests {
 
         // SAFETY: SVE2 availability was checked above.
         check_lanes::<{ 2 * LANES }>(|inputs| unsafe { hash_x8_xar(inputs) });
+    }
+
+    #[test]
+    fn test_dup_lanes_match_reference() {
+        let available = std::arch::is_aarch64_feature_detected!("sha3");
+        if cfg!(miri) {
+            assert!(available, "enable SHA-3 so Miri executes the pair body");
+        }
+        if !available {
+            return;
+        }
+
+        // SAFETY: SHA-3 extension availability was checked above.
+        check_lanes::<2>(|inputs| unsafe { hash_x2_dup(inputs) });
     }
 
     /// Check subtree chaining values against the reference at subtree-aligned
@@ -1079,6 +1315,36 @@ mod tests {
             let features = Features { sve2 };
             let pack = |messages: &[&[u8]], digests: &mut _| features.pack(messages, digests);
             check_batch(|messages| batch(messages, pack, reference));
+        }
+    }
+
+    /// Check that a batch with two active lanes hashes them with and without
+    /// the SHA-3 extension, and that other batches decline.
+    #[test]
+    fn test_pair_batch() {
+        assert!(supported());
+        let (left, right) = ([1u8; 72], [2u8; 72]);
+        let mut inputs = [&left[..]; 2 * LANES];
+        inputs[1] = &right;
+        let expected = [left, right].map(|input| *blake3::hash(&input).as_bytes());
+
+        // Two active lanes use duplicated words with SHA-3 and the crate
+        // without it.
+        for sha3 in [false, true] {
+            if sha3 && !supports_sha3() {
+                continue;
+            }
+
+            // SAFETY: NEON availability was asserted above, and the SHA-3
+            // extension is used only when detected.
+            let outputs = unsafe { pair_batch(inputs, 2, sha3) }.expect("two active lanes");
+            assert_eq!(outputs[..2], expected, "sha3={sha3}");
+        }
+
+        // Other active lane counts leave the batch to the lane kernels.
+        for active in [3, 4] {
+            // SAFETY: NEON availability was asserted above.
+            assert!(unsafe { pair_batch(inputs, active, false) }.is_none());
         }
     }
 

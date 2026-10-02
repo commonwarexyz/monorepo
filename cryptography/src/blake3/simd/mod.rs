@@ -1,8 +1,6 @@
 //! BLAKE3 kernels for merkle node pairs, independent message batches, and subtrees.
 
-use super::Digest;
-#[cfg(target_arch = "x86_64")]
-use super::gather;
+use super::{Digest, gather};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN, hazmat::HasherExt as _};
@@ -453,12 +451,22 @@ unsafe fn hash<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LEN
 ///
 /// Returns `None` when no kernel is available, the messages differ in length,
 /// or either exceeds [`PAIR_LEN`](super::PAIR_LEN) bytes.
-#[cfg(target_arch = "x86_64")]
 #[inline]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
     cfg_if::cfg_if! {
         if #[cfg(target_arch = "x86_64")] {
             let [left, right] = x86_64::hash_pair(left, right)?;
+            Some((Digest(left), Digest(right)))
+        } else if #[cfg(any(target_feature = "neon", feature = "std"))] {
+            if !aarch64::supports_pair() {
+                return None;
+            }
+            let (left, len) = gather(left)?;
+            let (right, right_len) = gather(right)?;
+            if len != right_len {
+                return None;
+            }
+            let [left, right] = aarch64::hash_pair([&left[..len], &right[..len]]);
             Some((Digest(left), Digest(right)))
         } else {
             let _ = (left, right);
@@ -504,17 +512,24 @@ fn batched() -> bool {
 /// and otherwise concatenating them for the batch kernel.
 ///
 /// Returns `None` when no kernel is available, there are fewer than two
-/// messages, or their total length overflows `usize`.
+/// messages, or their total length overflows `usize`. On aarch64 without the
+/// SHA-3 extension, it also returns `None` for two messages that [`hash_pair`]
+/// does not hash.
 pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option<Vec<Digest>> {
     // Every batch kernel needs at least two messages.
     if messages.len() < 2 {
         return None;
     }
-    #[cfg(target_arch = "x86_64")]
-    if let [left, right] = messages
-        && let Some((left, right)) = hash_pair(left, right)
-    {
-        return Some(vec![left, right]);
+    if let [left, right] = messages {
+        if let Some((left, right)) = hash_pair(left, right) {
+            return Some(vec![left, right]);
+        }
+
+        // Without the two-message kernels, two messages hash individually.
+        #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+        if !aarch64::supports_pair() {
+            return None;
+        }
     }
     #[cfg(target_arch = "x86_64")]
     if matches!(messages.len(), 3 | 4)

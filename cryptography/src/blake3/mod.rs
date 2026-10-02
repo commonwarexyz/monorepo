@@ -220,7 +220,7 @@ impl Hasher for Blake3 {
 
     #[inline]
     fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(pair) = simd::hash_pair(left, right) {
             return pair;
         }
