@@ -180,8 +180,8 @@ where
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
     pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
-    /// Maximum number of previous targets whose pending operation requests may be reused
-    /// after a target update. Set to 0 to cancel all pending requests on each target update.
+    /// Maximum number of previous targets whose pending requests may be reused after a target
+    /// update. Set to 0 to cancel all pending requests on each target update.
     pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
@@ -201,14 +201,14 @@ where
     /// The vectors in the map are non-empty.
     fetched_operations: BTreeMap<Location<DB::Family>, Vec<DB::Op>>,
 
-    /// Pinned merkle nodes extracted from proofs, used for database construction
+    /// Pinned merkle nodes at `target.range.start()`, used for database construction.
     pinned_nodes: Option<Vec<DB::Digest>>,
 
     /// Superseded target sizes whose in-flight requests remain eligible.
     /// Each fetch owns the root it authenticates against.
     retained_sizes: BTreeSet<Location<DB::Family>>,
 
-    /// Maximum number of previous targets eligible for operation request reuse.
+    /// Maximum number of previous targets eligible for request reuse.
     max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)
@@ -428,8 +428,9 @@ where
 
     /// Reset sync state for a target update.
     ///
-    /// Retains requests whose verification roots remain in the retention window, keeping
-    /// the new boundary free for pinned-node fetching when the lower bound advances.
+    /// Keeps fetched operations. Keeps pinned nodes only while the lower bound is unchanged.
+    /// Retains requests whose verification roots remain in the retention window, except those at
+    /// or below a moved lower bound.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
@@ -437,7 +438,6 @@ where
         let start_moved = self.target.range.start() != new_target.range.start();
         self.journal = self.journal.resize(new_target.range.start()).await?;
         if start_moved {
-            self.fetched_operations.clear();
             self.pinned_nodes = None;
         }
 
@@ -449,11 +449,11 @@ where
             }
         }
 
-        // Requests at a moved boundary must leave room for fetching its pinned nodes.
-        // An unchanged boundary can still use a response from a retained root.
+        // Requests are tracked by start location. A request kept at a moved lower bound would
+        // block the boundary request there.
         let new_start = new_target.range.start();
         self.outstanding_requests.retain(|request| {
-            (request.start() > new_start || (!start_moved && request.start() == new_start))
+            (!start_moved || request.start() > new_start)
                 && self.retained_sizes.contains(&request.size())
         });
 
@@ -629,7 +629,7 @@ where
             Response::Boundary {
                 op, pinned_nodes, ..
             } => {
-                // A retained boundary response authenticates the current lower bound.
+                // A tracked boundary request is at the current lower bound.
                 self.pinned_nodes = Some(pinned_nodes);
                 self.store_operations(start_loc, vec![op]);
             }
@@ -1038,9 +1038,9 @@ mod tests {
             let mut engine = engine.reset_for_target_update(target_2).await.unwrap();
 
             assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(10)]));
-            // The boundary request at the unchanged start survives: it seeds the
-            // journal position, and its late response verifies against the
-            // retained size. Root eviction below still cancels it.
+
+            // The boundary request at the unchanged lower bound is retained while its size is in
+            // the retention window.
             assert!(engine.outstanding_requests.contains(&Location::new(5)));
             assert!(engine.outstanding_requests.contains(&Location::new(6)));
             assert_eq!(engine.outstanding_requests.len(), 2);
@@ -1086,6 +1086,9 @@ mod tests {
         });
     }
 
+    /// Moving the lower bound to the start of an operation request at a retained size cancels it
+    /// and the old boundary request, and scheduling issues the boundary request at the new lower
+    /// bound.
     #[test]
     fn moved_floor_schedules_boundary_without_waiting_for_old_operation() {
         deterministic::Runner::default().start(|context| async move {
@@ -1093,6 +1096,8 @@ mod tests {
             config.max_outstanding_requests = 0;
             config.max_retained_roots = 1;
             let mut engine = Engine::new(config).await.unwrap();
+
+            // Track the boundary request and an operation request at the next lower bound.
             let operation_id = insert_pending_request(
                 &mut engine,
                 Request::Operations {
@@ -1103,6 +1108,7 @@ mod tests {
             );
             assert!(engine.outstanding_requests.contains(&Location::new(5)));
 
+            // Move the lower bound to the start of the operation request.
             let next = Target {
                 root: sha256::Digest::from([2; 32]),
                 range: non_empty_range!(Location::new(6), Location::new(12)),
@@ -1110,6 +1116,8 @@ mod tests {
             let mut engine = engine.reset_for_target_update(next).await.unwrap();
             engine.schedule_requests();
 
+            // Both requests are cancelled and the boundary request at the new lower bound is
+            // the only one outstanding.
             assert!(engine.outstanding_requests.remove(operation_id).is_none());
             assert!(!engine.outstanding_requests.contains(&Location::new(5)));
             assert!(engine.outstanding_requests.contains(&Location::new(6)));
@@ -1117,8 +1125,11 @@ mod tests {
         });
     }
 
+    /// Target updates keep fetched operations and keep pinned nodes only while the lower bound is
+    /// unchanged. Once the lower bound moves, applying drops batches below it and trims a batch
+    /// that straddles it.
     #[test]
-    fn target_updates_preserve_verified_data_only_while_the_floor_is_unchanged() {
+    fn target_updates_keep_operations_and_reset_pins_only_when_floor_moves() {
         deterministic::Runner::default().start(|context| async move {
             let mut engine = Engine::new(test_engine_config(
                 context,
@@ -1127,26 +1138,39 @@ mod tests {
             ))
             .await
             .unwrap();
-            engine.fetched_operations.insert(Location::new(7), vec![42]);
+
+            // Hold pinned nodes and two batches fetched ahead of the journal tip.
+            let fetched = BTreeMap::from([
+                (Location::new(6), vec![1, 2]),
+                (Location::new(8), vec![3, 4]),
+            ]);
+            engine.fetched_operations = fetched.clone();
             let pinned = vec![sha256::Digest::from([7; 32])];
             engine.pinned_nodes = Some(pinned.clone());
+
+            // An update with an unchanged lower bound keeps operations and pinned nodes.
             let next = Target {
                 root: sha256::Digest::from([2; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(12)),
             };
             let engine = engine.reset_for_target_update(next).await.unwrap();
-            assert_eq!(
-                engine.fetched_operations.get(&Location::new(7)),
-                Some(&vec![42])
-            );
+            assert_eq!(engine.fetched_operations, fetched);
             assert_eq!(engine.pinned_nodes, Some(pinned));
+
+            // An update that moves the lower bound keeps operations and clears pinned nodes.
             let next = Target {
                 root: sha256::Digest::from([3; 32]),
-                range: non_empty_range!(Location::new(6), Location::new(14)),
+                range: non_empty_range!(Location::new(9), Location::new(14)),
             };
             let engine = engine.reset_for_target_update(next).await.unwrap();
-            assert!(engine.fetched_operations.is_empty());
+            assert_eq!(engine.fetched_operations, fetched);
             assert!(engine.pinned_nodes.is_none());
+
+            // Applying drops the batch below the new lower bound and appends the operation of
+            // the straddling batch at it.
+            let engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.journal.size(), 10);
+            assert!(engine.fetched_operations.is_empty());
         });
     }
 
