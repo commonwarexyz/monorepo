@@ -1,20 +1,15 @@
 use commonware_cryptography::{
     Signer,
     ed25519::PrivateKey,
-    handshake::{
-        Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
-    },
+    handshake::sake::{Context, Error, Version, dial_end, dial_start, listen_end, listen_start},
+    transcript::Transcript,
 };
 use commonware_math::algebra::Random;
-use criterion::criterion_main;
-use rand::SeedableRng as _;
-use rand_chacha::ChaCha8Rng;
+use commonware_utils::test_rng;
+use criterion::{Criterion, criterion_group};
 
-mod handshake;
-mod transport;
-
-fn connect() -> Result<(SendCipher, RecvCipher), Error> {
-    let mut rng = ChaCha8Rng::seed_from_u64(0);
+fn connect() -> Result<(Transcript, Transcript), Error> {
+    let mut rng = test_rng();
     let dialer_crypto = PrivateKey::random(&mut rng);
     let listener_crypto = PrivateKey::random(&mut rng);
 
@@ -26,6 +21,7 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
             0..1,
             dialer_crypto.clone(),
             listener_crypto.public_key(),
+            Version::V1,
         ),
     );
     let (l_state, msg2) = listen_start(
@@ -36,12 +32,17 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
             0..1,
             listener_crypto,
             dialer_crypto.public_key(),
+            Version::V1,
         ),
         msg1,
     )?;
-    let (msg3, d_send, _) = dial_end(d_state, msg2)?;
-    let (_, l_recv) = listen_end(l_state, msg3)?;
-    Ok((d_send, l_recv))
+    let (msg3, dialer) = dial_end(d_state, msg2)?;
+    let listener = listen_end(l_state, msg3)?;
+    Ok((dialer, listener))
 }
 
-criterion_main!(handshake::benches, transport::benches);
+fn bench_connect(c: &mut Criterion) {
+    c.bench_function(module_path!(), |b| b.iter(|| connect().unwrap()));
+}
+
+criterion_group!(benches, bench_connect);

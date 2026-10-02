@@ -959,7 +959,6 @@ pub struct ConnectedPeerProvider<P: PublicKey, E: Clock> {
     me: P,
     ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
     peers: Vec<P>,
-    _clock: std::marker::PhantomData<E>,
 }
 
 impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
@@ -968,7 +967,6 @@ impl<P: PublicKey, E: Clock> Clone for ConnectedPeerProvider<P, E> {
             me: self.me.clone(),
             ingress: self.ingress.clone(),
             peers: self.peers.clone(),
-            _clock: std::marker::PhantomData,
         }
     }
 }
@@ -979,12 +977,7 @@ impl<P: PublicKey, E: Clock> ConnectedPeerProvider<P, E> {
         ingress: mpsc::UnboundedSender<ingress::Message<P, E>>,
         peers: Vec<P>,
     ) -> Self {
-        Self {
-            me,
-            ingress,
-            peers,
-            _clock: std::marker::PhantomData,
-        }
+        Self { me, ingress, peers }
     }
 }
 
@@ -1189,8 +1182,6 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
             replica: self.replica,
             forwarder: self.forwarder.clone(),
             recipients,
-
-            _phantom: std::marker::PhantomData,
         })
     }
 }
@@ -1204,8 +1195,6 @@ pub struct SplitCheckedSender<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> 
     replica: SplitOrigin,
     forwarder: F,
     recipients: Recipients<P>,
-
-    _phantom: std::marker::PhantomData<E>,
 }
 
 impl<'a, P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::CheckedSender

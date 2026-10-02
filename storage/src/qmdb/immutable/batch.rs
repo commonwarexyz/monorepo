@@ -174,8 +174,7 @@ where
 
     /// Set a key to a value.
     ///
-    /// If the key already exists in the database or an ancestor batch, reads
-    /// of it may return any of its written values.
+    /// The key must not already be set in the database history or in any ancestor batch.
     pub fn set(mut self, key: K, value: V::Value) -> Self {
         self.mutations.insert(key, value);
         self
@@ -184,8 +183,7 @@ where
     /// Read through: mutations -> ancestor diffs -> committed DB.
     ///
     /// Only operations at or above the inactivity floor this batch builds on are read, so every
-    /// node answers alike for a key written once, however far it has pruned. A repeated key may
-    /// return any of its written values.
+    /// node answers alike, however far it has pruned.
     ///
     /// # Errors
     ///
@@ -223,8 +221,7 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys. A key written once reads as
-    /// [`Self::get`] would, and a repeated key may return any of its written values.
+    /// Returns results in the same order as the input keys, matching [`Self::get`] for each key.
     ///
     /// # Errors
     ///
@@ -497,8 +494,7 @@ where
     /// Read through: local diff -> ancestor diffs -> committed DB.
     ///
     /// Only operations at or above this batch's inactivity floor are read, so every node answers
-    /// alike for a key written once, however far it has pruned. A repeated key may return any of
-    /// its written values.
+    /// alike, however far it has pruned.
     ///
     /// # Errors
     ///
@@ -530,8 +526,7 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys. A key written once reads as
-    /// [`Self::get`] would, and a repeated key may return any of its written values.
+    /// Returns results in the same order as the input keys, matching [`Self::get`] for each key.
     ///
     /// # Errors
     ///
