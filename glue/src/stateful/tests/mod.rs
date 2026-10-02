@@ -722,7 +722,10 @@ where
         // state sync, then restart it without clearing any partitions.
         .crash(Crash::Schedule(
             Schedule::new()
-                .at(Duration::from_secs(5), Action::Crash(late_joiner.clone()))
+                .at(
+                    Duration::from_millis(6_250),
+                    Action::Crash(late_joiner.clone()),
+                )
                 .at(Duration::from_secs(7), Action::Restart(late_joiner)),
         ))
         .exit_condition(ProcessedHeightAtLeast::new(130))
@@ -730,7 +733,9 @@ where
         .property(LateJoinerStateSyncHandoff)
         .property(BlockAgreementAtHeight::new(130))
         .run()
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .for_each(|result| assert_eq!(result.crashes, 1));
 }
 
 /// Partition the late joiner, crash it mid-sync, then restart it into the same

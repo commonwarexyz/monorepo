@@ -8,23 +8,15 @@
 //! the lock. A closed mailbox returns messages to the sender, so no payload is
 //! ever destroyed under the lock.
 
-use super::{
-    request::RequestOutput,
-    sleep::TimerId,
-    task::{Target, Task},
-    waiter::WaiterId,
-    waker::Waker,
-};
+use super::{request::RequestOutput, sleep::TimerId, task::Target, waiter::WaiterId, waker::Waker};
 use crate::Error;
 use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::mem;
 
 /// Owned work delivered to the worker without borrowing its local state.
 pub enum Message {
-    /// Wake the root future or a task.
+    /// Wake the root future or a task (including a spawned task's first poll).
     Wake(Target),
-    /// Place a spawned task on this worker.
-    Spawn(Task),
     /// Transfer observation of an operation or timer to a channel.
     Forward(Forward),
     /// Release observation of an operation or timer.
@@ -128,6 +120,7 @@ impl Mailbox {
     }
 
     /// Whether the mailbox still accepts messages.
+    #[cfg(test)]
     pub fn is_open(&self) -> bool {
         self.inbox.lock().open
     }
@@ -136,7 +129,7 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::{task::Task, waker::tests::eventfd_count};
+    use crate::iouring::{task::Task, tasks::Tasks, waker::tests::eventfd_count};
     use std::{
         future::pending,
         sync::{
@@ -166,7 +159,9 @@ mod tests {
         }
     }
 
-    fn spawn_message(mailbox: &Arc<Mailbox>) -> (Message, Arc<AtomicBool>) {
+    /// A wake carrying the only reference to a task, so the task's cell is
+    /// freed wherever the message is released.
+    fn wake_message(mailbox: &Arc<Mailbox>) -> (Message, Arc<AtomicBool>) {
         let dropped = Arc::new(AtomicBool::new(false));
         let guard = Reentrant {
             mailbox: Arc::downgrade(mailbox),
@@ -177,17 +172,19 @@ mod tests {
                 let _guard = guard;
                 pending::<()>().await;
             },
+            &Tasks::new(1),
             Weak::new(),
         );
 
-        (Message::Spawn(task), dropped)
+        (Message::Wake(Target::Task(task)), dropped)
     }
 
-    /// Dispose of messages as worker cleanup does, clearing each spawned
-    /// task's future in place before releasing the message.
+    /// Dispose of messages, clearing each carried task's future in place, as
+    /// worker teardown does through the task set, before releasing the
+    /// message.
     fn dispose(messages: impl IntoIterator<Item = Message>) {
         for message in messages {
-            if let Message::Spawn(task) = &message {
+            if let Message::Wake(Target::Task(task)) = &message {
                 task.clear();
             }
         }
@@ -205,7 +202,11 @@ mod tests {
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
         assert!(
             mailbox
-                .send(Message::Spawn(Task::new(pending(), Weak::new())))
+                .send(Message::Wake(Target::Task(Task::new(
+                    pending(),
+                    &Tasks::new(1),
+                    Weak::new()
+                ))))
                 .is_ok()
         );
         assert!(mailbox.waker.pending(0));
@@ -213,7 +214,7 @@ mod tests {
         assert!(!mailbox.waker.pending(1));
         assert!(matches!(
             scratch.as_slice(),
-            [Message::Wake(Target::Root), Message::Spawn(_)]
+            [Message::Wake(Target::Root), Message::Wake(Target::Task(_))]
         ));
 
         // A new batch remains pending while the worker drains its scratch.
@@ -252,24 +253,27 @@ mod tests {
     }
 
     #[test]
-    fn test_close_returns_tasks_and_rejects_new_messages() {
+    fn test_close_returns_messages_and_rejects_new_ones() {
         let mailbox = Arc::new(Mailbox::new().unwrap());
-        let (message, dropped) = spawn_message(&mailbox);
+        let (message, dropped) = wake_message(&mailbox);
         assert!(mailbox.send(message).is_ok());
 
-        // Closing transfers queued tasks to the caller for destruction.
+        // Closing transfers queued messages to the caller for disposal.
         let queued = mailbox.close();
         assert!(!mailbox.is_open());
-        assert!(matches!(queued.as_slice(), [Message::Spawn(_)]));
+        assert!(matches!(
+            queued.as_slice(),
+            [Message::Wake(Target::Task(_))]
+        ));
         assert!(!dropped.load(Ordering::Relaxed));
 
         dispose(queued);
         assert!(dropped.load(Ordering::Relaxed));
 
-        // Rejected tasks also reach the caller, without another publication.
-        let (message, dropped) = spawn_message(&mailbox);
+        // Rejected messages also reach the caller, without another publication.
+        let (message, dropped) = wake_message(&mailbox);
         let rejected = mailbox.send(message);
-        assert!(matches!(rejected, Err(Message::Spawn(_))));
+        assert!(matches!(rejected, Err(Message::Wake(Target::Task(_)))));
         assert!(!dropped.load(Ordering::Relaxed));
         assert!(mailbox.waker.pending(0));
         assert!(!mailbox.waker.pending(1));
@@ -286,7 +290,7 @@ mod tests {
     fn test_send_racing_close_preserves_payload_ownership() {
         let mailbox = Arc::new(Mailbox::new().unwrap());
         let gate = Arc::new(Barrier::new(2));
-        let (message, dropped) = spawn_message(&mailbox);
+        let (message, dropped) = wake_message(&mailbox);
 
         let producer = thread::spawn({
             let mailbox = mailbox.clone();
@@ -301,7 +305,7 @@ mod tests {
         let queued = mailbox.close();
         let result = producer.join().unwrap();
 
-        // Either send or close must return the task, whichever wins the race.
+        // Either send or close must return the message, whichever wins the race.
         assert_eq!(queued.len(), usize::from(result.is_ok()));
         assert!(!mailbox.is_open());
         assert!(!dropped.load(Ordering::Relaxed));

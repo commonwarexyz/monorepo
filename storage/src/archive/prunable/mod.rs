@@ -886,7 +886,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_failed_start_sync_is_returned_by_next_start_sync_handle() {
+    fn test_failed_start_sync_is_returned_by_next_start_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
@@ -911,14 +911,15 @@ mod tests {
                 .await
                 .expect("write should be accepted before observing the failed sync");
 
-            let (_archive, second) = archive
-                .start_sync()
-                .await
-                .expect("start_sync should return a handle for the failed sync");
-            let err = second
-                .await
-                .expect_err("next start_sync handle should observe failed in-flight sync");
-            assert!(matches!(err, RError::Io(_)));
+            // The next start_sync flushes the buffered write, so it first observes the failed
+            // in-flight sync.
+            let Err(err) = archive.start_sync().await else {
+                panic!("next start_sync should return the failed in-flight sync");
+            };
+            assert!(matches!(
+                err,
+                Error::Journal(JournalError::Runtime(RError::Io(_)))
+            ));
 
             let err = first.await.expect_err("first sync handle should fail");
             assert!(matches!(err, RError::Io(_)));
