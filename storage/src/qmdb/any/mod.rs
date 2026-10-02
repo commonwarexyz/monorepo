@@ -75,9 +75,10 @@
 //! ```
 //!
 //! ```ignore
-//! // 6. Advance the floor with a policy. This one evicts expired updates at the floor, records
-//! //    each evicted key and value, and stops at the first unexpired update. It decides at most
-//! //    8 updates and passes at most 16 inactive locations.
+//! // 6. Advance the floor with a policy. `Key` and `Value` are the caller's types, `Value` has an
+//! //    `expiry` height, and `now` is the caller's current height. This policy evicts expired
+//! //    updates at the floor, records each evicted key and value, and stops at the first
+//! //    unexpired update. It decides at most 8 updates and passes at most 16 inactive locations.
 //! struct Expire {
 //!     now: u64,
 //!     expired: Vec<(Key, Value)>,

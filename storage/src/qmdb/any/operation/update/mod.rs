@@ -30,9 +30,9 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// When false, staged deletes fall back to normal mutations.
     const STAGES_DELETES: bool;
 
-    /// The cached payload a staged read records when it resolves in an uncommitted ancestor's
-    /// diff. `None` leaves those slots unresolved, so their updates fall back to normal
-    /// mutations.
+    /// What [`stage`](crate::qmdb::any::batch::UnmerkleizedBatch::stage) records for a read that
+    /// resolves in an ancestor batch, or `None` if it cannot record one. A write to an unrecorded
+    /// key resolves at merkleize like any other write.
     const STAGES_ANCESTORS: Option<Self::Cached>;
 
     /// Whether merkleize gathers the snapshot collision siblings of written keys that are active

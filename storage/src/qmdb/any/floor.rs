@@ -17,9 +17,7 @@
 //! keys.
 //!
 //! Reads stay below the batch's original tip and below `entries + skips` locations past the
-//! inherited floor. Each read round decodes up to `entries` candidate locations plus those
-//! sharing a translated-key bucket with keys the batch writes, so `entries = usize::MAX` reads
-//! every reachable candidate in one round.
+//! inherited floor.
 
 use crate::merkle::{Family, Location};
 use std::marker::PhantomData;
