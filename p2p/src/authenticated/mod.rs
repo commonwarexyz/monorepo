@@ -10,12 +10,14 @@
 mod channels;
 mod connection;
 mod data;
+mod dialer;
 pub use crate::sizing::peer_set_limit;
 pub use data::{MAX_PAYLOAD_OVERHEAD, max_size};
 pub(crate) mod dialing;
 pub mod discovery;
 pub mod lookup;
 mod mailbox;
+mod metrics;
 pub use mailbox::Mailbox;
 mod relay;
 mod router;

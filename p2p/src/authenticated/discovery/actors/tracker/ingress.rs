@@ -1,7 +1,8 @@
 use super::Reservation;
 use crate::{
-    BlockedSubscription, PeerSetSubscription, TrackedPeers,
+    BlockedSubscription, Ingress, PeerSetSubscription, TrackedPeers,
     authenticated::{
+        dialer,
         dialing::Dialable,
         discovery::{
             actors::{peer, tracker::Metadata},
@@ -107,15 +108,15 @@ pub enum Message<C: PublicKey> {
 
     /// Request a reservation for a particular peer to dial.
     ///
-    /// The tracker will respond with an [`Option<Reservation<C>>`], which will be `None` if the
-    /// reservation cannot be granted (e.g., if the peer is already connected, blocked or already
-    /// has an active reservation).
+    /// The tracker will respond with an [`Option<(Reservation<C>, Ingress)>`], which will be `None`
+    /// if the reservation cannot be granted (e.g., if the peer is already connected, blocked or
+    /// already has an active reservation).
     Dial {
         /// The public key of the peer to reserve.
         public_key: C,
 
-        /// sender to respond with the reservation.
-        reservation: oneshot::Sender<Option<Reservation<C>>>,
+        /// sender to respond with the reservation and the address to dial.
+        reservation: oneshot::Sender<Option<(Reservation<C>, Ingress)>>,
     },
 
     // ---------- Used by listener ----------
@@ -216,7 +217,7 @@ impl<C: PublicKey> Mailbox<C> {
     /// Send a `Dial` message to the tracker.
     ///
     /// Returns `None` if the tracker is shut down.
-    pub(crate) async fn dial(&self, public_key: C) -> Option<Reservation<C>> {
+    pub(crate) async fn dial(&self, public_key: C) -> Option<(Reservation<C>, Ingress)> {
         let (reservation, receiver) = oneshot::channel();
         let _ = self.0.enqueue(Message::Dial {
             public_key,
@@ -254,6 +255,18 @@ impl<C: PublicKey> Mailbox<C> {
 #[derive(Clone, Debug)]
 pub struct Releaser<C: PublicKey> {
     sender: mailbox::Sender<Message<C>>,
+}
+
+impl<C: PublicKey> dialer::Tracker<C> for Mailbox<C> {
+    type Reservation = Reservation<C>;
+
+    async fn dialable(&self) -> Dialable<C> {
+        self.dialable().await
+    }
+
+    async fn dial(&self, peer: C) -> Option<(Reservation<C>, Ingress)> {
+        self.dial(peer).await
+    }
 }
 
 impl<C: PublicKey> Releaser<C> {

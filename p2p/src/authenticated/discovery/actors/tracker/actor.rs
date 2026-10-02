@@ -1253,19 +1253,13 @@ mod tests {
             let TestHarness { mailbox, .. } = setup_actor(context.child("actor"), cfg_initial);
 
             let reservation = mailbox.dial(boot_pk.clone()).await;
-            assert!(reservation.is_some());
-            if let Some(res) = reservation {
-                match res.metadata() {
-                    crate::authenticated::discovery::actors::tracker::Metadata::Dialer(
-                        pk,
-                        addr,
-                    ) => {
-                        assert_eq!(pk, &boot_pk);
-                        assert_eq!(*addr, Ingress::Socket(boot_addr));
-                    }
-                    _ => panic!("Expected Dialer metadata"),
-                }
-            }
+            let (res, ingress) = reservation.expect("bootstrapper should be dialable");
+            assert_eq!(ingress, Ingress::Socket(boot_addr));
+            assert!(matches!(
+                res.metadata(),
+                crate::authenticated::discovery::actors::tracker::Metadata::Dialer(pk, addr)
+                    if pk == &boot_pk && *addr == ingress
+            ));
 
             let (_unknown_signer, unknown_pk) = new_signer_and_pk(100);
             let no_reservation = mailbox.dial(unknown_pk).await;

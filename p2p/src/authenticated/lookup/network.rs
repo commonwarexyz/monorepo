@@ -1,7 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
-    actors::{dialer, listener, spawner, tracker},
+    actors::{listener, spawner, tracker},
     config::Config,
 };
 use crate::{
@@ -9,7 +9,7 @@ use crate::{
     authenticated::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
-        max_size, router,
+        dialer, max_size, router,
         stream::Config as StreamConfig,
     },
     sizing::max_retained_peers,
@@ -244,7 +244,9 @@ where
                 allow_private_ips: self.cfg.allow_private_ips,
             },
         );
-        let mut dialer_task = dialer.start(self.tracker_mailbox, spawner_mailbox);
+        let mut dialer_task = dialer.start(self.tracker_mailbox, move |connection, reservation| {
+            let _ = spawner_mailbox.clone().spawn(connection, reservation);
+        });
 
         let mut shutdown = self.context.stopped();
 

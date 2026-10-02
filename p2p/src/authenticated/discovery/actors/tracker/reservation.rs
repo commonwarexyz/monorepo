@@ -10,18 +10,13 @@ pub struct Reservation<P: PublicKey> {
     metadata: Metadata<P>,
 
     /// Used to automatically notify the completion of the reservation when it is dropped.
-    ///
-    /// Stored as an `Option` to avoid unnecessary cloning by `take`ing the value.
-    releaser: Option<Releaser<P>>,
+    releaser: Releaser<P>,
 }
 
 impl<P: PublicKey> Reservation<P> {
     /// Create a new reservation for a peer.
     pub const fn new(metadata: Metadata<P>, releaser: Releaser<P>) -> Self {
-        Self {
-            metadata,
-            releaser: Some(releaser),
-        }
+        Self { metadata, releaser }
     }
 
     /// Returns the metadata associated with this reservation.
@@ -32,10 +27,6 @@ impl<P: PublicKey> Reservation<P> {
 
 impl<P: PublicKey> Drop for Reservation<P> {
     fn drop(&mut self) {
-        let mut releaser = self
-            .releaser
-            .take()
-            .expect("Reservation::drop called twice");
-        releaser.release(self.metadata.clone());
+        self.releaser.release(self.metadata.clone());
     }
 }

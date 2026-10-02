@@ -2,6 +2,7 @@ use super::Reservation;
 use crate::{
     AddressableTrackedPeers, BlockedSubscription, Ingress, PeerSetSubscription, TrackedPeers,
     authenticated::{
+        dialer,
         dialing::Dialable,
         lookup::actors::{peer, tracker::Metadata},
     },
@@ -195,6 +196,18 @@ impl<C: PublicKey> Mailbox<C> {
 #[derive(Clone, Debug)]
 pub struct Releaser<C: PublicKey> {
     sender: mailbox::Sender<Message<C>>,
+}
+
+impl<C: PublicKey> dialer::Tracker<C> for Mailbox<C> {
+    type Reservation = Reservation<C>;
+
+    async fn dialable(&self) -> Dialable<C> {
+        self.dialable().await
+    }
+
+    async fn dial(&self, peer: C) -> Option<(Reservation<C>, Ingress)> {
+        self.dial(peer).await
+    }
 }
 
 impl<C: PublicKey> Releaser<C> {
