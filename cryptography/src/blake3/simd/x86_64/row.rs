@@ -6,7 +6,7 @@ use core::arch::x86_64::*;
 /// Row operations preserve each message's 128-bit group.
 ///
 /// Callers establish AVX2 for 256-bit rows, AVX-512F and AVX-512VL as well
-/// when selecting native 256-bit rotates.
+/// when selecting native 256-bit rotates, and AVX-512F for 512-bit rows.
 pub(super) trait Row: Copy {
     unsafe fn from_words(words: [u32; 4]) -> Self;
     unsafe fn add(a: Self, b: Self) -> Self;
@@ -102,6 +102,80 @@ impl Row for __m256i {
     unsafe fn unpacklo32(a: Self, b: Self) -> Self {
         // SAFETY: The caller establishes the row implementation's features.
         unsafe { _mm256_unpacklo_epi32(a, b) }
+    }
+}
+
+impl Row for __m512i {
+    #[inline(always)]
+    unsafe fn from_words(words: [u32; 4]) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe {
+            _mm512_broadcast_i32x4(_mm_setr_epi32(
+                words[0] as i32,
+                words[1] as i32,
+                words[2] as i32,
+                words[3] as i32,
+            ))
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn add(a: Self, b: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_add_epi32(a, b) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor(a: Self, b: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_xor_si512(a, b) }
+    }
+
+    #[inline(always)]
+    unsafe fn rotate<const VL: bool, const R: i32, const L: i32>(x: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_ror_epi32::<R>(x) }
+    }
+
+    #[inline(always)]
+    unsafe fn shuffle<const MASK: i32>(x: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_shuffle_epi32::<MASK>(x) }
+    }
+
+    #[inline(always)]
+    unsafe fn shuffle2<const MASK: i32>(a: Self, b: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe {
+            _mm512_castps_si512(_mm512_shuffle_ps::<MASK>(
+                _mm512_castsi512_ps(a),
+                _mm512_castsi512_ps(b),
+            ))
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn blend<const MASK: i32>(a: Self, b: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_mask_blend_epi32((MASK as u16) | ((MASK as u16) << 8), a, b) }
+    }
+
+    #[inline(always)]
+    unsafe fn unpacklo64(a: Self, b: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_unpacklo_epi64(a, b) }
+    }
+
+    #[inline(always)]
+    unsafe fn unpackhi32(a: Self, b: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_unpackhi_epi32(a, b) }
+    }
+
+    #[inline(always)]
+    unsafe fn unpacklo32(a: Self, b: Self) -> Self {
+        // SAFETY: The caller establishes the row implementation's features.
+        unsafe { _mm512_unpacklo_epi32(a, b) }
     }
 }
 
