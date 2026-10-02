@@ -1,6 +1,10 @@
 //! BLAKE3 implementation of the [Hasher] trait.
 //!
-//! This implementation uses the [blake3] crate to generate BLAKE3 digests.
+//! Every entry point produces standard BLAKE3 digests. [Hasher::hash_with]
+//! splits large messages along the BLAKE3 tree and hashes the subtrees across
+//! the given strategy. [Hasher::hash_pair], [Hasher::hash_many], and
+//! [Hasher::hash_many_parts] hash independent messages together. Batching is
+//! most effective when the messages have equal lengths.
 //!
 //! # Example
 //! ```rust
@@ -16,14 +20,28 @@
 //! hasher.update(b"world!");
 //! let (_hasher, digest) = hasher.finalize();
 //! println!("digest: {:?}", digest);
+//!
+//! // Hash independent messages in one call
+//! let messages: [[u8; 32]; 16] = core::array::from_fn(|lane| [lane as u8; 32]);
+//! let digests = Blake3::hash_many(&messages);
+//! assert_eq!(digests[3], Blake3::hash(&[messages[3].as_slice()]));
 //! ```
 
 use crate::Hasher;
-use blake3::Hash;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+use blake3::{
+    Hash,
+    hazmat::{
+        ChainingValue, HasherExt as _, Mode, left_subtree_len, merge_subtrees_non_root,
+        merge_subtrees_root,
+    },
+};
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
+use commonware_parallel::Strategy;
 use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
     cmp::Ordering,
@@ -38,11 +56,112 @@ pub type CoreBlake3 = blake3::Hasher;
 
 const DIGEST_LENGTH: usize = blake3::OUT_LEN;
 
+/// Largest message, in bytes, that the two-message kernels hash and that
+/// [`Hasher::hash`] gathers inline (two blocks, which covers the merkle node
+/// shapes).
+const PAIR_LEN: usize = 2 * blake3::BLOCK_LEN;
+
+/// Length, in bytes, above which [`Hasher::hash_with`] splits a subtree into
+/// its children when the strategy's parallelism exceeds one.
+pub(crate) const TASK_LEN: usize = 64 * 1024;
+
+/// Hash the two children of the `len`-byte node at `offset`, across `strategy`
+/// when the right child spans at least [`TASK_LEN`] bytes.
+///
+/// `parts` holds the node's bytes and starts at byte `base` of the message.
+/// The node must be a nonempty node of the message's BLAKE3 tree larger than
+/// one chunk, such as one reached by splitting with `left_subtree_len`.
+fn children(
+    strategy: &impl Strategy,
+    parts: &[&[u8]],
+    base: usize,
+    offset: usize,
+    len: usize,
+) -> (ChainingValue, ChainingValue) {
+    let left = left_subtree_len(len as u64) as usize;
+    let split = offset + left;
+
+    // The right child starts in the first part that ends after `split`.
+    let mut start = base;
+    let mut index = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if start + part.len() > split {
+            index = i;
+            break;
+        }
+        start += part.len();
+    }
+    let left_parts = &parts[..=index];
+    let right_parts = &parts[index..];
+
+    // A right child shorter than `TASK_LEN` hashes after the left child
+    // without a fork.
+    if len - left < TASK_LEN {
+        return (
+            subtree(strategy, left_parts, base, offset, left),
+            subtree(strategy, right_parts, start, split, len - left),
+        );
+    }
+    strategy.join(
+        || subtree(strategy, left_parts, base, offset, left),
+        || subtree(strategy, right_parts, start, split, len - left),
+    )
+}
+
+/// Hash the `len`-byte node at `offset`, splitting it until each subtree fits
+/// in [`TASK_LEN`] bytes.
+///
+/// `parts` holds the node's bytes and starts at byte `base` of the message.
+/// The node must be a nonempty node of the message's BLAKE3 tree.
+fn subtree(
+    strategy: &impl Strategy,
+    parts: &[&[u8]],
+    base: usize,
+    offset: usize,
+    len: usize,
+) -> ChainingValue {
+    if len > TASK_LEN {
+        let (left, right) = children(strategy, parts, base, offset, len);
+        return merge_subtrees_non_root(&left, &right, Mode::Hash);
+    }
+
+    let mut hasher = CoreBlake3::new();
+    hasher.set_input_offset(offset as u64);
+    let end = offset + len;
+    let mut start = base;
+    for part in parts {
+        if start >= end {
+            break;
+        }
+        let (low, high) = (offset.max(start), end.min(start + part.len()));
+        if low < high {
+            hasher.update(&part[low - start..high - start]);
+        }
+        start += part.len();
+    }
+    hasher.finalize_non_root()
+}
+
+/// Copy the concatenation of `parts` into a zero-padded buffer, returning
+/// `None` if it exceeds [`PAIR_LEN`] bytes.
+#[inline]
+fn gather(parts: &[&[u8]]) -> Option<([u8; PAIR_LEN], usize)> {
+    let mut buffer = [0u8; PAIR_LEN];
+    let mut len = 0;
+    for part in parts {
+        buffer.get_mut(len..len + part.len())?.copy_from_slice(part);
+        len += part.len();
+    }
+    Some((buffer, len))
+}
+
+/// Hash one contiguous message.
+#[inline]
+fn one(message: &[u8]) -> Digest {
+    blake3::hash(message).into()
+}
+
 /// BLAKE3 hasher.
-#[cfg_attr(
-    feature = "blake3-parallel",
-    doc = "When the input message is larger than 128KiB, `rayon` is used to parallelize hashing."
-)]
 #[derive(Debug, Default)]
 pub struct Blake3 {
     hasher: CoreBlake3,
@@ -51,43 +170,70 @@ pub struct Blake3 {
 impl Hasher for Blake3 {
     type Digest = Digest;
 
+    #[inline]
     fn hash(parts: &[&[u8]]) -> Self::Digest {
-        let mut hasher = Self::default();
+        if let [part] = parts {
+            return one(part);
+        }
+        if let Some((buffer, len)) = gather(parts) {
+            return one(&buffer[..len]);
+        }
+        let mut hasher = CoreBlake3::new();
         for part in parts {
             hasher.update(part);
         }
-        hasher.finalize().1
+        hasher.finalize().into()
     }
 
+    fn hash_with(strategy: &impl Strategy, parts: &[&[u8]]) -> Self::Digest {
+        // A total that overflows `usize` (aliased parts on 32-bit targets) is
+        // hashed serially, which counts bytes in a `u64`.
+        let len = parts
+            .iter()
+            .try_fold(0usize, |len, part| len.checked_add(part.len()));
+        match len {
+            // A strategy with a parallelism of one hashes the message without
+            // splitting.
+            Some(len) if len > TASK_LEN && strategy.manual().parallelism() > 1 => {
+                let (left, right) = children(strategy, parts, 0, 0, len);
+                merge_subtrees_root(&left, &right, Mode::Hash).into()
+            }
+            _ => Self::hash(parts),
+        }
+    }
+
+    #[inline]
     fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
         (Self::hash(left), Self::hash(right))
     }
 
-    fn update(&mut self, message: &[u8]) -> &mut Self {
-        #[cfg(not(feature = "blake3-parallel"))]
-        self.hasher.update(message);
+    fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+        messages
+            .iter()
+            .map(|message| one(message.as_ref()))
+            .collect()
+    }
 
-        #[cfg(feature = "blake3-parallel")]
-        {
-            // 128 KiB
-            const PARALLEL_THRESHOLD: usize = 2usize.pow(17);
-
-            // Heuristic defined @ https://docs.rs/blake3/latest/blake3/struct.Hasher.html#method.update_rayon
-            if message.len() >= PARALLEL_THRESHOLD {
-                self.hasher.update_rayon(message);
-            } else {
-                self.hasher.update(message);
-            }
+    fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Vec<Self::Digest> {
+        if P == 1 {
+            return Self::hash_many(messages.as_flattened());
         }
+        let mut digests = Vec::with_capacity(messages.len());
+        crate::hash_pairs::<Self, P>(messages, &mut digests);
+        digests
+    }
 
+    #[inline]
+    fn update(&mut self, message: &[u8]) -> &mut Self {
+        self.hasher.update(message);
         self
     }
 
+    #[inline]
     fn finalize(mut self) -> (Self, Self::Digest) {
-        let finalized = self.hasher.finalize();
+        let digest = self.hasher.finalize().into();
         self.hasher.reset();
-        let array: [u8; DIGEST_LENGTH] = finalized.into();
-        (self, Self::Digest::from(array))
+        (self, digest)
     }
 }
 
@@ -197,10 +343,26 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_parallel::Rayon;
+    use commonware_utils::TestRng;
+    use core::num::NonZeroUsize;
+    use rand::Rng as _;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+        mpsc,
+    };
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
     );
+
+    /// Return `len` random bytes, distinct per `seed`.
+    fn random(len: usize, seed: u64) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        TestRng::new(seed).fill_bytes(&mut bytes);
+        bytes
+    }
 
     #[test]
     fn test_blake3() {
@@ -261,6 +423,357 @@ mod tests {
             let (_, digest) = hasher.finalize();
             assert_eq!(digest.as_ref(), expected, "len {len}");
         }
+    }
+
+    /// Reference digest: the concatenated parts through the crate's hasher.
+    fn reference(parts: &[&[u8]]) -> Digest {
+        blake3::Hasher::new()
+            .update(&parts.concat())
+            .finalize()
+            .into()
+    }
+
+    #[test]
+    fn test_blake3_hash_parts_boundaries() {
+        for total in (0..=1025usize).chain([2049]) {
+            let data = random(total, 0);
+            let mid = total / 3;
+            let parts: [&[u8]; 3] = [&data[..mid], &data[mid..2 * mid], &data[2 * mid..]];
+            assert_eq!(Blake3::hash(&parts), reference(&parts), "total={total}");
+            assert_eq!(Blake3::hash(&[&data]), reference(&[&data]), "total={total}");
+        }
+        assert_eq!(Blake3::hash(&[]), reference(&[]));
+        assert_eq!(Blake3::hash(&[&[], &[]]), reference(&[]));
+    }
+
+    /// Deterministically exercise the pair kernel with the MMR node shape
+    /// (position || left || right).
+    #[test]
+    fn test_hash_pair_mmr_node_shape_matches_streaming() {
+        fn node(position: u64, fill: u8) -> Vec<Vec<u8>> {
+            vec![
+                position.to_be_bytes().to_vec(),
+                vec![fill; 32],
+                vec![fill + 1; 32],
+            ]
+        }
+        crate::fuzz::Plan::<Blake3>::new(node(42, 0x11), node(43, 0x33)).run();
+    }
+
+    /// Deterministically exercise the pair kernel with the BMT node shape
+    /// (left || right).
+    #[test]
+    fn test_hash_pair_bmt_node_shape_matches_streaming() {
+        let zero = [0u8; 32];
+        let ff = [0xff; 32];
+        let ascending: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let backing: Vec<u8> = (0..96).map(|i| i as u8).collect();
+        for (left, right) in [
+            ([&zero[..], &zero[..]], [&zero[..], &zero[..]]),
+            ([&ff[..], &ff[..]], [&ff[..], &ff[..]]),
+            ([&ascending[..], &ff[..]], [&ff[..], &zero[..]]),
+            (
+                [&backing[1..33], &backing[17..49]],
+                [&backing[2..34], &backing[18..50]],
+            ),
+        ] {
+            assert_eq!(
+                Blake3::hash_pair(&left, &right),
+                (reference(&left), reference(&right))
+            );
+        }
+    }
+
+    /// Check `hash_pair` against the streaming reference for split messages
+    /// up to two blocks and around one chunk, and for unequal lengths.
+    #[test]
+    fn test_hash_pair_lengths_match_streaming() {
+        let data: Vec<u8> = (0..1100).map(|i| (i as u8).wrapping_mul(7)).collect();
+        for len in (0..=2 * PAIR_LEN).chain([1024, 1025]) {
+            let left = &data[..len];
+            let right = &data[1..=len];
+            let split = len / 2;
+            let (left_digest, right_digest) =
+                Blake3::hash_pair(&[&left[..split], &left[split..]], &[right]);
+            assert_eq!(left_digest, reference(&[left]), "len={len}");
+            assert_eq!(right_digest, reference(&[right]), "len={len}");
+
+            // Unequal lengths fall back to independent hashes.
+            let (left_digest, right_digest) = Blake3::hash_pair(&[left], &[&data[..=len]]);
+            assert_eq!(left_digest, reference(&[left]), "len={len}");
+            assert_eq!(right_digest, reference(&[&data[..=len]]), "len={len}");
+        }
+    }
+
+    /// Check `hash_many` against individual hashes at block, chunk, and batch
+    /// size boundaries, and across a run split by a length change.
+    #[test]
+    fn test_hash_many_boundaries_match_individual_hashes() {
+        let lengths = (0..=129).chain([
+            191, 192, 193, 1023, 1024, 1025, 2048, 2049, 3072, 4097, 16_384, 17_409,
+        ]);
+        for len in lengths {
+            // Bytes do not repeat across chunks, so a kernel reading the wrong
+            // chunk, block, or lane produces a different digest.
+            let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| random(len, lane as u64));
+            let refs = messages.each_ref().map(Vec::as_slice);
+            for count in [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33] {
+                let refs = &refs[..count];
+                let expected: Vec<Digest> =
+                    refs.iter().map(|message| reference(&[message])).collect();
+                assert_eq!(Blake3::hash_many(refs), expected, "len={len} count={count}");
+            }
+        }
+
+        // A length change splits the run.
+        let messages: [Vec<u8>; 16] = core::array::from_fn(|lane| vec![lane as u8; 64]);
+        let mut refs = messages.each_ref().map(Vec::as_slice);
+        refs[9] = &messages[9][..63];
+        let expected: Vec<Digest> = refs.iter().map(|message| reference(&[message])).collect();
+        assert_eq!(Blake3::hash_many(&refs), expected);
+        for count in 2..=4 {
+            assert_eq!(
+                Blake3::hash_many(&refs[8..8 + count]),
+                expected[8..8 + count]
+            );
+        }
+    }
+
+    /// Check `hash_many` on overlapping unaligned views of one buffer, and run
+    /// it on a view that changes between conversions.
+    #[test]
+    fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
+        let backing = random(2100, 0);
+        for len in [36, 40, 64, 72, 129, 1025, 2049] {
+            let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + len]);
+            let expected: Vec<Digest> = messages
+                .iter()
+                .map(|message| reference(&[message]))
+                .collect();
+            for count in 1..=messages.len() {
+                assert_eq!(Blake3::hash_many(&messages[..count]), expected[..count]);
+            }
+            let repeated = [&backing[1..=len]; 16];
+            assert_eq!(Blake3::hash_many(&repeated), vec![expected[1]; 16]);
+        }
+
+        // This wrapper breaks the `as_ref` contract by returning a shorter slice
+        // after its first conversion.
+        struct SharedView {
+            bytes: [u8; 64],
+            shortened: core::cell::Cell<bool>,
+        }
+        impl AsRef<[u8]> for SharedView {
+            fn as_ref(&self) -> &[u8] {
+                if self.shortened.replace(true) {
+                    &self.bytes[..1]
+                } else {
+                    &self.bytes
+                }
+            }
+        }
+        for count in 2..=4 {
+            let message = SharedView {
+                bytes: [0x5a; 64],
+                shortened: core::cell::Cell::new(false),
+            };
+            let messages = vec![&message; count];
+            let result = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                Blake3::hash_many(&messages)
+            }));
+            if let Ok(digests) = result {
+                assert_eq!(digests.len(), count);
+            }
+        }
+    }
+
+    /// Check single messages of two or more chunks against the streaming
+    /// reference across partial-chunk and tree-shape boundaries.
+    #[test]
+    fn test_hash_long_matches_reference() {
+        let data = random(4 * 1024 * 1024 + 1024, 1);
+        let lens = [
+            2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 24, 31, 33, 64, 65, 1024, 4096,
+        ]
+        .into_iter()
+        .flat_map(|chunks| {
+            let len = chunks * blake3::CHUNK_LEN;
+            [len - 1, len, len + 1, len + 777]
+        })
+        .filter(|&len| len >= 2 * blake3::CHUNK_LEN);
+        for len in lens {
+            let message = &data[..len];
+            assert_eq!(Blake3::hash(&[message]), reference(&[message]), "len={len}");
+        }
+    }
+
+    /// Check `hash_with` sequentially and across four workers against the
+    /// reference for whole, split, padded, and paged messages around multiples
+    /// of [`TASK_LEN`].
+    #[test]
+    fn test_hash_with_matches_hash() {
+        let data = random((1 << 20) + 5, 0);
+        let rayon = Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap();
+        for len in [
+            0,
+            1,
+            1024,
+            TASK_LEN,
+            TASK_LEN + 1,
+            TASK_LEN + 2 * blake3::CHUNK_LEN,
+            TASK_LEN + 5000,
+            2 * TASK_LEN,
+            2 * TASK_LEN + 1,
+            2 * TASK_LEN + 3 * blake3::CHUNK_LEN + 7,
+            3 * TASK_LEN + 17,
+            8 * TASK_LEN,
+            (1 << 20) + 5,
+        ] {
+            let message = &data[..len];
+            let expected = reference(&[message]);
+            let (a, b) = (len / 3, len / 3 + TASK_LEN.min(len - len / 3));
+            let splits: [&[&[u8]]; 3] = [
+                &[message],
+                &[&message[..a], &message[a..b], &message[b..]],
+                &[&[], message, &[]],
+            ];
+
+            // Many unaligned parts, so part boundaries fall inside chunks and tasks.
+            let pages: Vec<&[u8]> = message.chunks(1000).collect();
+            assert_eq!(
+                Blake3::hash_with(&rayon, &pages),
+                expected,
+                "len={len} pages"
+            );
+            for parts in splits {
+                assert_eq!(
+                    Blake3::hash_with(&commonware_parallel::Sequential, parts),
+                    expected,
+                    "len={len}"
+                );
+                assert_eq!(Blake3::hash_with(&rayon, parts), expected, "len={len}");
+            }
+        }
+    }
+
+    /// Check that `hash_with` forks a node only when its right child spans at
+    /// least [`TASK_LEN`] bytes.
+    #[test]
+    fn test_hash_with_forks_full_right_children() {
+        // One worker planned as four. Each fork from this thread queues one job
+        // for that worker.
+        let pool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .build()
+                .unwrap(),
+        );
+        let strategy =
+            Rayon::with_pool(pool.clone()).with_parallelism(NonZeroUsize::new(4).unwrap());
+        let data = random(2 * TASK_LEN, 0);
+        for (len, forks) in [(TASK_LEN + 1, 0), (2 * TASK_LEN - 1, 0), (2 * TASK_LEN, 1)] {
+            // Occupy the worker with a loop that runs queued jobs and counts them.
+            let done = Arc::new(AtomicBool::new(false));
+            let (started, ready) = mpsc::channel();
+            let (sender, receiver) = mpsc::channel();
+            pool.spawn({
+                let done = done.clone();
+                move || {
+                    started.send(()).unwrap();
+                    let mut jobs = 0;
+                    while !done.load(Relaxed) {
+                        if rayon::yield_now() == Some(rayon::Yield::Executed) {
+                            jobs += 1;
+                        }
+                    }
+                    sender.send(jobs).unwrap();
+                }
+            });
+            ready.recv().unwrap();
+
+            // Hash, then release the worker and compare its job count.
+            let message = &data[..len];
+            let digest = Blake3::hash_with(&strategy, &[message]);
+            done.store(true, Relaxed);
+            assert_eq!(digest, reference(&[message]), "len={len}");
+            assert_eq!(receiver.recv().unwrap(), forks, "len={len}");
+        }
+    }
+
+    #[test]
+    fn test_hash_many_parts_matches_hash() {
+        let data = random(4096, 0);
+        for count in [0, 1, 2, 3, 4, 7, 8, 15, 16, 17, 33] {
+            let nodes: Vec<[&[u8]; 3]> = (0..count)
+                .map(|i| [&data[i..i + 8], &data[i + 8..i + 40], &data[i + 40..i + 72]])
+                .collect();
+            let pairs: Vec<[&[u8]; 2]> = (0..count)
+                .map(|i| [&data[i..i + 32], &data[i + 32..i + 64]])
+                .collect();
+            let leaves: Vec<[&[u8]; 2]> = (0..count)
+                .map(|i| [&data[i..i + 8], &data[i + 8..i + 40]])
+                .collect();
+            let bmt_leaves: Vec<[&[u8]; 2]> = (0..count)
+                .map(|i| [&data[i..i + 4], &data[i + 4..i + 36]])
+                .collect();
+            let mixed: Vec<[&[u8]; 2]> = (0..count)
+                .map(|i| [&data[..i], &data[i..2 * i + 1000]])
+                .collect();
+            let check = |digests: Vec<Digest>, expected: Vec<Digest>| {
+                assert_eq!(digests, expected, "count={count}");
+            };
+            check(
+                Blake3::hash_many_parts(&nodes),
+                nodes.iter().map(|parts| reference(parts)).collect(),
+            );
+            check(
+                Blake3::hash_many_parts(&pairs),
+                pairs.iter().map(|parts| reference(parts)).collect(),
+            );
+            check(
+                Blake3::hash_many_parts(&leaves),
+                leaves.iter().map(|parts| reference(parts)).collect(),
+            );
+            check(
+                Blake3::hash_many_parts(&bmt_leaves),
+                bmt_leaves.iter().map(|parts| reference(parts)).collect(),
+            );
+            check(
+                Blake3::hash_many_parts(&mixed),
+                mixed.iter().map(|parts| reference(parts)).collect(),
+            );
+        }
+    }
+
+    #[test]
+    fn test_hash_many_parts_pair_boundaries() {
+        let data = random(8192, 0);
+        for len in [0, 1, 40, 64, 72, 127, 128, 129, 1024, 1025, 2048, 4096] {
+            let split = len.min(1);
+            let messages = [
+                [&data[..len / 2], &data[len / 2..len]],
+                [&data[1..1 + split], &data[1 + split..1 + len]],
+            ];
+            assert_eq!(
+                Blake3::hash_many_parts(&messages),
+                messages
+                    .iter()
+                    .map(|parts| reference(parts))
+                    .collect::<Vec<_>>(),
+                "len={len}"
+            );
+        }
+        assert_eq!(Blake3::hash_many_parts(&[[]; 2]), vec![reference(&[]); 2]);
+    }
+
+    #[test]
+    fn test_gather() {
+        assert_eq!(gather(&[]), Some(([0; PAIR_LEN], 0)));
+        let (buffer, len) = gather(&[&[1, 2], &[], &[3]]).unwrap();
+        assert_eq!(len, 3);
+        assert_eq!(buffer[..4], [1, 2, 3, 0]);
+        assert!(gather(&[&[0; PAIR_LEN]]).is_some());
+        assert!(gather(&[&[0; PAIR_LEN], &[0]]).is_none());
     }
 
     #[test]
