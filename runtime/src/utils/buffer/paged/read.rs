@@ -581,11 +581,11 @@ mod tests {
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
             // Create Replay
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();
@@ -622,10 +622,10 @@ mod tests {
 
             // Write data that doesn't fill the last page
             let data: Vec<u8> = (1u8..=(PAGE_SIZE.get() + 10) as u8).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();
@@ -654,19 +654,18 @@ mod tests {
 
             // Write data spanning 4 pages (4 * 103 = 412 bytes, with last page partial)
             let data: Vec<u8> = (0u8..=255).cycle().take(400).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
             // Create Replay with buffer size that results in prefetch_count=1.
             // Physical page size = 103 + 12 = 115 bytes.
             // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(115), ReadOptions::default())
                 .await
                 .unwrap();
 
-            // Ensure all data - this requires 4 separate fill() calls (one per page).
-            // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
+            // Load all four logical pages with one-page prefetches and a frozen partial tail.
             assert!(replay.ensure(400).await.unwrap());
             assert_eq!(replay.remaining(), 400);
 
@@ -686,6 +685,7 @@ mod tests {
             }
 
             assert_eq!(collected, data);
+
             // With prefetch_count=1 and 4 pages, we expect at least 4 chunks
             // (one per page, though partial reads could result in more).
             assert!(
@@ -707,7 +707,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let mut append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -715,7 +715,7 @@ mod tests {
             assert_eq!(append.size(), 0);
 
             // Create Replay on empty blob
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();
@@ -755,10 +755,10 @@ mod tests {
 
             // Write data spanning multiple pages
             let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
-            append.append(&data).await.unwrap();
-            append.sync().await.unwrap();
+            (append, _) = append.append(&data).await.unwrap();
+            append = append.sync().await.unwrap();
 
-            let mut replay = append
+            let (_, mut replay) = append
                 .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
                 .await
                 .unwrap();
@@ -776,11 +776,10 @@ mod tests {
             // Seek beyond blob size should error
             assert!(replay.seek_to(data.len() as u64 + 1).is_err());
 
-            // Test that remaining() is correct after seek by reading all data.
+            // Seek into the blob, then drain the remaining bytes and verify their exact contents.
             let seek_offset = 150usize;
             replay.seek_to(seek_offset as u64).unwrap();
             let expected_remaining = data.len() - seek_offset;
-            // Read all bytes and verify content
             let mut collected = Vec::new();
             loop {
                 // Load more data if needed

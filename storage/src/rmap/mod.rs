@@ -75,12 +75,10 @@ impl RMap {
                 }
                 if value == p_end + 1 && value + 1 == n_start {
                     // Value bridges prev and next
-                    self.ranges.remove(&p_start);
                     self.ranges.remove(&n_start);
                     self.ranges.insert(p_start, n_end);
                 } else if value == p_end + 1 {
                     // Value is adjacent to prev's end
-                    self.ranges.remove(&p_start);
                     self.ranges.insert(p_start, value);
                 } else if value + 1 == n_start {
                     // Value is adjacent to next's start
@@ -98,7 +96,6 @@ impl RMap {
                 }
                 if value == p_end + 1 {
                     // Value is adjacent to prev's end
-                    self.ranges.remove(&p_start);
                     self.ranges.insert(p_start, value);
                 } else {
                     // New isolated range

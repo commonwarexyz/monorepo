@@ -1741,7 +1741,6 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         context.shared.panicker.clone(),
                         tree.clone(),
                     );
-                    tree.register(handle.aborter().unwrap());
                     let shared = context.shared.clone();
                     let origin = context.origin.clone();
                     if matches!(placement, Placement::Foreign) {

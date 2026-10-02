@@ -1,11 +1,14 @@
 #![allow(dead_code)]
 
-use crate::dkg::{
-    ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
-    network::{Addresses, Directory as DkgDirectory, Manager as DkgManager},
-    orchestrator,
-    reshare::{self, store::Store},
-    types::{Payload, SchemeInfo},
+use crate::{
+    dkg::{
+        ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+        network::{Addresses, Directory as DkgDirectory, Manager as DkgManager},
+        orchestrator,
+        reshare::{self, store::Store},
+        types::{Payload, SchemeInfo},
+    },
+    simulate::{reporter::MonitorReporter, tracker::ProgressTracker},
 };
 use bytes::BufMut;
 use commonware_actor::Feedback;
@@ -51,7 +54,7 @@ use commonware_storage::archive::immutable;
 use commonware_utils::{
     Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
-    channel::{fallible::OneshotExt, oneshot},
+    channel::{fallible::OneshotExt, mpsc, oneshot},
     ordered::Set,
     sequence::Unit,
     sync::Mutex,
@@ -885,4 +888,37 @@ impl SecretStore for MemorySecretStore {
         inner.seeds.retain(|epoch, _| *epoch >= min);
         inner.dealings.retain(|(epoch, _), _| *epoch >= min);
     }
+}
+
+/// Conflicting tips at the same height must fail the tracker even in different rounds.
+#[test]
+fn simulator_rejects_conflicting_tips_at_same_height() {
+    // Two validators report different digests at height seven in different rounds.
+    let (monitor, mut updates) = mpsc::unbounded_channel();
+    let mut first = MonitorReporter::new(
+        PrivateKey::from_seed(1).public_key(),
+        monitor.clone(),
+        MarshalApplication::default(),
+    );
+    let mut second = MonitorReporter::new(
+        PrivateKey::from_seed(2).public_key(),
+        monitor,
+        MarshalApplication::default(),
+    );
+    first.report(Update::Tip(
+        Round::new(Epoch::zero(), View::new(10)),
+        Height::new(7),
+        Sha256Digest::from([1; 32]),
+    ));
+    second.report(Update::Tip(
+        Round::new(Epoch::zero(), View::new(11)),
+        Height::new(7),
+        Sha256Digest::from([2; 32]),
+    ));
+
+    // The first digest is accepted and the second is a fork at that height.
+    let mut tracker = ProgressTracker::default();
+    tracker.observe(updates.try_recv().unwrap()).unwrap();
+    let err = tracker.observe(updates.try_recv().unwrap()).unwrap_err();
+    assert!(err.contains("fork detected at height"), "{err}");
 }

@@ -95,19 +95,11 @@ jobs:
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
-            partition: "1/4"
+            partition: "1/2"
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
-            partition: "2/4"
-          - package: commonware-coding
-            test_flags: ""
-            lint_flags: ""
-            partition: "3/4"
-          - package: commonware-coding
-            test_flags: ""
-            lint_flags: ""
-            partition: "4/4"
+            partition: "2/2"
           - package: commonware-math
             test_flags: ""
             lint_flags: ""

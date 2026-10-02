@@ -736,11 +736,6 @@ impl crate::Spawner for Context {
             parent.clone(),
         );
 
-        // Attach cancellation before another worker can begin polling the task.
-        if let Some(aborter) = handle.aborter() {
-            parent.register(aborter);
-        }
-
         // A one-off worker polls the future as its root. An ordinary spawn
         // becomes a task on its origin worker.
         if let Some(reservation) = reservation {
