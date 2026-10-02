@@ -51,7 +51,7 @@ use core::{
 use rand_core::CryptoRng;
 use zeroize::Zeroize;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 mod simd;
 
 /// Re-export [blake3::Hasher] as `CoreBlake3` for external use if needed.
@@ -215,7 +215,7 @@ impl Hasher for Blake3 {
     }
 
     fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(digests) = simd::hash_many(messages) {
             return digests;
         }
@@ -229,7 +229,7 @@ impl Hasher for Blake3 {
         if P == 1 {
             return Self::hash_many(messages.as_flattened());
         }
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         if let Some(digests) = simd::hash_many_parts(messages) {
             return digests;
         }
