@@ -5,7 +5,7 @@
 //! The proposed design separates instruction semantics, algorithm implementations, and
 //! execution. [`Simd`] defines the common instruction and execution interface, and
 //! [`Operation`] defines equivalent algorithm paths. The concrete backends, accelerated
-//! instructions, and dispatch signatures below are sketches for a prototype.
+//! instructions, and dispatch signatures below remain a prototype.
 //!
 //! ## Instruction profiles
 //!
@@ -39,7 +39,8 @@
 //!
 //! [`emulated`] provides array-backed `EmulatedScalar`, `EmulatedIceLake`, `EmulatedArmV9`, and
 //! `EmulatedNeon` execution tokens.
-//! Native providers remain proposed: `NativeIceLake`, `NativeArmV9`, and `NativeNeon`.
+//! `native::NativeNeon` provides native NEON execution on AArch64 after checking CPU support.
+//! Native providers remain proposed for Ice Lake and Armv9.
 //! Each token implements its instruction profile, so a generic profile algorithm can run
 //! with either a native or an emulated provider.
 //! Vector and mask representations are associated types of the instruction traits. Native and
@@ -163,7 +164,7 @@
 //! without specializations use their portable defaults. This requires neither trait-implementation
 //! discovery nor overlapping fallback implementations.
 //!
-//! A crate-owned dispatcher selects an available native token or `EmulatedScalar` at the outer boundary
+//! [`dispatch()`] selects native NEON when supported, or `EmulatedScalar` at the outer boundary
 //! and executes the root operation. The concrete token threads through the tree. Child calls to
 //! `execute` repeat neither feature detection nor runtime backend selection and use static dispatch.
 //! Passing a runtime enum through the tree and matching it at every child would lose this property.
@@ -227,9 +228,9 @@
 //! 1. Define instructions for the `IceLake`, `ArmV9`, and `Neon` profiles and precise primitive
 //!    semantics, starting with operations needed by existing erasure-coding or curve-arithmetic
 //!    kernels. Extend [`Simd`]'s common instructions as needed.
-//! 2. Implement native backends and instruction-level hardware tests. Define native SVE
+//! 2. Extend native backends and instruction-level hardware tests beyond NEON. Define native SVE
 //!    vector-length handling for `ArmV9` and extend emulation as profile instructions are added.
-//! 3. Add opaque operation constructors for real kernels and a crate-owned outer dispatcher.
+//! 3. Add opaque operation constructors for real kernels and extend native dispatch as backends land.
 //!    Preserve generic composition with specialized children under portable parent defaults.
 //! 4. Use [`check_consistent`] in shared fuzz plans when specific instructions enable
 //!    meaningful alternative strategies, including observable mutable state. Keep hardware
@@ -296,5 +297,10 @@ commonware_macros::stability_scope!(ALPHA {
     pub use consistency::check_consistent;
     mod core;
     pub use core::{ArmV9, IceLake, Neon, Operation, Simd};
+    pub mod dispatch;
+    pub use dispatch::dispatch;
     pub mod emulated;
+    pub mod native;
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz;
 });
