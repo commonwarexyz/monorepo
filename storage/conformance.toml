@@ -510,6 +510,10 @@ hash = "a023b1399b8656e8e113787f935d10013606440d43c8cb7c818749f6f09fc2fd"
 n_cases = 200
 hash = "41e1e4693b5b53c49e36891d2fb7ccc138ff7837280e71d0b10c851f5b0b101d"
 
+["commonware_storage::qmdb::conformance::tests::StorageConformance<StoreStorage>"]
+n_cases = 64
+hash = "5d7093b1f5e1ea7ae3f8fc1767057af7622dfa2c64bac59d6e45276cdbf9245f"
+
 ["commonware_storage::qmdb::current::ordered::tests::conformance::CodecConformance<constant::ExclusionProof<mmb::Family,U64,\nFixedEncoding<U64>,Sha256Digest,32>>"]
 n_cases = 65536
 hash = "9ced33c6c456eeabb2e47016c7ad438c2429e8c1e76034b05b9dd93c4a8f2d5c"

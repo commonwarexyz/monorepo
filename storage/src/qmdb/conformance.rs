@@ -449,21 +449,17 @@ mod tests {
     /// 2. Delete ~20% of keys, update the rest.
     /// 3. Recreate the deleted keys alongside new keys that collide under the translator.
     /// 4. Update original keys; delete odd-indexed colliding keys, update even-indexed ones.
-    async fn keyed_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
-        db: D,
-        seed: u64,
-    ) -> (D, Vec<u8>) {
+    fn keyed_batches(seed: u64) -> [Vec<(Digest, Option<Digest>)>; 4] {
         let n = seed % 50 + 5;
 
         // Choose a translator bucket for colliding keys (varies per seed).
         let prefix = (seed % 256) as u8;
 
         // 1. Create n keys.
-        let writes: Vec<_> = (0..n).map(|i| (to_digest(i), Some(to_val(i, 1)))).collect();
-        let db = apply_writes(db, writes).await;
+        let created: Vec<_> = (0..n).map(|i| (to_digest(i), Some(to_val(i, 1)))).collect();
 
         // 2. Delete ~20% of keys, update the rest with new values.
-        let writes: Vec<_> = (0..n)
+        let mixed: Vec<_> = (0..n)
             .map(|i| {
                 let key = to_digest(i);
                 if is_deleted(seed, i) {
@@ -473,38 +469,64 @@ mod tests {
                 }
             })
             .collect();
-        let db = apply_writes(db, writes).await;
 
         // 3. Recreate every deleted key, and introduce new keys that share a translator
         //    bucket (offset by 10000 to avoid overlapping with the original key range).
-        let mut writes = Vec::new();
+        let mut recreated = Vec::new();
         for i in 0..n {
             if is_deleted(seed, i) {
-                writes.push((to_digest(i), Some(to_val(i, 3))));
+                recreated.push((to_digest(i), Some(to_val(i, 3))));
             }
         }
         for i in 0..n / 2 {
-            writes.push((colliding_digest(prefix, 10000 + i), Some(to_val(i, 4))));
+            recreated.push((colliding_digest(prefix, 10000 + i), Some(to_val(i, 4))));
         }
-        let db = apply_writes(db, writes).await;
 
         // 4. Update original keys; delete odd-indexed colliding keys, update even-indexed.
-        let mut writes = Vec::new();
+        let mut updated = Vec::new();
         for i in 0..n {
-            writes.push((to_digest(i), Some(to_val(i, 5))));
+            updated.push((to_digest(i), Some(to_val(i, 5))));
         }
         for i in 0..n / 2 {
             let key = colliding_digest(prefix, 10000 + i);
             if i % 2 == 1 {
-                writes.push((key, None));
+                updated.push((key, None));
             } else {
-                writes.push((key, Some(to_val(i, 6))));
+                updated.push((key, Some(to_val(i, 6))));
             }
         }
-        let db = apply_writes(db, writes).await;
 
+        [created, mixed, recreated, updated]
+    }
+
+    /// Apply [`keyed_batches`] for `seed` to `db` and return its root.
+    async fn keyed_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+        mut db: D,
+        seed: u64,
+    ) -> (D, Vec<u8>) {
+        for writes in keyed_batches(seed) {
+            db = apply_writes(db, writes).await;
+        }
         let root = db.root().to_vec();
         (db, root)
+    }
+
+    /// [`keyed_batches`] on a store, applying every batch with [`Proportional`].
+    struct StoreStorage;
+
+    impl StorageWorkload for StoreStorage {
+        type Error = crate::qmdb::Error<mmr::Family>;
+
+        async fn run(context: Ctx, seed: u64) -> Result<(), Self::Error> {
+            let cfg = store_config("store", &context);
+            let mut db = Store::init(context.child("db"), cfg, None).await?;
+            for writes in keyed_batches(seed) {
+                let batch = writes.into_iter().collect();
+                (db, _) = db.apply_batch(batch, &mut Proportional).await?;
+            }
+            db.sync().await?;
+            Ok(())
+        }
     }
 
     /// The policy a batch of the floor workload advances its floor with.
@@ -1489,6 +1511,7 @@ mod tests {
         StorageConformance<CurrentMmbUnorderedVariableStorage> => 64,
         StorageConformance<CurrentMmbOrderedFixedStorage> => 64,
         StorageConformance<CurrentMmbOrderedVariableStorage> => 64,
+        StorageConformance<StoreStorage> => 64,
         StorageConformance<StoreFloorStorage> => 200,
         StorageConformance<ImmutableMmrFixedStorage> => 64,
         StorageConformance<ImmutableMmbFixedStorage> => 64,
