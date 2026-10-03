@@ -105,10 +105,16 @@ impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
 }
 
 /// Internal Secp256r1 Public Key storage.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
+#[derive(Clone, Eq, Ord, PartialOrd, FixedArray)]
 pub struct PublicKeyInner {
     raw: [u8; PUBLIC_KEY_LENGTH],
     pub key: VerifyingKey,
+}
+
+impl PartialEq for PublicKeyInner {
+    fn eq(&self, other: &Self) -> bool {
+        self.raw == other.raw
+    }
 }
 
 impl PublicKeyInner {
