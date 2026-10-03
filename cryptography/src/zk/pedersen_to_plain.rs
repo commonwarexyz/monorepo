@@ -334,7 +334,7 @@ where
 /// Verify a [`Proof`] against a [`Claim`].
 ///
 /// Returns `true` if the proof is valid for the current transcript state.
-pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode + PartialEq>(
+pub fn verify<F: Field + Random, G: CryptoGroup<Scalar = F> + Encode>(
     rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<Synthetic<F, G>>,

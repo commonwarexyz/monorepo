@@ -287,7 +287,6 @@ where
         inactivity_floor: Location<F>,
     ) -> MerkleizeResult<F, H::Digest, V, S>
     where
-        F: Family,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
@@ -483,10 +482,7 @@ where
     }
 
     /// Create an owned merkleized batch representing the current applied state.
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
-    where
-        F: Family,
-    {
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, V, S>> {
         Arc::new(MerkleizedBatch {
             merkle_batch: self.merkle.to_batch(),
             operations: Arc::new(Vec::new()),

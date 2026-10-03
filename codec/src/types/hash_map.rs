@@ -71,7 +71,7 @@ impl<K: EncodeSize, V: EncodeSize, S> EncodeSize for HashMap<K, V, S> {
 }
 
 // Read implementation for HashMap
-impl<K: Read + Ord + Hash + Eq, V: Read> Read for HashMap<K, V> {
+impl<K: Read + Ord + Hash, V: Read> Read for HashMap<K, V> {
     type Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg));
 
     fn read_cfg(buf: &mut impl Buf, (range, (k_cfg, v_cfg)): &Self::Cfg) -> Result<Self, Error> {
@@ -107,7 +107,7 @@ mod tests {
         k_cfg: KCfg,
         v_cfg: VCfg,
     ) where
-        K: Write + EncodeSize + Read<Cfg = KCfg> + Ord + Hash + Eq + PartialEq + Debug,
+        K: Write + EncodeSize + Read<Cfg = KCfg> + Ord + Hash + Debug,
         V: Write + EncodeSize + Read<Cfg = VCfg> + PartialEq + Debug,
         HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
             + Decode<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>

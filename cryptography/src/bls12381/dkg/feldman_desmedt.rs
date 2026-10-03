@@ -650,7 +650,7 @@ impl<V: Variant, P: PublicKey> Read for Output<V, P> {
 #[cfg(feature = "arbitrary")]
 impl<P: PublicKey, V: Variant> arbitrary::Arbitrary<'_> for Output<V, P>
 where
-    P: for<'a> arbitrary::Arbitrary<'a> + Ord,
+    P: for<'a> arbitrary::Arbitrary<'a>,
     V::Public: for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {

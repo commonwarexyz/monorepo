@@ -968,7 +968,7 @@ pub mod tests {
     /// The factory will be called multiple times to test reopening.
     pub async fn test_build_random_close_reopen<M, C, F, Fut>(context: Context, open_db: F)
     where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -990,7 +990,7 @@ pub mod tests {
     /// Run `test_commit_after_sync_recovery` against a database factory.
     pub async fn test_commit_after_sync_recovery<M, C, F, Fut>(context: Context, mut open_db: F)
     where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -1034,7 +1034,7 @@ pub mod tests {
     /// failure scenarios.
     pub async fn test_simulate_write_failures<M, C, F, Fut>(mut context: Context, mut open_db: F)
     where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -1194,7 +1194,7 @@ pub mod tests {
         mut context: Context,
         mut open_db: F,
     ) where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable,
         C: DbAny<M> + BitmapPrunedBits + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,
@@ -3824,7 +3824,7 @@ pub mod tests {
         context: Context,
         mut open_db: F,
     ) where
-        M: merkle::Graftable + 'static,
+        M: merkle::Graftable,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
         <C as DbAny<M>>::Value: TestValue,

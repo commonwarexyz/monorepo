@@ -991,7 +991,7 @@ impl<G> Setup<G> {
         strategy: &impl Strategy,
     ) -> Option<Vec<bool>>
     where
-        G: Space<F> + PartialEq,
+        G: Space<F>,
     {
         let (vs, flat) = self.build_virtual::<F>();
         let synths = f(&vs, &mut *rng)?;

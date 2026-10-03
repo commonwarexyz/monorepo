@@ -30,7 +30,6 @@ use commonware_utils::{
 use rand_core::CryptoRng;
 use std::{
     collections::{HashMap, HashSet},
-    hash::Hash,
     sync::Arc,
 };
 
@@ -74,7 +73,6 @@ where
     E: CryptoRng,
     S: Scheme,
     L: elector::Config<S>,
-    L::Elector: Clone,
     D: Digest,
 {
     fn clone(&self) -> Self {
@@ -106,7 +104,7 @@ where
     E: CryptoRng,
     S: Scheme,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let elector = cfg.elector.build(&cfg.participants);
@@ -164,7 +162,7 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Activity = Activity<S, D>;
 
@@ -368,7 +366,7 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: Scheme,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Index = View;
 

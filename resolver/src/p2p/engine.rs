@@ -45,7 +45,6 @@ where
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes>,
     Pro: Producer<Key = Key>,
-    Con::Subscriber: Eq,
 {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -96,7 +95,7 @@ where
     Key: Span,
     Con: Consumer<Key = Key, Value = Bytes>,
     Pro: Producer<Key = Key>,
-    Con::Subscriber: Clone + Ord + Send + 'static,
+    Con::Subscriber: Ord,
 {
     /// Creates a new `Actor` with the given configuration.
     ///

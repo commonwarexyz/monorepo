@@ -64,9 +64,9 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
 
 impl<B, S> crate::Application<deterministic::Context> for MockVerifyingApp<B, S>
 where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
 {
     type Block = B;
     type Context = B::Context;
@@ -121,9 +121,9 @@ impl<B, S> GatedVerifyingApp<B, S> {
 
 impl<B, S> crate::Application<deterministic::Context> for GatedVerifyingApp<B, S>
 where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
 {
     type Block = B;
     type Context = B::Context;

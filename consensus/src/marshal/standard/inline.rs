@@ -132,7 +132,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     context: Arc<E>,
@@ -151,7 +151,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     fn clone(&self) -> Self {
@@ -179,7 +179,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     /// Creates a new inline-verification wrapper.
@@ -229,7 +229,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -586,7 +586,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     #[allow(clippy::async_yields_async)]
@@ -670,7 +670,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -688,7 +688,7 @@ where
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     type Activity = A::Activity;
@@ -742,7 +742,7 @@ mod tests {
                 Context = Context<B::Digest, S::PublicKey>,
                 Input = (),
             >,
-        B: Block + Clone,
+        B: Block,
         ES: crate::types::Epocher,
     {
         fn assert_automaton<T: Automaton>() {}
