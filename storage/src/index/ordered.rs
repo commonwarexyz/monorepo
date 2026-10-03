@@ -189,14 +189,17 @@ impl<T: Translator, V: Send + Sync> super::Factory for Index<T, V> {
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
-    where
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: impl IntoIterator<Item = K>,
+        mut visit: impl FnMut(usize, &'a V),
+    ) where
         V: 'a,
     {
         // Probe in translated-key order: consecutive tree descents share upper node paths,
         // which stay cache-resident across the batch.
         let mut order: Vec<(T::Key, usize)> = keys
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(key_idx, key)| (self.translator.transform(key.as_ref()), key_idx))
             .collect();

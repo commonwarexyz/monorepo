@@ -46,6 +46,14 @@ impl Array {
         Self { values }
     }
 
+    /// Writes sorted, unique values using the array container encoding.
+    pub(super) fn write_values(values: impl ExactSizeIterator<Item = u16>, buf: &mut impl BufMut) {
+        values.len().write(buf);
+        for value in values {
+            value.write(buf);
+        }
+    }
+
     /// Returns the number of values in the container.
     pub const fn len(&self) -> usize {
         self.values.len()

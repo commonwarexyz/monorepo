@@ -144,11 +144,11 @@ impl<F: Family, D: Digest> Proof<F, D> {
     }
 
     /// Return true if this proof verifies against the supplied root, using the bagging carried by
-    /// `hasher`.
+    /// `hasher`. Elements are yielded in consecutive location order starting at `start_loc`.
     pub fn verify_range_inclusion<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         root: &D,
     ) -> bool
@@ -260,7 +260,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub fn reconstruct_root<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
     ) -> Result<D, ReconstructionError>
     where
@@ -279,7 +279,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub fn verify_range_inclusion_and_extract_digests<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         root: &D,
     ) -> Result<Vec<(Position<F>, D)>, Error<F>>
@@ -339,7 +339,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub fn verify_proof_and_pinned_nodes<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         pinned_nodes: &[D],
         root: &D,
@@ -360,7 +360,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     fn try_verify_proof_and_pinned_nodes<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         pinned_nodes: &[D],
         root: &D,
@@ -369,12 +369,14 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
+        let elements = elements.into_iter();
+        let elements_len = elements.len();
         let bagging = hasher.root_bagging();
         let collected = self
             .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
             .ok()?;
 
-        if elements.is_empty() {
+        if elements_len == 0 {
             return pinned_nodes.is_empty().then_some(());
         }
 
@@ -382,7 +384,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return None;
         }
 
-        let end_loc = start_loc.checked_add(elements.len() as u64)?;
+        let end_loc = start_loc.checked_add(elements_len as u64)?;
         let bp = Blueprint::new(
             self.leaves,
             self.inactive_peaks,
@@ -449,7 +451,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub(crate) fn reconstruct_root_inner<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         collected: Option<&mut Vec<(Position<F>, D)>>,
     ) -> Result<D, ReconstructionError>
@@ -457,9 +459,13 @@ impl<F: Family, D: Digest> Proof<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
+        let mut elements = elements.into_iter();
         let bagging = hasher.root_bagging();
         let mut collected = collected;
-        if elements.is_empty() {
+        if elements.len() == 0 {
+            if elements.next().is_some() {
+                return Err(ReconstructionError::ExtraDigests);
+            }
             if start_loc == 0 {
                 if self.inactive_peaks != 0 {
                     return Err(ReconstructionError::InvalidProof);
@@ -508,12 +514,11 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
 
         let mut sibling_cursor = 0usize;
-        let mut elements_iter = elements.iter();
         for peak in &bp.range_peaks {
             let peak_digest = peak.reconstruct_digest(
                 hasher,
                 &bp.range,
-                &mut elements_iter,
+                &mut elements,
                 proof_digests.siblings,
                 &mut sibling_cursor,
                 collected.as_deref_mut(),
@@ -535,7 +540,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
 
         // Verify all elements were consumed.
-        if elements_iter.next().is_some() {
+        if elements.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
 
@@ -1116,6 +1121,78 @@ mod tests {
         };
         mem.apply_batch(&batch).unwrap();
         mem
+    }
+
+    /// An iterator with deliberately incorrect length metadata.
+    struct Misreported<I> {
+        inner: I,
+        remaining: usize,
+    }
+
+    impl<I: Iterator> Iterator for Misreported<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.remaining = self.remaining.saturating_sub(1);
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.remaining, Some(self.remaining))
+        }
+    }
+
+    impl<I: Iterator> ExactSizeIterator for Misreported<I> {}
+
+    fn range_iterator_inputs<F: Family>() {
+        for bagging in [ForwardFold, BackwardFold] {
+            let hasher = hasher_for_bagging(bagging);
+            let mem = build_raw::<F>(&hasher, 3);
+            let root = plain_root(&mem, &hasher);
+            let proof = build_range_proof(
+                &hasher,
+                mem.leaves(),
+                0,
+                Location::new(0)..Location::new(3),
+                |pos| mem.get_node(pos),
+                Error::ElementPruned,
+            )
+            .unwrap();
+            let elements = || (0..3u32).map(|i| u64::from(i).to_be_bytes());
+            assert!(proof.verify_range_inclusion(&hasher, elements(), Location::new(0), &root));
+
+            for count in [2, 4] {
+                let malformed = Misreported {
+                    inner: (0..count).map(|i: u64| i.to_be_bytes()),
+                    remaining: 3,
+                };
+                assert!(!proof.verify_range_inclusion(&hasher, malformed, Location::new(0), &root));
+            }
+
+            let empty: Proof<F, D> = Proof::default();
+            let root = hasher.digest(&0u64.to_be_bytes());
+            assert!(empty.verify_range_inclusion(
+                &hasher,
+                core::iter::empty::<[u8; 8]>(),
+                Location::new(0),
+                &root,
+            ));
+            assert!(!empty.verify_range_inclusion(
+                &hasher,
+                Misreported {
+                    inner: elements(),
+                    remaining: 0
+                },
+                Location::new(0),
+                &root,
+            ));
+        }
+    }
+
+    #[test]
+    fn test_range_iterator_inputs() {
+        range_iterator_inputs::<mmr::Family>();
+        range_iterator_inputs::<mmb::Family>();
     }
 
     fn build_inactive_prefix<F: Family>(hasher: &H, n: u64, inactive_peaks: usize) -> Mem<F, D> {

@@ -464,15 +464,18 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         self.partition_values(i, &k).iter()
     }
 
-    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
-    where
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: impl IntoIterator<Item = K>,
+        mut visit: impl FnMut(usize, &'a V),
+    ) where
         V: 'a,
     {
         // Probe in (partition, translated-key) order so consecutive probes hit the same partition
         // (one region of the 2^(8*P)-entry partition array) and the same value run within it,
         // instead of scattering across partitions in input order.
         let mut order: Vec<(usize, T::Key, usize)> = keys
-            .iter()
+            .into_iter()
             .enumerate()
             .map(|(key_idx, key)| {
                 let (partition, sub) = partition_index_and_sub_key::<P>(key.as_ref());
