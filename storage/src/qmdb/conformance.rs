@@ -590,8 +590,13 @@ mod tests {
             }
         }
 
-        /// The `j`th seeded pick from `ids` for the open batch.
+        /// The `j`th seeded pick from the `ids` the open batch does not write yet.
         fn pick(&self, ids: &BTreeSet<u64>, j: u64) -> Option<u64> {
+            let ids: Vec<u64> = ids
+                .iter()
+                .copied()
+                .filter(|id| !self.writes.contains_key(&self.key(*id)))
+                .collect();
             if ids.is_empty() {
                 return None;
             }
@@ -602,10 +607,10 @@ mod tests {
                 &j.to_be_bytes(),
             ]);
             let mix = u64::from_be_bytes(digest[..8].try_into().unwrap());
-            ids.iter().nth((mix % ids.len() as u64) as usize).copied()
+            Some(ids[(mix % ids.len() as u64) as usize])
         }
 
-        /// The `j`th seeded pick from the live ids.
+        /// The `j`th seeded pick from the live ids the open batch does not write yet.
         fn live(&self, j: u64) -> u64 {
             self.pick(&self.live, j).unwrap()
         }
@@ -647,7 +652,8 @@ mod tests {
     /// 2. Update three live keys in each of 12 batches.
     /// 3. Delete two live keys, update one, and delete one missing key in each of 12 batches.
     /// 4. Recreate two deleted keys and update one live key in each of 8 batches.
-    /// 5. Delete or recreate one colliding key and update another in each of 6 batches.
+    /// 5. Delete or recreate one colliding key, and update another if it is live, in each of 6
+    ///    batches.
     /// 6. Commit a batch without writes under [`Proportional`], then another under [`Seeded`].
     /// 7. Delete four live keys in each batch until four keys remain.
     /// 8. Create 16 keys, then update two live keys in each of 4 batches.
