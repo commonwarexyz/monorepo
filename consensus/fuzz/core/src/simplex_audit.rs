@@ -26,7 +26,7 @@ use commonware_utils::{
     sync::Mutex,
 };
 use rand_core::CryptoRng;
-use std::{hash::Hash, sync::Arc};
+use std::sync::Arc;
 
 /// Completion of an automaton request at the proxy response boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -189,7 +189,6 @@ where
     E: CryptoRng,
     S: certificate::Scheme,
     L: ElectorConfig<S>,
-    L::Elector: Clone,
     D: Digest,
 {
     fn clone(&self) -> Self {
@@ -207,8 +206,8 @@ impl<E, S, L, D> RecordingReporter<E, S, L, D>
 where
     E: CryptoRng,
     S: certificate::Scheme,
-    L: ElectorConfig<S> + Clone,
-    D: Digest + Eq + Hash + Clone,
+    L: ElectorConfig<S>,
+    D: Digest,
 {
     /// Creates a recording layer over the existing mock Reporter.
     pub fn new(
@@ -232,7 +231,7 @@ where
     E: CryptoRng,
     S: certificate::Scheme,
     L: ElectorConfig<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     /// Built copy of the configured elector.
     pub const fn elector(&self) -> &L::Elector {
@@ -263,8 +262,7 @@ where
     E: CryptoRng,
     S: certificate::Scheme,
     L: ElectorConfig<S>,
-    L::Elector: Clone,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     for reporter in reporters {
         reporter.audit.assert_history_ordering();
@@ -280,7 +278,7 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: ElectorConfig<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Activity = Activity<S, D>;
 
@@ -301,7 +299,7 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: certificate::Scheme,
     L: ElectorConfig<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Index = View;
 
@@ -355,8 +353,6 @@ where
     where
         T: Clone + Send + 'static,
         F: FnOnce(Completion<T>) -> AutomatonEvent<D, S::PublicKey> + Send + 'static,
-        S: 'static,
-        D: 'static,
     {
         let (mut sender, output) = oneshot::channel();
         let audit = self.audit.clone();
@@ -398,8 +394,8 @@ impl<E, A, S, D> Automaton for RecordingAutomaton<E, A, S, D>
 where
     E: Spawner,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    S: certificate::Scheme + 'static,
-    D: Digest + 'static,
+    S: certificate::Scheme,
+    D: Digest,
 {
     type Context = Context<D, S::PublicKey>;
     type Digest = D;
@@ -441,8 +437,8 @@ impl<E, A, S, D> CertifiableAutomaton for RecordingAutomaton<E, A, S, D>
 where
     E: Spawner,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>, Digest = D>,
-    S: certificate::Scheme + 'static,
-    D: Digest + 'static,
+    S: certificate::Scheme,
+    D: Digest,
 {
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         let receiver = self.inner.certify(round, payload).await;

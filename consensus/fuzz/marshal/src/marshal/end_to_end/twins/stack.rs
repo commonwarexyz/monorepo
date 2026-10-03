@@ -81,8 +81,7 @@ pub(crate) trait TwinsBlockBuilder<P: Simplex>:
         Context = Ctx<P>,
         Block = B<P>,
         Input = (),
-    > + Clone
-    + Reporter<Activity = Update<B<P>>>
+    > + Reporter<Activity = Update<B<P>>>
 {
     fn create(
         choice: ApplicationChoice,
@@ -655,7 +654,7 @@ pub(crate) fn start_engine<P: Simplex, EC, A, R>(
         impl Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) where
-    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
+    EC: ElectorConfig<SchemeOf<P>>,
     A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
     R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {
@@ -708,7 +707,7 @@ pub(crate) fn start_engine_with_floor<P: Simplex, EC, A, R>(
         impl Receiver<PublicKey = PublicKeyOf<P>>,
     ),
 ) where
-    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
+    EC: ElectorConfig<SchemeOf<P>>,
     A: CertifiableAutomaton<Context = Ctx<P>, Digest = Sha256Digest>,
     R: Relay<Digest = Sha256Digest, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {

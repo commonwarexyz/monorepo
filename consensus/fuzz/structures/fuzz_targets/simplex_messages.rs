@@ -13,9 +13,9 @@ use commonware_consensus::{
             bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
         },
         types::{
-            Activity, Artifact, Attributable, Certificate, ConflictingFinalize,
-            ConflictingNotarize, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, NullifyFinalize, Proposal, Subject, Vote, VoteTracker,
+            Activity, Artifact, Certificate, ConflictingFinalize, ConflictingNotarize, Context,
+            Finalization, Finalize, Notarization, Notarize, Nullification, Nullify,
+            NullifyFinalize, Proposal, Subject, Vote,
         },
     },
     types::{
@@ -197,9 +197,7 @@ fn roundtrip_vote<S: SimplexScheme<sha256::Digest>>(data: &[u8]) {
 fn roundtrip_certificate<S: SimplexScheme<sha256::Digest>>(
     data: &[u8],
     cfg: &<S::Certificate as Read>::Cfg,
-) where
-    S::Certificate: Read,
-{
+) {
     if let Ok(cert) = Certificate::<S, sha256::Digest>::decode_cfg(Copying(data), cfg) {
         let encoded = cert.encode();
         assert_eq!(data, encoded.as_ref());
@@ -226,7 +224,7 @@ where
 
 fn assert_certificate_roundtrip<S>(scheme: &S, certificate: Certificate<S, sha256::Digest>)
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let encoded = certificate.encode();
     assert_eq!(encoded.len(), certificate.encode_size());
@@ -255,7 +253,7 @@ where
 
 fn assert_activity_roundtrip<S>(scheme: &S, activity: Activity<S, sha256::Digest>)
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let cfg = scheme.certificate_codec_config();
     let view = activity.view();
@@ -277,7 +275,7 @@ where
 
 fn assert_artifact_roundtrip<S>(scheme: &S, artifact: Artifact<S, sha256::Digest>)
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let cfg = scheme.certificate_codec_config();
     let view = artifact.view();
@@ -323,44 +321,11 @@ fn assert_subject_views(proposal: &Proposal<sha256::Digest>) {
     assert_eq!(finalize.view(), proposal.view());
 }
 
-fn assert_vote_tracker<S>(schemes: &[S], signer: usize, proposal: &Proposal<sha256::Digest>)
-where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme<PublicKey = PublicKey>,
-{
-    let Some(notarize) = Notarize::sign(&schemes[signer], proposal.clone()) else {
-        return;
-    };
-    let Some(nullify) = Nullify::sign::<sha256::Digest>(&schemes[signer], proposal.round) else {
-        return;
-    };
-    let Some(finalize) = Finalize::sign(&schemes[signer], proposal.clone()) else {
-        return;
-    };
-
-    let mut tracker = VoteTracker::new(schemes.len(), false);
-    let signer = notarize.signer();
-    assert!(!tracker.has_notarize(signer));
-    assert!(!tracker.has_finalize(signer));
-    assert!(tracker.insert_notarize(notarize));
-    assert!(tracker.insert_nullify(nullify));
-    assert!(tracker.insert_finalize(finalize));
-    assert!(tracker.has_notarize(signer));
-    assert!(tracker.has_finalize(signer));
-    assert!(tracker.nullify(signer).is_some());
-    assert_eq!(tracker.iter_notarizes().count(), 1);
-    assert_eq!(tracker.iter_finalizes().count(), 1);
-    tracker.clear_notarizes();
-    tracker.clear_finalizes();
-    assert!(!tracker.has_notarize(signer));
-    assert!(!tracker.has_finalize(signer));
-}
-
 fn assert_structured_surface<S>(schemes: &[S], signer: usize, proposal: Proposal<sha256::Digest>)
 where
     S: SimplexScheme<sha256::Digest> + CertificateScheme<PublicKey = PublicKey>,
 {
     assert_subject_views(&proposal);
-    assert_vote_tracker(schemes, signer, &proposal);
 
     let Some(notarize) = Notarize::sign(&schemes[signer], proposal.clone()) else {
         return;
@@ -746,7 +711,7 @@ fn structured<S>(
 
 fn assert_arbitrary_byte_roundtrip<T>(u: &mut arbitrary::Unstructured<'_>, cfg: &T::Cfg)
 where
-    T: for<'a> Arbitrary<'a> + Read + Encode + EncodeSize,
+    T: for<'a> Arbitrary<'a> + Read + Encode,
 {
     let Ok(value) = T::arbitrary(u) else {
         return;

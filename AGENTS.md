@@ -48,6 +48,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 - Label runtime actors with `context.child(...)`; use `context.shared(true).spawn()` for CPU-intensive work in async code.
 - Benchmark names use `module_path!()` and the format `module::operation/key=value key=value`.
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.
+- Storage handles and runtime writers take `self` on asynchronous methods that mutate storage and return it on success, so an error or a dropped future destroys it. A method may borrow instead when a failure leaves its receiver unchanged or permanently failed. Synchronous methods that perform no I/O borrow.
 
 ## Task-specific guides
 

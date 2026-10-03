@@ -7,6 +7,10 @@
 //! - Unacknowledged items are re-delivered after recovery
 //! - Acknowledged items (once committed) may or may not be re-delivered after crash
 //! - Queue state is consistent after recovery
+//! - The reader delivers and accepts acknowledgements only for items published by a successful
+//!   commit or sync
+//! - After a failed operation drops the queue, the reader delivers every unacknowledged published
+//!   item and then returns `None`
 //!
 //! The operation phase runs under write and sync fault injection. Remove faults are armed only
 //! around each Sync drive, so its internal prune can fail after removing whole sections and
@@ -15,7 +19,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
-use commonware_storage::queue::{Config, Queue};
+use commonware_storage::queue::{Config, Error, Queue, Reader};
 use commonware_storage_fuzz::{
     bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
     bounded_page_size, faulted_recovery,
@@ -23,7 +27,7 @@ use commonware_storage_fuzz::{
 use commonware_utils::{Entropy, Probability, sync::RwLock};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
@@ -89,12 +93,16 @@ struct FuzzInput {
 
 /// Tracking state for verifying recovery.
 ///
-/// Note: Queue ack state is NOT persisted. On restart, `ack_floor` equals
+/// Note: Reader ack state is NOT persisted. On restart, `ack_floor` equals
 /// `journal.bounds().start` (the pruning boundary). Items that were acked
 /// in-memory but not pruned will be re-delivered.
 #[derive(Debug, Clone)]
 struct RecoveryState {
     /// Items that were successfully enqueued or committed (position -> value).
+    ///
+    /// Every successful commit or sync publishes the whole appended prefix and a failed operation
+    /// publishes nothing, so these are exactly the positions `[0, published)` visible to the
+    /// reader.
     committed: BTreeMap<u64, u8>,
 
     /// Items whose covering operation failed (position -> value). Every append
@@ -106,7 +114,8 @@ struct RecoveryState {
     current_ack_floor: u64,
 
     /// Items that were appended but not yet committed (position -> value).
-    /// These may be lost on crash. On commit, they move to `committed`.
+    /// These are invisible to the reader and may be lost on crash. On commit,
+    /// they move to `committed`.
     uncommitted: BTreeMap<u64, u8>,
 
     /// Blob-aligned pruning boundary established by the last successful Sync.
@@ -188,6 +197,11 @@ impl RecoveryState {
         self.synced_boundary = self.synced_boundary.max(min_blob * items_per_section);
     }
 
+    /// Returns the number of items published to the reader.
+    fn published(&self) -> u64 {
+        self.committed.len() as u64
+    }
+
     /// Returns the expected item content at a recovered position, if tracked.
     fn expected_item(&self, pos: u64) -> Option<u8> {
         self.committed
@@ -212,9 +226,86 @@ fn make_item(value: u8) -> Vec<u8> {
     vec![value; ITEM_SIZE]
 }
 
-/// Run operations on the queue, tracking state for recovery verification.
+/// Check that an item the reader delivered during the operation phase was published and holds
+/// its committed content.
+fn check_delivery(state: &RecoveryState, pos: u64, item: &[u8]) {
+    let published = state.published();
+    assert!(
+        pos < published,
+        "reader delivered position {pos} beyond the published size {published}",
+    );
+    let value = state.committed[&pos];
+    assert!(
+        item == make_item(value),
+        "reader delivered wrong content at position {pos}",
+    );
+}
+
+/// Drain the reader after the queue is gone, checking that it delivers exactly the unacknowledged
+/// published items and then returns `None`.
+async fn drain_after_drop(
+    reader: &mut Reader<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+) {
+    reader.reset();
+    let ack_floor = reader.ack_floor();
+    let mut delivered = BTreeSet::new();
+    while let Some((pos, item)) = reader
+        .recv()
+        .await
+        .expect("read of a published item failed after the queue was dropped")
+    {
+        check_delivery(state, pos, &item);
+        assert!(
+            !reader.is_acked(pos),
+            "reader delivered acknowledged position {pos}",
+        );
+        assert!(
+            delivered.insert(pos),
+            "reader delivered position {pos} twice"
+        );
+    }
+
+    // Every published position at or above the floor is either acknowledged or delivered.
+    for pos in ack_floor..state.published() {
+        assert!(
+            reader.is_acked(pos) != delivered.contains(&pos),
+            "published position {pos} was neither acknowledged nor delivered after the queue \
+             was dropped",
+        );
+    }
+}
+
+/// Run operations on the queue, tracking state for recovery verification. Once the queue is gone,
+/// consumed by a failed operation or dropped after the last one, the reader must finish its
+/// published items.
 async fn run_operations(
+    queue: Queue<deterministic::Context, Vec<u8>>,
+    mut reader: Reader<deterministic::Context, Vec<u8>>,
+    operations: &[QueueOperation],
+    items_per_section: u64,
+    faults: &Arc<RwLock<deterministic::FaultConfig>>,
+    op_faults: &deterministic::FaultConfig,
+    sync_faults: &deterministic::FaultConfig,
+) -> RecoveryState {
+    let state = apply_operations(
+        queue,
+        &mut reader,
+        operations,
+        items_per_section,
+        faults,
+        op_faults,
+        sync_faults,
+    )
+    .await;
+    drain_after_drop(&mut reader, &state).await;
+    state
+}
+
+/// Apply operations until one fails, tracking state for recovery verification.
+async fn apply_operations(
     mut queue: Queue<deterministic::Context, Vec<u8>>,
+    reader: &mut Reader<deterministic::Context, Vec<u8>>,
     operations: &[QueueOperation],
     items_per_section: u64,
     faults: &Arc<RwLock<deterministic::FaultConfig>>,
@@ -239,7 +330,7 @@ async fn run_operations(
                     Err(_) => {
                         state.enqueue_failed(pos, *value);
                         state.mark_mutable_error();
-                        return state;
+                        break;
                     }
                 }
             }
@@ -255,7 +346,7 @@ async fn run_operations(
                     Err(_) => {
                         state.append_failed(pos, *value);
                         state.mark_mutable_error();
-                        return state;
+                        break;
                     }
                 }
             }
@@ -268,46 +359,84 @@ async fn run_operations(
                 Err(_) => {
                     state.commit_failed();
                     state.mark_mutable_error();
-                    return state;
+                    break;
                 }
             },
 
             QueueOperation::DequeueAndAck => {
                 // Reads are never fault-injected and every prior mutable op
                 // succeeded, so a dequeue error here can only be a real bug.
-                let dequeued = queue
-                    .dequeue()
+                let dequeued = reader
+                    .try_recv()
                     .await
                     .expect("dequeue failed on successfully written data");
-                if let Some((pos, _item)) = dequeued {
-                    // Ack of a just-dequeued position is in-memory bookkeeping on an
-                    // in-range position, so it has no legal way to fail.
-                    queue.ack(pos).expect("ack of dequeued position failed");
-                    state.update_ack_floor(queue.ack_floor());
+                match dequeued {
+                    Some((pos, item)) => {
+                        check_delivery(&state, pos, &item);
+
+                        // Ack of a just-dequeued position is in-memory bookkeeping on a
+                        // published position, so it has no legal way to fail.
+                        reader.ack(pos).expect("ack of dequeued position failed");
+                        assert!(reader.is_acked(pos), "acked position {pos} is not acked");
+                        state.update_ack_floor(reader.ack_floor());
+                    }
+                    None => assert!(
+                        reader.read_position() == state.published(),
+                        "reader returned None before reading every published item",
+                    ),
                 }
                 queue
             }
 
             QueueOperation::DequeueNoAck => {
                 // Dequeue without acking. The unacked item must be re-delivered on recovery.
-                queue
-                    .dequeue()
+                let dequeued = reader
+                    .try_recv()
                     .await
                     .expect("dequeue failed on successfully written data");
+                match dequeued {
+                    Some((pos, item)) => check_delivery(&state, pos, &item),
+                    None => assert!(
+                        reader.read_position() == state.published(),
+                        "reader returned None before reading every published item",
+                    ),
+                }
                 queue
             }
 
             QueueOperation::AckOffset { offset } => {
                 let size = queue.size();
-                let ack_floor = queue.ack_floor();
+                let ack_floor = reader.ack_floor();
                 if size > ack_floor {
                     let range = size - ack_floor;
                     let pos = ack_floor + (*offset as u64 % range);
-
-                    // Ack is in-memory bookkeeping and the position is in range, so an
-                    // error here is a real bug, never an injected fault.
-                    queue.ack(pos).expect("ack of in-range position failed");
-                    state.update_ack_floor(queue.ack_floor());
+                    let published = state.published();
+                    if pos < published {
+                        // Ack is in-memory bookkeeping and the position is published, so an
+                        // error here is a real bug, never an injected fault.
+                        reader.ack(pos).expect("ack of published position failed");
+                        assert!(reader.is_acked(pos), "acked position {pos} is not acked");
+                        state.update_ack_floor(reader.ack_floor());
+                    } else {
+                        // Appended items stay out of range until a commit or sync publishes
+                        // them.
+                        let err = reader
+                            .ack(pos)
+                            .expect_err("ack of an unpublished position succeeded");
+                        assert!(
+                            matches!(err, Error::PositionOutOfRange(p, n) if p == pos && n == published),
+                            "ack of unpublished position {pos} returned {err:?}",
+                        );
+                        assert_eq!(
+                            reader.ack_floor(),
+                            ack_floor,
+                            "rejected ack moved the ack floor",
+                        );
+                        assert!(
+                            !reader.is_acked(pos),
+                            "rejected ack marked position {pos} acked",
+                        );
+                    }
                 }
                 queue
             }
@@ -315,12 +444,34 @@ async fn run_operations(
             QueueOperation::AckUpToOffset { offset } => {
                 let size = queue.size();
                 let up_to = (*offset as u64) % (size + 1);
-
-                // Same as ack: in-memory, in-range, no legal failure.
-                queue
-                    .ack_up_to(up_to)
-                    .expect("ack_up_to of in-range position failed");
-                state.update_ack_floor(queue.ack_floor());
+                let published = state.published();
+                if up_to <= published {
+                    // Same as ack: in-memory, published, no legal failure.
+                    reader
+                        .ack_up_to(up_to)
+                        .expect("ack_up_to of published position failed");
+                    assert!(
+                        reader.ack_floor() >= up_to,
+                        "ack_up_to({up_to}) left the ack floor at {}",
+                        reader.ack_floor(),
+                    );
+                    state.update_ack_floor(reader.ack_floor());
+                } else {
+                    // Appended items stay out of range until a commit or sync publishes them.
+                    let ack_floor = reader.ack_floor();
+                    let err = reader
+                        .ack_up_to(up_to)
+                        .expect_err("ack_up_to past the published items succeeded");
+                    assert!(
+                        matches!(err, Error::PositionOutOfRange(p, n) if p == up_to && n == published),
+                        "ack_up_to({up_to}) past the published items returned {err:?}",
+                    );
+                    assert_eq!(
+                        reader.ack_floor(),
+                        ack_floor,
+                        "rejected ack_up_to moved the ack floor",
+                    );
+                }
                 queue
             }
 
@@ -336,8 +487,8 @@ async fn run_operations(
                         // sync = commit + prune, so success means ALL
                         // previously uncommitted items are now durable too.
                         state.commit_succeeded();
-                        state.update_ack_floor(queue.ack_floor());
-                        state.sync_succeeded(queue.ack_floor(), queue.size(), items_per_section);
+                        state.update_ack_floor(reader.ack_floor());
+                        state.sync_succeeded(reader.ack_floor(), queue.size(), items_per_section);
                         queue
                     }
                     Err(_) => {
@@ -349,13 +500,13 @@ async fn run_operations(
                         // forward.
                         state.commit_failed();
                         state.mark_mutable_error();
-                        return state;
+                        break;
                     }
                 }
             }
 
             QueueOperation::Reset => {
-                queue.reset();
+                reader.reset();
                 queue
             }
         };
@@ -364,18 +515,18 @@ async fn run_operations(
     state
 }
 
-/// Dequeue every unacked item from the recovered queue, checking each recovered position holds
+/// Dequeue every unacked item from the recovered reader, checking each recovered position holds
 /// tracked content and that exactly `size - ack_floor` items are delivered.
 async fn verify_recovered_items(
-    queue: &mut Queue<deterministic::Context, Vec<u8>>,
+    reader: &mut Reader<deterministic::Context, Vec<u8>>,
     state: &RecoveryState,
     size: u64,
     ack_floor: u64,
 ) {
-    queue.reset();
+    reader.reset();
     let mut dequeued_count = 0u64;
     loop {
-        match queue.dequeue().await {
+        match reader.try_recv().await {
             Ok(Some((pos, item))) => {
                 dequeued_count += 1;
 
@@ -411,13 +562,41 @@ async fn verify_recovered_items(
     );
 }
 
+/// Enqueue a new item on the recovered queue, checking it lands at the recovered size and that
+/// its commit publishes it to the drained reader.
+async fn verify_enqueue(
+    queue: Queue<deterministic::Context, Vec<u8>>,
+    reader: &mut Reader<deterministic::Context, Vec<u8>>,
+    size: u64,
+) -> Queue<deterministic::Context, Vec<u8>> {
+    let (queue, new_pos) = queue
+        .enqueue(make_item(0xFF))
+        .await
+        .expect("recovered queue rejected a new enqueue");
+    assert_eq!(
+        new_pos, size,
+        "new item landed away from the recovered queue size"
+    );
+    let delivered = reader
+        .try_recv()
+        .await
+        .expect("read of the new item failed");
+    assert_eq!(
+        delivered,
+        Some((size, make_item(0xFF))),
+        "reader did not deliver the newly enqueued item",
+    );
+    queue
+}
+
 /// Verify the durable prefix and basic usability after a mutable operation failed.
 async fn verify_recovery_after_mutable_error(
-    mut queue: Queue<deterministic::Context, Vec<u8>>,
+    queue: Queue<deterministic::Context, Vec<u8>>,
+    mut reader: Reader<deterministic::Context, Vec<u8>>,
     state: &RecoveryState,
 ) {
     let size_before = queue.size();
-    let ack_floor = queue.ack_floor();
+    let ack_floor = reader.ack_floor();
     let durable_end = state
         .committed
         .last_key_value()
@@ -449,17 +628,10 @@ async fn verify_recovery_after_mutable_error(
         "recovered ack floor {ack_floor} regressed below the last synced boundary {}",
         state.synced_boundary,
     );
-    verify_recovered_items(&mut queue, state, size_before, ack_floor).await;
+    verify_recovered_items(&mut reader, state, size_before, ack_floor).await;
 
     // Usability phase: the recovered instance must accept new writes.
-    let (queue, new_pos) = queue
-        .enqueue(make_item(0xFF))
-        .await
-        .expect("recovered queue rejected a new enqueue");
-    assert_eq!(
-        new_pos, size_before,
-        "new item landed away from the recovered queue size"
-    );
+    let queue = verify_enqueue(queue, &mut reader, size_before).await;
 
     // The persist path must also remain usable.
     let queue = queue.sync().await.expect("recovered queue failed to sync");
@@ -469,14 +641,18 @@ async fn verify_recovery_after_mutable_error(
 }
 
 /// Verify the queue state after recovery.
-async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, state: &RecoveryState) {
+async fn verify_recovery(
+    queue: Queue<deterministic::Context, Vec<u8>>,
+    mut reader: Reader<deterministic::Context, Vec<u8>>,
+    state: &RecoveryState,
+) {
     if state.saw_mutable_error() {
-        verify_recovery_after_mutable_error(queue, state).await;
+        verify_recovery_after_mutable_error(queue, reader, state).await;
         return;
     }
 
     let size = queue.size();
-    let ack_floor = queue.ack_floor();
+    let ack_floor = reader.ack_floor();
 
     // The recovered size is bounded below by committed items and above by every tracked append.
     assert!(
@@ -500,17 +676,10 @@ async fn verify_recovery(mut queue: Queue<deterministic::Context, Vec<u8>>, stat
         "recovered ack_floor diverged from the boundary pruned by the last successful sync"
     );
 
-    verify_recovered_items(&mut queue, state, size, ack_floor).await;
+    verify_recovered_items(&mut reader, state, size, ack_floor).await;
 
     // Usability phase: the recovered instance must accept new writes.
-    let (queue, new_pos) = queue
-        .enqueue(make_item(0xFF))
-        .await
-        .expect("recovered queue rejected a new enqueue");
-    assert_eq!(
-        new_pos, size,
-        "new item landed away from the recovered queue size"
-    );
+    let queue = verify_enqueue(queue, &mut reader, size).await;
 
     // Destroy exercises the removal path on a post-crash image.
     queue.destroy().await.expect("destroy");
@@ -545,7 +714,7 @@ fn fuzz(input: FuzzInput) {
                 replay_buffer,
             };
 
-            let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
+            let (queue, reader) = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
                 .await
                 .expect("init on a fresh partition with no faults armed");
 
@@ -564,6 +733,7 @@ fn fuzz(input: FuzzInput) {
 
             run_operations(
                 queue,
+                reader,
                 &operations,
                 items_per_section.get(),
                 &faults,
@@ -607,11 +777,11 @@ fn fuzz(input: FuzzInput) {
             replay_buffer,
         };
 
-        let queue = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
+        let (queue, reader) = Queue::<_, Vec<u8>>::init(ctx.child("storage"), queue_cfg)
             .await
             .expect("clean recovery must succeed on a post-crash image");
 
-        verify_recovery(queue, &state).await;
+        verify_recovery(queue, reader, &state).await;
     });
 }
 

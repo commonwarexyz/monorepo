@@ -13,7 +13,7 @@ use super::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
-use commonware_coding::{CodecConfig, ReedSolomon};
+use commonware_coding::ReedSolomon;
 use commonware_consensus::{
     Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay,
     marshal::{
@@ -238,16 +238,15 @@ where
     );
 
     // Coding disseminates shards on the block channel instead of whole blocks.
-    let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+    let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
         scheme_provider: provider,
         blocker: oracle.control(validator.clone()),
-        shard_codec_cfg: CodecConfig {
-            maximum_shard_size: 1024 * 1024,
-        },
+        max_block_size: NZUsize!(1024 * 1024),
         block_codec_cfg: (),
         strategy: Sequential,
         mailbox_size: NZUsize!(10),
         peer_buffer_size: NZUsize!(64),
+        records: NZUsize!(16),
         background_channel_capacity: NZUsize!(1024),
         peer_provider: oracle.manager(),
     };
@@ -404,7 +403,7 @@ pub(crate) fn start_engine_coding_with_networks<P: Simplex, EC, A, R>(
     ),
 ) where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
-    EC: ElectorConfig<SchemeOf<P>> + Clone + Send + 'static,
+    EC: ElectorConfig<SchemeOf<P>>,
     A: CertifiableAutomaton<Context = CodingCtx<P>, Digest = CommitmentOf<P>>,
     R: Relay<Digest = CommitmentOf<P>, PublicKey = PublicKeyOf<P>, Plan = Plan<PublicKeyOf<P>>>,
 {

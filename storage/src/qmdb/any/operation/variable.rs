@@ -20,7 +20,6 @@ use commonware_runtime::BufMut;
 impl<F, V, S> OperationCodec<F, S> for VariableEncoding<V>
 where
     F: Family,
-    S::Key: Write + Read,
     V: VariableValue,
     S: Update<Value = V, ValueEncoding = Self>
         + Write
@@ -71,7 +70,7 @@ where
 impl<F, K, V> EncodeSize for Operation<F, update::Ordered<K, VariableEncoding<V>>>
 where
     F: Family,
-    K: Key + EncodeSize,
+    K: Key,
     V: VariableValue,
     update::Ordered<K, VariableEncoding<V>>: EncodeSize,
 {
@@ -88,7 +87,7 @@ where
 impl<F, K, V> EncodeSize for Operation<F, update::Unordered<K, VariableEncoding<V>>>
 where
     F: Family,
-    K: Key + EncodeSize,
+    K: Key,
     V: VariableValue,
     update::Unordered<K, VariableEncoding<V>>: EncodeSize,
 {

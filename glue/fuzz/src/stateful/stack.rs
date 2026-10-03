@@ -95,12 +95,9 @@ const TERM_STALL_TIMEOUT: Duration = Duration::from_secs(3);
 const SECTION_ITEMS: NonZeroU64 = NZU64!(10);
 
 /// What an engine needs of a leader-election configuration.
-pub(super) trait ElectorConfig:
-    elector::Config<Scheme> + Clone + Send + Sync + 'static
-{
-}
+pub(super) trait ElectorConfig: elector::Config<Scheme> + Sync {}
 
-impl<T> ElectorConfig for T where T: elector::Config<Scheme> + Clone + Send + Sync + 'static {}
+impl<T> ElectorConfig for T where T: elector::Config<Scheme> + Sync {}
 
 /// The fallback elector, built for the run's term length so that the elector and
 /// the channel split agree on where each term begins.

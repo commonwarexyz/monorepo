@@ -818,7 +818,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
 
 impl<E, T, R, D> StateSyncSet<E, R, D> for Shared<T>
 where
-    E: Send + Sync + Metrics,
+    E: Metrics,
     T: StateSyncDb<E, R> + 'static,
     R: Send + 'static,
     D: Digest,
@@ -2332,7 +2332,6 @@ mod tests {
             T: ManagedDb<Context> + 'static,
             T::Unmerkleized: Unmerkleized<Merkleized = T::Merkleized>,
             <T::Unmerkleized as Unmerkleized>::Error: Debug,
-            T::SyncTarget: Debug,
         {
             let initial = T::initial_sync_target();
             let db = T::init(context, config, None).await.unwrap();
@@ -3205,7 +3204,7 @@ mod tests {
 
     impl<E> StateSyncDb<E, Arc<AtomicBool>> for SlowSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 
@@ -3271,7 +3270,7 @@ mod tests {
 
     impl<E> StateSyncDb<E, Arc<AtomicBool>> for RejectDuplicateTargetSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 
@@ -3348,7 +3347,7 @@ mod tests {
 
     impl<E> StateSyncDb<E, ()> for StaleReachedSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 
@@ -3541,7 +3540,7 @@ mod tests {
 
     impl<E> StateSyncDb<E, SlowSyncController> for ObservedSlowSyncDb
     where
-        E: Send + Clock,
+        E: Clock,
     {
         type SyncError = Infallible;
 

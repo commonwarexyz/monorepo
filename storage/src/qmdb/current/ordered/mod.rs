@@ -181,8 +181,8 @@ pub mod tests {
         mut open_db: Fn,
     ) where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -317,8 +317,8 @@ pub mod tests {
     pub(super) fn test_range_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -388,8 +388,8 @@ pub mod tests {
     pub(super) fn test_key_value_proof<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -464,8 +464,8 @@ pub mod tests {
     pub(super) fn test_proving_repeated_updates<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest>,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
         Fn: FnMut(Context, String) -> Fut + 'static,
@@ -540,8 +540,8 @@ pub mod tests {
     pub(super) fn test_exclusion_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable + PartialEq,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
-        V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug,
         Operation<F, Digest, V>: Codec,
         Update<Digest, V>: Codec,
         <Update<Digest, V> as Read>::Cfg: Default,

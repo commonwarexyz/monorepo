@@ -498,10 +498,7 @@ async fn restart<P: Simplex>(
     )>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
     amnesia: bool,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     // (1) Abort+await both old handles FIRST: no double-incarnation sender.
     lifecycle::abort_tasks(mv).await;
 
@@ -637,10 +634,7 @@ async fn restart_durable<P: Simplex>(
         mpsc::UnboundedSender<network::FlushAck>,
     )>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     restart::<P>(
         mv,
         context,
@@ -679,10 +673,7 @@ async fn restart_amnesia<P: Simplex>(
         mpsc::UnboundedSender<network::FlushAck>,
     )>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     restart::<P>(
         mv,
         context,
@@ -726,11 +717,7 @@ async fn restart_amnesia<P: Simplex>(
 /// Disrupter role draws from the shared RNG while running, coupling the stream to
 /// its timing, still deterministic under the single-threaded scheduler since the
 /// role is fixed for the episode.
-pub fn run<P: Simplex>(input: commonware_consensus_fuzz_core::FuzzInput, chooser: Chooser)
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+pub fn run<P: Simplex>(input: commonware_consensus_fuzz_core::FuzzInput, chooser: Chooser) {
     // The hard step cap (truncation guard): allow at least the requested finalization
     // budget so the episode can attempt its full container budget.
     let steps = MALLORY_EPISODE_STEPS.max(input.required_containers as usize);
@@ -751,10 +738,7 @@ fn run_with<P: Simplex>(
     input: commonware_consensus_fuzz_core::FuzzInput,
     chooser: Chooser,
     steps: usize,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     run_inner::<P>(input, chooser, steps, None);
 }
 
@@ -769,10 +753,7 @@ fn run_inner<P: Simplex>(
     chooser: Chooser,
     steps: usize,
     forced_role: Option<adversary::AdversaryRole>,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     // Four honest validators, fully connected at setup. N4F0C4 with every node
     // certifying is the config that keeps four honest nodes live (a quorum of
     // three is always met); the per-step transient partitions are installed by

@@ -124,7 +124,7 @@ fn distinct_indices(selection: &[u8], n: usize) -> Vec<usize> {
 
 fn run<V: Variant>(seed: u64, n: u32, ops: &[Op])
 where
-    V::Signature: for<'a> Arbitrary<'a> + Additive,
+    V::Signature: for<'a> Arbitrary<'a>,
 {
     let mut rng = TestRng::new(seed);
 

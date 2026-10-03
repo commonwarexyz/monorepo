@@ -100,7 +100,6 @@ impl<P, R> Receiver for ByzantineFirstReceiver<P, R>
 where
     P: PublicKey,
     R: Receiver<PublicKey = P>,
-    R::Error: Send + Sync,
 {
     type Error = R::Error;
     type PublicKey = P;
