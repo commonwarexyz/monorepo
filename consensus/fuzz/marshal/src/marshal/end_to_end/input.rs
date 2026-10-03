@@ -11,7 +11,9 @@ use super::{
     },
 };
 use arbitrary::Arbitrary;
-use commonware_consensus::{simplex::ForwardPolicy, types::TermLength};
+use commonware_consensus::{
+    marshal::mocks::harness::NUM_VALIDATORS, simplex::ForwardPolicy, types::TermLength,
+};
 use commonware_consensus_fuzz_core::{
     network::ByzantinePolicy,
     strategy::{HeaderMutation, StrategyChoice},
@@ -22,6 +24,8 @@ use commonware_utils::NZU32;
 const MIN_REQUIRED: u64 = 1;
 pub(super) const MAX_TWINS_ROUNDS: u8 = 6;
 const MAX_TWINS_TRAILING_BLOCKS: u8 = 3;
+/// Highest anchor height a floor-started honest node waits for before joining.
+const MAX_FLOOR_HEIGHT: u8 = 6;
 
 fn sample_fault_rounds(
     u: &mut arbitrary::Unstructured<'_>,
@@ -213,6 +217,16 @@ impl Arbitrary<'_> for NotarizationBlockSplitScenarioInput {
     }
 }
 
+/// An honest node held back at startup and started from `Start::Floor` once
+/// the cluster has finalized its anchor.
+#[derive(Debug, Clone, Copy)]
+pub struct FloorStart {
+    /// Position among the honest nodes, in spawn order.
+    pub slot: u8,
+    /// Height of the floor anchor.
+    pub height: u8,
+}
+
 /// Input for the end-to-end marshal Twins mutators.
 #[derive(Debug, Clone)]
 pub struct MarshalTwinsInput {
@@ -233,6 +247,9 @@ pub struct MarshalTwinsInput {
     pub trailing_blocks: u8,
     /// Simplex forwarding policy used by every engine.
     pub forwarding: ForwardPolicy,
+    /// Honest node that joins late from a floor instead of genesis. Only the
+    /// general standard Twins target honors it.
+    pub floor: Option<FloorStart>,
 }
 
 impl Arbitrary<'_> for MarshalTwinsInput {
@@ -279,6 +296,15 @@ impl Arbitrary<'_> for MarshalTwinsInput {
             1 => ForwardPolicy::SilentVoters,
             _ => ForwardPolicy::SilentLeader,
         };
+        // Exhausted input keeps every node at genesis.
+        let floor = if u.int_in_range(0..=3)? == 3 {
+            Some(FloorStart {
+                slot: u.int_in_range(0..=NUM_VALIDATORS as u8 - 2)?,
+                height: u.int_in_range(1..=MAX_FLOOR_HEIGHT)?,
+            })
+        } else {
+            None
+        };
         let remaining = u.len().min(commonware_consensus_fuzz_core::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
             vec![0]
@@ -293,6 +319,7 @@ impl Arbitrary<'_> for MarshalTwinsInput {
             strategy,
             trailing_blocks,
             forwarding,
+            floor,
         })
     }
 }

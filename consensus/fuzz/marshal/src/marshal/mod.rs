@@ -36,8 +36,9 @@ pub mod end_to_end;
 pub mod store;
 
 pub use end_to_end::{
-    DropRule, MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput,
-    PreGstAction, Role, ScenarioTemplate, fuzz_marshal_coding_disrupter, fuzz_marshal_coding_twins,
+    DropRule, FloorStart, MarshalDisrupterInput, MarshalTwinsInput,
+    NotarizationBlockSplitScenarioInput, PreGstAction, Role, ScenarioTemplate,
+    fuzz_marshal_coding_disrupter, fuzz_marshal_coding_twins,
     fuzz_marshal_standard_block_dissemination, fuzz_marshal_standard_certificate_poison,
     fuzz_marshal_standard_deferred_cert_mock_twins_split_header, fuzz_marshal_standard_disrupter,
     fuzz_marshal_standard_inline_cert_mock_twins_split_header, fuzz_marshal_standard_scenarios,

@@ -6,6 +6,10 @@
 //! compromised primary use a real marshal/application data path. Standard
 //! selects an Inline or Deferred wrapper and uses the general Disrupter;
 //! coding uses Marshaled directly and a Commitment-typed double-voter.
+//!
+//! The general standard campaign may hold one honest node back and start it
+//! from a floor once the cluster has finalized the anchor, so marshal syncs
+//! from a finalization instead of genesis.
 
 mod coding;
 mod layout;
@@ -17,7 +21,7 @@ use super::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
         FaultyConfig, SelectedBlockBuilderApp,
     },
-    input::MarshalTwinsInput,
+    input::{FloorStart, MarshalTwinsInput},
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
 };
 pub use coding::fuzz_marshal_coding_twins;
@@ -26,26 +30,28 @@ use commonware_consensus::{
         Start,
         mocks::{application::Application, block::Block as MockBlock, harness::NUM_VALIDATORS},
     },
-    simplex::{mocks::twins, types::Context as SimplexContext},
-    types::{Epoch, TermLength, View},
+    simplex::{Floor, mocks::twins, types::Context as SimplexContext},
+    types::{Epoch, Height, TermLength, View},
 };
 use commonware_consensus_fuzz_core::{
     NAMESPACE, NetworkChannels, SimplexCertificateMock, TwinsBackend, TwinsCase, TwinsDisrupter,
-    TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex, strategy::StrategyChoice,
+    TwinsElector, TwinsSetup, TwinsTopology, run_twins_with_backend, simplex::Simplex,
+    strategy::StrategyChoice,
 };
 use commonware_cryptography::{
     Digestible, certificate::ConstantProvider, sha256::Digest as Sha256Digest,
 };
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender, simulated::Oracle};
-use commonware_runtime::{Runner, Supervisor as _, deterministic};
+use commonware_runtime::{Clock as _, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize, sync::Mutex};
 use layout::{AttackLayout, attack_layout};
 pub(crate) use observer::ObservedMarshal;
 use stack::{
     ATTACK_SLOW_VERIFY_DELAY, ATTACK_VICTIM_VERIFY_DELAY, DEFAULT_MAX_PENDING_ACKS,
-    DeferredMarshal, InlineMarshal, MarshalChoice, SelectedMarshal, TwinsBlockBuilder,
+    DeferredMarshal, InlineMarshal, MarshalChoice, POLL, SelectedMarshal, TwinsBlockBuilder,
     TwinsMarshal, Validator, genesis_block, register_engine_networks, setup_network,
-    setup_network_links, setup_validator, start_engine, wait_for_liveness,
+    setup_network_links, setup_validator, start_engine, start_engine_with_floor, wait_for_liveness,
 };
 use std::{
     collections::HashMap,
@@ -55,6 +61,7 @@ use std::{
         Arc, LazyLock,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 /// Opt-in ground-truth probe for header-context mismatches.
@@ -67,6 +74,9 @@ const MAX_CASES: usize = 64;
 const ATTACK_MAX_CASES: usize = 2048;
 const CASE_REPORT_INTERVAL: usize = 1024;
 const DEEP_PENDING_ACKS: NonZeroUsize = NZUsize!(8);
+/// Simulated time the cluster gets to finalize a floor anchor before the
+/// held-back node joins from genesis instead.
+const FLOOR_START_DEADLINE: Duration = Duration::from_secs(60);
 
 fn pending_ack_invariant_limit(max_pending_acks: NonZeroUsize) -> Option<NonZeroUsize> {
     (max_pending_acks <= DEEP_PENDING_ACKS).then_some(max_pending_acks)
@@ -105,6 +115,7 @@ impl fmt::Debug for MarshalTwinsInputDebug<'_> {
             .field("strategy", &input.strategy)
             .field("trailing_blocks", &input.trailing_blocks)
             .field("forwarding", &input.forwarding)
+            .field("floor", &input.floor)
             .finish()
     }
 }
@@ -128,6 +139,7 @@ struct StackSelection {
     application: ApplicationChoice,
     marshal: MarshalChoice,
     max_pending_acks: NonZeroUsize,
+    ancestry_depth: u8,
 }
 
 struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>, M> {
@@ -139,13 +151,33 @@ struct MarshalTwinsBackend<P: Simplex, A: TwinsBlockBuilder<P>, M> {
     stack_label: Arc<str>,
     case_policy: CasePolicy,
     max_pending_acks: NonZeroUsize,
+    ancestry_depth: u8,
+    floor: Option<FloorStart>,
+    /// The honest node that joined from a floor, with its anchor height.
+    floor_node: Option<(usize, Height)>,
     _marker: BackendMarker<P, A, M>,
 }
 
+/// An honest node held back until the cluster finalizes its floor anchor.
+struct PendingFloorNode<P: Simplex> {
+    context: deterministic::Context,
+    scheme: P::Scheme,
+    validator: PublicKeyOf<P>,
+    idx: usize,
+    verification_delay: Option<(View, Duration)>,
+    elector: TwinsElector<P>,
+    channels: NetworkChannels<PublicKeyOf<P>>,
+    height: Height,
+}
+
 struct MarshalTwinsState<P: Simplex> {
+    oracle: Oracle<PublicKeyOf<P>, deterministic::Context>,
     validators: Vec<Validator<P>>,
     honest: Vec<(usize, Application<B<P>>)>,
     primaries: Vec<(usize, Application<B<P>>)>,
+    pending_floor: Option<PendingFloorNode<P>>,
+    /// The honest node started from a floor, with its anchor height.
+    floor_node: Option<(usize, Height)>,
     certification_agreement: CertificationAgreementInvariant,
     block_contexts: BlockContextRegistry<Ctx<P>>,
     genesis: Sha256Digest,
@@ -167,6 +199,12 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
         };
         let mut rng = FuzzRng::new(entropy);
         let app_config = FaultyConfig::new(&mut rng, View::new(fault_injection_rounds.into()));
+        // Attack layouts time their verification delays around a full cluster.
+        let floor = if matches!(case_policy, CasePolicy::AttackLayout) {
+            None
+        } else {
+            input.floor
+        };
         Self {
             input,
             probe_input,
@@ -176,6 +214,9 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
             stack_label,
             case_policy,
             max_pending_acks: selection.max_pending_acks,
+            ancestry_depth: selection.ancestry_depth,
+            floor,
+            floor_node: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -204,6 +245,156 @@ impl<P: Simplex, A: TwinsBlockBuilder<P>, M> MarshalTwinsBackend<P, A, M> {
                 self.probe_input,
             );
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_honest(
+        &self,
+        context: deterministic::Context,
+        state: &mut MarshalTwinsState<P>,
+        oracle: &Oracle<PublicKeyOf<P>, deterministic::Context>,
+        scheme: P::Scheme,
+        validator: PublicKeyOf<P>,
+        idx: usize,
+        elector: TwinsElector<P>,
+        verification_delay: Option<(View, Duration)>,
+        floor: Floor<SchemeOf<P>, Sha256Digest>,
+        channels: NetworkChannels<PublicKeyOf<P>>,
+    ) where
+        M: TwinsMarshal<P, A>,
+    {
+        let application = A::create(
+            self.application_choice,
+            self.app_config,
+            verification_delay,
+            state.block_contexts.clone(),
+            DeliveryReporter::new(
+                idx,
+                state.validators[idx].application.clone(),
+                self.pending_ack_invariant_limit(),
+                self.stack_label.clone(),
+            ),
+        )
+        .with_ancestry_depth(self.ancestry_depth);
+        let builder = <M as TwinsMarshal<P, A>>::create(
+            self.marshal_choice,
+            &context,
+            application,
+            state.validators[idx].mailbox.clone(),
+        );
+        state.validators[idx].start(builder.clone());
+        state
+            .honest
+            .push((idx, state.validators[idx].application.clone()));
+        let observed: ObservedMarshal<P, <M as TwinsMarshal<P, A>>::Wrapper> = ObservedMarshal {
+            validator: idx,
+            probe_input: self.probe_input.clone(),
+            context: Arc::new(Mutex::new(context.child("automaton_invariants"))),
+            inner: builder.clone(),
+            certification_agreement: state.certification_agreement.clone(),
+            header_mismatch: HeaderMismatchInvariant::new(
+                self.application_choice,
+                self.app_config,
+                A::rejects,
+                state.block_contexts.clone(),
+                self.marshal_choice,
+                self.stack_label.clone(),
+            ),
+        };
+        start_engine_with_floor::<P, _, _, _>(
+            context.child("honest"),
+            oracle,
+            validator,
+            scheme,
+            elector,
+            observed,
+            builder,
+            state.validators[idx].mailbox.clone(),
+            floor,
+            format!("marshal-twins-honest-{idx}"),
+            self.input.forwarding,
+            channels.0,
+            channels.1,
+            channels.2,
+        );
+    }
+
+    /// Starts the held-back node once another honest node has finalized its
+    /// anchor height: marshal from `Start::Floor` and the engine from the same
+    /// finalization. Past the deadline, the node starts from genesis instead so
+    /// the liveness verdict keeps its usual meaning.
+    async fn start_floor_node(
+        &mut self,
+        context: &deterministic::Context,
+        state: &mut MarshalTwinsState<P>,
+        pending: PendingFloorNode<P>,
+    ) where
+        M: TwinsMarshal<P, A>,
+    {
+        let references = state
+            .honest
+            .iter()
+            .map(|(idx, _)| state.validators[*idx].mailbox.clone())
+            .collect::<Vec<_>>();
+        let anchor = select! {
+            finalization = async {
+                loop {
+                    for mailbox in &references {
+                        if let Some(finalization) = mailbox.get_finalization(pending.height).await {
+                            return finalization;
+                        }
+                    }
+                    context.sleep(POLL).await;
+                }
+            } => Some(finalization),
+            _ = context.sleep(FLOOR_START_DEADLINE) => None,
+        };
+        let floor = match anchor {
+            Some(finalization) => {
+                // The genesis-configured actor is replaced on the same partition,
+                // so the floor actor recovers only the stored genesis block.
+                drop(state.validators.remove(pending.idx));
+                let mut oracle = state.oracle.clone();
+                let validator = setup_validator::<P>(
+                    pending.context.child("marshal"),
+                    &mut oracle,
+                    pending.validator.clone(),
+                    ConstantProvider::new(pending.scheme.clone()),
+                    Start::Floor(finalization.clone()),
+                    None,
+                    self.max_pending_acks,
+                    None,
+                )
+                .await;
+                state.validators.insert(pending.idx, validator);
+                state.floor_node = Some((pending.idx, pending.height));
+                self.floor_node = state.floor_node;
+                Floor::Finalized(finalization)
+            }
+            None => Floor::Genesis(state.genesis),
+        };
+        if *VERIFY_PROBE {
+            eprintln!(
+                "[marshal-twins] floor node: index={} height={} anchored={} stack={}",
+                pending.idx,
+                pending.height,
+                state.floor_node.is_some(),
+                self.stack_label,
+            );
+        }
+        let oracle = state.oracle.clone();
+        self.start_honest(
+            pending.context,
+            state,
+            &oracle,
+            pending.scheme,
+            pending.validator,
+            pending.idx,
+            pending.elector,
+            pending.verification_delay,
+            floor,
+            pending.channels,
+        );
     }
 }
 
@@ -246,22 +437,26 @@ where
             validators.push(setup);
             registrations.insert(validator.clone(), networks);
         }
+        let state = MarshalTwinsState {
+            oracle: oracle.clone(),
+            validators,
+            honest: Vec::with_capacity(NUM_VALIDATORS as usize - 1),
+            primaries: Vec::new(),
+            pending_floor: None,
+            floor_node: None,
+            certification_agreement: CertificationAgreementInvariant::new(
+                self.stack_label.clone(),
+                self.marshal_choice,
+            ),
+            block_contexts,
+            genesis,
+        };
         TwinsSetup {
             oracle,
             participants,
             schemes,
             registrations,
-            state: MarshalTwinsState {
-                validators,
-                honest: Vec::with_capacity(NUM_VALIDATORS as usize - 1),
-                primaries: Vec::new(),
-                certification_agreement: CertificationAgreementInvariant::new(
-                    self.stack_label.clone(),
-                    self.marshal_choice,
-                ),
-                block_contexts,
-                genesis,
-            },
+            state,
         }
     }
 
@@ -387,6 +582,7 @@ where
             self.marshal_choice,
             &context,
             AlwaysAcceptBlockBuilderApp::<Ctx<P>, SchemeOf<P>>::default()
+                .with_ancestry_depth(self.ancestry_depth)
                 .with_block_contexts(state.block_contexts.clone())
                 .with_reporter(DeliveryReporter::new(
                     idx,
@@ -447,58 +643,33 @@ where
             }
             _ => None,
         };
-        let application = A::create(
-            self.application_choice,
-            self.app_config,
-            verification_delay,
-            state.block_contexts.clone(),
-            DeliveryReporter::new(
+        let slot = state.honest.len() + usize::from(state.pending_floor.is_some());
+        if let Some(floor) = self.floor
+            && usize::from(floor.slot) == slot
+        {
+            state.pending_floor = Some(PendingFloorNode {
+                context,
+                scheme,
+                validator,
                 idx,
-                state.validators[idx].application.clone(),
-                self.pending_ack_invariant_limit(),
-                self.stack_label.clone(),
-            ),
-        );
-        let builder = <M as TwinsMarshal<P, A>>::create(
-            self.marshal_choice,
-            &context,
-            application,
-            state.validators[idx].mailbox.clone(),
-        );
-        state.validators[idx].start(builder.clone());
-        state
-            .honest
-            .push((idx, state.validators[idx].application.clone()));
-        let observed: ObservedMarshal<P, <M as TwinsMarshal<P, A>>::Wrapper> = ObservedMarshal {
-            validator: idx,
-            probe_input: self.probe_input.clone(),
-            context: Arc::new(Mutex::new(context.child("automaton_invariants"))),
-            inner: builder.clone(),
-            certification_agreement: state.certification_agreement.clone(),
-            header_mismatch: HeaderMismatchInvariant::new(
-                self.application_choice,
-                self.app_config,
-                A::rejects,
-                state.block_contexts.clone(),
-                self.marshal_choice,
-                self.stack_label.clone(),
-            ),
-        };
-        start_engine::<P, _, _, _>(
-            context.child("honest"),
+                verification_delay,
+                elector: topology.elector.clone(),
+                channels,
+                height: Height::new(floor.height.into()),
+            });
+            return;
+        }
+        self.start_honest(
+            context,
+            state,
             oracle,
-            validator,
             scheme,
+            validator,
+            idx,
             topology.elector.clone(),
-            observed,
-            builder,
-            state.validators[idx].mailbox.clone(),
-            state.genesis,
-            format!("marshal-twins-honest-{idx}"),
-            self.input.forwarding,
-            channels.0,
-            channels.1,
-            channels.2,
+            verification_delay,
+            Floor::Genesis(state.genesis),
+            channels,
         );
     }
 
@@ -508,6 +679,9 @@ where
         state: &mut Self::State,
         prefix_end: View,
     ) {
+        if let Some(pending) = state.pending_floor.take() {
+            self.start_floor_node(context, state, pending).await;
+        }
         wait_for_liveness(
             context,
             &state.honest,
@@ -529,16 +703,24 @@ where
                 *idx,
                 application,
                 state.genesis,
-                commonware_consensus::types::Height::zero(),
+                Height::zero(),
                 &self.stack_label,
             );
         }
-        invariants::check_all_blocks(
-            &state.honest,
-            state.genesis,
-            commonware_consensus::types::Height::zero(),
-            Some(&self.stack_label),
-        );
+        for (idx, application) in &state.honest {
+            let floor = match state.floor_node {
+                Some((node, height)) if node == *idx => height,
+                _ => Height::zero(),
+            };
+            invariants::check_local_blocks(
+                *idx,
+                application,
+                state.genesis,
+                floor,
+                &self.stack_label,
+            );
+        }
+        invariants::agreement(&state.honest, &self.stack_label);
     }
 }
 
@@ -573,6 +755,7 @@ pub fn fuzz_marshal_standard_deferred_cert_mock_twins_split_header(mut input: Ma
             application: ApplicationChoice::AlwaysAccept,
             marshal: MarshalChoice::Deferred,
             max_pending_acks: NZUsize!(2),
+            ancestry_depth: 0,
         },
         input.raw_bytes,
     );
@@ -599,6 +782,7 @@ pub fn fuzz_marshal_standard_inline_cert_mock_twins_split_header(mut input: Mars
             application: ApplicationChoice::AlwaysAccept,
             marshal: MarshalChoice::Inline,
             max_pending_acks: NZUsize!(2),
+            ancestry_depth: 0,
         },
         input.raw_bytes,
     );
@@ -611,12 +795,14 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
                 application: ApplicationChoice::AlwaysAccept,
                 marshal: MarshalChoice::Deferred,
                 max_pending_acks: NZUsize!(2),
+                ancestry_depth: 0,
             },
             vec![0],
         );
     };
-    // Keep application, wrapper, and acknowledgement depth independent while
-    // preserving the remaining bytes as identical scenario/runtime entropy.
+    // Keep application, wrapper, acknowledgement depth, and ancestry depth
+    // independent while preserving the remaining bytes as identical
+    // scenario/runtime entropy.
     let application = ApplicationChoice::from_selector(selector);
     let wrapper = if selector & 0b10 == 0 {
         MarshalChoice::Deferred
@@ -629,6 +815,7 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
         2 => DEEP_PENDING_ACKS,
         _ => DEFAULT_MAX_PENDING_ACKS,
     };
+    let ancestry_depth = (selector >> 4) & 0b11;
     let entropy = if entropy.is_empty() {
         vec![0]
     } else {
@@ -639,24 +826,31 @@ fn select_general_stack(raw_bytes: &[u8]) -> (StackSelection, Vec<u8>) {
             application,
             marshal: wrapper,
             max_pending_acks,
+            ancestry_depth,
         },
         entropy,
     )
 }
 
+/// Runs one Twins case and returns the honest node that joined from a floor,
+/// with its anchor height, if any.
 fn fuzz_marshal_twins_with<P, A, M>(
     input: MarshalTwinsInput,
     case_policy: CasePolicy,
     selection: StackSelection,
     entropy: Vec<u8>,
-) where
+) -> Option<(usize, Height)>
+where
     P: Simplex,
     A: TwinsBlockBuilder<P>,
     M: TwinsMarshal<P, A> + TwinsMarshal<P, PrimaryApp<P>>,
 {
     let stack_label: Arc<str> = format!(
-        "application={} wrapper={} max_pending_acks={}",
-        selection.application, selection.marshal, selection.max_pending_acks
+        "application={} wrapper={} max_pending_acks={} ancestry_depth={}",
+        selection.application,
+        selection.marshal,
+        selection.max_pending_acks,
+        selection.ancestry_depth,
     )
     .into();
     if *VERIFY_PROBE {
@@ -678,7 +872,8 @@ fn fuzz_marshal_twins_with<P, A, M>(
             entropy,
         );
         run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
-    });
+        backend.floor_node
+    })
 }
 
 #[cfg(test)]
@@ -703,6 +898,17 @@ mod tests {
     }
 
     #[test]
+    fn general_stack_samples_ancestry_depth() {
+        assert_eq!(select_general_stack(&[0]).0.ancestry_depth, 0);
+        assert_eq!(select_general_stack(&[0b1_0000]).0.ancestry_depth, 1);
+        assert_eq!(select_general_stack(&[0b11_0000]).0.ancestry_depth, 3);
+        assert_eq!(
+            select_general_stack(&[0b11_0000]).0.max_pending_acks,
+            NZUsize!(1)
+        );
+    }
+
+    #[test]
     fn pending_ack_oracle_is_armed_only_for_reachable_windows() {
         assert_eq!(
             pending_ack_invariant_limit(DEEP_PENDING_ACKS),
@@ -721,10 +927,41 @@ mod tests {
             strategy: StrategyChoice::AnyScope,
             trailing_blocks: 1,
             forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
+            floor: None,
         };
 
         let rendered = format!("{:?}", MarshalTwinsInputDebug(&input));
         assert!(rendered.contains("raw_bytes_len: 1024"));
         assert!(!rendered.contains("171, 171"));
+    }
+
+    #[test]
+    fn standard_twins_floor_node_joins_from_floor() {
+        let input = MarshalTwinsInput {
+            // Selector byte 0b11_0000: always-accept, deferred, one pending
+            // ack, ancestry depth 3.
+            raw_bytes: vec![0, 0b11_0000],
+            rounds: 1,
+            case_selector: 0,
+            sustained: false,
+            strategy: StrategyChoice::SmallScope {
+                fault_rounds: 1,
+                fault_rounds_bound: 1,
+            },
+            trailing_blocks: 2,
+            forwarding: commonware_consensus::simplex::ForwardPolicy::Disabled,
+            floor: Some(FloorStart { slot: 1, height: 3 }),
+        };
+        let (selection, entropy) = select_general_stack(&input.raw_bytes);
+        let floor_node = fuzz_marshal_twins_with::<
+            SimplexCertificateMock,
+            SelectedBlockBuilderApp<Ctx<SimplexCertificateMock>, SchemeOf<SimplexCertificateMock>>,
+            SelectedMarshal,
+        >(input, CasePolicy::General, selection, entropy);
+        assert_eq!(
+            floor_node.map(|(_, height)| height),
+            Some(Height::new(3)),
+            "floor node must anchor at the sampled height, not fall back to genesis",
+        );
     }
 }

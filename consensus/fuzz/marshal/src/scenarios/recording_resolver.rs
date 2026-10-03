@@ -463,7 +463,7 @@ mod tests {
             validator.mailbox.hint_notarized(round, block.digest());
             // FIFO barrier: the hint, and so the fetch and the armed delivery,
             // has been processed once this round-trip returns.
-            let _ = validator.mailbox.get_processed_height().await;
+            let _ = validator.mailbox.get_processed().await;
             assert!(
                 resolver.fetches().iter().any(|(key, annotation)| matches!(
                     (key, annotation),
@@ -485,7 +485,7 @@ mod tests {
             validator
                 .mailbox
                 .hint_notarized(round_two, Sha256::hash(&[b"missing"]));
-            let _ = validator.mailbox.get_processed_height().await;
+            let _ = validator.mailbox.get_processed().await;
             assert!(
                 !resolver.wait_for_delivery_response().await,
                 "garbage delivery must be rejected"

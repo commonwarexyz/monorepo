@@ -3,7 +3,8 @@
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     network::{Addresses, Directory as DkgDirectory, Manager as DkgManager},
-    orchestrator, reshare,
+    orchestrator,
+    reshare::{self, store::Store},
     types::{Payload, SchemeInfo},
 };
 use bytes::BufMut;
@@ -43,10 +44,12 @@ use commonware_p2p::{
     utils::mux,
 };
 use commonware_parallel::Sequential;
-use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    BufferPooler, Clock, Metrics, Storage, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
 use commonware_storage::archive::immutable;
 use commonware_utils::{
-    Acknowledgement, NZU16, NZU64, NZUsize,
+    Acknowledgement, NZU16, NZU32, NZU64, NZUsize,
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
@@ -56,7 +59,7 @@ use commonware_utils::{
 use std::{
     collections::{BTreeMap, HashSet},
     marker::PhantomData,
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
@@ -637,6 +640,50 @@ pub(crate) fn genesis_block(leader: TestPublicKey) -> TestBlock {
     TestBlock::new::<Sha256>(context, digest, Height::zero(), 0)
 }
 
+/// Builds the canonical child of `parent`.
+pub(crate) fn child(parent: &TestBlock) -> TestBlock {
+    let height = parent.height().next();
+    TestBlock::new::<Sha256>(
+        parent.context().clone(),
+        parent.digest(),
+        height,
+        height.get(),
+    )
+}
+
+/// Write and replay buffer size for reshare recovery journals in unit tests.
+pub(crate) const IO_BUFFER: NonZeroUsize = NZUsize!(2048);
+
+/// Returns a one-page cache for a reshare recovery journal in unit tests.
+pub(crate) fn page_cache(context: &impl BufferPooler) -> CacheRef {
+    CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(1))
+}
+
+/// Opens a reshare recovery store under `partition`.
+pub(crate) async fn store<E, SS, V, P>(
+    context: E,
+    partition: &str,
+    secret_store: SS,
+) -> Store<E, SS, V, P>
+where
+    E: BufferPooler + Clock + Storage + Metrics,
+    SS: SecretStore,
+    V: Variant,
+    P: CryptoPublicKey,
+{
+    let page_cache = page_cache(&context);
+    Store::init(
+        context,
+        partition,
+        NZU32!(16),
+        page_cache,
+        IO_BUFFER,
+        IO_BUFFER,
+        secret_store,
+    )
+    .await
+}
+
 /// Builds a marshal mailbox whose actor is dropped before it starts.
 ///
 /// Reads through the returned mailbox resolve as unavailable, which is useful
@@ -718,14 +765,15 @@ fn archive_config<C>(
     }
 }
 
-pub(crate) fn simplex_config() -> orchestrator::SimplexConfig<TestElector> {
+pub(crate) fn simplex_config(
+    context: &impl BufferPooler,
+) -> orchestrator::SimplexConfig<TestElector> {
     orchestrator::SimplexConfig {
         elector: TestElector::default(),
         mailbox_size: NZUsize!(16),
         replay_buffer: NZUsize!(1024),
         write_buffer: NZUsize!(1024),
-        page_cache_page_size: NZU16!(1024),
-        page_cache_pages: NZUsize!(8),
+        page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8)),
         leader_timeout: Duration::from_millis(100),
         certification_timeout: Duration::from_millis(200),
         timeout_retry: Duration::from_millis(500),
@@ -755,6 +803,7 @@ struct MemorySecretStoreInner {
     seeds: BTreeMap<Epoch, Summary>,
     dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
     prunes: Vec<Epoch>,
+    stall: bool,
 }
 
 impl MemorySecretStore {
@@ -773,11 +822,24 @@ impl MemorySecretStore {
     pub(crate) fn seed_share(&self, epoch: Epoch, share: Share) {
         self.inner.lock().shares.insert(epoch, share);
     }
+
+    /// Makes the next [`SecretStore::put_share`] persist its share and then
+    /// never return.
+    pub(crate) fn stall(&self) {
+        self.inner.lock().stall = true;
+    }
 }
 
 impl SecretStore for MemorySecretStore {
     async fn put_share(&mut self, epoch: Epoch, share: Share) {
-        self.inner.lock().shares.insert(epoch, share);
+        let stall = {
+            let mut inner = self.inner.lock();
+            inner.shares.insert(epoch, share);
+            std::mem::take(&mut inner.stall)
+        };
+        if stall {
+            std::future::pending::<()>().await;
+        }
     }
 
     async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {

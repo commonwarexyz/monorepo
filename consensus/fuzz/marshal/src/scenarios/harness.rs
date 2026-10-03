@@ -627,7 +627,10 @@ where
 
     /// FIFO barrier: a round-trip that flushes prior fire-and-forget messages.
     pub(crate) async fn barrier(&self, node: Node) -> Option<Height> {
-        self.mailbox(node).get_processed_height().await
+        self.mailbox(node)
+            .get_processed()
+            .await
+            .map(|processed| processed.height())
     }
 
     /// The application delivery tip on `node` (`(height, digest)`), set from the
@@ -641,10 +644,7 @@ where
     pub(crate) async fn barrier_all(&self) {
         for idx in 0..self.nodes.len() {
             if self.nodes[idx].is_some() {
-                let _ = self
-                    .mailbox(node_from_idx(idx))
-                    .get_processed_height()
-                    .await;
+                let _ = self.mailbox(node_from_idx(idx)).get_processed().await;
             }
         }
     }

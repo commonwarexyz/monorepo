@@ -38,7 +38,7 @@
 //! # Raw [Blob] handles
 //!
 //! The [Writer] owns the page layout, page cache entries, and durability bookkeeping of its
-//! [Blob]. Raw handles cloned before the writer existed see physical bytes, including CRC
+//! [Blob]. Raw handles shared before the writer existed see physical bytes, including CRC
 //! records, and do not observe buffered bytes until they are flushed. They must not mutate the
 //! blob while a [Writer] exists: such writes bypass the write buffer and page cache and can
 //! invalidate checksum recovery.
@@ -63,6 +63,7 @@ use commonware_utils::Widen;
 use std::{
     marker::PhantomData,
     num::{NonZeroU16, NonZeroUsize},
+    sync::Arc,
 };
 use tracing::warn;
 
@@ -124,7 +125,7 @@ pub struct Writer<B: Blob, Phase = Append> {
     phase: PhantomData<Phase>,
 
     /// The underlying blob being wrapped.
-    blob: B,
+    blob: Arc<B>,
 
     /// The page where the next appended byte will be written to.
     current_page: u64,
@@ -162,16 +163,17 @@ impl<B: Blob> Recovery<B> {
     /// `cache_ref` and appends stage in a write buffer of capacity `capacity`. Trims any invalid
     /// tail so the blob ends at a checksum-validated page. Earlier pages are not scanned.
     ///
-    /// Before appending, the tail-page contents must be durable: either open after a crash or call
-    /// [Self::sync]. Until then, recovery may read or truncate the blob. The discovered checksum
-    /// slot seeds durable-slot tracking, so appending over a still-volatile tail can overwrite the
-    /// only durable slot.
+    /// Before appending, the tail-page contents must be durable: either pass a blob with no writes
+    /// since it was opened or call [Self::sync]. Until then, recovery may read or truncate the
+    /// blob. The discovered checksum slot seeds durable-slot tracking, so appending over a
+    /// still-volatile tail can overwrite the only durable slot.
     pub async fn open(
         blob: B,
         original_blob_size: u64,
         capacity: usize,
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
+        let blob = Arc::new(blob);
         let page_size: u64 = cache_ref.page_size().widen();
         let (partial_page_state, pages, invalid_data_found) =
             Writer::<B>::read_last_valid_page(&blob, original_blob_size, page_size).await?;
@@ -519,8 +521,7 @@ impl<B: Blob> Writer<B> {
     /// This writes buffered bytes to the blob layout but does not make them durable. Call
     /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
-    /// Later appends preserve this view, including its frozen partial page. Close all
-    /// disk-backed views before reopening the storage for initialization repair.
+    /// Later appends preserve this view, including its frozen partial page.
     pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))
@@ -1171,8 +1172,9 @@ impl<B: Blob, Phase> Writer<B, Phase> {
 
     /// Replay at most `max_size` logical bytes without changing the stored suffix.
     ///
-    /// The terminal physical page must still have a valid checksum covering its retained bytes.
-    /// Buffered data is flushed as for [Self::replay]. This does not establish durability.
+    /// Pages read from storage must have valid checksums covering their retained bytes.
+    /// Buffered data is flushed as for [Self::replay], and the included partial tail is frozen
+    /// in memory. This does not establish durability.
     pub async fn replay_prefix(
         &mut self,
         max_size: u64,
@@ -1188,10 +1190,15 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             .checked_mul(physical_page_size)
             .ok_or(Error::OffsetOverflow)?;
         let prefetch = (buffer_size.get() / physical_page_size as usize).max(1);
+        let partial_page = (logical_size > self.buffer.offset).then(|| {
+            let len = (logical_size - self.buffer.offset) as usize;
+            IoBuf::copy_from_slice(&self.buffer.partial()[..len])
+        });
         Ok(Replay::new(PageReader::new(
             self.blob.clone(),
             physical_size,
             logical_size,
+            partial_page,
             prefetch,
             page_size,
             read_options,
@@ -1200,13 +1207,12 @@ impl<B: Blob, Phase> Writer<B, Phase> {
 
     /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
     ///
-    /// The returned replay can be used to sequentially read all pages from the blob while ensuring
-    /// all data passes integrity verification. CRCs are validated but not included in the output.
-    /// Every underlying blob read performed by the returned replay uses `read_options`, including
-    /// refills after seeking.
+    /// The returned replay validates checksums for stored pages and retains a frozen copy of the
+    /// current partial page. CRCs are not included in the output. Every underlying blob read
+    /// performed by the returned replay uses `read_options`, including refills after seeking.
     ///
-    /// This is not a durable operation. Buffered data may be plainly written so the replay can
-    /// read it, but callers must still use [`sync`](Self::sync) if that data must survive a crash.
+    /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
+    /// survive a crash.
     pub async fn replay(
         &mut self,
         buffer_size: NonZeroUsize,
@@ -1418,6 +1424,10 @@ mod tests {
             // The rejected value can use the ordinary crossing path without losing data.
             assert_eq!(writer.append(&4u64.to_be_bytes()).await.unwrap(), 32);
             writer.sync().await.unwrap();
+
+            // The snapshot shares the writer's blob, so drop both before reopening. The reopened
+            // writer must recover all five synced values.
+            drop(snapshot);
             drop(writer);
             let (blob, size) = context.open("append_value", b"blob").await.unwrap();
             let writer = Writer::new(blob, size, 32, cache).await.unwrap();
@@ -1522,7 +1532,7 @@ mod tests {
             let data: Vec<u8> = (0..400).map(|i| (i % 251) as u8).collect();
             writer.append(&data).await.unwrap();
             writer.sync().await.unwrap();
-            for cap in [0, 1, 103, 150, 206, 400, u64::MAX] {
+            for cap in [0, 1, 103, 150, 206, 309, 330, 400, u64::MAX] {
                 let end = cap.min(data.len() as u64) as usize;
                 let mut replay = writer
                     .replay_prefix(cap, NZUsize!(4096), ReadOptions::default())
@@ -1550,6 +1560,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -1581,6 +1592,7 @@ mod tests {
                 .open("test_partition", b"snapshot_torn")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
@@ -1706,6 +1718,7 @@ mod tests {
                 .open("test_partition", b"prefix_torn")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -1752,6 +1765,7 @@ mod tests {
                 .open("test_partition", b"prefix_proven")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -1847,6 +1861,7 @@ mod tests {
                 .open("test_partition", b"prefix_stale")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -1895,6 +1910,7 @@ mod tests {
                 .open("test_partition", b"prefix_batches")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -3049,6 +3065,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -3093,6 +3110,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -3174,6 +3192,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
@@ -3208,6 +3227,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
@@ -3245,6 +3265,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
@@ -3284,6 +3305,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
@@ -3333,6 +3355,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
@@ -3380,6 +3403,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
@@ -3427,6 +3451,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Writer::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
@@ -3469,6 +3494,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let inner = SyncTrackingBlob::new();
+            let inner = Arc::new(inner);
             let (blob, pending) = DelayedSyncBlob::new(inner.clone());
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Recovery::open(blob, 0, BUFFER_SIZE, cache_ref)
@@ -3538,6 +3564,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -3591,6 +3618,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -3668,6 +3696,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -3710,6 +3739,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -3748,6 +3778,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -3870,7 +3901,6 @@ mod tests {
     }
 
     /// Blob wrapper that turns one write into a durable partial write followed by an error.
-    #[derive(Clone)]
     struct PartialWriteBlob<B: Blob> {
         inner: B,
         writes: Arc<AtomicUsize>,
@@ -3967,7 +3997,6 @@ mod tests {
     }
 
     /// Blob wrapper that durably writes a torn extension and its complete incoming footer.
-    #[derive(Clone)]
     struct TornExtensionBlob<B: Blob> {
         inner: B,
         writes: Arc<AtomicUsize>,
@@ -4055,6 +4084,7 @@ mod tests {
                 .open("test_partition", b"torn_extension_footer")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let write_count = Arc::new(AtomicUsize::new(0));
             let faulty_blob = TornExtensionBlob {
                 inner: blob.clone(),
@@ -4087,6 +4117,7 @@ mod tests {
             assert_eq!(checksum.len1, 3);
             assert_eq!(checksum.len2, 6);
 
+            drop(blob);
             let (blob, blob_size) = context
                 .open("test_partition", b"torn_extension_footer")
                 .await
@@ -4112,18 +4143,17 @@ mod tests {
     }
 
     /// Blob wrapper that delays one selected read after capturing its current bytes.
-    #[derive(Clone)]
     struct DelayedReadBlob<B: Blob> {
         inner: B,
         offset: u64,
         len: usize,
-        reads: Arc<AtomicUsize>,
-        started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
-        release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
+        reads: AtomicUsize,
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
     }
 
     impl<B: Blob> DelayedReadBlob<B> {
-        fn new(
+        const fn new(
             inner: B,
             offset: u64,
             len: usize,
@@ -4134,9 +4164,9 @@ mod tests {
                 inner,
                 offset,
                 len,
-                reads: Arc::new(AtomicUsize::new(0)),
-                started: Arc::new(Mutex::new(Some(started))),
-                release: Arc::new(Mutex::new(Some(release))),
+                reads: AtomicUsize::new(0),
+                started: Mutex::new(Some(started)),
+                release: Mutex::new(Some(release)),
             }
         }
     }
@@ -4839,6 +4869,7 @@ mod tests {
                 .open("test_partition", b"crc_fallback")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             assert_eq!(size, physical_page_size as u64);
 
             let page = blob
@@ -4996,6 +5027,7 @@ mod tests {
                 .open("test_partition", b"non_last_page")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             assert_eq!(
                 size,
                 (physical_page_size * 2) as u64,
@@ -5587,6 +5619,7 @@ mod tests {
                 .open("test_partition", b"shrink_torn")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut writer = Recovery::open(blob.clone(), blob_size, BUFFER_SIZE, cache_ref)
                 .await
@@ -5611,6 +5644,7 @@ mod tests {
             .unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let (blob, blob_size) = context
                 .open("test_partition", b"shrink_torn")
                 .await
@@ -5745,6 +5779,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_fallback_slot")
                 .await
                 .unwrap();
+            let blob = Arc::new(blob);
             let faulty_blob = PartialWriteBlob::new(blob.clone(), 4, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
@@ -5780,6 +5815,7 @@ mod tests {
             assert_eq!(failed_write_len.load(Ordering::SeqCst), CHECKSUM_SLOT_SIZE);
             drop(append);
 
+            drop(blob);
             let (blob, size) = context
                 .open("test_partition", b"same_page_shrink_fallback_slot")
                 .await
@@ -5957,6 +5993,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Recovery::open(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -5983,6 +6020,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Recovery::open(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
@@ -6024,6 +6062,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
+            let blob = Arc::new(blob);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let mut append = Recovery::open(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await

@@ -37,7 +37,7 @@ just lint                         # workspace-wide lint, docs, and stability che
 just pre-pr                       # before opening a PR
 ```
 
-Avoid a workspace build or test unless the change needs it. For platform-specific runtime changes, also run the applicable io_uring checks on Linux. Run `just udeps` after dependency changes, the WASM build after cryptography/utils/storage changes, and `just miri <module>::` after adding unsafe code.
+Avoid a workspace build or test unless the change needs it. For platform-specific runtime changes, also run the applicable io_uring checks on Linux. Run `just udeps` after dependency changes, the WASM build after cryptography/utils/storage changes, `just test-no-std` after changes to crates with a `std` feature, and `just miri <module>::` after adding unsafe code.
 
 Async protocol tests must use the deterministic runtime. Use `commonware_utils::test_rng()` or `TestRng::new(seed)` rather than entropy-backed RNGs. Test recovery and malicious-input paths where they apply.
 

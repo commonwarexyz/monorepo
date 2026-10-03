@@ -42,7 +42,9 @@ mod runner;
 mod scenario;
 pub(crate) mod twins;
 
-pub use input::{MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput};
+pub use input::{
+    FloorStart, MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput,
+};
 pub use runner::{
     fuzz_marshal_coding_disrupter, fuzz_marshal_standard_block_dissemination,
     fuzz_marshal_standard_certificate_poison, fuzz_marshal_standard_disrupter,

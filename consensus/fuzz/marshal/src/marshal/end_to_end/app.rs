@@ -10,7 +10,8 @@
 //! (`height = parent + 1`) that embeds the consensus context verbatim. `verify`
 //! eventually accepts, with an optional per-view delay used to exercise
 //! certification timeouts; ancestry, context, and parent-linkage checks are
-//! enforced by the wrapper itself.
+//! enforced by the wrapper itself. Both calls may walk a bounded number of
+//! further ancestors, checking that the stream yields a contiguous chain.
 //!
 //! Generic over the context type `C` so the same builder serves both variants:
 //! standard uses `Context<Digest, K>`, coding uses `Context<Commitment, K>`.
@@ -22,12 +23,13 @@ use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Epochable, Reporter, Viewable,
     marshal::{
         Update,
-        ancestry::Ancestry,
+        ancestry::{self, Ancestry, BoxedAncestry},
         mocks::{application::Application as SinkApplication, block::Block},
     },
     types::{Height, Round, View},
 };
 use commonware_cryptography::{Sha256, certificate::Scheme, sha256::Digest as Sha256Digest};
+use commonware_macros::select;
 use commonware_runtime::{Clock as _, deterministic};
 use commonware_utils::{FuzzRng, channel::mpsc, sync::Mutex};
 use futures::StreamExt;
@@ -39,6 +41,117 @@ use std::{
 /// Buffer for delivery-height updates; far above the single-epoch block count so
 /// a subscriber never misses one.
 const PROGRESS_CHANNEL_CAPACITY: usize = 256;
+
+/// Longest wait for one ancestor beyond the parent: enough for a peer fetch
+/// over the harness links. An ancestor below a node's floor is never served,
+/// so the walk must give up rather than hold the call.
+const ANCESTRY_STEP_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn assert_contiguous<B: ConsensusBlock>(child: &B, parent: &B) {
+    assert_eq!(
+        parent.height().next(),
+        child.height(),
+        "ancestry stream skipped a height below {}",
+        child.height().get(),
+    );
+    assert_eq!(
+        parent.digest(),
+        child.parent(),
+        "ancestry stream yielded a non-parent below height {}",
+        child.height().get(),
+    );
+}
+
+/// Takes the stream head, then walks up to `depth` ancestors past it, checking
+/// that each is the direct parent of the block before it. Returns the blocks
+/// walked, newest first; empty if the stream is exhausted.
+async fn walk_ancestry<B: ConsensusBlock>(
+    runtime: &deterministic::Context,
+    mut ancestry: impl Ancestry<B>,
+    depth: u8,
+) -> Vec<Arc<B>> {
+    let mut walked = Vec::with_capacity(usize::from(depth) + 1);
+    let Some(head) = ancestry.next().await else {
+        return walked;
+    };
+    walked.push(head);
+    let mut timed_out = false;
+    for _ in 0..depth {
+        let child = walked.last().expect("walked starts with the head");
+        if let Some(parent) = ancestry.peek() {
+            assert_contiguous(child.as_ref(), parent);
+        }
+        let parent = select! {
+            parent = ancestry.next() => parent,
+            _ = runtime.sleep(ANCESTRY_STEP_TIMEOUT) => {
+                timed_out = true;
+                None
+            },
+        };
+        let Some(parent) = parent else {
+            break;
+        };
+        assert_contiguous(child.as_ref(), parent.as_ref());
+        walked.push(parent);
+    }
+    if walked.len() > 1 {
+        replay_ancestry(runtime, &walked, ancestry, !timed_out).await;
+    }
+    walked
+}
+
+/// Replays `walked` through the bounded and prefixed ancestry streams, which
+/// must yield the same blocks. With `probe_tail`, the prefixed stream then
+/// checks its boundary against the next block of `tail`; a walk that already
+/// timed out skips the probe so the call waits at most once.
+async fn replay_ancestry<B: ConsensusBlock>(
+    runtime: &deterministic::Context,
+    walked: &[Arc<B>],
+    tail: impl Ancestry<B>,
+    probe_tail: bool,
+) {
+    let mut bounded = ancestry::from_iter(walked.iter().cloned());
+    for block in walked {
+        assert_eq!(
+            bounded.peek().map(|peeked| peeked.digest()),
+            Some(block.digest()),
+            "bounded ancestry peeked a different block",
+        );
+        assert_eq!(
+            bounded.next().await.map(|yielded| yielded.digest()),
+            Some(block.digest()),
+            "bounded ancestry yielded a different block",
+        );
+    }
+    assert!(
+        bounded.next().await.is_none(),
+        "bounded ancestry outlived its blocks"
+    );
+
+    let boxed = BoxedAncestry::new(tail);
+    let mut prefixed = ancestry::with_prefix(walked.iter().cloned(), boxed.clone());
+    for block in walked {
+        assert_eq!(
+            prefixed.next().await.map(|yielded| yielded.digest()),
+            Some(block.digest()),
+            "prefixed ancestry yielded a different block",
+        );
+    }
+    let oldest = walked.last().expect("walked is non-empty");
+    if let Some(parent) = prefixed.peek() {
+        assert_contiguous(oldest.as_ref(), parent);
+    }
+    if !probe_tail {
+        return;
+    }
+    let parent = select! {
+        parent = prefixed.next() => parent,
+        _ = runtime.sleep(ANCESTRY_STEP_TIMEOUT) => None,
+    };
+    if let Some(parent) = parent {
+        assert_contiguous(oldest.as_ref(), parent.as_ref());
+    }
+}
 
 /// Shared delivery-height progress for one node, so a liveness watcher can await a
 /// target height on a channel instead of polling (and cloning) the application's
@@ -272,6 +385,7 @@ where
     B: ConsensusBlock<Digest = Sha256Digest>,
 {
     verification_delay: Option<(View, Duration)>,
+    ancestry_depth: u8,
     block_contexts: Option<BlockContextRegistry<C>>,
     reporter: Option<DeliveryReporter<B>>,
     _marker: PhantomData<fn() -> S>,
@@ -285,6 +399,7 @@ where
     fn default() -> Self {
         Self {
             verification_delay: None,
+            ancestry_depth: 0,
             block_contexts: None,
             reporter: None,
             _marker: PhantomData,
@@ -300,6 +415,7 @@ where
     fn clone(&self) -> Self {
         Self {
             verification_delay: self.verification_delay,
+            ancestry_depth: self.ancestry_depth,
             block_contexts: self.block_contexts.clone(),
             reporter: self.reporter.clone(),
             _marker: PhantomData,
@@ -316,10 +432,17 @@ where
     pub const fn with_verification_delay(view: View, delay: Duration) -> Self {
         Self {
             verification_delay: Some((view, delay)),
+            ancestry_depth: 0,
             block_contexts: None,
             reporter: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Walk `depth` ancestors past the parent on every propose and verify.
+    pub(crate) const fn with_ancestry_depth(mut self, depth: u8) -> Self {
+        self.ancestry_depth = depth;
+        self
     }
 
     pub(crate) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
@@ -347,13 +470,14 @@ where
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        mut ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
         _input: Self::Input,
     ) -> Option<Self::Block> {
-        let (_, consensus_context) = context;
+        let (runtime, consensus_context) = context;
         // The first ancestor is the parent (highest height); the wrapper seeds
         // the stream with the parent it already fetched for this round.
-        let parent = ancestry.next().await?;
+        let walked = walk_ancestry(&runtime, ancestry, self.ancestry_depth).await;
+        let parent = walked.first()?;
         let height = parent.height().next();
         let block = B::build(consensus_context, parent.digest(), height, height.get());
         if let Some(block_contexts) = &self.block_contexts {
@@ -365,7 +489,7 @@ where
     async fn verify(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
         let (runtime, consensus) = context;
         if let Some((view, delay)) = self.verification_delay
@@ -373,6 +497,9 @@ where
         {
             runtime.sleep(delay).await;
         }
+        // The stream head is the block under verification, followed by the
+        // parent the wrapper fetched.
+        let _ = walk_ancestry(&runtime, ancestry, self.ancestry_depth).await;
         true
     }
 }
@@ -531,6 +658,11 @@ where
         Self { inner, config }
     }
 
+    pub(crate) fn with_ancestry_depth(mut self, depth: u8) -> Self {
+        self.inner = self.inner.with_ancestry_depth(depth);
+        self
+    }
+
     pub(crate) fn with_block_contexts(mut self, block_contexts: BlockContextRegistry<C>) -> Self {
         self.inner = self.inner.with_block_contexts(block_contexts);
         self
@@ -642,6 +774,15 @@ where
             ApplicationChoice::Faulty => {
                 Self::Faulty(FaultyBlockBuilderApp::new(config, verification_delay))
             }
+        }
+    }
+
+    pub(crate) fn with_ancestry_depth(self, depth: u8) -> Self {
+        match self {
+            Self::AlwaysAccept(application) => {
+                Self::AlwaysAccept(application.with_ancestry_depth(depth))
+            }
+            Self::Faulty(application) => Self::Faulty(application.with_ancestry_depth(depth)),
         }
     }
 
