@@ -902,7 +902,10 @@ pub trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {}
+pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {
+    /// Whether this backend uses SIMD instructions.
+    const IS_ACCELERATED: bool;
+}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///

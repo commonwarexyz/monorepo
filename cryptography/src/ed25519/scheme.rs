@@ -9,6 +9,7 @@ use alloc::{
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_cryptography_curve25519::batch as curve_batch;
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -27,6 +28,10 @@ const CURVE_NAME: &str = "ed25519";
 const PRIVATE_KEY_LENGTH: usize = 32;
 const PUBLIC_KEY_LENGTH: usize = 32;
 const SIGNATURE_LENGTH: usize = 64;
+
+#[cfg(test)]
+#[path = "batch_tests.rs"]
+mod batch_tests;
 
 /// Ed25519 Private Key.
 #[derive(Clone, Debug)]
@@ -321,8 +326,28 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// Ed25519 Batch Verifier.
+///
+/// Large batches verify with the in-tree AVX-512 backend on x86-64 CPUs that support it. Every
+/// other batch verifies with dalek.
 pub struct Batch {
     verifier: ed_core::batch::Verifier<Vec<u8>>,
+}
+
+impl Batch {
+    /// Whether to verify `len` signatures at `parallelism` with the in-tree backend.
+    fn uses_curve(len: usize, parallelism: usize) -> bool {
+        cfg!(target_arch = "x86_64")
+            && curve_batch::is_accelerated()
+            && len >= if parallelism > 1 { 256 } else { 8 }
+    }
+
+    fn verify_dalek<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+        self.verifier.verify(rng, strategy).is_ok()
+    }
+
+    fn verify_curve<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+        curve_batch::verify(rng, self.verifier.encoded(), strategy)
+    }
 }
 
 impl BatchVerifier for Batch {
@@ -341,17 +366,17 @@ impl BatchVerifier for Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        // Keep argument construction here so the signature can be written directly into the queue.
-        self.verifier.queue(
-            public_key.key,
-            ed_core::Signature::from(signature.raw),
-            union_unique(namespace, message),
-        );
+        self.verifier
+            .add_payload(union_unique(namespace, message), public_key, signature);
         true
     }
 
     fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        self.verifier.verify(rng, strategy).is_ok()
+        if Self::uses_curve(self.verifier.len(), strategy.manual().parallelism()) {
+            self.verify_curve(rng, strategy)
+        } else {
+            self.verify_dalek(rng, strategy)
+        }
     }
 }
 

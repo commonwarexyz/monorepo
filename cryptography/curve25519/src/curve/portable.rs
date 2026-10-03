@@ -82,7 +82,9 @@ impl GBackend for Backend {
     }
 }
 
-impl super::Backend for Backend {}
+impl super::Backend for Backend {
+    const IS_ACCELERATED: bool = false;
+}
 
 impl GAffineVec {
     /// Untransposes backend lanes into scalar affine points.

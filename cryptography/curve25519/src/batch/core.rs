@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use commonware_parallel::{Sequential, Strategy};
 use msm::Term;
 use rand_core::CryptoRng;
-pub(super) use scalar::Scalar;
+pub(crate) use scalar::Scalar;
 use sha2::{Digest, Sha512};
 
 /// The exact byte encoding used to identify an Ed25519 verifying key.
@@ -41,14 +41,14 @@ fn sha512(parts: &[&[u8]]) -> [u8; 64] {
 
 /// An Ed25519 signature split into its two wire components.
 #[derive(Copy, Clone, Debug)]
-pub(super) struct Signature {
+pub(crate) struct Signature {
     r: [u8; 32],
     s: [u8; 32],
 }
 
 impl Signature {
     /// Constructs a signature from its 64-byte wire encoding (`R || s`).
-    pub(super) fn from_bytes(bytes: [u8; 64]) -> Self {
+    pub(crate) fn from_bytes(bytes: [u8; 64]) -> Self {
         let mut r = [0u8; 32];
         let mut s = [0u8; 32];
         r.copy_from_slice(&bytes[..32]);
@@ -118,7 +118,7 @@ struct ScalarBlock {
 /// same principle). This phase touches no curve points: it is uniform per signature regardless
 /// of how the batch's signers are distributed.
 fn scalar_phase(
-    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    items: &[(VerifyingKeyBytes, Signature, &[u8])],
     order: &[(VerifyingKeyBytes, u32)],
     seed: &[u8; 32],
     strategy: &impl Strategy,
@@ -135,7 +135,7 @@ fn scalar_phase(
             if i >= n {
                 break;
             }
-            let (a_bytes, sig, msg) = items[order[i].1 as usize];
+            let (a_bytes, sig, msg) = &items[order[i].1 as usize];
             let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
                 valid = false;
                 continue;
@@ -270,7 +270,7 @@ where
 fn verify_batch_inner<B: Backend>(
     backend: B,
     rng: &mut impl CryptoRng,
-    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    items: &[(VerifyingKeyBytes, Signature, &[u8])],
     strategy: &impl Strategy,
 ) -> bool {
     let n = items.len();
@@ -295,7 +295,7 @@ fn verify_batch_inner<B: Backend>(
     let mut order: Vec<(VerifyingKeyBytes, u32)> = items
         .iter()
         .enumerate()
-        .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
+        .map(|(i, (a_bytes, _, _))| (*a_bytes, i as u32))
         .collect();
     strategy.sort_by(&mut order, |x, y| x.0.cmp(&y.0));
 
@@ -321,7 +321,7 @@ fn verify_batch_inner<B: Backend>(
     // count is every `R`, every distinct `A`, and the basepoint.
     let width = msm::width_for(n + groups.len() + 1, strategy.parallelism());
     let resolve_r = |i: usize| {
-        let (_, sig, _) = items[order[i].1 as usize];
+        let (_, sig, _) = &items[order[i].1 as usize];
         (sig.r, zr(i))
     };
 
@@ -348,7 +348,7 @@ fn verify_batch_inner<B: Backend>(
 
 struct VerifyBatchCall<'a, 'b, R, S> {
     rng: &'a mut R,
-    items: &'a [(&'b VerifyingKeyBytes, &'b Signature, &'b [u8])],
+    items: &'a [(VerifyingKeyBytes, Signature, &'b [u8])],
     strategy: &'a S,
 }
 
@@ -363,9 +363,9 @@ impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
 /// Batches below this many signatures verify on the calling thread.
 const SEQUENTIAL_MAX_SIGNATURES: usize = 16;
 
-fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
+fn verify_batch_dispatch<R: CryptoRng, S: Strategy>(
     rng: &mut R,
-    items: &[(&'a VerifyingKeyBytes, &'a Signature, &'a [u8])],
+    items: &[(VerifyingKeyBytes, Signature, &[u8])],
     strategy: &S,
 ) -> bool {
     if items.len() < SEQUENTIAL_MAX_SIGNATURES {
@@ -390,9 +390,9 @@ fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
 /// `A` is coalesced by its raw encoding before ever being decompressed (see [`group_ranges`]), so
 /// a signer reused across the batch is decompressed once, not once per signature, and the
 /// deduplicated `A` encodings join `R`'s per-signature encodings in the same decompression pass.
-pub(super) fn verify_batch_bytes<'a>(
+pub(crate) fn verify_batch_bytes<'a>(
     rng: &mut impl CryptoRng,
-    items: impl IntoIterator<Item = (&'a VerifyingKeyBytes, &'a Signature, &'a [u8])>,
+    items: impl IntoIterator<Item = (VerifyingKeyBytes, Signature, &'a [u8])>,
     strategy: &impl Strategy,
 ) -> bool {
     let items: Vec<_> = items.into_iter().collect();
@@ -506,7 +506,9 @@ mod tests {
             .test(|u| {
                 let rng_seed: [u8; 32] = u.arbitrary()?;
                 let batch = mixed_batch_with_repeats(u, 600)?;
-                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                let items = batch
+                    .iter()
+                    .map(|(vk, sig, msg)| (*vk, *sig, msg.as_slice()));
                 assert!(verify_batch_bytes(
                     &mut FuzzRng::new(rng_seed.to_vec()),
                     items,
@@ -533,11 +535,15 @@ mod tests {
                 let mut batch = mixed_batch_with_repeats(u, 300)?;
                 batch[123].1.s[0] ^= 1;
 
-                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                let items = batch
+                    .iter()
+                    .map(|(vk, sig, msg)| (*vk, *sig, msg.as_slice()));
                 let serial =
                     verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), items, &Sequential);
 
-                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                let items = batch
+                    .iter()
+                    .map(|(vk, sig, msg)| (*vk, *sig, msg.as_slice()));
                 let parallel =
                     verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), items, &strategy);
 

@@ -20,10 +20,10 @@
 //! [this post]: https://hdevalence.ca/blog/2020-10-04-its-25519am
 //! [ZIP215]: https://zips.z.cash/zip-0215
 
-mod core;
-
-use self::core::Scalar;
-use crate::curve::{G, GAffine};
+use crate::{
+    batch::core::{self, Scalar},
+    curve::{G, GAffine},
+};
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
@@ -484,7 +484,7 @@ impl BatchVerifier {
         let items = self
             .items
             .iter()
-            .map(|item| (&item.public_key, &item.signature, item.message.as_slice()));
+            .map(|item| (item.public_key, item.signature, item.message.as_slice()));
         core::verify_batch_bytes(rng, items, strategy)
     }
 }
