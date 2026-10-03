@@ -1,7 +1,5 @@
 //! Policies that advance a batch's inactivity floor.
 //!
-//! [`Proportional`] is the default compaction.
-//!
 //! [`merkleize`](super::any::batch::UnmerkleizedBatch::merkleize) and the store's
 //! [`apply_batch`](super::store::db::Db::apply_batch) read [`Policy::limits`] once. With
 //! [`Limits::Fixed`], the pass starts at the batch's inherited inactivity floor. While updates
@@ -43,6 +41,8 @@ pub enum Limits {
 }
 
 /// Chooses how a batch advances its inactivity floor.
+///
+/// [`Proportional`] is the default compaction.
 pub trait Policy<F: Family, K, V> {
     /// How far the floor advances.
     fn limits(&self) -> Limits;

@@ -1649,8 +1649,7 @@ where
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
-    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`Policy`]).
     ///
     /// # Errors
     ///
@@ -1819,8 +1818,7 @@ where
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
-    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`Policy`]).
     ///
     /// # Errors
     ///
@@ -2499,8 +2497,7 @@ where
     /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
     /// and return an `Arc<MerkleizedBatch>`.
     ///
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
-    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`Policy`]).
     ///
     /// # Errors
     ///
@@ -2721,8 +2718,7 @@ where
     /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
     /// and return an `Arc<MerkleizedBatch>`.
     ///
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
-    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`Policy`]).
     ///
     /// # Errors
     ///

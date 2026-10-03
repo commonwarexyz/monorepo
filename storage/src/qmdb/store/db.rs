@@ -473,10 +473,8 @@ where
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
     /// make the applied state durable.
     ///
-    /// Before its commit, the batch advances the inactivity floor with `policy` (see
-    /// [`floor`](crate::qmdb::floor)). Pass [`Proportional`](crate::qmdb::floor::Proportional)
-    /// for the default compaction. If the batch leaves the store empty, the floor moves to its
-    /// commit.
+    /// Before its commit, the batch advances the inactivity floor with `policy` (see [`Policy`]).
+    /// If the batch leaves the store empty, the floor moves to its commit.
     #[boxed]
     pub async fn apply_batch<P>(
         mut self,
