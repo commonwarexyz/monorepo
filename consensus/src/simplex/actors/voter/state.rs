@@ -269,9 +269,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 None
             }
             Floor::Finalized(finalization) => {
-                let returned = finalization.clone();
+                // The caller reports the floor finalization, so take it as
+                // broadcast before a later certificate at its view repeats it.
+                let view = finalization.view();
                 self.add_finalization(finalization);
-                Some(returned)
+                self.broadcast_finalization(view)
             }
         }
     }

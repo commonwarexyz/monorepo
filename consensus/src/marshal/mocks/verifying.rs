@@ -17,12 +17,15 @@ use std::{marker::PhantomData, sync::Arc};
 /// This mock:
 /// - Returns the configured block (if any) from `propose()`
 /// - Returns a configurable result from `verify()`
+/// - Rejects blocks matching an optional predicate in `verify()`
 #[derive(Clone)]
 pub struct MockVerifyingApp<B, S> {
     /// The block returned by `propose`. If `None`, `propose` returns `None`.
     pub propose_result: Option<B>,
     /// The result returned by `verify`.
     pub verify_result: bool,
+    /// Blocks for which `verify` returns false.
+    pub reject: Option<fn(&B) -> bool>,
     _phantom: PhantomData<S>,
 }
 
@@ -32,6 +35,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
+            reject: None,
             _phantom: PhantomData,
         }
     }
@@ -41,6 +45,7 @@ impl<B, S> MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result,
+            reject: None,
             _phantom: PhantomData,
         }
     }
@@ -50,6 +55,12 @@ impl<B, S> MockVerifyingApp<B, S> {
         self.propose_result = Some(block);
         self
     }
+
+    /// Configure the blocks for which `verify` returns false.
+    pub fn with_reject(mut self, reject: fn(&B) -> bool) -> Self {
+        self.reject = Some(reject);
+        self
+    }
 }
 
 impl<B, S> Default for MockVerifyingApp<B, S> {
@@ -57,6 +68,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
         Self {
             propose_result: None,
             verify_result: true,
+            reject: None,
             _phantom: PhantomData,
         }
     }
@@ -85,8 +97,13 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
+        if let (Some(reject), Some(block)) = (self.reject, ancestry.peek())
+            && reject(block)
+        {
+            return false;
+        }
         self.verify_result
     }
 }

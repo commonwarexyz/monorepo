@@ -36,10 +36,10 @@
 //!
 //! The wire key names only the view. A retained finalization settles every ask at or below it.
 //! Otherwise serving prefers an exact certified notarization to a covering nullification, matching
-//! proposal construction. If neither is retained, the responder serves its current floor. The
-//! highest finalization remains servable even when a certified notarization at the same or a
-//! higher view holds the construction floor. The requester treats a valid response that does not
-//! settle its ask as ambiguous and retries without faulting the peer.
+//! proposal construction. If neither is retained, the responder serves its floor for views at or
+//! below it. The highest finalization remains servable even when a certified notarization at the
+//! same or a higher view holds the construction floor. The requester treats a valid response that
+//! does not settle its ask as ambiguous and retries without faulting the peer.
 //!
 //! A notarization is served only after local certification succeeds. Possession still settles the
 //! holder's own ask, because certification judges evidence already in hand. A failed verdict also
@@ -62,7 +62,7 @@
 //!            (retained out)    (reject term-1 evidence)
 //! ```
 //!
-//! Pruning repairs this by pulling the cursor back to just above the floor, so a later scan
+//! Raising the floor repairs this by pulling the cursor back to just above it, so a later scan
 //! re-requests the tail. Anchors whose requests are still pending are re-issued along the way
 //! and deduplicated by the engine, while anchors with a stored covering nullification are
 //! skipped:
