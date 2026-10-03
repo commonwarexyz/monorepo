@@ -1,31 +1,54 @@
+//! SHA-256 kernels for x86_64 with SHA-NI and AVX-512.
+
 use cfg_if::cfg_if;
 
-cfg_if! {
-    if #[cfg(any(
-        feature = "std",
-        all(
-            target_feature = "sha",
-            target_feature = "avx2",
-            target_feature = "ssse3",
-            target_feature = "sse4.1",
-        ),
-    ))] {
-        mod pair;
-        pub(super) use pair::{hash_pair_64, hash_pair_72};
-    }
-}
+mod equal;
+mod pair;
+mod x16;
+
+pub(super) use equal::hash_pair_equal;
+pub(super) use pair::{hash_pair_64, hash_pair_72};
+pub(super) use x16::hash_x16_equal;
 
 cfg_if! {
-    if #[cfg(any(
-        feature = "std",
-        all(
-            target_feature = "avx512f",
-            target_feature = "avx512bw",
-            target_feature = "avx512vl",
-        ),
-    ))] {
-        mod x16;
-        pub(super) use x16::hash_x16_equal;
+    if #[cfg(feature = "std")] {
+        /// Return whether SHA-NI, AVX2, SSSE3, and SSE4.1 are available.
+        #[inline]
+        pub(super) fn supports_sha() -> bool {
+            std::arch::is_x86_feature_detected!("sha")
+                && std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("ssse3")
+                && std::arch::is_x86_feature_detected!("sse4.1")
+        }
+
+        /// Return whether AVX-512F, AVX-512BW, and AVX-512VL are available.
+        #[inline]
+        pub(super) fn supports_x16() -> bool {
+            std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("avx512vl")
+        }
+    } else {
+        /// Return whether SHA-NI, AVX2, SSSE3, and SSE4.1 are statically
+        /// enabled.
+        pub(super) const fn supports_sha() -> bool {
+            cfg!(all(
+                target_feature = "sha",
+                target_feature = "avx2",
+                target_feature = "ssse3",
+                target_feature = "sse4.1",
+            ))
+        }
+
+        /// Return whether AVX-512F, AVX-512BW, and AVX-512VL are statically
+        /// enabled.
+        pub(super) const fn supports_x16() -> bool {
+            cfg!(all(
+                target_feature = "avx512f",
+                target_feature = "avx512bw",
+                target_feature = "avx512vl",
+            ))
+        }
     }
 }
 

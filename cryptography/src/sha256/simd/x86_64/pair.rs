@@ -1,11 +1,11 @@
 use super::{
-    super::{BMT_NODE_LEN, MMR_NODE_LEN, POSITION_LEN},
+    super::{BMT_NODE_LEN, MMR_NODE_LEN, POSITION_LEN, blocks::padding_wk},
     Align16, K,
 };
 use crate::sha256::{DIGEST_LENGTH, Digest, IV};
 
 /// Shuffle mask converting between byte and word endianness.
-static BYTE_SWAP_MASK: Align16<[u8; 16]> =
+pub(super) static BYTE_SWAP_MASK: Align16<[u8; 16]> =
     Align16([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
 
 /// The `0x80` terminator following the 8-byte message tail in the MMR node's
@@ -17,31 +17,7 @@ static FINAL_72_LENGTH: Align16<[u32; 4]> = Align16([0, 0, 0, (MMR_NODE_LEN * 8)
 
 /// The SHA-256 schedule words plus round constants for the fixed padding
 /// block after a 64-byte BMT node.
-static FINAL_64_WK: Align16<[u32; 64]> = Align16({
-    let mut schedule = [0u32; 64];
-    schedule[0] = 0x80000000;
-    schedule[15] = (BMT_NODE_LEN * 8) as u32;
-
-    let mut i = 16;
-    while i < schedule.len() {
-        let prev15 = schedule[i - 15];
-        let sigma0 = prev15.rotate_right(7) ^ prev15.rotate_right(18) ^ (prev15 >> 3);
-        let prev2 = schedule[i - 2];
-        let sigma1 = prev2.rotate_right(17) ^ prev2.rotate_right(19) ^ (prev2 >> 10);
-        schedule[i] = schedule[i - 16]
-            .wrapping_add(sigma0)
-            .wrapping_add(schedule[i - 7])
-            .wrapping_add(sigma1);
-        i += 1;
-    }
-
-    let mut i = 0;
-    while i < schedule.len() {
-        schedule[i] = schedule[i].wrapping_add(K.0[i]);
-        i += 1;
-    }
-    schedule
-});
+static FINAL_64_WK: Align16<[u32; 64]> = Align16(padding_wk(&K.0, BMT_NODE_LEN));
 
 /// Hash two MMR node-shaped messages (`position || left || right`, 72 bytes)
 /// with interleaved SHA-NI instructions: one full block plus a fixed-layout
