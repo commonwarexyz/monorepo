@@ -546,6 +546,8 @@ where
                 }
             };
         }
+
+        // The writes or the policy's evictions may leave the store empty.
         if self.is_empty() {
             self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
@@ -580,6 +582,9 @@ where
             // skips is out of reach.
             let reach = Location::new((*floor).saturating_add(skips).saturating_add(1)).min(end);
             let next = self.active(floor, reach).await?;
+
+            // Move the floor to the next active update, or to `reach` if none lies before it. A
+            // gap wider than the remaining skips spends them and ends the pass.
             let frontier = next.as_ref().map_or(reach, |(loc, _, _)| *loc);
             let gap = *frontier - *floor;
             if gap > skips {
@@ -588,9 +593,14 @@ where
             }
             floor = frontier;
             skips -= gap;
+
+            // With no active update before `end`, the floor stops there.
             let Some((loc, key, value)) = next else {
                 break;
             };
+
+            // Keeping or replacing writes the key's update at the tip, and evicting deletes the
+            // key. Stopping leaves the update in place with the floor at its location.
             match policy.decide(Entry::new(loc, &key, value)).into_action() {
                 Action::Keep(value) | Action::Replace(value) => {
                     let tip = self.size();
@@ -607,6 +617,8 @@ where
                 }
                 Action::Stop => break,
             }
+
+            // A decided update moves the floor one past it.
             entries -= 1;
             floor = loc + 1;
         }
