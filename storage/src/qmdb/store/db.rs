@@ -527,6 +527,7 @@ where
             }
         }
 
+        // Advance the floor with `policy`. An empty store has no active update to move or decide.
         if !self.is_empty() {
             self = match limits {
                 // Keep up to one active update for each operation the batch makes inactive, and one
