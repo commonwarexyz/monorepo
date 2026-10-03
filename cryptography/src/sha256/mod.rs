@@ -27,7 +27,10 @@
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-#[cfg(all(not(feature = "std"), target_arch = "x86_64"))]
+#[cfg(all(
+    not(feature = "std"),
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{
@@ -200,34 +203,21 @@ impl Hasher for Sha256 {
         (Self::hash(left), Self::hash(right))
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-        let Some(minimum) = simd::minimum_x16_batch_len() else {
-            return messages
-                .iter()
-                .map(|message| Self::hash(&[message.as_ref()]))
-                .collect();
-        };
+        simd::hash_many(messages)
+    }
 
-        // Adjacent equal-length runs satisfy the kernel's length requirement and
-        // keep the resulting digests in input order.
-        let mut digests = Vec::with_capacity(messages.len());
-        for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-            for batch in run.chunks(simd::X16_LANES) {
-                if batch.len() >= minimum {
-                    // Spare lanes borrow the first input; only active lanes contribute output.
-                    let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
-                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
-                        *input = message.as_ref();
-                    }
-                    if let Some(batch_digests) = simd::hash_x16(inputs) {
-                        digests.extend_from_slice(&batch_digests[..batch.len()]);
-                        continue;
-                    }
-                }
-                digests.extend(batch.iter().map(|message| Self::hash(&[message.as_ref()])));
-            }
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Vec<Self::Digest> {
+        if P == 1 {
+            return simd::hash_many(messages.as_flattened());
         }
+        if let Some(digests) = simd::hash_many_parts(messages) {
+            return digests;
+        }
+        let mut digests = Vec::with_capacity(messages.len());
+        crate::hash_pairs::<Self, P>(messages, &mut digests);
         digests
     }
 
@@ -551,6 +541,66 @@ mod tests {
         );
     }
 
+    /// Check batched hashing of multi-part messages against one-shot hashing
+    /// for the merkle node and leaf shapes, whole or in parts, at batch counts
+    /// around the x16 cutoff and lane count, and for runs of mixed lengths.
+    #[test]
+    fn test_hash_many_parts_matches_hash() {
+        fn check<const P: usize>(lens: [usize; P], count: usize, run: usize) {
+            let messages: Vec<[Vec<u8>; P]> = (0..count)
+                .map(|index| {
+                    // Every `run` messages, grow the last part by one byte.
+                    let grow = index / run;
+                    core::array::from_fn(|part| {
+                        let len = lens[part] + if part == P - 1 { grow } else { 0 };
+                        message(len, (index * P + part) as u64)
+                    })
+                })
+                .collect();
+            let parts: Vec<[&[u8]; P]> = messages
+                .iter()
+                .map(|message| message.each_ref().map(Vec::as_slice))
+                .collect();
+            let expected: Vec<_> = parts.iter().map(|parts| Sha256::hash(parts)).collect();
+            assert_eq!(
+                Sha256::hash_many_parts(&parts),
+                expected,
+                "lens={lens:?} count={count} run={run}"
+            );
+        }
+
+        for count in [
+            0, 1, 2, 3, 6, 7, 8, 9, 10, 11, 15, 16, 17, 25, 26, 31, 32, 33, 40,
+        ] {
+            for run in [1, 5, usize::MAX] {
+                check([8, 32, 32], count, run);
+                check([72], count, run);
+                check([32, 32], count, run);
+                check([64], count, run);
+                check([36], count, run);
+                check([8, 32], count, run);
+                check([4, 32], count, run);
+                check([8, 100], count, run);
+                check([8, 1000, 3], count, run);
+            }
+        }
+    }
+
+    /// Check batched BMT nodes whose digests are unaligned and overlap, since
+    /// the node kernels load directly from each part.
+    #[test]
+    fn test_hash_many_parts_unaligned_nodes_match_hash() {
+        let backing = message(200, 7);
+        let nodes: Vec<[&[u8]; 2]> = (0..9)
+            .map(|i| [&backing[i..i + 32], &backing[3 * i + 1..3 * i + 33]])
+            .collect();
+        for count in 0..=nodes.len() {
+            let nodes = &nodes[..count];
+            let expected: Vec<_> = nodes.iter().map(|parts| Sha256::hash(parts)).collect();
+            assert_eq!(Sha256::hash_many_parts(nodes), expected, "count={count}");
+        }
+    }
+
     #[test]
     fn test_hash_many_boundaries_match_individual_hashes() {
         for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
@@ -560,7 +610,7 @@ mod tests {
                     .collect()
             });
             let refs = messages.each_ref().map(Vec::as_slice);
-            for count in [0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33] {
+            for count in [0, 1, 2, 6, 7, 9, 10, 15, 16, 17, 25, 26, 31, 32, 33] {
                 let refs = &refs[..count];
                 let expected = refs
                     .iter()
@@ -582,25 +632,112 @@ mod tests {
         assert!(simd::hash_x16(refs).is_none());
     }
 
+    /// The SIMD kernels are selected exactly when the CPU has their features, so a broken
+    /// feature check cannot silently fall back to serial hashing.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[test]
+    fn test_kernels_dispatch() {
+        // Without std, dispatch uses only statically enabled target features.
+        cfg_if::cfg_if! {
+            if #[cfg(target_arch = "aarch64")] {
+                #[cfg(feature = "std")]
+                let pair = std::arch::is_aarch64_feature_detected!("sha2");
+                #[cfg(not(feature = "std"))]
+                let pair = cfg!(target_feature = "sha2");
+            } else {
+                #[cfg(feature = "std")]
+                let (pair, x16) = (
+                    std::arch::is_x86_feature_detected!("sha")
+                        && std::arch::is_x86_feature_detected!("avx2")
+                        && std::arch::is_x86_feature_detected!("ssse3")
+                        && std::arch::is_x86_feature_detected!("sse4.1"),
+                    std::arch::is_x86_feature_detected!("avx512f")
+                        && std::arch::is_x86_feature_detected!("avx512bw")
+                        && std::arch::is_x86_feature_detected!("avx512vl"),
+                );
+                #[cfg(not(feature = "std"))]
+                let (pair, x16) = (
+                    cfg!(all(
+                        target_feature = "sha",
+                        target_feature = "avx2",
+                        target_feature = "ssse3",
+                        target_feature = "sse4.1",
+                    )),
+                    cfg!(all(
+                        target_feature = "avx512f",
+                        target_feature = "avx512bw",
+                        target_feature = "avx512vl",
+                    )),
+                );
+            }
+        }
+        let (position, digest) = ([1u8; 8], [2u8; DIGEST_LENGTH]);
+        let mmr: [&[u8]; 3] = [&position, &digest, &digest];
+        let bmt: [&[u8]; 2] = [&digest, &digest];
+        assert_eq!(simd::hash_pair(&mmr, &mmr).is_some(), pair);
+        assert_eq!(simd::hash_pair(&bmt, &bmt).is_some(), pair);
+        for len in [0, 40, 64, 72, 1000] {
+            let (left, right) = (vec![1u8; len], vec![2u8; len]);
+            assert_eq!(
+                simd::hash_pair(&[&left], &[&right]).is_some(),
+                pair,
+                "len {len}"
+            );
+        }
+        assert!(simd::hash_pair(&[&[0u8; 64]], &[&[0u8; 65]]).is_none());
+        #[cfg(target_arch = "aarch64")]
+        {
+            // Batches take the four-chain path only when they hold four or more
+            // messages and the first is BMT node-shaped.
+            let leaf: [&[u8]; 2] = [&position, &digest];
+            assert!(simd::hash_many_parts(&[leaf; 4]).is_none());
+            let nodes = [bmt; 4];
+            assert!(simd::hash_many_parts(&nodes[..3]).is_none());
+            assert!(simd::hash_many_parts(&nodes).is_some());
+
+            // The four-chain kernel runs exactly when the CPU has SHA2.
+            let node = Some((&digest, &digest));
+            assert_eq!(simd::hash_quad([node; 4]).is_some(), pair);
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let messages = [[0u8; 64]; simd::X16_LANES];
+            let refs = messages.each_ref().map(|message| message.as_slice());
+            assert_eq!(simd::hash_x16(refs).is_some(), x16);
+            let leaves = refs.map(|message| [&message[..8], &message[8..40]]);
+            assert_eq!(simd::hash_many_parts(&leaves).is_some(), x16);
+
+            // Node-length messages gather for the x16 kernel only without the
+            // node pair kernels.
+            let nodes = refs.map(|message| {
+                let (left, right) = message.split_at(DIGEST_LENGTH);
+                [left, right]
+            });
+            assert_eq!(simd::hash_many_parts(&nodes).is_some(), x16 && !pair);
+        }
+    }
+
     #[test]
     fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
         let backing: Vec<u8> = (0..160).map(|i| i as u8).collect();
-        let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + 129]);
-        let expected = messages
-            .iter()
-            .map(|&message| Sha256::hash(&[message]))
-            .collect::<Vec<_>>();
-        for count in 1..=messages.len() {
-            assert_eq!(Sha256::hash_many(&messages[..count]), expected[..count]);
-        }
+        for len in [64, 72, 129] {
+            let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + len]);
+            let expected = messages
+                .iter()
+                .map(|&message| Sha256::hash(&[message]))
+                .collect::<Vec<_>>();
+            for count in 1..=messages.len() {
+                assert_eq!(Sha256::hash_many(&messages[..count]), expected[..count]);
+            }
 
-        let message = &backing[1..130];
-        let messages = [message; 16];
-        let expected = messages
-            .iter()
-            .map(|&message| Sha256::hash(&[message]))
-            .collect::<Vec<_>>();
-        assert_eq!(Sha256::hash_many(&messages), expected);
+            let message = &backing[1..1 + len];
+            let messages = [message; 16];
+            let expected = messages
+                .iter()
+                .map(|&message| Sha256::hash(&[message]))
+                .collect::<Vec<_>>();
+            assert_eq!(Sha256::hash_many(&messages), expected);
+        }
     }
 
     #[test]

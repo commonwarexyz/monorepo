@@ -152,3 +152,55 @@ pub unsafe fn hash_pair_64(
     }
     (Digest(left_digest), Digest(right_digest))
 }
+
+/// Hash four BMT node-shaped messages (`left || right`, 64 bytes) with four
+/// interleaved chains of SHA2 instructions: one full block plus a constant
+/// padding block each, whose schedule comes from a precomputed table.
+///
+/// The padding block has no schedule instructions, so on Neoverse V2 and V3
+/// two chains leave the SHA2 unit idle between its dependent rounds. Four
+/// chains fill it, finishing more nodes per cycle than two pairs.
+///
+/// # Safety
+///
+/// The `sha2` target feature must be available.
+#[target_feature(enable = "sha2")]
+pub unsafe fn hash_quad_64(
+    left: [&[u8; DIGEST_LENGTH]; 4],
+    right: [&[u8; DIGEST_LENGTH]; 4],
+) -> [Digest; 4] {
+    let mut digests = [[0u8; DIGEST_LENGTH]; 4];
+    // SAFETY: The inputs are 32-byte digests, the output holds four 32-byte
+    // digests, the caller guarantees the SHA2 instructions are available,
+    // and all registers written by the asm are listed as outputs.
+    unsafe {
+        core::arch::asm!(
+            include_str!("sha256_quad_block1_64.asm"),
+            include_str!("sha256_rounds_4x.asm"),
+            include_str!("sha256_quad_chain.asm"),
+            include_str!("sha256_rounds_4x_fixed.asm"),
+            include_str!("sha256_quad_finish.asm"),
+            left_0 = in(reg) left[0].as_ptr(),
+            left_1 = in(reg) left[1].as_ptr(),
+            left_2 = in(reg) left[2].as_ptr(),
+            left_3 = in(reg) left[3].as_ptr(),
+            right_0 = in(reg) right[0].as_ptr(),
+            right_1 = in(reg) right[1].as_ptr(),
+            right_2 = in(reg) right[2].as_ptr(),
+            right_3 = in(reg) right[3].as_ptr(),
+            output = inout(reg) digests.as_mut_ptr() => _,
+            k = inout(reg) K.0.as_ptr() => _,
+            padding = inout(reg) FINAL_64_WK.0.as_ptr() => _,
+            state = in(reg) IV.as_ptr(),
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+            out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+            out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            out("v20") _, out("v21") _, out("v22") _, out("v23") _,
+            out("v24") _, out("v25") _, out("v26") _,
+            options(nostack)
+        );
+    }
+    digests.map(Digest)
+}

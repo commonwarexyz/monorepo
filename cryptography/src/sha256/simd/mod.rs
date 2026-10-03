@@ -20,10 +20,20 @@
 //! that span parts, and pads the tail on the stack. Messages of different
 //! lengths fall back to serial hashing.
 //!
+//! On aarch64, batches of BMT node-length messages, given as one part or as
+//! two digests, go four at a time to a kernel with four interleaved chains.
+//! The table-driven padding block has no schedule instructions to fill the
+//! gaps between dependent rounds, and on Neoverse V2 and V3 two chains leave
+//! the SHA2 unit idle there.
+//!
 //! AVX-512 hashes batches of 16 equal-length contiguous messages in independent
 //! SIMD lanes, producing the ordinary SHA-256 digest of each message.
 
-use super::{DIGEST_LENGTH, Digest};
+#[cfg(target_arch = "aarch64")]
+use super::Sha256;
+use super::{DIGEST_LENGTH, Digest, hash_specialized};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "x86_64")] {
@@ -54,27 +64,189 @@ pub(super) const X16_LANES: usize = 16;
 
 /// Minimum active lanes for an available x16 kernel.
 ///
-/// Uses [ISA-L's shortage cutoffs]: keep up to six messages on SHA-NI, or one
-/// message on the software fallback. These are initial tuning choices for the
-/// local batch.
+/// With SHA-NI, batches of fewer than 10 messages go to the interleaved pair
+/// kernels. Without SHA-NI, smaller batches hash one message at a time, and
+/// [ISA-L's shortage cutoff] keeps only one message off the x16 kernel.
 ///
-/// [ISA-L's shortage cutoffs]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
+/// [ISA-L's shortage cutoff]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
 #[cfg(target_arch = "x86_64")]
 #[inline]
 // Feature detection is const only without std.
 #[allow(clippy::missing_const_for_fn)]
-pub(super) fn minimum_x16_batch_len() -> Option<usize> {
+fn minimum_x16_batch_len() -> Option<usize> {
     if !kernels::supports_x16() {
         return None;
     }
-    cfg_if::cfg_if! {
-        if #[cfg(feature = "std")] {
-            let sha = std::arch::is_x86_feature_detected!("sha");
+    Some(if kernels::supports_sha() { 10 } else { 2 })
+}
+
+/// Hash independent contiguous messages.
+///
+/// Adjacent equal-length messages go to the x16 kernel when it is available
+/// and a batch is large enough, and to the pair kernels otherwise. On
+/// aarch64, groups of four BMT node-length messages go to the four-chain
+/// kernel.
+pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
+    #[cfg(target_arch = "x86_64")]
+    let minimum = minimum_x16_batch_len();
+    let mut digests = Vec::with_capacity(messages.len());
+
+    // Adjacent equal-length runs satisfy the kernels' length requirement and
+    // keep the resulting digests in input order.
+    for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(minimum) = minimum {
+            for batch in run.chunks(X16_LANES) {
+                if batch.len() >= minimum {
+                    // Spare lanes borrow the first input. Only active lanes
+                    // contribute output.
+                    let mut inputs = [batch[0].as_ref(); X16_LANES];
+                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
+                        *input = message.as_ref();
+                    }
+                    if let Some(batch_digests) = hash_x16(inputs) {
+                        digests.extend_from_slice(&batch_digests[..batch.len()]);
+                        continue;
+                    }
+                }
+                pairs(batch, &mut digests);
+            }
+            continue;
+        }
+        #[cfg(target_arch = "aarch64")]
+        if run[0].as_ref().len() == BMT_NODE_LEN {
+            quads(run, &mut digests);
+            continue;
+        }
+        pairs(run, &mut digests);
+    }
+    digests
+}
+
+/// Hash equal-length contiguous `messages` two at a time with the pair
+/// kernels, hashing an odd trailing message alone.
+fn pairs<M: AsRef<[u8]>>(messages: &[M], digests: &mut Vec<Digest>) {
+    // Node-length messages use the node kernels, and other lengths the generic
+    // kernel directly.
+    let node = messages
+        .first()
+        .is_some_and(|message| matches!(message.as_ref().len(), BMT_NODE_LEN | MMR_NODE_LEN));
+    let (pairs, rest) = messages.as_chunks::<2>();
+    for [left, right] in pairs {
+        let (left, right) = ([left.as_ref()], [right.as_ref()]);
+        let pair = if node {
+            hash_pair(&left, &right)
         } else {
-            let sha = cfg!(target_feature = "sha");
+            hash_pair_equal(&left, &right)
+        };
+        match pair {
+            Some((left, right)) => digests.extend([left, right]),
+            None => digests.extend([hash_specialized(&left), hash_specialized(&right)]),
         }
     }
-    Some(if sha { 7 } else { 2 })
+    digests.extend(
+        rest.iter()
+            .map(|message| hash_specialized(&[message.as_ref()])),
+    );
+}
+
+/// Hash contiguous BMT node-length `messages` four at a time with the
+/// four-chain kernel, and the rest with the pair kernels.
+#[cfg(target_arch = "aarch64")]
+fn quads<M: AsRef<[u8]>>(messages: &[M], digests: &mut Vec<Digest>) {
+    let (quads, rest) = messages.as_chunks::<4>();
+    for quad in quads {
+        match hash_quad(quad.each_ref().map(|message| bmt(message.as_ref()))) {
+            Some(quad) => digests.extend(quad),
+            None => pairs(quad, digests),
+        }
+    }
+    pairs(rest, digests);
+}
+
+/// Hash independent messages, each given as `P` parts, by gathering them
+/// into one buffer for [`hash_many`].
+///
+/// Returns `None` when the x16 kernel is unavailable, there are fewer
+/// messages than its cutoff, the node pair kernels are available and the
+/// first message is node-length, or the messages' total length overflows
+/// `usize`.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option<Vec<Digest>> {
+    if messages.len() < minimum_x16_batch_len()? {
+        return None;
+    }
+    let len = message_len(&messages[0])?;
+    if kernels::supports_sha() && matches!(len, BMT_NODE_LEN | MMR_NODE_LEN) {
+        return None;
+    }
+    let mut buffer = Vec::with_capacity(message_len(messages.as_flattened())?);
+    for part in messages.as_flattened() {
+        buffer.extend_from_slice(part);
+    }
+
+    // Each message is the next run of the buffer, as long as its parts.
+    let mut rest = buffer.as_slice();
+    let slices: Vec<&[u8]> = messages
+        .iter()
+        .map(|parts| {
+            let (message, tail) = rest.split_at(parts.iter().map(|part| part.len()).sum());
+            rest = tail;
+            message
+        })
+        .collect();
+    Some(hash_many(&slices))
+}
+
+/// Hash independent messages, each given as `P` parts, sending groups of four
+/// BMT node-shaped messages (two 32-byte digests each) to the four-chain
+/// kernel and the rest to the pair kernels.
+///
+/// Returns `None` when the messages are not two-part, the first is not BMT
+/// node-shaped, or there are fewer than four.
+#[cfg(target_arch = "aarch64")]
+pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option<Vec<Digest>> {
+    if P != 2 || messages.len() < 4 || node(&messages[0]).is_none() {
+        return None;
+    }
+    let mut digests = Vec::with_capacity(messages.len());
+    let (quads, rest) = messages.as_chunks::<4>();
+    for quad in quads {
+        match hash_quad(quad.each_ref().map(|parts| node(parts))) {
+            Some(quad) => digests.extend(quad),
+            None => crate::hash_pairs::<Sha256, P>(quad, &mut digests),
+        }
+    }
+    crate::hash_pairs::<Sha256, P>(rest, &mut digests);
+    Some(digests)
+}
+
+/// Return the two digests of a BMT node-shaped message given as its
+/// constituent parts, or `None` for any other shape.
+#[cfg(target_arch = "aarch64")]
+fn node<'a, const P: usize>(
+    parts: &[&'a [u8]; P],
+) -> Option<(&'a [u8; DIGEST_LENGTH], &'a [u8; DIGEST_LENGTH])> {
+    let [left, right] = parts.as_slice() else {
+        return None;
+    };
+    Some(((*left).try_into().ok()?, (*right).try_into().ok()?))
+}
+
+/// Hash four BMT node-shaped messages, given as their constituent digests,
+/// with the four-chain kernel.
+///
+/// Returns `None` when any message is not node-shaped or the SHA2
+/// instructions are unavailable.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+pub(super) fn hash_quad(
+    nodes: [Option<(&[u8; DIGEST_LENGTH], &[u8; DIGEST_LENGTH])>; 4],
+) -> Option<[Digest; 4]> {
+    let [Some(a), Some(b), Some(c), Some(d)] = nodes else {
+        return None;
+    };
+    dispatch_quad_64([a.0, b.0, c.0, d.0], [a.1, b.1, c.1, d.1])
 }
 
 /// Hash 16 equal-length contiguous messages with AVX-512 software SHA-256.
@@ -242,4 +414,13 @@ define_dispatch!(
     dispatch_equal,
     hash_pair_equal,
     (left: &[&[u8]], right: &[&[u8]], len: usize) -> (Digest, Digest)
+);
+#[cfg(target_arch = "aarch64")]
+define_dispatch!(
+    dispatch_quad_64,
+    hash_quad_64,
+    (
+        left: [&[u8; DIGEST_LENGTH]; 4],
+        right: [&[u8; DIGEST_LENGTH]; 4],
+    ) -> [Digest; 4]
 );
