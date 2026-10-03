@@ -5679,134 +5679,54 @@ pub mod tests {
 
     test_for_all_variants!(test_current_activity_depths, "WARN");
 
-    /// [`test_any_policy_freed_ancestors`] on a current database, whose policy draws candidates
-    /// from the speculative bitmap.
-    async fn test_current_policy_freed_ancestors<M, C, F, Fut>(context: Context, open_db: F)
-    where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "freed".into()).await;
-        test_any_policy_freed_ancestors(context, db, val).await;
+    /// Define `$name`, which runs the Any test `$any` on a current database opened in `$partition`,
+    /// for every variant. Current raises and policies draw candidates from the speculative bitmap.
+    macro_rules! current_test {
+        ($name:ident, $any:ident, $partition:literal) => {
+            async fn $name<M, C, F, Fut>(context: Context, open_db: F)
+            where
+                M: merkle::Graftable,
+                C: Inspect<M>,
+                Operation<M, C::Update>: Codec,
+                F: Fn(Context, String) -> Fut,
+                Fut: Future<Output = C>,
+            {
+                let db = open_db(context.child("db"), $partition.into()).await;
+                $any(context, db, val).await;
+            }
+
+            test_for_all_variants!($name, "WARN");
+        };
     }
 
-    test_for_all_variants!(test_current_policy_freed_ancestors, "WARN");
-
-    /// [`test_any_proportional_bound`] on a current database, whose raise draws candidates from
-    /// the speculative bitmap.
-    async fn test_current_proportional_bound<M, C, F, Fut>(context: Context, open_db: F)
-    where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "bound".into()).await;
-        test_any_proportional_bound(context, db, val).await;
-    }
-
-    test_for_all_variants!(test_current_proportional_bound, "WARN");
-
-    /// [`test_any_policy_matches_raise`] on a current database, whose raise and policy draw
-    /// candidates from the speculative bitmap.
-    async fn test_current_policy_matches_raise<M, C, F, Fut>(context: Context, open_db: F)
-    where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "raise".into()).await;
-        test_any_policy_matches_raise(context, db, val).await;
-    }
-
-    test_for_all_variants!(test_current_policy_matches_raise, "WARN");
-
-    /// [`test_any_policy_decisions_match_writes`] on a current database, whose policy draws
-    /// candidates from the speculative bitmap.
-    async fn test_current_policy_decisions_match_writes<M, C, F, Fut>(context: Context, open_db: F)
-    where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "decisions".into()).await;
-        test_any_policy_decisions_match_writes(context, db, val).await;
-    }
-
-    test_for_all_variants!(test_current_policy_decisions_match_writes, "WARN");
-    /// [`test_any_policy_limits`] on a current database, whose policy draws candidates from the speculative
-    /// bitmap.
-    async fn test_current_policy_limits<M, C, F, Fut>(context: Context, open_db: F)
-    where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "limits".into()).await;
-        test_any_policy_limits(context, db, val).await;
-    }
-
-    test_for_all_variants!(test_current_policy_limits, "WARN");
-
-    /// [`test_any_policy_limits_after_colliding_writes`] on a current database, whose policy draws candidates from the speculative
-    /// bitmap.
-    async fn test_current_policy_limits_after_colliding_writes<M, C, F, Fut>(
-        context: Context,
-        open_db: F,
-    ) where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "colliding".into()).await;
-        test_any_policy_limits_after_colliding_writes(context, db, val).await;
-    }
-
-    test_for_all_variants!(test_current_policy_limits_after_colliding_writes, "WARN");
-
-    /// [`test_any_policy_hold`] on a current database, whose policy draws candidates from the speculative
-    /// bitmap.
-    async fn test_current_policy_hold<M, C, F, Fut>(context: Context, open_db: F)
-    where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "hold".into()).await;
-        test_any_policy_hold(context, db, val).await;
-    }
-
-    test_for_all_variants!(test_current_policy_hold, "WARN");
-
-    /// [`test_any_policy_stop`] on a current database, whose policy draws candidates from the speculative
-    /// bitmap.
-    async fn test_current_policy_stop<M, C, F, Fut>(context: Context, open_db: F)
-    where
-        M: merkle::Graftable,
-        C: Inspect<M>,
-        Operation<M, C::Update>: Codec,
-        F: Fn(Context, String) -> Fut,
-        Fut: Future<Output = C>,
-    {
-        let db = open_db(context.child("db"), "stop".into()).await;
-        test_any_policy_stop(context, db, val).await;
-    }
-
-    test_for_all_variants!(test_current_policy_stop, "WARN");
+    current_test!(
+        test_current_policy_freed_ancestors,
+        test_any_policy_freed_ancestors,
+        "freed"
+    );
+    current_test!(
+        test_current_proportional_bound,
+        test_any_proportional_bound,
+        "bound"
+    );
+    current_test!(
+        test_current_policy_matches_raise,
+        test_any_policy_matches_raise,
+        "raise"
+    );
+    current_test!(
+        test_current_policy_decisions_match_writes,
+        test_any_policy_decisions_match_writes,
+        "decisions"
+    );
+    current_test!(test_current_policy_limits, test_any_policy_limits, "limits");
+    current_test!(
+        test_current_policy_limits_after_colliding_writes,
+        test_any_policy_limits_after_colliding_writes,
+        "colliding"
+    );
+    current_test!(test_current_policy_hold, test_any_policy_hold, "hold");
+    current_test!(test_current_policy_stop, test_any_policy_stop, "stop");
 
     /// [`test_any_policy_keep_evict_and_recover`] on a current database, whose policy draws
     /// candidates from the speculative bitmap.

@@ -17,13 +17,13 @@
 //! [`Limits::Proportional`] moves them. Evictions and replacements resolve as writes to their
 //! keys.
 //!
-//! Reads stay below the batch's original tip and below `entries + skips` locations past the
-//! inherited floor.
+//! The pass reads only below the batch's original tip and below `entries + skips` locations past
+//! the inherited floor.
 
 use crate::merkle::{Family, Location};
 use std::marker::PhantomData;
 
-/// An invariant lifetime that ties a [`Decision`] to the [`Entry`] it decides.
+/// An invariant lifetime that ties a [`Decision`] to the call of [`Policy::decide`] that made it.
 type Brand<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
 
 /// How far a policy advances the floor.
@@ -85,16 +85,16 @@ pub trait Policy<F: Family, K, V> {
 ///     qmdb::floor::{Decision, Entry, Limits, Policy},
 /// };
 ///
-/// struct Stash<F: Family>(Option<Entry<'static, F, u64, u64>>);
+/// struct Stash(Option<Decision<'static, u64>>);
 ///
-/// impl<F: Family> Policy<F, u64, u64> for Stash<F> {
+/// impl<F: Family> Policy<F, u64, u64> for Stash {
 ///     fn limits(&self) -> Limits {
-///         Limits::Fixed { entries: 1, skips: 0 }
+///         Limits::Fixed { entries: 2, skips: 0 }
 ///     }
 ///
 ///     fn decide<'a>(&mut self, entry: Entry<'a, F, u64, u64>) -> Decision<'a, u64> {
-///         match self.0.replace(entry) {
-///             Some(stashed) => stashed.keep(),
+///         match self.0.replace(entry.keep()) {
+///             Some(stashed) => stashed,
 ///             None => unreachable!(),
 ///         }
 ///     }
@@ -105,7 +105,6 @@ pub struct Entry<'a, F: Family, K, V> {
     location: Location<F>,
     key: &'a K,
     value: V,
-    brand: Brand<'a>,
 }
 
 impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
@@ -115,7 +114,6 @@ impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
             location,
             key,
             value,
-            brand: PhantomData,
         }
     }
 

@@ -2467,6 +2467,15 @@ pub(crate) mod test {
             }
         }
 
+        /// Return a policy with proportional limits, whose `decide` is never called.
+        pub(crate) const fn proportional(decide: D) -> Self {
+            Self {
+                limits: Limits::Proportional,
+                decide,
+                visited: Vec::new(),
+            }
+        }
+
         /// Return the location of each decided update, in order.
         pub(crate) fn locations(&self) -> Vec<GenericLocation<F>> {
             self.visited.iter().map(|(loc, _, _)| *loc).collect()
@@ -3012,11 +3021,9 @@ pub(crate) mod test {
         assert_same(&db, &raised, &compacted);
 
         // A policy with proportional limits reproduces the raise without deciding an update.
-        let mut policy = Script {
-            limits: Limits::Proportional,
-            decide: |_: &Digest| -> Choice { unreachable!("decided under proportional limits") },
-            visited: Vec::new(),
-        };
+        let mut policy = Script::proportional(|_: &Digest| -> Choice {
+            unreachable!("decided under proportional limits")
+        });
         let proportional = merkleize(&db, with(db.new_batch()), &mut policy)
             .await
             .unwrap();
@@ -3885,10 +3892,10 @@ pub(crate) mod test {
     }
 
     /// Return deletes of the `n` live keys with the highest locations.
-    fn newest<F: Family>(
-        live: &BTreeMap<Digest, GenericLocation<F>>,
+    fn newest<K: Copy + Ord, L: Copy + Ord, V>(
+        live: &BTreeMap<K, L>,
         n: usize,
-    ) -> Vec<(Digest, Option<Digest>)> {
+    ) -> Vec<(K, Option<V>)> {
         let mut keys: Vec<_> = live.iter().map(|(key, loc)| (*loc, *key)).collect();
         keys.sort_unstable_by(|a, b| b.cmp(a));
         keys.into_iter()
@@ -3897,10 +3904,85 @@ pub(crate) mod test {
             .collect()
     }
 
-    /// Every [`Proportional`] batch keeps the floor at most `3 * (n + 1)` operations behind the tip,
-    /// where `n` is the number of live keys, across a large batch of creates, hot-key updates,
-    /// delete and recreate churn, shrinking by deleting the newest keys, bursts of creates followed
-    /// by deletes of the newest keys, and large mixed batches.
+    /// Apply a large batch of creates, hot-key updates, delete and recreate churn, shrinking by
+    /// deleting the newest keys, bursts of creates followed by deletes of the newest keys, and
+    /// large mixed batches to `db`, drawing keys from `key` and values from `value`. `apply`
+    /// applies one batch and records the location of each live key in its map.
+    pub(crate) async fn churn<D, K, V, L>(
+        mut db: D,
+        key: impl Fn(u64) -> K,
+        value: impl Fn(u64) -> V,
+        mut apply: impl AsyncFnMut(D, &mut BTreeMap<K, L>, &[(K, Option<V>)]) -> D,
+    ) -> D
+    where
+        K: Copy + Ord,
+        L: Copy + Ord,
+    {
+        let mut live = BTreeMap::new();
+
+        // Create 256 keys in one batch.
+        let writes: Vec<_> = (0..256).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+
+        // Update four hot keys in each of 64 batches.
+        for round in 0..64 {
+            let writes: Vec<_> = (0..4)
+                .map(|i| (key(i), Some(value(1000 + round))))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Delete eight keys, then delete the next eight in each of 64 batches while recreating
+        // the eight the previous batch deleted.
+        let window = |round: u64| (8 * round..8 * round + 8).map(|i| key(i % 256));
+        let writes: Vec<_> = window(0).map(|key| (key, None)).collect();
+        db = apply(db, &mut live, &writes).await;
+        for round in 0..64 {
+            let writes: Vec<_> = window(round)
+                .map(|key| (key, Some(value(2000 + round))))
+                .chain(window(round + 1).map(|key| (key, None)))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Delete the eight newest keys in each batch until eight keys remain.
+        while live.len() > 8 {
+            let writes = newest(&live, 8);
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Four times, create a burst of 64 keys and then delete the eight newest keys in each of
+        // eight batches.
+        for burst in 0..4 {
+            let start = 1000 + 64 * burst;
+            let writes: Vec<_> = (start..start + 64)
+                .map(|i| (key(i), Some(value(i))))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+            for _ in 0..8 {
+                let writes = newest(&live, 8);
+                db = apply(db, &mut live, &writes).await;
+            }
+        }
+
+        // Create 512 keys in one batch, then delete 64 keys, update 128, and create 32 in each of
+        // four batches.
+        let writes: Vec<_> = (2000..2512).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+        for round in 0..4 {
+            let keys: Vec<_> = live.keys().copied().collect();
+            let start = 3000 + 32 * round;
+            let deletes = keys[..64].iter().map(|&key| (key, None));
+            let updates = keys[64..192].iter().map(|&key| (key, Some(value(round))));
+            let creates = (start..start + 32).map(|i| (key(i), Some(value(i))));
+            let writes: Vec<_> = deletes.chain(updates).chain(creates).collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+        db
+    }
+
+    /// Every [`Proportional`] batch of [`churn`] keeps the floor at most `3 * (n + 1)` operations
+    /// behind the tip, where `n` is the number of live keys.
     pub(crate) async fn test_any_proportional_bound<F, D>(
         _context: Context,
         db: D,
@@ -3910,72 +3992,7 @@ pub(crate) mod test {
         D: Inspect<F>,
         Operation<F, D::Update>: Codec,
     {
-        let mut live = BTreeMap::new();
-
-        // Create 256 keys in one batch.
-        let writes: Vec<_> = (0..256)
-            .map(|i| (to_digest(i), Some(make_value(i))))
-            .collect();
-        let mut db = bounded(db, &mut live, &writes).await;
-
-        // Update four hot keys in each of 64 batches.
-        for round in 0..64 {
-            let writes: Vec<_> = (0..4)
-                .map(|i| (to_digest(i), Some(make_value(1000 + round))))
-                .collect();
-            db = bounded(db, &mut live, &writes).await;
-        }
-
-        // Delete eight keys, then delete the next eight in each of 64 batches while recreating
-        // the eight the previous batch deleted.
-        let window = |round: u64| (8 * round..8 * round + 8).map(|i| to_digest(i % 256));
-        let writes: Vec<_> = window(0).map(|key| (key, None)).collect();
-        db = bounded(db, &mut live, &writes).await;
-        for round in 0..64 {
-            let writes: Vec<_> = window(round)
-                .map(|key| (key, Some(make_value(2000 + round))))
-                .chain(window(round + 1).map(|key| (key, None)))
-                .collect();
-            db = bounded(db, &mut live, &writes).await;
-        }
-
-        // Delete the eight newest keys in each batch until eight keys remain.
-        while live.len() > 8 {
-            let writes = newest(&live, 8);
-            db = bounded(db, &mut live, &writes).await;
-        }
-
-        // Four times, create a burst of 64 keys and then delete the eight newest keys in each of
-        // eight batches.
-        for burst in 0..4 {
-            let start = 1000 + 64 * burst;
-            let writes: Vec<_> = (start..start + 64)
-                .map(|i| (to_digest(i), Some(make_value(i))))
-                .collect();
-            db = bounded(db, &mut live, &writes).await;
-            for _ in 0..8 {
-                let writes = newest(&live, 8);
-                db = bounded(db, &mut live, &writes).await;
-            }
-        }
-
-        // Create 512 keys in one batch, then delete 64 keys, update 128, and create 32 in each of
-        // four batches.
-        let writes: Vec<_> = (2000..2512)
-            .map(|i| (to_digest(i), Some(make_value(i))))
-            .collect();
-        db = bounded(db, &mut live, &writes).await;
-        for round in 0..4 {
-            let keys: Vec<_> = live.keys().copied().collect();
-            let start = 3000 + 32 * round;
-            let deletes = keys[..64].iter().map(|&key| (key, None));
-            let updates = keys[64..192]
-                .iter()
-                .map(|&key| (key, Some(make_value(round))));
-            let creates = (start..start + 32).map(|i| (to_digest(i), Some(make_value(i))));
-            let writes: Vec<_> = deletes.chain(updates).chain(creates).collect();
-            db = bounded(db, &mut live, &writes).await;
-        }
+        let db = churn(db, to_digest, make_value, bounded::<F, D>).await;
         db.destroy().await.unwrap();
     }
 

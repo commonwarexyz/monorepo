@@ -67,10 +67,7 @@ use crate::{
         Cursor, Unordered as Index,
         partitioned::{PartitionRange, Partitioned},
     },
-    journal::{
-        Error as JournalError,
-        contiguous::{Contiguous, Mutable},
-    },
+    journal::{Error as JournalError, contiguous::Contiguous},
     merkle::{
         Bagging, Family, Location,
         hasher::{Hasher as MerkleHasher, Standard as StandardHasher},
@@ -1151,68 +1148,4 @@ fn delete_known_loc<F: Family, I: Index<Value = Location<F>>>(
         "known key with given old_loc should have been found"
     );
     cursor.delete();
-}
-
-/// A wrapper of DB state required for implementing inactivity floor management.
-pub(crate) struct FloorHelper<
-    'a,
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-> {
-    pub snapshot: &'a mut I,
-    pub log: C,
-}
-
-impl<F, I, C> FloorHelper<'_, F, I, C>
-where
-    F: Family,
-    I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
-{
-    /// Return the location and operation of the first active operation in `[loc, end)`, or
-    /// `None` if every operation in the range is inactive.
-    async fn active(
-        &self,
-        mut loc: Location<F>,
-        end: Location<F>,
-    ) -> Result<Option<(Location<F>, C::Item)>, Error<F>> {
-        while loc < end {
-            let op = self.log.read(*loc).await?;
-            let active = op
-                .key()
-                .is_some_and(|key| self.snapshot.get(key).any(|&active| active == loc));
-            if active {
-                return Ok(Some((loc, op)));
-            }
-            loc += 1;
-        }
-        Ok(None)
-    }
-
-    /// Move the active operation at `loc` to the tip of the log as `op`, an update of its key.
-    async fn relocate(mut self, loc: Location<F>, op: &C::Item) -> Result<Self, Error<F>> {
-        let key = op.key().expect("updates have keys");
-        let tip = Location::new(self.log.bounds().end);
-        update_known_loc(self.snapshot, key, loc, tip);
-        (self.log, _) = self.log.append(op).await?;
-        Ok(self)
-    }
-
-    /// Raise the inactivity floor by taking one _step_, which involves searching below `tip` for
-    /// the first active operation at or above the inactivity floor, moving it to the tip of the
-    /// log, and then setting the inactivity floor to the location following the moved operation.
-    /// Returns the helper and the new inactivity floor location, which is `tip` when no active
-    /// operation remains below it.
-    async fn raise_floor(
-        self,
-        inactivity_floor_loc: Location<F>,
-        tip: Location<F>,
-    ) -> Result<(Self, Location<F>), Error<F>> {
-        let Some((loc, op)) = self.active(inactivity_floor_loc, tip).await? else {
-            return Ok((self, tip));
-        };
-        let helper = self.relocate(loc, &op).await?;
-        Ok((helper, loc + 1))
-    }
 }

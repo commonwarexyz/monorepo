@@ -790,7 +790,7 @@ mod tests {
         (db, root)
     }
 
-    /// [`floor_batches`] on a store, each batch applied with its policy.
+    /// [`floor_batches`] on a store, applying every batch with its policy.
     struct StoreFloorStorage;
 
     impl StorageWorkload for StoreFloorStorage {

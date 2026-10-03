@@ -542,7 +542,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -565,11 +565,11 @@ where
                     .await?;
                 (prepared, staged, Some(prefetched))
             }
-            Limits::Fixed { entries, skips } => {
+            limits => {
                 let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
                 let (prepared, staged) = inner
                     .prepare(&db.any)?
-                    .advance(staged, policy, entries, skips, fill)
+                    .advance(staged, policy, limits, fill)
                     .await?;
                 (prepared, staged, None)
             }
@@ -629,7 +629,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -642,14 +642,8 @@ where
         };
         let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
-        let (prepared, staged) = match policy.limits() {
-            Limits::Proportional => (prepared, staged),
-            Limits::Fixed { entries, skips } => {
-                prepared
-                    .advance(staged, policy, entries, skips, fill)
-                    .await?
-            }
-        };
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(staged, policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
@@ -693,7 +687,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -708,14 +702,8 @@ where
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };
         let prepared = inner.prepare(&db.any)?;
-        let (prepared, staged) = match policy.limits() {
-            Limits::Proportional => (prepared, Vec::new()),
-            Limits::Fixed { entries, skips } => {
-                prepared
-                    .advance(Vec::new(), policy, entries, skips, fill)
-                    .await?
-            }
-        };
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged, None, fill)
             .await?;
@@ -759,7 +747,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -774,14 +762,8 @@ where
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };
         let prepared = inner.prepare(&db.any)?;
-        let (prepared, staged) = match policy.limits() {
-            Limits::Proportional => (prepared, Vec::new()),
-            Limits::Fixed { entries, skips } => {
-                prepared
-                    .advance(Vec::new(), policy, entries, skips, fill)
-                    .await?
-            }
-        };
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;

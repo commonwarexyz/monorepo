@@ -2000,7 +2000,7 @@ pub(crate) mod test {
         });
     }
 
-    /// The same deletion under a fixed policy that reaches the window and evicts nothing.
+    /// The same deletion under a fixed policy whose pass gathers the locations merkleize reuses.
     #[test_traced("INFO")]
     fn test_ordered_child_delete_colliding_key_fixed_policy() {
         let executor = deterministic::Runner::default();
@@ -2016,11 +2016,11 @@ pub(crate) mod test {
         });
     }
 
-    /// Delete a key in a child batch whose predecessor shares its translated-key bucket, merkleizing
-    /// the child with `policy`, and check the predecessor's next_key.
+    /// Delete a key in a child batch whose predecessor shares its translated-key bucket,
+    /// merkleizing the child with `policy`, and check the predecessor's next_key.
     async fn child_delete_colliding_key<P>(context: deterministic::Context, policy: &mut P)
     where
-        P: Policy<mmr::Family, Digest, Digest> + Send,
+        P: Policy<mmr::Family, Digest, Digest>,
     {
         {
             let db = open_db(context.child("db")).await;

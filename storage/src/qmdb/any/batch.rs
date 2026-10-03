@@ -192,7 +192,7 @@ fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool 
     items.get(*cursor) == Some(target)
 }
 
-/// Merge `a` and `b`, each sorted by `less`, into one sorted vector. On ties, the element from
+/// Merge the `less`-sorted vectors `a` and `b` into one sorted vector. On ties, the element from
 /// `b` comes first.
 fn merge_by<T>(a: Vec<T>, b: Vec<T>, less: impl Fn(&T, &T) -> bool) -> Vec<T> {
     if b.is_empty() {
@@ -1677,7 +1677,7 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&db.bitmap, floor, tip, limit, out)
@@ -1689,11 +1689,11 @@ where
                     .await?;
                 (prepared, staged, Some(prefetched))
             }
-            Limits::Fixed { entries, skips } => {
+            limits => {
                 let (batch, staged) = self.resolve_updates(updates, upserts, db.strategy());
                 let (prepared, staged) = batch
                     .prepare(db)?
-                    .advance(staged, policy, entries, skips, fill)
+                    .advance(staged, policy, limits, fill)
                     .await?;
                 (prepared, staged, None)
             }
@@ -1847,21 +1847,15 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&db.bitmap, floor, tip, limit, out)
         };
         let (batch, staged) = self.resolve_updates(updates, upserts, db.strategy());
         let prepared = batch.prepare(db)?;
-        let (prepared, staged) = match policy.limits() {
-            Limits::Proportional => (prepared, staged),
-            Limits::Fixed { entries, skips } => {
-                prepared
-                    .advance(staged, policy, entries, skips, fill)
-                    .await?
-            }
-        };
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(staged, policy, limits, fill).await?;
         let (batch, _retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
@@ -2199,10 +2193,12 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Run `policy` over the batch's active updates from its inherited floor, after the writes in
-    /// the batch and `staged`, deciding at most `entries` updates and passing at most `skips`
-    /// inactive locations, and freeze the floor the pass reached for merkleize. Candidates come
-    /// from `fill`, which must meet the candidate contract of `merkleize_with_floor_scan`.
+    /// Under [`Limits::Fixed`], run `policy` over the batch's active updates from its inherited
+    /// floor, after the writes in the batch and `staged`, deciding at most `entries` updates and
+    /// passing at most `skips` inactive locations, and freeze the floor the pass reached for
+    /// merkleize. Candidates come from `fill`, which must meet the candidate contract of
+    /// `merkleize_with_floor_scan`. Under [`Limits::Proportional`], return the batch and `staged`
+    /// unchanged.
     ///
     /// Returns `staged` merged with the policy's evictions and replacements, sorted by location.
     /// Evictions the update kind cannot stage become batch mutations, which no earlier write
@@ -2211,14 +2207,16 @@ where
         mut self,
         staged: StagedUpdates<F, U>,
         policy: &mut P,
-        entries: usize,
-        skips: u64,
+        limits: Limits,
         mut fill: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<(Self, StagedUpdates<F, U>), crate::qmdb::Error<F>>
     where
         U: update::Parts,
         P: Policy<F, U::Key, U::Value>,
     {
+        let Limits::Fixed { entries, skips } = limits else {
+            return Ok((self, staged));
+        };
         let floor = self.merkleizer.base_inactivity_floor_loc;
         let tip = self.merkleizer.base_state.size;
         let reach = (*floor)
@@ -2523,20 +2521,14 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&db.bitmap, floor, tip, limit, out)
         };
         let prepared = self.prepare(db)?;
-        let (prepared, staged) = match policy.limits() {
-            Limits::Proportional => (prepared, Vec::new()),
-            Limits::Fixed { entries, skips } => {
-                prepared
-                    .advance(Vec::new(), policy, entries, skips, fill)
-                    .await?
-            }
-        };
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (batch, _retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged, None, fill)
             .await?;
@@ -2751,20 +2743,14 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
-        P: Policy<F, K, V::Value> + Send,
+        P: Policy<F, K, V::Value>,
     {
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&db.bitmap, floor, tip, limit, out)
         };
         let prepared = self.prepare(db)?;
-        let (prepared, staged) = match policy.limits() {
-            Limits::Proportional => (prepared, Vec::new()),
-            Limits::Fixed { entries, skips } => {
-                prepared
-                    .advance(Vec::new(), policy, entries, skips, fill)
-                    .await?
-            }
-        };
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (batch, _retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
