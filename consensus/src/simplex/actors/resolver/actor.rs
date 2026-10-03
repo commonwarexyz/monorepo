@@ -377,7 +377,7 @@ impl<
                 response,
             } => {
                 let span = info_span!(
-                    parent: span,
+                    parent: &span,
                     "simplex.resolver.deliver",
                     epoch = self.epoch.traced(),
                     view = view.traced()
@@ -475,10 +475,12 @@ mod tests {
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
     };
-    use commonware_macros::{select, test_async};
+    use commonware_macros::{select, test_async, test_collect_traces};
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
+    use commonware_runtime::{
+        Quota, Runner, Supervisor, deterministic, telemetry::traces::collector::TraceStorage,
+    };
     use commonware_utils::{
         NZU32, NZUsize, channel::oneshot, non_empty, non_empty_vec, probability, sync::Mutex,
     };
@@ -1522,6 +1524,49 @@ mod tests {
             actor.certified(&mut resolver, notarization, true);
             assert_eq!(actor.state.produce(view), Some(encoded));
         });
+    }
+
+    /// The resolver engine can release its handles to a fetch span while the
+    /// delivery is queued, leaving the delivery with the only handle.
+    /// Processing must still run under that span.
+    #[test_collect_traces]
+    fn delivery_holding_only_span_handle_parents_processing(traces: TraceStorage) {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(3);
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
+
+            let (response, receiver) = oneshot::channel();
+            actor.handle_resolver(
+                HandlerMessage::Deliver {
+                    span: tracing::info_span!("test.fetch"),
+                    view,
+                    data: Certificate::Notarization(notarization).encode(),
+                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    response,
+                },
+                &mut voter,
+                &mut resolver,
+            );
+            assert_eq!(receiver.await.unwrap(), Outcome::Complete);
+        });
+
+        traces
+            .get_all()
+            .expect_event(|event| {
+                event.metadata.content == "received certificate for request"
+                    && event
+                        .expect_span(|span| span.content == "test.fetch")
+                        .is_ok()
+            })
+            .unwrap();
     }
 
     #[test_async]
