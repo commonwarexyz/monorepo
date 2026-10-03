@@ -15,7 +15,7 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Shared, fill_from},
@@ -24,6 +24,7 @@ use crate::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
         },
+        floor::{Limits, Policy},
         operation::Key,
     },
 };
@@ -503,14 +504,16 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with `policy`, then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// is committed with the returned batch. `policy` chooses how the floor advances (see
+    /// [`Policy`]).
     ///
     /// # Errors
     ///
@@ -526,17 +529,19 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -545,21 +550,31 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
-        // Overlap the update resolution with a committed-prefix candidate prefetch.
-        // Candidates come from the speculative `bitmap_parent` (the same source the floor
-        // raise scans below), clamped to the committed prefix inside the helper.
-        let (prepared, staged_updates, prefetched) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
+        // The speculative bitmap clears committed updates that pending ancestors superseded, so
+        // the floor scan skips them without reading them.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
+        let (prepared, staged, prefetched) = match policy.limits() {
+            Limits::Proportional => {
+                // Overlap the update resolution with a candidate prefetch. The helper clamps the
+                // prefetch to the committed prefix.
+                let (prepared, staged, prefetched) = inner
+                    .resolve_updates_prefetched(updates, upserts, &db.any, fill)
+                    .await?;
+                (prepared, staged, Some(prefetched))
+            }
+            limits => {
+                let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
+                let (prepared, staged) = inner
+                    .prepare(&db.any)?
+                    .advance(staged, policy, limits, fill)
+                    .await?;
+                (prepared, staged, None)
+            }
+        };
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                staged_updates,
-                Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(metadata, staged, prefetched, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -575,14 +590,16 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with `policy`, then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch.
+    /// is committed with the returned batch. `policy` chooses how the floor advances (see
+    /// [`Policy`]).
     ///
     /// # Errors
     ///
@@ -598,17 +615,19 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -616,12 +635,15 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
+        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(staged, policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -638,7 +660,10 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// `policy` chooses how the floor advances (see [`Policy`]).
     ///
     /// # Errors
     ///
@@ -649,15 +674,17 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -665,15 +692,17 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+
+        // The speculative bitmap clears committed updates that pending ancestors superseded, so
+        // the floor scan skips them without reading them.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
         let prepared = inner.prepare(&db.any)?;
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Unordered<K, V>>::new(),
-                None,
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(metadata, staged, None, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -690,7 +719,10 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// `policy` chooses how the floor advances (see [`Policy`]).
     ///
     /// # Errors
     ///
@@ -701,15 +733,17 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -717,14 +751,17 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+
+        // The speculative bitmap clears committed updates that pending ancestors superseded, so
+        // the floor scan skips them without reading them.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
         let prepared = inner.prepare(&db.any)?;
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Ordered<K, V>>::new(),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -1318,12 +1355,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 
@@ -1351,12 +1389,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 
@@ -1881,8 +1920,7 @@ mod tests {
 
             // Prefetch-then-live handoff: the prefetch is clamped to the committed
             // boundary and the live scan resumes from the continuation with the
-            // post-batch tip. Nothing the raise must revalidate may be lost across the
-            // handoff (false negatives are forbidden): every set bit in `[floor, len)`
+            // post-batch tip. The handoff emits exactly every set bit in `[floor, len)`
             // and every location in `[len, tip)`.
             let tip = len + 3;
             let cap = tip as usize;
@@ -1891,14 +1929,11 @@ mod tests {
                 let mut got = Vec::new();
                 let next = fill_candidates(&chain, Location::new(floor), committed, cap, &mut got);
                 fill_candidates(&chain, next, tip, cap, &mut got);
-                assert!(got.is_sorted_by(|a, b| a < b), "{name} floor={floor}");
-                for loc in floor..tip {
-                    let must_emit = loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc);
-                    assert!(
-                        !must_emit || got.contains(&Location::new(loc)),
-                        "{name} floor={floor} lost {loc}"
-                    );
-                }
+                let want: Vec<Location> = (floor..tip)
+                    .filter(|&loc| loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc))
+                    .map(Location::new)
+                    .collect();
+                assert_eq!(got, want, "{name} floor={floor}");
             }
         }
     }
