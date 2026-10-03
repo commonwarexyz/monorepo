@@ -470,10 +470,12 @@ where
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
     /// make the applied state durable.
     ///
-    /// Before its commit, the batch moves one active update to the tip for each operation it makes
-    /// inactive: each update it supersedes, each delete it appends, and the previous commit. This
-    /// keeps the inactivity floor at most `3 * (n + 1)` operations behind the tip, where `n` is the
-    /// number of active keys. If the batch leaves the store empty, the floor moves to its commit.
+    /// Before its commit, the batch moves up to one active update to the tip for each operation it
+    /// makes inactive: each update it supersedes, each delete it appends, and the previous commit.
+    /// It moves only updates below the tip as it stood before the moves, so no update moves twice.
+    /// This keeps the inactivity floor at most `3 * (n + 1)` operations behind the tip, where `n`
+    /// is the number of active keys. If the batch leaves the store empty, the floor moves to its
+    /// commit.
     #[boxed]
     pub async fn apply_batch(
         mut self,
@@ -528,14 +530,20 @@ where
             self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         } else {
+            // Moves stop at the tip as it stood before the raise, so no update moves twice.
             let steps_to_take = steps + 1;
+            let tip = Location::new(self.log.bounds().end);
             let mut helper = FloorHelper {
                 snapshot: &mut self.snapshot,
                 log: self.log,
             };
             let mut inactivity_floor_loc = self.inactivity_floor_loc;
             for _ in 0..steps_to_take {
-                (helper, inactivity_floor_loc) = helper.raise_floor(inactivity_floor_loc).await?;
+                if inactivity_floor_loc >= tip {
+                    break;
+                }
+                (helper, inactivity_floor_loc) =
+                    helper.raise_floor(inactivity_floor_loc, tip).await?;
             }
             self.log = helper.log;
             self.inactivity_floor_loc = inactivity_floor_loc;
@@ -595,7 +603,10 @@ mod test {
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::future::Future;
     use futures::FutureExt as _;
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        collections::BTreeSet,
+        num::{NonZeroU16, NonZeroUsize},
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
@@ -1210,11 +1221,11 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            // First apply_entries: Update + 1 move + CommitFloor = 3 ops. Subsequent 99: Update + 2
-            // moves + CommitFloor = 4 ops each. Total: 1 (init) + 3 + 99*4 = 400.
-            assert_eq!(*db.bounds().end, 400);
-            // Only the last Update and CommitFloor are active → floor = 398.
-            assert_eq!(*db.inactivity_floor_loc, 398);
+            // Each apply_entries appends the Update, one move of it, and a CommitFloor, because
+            // moves stop at the tip as it stood before them. Total: 1 (init) + 100 * 3 = 301.
+            assert_eq!(*db.bounds().end, 301);
+            // Only the last moved Update and CommitFloor are active, so the floor is 299.
+            assert_eq!(*db.inactivity_floor_loc, 299);
             let floor = db.inactivity_floor_loc;
 
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
@@ -1354,18 +1365,26 @@ mod test {
         });
     }
 
-    /// Apply `writes` as one batch, replay its operations into `live`, and assert that the floor
-    /// trails the tip by at most `3 * (n + 1)` operations, where `n` is the number of live keys.
+    /// Apply `writes` as one batch, replay its operations into `live`, and assert that the batch
+    /// moves each update at most once and that the floor trails the tip by at most `3 * (n + 1)`
+    /// operations, where `n` is the number of live keys. A key the batch writes may appear twice:
+    /// its write and one move of that write.
     async fn bounded(
         db: TestStore,
         live: &mut BTreeMap<Digest, Location>,
         writes: &[(Digest, Option<Vec<u8>>)],
     ) -> TestStore {
         let (db, range) = apply_entries(db, writes.iter().cloned()).await;
+        let written: BTreeSet<_> = writes.iter().map(|(key, _)| *key).collect();
+        let mut updated = BTreeMap::new();
         for loc in *range.start..*range.end {
             let loc = Location::new(loc);
             match db.get_op(loc).await.unwrap() {
                 Operation::Update(Update(key, _)) => {
+                    let count = updated.entry(key).or_insert(0usize);
+                    *count += 1;
+                    let limit = 1 + usize::from(written.contains(&key));
+                    assert!(*count <= limit, "the batch moves an update of {key} twice");
                     live.insert(key, loc);
                 }
                 Operation::Delete(key) => {

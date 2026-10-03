@@ -1204,34 +1204,26 @@ where
         Ok((self, true))
     }
 
-    /// Raise the inactivity floor by taking one _step_, which involves searching for the first
-    /// active operation above the inactivity floor, moving it to tip, and then setting the
-    /// inactivity floor to the location following the moved operation. This method is therefore
-    /// guaranteed to raise the floor by at least one. Returns the helper and the new inactivity
-    /// floor location.
-    ///
-    /// # Panics
-    ///
-    /// Expects there is at least one active operation above the inactivity floor, and panics
-    /// otherwise.
+    /// Raise the inactivity floor by taking one _step_, which involves searching below `tip` for
+    /// the first active operation at or above the inactivity floor, moving it to the tip of the
+    /// log, and then setting the inactivity floor to the location following the moved operation.
+    /// Returns the helper and the new inactivity floor location, which is `tip` when no active
+    /// operation remains below it.
     async fn raise_floor(
         mut self,
         mut inactivity_floor_loc: Location<F>,
+        tip: Location<F>,
     ) -> Result<(Self, Location<F>), Error<F>> {
-        let tip_loc: Location<F> = Location::new(self.log.bounds().end);
-        loop {
-            assert!(
-                *inactivity_floor_loc < tip_loc,
-                "no active operations above the inactivity floor"
-            );
+        while inactivity_floor_loc < tip {
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
             let op = self.log.read(*old_loc).await?;
             let moved;
             (self, moved) = self.move_op_if_active(op, old_loc).await?;
             if moved {
-                return Ok((self, inactivity_floor_loc));
+                break;
             }
         }
+        Ok((self, inactivity_floor_loc))
     }
 }
