@@ -23,16 +23,23 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
-use commonware_macros::boxed;
+use commonware_macros::{boxed, select};
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range};
+use commonware_utils::{
+    NZU16, NZU64, NZUsize, TestRng,
+    channel::{mpsc, oneshot},
+    non_empty_range,
+    sync::Mutex,
+};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
+    collections::BTreeSet,
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    pin::pin,
     sync::Arc,
 };
 
@@ -537,6 +544,227 @@ where
 
         H::destroy(synced_db).await;
         H::destroy(target_db).await;
+    });
+}
+
+/// A source wrapper that holds the first boundary response until released and panics on a
+/// second boundary request.
+struct DelayedBoundary<S> {
+    source: S,
+    gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+}
+
+impl<S: Source<Op: Send>> Source for DelayedBoundary<S> {
+    type Family = S::Family;
+    type Digest = S::Digest;
+    type Op = S::Op;
+    type Error = S::Error;
+
+    async fn serve(&self, request: sync::Request<Self::Family>) -> sync::source::Result<Self> {
+        let response = self.source.serve(request).await?;
+        if matches!(request, sync::Request::Boundary { .. }) {
+            let (requested, release) = self
+                .gate
+                .lock()
+                .take()
+                .expect("the unchanged boundary must not be fetched again");
+            requested.send(()).unwrap();
+            release.await.unwrap();
+        }
+        Ok(response)
+    }
+}
+
+/// A boundary response requested before a target update with an unchanged lower bound is
+/// applied without a second boundary request, and sync completes after its root is evicted.
+pub(crate) fn test_target_updates_preserve_delayed_boundary<H: SyncTestHarness>()
+where
+    OpOf<H>: Encode + Clone + Send + Sync,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        // Build three targets that share a lower bound above zero.
+        let target_db = H::init_db(context.child("target")).await;
+        let target_db = H::apply_ops(target_db, H::create_ops(20), None).await;
+        let target_db = H::prune(target_db, Location::new(5)).await;
+        let start = H::bounds(&target_db).start;
+        assert!(*start > 0);
+        let initial_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(start, H::bounds(&target_db).end),
+        };
+        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 1), None).await;
+        let next_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(start, H::bounds(&target_db).end),
+        };
+        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 2), None).await;
+        let final_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(start, H::bounds(&target_db).end),
+        };
+
+        // Start sync with a source that holds the boundary response.
+        let target_db = Arc::new(target_db);
+        let (requested_tx, requested_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config("delayed_boundary", &context),
+            target: initial_target,
+            source: DelayedBoundary {
+                source: target_db.clone(),
+                gate: Mutex::new(Some((requested_tx, release_rx))),
+            },
+            fetch_batch_size: NZU64!(4),
+            max_outstanding_requests: 1,
+            apply_batch_size: NZU64!(4),
+            update_rx: Some(update_rx),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 1,
+        };
+        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+
+        // Hold a real boundary proof until the engine has processed the first update.
+        let client = {
+            let mut step = pin!(client.step());
+            select! {
+                requested = requested_rx => requested.unwrap(),
+                _ = step.as_mut() => panic!("the boundary response must remain pending"),
+            }
+            update_tx.send(next_target).await.unwrap();
+            match step.await.unwrap() {
+                NextStep::Continue(client) => client,
+                NextStep::Complete(_) => panic!("client should not be complete"),
+            }
+        };
+
+        // Release the boundary response requested against the first root.
+        release_tx.send(()).unwrap();
+        let client = match client.step().await.unwrap() {
+            NextStep::Continue(client) => client,
+            NextStep::Complete(_) => panic!("client should not be complete"),
+        };
+        assert_eq!(
+            Contiguous::bounds(client.journal()).end,
+            *start + 1,
+            "the retained boundary response must apply"
+        );
+
+        // The boundary is now verified and applied. Evict its original root before finishing.
+        update_tx.send(final_target.clone()).await.unwrap();
+        drop(update_tx);
+        let synced = client.sync().await.unwrap();
+        assert_eq!(H::db_root(&synced), final_target.root);
+        assert_eq!(H::bounds(&synced), start..final_target.range.end());
+        H::destroy(synced).await;
+        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("single source"))).await;
+    });
+}
+
+/// A source wrapper that never answers the boundary request at `stalled` and panics when an
+/// operation request covers a location an earlier operation request covered.
+struct StalledBoundary<S: Source> {
+    source: S,
+    stalled: Location<S::Family>,
+    requested: Mutex<BTreeSet<u64>>,
+}
+
+impl<S: Source<Op: Send>> Source for StalledBoundary<S> {
+    type Family = S::Family;
+    type Digest = S::Digest;
+    type Op = S::Op;
+    type Error = S::Error;
+
+    async fn serve(&self, request: sync::Request<Self::Family>) -> sync::source::Result<Self> {
+        match request {
+            sync::Request::Boundary { start, .. } if start == self.stalled => {
+                return std::future::pending().await;
+            }
+            sync::Request::Operations { start, max_ops, .. } => {
+                let end = start.checked_add(max_ops.get()).unwrap();
+                let mut requested = self.requested.lock();
+                for loc in *start..*end {
+                    assert!(
+                        requested.insert(loc),
+                        "location {loc} refetched by {request:?}"
+                    );
+                }
+            }
+            sync::Request::Boundary { .. } => {}
+        }
+        self.source.serve(request).await
+    }
+}
+
+/// Operations fetched ahead of the journal tip are applied after a target update moves the lower
+/// bound into them, without fetching them again.
+pub(crate) fn test_target_update_keeps_operations_above_moved_floor<H: SyncTestHarness>()
+where
+    OpOf<H>: Encode + Clone + Send + Sync,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        // Build a target pruned above zero and a later target whose lower bound is two higher.
+        let target_db = H::init_db(context.child("target")).await;
+        let target_db = H::apply_ops(target_db, H::create_ops(20), None).await;
+        let target_db = H::prune(target_db, Location::new(5)).await;
+        let floor = H::bounds(&target_db).start;
+        assert!(*floor > 0);
+        let initial_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(floor, H::bounds(&target_db).end),
+        };
+        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 1), None).await;
+        let next_floor = floor.checked_add(2).unwrap();
+        let next_target = Target {
+            root: H::db_root(&target_db),
+            range: non_empty_range!(next_floor, H::bounds(&target_db).end),
+        };
+
+        // Start sync with a source that stalls the boundary at the first lower bound.
+        let target_db = Arc::new(target_db);
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config("moved_floor", &context),
+            target: initial_target,
+            source: StalledBoundary {
+                source: target_db.clone(),
+                stalled: floor,
+                requested: Mutex::new(BTreeSet::new()),
+            },
+            fetch_batch_size: NZU64!(3),
+            max_outstanding_requests: 2,
+            apply_batch_size: NZU64!(4),
+            update_rx: Some(update_rx),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 4,
+        };
+        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+
+        // The first operation batch is stored while the journal waits for the boundary.
+        let client = match client.step().await.unwrap() {
+            NextStep::Continue(client) => client,
+            NextStep::Complete(_) => panic!("client should not be complete"),
+        };
+        assert_eq!(Contiguous::bounds(client.journal()).end, *floor);
+
+        // Move the lower bound into the stored batch and finish at the later target. The source
+        // panics if a location is requested twice.
+        update_tx.send(next_target.clone()).await.unwrap();
+        drop(update_tx);
+        let synced = client.sync().await.unwrap();
+        assert_eq!(H::db_root(&synced), next_target.root);
+        H::destroy(synced).await;
+        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("single source"))).await;
     });
 }
 
@@ -1145,6 +1373,16 @@ macro_rules! sync_tests_for_harness {
             #[test_traced("WARN")]
             fn test_target_update_during_sync() {
                 super::test_target_update_during_sync::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_updates_preserve_delayed_boundary() {
+                super::test_target_updates_preserve_delayed_boundary::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_target_update_keeps_operations_above_moved_floor() {
+                super::test_target_update_keeps_operations_above_moved_floor::<$harness>();
             }
 
             #[test]
