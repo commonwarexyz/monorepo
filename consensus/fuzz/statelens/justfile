@@ -1,0 +1,192 @@
+# StateLens recipes. See README.md.
+
+set positional-arguments := true
+
+# Turn sources into invariants: just extract <kind> <source>...
+extract *args:
+    python3 scripts/statelens.py extract "$@"
+
+# Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P]
+campaign *args:
+    python3 scripts/statelens.py campaign "$@"
+
+# Run only the campaign's test gate on this checkout: just test [--profile P]
+test *args:
+    python3 scripts/statelens.py test-gate "$@"
+
+# Fuzz a target a campaign built: just run <target> [-- -fork=8 -max_total_time=600]
+run target *args:
+    cd .. && just run "$@"
+
+# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--skip-campaign] [--parallel] [--tmux] [-- -fork=8]
+fuzz target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # A profile name runs every target the profile builds; a target name runs
+    # that one. Every StateLens variant is derived from a target of its own
+    # package, so it keeps that package's prefix, and a name that is neither is
+    # refused rather than sent to the marshal profile by default.
+    target="$1"
+    shift
+    # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
+    # --skip-campaign fuzzes the targets a campaign already built in this checkout,
+    # whatever its result, because a campaign refuses an instrumented checkout.
+    parallel=no
+    windows=no
+    campaign=yes
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --skip-campaign)        campaign=no; shift ;;
+        --parallel|--parallels) parallel=yes; shift ;;
+        --tmux)                 parallel=yes; windows=yes; shift ;;
+        --)                     shift; break ;;
+        *)                      break ;;
+      esac
+    done
+    # `cargo fuzz run` takes libFuzzer flags only after `--`, which the loop consumed.
+    if [ $# -gt 0 ]; then set -- -- "$@"; fi
+    case "$target" in
+      simplex|marshal)   profile="$target"; every=yes ;;
+      simplex_*)         profile=simplex;   every=no ;;
+      marshal_*)         profile=marshal;   every=no ;;
+      *) echo "just fuzz: $target is not a profile or a simplex_/marshal_ target" >&2
+         exit 1 ;;
+    esac
+    if [ "$campaign" = yes ]; then
+        just campaign --profile "$profile"
+    fi
+    if [ "$every" = no ]; then
+        just run "$target" "$@"
+        exit 0
+    fi
+    # A read loop, not `mapfile`: that is bash 4, and macOS ships bash 3.2.
+    names=()
+    while IFS= read -r name; do
+        [ -n "$name" ] && names+=("$name")
+    done < <(python3 scripts/statelens.py targets --profile "$profile")
+    here="$(pwd)"
+    cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+
+    if [ "$windows" = yes ]; then
+        command -v tmux >/dev/null 2>&1 || {
+            echo "just fuzz: --tmux needs tmux on PATH" >&2; exit 1; }
+        session="statelens-$profile"
+        tmux has-session -t "$session" 2>/dev/null && {
+            echo "just fuzz: tmux session $session already exists; kill it first with" >&2
+            echo "           tmux kill-session -t $session" >&2; exit 1; }
+        echo "just fuzz: ${#names[@]} target(s), one tmux window each, ${cores} core(s)" >&2
+        for at in $(seq 0 $(( ${#names[@]} - 1 ))); do
+            name="${names[$at]}"
+            # The window stays open after the run so its result can be read.
+            body="cd '$here' && just run '$name' $*; echo; echo '[$name finished; enter closes this window]'; read _"
+            # Named after the target it was derived from, which is what
+            # distinguishes the windows from each other.
+            window="${name%_statelens}"
+            if [ "$at" -eq 0 ]; then
+                tmux new-session -d -s "$session" -n "$window" "bash -lc \"$body\""
+            else
+                tmux new-window -t "$session" -n "$window" "bash -lc \"$body\""
+            fi
+        done
+        if [ -n "${TMUX:-}" ]; then
+            tmux switch-client -t "$session"
+        else
+            echo "just fuzz: attaching; detach with ctrl-b d, and return with" >&2
+            echo "           tmux attach -t $session" >&2
+            tmux attach -t "$session"
+        fi
+        exit 0
+    fi
+
+    if [ "$parallel" = no ]; then
+        # Sequential and unbounded means the first target never ends and the
+        # rest never start, so say so rather than quietly imposing a limit.
+        if [[ "$*" != *-max_total_time=* ]]; then
+            echo "just fuzz: no -max_total_time, so target 1 of ${#names[@]} runs until it" >&2
+            echo "           stops and the rest wait. Use --parallel, --tmux, or pass" >&2
+            echo "           -- -max_total_time=<seconds>." >&2
+        fi
+        echo "just fuzz: ${#names[@]} $profile target(s), in turn" >&2
+        for name in "${names[@]}"; do
+            echo "just fuzz: === $name ===" >&2
+            just run "$name" "$@"
+        done
+        exit 0
+    fi
+
+    # Batches, because a pool that waits for one process at a time needs
+    # `wait -n`, which is bash 4.3. libFuzzer's own `-fork=N` also takes cores,
+    # so a whole profile at once would oversubscribe badly.
+    jobs=${STATELENS_JOBS:-$(( cores / 4 > 0 ? cores / 4 : 1 ))}
+    [ "$jobs" -gt "${#names[@]}" ] && jobs=${#names[@]}
+    logs="campaign/logs"
+    mkdir -p "$logs"
+    echo "just fuzz: ${#names[@]} $profile target(s), $jobs at a time, ${cores} core(s)" >&2
+    echo "just fuzz: output goes to $logs/<target>.run.log" >&2
+    failed=()
+    index=0
+    while [ "$index" -lt "${#names[@]}" ]; do
+        pids=()
+        batch=()
+        while [ "${#batch[@]}" -lt "$jobs" ] && [ "$index" -lt "${#names[@]}" ]; do
+            name="${names[$index]}"
+            batch+=("$name")
+            index=$(( index + 1 ))
+            echo "just fuzz: starting $name" >&2
+            ( just run "$name" "$@" ) > "$logs/$name.run.log" 2>&1 &
+            pids+=("$!")
+        done
+        for at in $(seq 0 $(( ${#pids[@]} - 1 ))); do
+            if ! wait "${pids[$at]}"; then
+                failed+=("${batch[$at]}")
+            fi
+        done
+    done
+    for name in "${names[@]}"; do
+        printf 'just fuzz: %-58s %s\n' "$name" \
+            "$(printf '%s\n' "${failed[@]:-}" | grep -qxF "$name" && echo FAILED || echo ok)" >&2
+    done
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo "just fuzz: ${#failed[@]} target(s) failed; see $logs/<target>.run.log" >&2
+        exit 1
+    fi
+
+# Coverage of the corpora the targets built: just coverage <simplex|marshal|target...>
+coverage *args:
+    python3 scripts/statelens.py coverage "$@"
+
+# Build the code index a campaign and the agents query: just code-index [--subsystem S]
+code-index *args:
+    python3 scripts/statelens.py code build "$@"
+
+# Identify an entity in the code: just code <defs|refs|callers|callees> <NAME>
+code query name *args:
+    python3 scripts/statelens.py code "$@"
+
+# Read the syntax tree: just ast <sites|notes> [NAME] [path...]
+ast query *args:
+    python3 scripts/statelens.py ast "$@"
+
+# Undo what a campaign wrote to this checkout: just clean [--yes]
+clean *args:
+    python3 scripts/statelens.py clean "$@"
+
+# Check the worked analyses: just check-examples [path...]
+check-examples *args:
+    python3 scripts/statelens.py lint-examples "$@"
+
+# Check the scripts: just check-scripts [TestClass]
+check-scripts *args:
+    python3 scripts/test_statelens.py "$@"
+
+# Check invariant files: just check-invariants [path...]
+check-invariants *args:
+    python3 scripts/statelens.py lint "$@"
+
+# Check an instrumentation plan: just check-plan [--profile P] [path...]
+check-plan *args:
+    python3 scripts/statelens.py lint-plan "$@"
+
+# Check the prompt copies in the specification: just check-prompts [--write]
+check-prompts *args:
+    python3 scripts/statelens.py lint-prompts "$@"
