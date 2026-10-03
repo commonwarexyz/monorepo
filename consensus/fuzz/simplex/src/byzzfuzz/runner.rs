@@ -112,11 +112,7 @@ async fn setup_engines<P: Simplex>(
     gate: FaultGate,
     log_label: &'static str,
     hb_log: Option<happens_before::capture::EventLog>,
-) -> EngineSetup<P>
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) -> EngineSetup<P> {
     // Override the harness-wide `input.certify` with ByzzFuzz-specific
     // sampling. `FuzzInput::arbitrary` uses `Always` because Standard and Twins
     // on N4F1C3 cannot survive losing one of three honest certifiers. ByzzFuzz
@@ -520,11 +516,7 @@ async fn reach_gst_and_check_liveness<P: Simplex>(
 }
 
 /// Run a single ByzzFuzz iteration.
-pub fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput)
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+pub fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput) {
     input.configuration = N4F0C4;
     input.partition = Partition::Connected;
     input.degraded_network = false;

@@ -167,7 +167,7 @@ fn roundtrip_bytes(input_data_bytes: Bytes) {
 fn roundtrip_primitive<T, X>(v: T)
 where
     X: IsUnit,
-    T: Encode + Decode + PartialEq + DecodeExt<X> + std::fmt::Debug,
+    T: Encode + PartialEq + DecodeExt<X> + std::fmt::Debug,
 {
     let encoded = v.encode();
     assert_eq!(v.encode_size(), encoded.len());
@@ -203,7 +203,7 @@ fn roundtrip_map<K, V>(
     k_cfg: K::Cfg,
     v_cfg: V::Cfg,
 ) where
-    K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Ord + Hash + std::fmt::Debug,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
     HashMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
         + std::fmt::Debug
@@ -226,7 +226,7 @@ fn roundtrip_map<K, V>(
 
 fn roundtrip_set<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
 where
-    K: Write + EncodeSize + Read + Clone + Hash + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Hash + Eq + std::fmt::Debug,
     HashSet<K>:
         Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
@@ -247,7 +247,7 @@ fn roundtrip_btree_map<K, V>(
     k_cfg: K::Cfg,
     v_cfg: V::Cfg,
 ) where
-    K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Ord + std::fmt::Debug,
     V: Write + EncodeSize + Read + Clone + std::fmt::Debug + PartialEq,
     BTreeMap<K, V>: Read<Cfg = (RangeCfg<usize>, (K::Cfg, V::Cfg))>
         + std::fmt::Debug
@@ -269,7 +269,7 @@ fn roundtrip_btree_map<K, V>(
 
 fn roundtrip_btree_set<K>(set: &BTreeSet<K>, range_cfg: RangeCfg<usize>, k_cfg: K::Cfg)
 where
-    K: Write + EncodeSize + Read + Clone + Ord + Eq + std::fmt::Debug + PartialEq,
+    K: Write + EncodeSize + Read + Clone + Ord + std::fmt::Debug,
     BTreeSet<K>:
         Read<Cfg = (RangeCfg<usize>, K::Cfg)> + std::fmt::Debug + PartialEq + Write + EncodeSize,
 {
@@ -287,7 +287,7 @@ where
 
 fn roundtrip_vec<T>(vec: Vec<T>)
 where
-    T: Encode + Decode + PartialEq + DecodeExt<()> + std::fmt::Debug,
+    T: Encode + PartialEq + DecodeExt<()> + std::fmt::Debug,
 {
     let input_len = vec.len();
     let encoded_vec = vec.encode();
@@ -358,7 +358,7 @@ fn roundtrip_varint_array(values: [u16; 4]) {
 
 fn roundtrip_option<T>(opt: Option<T>)
 where
-    T: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
+    T: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
     Option<T>: Decode<Cfg = T::Cfg>,
 {
     let encoded = opt.encode();
@@ -390,9 +390,9 @@ fn roundtrip_option_bytes(opt: Option<Bytes>) {
 
 fn roundtrip_tuple_2<T1, T2>(tuple: (T1, T2))
 where
-    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    (T1, T2): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg)> + PartialEq + std::fmt::Debug + EncodeSize,
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    (T1, T2): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg)> + PartialEq + std::fmt::Debug,
 {
     let encoded = tuple.encode();
     assert_eq!(tuple.encode_size(), encoded.len());
@@ -406,14 +406,10 @@ where
 
 fn roundtrip_tuple_3<T1, T2, T3>(tuple: (T1, T2, T3))
 where
-    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug + EncodeSize,
-    (T1, T2, T3): Encode
-        + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)>
-        + PartialEq
-        + std::fmt::Debug
-        + EncodeSize,
+    T1: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    T2: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    T3: Encode + Read<Cfg = ()> + PartialEq + std::fmt::Debug,
+    (T1, T2, T3): Encode + Decode<Cfg = (T1::Cfg, T2::Cfg, T3::Cfg)> + PartialEq + std::fmt::Debug,
 {
     let encoded = tuple.encode();
     assert_eq!(tuple.encode_size(), encoded.len());

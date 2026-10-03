@@ -378,7 +378,7 @@ mod coding {
     //! by `Marshaled`.
 
     use super::*;
-    use commonware_coding::{CodecConfig, ReedSolomon};
+    use commonware_coding::ReedSolomon;
     use commonware_consensus::{
         CertifiableBlock,
         marshal::coding::{
@@ -390,7 +390,7 @@ mod coding {
     use commonware_cryptography::{Digestible, Sha256};
     use commonware_parallel::Sequential;
     use commonware_utils::{NZU16, NZUsize};
-    use std::sync::Arc;
+    use std::{num::NonZeroUsize, sync::Arc};
 
     /// The coding marshal variant.
     #[derive(Clone, Copy, Debug, Default)]
@@ -409,8 +409,11 @@ mod coding {
         extra_shards: NZU16!(1),
     };
 
-    /// Largest shard the shard engine decodes.
-    const MAX_SHARD_SIZE: usize = 1024 * 1024;
+    /// Largest encoded block the shard engine reconstructs or broadcasts.
+    const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
+
+    /// Commitment records the shard engine retains.
+    const RECORDS: NonZeroUsize = NZUsize!(16);
 
     impl Marshal for Coding {
         const NAME: &'static str = "coding";
@@ -470,11 +473,12 @@ mod coding {
                 shards::Config {
                     scheme_provider: provider,
                     blocker: oracle.control(identity),
-                    shard_codec_cfg: Self::wire_cfg(),
+                    max_block_size: Self::wire_cfg(),
                     block_codec_cfg: (),
                     strategy: Sequential,
                     mailbox_size: MAILBOX_SIZE,
                     peer_buffer_size: NZUsize!(64),
+                    records: RECORDS,
                     background_channel_capacity: NZUsize!(1024),
                     peer_provider: oracle.manager(),
                 },
@@ -504,9 +508,7 @@ mod coding {
         }
 
         fn wire_cfg() -> <Self::Wire as Read>::Cfg {
-            CodecConfig {
-                maximum_shard_size: MAX_SHARD_SIZE,
-            }
+            MAX_BLOCK_SIZE
         }
 
         /// A shard names the commitment it belongs to, which hashes the

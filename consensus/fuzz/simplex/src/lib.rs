@@ -210,7 +210,7 @@ fn spawn_filtered_audited_validator<
 ) -> RecordingReporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    EC: ElectorConfig<P::Scheme>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,

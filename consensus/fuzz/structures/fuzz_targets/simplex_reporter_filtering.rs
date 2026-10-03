@@ -169,7 +169,7 @@ fn notarization<S>(
     proposal: Proposal<sha256::Digest>,
 ) -> Option<Notarization<S, sha256::Digest>>
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let notarizes = schemes
         .iter()
@@ -185,7 +185,7 @@ where
 
 fn nullification<S>(schemes: &[S], proposal: Proposal<sha256::Digest>) -> Option<Nullification<S>>
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let nullifies = schemes
         .iter()
@@ -204,7 +204,7 @@ fn finalization<S>(
     proposal: Proposal<sha256::Digest>,
 ) -> Option<Finalization<S, sha256::Digest>>
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let finalizes = schemes
         .iter()
@@ -225,7 +225,7 @@ fn activity<S>(
     proposal: Proposal<sha256::Digest>,
 ) -> Option<Activity<S, sha256::Digest>>
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let signer = signer as usize % schemes.len();
     match kind {
@@ -298,7 +298,7 @@ fn check_reporter<S>(
     valid: bool,
     verify: bool,
 ) where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let expected = should_report::<S, sha256::Digest>(&activity, valid, verify);
 
@@ -318,7 +318,7 @@ fn check_reporter<S>(
 
 fn check_source<S>(schemes: &[S], verifier: S, input: &FuzzInput, valid: bool)
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let Some(activity) = activity(schemes, input.activity, input.signer, proposal(input)) else {
         return;
@@ -330,7 +330,7 @@ where
 
 fn reporter_case<S>(fixture: Fixture<S>, wrong_fixture: Fixture<S>, input: &FuzzInput)
 where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
+    S: SimplexScheme<sha256::Digest>,
 {
     let Fixture {
         schemes, verifier, ..

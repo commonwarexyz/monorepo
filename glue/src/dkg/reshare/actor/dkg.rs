@@ -12,10 +12,9 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
-    certificate::Scheme,
 };
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::MuxHandle};
+use commonware_p2p::{Blocker, Sender, utils::mux::MuxHandle};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, Metrics, Spawner, Storage as RuntimeStorage,
@@ -37,18 +36,17 @@ where
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
 {
-    pub(super) async fn run_dkg<SE, RE>(
+    pub(super) async fn run_dkg<SE>(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        dealing_mux: &mut MuxHandle<SE, RE>,
+        dealing_mux: &mut MuxHandle<SE>,
     ) where
         SE: Sender<PublicKey = C::PublicKey>,
-        RE: Receiver<PublicKey = C::PublicKey>,
     {
         let epoch = Epoch::zero();
         let completion = self.dkg_completion();

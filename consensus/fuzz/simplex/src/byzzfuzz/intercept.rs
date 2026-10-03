@@ -177,7 +177,7 @@ where
 impl<P, R, F> Debug for RoundTrackingReceiver<P, R, F>
 where
     P: PublicKey,
-    R: Receiver<PublicKey = P> + Debug,
+    R: Receiver<PublicKey = P>,
     F: Fn(&[u8]) -> Option<u64> + Send + 'static,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -191,7 +191,6 @@ impl<P, R, F> Receiver for RoundTrackingReceiver<P, R, F>
 where
     P: PublicKey,
     R: Receiver<PublicKey = P>,
-    R::Error: Send + Sync,
     F: Fn(&[u8]) -> Option<u64> + Send + Sync + 'static,
 {
     type Error = R::Error;
@@ -224,10 +223,7 @@ pub fn vote_view_extractor<S: Scheme<Sha256Digest>>(
 pub fn certificate_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
     pool: Arc<crate::byzzfuzz::observed::ObservedState>,
-) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static
-where
-    <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
-{
+) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static {
     move |bytes: &[u8]| {
         let c = Certificate::<S, Sha256Digest>::decode_cfg(Copying(bytes), &cert_codec).ok()?;
         pool.observe_certificate::<S, S::PublicKey>(&c);
@@ -265,9 +261,6 @@ pub(crate) fn observe_resolver_wire_view<S: Scheme<Sha256Digest>>(
 pub fn resolver_view_extractor<S: Scheme<Sha256Digest>>(
     cert_codec: <S::Certificate as Read>::Cfg,
     pool: std::sync::Arc<crate::byzzfuzz::observed::ObservedState>,
-) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static
-where
-    <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
-{
+) -> impl Fn(&[u8]) -> Option<u64> + Send + Sync + 'static {
     move |bytes: &[u8]| observe_resolver_wire_view::<S>(bytes, &cert_codec, &pool)
 }

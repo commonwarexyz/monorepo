@@ -325,7 +325,7 @@ trait Shape: 'static {
     const NAME: &'static str;
 
     /// The set.
-    type Set: DatabaseSet<Runtime> + StateSyncSet<Runtime, Self::Sources, Digest>;
+    type Set: StateSyncSet<Runtime, Self::Sources, Digest>;
 
     /// The peers the set syncs from, one per database.
     type Sources: Send + 'static;

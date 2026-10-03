@@ -131,7 +131,6 @@ pub fn fuzz_marshal_scenario_prefix_inline<P: Simplex>(input: MarshalScenarioPre
 fn run<P: Simplex, M>(input: MarshalScenarioPrefixInput, marshal: MarshalChoice)
 where
     M: TwinsMarshal<P, App<P>>,
-    M::Wrapper: Clone + Send + 'static,
 {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let config = deterministic::Config::new().with_rng(rng);

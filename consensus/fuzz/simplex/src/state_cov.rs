@@ -89,7 +89,7 @@ where
             drop(nullifications);
 
             let finalizations = reporter.finalizations.lock();
-            for (view, cert) in finalizations.iter() {
+            for (view, (cert, _)) in finalizations.iter() {
                 let v = view.get();
                 data.finalizations.insert(
                     v,

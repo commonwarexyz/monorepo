@@ -86,9 +86,7 @@ where
     P: Simplex,
     E: CryptoRng,
     P::Scheme: Scheme<Sha256Digest>,
-    <P::Scheme as certificate::Verifier>::PublicKey: Eq + Hash + Clone,
     L: Elector<P::Scheme>,
-    L::Elector: Clone,
 {
     fn check_safety(self, configuration: Configuration, term_length: TermLength) {
         check_fuzz_invariants(term_length, self);
@@ -614,8 +612,7 @@ pub fn check_vote_invariants<E, S, L>(
 ) where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
-    S::PublicKey: Eq + Hash + Clone,
-    L: Elector<S> + Clone,
+    L: Elector<S>,
 {
     let byzantine: HashSet<usize> = (0..faults).collect();
     check_vote_invariants_with_byzantine(&byzantine, elector, epoch, term_length, reporters);
@@ -660,7 +657,6 @@ pub fn check_certificate_leader_derivation<E, S, L>(
 ) where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
-    S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
 {
     let Some(first) = reporters.first() else {
@@ -724,7 +720,7 @@ pub fn check_certificate_leader_derivation<E, S, L>(
                 next_term_start(certificate.round.view().get(), term_length),
             );
         }
-        for certificate in reporter.finalizations.lock().values() {
+        for (certificate, _) in reporter.finalizations.lock().values() {
             derive(
                 certificate.round(),
                 &certificate.certificate,
@@ -790,8 +786,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
 ) where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
-    S::PublicKey: Eq + Hash + Clone,
-    L: Elector<S> + Clone,
+    L: Elector<S>,
 {
     // Invariant: certificate_derived_leader_agreement
     // Every reporter that derives a leader for the same view must derive the
@@ -1150,7 +1145,7 @@ pub fn check_vote_invariants_with_byzantine<E, S, L>(
         drop(nullifications);
 
         let finalizations = reporter.finalizations.lock();
-        for (view, finalization) in finalizations.iter() {
+        for (view, (finalization, _)) in finalizations.iter() {
             let view = view.get();
             assert!(
                 view != 0,
@@ -1457,9 +1452,7 @@ fn check_fuzz_invariants<E, S, L>(
 ) where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
-    S::PublicKey: Eq + Hash + Clone,
     L: Elector<S>,
-    L::Elector: Clone,
 {
     // A reporter's own exact votes are incarnation-scoped because the batcher
     // can report a constructed vote before the voter has durably synced it.
@@ -2508,7 +2501,6 @@ where
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
-    L::Elector: Clone,
 {
     let audit = reporter.audit();
     let quorum = bounds::quorum(
@@ -2589,7 +2581,6 @@ pub fn check_notarization_unlocks_finalize_quorum<E, S, L>(
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
-    L::Elector: Clone,
 {
     let pending = unresolved_finalize_recoveries(reporter);
     let quorum = bounds::quorum(
@@ -2612,7 +2603,6 @@ pub fn check_finalize_recoveries_drained<E, S, L>(
     E: CryptoRng,
     S: Scheme<Sha256Digest>,
     L: Elector<S>,
-    L::Elector: Clone,
 {
     let mut pending = unresolved_finalize_recoveries(reporter);
     pending.retain(|proposal, _| earlier.contains_key(proposal));
@@ -2738,7 +2728,7 @@ where
             let finalizations = reporter.finalizations.lock();
             let finalization_data = finalizations
                 .iter()
-                .map(|(view, cert)| {
+                .map(|(view, (cert, _))| {
                     (
                         view.get(),
                         Finalization {
@@ -3218,9 +3208,10 @@ mod tests {
         rep.nullifications
             .lock()
             .insert(View::new(1), nullification_activity(&schemes, 1));
-        rep.finalizations
-            .lock()
-            .insert(View::new(3), finalization_activity(&schemes, 3, 2, 0xA));
+        rep.finalizations.lock().insert(
+            View::new(3),
+            (finalization_activity(&schemes, 3, 2, 0xA), 1),
+        );
         check_vote_invariants_with_byzantine(
             &HashSet::new(),
             RoundRobin::default().with_term(

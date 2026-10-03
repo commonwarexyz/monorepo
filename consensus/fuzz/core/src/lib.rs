@@ -329,8 +329,7 @@ impl<R: Reporter> Reporter for FuzzReporter<R> {
     }
 }
 
-type WiredReporter<R> =
-    Reporters<<R as Reporter>::Activity, FuzzReporter<R>, Option<FuzzReporter<R>>>;
+type WiredReporter<R> = Reporters<FuzzReporter<R>, Option<FuzzReporter<R>>>;
 
 struct FuzzInputDebug<'a>(&'a FuzzInput);
 
@@ -964,7 +963,7 @@ pub fn build_validator<
 ) -> ManagedValidator<P, reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>>
 where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    EC: ElectorConfig<P::Scheme>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
@@ -1028,12 +1027,11 @@ fn start_validator_engine<
 ) -> Handle<()>
 where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    EC: ElectorConfig<P::Scheme>,
     Automaton: CertifiableAutomaton<
             Context = SimplexContext<Sha256Digest, PublicKeyOf<P>>,
             Digest = Sha256Digest,
-        > + Send
-        + 'static,
+        >,
     Relay: ConsensusRelay<
             Digest = Sha256Digest,
             PublicKey = PublicKeyOf<P>,
@@ -1091,7 +1089,7 @@ where
 /// mock family runs the application directly; the recording family wraps it
 /// in its audit-history recorder.
 pub trait HarnessReporter<P, EC, Mailbox>:
-    Reporter<Activity = Activity<P::Scheme, Sha256Digest>> + Clone
+    Reporter<Activity = Activity<P::Scheme, Sha256Digest>>
 where
     P: simplex::Simplex,
     EC: ElectorConfig<P::Scheme>,
@@ -1099,8 +1097,7 @@ where
     type Automaton: CertifiableAutomaton<
             Context = SimplexContext<Sha256Digest, PublicKeyOf<P>>,
             Digest = Sha256Digest,
-        > + Send
-        + 'static;
+        >;
 
     fn create(
         context: deterministic::Context,
@@ -1270,7 +1267,7 @@ pub fn build_validator_with_reporter<
 ) -> ManagedValidator<P, R>
 where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    EC: ElectorConfig<P::Scheme>,
     R: HarnessReporter<P, EC, application::Mailbox<Sha256Digest, PublicKeyOf<P>>>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
@@ -1371,7 +1368,7 @@ pub fn spawn_filtered_honest_validator<
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    EC: ElectorConfig<P::Scheme>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,
     RecoveredSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
@@ -1440,7 +1437,7 @@ pub fn spawn_filtered_validator_with_reporter<
 ) -> R
 where
     P: simplex::Simplex,
-    EC: ElectorConfig<P::Scheme> + Clone + Send + 'static,
+    EC: ElectorConfig<P::Scheme>,
     R: HarnessReporter<P, EC, block_relay::Mailbox<PublicKeyOf<P>>>,
     PendingSender: commonware_p2p::Sender<PublicKey = PublicKeyOf<P>>,
     PendingReceiver: commonware_p2p::Receiver<PublicKey = PublicKeyOf<P>>,

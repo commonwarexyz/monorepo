@@ -12,18 +12,24 @@ use crate::{
 };
 use clap::Args;
 use commonware_consensus::types::Epoch;
-use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
+use commonware_cryptography::{
+    ChaCha20Poly1305, bls12381::primitives::variant::MinSig, ed25519::PublicKey,
+};
 use commonware_glue::dkg::{
     SecretStore as _, bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
 use commonware_p2p::authenticated::{self, discovery};
 use commonware_runtime::{Handle, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::{
+    cups::{self, Cups},
+    sake::{self, Sake},
+};
 use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tracing::{error, info};
 
@@ -53,7 +59,15 @@ pub async fn run(context: tokio::Context, args: Bootstrap) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        Handshake::new(node.signer.clone()),
+        Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
+                signer: node.signer.clone(),
+                synchrony_bound: Duration::from_secs(5),
+                max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
+            },
+            cups::Version::V1,
+        ),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,

@@ -156,6 +156,10 @@ impl<T> Handle<T>
 where
     T: Send + 'static,
 {
+    /// Wraps `f` as a task supervised by `tree`.
+    ///
+    /// The task's cancellation is registered on `tree` before this returns, so a closed `tree`
+    /// cancels the task before `f` can be polled.
     #[inline(always)]
     pub(crate) fn init<F>(
         f: F,
@@ -169,6 +173,9 @@ where
         // Initialize channels to handle result/abort
         let (sender, receiver) = oneshot::channel();
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
+
+        // Attach cancellation before the caller can publish the task.
+        tree.register(Aborter::new(abort_handle.clone(), metric.clone()));
 
         // Install cleanup before the first poll so rejected tasks also close
         // supervision and finish their metrics when the future is dropped.
@@ -337,6 +344,7 @@ where
     }
 
     /// Returns a helper that aborts the task and updates metrics consistently.
+    #[cfg(test)]
     pub(crate) fn aborter(&self) -> Option<Aborter> {
         match &self.state {
             HandleState::Task {
@@ -559,8 +567,11 @@ impl Panicked {
                 // and return the output
                 Err(_) => task.await,
             },
-            Either::Right((output, _)) => {
-                // Return the output
+            Either::Right((output, mut panicked)) => {
+                // A panic sent while the task completed wins over its output
+                if let Ok(panic) = panicked.try_recv() {
+                    resume_unwind(panic);
+                }
                 output
             }
         }
@@ -591,12 +602,22 @@ impl Aborter {
 
 #[cfg(test)]
 mod tests {
-    use super::{AbortOnDrop, Handle};
-    use crate::{Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic};
+    use super::{AbortOnDrop, Handle, MetricHandle, Panicker};
+    use crate::{
+        Error, Metrics as _, Runner, Spawner, Supervisor as _, deterministic,
+        telemetry::metrics::raw::Gauge,
+        utils::{extract_panic_message, supervision::Tree},
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{FutureExt as _, future, poll, stream::AbortHandle};
     use rstest::rstest;
-    use std::sync::Arc;
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
 
     const METRIC_PREFIX: &str = "runtime_tasks_running{";
 
@@ -951,5 +972,48 @@ mod tests {
                 "expected tasks_running gauge to return to 0 after abort: {metrics}",
             );
         });
+    }
+
+    /// A panic published during the task's completing poll wins over its output.
+    #[test]
+    fn interrupt_observes_panic_sent_while_completing() {
+        let (panicker, panicked) = Panicker::new(false);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            panicked
+                .interrupt(async move {
+                    panicker.notify(Box::new("late"));
+                    7
+                })
+                .now_or_never()
+        }));
+        let panic = result.expect_err("panic sent while completing was dropped");
+        assert_eq!(extract_panic_message(&*panic), "late");
+    }
+
+    /// A task whose supervisor closed before initialization is cancelled before its future can
+    /// be polled.
+    #[test]
+    fn init_registers_before_publication() {
+        // Close the supervisor, as when it aborts while the task factory runs.
+        let tree = Tree::root();
+        tree.abort();
+
+        // Initialization registers the task, which the closed supervisor cancels at once.
+        let (panicker, _panicked) = Panicker::new(false);
+        let gauge = Gauge::default();
+        let polled = Arc::new(AtomicBool::new(false));
+        let observed = polled.clone();
+        let (task, handle) = Handle::init(
+            async move { observed.store(true, Ordering::SeqCst) },
+            MetricHandle::new(gauge.clone()),
+            panicker,
+            tree,
+        );
+        assert_eq!(gauge.get(), 0);
+
+        // The first poll completes without polling the user future.
+        assert_eq!(task.now_or_never(), Some(()));
+        assert!(!polled.load(Ordering::SeqCst));
+        assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
     }
 }

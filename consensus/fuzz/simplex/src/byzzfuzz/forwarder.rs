@@ -298,10 +298,7 @@ pub fn make_certificate<S: Scheme<Sha256Digest>>(
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
     gate: FaultGate,
-) -> impl SplitForwarder<S::PublicKey>
-where
-    <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
-{
+) -> impl SplitForwarder<S::PublicKey> {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
         let decoded = Certificate::<S, Sha256Digest>::decode_cfg(message.clone(), &cert_codec).ok();
         let Some(msg) = decoded else {
@@ -398,10 +395,7 @@ pub fn make_resolver<S: Scheme<Sha256Digest>>(
     intercept_tx: Option<UnboundedSender<Intercept<S::PublicKey>>>,
     pool: Arc<ObservedState>,
     gate: FaultGate,
-) -> impl SplitForwarder<S::PublicKey>
-where
-    <S::Certificate as Read>::Cfg: Clone + Send + Sync + 'static,
-{
+) -> impl SplitForwarder<S::PublicKey> {
     move |_origin: SplitOrigin, recipients: &Recipients<S::PublicKey>, message: &IoBuf| {
         // Fold any view carried by the outgoing wire bytes into the
         // sender's round cell *before* reading it; otherwise the resolver

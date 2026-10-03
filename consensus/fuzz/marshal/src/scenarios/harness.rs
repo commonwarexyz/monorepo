@@ -31,7 +31,7 @@ use commonware_consensus::{
     Automaton as _, CertifiableAutomaton as _, Heightable as _, Reporter as _,
     marshal::{
         Identifier,
-        core::{Buffer, CommitmentFallback, DigestFallback, Retirement},
+        core::{Buffer, CommitmentFallback, DigestFallback},
         mocks::application::Application,
         standard::Standard,
     },
@@ -132,8 +132,6 @@ impl<P: Simplex> Buffer<Standard<B<P>>> for RecordingBuffer<P> {
         Some(self.inner.subscribe(commitment))
     }
 
-    fn retire(&self, _update: Retirement<Sha256Digest>) {}
-
     fn send(&self, round: Round, block: Arc<B<P>>, recipients: Recipients<PublicKeyOf<P>>) {
         self.sends
             .lock()
@@ -175,10 +173,7 @@ pub(crate) struct FuzzScenarioStandardHarness<P: Simplex, M: TwinsMarshal<P, App
 // current scenario set but document the source-compatible authoring surface and
 // are exercised by future scenarios.
 #[allow(dead_code)]
-impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M>
-where
-    M::Wrapper: Clone,
-{
+impl<P: Simplex, M: TwinsMarshal<P, App<P>>> FuzzScenarioStandardHarness<P, M> {
     pub(crate) fn new(
         context: deterministic::Context,
         participants: Vec<PublicKeyOf<P>>,

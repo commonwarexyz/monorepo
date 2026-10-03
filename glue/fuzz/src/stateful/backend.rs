@@ -234,16 +234,13 @@ pub(super) trait Backend: Clone + Send + Sync + 'static {
     type Op: Codec<Cfg = ()> + Send + Sync + Clone + 'static;
 
     /// The concrete database.
-    type Db: ManagedDb<Runtime>
-        + StateSyncDb<Runtime, Resolver<Self>>
+    type Db: StateSyncDb<Runtime, Resolver<Self>>
         + Source<
             Family = mmr::Family,
             Digest = Digest,
             Op = Self::Op,
             Error = qmdb::Error<mmr::Family>,
-        > + Send
-        + Sync
-        + 'static;
+        > + 'static;
 
     /// The database configuration for one engine's storage partitions.
     fn config(prefix: &str, page_cache: CacheRef) -> Config<Self>;

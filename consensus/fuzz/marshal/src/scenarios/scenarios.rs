@@ -110,19 +110,14 @@ pub(crate) trait Scenario {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
         harness: &mut FuzzScenarioStandardHarness<P, M>,
-    ) -> ScenarioHandoff<P>
-    where
-        M::Wrapper: Clone;
+    ) -> ScenarioHandoff<P>;
 }
 
 /// Dispatch to the concrete scenario's live prefix.
 pub(crate) async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
     kind: ScenarioKind,
     harness: &mut FuzzScenarioStandardHarness<P, M>,
-) -> ScenarioHandoff<P>
-where
-    M::Wrapper: Clone,
-{
+) -> ScenarioHandoff<P> {
     match kind {
         ScenarioKind::StandardCertifyMissingCandidateFetchesByRound => {
             StandardCertifyMissingCandidateFetchesByRound
@@ -199,10 +194,7 @@ impl Scenario for StandardCertifyMissingCandidateFetchesByRound {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
         harness: &mut FuzzScenarioStandardHarness<P, M>,
-    ) -> ScenarioHandoff<P>
-    where
-        M::Wrapper: Clone,
-    {
+    ) -> ScenarioHandoff<P> {
         harness.begin("test_standard_certify_missing_candidate_fetches_by_round");
         // The missing candidate: a height-1 block at view 1 on genesis, led by
         // the source's `me` (Node::B under the participant permutation), built
@@ -300,10 +292,7 @@ impl Scenario for StandardCertifyFirstBlockFetchesGenesisParent {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
         harness: &mut FuzzScenarioStandardHarness<P, M>,
-    ) -> ScenarioHandoff<P>
-    where
-        M::Wrapper: Clone,
-    {
+    ) -> ScenarioHandoff<P> {
         harness.begin("test_standard_certify_first_block_fetches_genesis_parent");
         // The first block: a height-1 block at view 1 on genesis, led by the
         // source's `me` (Node::B under the participant permutation), built as
@@ -440,10 +429,7 @@ impl Scenario for StandardVerifyHeightLieParentFetchIsRoundBound {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
         harness: &mut FuzzScenarioStandardHarness<P, M>,
-    ) -> ScenarioHandoff<P>
-    where
-        M::Wrapper: Clone,
-    {
+    ) -> ScenarioHandoff<P> {
         harness.begin("test_standard_verify_height_lie_parent_fetch_is_round_bound");
         // The honest parent: a height-1 block at view 1 on genesis, led by the
         // source's `me` (Node::B under the participant permutation), built as
@@ -577,10 +563,7 @@ impl Scenario for StandardCertifyBumpsNotarizedFetchForPendingVerify {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
         harness: &mut FuzzScenarioStandardHarness<P, M>,
-    ) -> ScenarioHandoff<P>
-    where
-        M::Wrapper: Clone,
-    {
+    ) -> ScenarioHandoff<P> {
         harness.begin("test_standard_certify_bumps_notarized_fetch_for_pending_verify");
         // The missing candidate: a height-1 block at view 1 on genesis, led by
         // the source's `me` (Node::B under the participant permutation), built
@@ -696,10 +679,7 @@ impl Scenario for StandardVerifyMissingCandidateWaitsWithoutFetching {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
         harness: &mut FuzzScenarioStandardHarness<P, M>,
-    ) -> ScenarioHandoff<P>
-    where
-        M::Wrapper: Clone,
-    {
+    ) -> ScenarioHandoff<P> {
         harness.begin("test_standard_verify_missing_candidate_waits_without_fetching");
         // The unknown candidate: a digest that names no block, in a view-1
         // context on genesis led by the source's `me` (Node::B under the
@@ -846,10 +826,7 @@ impl Scenario for StandardGetBlockByHeightAndLatest {
     async fn drive<P: Simplex, M: TwinsMarshal<P, App<P>>>(
         &self,
         harness: &mut FuzzScenarioStandardHarness<P, M>,
-    ) -> ScenarioHandoff<P>
-    where
-        M::Wrapper: Clone,
-    {
+    ) -> ScenarioHandoff<P> {
         harness.begin("test_standard_get_block_by_height_and_latest");
         // Initially, no blocks.
         assert!(

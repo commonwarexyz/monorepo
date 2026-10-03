@@ -202,11 +202,7 @@ fn spawn_twin_pair<P: Simplex>(
     relay: &Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     channels: commonware_consensus_fuzz_core::NetworkChannels<PublicKeyOf<P>>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
-) -> [HonestSummary<P>; 2]
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) -> [HonestSummary<P>; 2] {
     let validator = participants[idx].clone();
     let context = context.child("twin").with_attribute("index", idx);
     let (vote_network, certificate_network, resolver_network) = channels;
@@ -458,11 +454,7 @@ fn build_honest<P: Simplex>(
     partition: String,
     channels: commonware_consensus_fuzz_core::NetworkChannels<PublicKeyOf<P>>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
-) -> HonestValidator<P>
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) -> HonestValidator<P> {
     let (pending, recovered, resolver) = channels;
     build_validator_with_reporter::<P, TwinsElector<P>, HonestReporter<P>, _, _, _, _, _, _>(
         existing,
@@ -497,10 +489,7 @@ async fn restart_honest<P: Simplex>(
     elector: TwinsElector<P>,
     relay: &Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     lifecycle::abort_tasks(mv).await;
     let validator = mv.validator().clone();
     let mut fresh =
@@ -609,11 +598,7 @@ async fn paced_step<P: Simplex>(
 
 /// Run one chaos-twins episode. Seeded solely from `FuzzRng::new(raw_bytes)`;
 /// no cross-input state, so a saved input replays exactly.
-pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput)
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+pub(crate) fn run<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput) {
     input.configuration = N4F1C3;
     input.partition = Partition::Connected;
     input.degraded_network = false;

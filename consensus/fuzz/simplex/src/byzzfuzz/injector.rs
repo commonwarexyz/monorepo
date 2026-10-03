@@ -76,7 +76,7 @@ where
         intercept_rx: UnboundedReceiver<Intercept<S::PublicKey>>,
     ) -> Handle<()>
     where
-        VS: commonware_p2p::Sender<PublicKey = S::PublicKey> + 'static,
+        VS: commonware_p2p::Sender<PublicKey = S::PublicKey>,
     {
         let context = self.context.child("run");
         context.spawn(move |_| self.run(vote_sender, intercept_rx))

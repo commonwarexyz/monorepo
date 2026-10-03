@@ -47,9 +47,7 @@ use commonware_consensus_fuzz_core::{
     simplex_audit::{RecordingReporter, summaries},
     utils::Partition,
 };
-use commonware_cryptography::{
-    PublicKey, certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest,
-};
+use commonware_cryptography::{PublicKey, sha256::Digest as Sha256Digest};
 use commonware_p2p::simulated::{Error as SimError, Link, Oracle};
 use commonware_runtime::{Clock, Runner, Supervisor, deterministic};
 use commonware_utils::{FuzzRng, channel::mpsc::Receiver as ViewReceiver};
@@ -209,10 +207,7 @@ async fn restart_durable<P: Simplex>(
     relay: &Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
     downtime: Duration,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     lifecycle::abort_tasks(mv).await;
     if !downtime.is_zero() {
         context.sleep(downtime).await;
@@ -269,10 +264,7 @@ async fn enact<P: Simplex>(
     participants: &[PublicKeyOf<P>],
     relay: &Arc<relay::Relay<Sha256Digest, PublicKeyOf<P>>>,
     input: &commonware_consensus_fuzz_core::FuzzInput,
-) where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) {
     match action {
         Action::Kill(i) => lifecycle::crash_stop(&mut managed[i]).await,
         Action::Start(i) => {
@@ -384,11 +376,7 @@ async fn paced_enact<P: Simplex>(
     conditions: &[Condition],
     checker: &mut Checker,
     reporters: &[ChaosReporter<P>],
-) -> StepBoundary
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+) -> StepBoundary {
     enact(
         action,
         managed,
@@ -426,11 +414,7 @@ where
 /// `FuzzRng::new(input.raw_bytes)`, chaos's only entropy; there is no
 /// cross-input state of any kind, so replaying a saved input reproduces the
 /// run exactly.
-pub(crate) fn run<P: Simplex>(input: commonware_consensus_fuzz_core::FuzzInput)
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+pub(crate) fn run<P: Simplex>(input: commonware_consensus_fuzz_core::FuzzInput) {
     let steps = CHAOS_EPISODE_STEPS.max(input.required_containers as usize);
     run_with::<P>(input, steps);
 }
@@ -439,11 +423,7 @@ where
 /// `required_containers`; the ignored integration tests pass a short count so a
 /// full deterministic episode finishes in seconds while exercising the same
 /// code paths.
-fn run_with<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput, steps: usize)
-where
-    <<P::Scheme as CertificateScheme>::Certificate as commonware_codec::Read>::Cfg:
-        Clone + Send + Sync + 'static,
-{
+fn run_with<P: Simplex>(mut input: commonware_consensus_fuzz_core::FuzzInput, steps: usize) {
     // Four honest validators, fully connected at setup, every node certifying:
     // the schedule owns every fault, and certify slack is mandatory because a
     // sampled non-certifier plus one killed node would be a guaranteed stall.
