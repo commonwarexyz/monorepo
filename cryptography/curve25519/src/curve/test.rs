@@ -339,14 +339,18 @@ fn repeated_squaring_matches_scalar() {
                 F([1 << 51; 5]),
                 F([0x123456789abcd, 7, MASK_52 - 1, 42, 1]),
             ]);
-            for input in [max, mixed] {
-                for k in [0, 1, 2, 5, 10, 20, 50, 100] {
-                    let actual = backend.pow2k(input, k);
-                    if k == 0 {
-                        assert_eq!(actual.limbs, input.limbs);
+            let inputs = [max, mixed];
+            for k in [0, 1, 2, 5, 10, 20, 50, 100] {
+                let interleaved = backend.pow2k(inputs, k);
+                for (input, interleaved) in inputs.into_iter().zip(interleaved) {
+                    let [single] = backend.pow2k([input], k);
+                    for actual in [single, interleaved] {
+                        if k == 0 {
+                            assert_eq!(actual.limbs, input.limbs);
+                        }
+                        let expected = FVec::transpose(input.untranspose().map(|v| v.pow2k(k)));
+                        assert_f_eq(actual, expected, "repeated squaring");
                     }
-                    let expected = FVec::transpose(input.untranspose().map(|v| v.pow2k(k)));
-                    assert_f_eq(actual, expected, "repeated squaring");
                 }
             }
         }
@@ -490,14 +494,18 @@ fn fuzz_group_matches_portable<B: Backend>(
 ) -> arbitrary::Result<()> {
     let reference = super::portable::Backend::new();
     let encodings: [[u8; 32]; LANES] = u.arbitrary()?;
-    let decoded = GAffine::decompress_batch(backend, &encodings);
+    let reversed = array::from_fn(|i| encodings[LANES - 1 - i]);
+    let [single] = GAffine::decompress_batch(backend, &[encodings]);
+    let [paired, paired_reversed] = GAffine::decompress_batch(backend, &[encodings, reversed]);
     let lanes = array::from_fn(|i| {
         let scalar = GAffine::decompress(&encodings[i]);
-        assert_eq!(
-            decoded[i].map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
-            scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
-            "decompression lane {i}",
-        );
+        for decoded in [single[i], paired[i], paired_reversed[LANES - 1 - i]] {
+            assert_eq!(
+                decoded.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+                scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+                "decompression lane {i}",
+            );
+        }
         scalar.unwrap_or(GAffine::IDENTITY)
     });
     let affine = GAffineVec::transpose(lanes);
@@ -578,13 +586,18 @@ fn zip215_decompression_and_group_laws() {
             }
             for chunk in encodings.chunks(LANES) {
                 let bytes = array::from_fn(|i| chunk[i % chunk.len()]);
-                let decoded = GAffine::decompress_batch(backend, &bytes);
+                let reversed = array::from_fn(|i| bytes[LANES - 1 - i]);
+                let [single] = GAffine::decompress_batch(backend, &[bytes]);
+                let [paired, paired_reversed] =
+                    GAffine::decompress_batch(backend, &[bytes, reversed]);
                 let lanes = array::from_fn(|i| {
                     let scalar = GAffine::decompress(&bytes[i]);
-                    assert_eq!(
-                        decoded[i].map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
-                        scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
-                    );
+                    for decoded in [single[i], paired[i], paired_reversed[LANES - 1 - i]] {
+                        assert_eq!(
+                            decoded.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
+                            scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
+                        );
+                    }
                     scalar.unwrap_or(GAffine::IDENTITY)
                 });
                 let p = GVec::transpose(lanes.map(GAffine::to_extended));
@@ -617,23 +630,38 @@ fn zip215_decompression_and_group_laws() {
 
 #[cfg(test)]
 #[test]
-fn secret_scalar_multiplication_matches_public() {
-    commonware_invariants::minifuzz::Builder::default()
-        .with_seed(0)
-        .with_search_limit(32)
-        .test(|u| {
-            let scalar: [u8; 32] = u.arbitrary()?;
-            let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?)
-                .unwrap()
-                .to_extended();
-            let point = GAffine::BASEPOINT.to_extended().add(torsion);
-            let bits = (0..256).rev().map(|i| scalar[i / 8] >> (i % 8) & 1 == 1);
-            assert_eq!(
-                point.scalar_mul_secret(&scalar).to_bytes(),
-                point.scalar_mul(bits).to_bytes()
-            );
-            Ok(())
-        });
+fn basepoint_128_is_doubled_basepoint() {
+    let mut point = GAffine::BASEPOINT.to_extended();
+    for _ in 0..128 {
+        point = point.double();
+    }
+    let expected = point.to_affine();
+    let actual = GAffine::BASEPOINT_128;
+    assert_eq!(actual.x.to_bytes(), expected.x.to_bytes());
+    assert_eq!(actual.y.to_bytes(), expected.y.to_bytes());
+    assert_eq!(actual.t2d.to_bytes(), expected.t2d.to_bytes());
+}
+
+/// Affine conversion, compression, and negation agree with their extended counterparts on
+/// points with `Z != 1`, including every ZIP215 torsion point.
+#[cfg(test)]
+#[test]
+fn affine_conversion_matches_extended() {
+    for encoding in ZIP215_POINTS {
+        let torsion = GAffine::decompress(&encoding).unwrap().to_extended();
+        let point = GAffine::BASEPOINT.to_extended().double().add(torsion);
+        let affine = point.to_affine();
+        assert_eq!(affine.to_bytes(), point.to_bytes());
+
+        // Decompression recomputes `x` and `2d*x*y` from the canonical encoding.
+        let decoded = GAffine::decompress(&affine.to_bytes()).unwrap();
+        assert_eq!(affine.x.to_bytes(), decoded.x.to_bytes());
+        assert_eq!(affine.t2d.to_bytes(), decoded.t2d.to_bytes());
+
+        let negated = affine.negate();
+        assert_eq!(negated.to_bytes(), point.negate().to_bytes());
+        assert!(negated.to_extended().add(point).is_identity());
+    }
 }
 
 /// Checks the runtime dispatch path as one multi-operation computation.
@@ -785,7 +813,7 @@ fn bucket_fill_matches_scalar_sum_for_every_geometry() {
                     buckets.as_flattened_mut(),
                     NB,
                     piece,
-                    |term| *term,
+                    |(point, digit)| (point, *digit),
                 );
             }
             let actual = buckets

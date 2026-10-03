@@ -27,6 +27,7 @@ use crate::curve::{G, GAffine};
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
+    ops::Range,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -90,9 +91,7 @@ impl SigningKey {
         let mut wide_scalar = Zeroizing::new([0u8; 64]);
         wide_scalar[..32].copy_from_slice(&scalar_le_bytes[..]);
         let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide_scalar));
-        let point = GAffine::BASEPOINT
-            .to_extended()
-            .scalar_mul_secret(&scalar_le_bytes);
+        let point = G::mul_base_secret(&scalar_le_bytes).to_affine();
         let verifying_key = VerifyingKey {
             bytes: core::VerifyingKeyBytes::new(point.to_bytes()),
             point: Some(point),
@@ -116,10 +115,7 @@ impl SigningKey {
         );
         let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
         let nonce_bytes = Zeroizing::new(nonce.to_bytes());
-        let r_bytes = GAffine::BASEPOINT
-            .to_extended()
-            .scalar_mul_secret(&nonce_bytes)
-            .to_bytes();
+        let r_bytes = G::mul_base_secret(&nonce_bytes).to_bytes();
 
         let challenge_digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
@@ -217,7 +213,7 @@ pub struct VerifyingKey {
     /// signature verification, so that we can more efficiently parse them in batch.
     bytes: core::VerifyingKeyBytes,
     /// If available, the point associated with these bytes.
-    point: Option<G>,
+    point: Option<GAffine>,
 }
 
 impl PartialEq for VerifyingKey {
@@ -297,37 +293,12 @@ impl arbitrary::Arbitrary<'_> for VerifyingKey {
 
 impl VerifyingKey {
     fn verify_message(&self, msg: &[u8], sig: &Signature) -> bool {
-        let r_bytes: [u8; 32] = sig.bytes[..32].try_into().expect("signature is 64 bytes");
-        let s_bytes: [u8; 32] = sig.bytes[32..].try_into().expect("signature is 64 bytes");
-        let Some(s) = Scalar::from_canonical_bytes(&s_bytes) else {
-            return false;
-        };
-        let Some(r) = GAffine::decompress(&r_bytes) else {
-            return false;
-        };
-        let a = match self.point {
-            Some(point) => point,
-            None => {
-                let Some(point) = GAffine::decompress(self.bytes.as_bytes()) else {
-                    return false;
-                };
-                point.to_extended()
-            }
-        };
-
-        let digest: [u8; 64] = sha2::Sha512::new()
-            .chain(r_bytes)
-            .chain(self.bytes.as_bytes())
-            .chain(msg)
-            .finalize_fixed()
-            .into();
-        let k = Scalar::from_bytes_mod_order_wide(&digest);
-
-        let sb = GAffine::BASEPOINT.to_extended().scalar_mul(s.bits_be());
-        let ka = a.scalar_mul(k.bits_be());
-        sb.add(ka.add_mixed(r).negate())
-            .mul_by_cofactor()
-            .is_identity()
+        core::verify(
+            &self.bytes,
+            self.point.as_ref(),
+            &core::Signature::from_bytes(sig.bytes),
+            msg,
+        )
     }
 
     /// Verifies `sig` over the namespaced message, per the [module's validation
@@ -414,7 +385,8 @@ impl arbitrary::Arbitrary<'_> for Signature {
 /// The encoded key is the batch pipeline's authoritative identity. Its optional decoded point is
 /// an individual-verification cache and is not part of the queued state.
 struct BatchItem {
-    message: Vec<u8>,
+    /// The message's range in [`BatchVerifier::messages`].
+    message: Range<usize>,
     public_key: core::VerifyingKeyBytes,
     signature: core::Signature,
 }
@@ -422,6 +394,9 @@ struct BatchItem {
 /// A batch verification context.
 pub struct BatchVerifier {
     items: Vec<BatchItem>,
+    /// Every queued message, back to back. One buffer keeps queueing and dropping a batch free of
+    /// per-signature allocations.
+    messages: Vec<u8>,
 }
 
 impl BatchVerifier {
@@ -432,6 +407,7 @@ impl BatchVerifier {
     pub fn new(capacity: usize) -> Self {
         Self {
             items: Vec::with_capacity(capacity),
+            messages: Vec::new(),
         }
     }
 
@@ -447,8 +423,13 @@ impl BatchVerifier {
         public_key: &VerifyingKey,
         signature: &Signature,
     ) {
+        // The same framing as `union_unique`, written in place.
+        let start = self.messages.len();
+        namespace.len().write(&mut self.messages);
+        self.messages.extend_from_slice(namespace);
+        self.messages.extend_from_slice(message);
         self.items.push(BatchItem {
-            message: union_unique(namespace, message),
+            message: start..self.messages.len(),
             public_key: public_key.bytes,
             signature: core::Signature::from_bytes(signature.bytes),
         });
@@ -462,8 +443,10 @@ impl BatchVerifier {
         public_key: &VerifyingKey,
         signature: &Signature,
     ) {
+        let start = self.messages.len();
+        self.messages.extend_from_slice(message);
         self.items.push(BatchItem {
-            message: message.to_vec(),
+            message: start..self.messages.len(),
             public_key: public_key.bytes,
             signature: core::Signature::from_bytes(signature.bytes),
         });
@@ -481,10 +464,13 @@ impl BatchVerifier {
     /// `rng` lets an attacker construct an invalid batch that passes verification.
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
-        let items = self
-            .items
-            .iter()
-            .map(|item| (&item.public_key, &item.signature, item.message.as_slice()));
+        let items = self.items.iter().map(|item| {
+            (
+                &item.public_key,
+                &item.signature,
+                &self.messages[item.message.clone()],
+            )
+        });
         core::verify_batch_bytes(rng, items, strategy)
     }
 }
@@ -499,8 +485,69 @@ mod tests {
     fn batch_items_do_not_retain_decoded_key_cache() {
         assert_eq!(
             core::mem::size_of::<BatchItem>(),
-            core::mem::size_of::<(Vec<u8>, [u8; 32], super::core::Signature)>(),
+            core::mem::size_of::<(core::ops::Range<usize>, [u8; 32], super::core::Signature)>(),
         );
+    }
+
+    #[test]
+    fn queued_messages_use_union_unique_framing() {
+        let key =
+            <SigningKey as commonware_math::algebra::Random>::random(test_rng()).verifying_key();
+        let signature = super::Signature { bytes: [0; 64] };
+        let mut verifier = BatchVerifier::new(3);
+        let queued = [
+            (&b""[..], &b""[..]),
+            (b"ns", b"message"),
+            (&[7; 200][..], b"m"),
+        ];
+        for (namespace, message) in queued {
+            verifier.add(namespace, message, &key, &signature);
+        }
+        for (item, (namespace, message)) in verifier.items.iter().zip(queued) {
+            assert_eq!(
+                verifier.messages[item.message.clone()],
+                commonware_utils::union_unique(namespace, message)
+            );
+        }
+    }
+
+    /// Equality, ordering, and hashing follow the encoding: a decoded copy equals the original
+    /// whatever its cached point, and two encodings of the same point stay distinct keys.
+    #[test]
+    fn verifying_key_identity_follows_encoding() {
+        use super::VerifyingKey;
+        use commonware_codec::{Copying, DecodeExt, Encode};
+        use core::cmp::Ordering;
+        use std::collections::HashSet;
+
+        let key =
+            <SigningKey as commonware_math::algebra::Random>::random(test_rng()).verifying_key();
+        let decoded = VerifyingKey::decode(key.encode()).unwrap();
+        assert!(key.point.is_some() && decoded.point.is_none());
+        assert_eq!(key, decoded);
+        assert_eq!(key.cmp(&decoded), Ordering::Equal);
+        assert!(!HashSet::from([key]).insert(decoded));
+
+        // `y = 1` and the non-canonical `y = p + 1` both encode the identity.
+        let mut canonical = [0u8; 32];
+        canonical[0] = 1;
+        let mut noncanonical = [0xffu8; 32];
+        noncanonical[0] = 0xee;
+        noncanonical[31] = 0x7f;
+        let point = |bytes| {
+            crate::curve::GAffine::decompress(bytes)
+                .unwrap()
+                .to_extended()
+        };
+        assert_eq!(
+            point(&canonical).to_bytes(),
+            point(&noncanonical).to_bytes()
+        );
+        let canonical = VerifyingKey::decode(Copying(&canonical[..])).unwrap();
+        let noncanonical = VerifyingKey::decode(Copying(&noncanonical[..])).unwrap();
+        assert_ne!(canonical, noncanonical);
+        assert_ne!(canonical.cmp(&noncanonical), Ordering::Equal);
+        assert!(HashSet::from([canonical]).insert(noncanonical));
     }
 
     #[test]

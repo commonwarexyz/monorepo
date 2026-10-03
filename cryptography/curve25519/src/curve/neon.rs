@@ -12,7 +12,7 @@ use super::{
     MASK_51, msm,
 };
 #[cfg(not(feature = "std"))]
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 use core::arch::aarch64::*;
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
@@ -531,6 +531,24 @@ impl FBackend for Backend {
     fn square(self, a: FVec) -> FVec {
         map_f(a, square_regs)
     }
+
+    /// Keeps every tile of a vector in registers across all `k` squarings, interleaving the
+    /// tiles' independent chains.
+    #[inline(always)]
+    fn pow2k<const N: usize>(self, mut a: [FVec; N], k: u32) -> [FVec; N] {
+        for value in &mut a {
+            let mut tiles: [Regs; TILES] = core::array::from_fn(|tile| load(&value.limbs, tile));
+            for _ in 0..k {
+                for tile in &mut tiles {
+                    *tile = square_regs(*tile);
+                }
+            }
+            for (tile, regs) in tiles.into_iter().enumerate() {
+                store(regs, &mut value.limbs, tile);
+            }
+        }
+        a
+    }
 }
 
 /// Packs two independent field elements into register lanes.
@@ -551,6 +569,79 @@ fn unpack_pair(regs: Regs) -> [F; 2] {
             F(regs.map(|reg| vgetq_lane_u64(reg, 0))),
             F(regs.map(|reg| vgetq_lane_u64(reg, 1))),
         ]
+    }
+}
+
+/// One extended point per lane of a register tile, as `[x, y, t, z]`.
+type Point = [Regs; 4];
+
+/// The identity point in both lanes of a register tile.
+#[inline(always)]
+fn identity_regs() -> Point {
+    // SAFETY: AArch64 targets provide NEON.
+    unsafe {
+        let zero = [vdupq_n_u64(0); 5];
+        let mut one = zero;
+        one[0] = vdupq_n_u64(1);
+        [zero, one, zero, one]
+    }
+}
+
+/// Applies the complete addition formula to two independent register lanes.
+#[inline(always)]
+fn add_regs([x1, y1, t1, z1]: Point, [x2, y2, t2, z2]: Point) -> Point {
+    // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
+    //
+    //   A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
+    //   B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
+    //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
+    //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
+    let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+    let b = mul_regs(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+    let c = mul_regs(mul_regs(t1, t2), load(&EDWARDS_D2.limbs, 0));
+    let zz = mul_regs(z1, z2);
+    let d = add_raw(zz, zz);
+    let e = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(d, c));
+    let g = reduce_regs(add_raw(d, c));
+    let h = reduce_regs(add_raw(b, a));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
+}
+
+/// Applies the dedicated `dbl-2008-hwcd` doubling formula to two independent register lanes.
+#[inline(always)]
+fn double_regs([x, y, _, z]: Point) -> Point {
+    let a = square_regs(x);
+    let b = square_regs(y);
+    let c0 = square_regs(z);
+    let c = reduce_regs(add_raw(c0, c0));
+    let xy2 = square_regs(reduce_regs(add_raw(x, y)));
+    let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
+    let g = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(g, c));
+    // SAFETY: AArch64 targets provide NEON.
+    let zero = unsafe { [vdupq_n_u64(0); 5] };
+    let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
+}
+
+/// Negates the lanes whose mask is all ones, with reduced output.
+#[inline(always)]
+fn neg_lanes(value: Regs, mask: uint64x2_t) -> Regs {
+    // SAFETY: AArch64 targets provide NEON.
+    unsafe {
+        let negated = reduce_regs(sub_raw([vdupq_n_u64(0); 5], value));
+        core::array::from_fn(|i| vbslq_u64(mask, negated[i], value[i]))
     }
 }
 
@@ -582,33 +673,24 @@ impl GBackend for Backend {
     #[inline(always)]
     fn g_add(self, mut p: GVec, q: GVec) -> GVec {
         for tile in 0..TILES {
-            // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
-            //
-            //   A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
-            //   B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
-            //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
-            //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
-            let x1 = load(&p.x.limbs, tile);
-            let y1 = load(&p.y.limbs, tile);
-            let x2 = load(&q.x.limbs, tile);
-            let y2 = load(&q.y.limbs, tile);
-            let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
-            let b = mul_regs(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
-            let c = mul_regs(
-                mul_regs(load(&p.t.limbs, tile), load(&q.t.limbs, tile)),
-                load(&EDWARDS_D2.limbs, tile),
+            let [x, y, t, z] = add_regs(
+                [
+                    load(&p.x.limbs, tile),
+                    load(&p.y.limbs, tile),
+                    load(&p.t.limbs, tile),
+                    load(&p.z.limbs, tile),
+                ],
+                [
+                    load(&q.x.limbs, tile),
+                    load(&q.y.limbs, tile),
+                    load(&q.t.limbs, tile),
+                    load(&q.z.limbs, tile),
+                ],
             );
-            let zz = mul_regs(load(&p.z.limbs, tile), load(&q.z.limbs, tile));
-            let d = add_raw(zz, zz);
-            let e = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(d, c));
-            let g = reduce_regs(add_raw(d, c));
-            let h = reduce_regs(add_raw(b, a));
-
-            store(mul_regs(e, f), &mut p.x.limbs, tile);
-            store(mul_regs(g, h), &mut p.y.limbs, tile);
-            store(mul_regs(e, h), &mut p.t.limbs, tile);
-            store(mul_regs(f, g), &mut p.z.limbs, tile);
+            store(x, &mut p.x.limbs, tile);
+            store(y, &mut p.y.limbs, tile);
+            store(t, &mut p.t.limbs, tile);
+            store(z, &mut p.z.limbs, tile);
         }
         p
     }
@@ -642,26 +724,16 @@ impl GBackend for Backend {
     #[inline(always)]
     fn g_double(self, mut p: GVec) -> GVec {
         for tile in 0..TILES {
-            let x = load(&p.x.limbs, tile);
-            let y = load(&p.y.limbs, tile);
-            let z = load(&p.z.limbs, tile);
-
-            let a = square_regs(x);
-            let b = square_regs(y);
-            let c0 = square_regs(z);
-            let c = reduce_regs(add_raw(c0, c0));
-            let xy2 = square_regs(reduce_regs(add_raw(x, y)));
-            let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
-            let g = reduce_regs(sub_raw(b, a));
-            let f = reduce_regs(sub_raw(g, c));
-            // SAFETY: AArch64 targets provide NEON.
-            let zero = unsafe { [vdupq_n_u64(0); 5] };
-            let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
-
-            store(mul_regs(e, f), &mut p.x.limbs, tile);
-            store(mul_regs(g, h), &mut p.y.limbs, tile);
-            store(mul_regs(e, h), &mut p.t.limbs, tile);
-            store(mul_regs(f, g), &mut p.z.limbs, tile);
+            let [x, y, t, z] = double_regs([
+                load(&p.x.limbs, tile),
+                load(&p.y.limbs, tile),
+                load(&p.t.limbs, tile),
+                load(&p.z.limbs, tile),
+            ]);
+            store(x, &mut p.x.limbs, tile);
+            store(y, &mut p.y.limbs, tile);
+            store(t, &mut p.t.limbs, tile);
+            store(z, &mut p.z.limbs, tile);
         }
         p
     }
@@ -678,16 +750,11 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
     let mut x2 = pack_pair(q.map(|point| point.x));
     let mut t2d = pack_pair(q.map(|point| point.t2d));
     if negative.iter().any(|&sign| sign) {
+        let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
         // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.
-        unsafe {
-            let masks = negative.map(|sign| 0u64.wrapping_sub(u64::from(sign)));
-            let mask = vld1q_u64(masks.as_ptr());
-            let zero = [vdupq_n_u64(0); 5];
-            let neg_x = reduce_regs(sub_raw(zero, x2));
-            let neg_t2d = reduce_regs(sub_raw(zero, t2d));
-            x2 = core::array::from_fn(|i| vbslq_u64(mask, neg_x[i], x2[i]));
-            t2d = core::array::from_fn(|i| vbslq_u64(mask, neg_t2d[i], t2d[i]));
-        }
+        let mask = unsafe { vld1q_u64(masks.as_ptr()) };
+        x2 = neg_lanes(x2, mask);
+        t2d = neg_lanes(t2d, mask);
     }
     let [x, y, t, z] = add_mixed_regs(
         [
@@ -790,7 +857,7 @@ impl msm::Backend for Backend {
         buckets: &mut [G],
         nb: usize,
         terms: &[T],
-        term: impl Fn(&T) -> (GAffine, i16),
+        term: impl Fn(&T) -> (&GAffine, i16),
     ) {
         msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
     }
@@ -819,6 +886,77 @@ impl msm::Backend for Backend {
             result = result.add(*window);
         }
         result
+    }
+
+    /// Groups terms by register tile rather than by [`LANES`], so the shared doubling chain runs
+    /// on one tile instead of every tile of a vector. Tables and additions cost the same per term.
+    fn straus<T>(
+        self,
+        terms: &[T],
+        windows: usize,
+        width: u32,
+        term: impl Fn(&T) -> (&GAffine, &[i16]),
+    ) -> G {
+        let entries = (1usize << (width - 1)) + 1;
+        let mut tables: Vec<Point> = Vec::with_capacity(terms.len().div_ceil(WIDTH) * entries);
+        for pair in terms.chunks(WIDTH) {
+            let points: [GAffine; WIDTH] = core::array::from_fn(|lane| {
+                pair.get(lane)
+                    .map_or(GAffine::IDENTITY, |item| *term(item).0)
+            });
+            let q = [
+                pack_pair(points.map(|point| point.x)),
+                pack_pair(points.map(|point| point.y)),
+                pack_pair(points.map(|point| point.t2d)),
+            ];
+            let mut multiple = identity_regs();
+            tables.push(multiple);
+            for _ in 1..entries {
+                multiple = add_mixed_regs(multiple, q);
+                tables.push(multiple);
+            }
+        }
+
+        let mut accumulator = identity_regs();
+        let mut started = false;
+        for window in (0..windows).rev() {
+            if started {
+                for _ in 0..width {
+                    accumulator = double_regs(accumulator);
+                }
+            }
+            for (pair, table) in terms.chunks(WIDTH).zip(tables.chunks_exact(entries)) {
+                let digits: [i16; WIDTH] = core::array::from_fn(|lane| {
+                    pair.get(lane).map_or(0, |item| term(item).1[window])
+                });
+                if digits == [0; WIDTH] {
+                    continue;
+                }
+                let [low, high] = digits.map(|digit| &table[usize::from(digit.unsigned_abs())]);
+                // SAFETY: AArch64 targets provide NEON, and both lane indices are within the
+                // register.
+                let [x, y, t, z]: Point = unsafe {
+                    core::array::from_fn(|coordinate| {
+                        core::array::from_fn(|limb| {
+                            vcopyq_laneq_u64::<1, 1>(low[coordinate][limb], high[coordinate][limb])
+                        })
+                    })
+                };
+                let masks = digits.map(|digit| 0u64.wrapping_sub(u64::from(digit < 0)));
+                // SAFETY: AArch64 targets provide NEON, and the mask array has two lanes.
+                let mask = unsafe { vld1q_u64(masks.as_ptr()) };
+                accumulator = add_regs(accumulator, [neg_lanes(x, mask), y, neg_lanes(t, mask), z]);
+                started = true;
+            }
+        }
+        let [x, y, t, z] = accumulator.map(unpack_pair);
+        let [first, second]: [G; WIDTH] = core::array::from_fn(|lane| G {
+            x: x[lane],
+            y: y[lane],
+            t: t[lane],
+            z: z[lane],
+        });
+        first.add(second)
     }
 }
 

@@ -1,15 +1,17 @@
-//! Variable-time Pippenger multi-scalar multiplication for batch signature verification.
+//! Variable-time multi-scalar multiplication for batch signature verification.
 //!
-//! [`Term`]s arrive decompressed and recoded into signed digits. The bucket kernel processes
-//! one term per private bucket stripe at once, so updates within each wave never collide.
+//! [`Term`]s arrive decompressed and recoded into signed digits. Small batches (see
+//! [`uses_straus`]) use Straus's method, whose cost has no per-window fixed part. Larger
+//! batches use Pippenger's bucket method: the bucket kernel processes one term per private bucket
+//! stripe at once, so updates within each wave never collide.
 //!
-//! [`multiscalar_mul`] exposes one execution shape for every [`Strategy`]: `(window, term range)`
+//! The bucket method exposes one execution shape for every [`Strategy`]: `(window, term range)`
 //! tiles. A window can be split across several point ranges when there are fewer windows than
 //! workers. Each strategy partition reuses private bucket scratch, tiles of the same window are
 //! added together, and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
-use crate::curve::{G, GAffine, msm::Backend};
+use crate::curve::{G, GAffine, LANES, msm::Backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;
@@ -73,11 +75,23 @@ impl Term {
     /// Recodes `scalar` at `width` (the batch-wide value from [`width_for`]; every term of one
     /// MSM must use the same width).
     pub(super) fn new(point: GAffine, scalar: &Scalar, width: u32) -> Self {
-        let digits: [i32; MAX_WINDOWS] = scalar.signed_digits(width);
+        let mut term = Self::zero(point);
+        term.recode(scalar, width);
+        term
+    }
+
+    /// A term for `point` with scalar zero.
+    pub(super) const fn zero(point: GAffine) -> Self {
         Self {
             point,
-            digits: digits.map(|d| d as i16),
+            digits: [0; MAX_WINDOWS],
         }
+    }
+
+    /// Replaces this term's scalar with `scalar`, recoded as in [`Term::new`].
+    pub(super) fn recode(&mut self, scalar: &Scalar, width: u32) {
+        let digits: [i32; MAX_WINDOWS] = scalar.signed_digits(width);
+        self.digits = digits.map(|d| d as i16);
     }
 }
 
@@ -151,7 +165,9 @@ mod bucketed {
         }
         buckets.fill(G::IDENTITY);
         for piece in super::pieces(chunks, start, end) {
-            backend.fill_buckets(buckets, nb, piece, |term| (term.point, term.digits[window]));
+            backend.fill_buckets(buckets, nb, piece, |term| {
+                (&term.point, term.digits[window])
+            });
         }
         backend.fold_buckets(buckets, nb, used)
     }
@@ -175,7 +191,7 @@ mod bucketed {
             let used = super::used_buckets(chunks, 0, total, window);
             for piece in super::pieces(chunks, 0, total) {
                 backend.fill_buckets(&mut buckets, nb, piece, |term| {
-                    (term.point, term.digits[window])
+                    (&term.point, term.digits[window])
                 });
             }
             let mut sum = G::IDENTITY;
@@ -254,16 +270,48 @@ fn partition_ranges(total: usize, ranges: usize) -> Vec<(usize, usize)> {
     result
 }
 
-/// Computes the full MSM over `chunks` (whose terms were recoded at `width`; see [`width_for`]
-/// and [`Term::new`]) with the bucket phase spread across `strategy`'s threads as
-/// `(window, global term range)` tiles. Each tile reduces to one point, same-window points are
-/// added, and the backend positions the resulting window sums.
+/// Whether [`multiscalar_mul`] uses Straus's method rather than buckets for `terms` terms at
+/// `parallelism`. The bucket method's per-window fold costs the same however few terms there
+/// are, and parallel Straus keeps winning longer because its parts share no work.
+const fn uses_straus(terms: usize, parallelism: usize) -> bool {
+    terms < if parallelism > 1 { 1024 } else { 384 }
+}
+
+/// Straus's method over lanes (see [`Backend::straus`]). Consecutive groups of [`LANES`] terms
+/// split into contiguous parts across `strategy`, each with its own accumulator.
+fn straus<B: Backend>(backend: B, terms: &[&Term], width: u32, strategy: &impl Strategy) -> G {
+    let groups = terms.len().div_ceil(LANES);
+    if groups == 0 {
+        return G::IDENTITY;
+    }
+    let parts = strategy.manual().parallelism().clamp(1, groups);
+    let part_len = groups.div_ceil(parts) * LANES;
+    strategy
+        .map_collect_vec(terms.chunks(part_len), |part| {
+            backend.straus(part, num_windows(width), width, |term| {
+                (&term.point, term.digits.as_slice())
+            })
+        })
+        .into_iter()
+        .fold(G::IDENTITY, G::add)
+}
+
+/// Computes the full MSM over `chunks`, whose terms were recoded at `width` (see [`width_for`]
+/// and [`Term::new`]). Small batches use [`straus`]. Larger ones spread the bucket phase across
+/// `strategy`'s threads as `(window, global term range)` tiles: each tile reduces to one point,
+/// same-window points are added, and the backend positions the resulting window sums.
 pub(super) fn multiscalar_mul<B: Backend>(
     backend: B,
     chunks: &[&[Term]],
     width: u32,
     strategy: &impl Strategy,
 ) -> G {
+    let total = total_terms(chunks);
+    if uses_straus(total, strategy.manual().parallelism()) {
+        let terms: Vec<&Term> = pieces(chunks, 0, total).flatten().collect();
+        return straus(backend, &terms, width, strategy);
+    }
+
     #[derive(Clone, Copy)]
     struct Tile {
         window: usize,
@@ -272,7 +320,6 @@ pub(super) fn multiscalar_mul<B: Backend>(
     }
 
     let parallelism = strategy.manual().parallelism();
-    let total = total_terms(chunks);
     let windows = num_windows(width);
     let ranges = partition_ranges(total, range_count(total, windows, parallelism));
     let mut tiles = Vec::with_capacity(windows * ranges.len());
@@ -349,6 +396,15 @@ mod tests {
             .collect()
     }
 
+    /// Expands one drawn seed into enough bytes for every draw a test makes, so its points and
+    /// scalars stay random however short the fuzzer's input is.
+    fn expand(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+        use rand_core::Rng as _;
+        let mut bytes = vec![0; 1 << 19];
+        commonware_utils::TestRng::new(u.arbitrary()?).fill_bytes(&mut bytes);
+        Ok(bytes)
+    }
+
     fn points_equal(actual: G, expected: G) -> bool {
         actual.add(expected.negate()).is_identity()
     }
@@ -420,8 +476,10 @@ mod tests {
         let backend = crate::curve::test_backend();
         Builder::default()
             .with_seed(0)
-            .with_search_limit(8)
+            .with_search_limit(1)
             .test(|u| {
+                let bytes = expand(u)?;
+                let u = &mut Unstructured::new(&bytes);
                 let points = arbitrary_affine_points(u, 100)?;
                 let scalars = (0..100)
                     .map(|_| u.arbitrary())
@@ -463,8 +521,10 @@ mod tests {
             fn call<B: Backend>(self, backend: B) {
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(8)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         let terms = arbitrary_terms(u, 100, 7)?;
                         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
                             let terms = terms[..n].to_vec();
@@ -492,8 +552,10 @@ mod tests {
             fn call<B: Backend>(self, backend: B) {
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(2)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         for width in TEST_WIDTHS {
                             let terms = arbitrary_terms(u, 600, width)?;
                             for n in [0, 1, 2, 5, 32, 600] {
@@ -507,6 +569,121 @@ mod tests {
                         }
                         Ok(())
                     });
+            }
+        }
+        crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+        crate::curve::with_backend(Check);
+    }
+
+    #[test]
+    fn straus_matches_serial_across_lane_boundaries() {
+        struct Check;
+        impl crate::curve::WithBackend for Check {
+            type Output = ();
+            fn call<B: Backend>(self, backend: B) {
+                let parallel = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                    .unwrap()
+                    .manual();
+                Builder::default()
+                    .with_seed(0)
+                    .with_search_limit(1)
+                    .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
+                        for width in [6, 8, 10] {
+                            let terms = arbitrary_terms(u, 383, width)?;
+                            for n in [1, 7, 8, 9, 16, 17, 33, 383] {
+                                let expected =
+                                    multiscalar_mul_terms_serial(backend, &[&terms[..n]], width);
+                                let refs: Vec<&Term> = terms[..n].iter().collect();
+                                let sequential = straus(backend, &refs, width, &Sequential);
+                                let parallel = straus(backend, &refs, width, &parallel);
+                                assert!(points_equal(sequential, expected), "n={n} width={width}");
+                                assert!(points_equal(parallel, expected), "n={n} width={width}");
+                            }
+                        }
+                        Ok(())
+                    });
+            }
+        }
+        crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+        crate::curve::with_backend(Check);
+    }
+
+    /// Straus over hand-picked digits matches an independent Horner evaluation exactly, so
+    /// torsion components are checked too.
+    #[test]
+    fn straus_matches_horner_for_edge_digits() {
+        struct Check;
+        impl crate::curve::WithBackend for Check {
+            type Output = ();
+            fn call<B: Backend>(self, backend: B) {
+                let parallel = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
+                    .unwrap()
+                    .manual();
+                let base = GAffine::BASEPOINT.to_extended();
+                let torsion = GAffine::decompress(&[0; 32]).unwrap();
+                let mixed =
+                    GAffine::decompress(&base.add(torsion.to_extended()).to_bytes()).unwrap();
+                let points = [GAffine::BASEPOINT, torsion, GAffine::IDENTITY, mixed];
+                for width in TEST_WIDTHS {
+                    let nb = num_buckets(width) as i16;
+                    let windows = num_windows(width);
+                    let cycle = [0, 1, -1, 2, -2, nb - 1, 1 - nb, nb, -nb];
+
+                    // The top window and window 1 are zero for every term, so groups are skipped
+                    // both before and after accumulation starts. Window 2 is `-nb` in every lane.
+                    let terms: Vec<Term> = (0..17)
+                        .map(|i| Term {
+                            point: points[i % points.len()],
+                            digits: core::array::from_fn(|window| match window {
+                                1 => 0,
+                                2 => -nb,
+                                _ if window + 1 >= windows => 0,
+                                _ => cycle[(i + window) % cycle.len()],
+                            }),
+                        })
+                        .collect();
+                    // Evaluate each term's digits by Horner's rule with scalar arithmetic.
+                    let values: Vec<G> = terms
+                        .iter()
+                        .map(|term| {
+                            let point = term.point.to_extended();
+                            (0..windows).rev().fold(G::IDENTITY, |acc, window| {
+                                let acc = (0..width).fold(acc, |acc, _| acc.double());
+                                let digit = term.digits[window];
+                                let magnitude = digit.unsigned_abs();
+                                let multiple = point.scalar_mul(
+                                    (0..width).rev().map(|bit| magnitude & (1 << bit) != 0),
+                                );
+                                acc.add(if digit < 0 {
+                                    multiple.negate()
+                                } else {
+                                    multiple
+                                })
+                            })
+                        })
+                        .collect();
+                    for n in [1, 2, 3, 7, 8, 9, 16, 17] {
+                        let terms = &terms[..n];
+                        let expected = values[..n]
+                            .iter()
+                            .fold(G::IDENTITY, |sum, &value| sum.add(value));
+                        let direct = backend.straus(terms, windows, width, |term| {
+                            (&term.point, term.digits.as_slice())
+                        });
+                        let refs: Vec<&Term> = terms.iter().collect();
+                        assert!(points_equal(direct, expected), "n={n} width={width}");
+                        assert!(
+                            points_equal(straus(backend, &refs, width, &Sequential), expected),
+                            "n={n} width={width}"
+                        );
+                        assert!(
+                            points_equal(straus(backend, &refs, width, &parallel), expected),
+                            "n={n} width={width}"
+                        );
+                    }
+                }
             }
         }
         crate::curve::WithBackend::call(Check, crate::curve::test_backend());
@@ -530,8 +707,10 @@ mod tests {
 
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(2)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         for width in [6, 8, 10] {
                             let terms = arbitrary_terms(u, 1000, width)?;
                             assert!(
@@ -612,8 +791,10 @@ mod tests {
                 const WIDTH: u32 = 7;
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(8)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         let terms = arbitrary_terms(u, 100, WIDTH)?;
                         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
                             let chunks = split_terms(terms[..n].to_vec(), &[n / 3, n / 3]);

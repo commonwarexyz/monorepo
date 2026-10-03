@@ -2,10 +2,21 @@
 //! with field multiplication built on IFMA's 52-bit multiply-accumulates.
 
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, GAffineVec, GBackend, GVec, LANES, MASK_51,
-    WithBackend,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES,
+    MASK_51, WithBackend,
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use core::arch::x86_64::*;
+
+/// One field element per lane, as five limb rows.
+type Regs = [__m512i; 5];
+
+/// One extended point per lane, as `[x, y, t, z]`.
+type Point = [Regs; 4];
+
+/// One affine point per lane, as `[x, y, t2d]`.
+type Affine = [Regs; 3];
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
 const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
@@ -55,6 +66,10 @@ fn store(regs: [__m512i; 5]) -> [[u64; LANES]; 5] {
 #[target_feature(enable = "avx512f")]
 fn mul19(z: __m512i) -> __m512i {
     let result;
+    // Typed scratch outputs: discarded `_` operands are printed as general-purpose registers
+    // when AVX-512VL is enabled for the whole build, which the assembler rejects.
+    let _times16: __m512i;
+    let _doubled: __m512i;
     // SAFETY: AVX-512F is enabled. The instructions only read their register input, write
     // their register outputs, preserve flags, and stay within the documented limb bound.
     unsafe {
@@ -64,8 +79,8 @@ fn mul19(z: __m512i) -> __m512i {
             "vpaddq {doubled}, {doubled}, {times16}",
             "vpaddq {result}, {doubled}, {z}",
             z = in(zmm_reg) z,
-            times16 = out(zmm_reg) _,
-            doubled = out(zmm_reg) _,
+            times16 = out(zmm_reg) _times16,
+            doubled = out(zmm_reg) _doubled,
             result = lateout(zmm_reg) result,
             options(pure, nomem, nostack, preserves_flags),
         );
@@ -202,6 +217,243 @@ fn sub_raw(a: [__m512i; 5], b: [__m512i; 5]) -> [__m512i; 5] {
     })
 }
 
+/// Negates the lanes selected by `mask` with reduced output, preserving every other limb.
+#[target_feature(enable = "avx512f,avx512ifma")]
+fn neg_lanes(value: Regs, mask: __mmask8) -> Regs {
+    let zero = [_mm512_setzero_si512(); 5];
+    let negated = reduce_regs(sub_raw(zero, value));
+    core::array::from_fn(|limb| _mm512_mask_blend_epi64(mask, value[limb], negated[limb]))
+}
+
+/// The identity point in every lane.
+#[target_feature(enable = "avx512f")]
+fn identity() -> Point {
+    let zero = [_mm512_setzero_si512(); 5];
+    let mut one = zero;
+    one[0] = _mm512_set1_epi64(1);
+    [zero, one, zero, one]
+}
+
+#[target_feature(enable = "avx512f")]
+fn load_point(p: &GVec) -> Point {
+    [
+        load(&p.x.limbs),
+        load(&p.y.limbs),
+        load(&p.t.limbs),
+        load(&p.z.limbs),
+    ]
+}
+
+#[target_feature(enable = "avx512f")]
+fn store_point([x, y, t, z]: Point) -> GVec {
+    GVec {
+        x: FVec { limbs: store(x) },
+        y: FVec { limbs: store(y) },
+        t: FVec { limbs: store(t) },
+        z: FVec { limbs: store(z) },
+    }
+}
+
+/// Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
+///
+/// ```text
+/// A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
+/// B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
+/// C = 2d * T1 * T2                 G = D + C        Z3 = F*G
+/// D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
+/// ```
+///
+/// # Correctness
+///
+/// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below `reduce_regs`'s
+/// `2^63` bound, and every right operand of `sub_raw` is reduced below `2^52`.
+#[target_feature(enable = "avx512f,avx512ifma")]
+fn add_regs([x1, y1, t1, z1]: Point, [x2, y2, t2, z2]: Point) -> Point {
+    let two_d = load(&EDWARDS_D2.limbs);
+    let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+    let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+    let c = mul_regs(mul_regs(t1, t2), two_d);
+    let zz = mul_regs_loose(z1, z2);
+    let d = add_raw(zz, zz);
+    let e = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(d, c));
+    let g = reduce_regs(add_raw(d, c));
+    let h = reduce_regs(add_raw(b, a));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
+}
+
+/// Mixed addition of an affine point using its precomputed `2d*x*y` coordinate.
+///
+/// # Correctness
+///
+/// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below `reduce_regs`'s
+/// `2^63` bound, and every right operand of `sub_raw` is reduced below `2^52`.
+#[target_feature(enable = "avx512f,avx512ifma")]
+fn add_mixed_regs([x1, y1, t1, z1]: Point, [x2, y2, t2d]: Affine) -> Point {
+    let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
+    let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
+    let c = mul_regs(t1, t2d);
+    let d = add_raw(z1, z1);
+    let e = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(d, c));
+    let g = reduce_regs(add_raw(d, c));
+    let h = reduce_regs(add_raw(b, a));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
+}
+
+/// Point doubling using the dedicated `dbl-2008-hwcd` formula.
+///
+/// # Correctness
+///
+/// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below `reduce_regs`'s
+/// `2^63` bound, and every right operand of `sub_raw` is reduced below `2^52`.
+#[target_feature(enable = "avx512f,avx512ifma")]
+fn double_regs([x, y, _, z]: Point) -> Point {
+    let a = square_regs(x);
+    let b = square_regs(y);
+    let c0 = square_regs_loose(z);
+    let c = reduce_regs(add_raw(c0, c0));
+    let xy2 = square_regs_loose(reduce_regs(add_raw(x, y)));
+    let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
+    let g = reduce_regs(sub_raw(b, a));
+    let f = reduce_regs(sub_raw(g, c));
+    let zero = [_mm512_setzero_si512(); 5];
+    let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
+    [
+        mul_regs(e, f),
+        mul_regs(g, h),
+        mul_regs(e, h),
+        mul_regs(f, g),
+    ]
+}
+
+/// Transposes eight rows of eight `u64`s: lane `j` of output row `i` is lane `i` of input row `j`.
+#[target_feature(enable = "avx512f")]
+fn transpose(r: [__m512i; 8]) -> [__m512i; 8] {
+    // Interleave row pairs within each 128-bit block, then regroup 128-bit blocks twice.
+    let t = [
+        _mm512_unpacklo_epi64(r[0], r[1]),
+        _mm512_unpackhi_epi64(r[0], r[1]),
+        _mm512_unpacklo_epi64(r[2], r[3]),
+        _mm512_unpackhi_epi64(r[2], r[3]),
+        _mm512_unpacklo_epi64(r[4], r[5]),
+        _mm512_unpackhi_epi64(r[4], r[5]),
+        _mm512_unpacklo_epi64(r[6], r[7]),
+        _mm512_unpackhi_epi64(r[6], r[7]),
+    ];
+    let u = [
+        _mm512_shuffle_i64x2::<0x88>(t[0], t[2]),
+        _mm512_shuffle_i64x2::<0x88>(t[1], t[3]),
+        _mm512_shuffle_i64x2::<0xdd>(t[0], t[2]),
+        _mm512_shuffle_i64x2::<0xdd>(t[1], t[3]),
+        _mm512_shuffle_i64x2::<0x88>(t[4], t[6]),
+        _mm512_shuffle_i64x2::<0x88>(t[5], t[7]),
+        _mm512_shuffle_i64x2::<0xdd>(t[4], t[6]),
+        _mm512_shuffle_i64x2::<0xdd>(t[5], t[7]),
+    ];
+    [
+        _mm512_shuffle_i64x2::<0x88>(u[0], u[4]),
+        _mm512_shuffle_i64x2::<0x88>(u[1], u[5]),
+        _mm512_shuffle_i64x2::<0x88>(u[2], u[6]),
+        _mm512_shuffle_i64x2::<0x88>(u[3], u[7]),
+        _mm512_shuffle_i64x2::<0xdd>(u[0], u[4]),
+        _mm512_shuffle_i64x2::<0xdd>(u[1], u[5]),
+        _mm512_shuffle_i64x2::<0xdd>(u[2], u[6]),
+        _mm512_shuffle_i64x2::<0xdd>(u[3], u[7]),
+    ]
+}
+
+// The point loaders below read `G` as 20 consecutive limbs and `GAffine` as 15.
+const _: () = {
+    use core::mem::{offset_of, size_of};
+    assert!(size_of::<G>() == 20 * 8 && size_of::<GAffine>() == 15 * 8);
+    assert!(offset_of!(G, y) == 40 && offset_of!(G, t) == 80 && offset_of!(G, z) == 120);
+    assert!(offset_of!(GAffine, y) == 40 && offset_of!(GAffine, t2d) == 80);
+};
+
+/// Loads the point behind each lane's pointer into that lane.
+///
+/// # Safety
+///
+/// Every pointer must be valid for reads of a [`G`].
+#[target_feature(enable = "avx512f")]
+unsafe fn load_points(points: [*const G; LANES]) -> Point {
+    let limbs = points.map(|point| point.cast::<u64>());
+    // SAFETY: `G` is 20 consecutive limbs (`x`, `y`, `t`, and `z`, five each), so each pointer is
+    // valid for limbs 0..20. The final load masks off limbs 20..24.
+    let (a, b, c) = unsafe {
+        (
+            transpose(limbs.map(|p| _mm512_loadu_si512(p.cast()))),
+            transpose(limbs.map(|p| _mm512_loadu_si512(p.add(8).cast()))),
+            transpose(limbs.map(|p| _mm512_maskz_loadu_epi64(0x0f, p.add(16).cast()))),
+        )
+    };
+    [
+        [a[0], a[1], a[2], a[3], a[4]],
+        [a[5], a[6], a[7], b[0], b[1]],
+        [b[2], b[3], b[4], b[5], b[6]],
+        [b[7], c[0], c[1], c[2], c[3]],
+    ]
+}
+
+/// Stores each lane selected by `mask` through that lane's pointer.
+///
+/// # Safety
+///
+/// Every pointer whose lane `mask` selects must be valid for writes of a [`G`].
+#[target_feature(enable = "avx512f")]
+unsafe fn store_points([x, y, t, z]: Point, points: [*mut G; LANES], mask: __mmask8) {
+    let zero = _mm512_setzero_si512();
+    let a = transpose([x[0], x[1], x[2], x[3], x[4], y[0], y[1], y[2]]);
+    let b = transpose([y[3], y[4], t[0], t[1], t[2], t[3], t[4], z[0]]);
+    let c = transpose([z[1], z[2], z[3], z[4], zero, zero, zero, zero]);
+    for lane in 0..LANES {
+        if mask & (1 << lane) != 0 {
+            let p = points[lane].cast::<u64>();
+            // SAFETY: the caller guarantees `p` is valid for writes of the 20 limbs of a `G`. The
+            // final store masks off limbs 20..24.
+            unsafe {
+                _mm512_storeu_si512(p.cast(), a[lane]);
+                _mm512_storeu_si512(p.add(8).cast(), b[lane]);
+                _mm512_mask_storeu_epi64(p.add(16).cast(), 0x0f, c[lane]);
+            }
+        }
+    }
+}
+
+/// Loads the affine point behind each lane's pointer into that lane.
+///
+/// # Safety
+///
+/// Every pointer must be valid for reads of a [`GAffine`].
+#[target_feature(enable = "avx512f")]
+unsafe fn load_affines(points: [*const GAffine; LANES]) -> Affine {
+    let limbs = points.map(|point| point.cast::<u64>());
+    // SAFETY: `GAffine` is 15 consecutive limbs (`x`, `y`, and `t2d`, five each), so each pointer
+    // is valid for limbs 0..15. The second load masks off limb 15.
+    let (a, b) = unsafe {
+        (
+            transpose(limbs.map(|p| _mm512_loadu_si512(p.cast()))),
+            transpose(limbs.map(|p| _mm512_maskz_loadu_epi64(0x7f, p.add(8).cast()))),
+        )
+    };
+    [
+        [a[0], a[1], a[2], a[3], a[4]],
+        [a[5], a[6], a[7], b[0], b[1]],
+        [b[2], b[3], b[4], b[5], b[6]],
+    ]
+}
+
 impl FBackend for Backend {
     #[inline(always)]
     fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
@@ -234,9 +486,17 @@ impl FBackend for Backend {
     }
 
     #[inline(always)]
-    fn pow2k(self, a: FVec, k: u32) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
-        unsafe { self.pow2k_field(a, k) }
+    fn pow2k<const N: usize>(self, mut a: [FVec; N], k: u32) -> [FVec; N] {
+        let (pairs, rest) = a.as_chunks_mut::<2>();
+        for pair in pairs {
+            // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+            *pair = unsafe { self.pow2k_pair(*pair, k) };
+        }
+        for value in rest {
+            // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+            *value = unsafe { self.pow2k_field(*value, k) };
+        }
+        a
     }
 
     #[inline(always)]
@@ -261,139 +521,165 @@ impl Backend {
         f.call(self)
     }
 
-    /// Fused point addition.
-    ///
-    /// # Correctness
-    ///
-    /// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below
-    /// `reduce_regs`'s `2^63` bound, and every right operand of `sub_raw` is reduced below
-    /// `2^52`.
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn add_points(self, p: GVec, q: GVec) -> GVec {
-        let (x1, y1, z1, t1) = (
-            load(&p.x.limbs),
-            load(&p.y.limbs),
-            load(&p.z.limbs),
-            load(&p.t.limbs),
-        );
-        let (x2, y2, z2, t2) = (
-            load(&q.x.limbs),
-            load(&q.y.limbs),
-            load(&q.z.limbs),
-            load(&q.t.limbs),
-        );
-        let two_d = load(&EDWARDS_D2.limbs);
-
-        // Unified extended-coordinates addition (Hisil-Wong-Carter-Dawson):
-        //
-        //   A = (Y1 - X1) * (Y2 - X2)        E = B - A        X3 = E*F
-        //   B = (Y1 + X1) * (Y2 + X2)        F = D - C        Y3 = G*H
-        //   C = 2d * T1 * T2                 G = D + C        Z3 = F*G
-        //   D = 2 * Z1 * Z2                  H = B + A        T3 = E*H
-        let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
-        let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
-        let c = mul_regs(mul_regs(t1, t2), two_d);
-        let zz = mul_regs_loose(z1, z2);
-        let d = add_raw(zz, zz);
-        let e = reduce_regs(sub_raw(b, a));
-        let f = reduce_regs(sub_raw(d, c));
-        let g = reduce_regs(add_raw(d, c));
-        let h = reduce_regs(add_raw(b, a));
-
-        GVec {
-            x: FVec {
-                limbs: store(mul_regs(e, f)),
-            },
-            y: FVec {
-                limbs: store(mul_regs(g, h)),
-            },
-            t: FVec {
-                limbs: store(mul_regs(e, h)),
-            },
-            z: FVec {
-                limbs: store(mul_regs(f, g)),
-            },
-        }
+        store_point(add_regs(load_point(&p), load_point(&q)))
     }
 
-    /// Fused mixed point addition.
-    ///
-    /// # Correctness
-    ///
-    /// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below
-    /// `reduce_regs`'s `2^63` bound, and every right operand of `sub_raw` is reduced below
-    /// `2^52`.
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn add_mixed_points(self, p: GVec, q: GAffineVec) -> GVec {
-        let (x1, y1, z1, t1) = (
-            load(&p.x.limbs),
-            load(&p.y.limbs),
-            load(&p.z.limbs),
-            load(&p.t.limbs),
-        );
-        let (x2, y2, t2d) = (load(&q.x.limbs), load(&q.y.limbs), load(&q.t2d.limbs));
+        let q = [load(&q.x.limbs), load(&q.y.limbs), load(&q.t2d.limbs)];
+        store_point(add_mixed_regs(load_point(&p), q))
+    }
 
-        let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
-        let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
-        let c = mul_regs(t1, t2d);
-        let d = add_raw(z1, z1);
-        let e = reduce_regs(sub_raw(b, a));
-        let f = reduce_regs(sub_raw(d, c));
-        let g = reduce_regs(add_raw(d, c));
-        let h = reduce_regs(add_raw(b, a));
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn double_points(self, p: GVec) -> GVec {
+        store_point(double_regs(load_point(&p)))
+    }
 
-        GVec {
-            x: FVec {
-                limbs: store(mul_regs(e, f)),
-            },
-            y: FVec {
-                limbs: store(mul_regs(g, h)),
-            },
-            t: FVec {
-                limbs: store(mul_regs(e, h)),
-            },
-            z: FVec {
-                limbs: store(mul_regs(f, g)),
-            },
+    /// Adds each term's signed affine point to the bucket its digit selects, one wave of
+    /// [`LANES`] terms at a time.
+    ///
+    /// Lane `l` owns stripe `l`, so a wave's buckets are distinct. They are transposed into
+    /// lanes, updated with one mixed addition, and transposed back.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn fill<T>(
+        self,
+        buckets: &mut [G],
+        nb: usize,
+        terms: &[T],
+        term: impl Fn(&T) -> (&GAffine, i16),
+    ) {
+        assert_eq!(Some(buckets.len()), LANES.checked_mul(nb));
+        let base = buckets.as_mut_ptr();
+        let identity = G::IDENTITY;
+        let affine_identity = GAffine::IDENTITY;
+        for wave in terms.chunks(LANES) {
+            let mut incoming = [&raw const affine_identity; LANES];
+            let mut current = [&raw const identity; LANES];
+            let mut slots = [core::ptr::null_mut(); LANES];
+            let mut active = 0;
+            let mut negative = 0;
+            for (lane, item) in wave.iter().enumerate() {
+                let (point, digit) = term(item);
+                if digit == 0 {
+                    continue;
+                }
+                let magnitude = usize::from(digit.unsigned_abs());
+                assert!(magnitude <= nb);
+                // SAFETY: `lane < LANES` and `1 <= magnitude <= nb` keep the slot in `buckets`.
+                let slot = unsafe { base.add(lane * nb + magnitude - 1) };
+                incoming[lane] = core::ptr::from_ref(point);
+                current[lane] = slot.cast_const();
+                slots[lane] = slot;
+                active |= 1 << lane;
+                negative |= u8::from(digit < 0) << lane;
+            }
+            if active == 0 {
+                continue;
+            }
+            // SAFETY: every pointer is a bucket in `buckets`, a term's point, or a live local point.
+            let (p, [x, y, t2d]) = unsafe { (load_points(current), load_affines(incoming)) };
+            let sum = add_mixed_regs(p, [neg_lanes(x, negative), y, neg_lanes(t2d, negative)]);
+            // SAFETY: the selected lanes hold distinct buckets in `buckets`.
+            unsafe { store_points(sum, slots, active) };
         }
     }
 
-    /// Fused point doubling using the dedicated `dbl-2008-hwcd` formula.
-    ///
-    /// # Correctness
-    ///
-    /// All input limbs satisfy `FVec`'s bound; every loose intermediate stays below
-    /// `reduce_regs`'s `2^63` bound, and every right operand of `sub_raw` is reduced below
-    /// `2^52`.
+    /// Weights and sums every stripe's buckets, with the stripes' buckets at each digit
+    /// transposed into lanes.
     #[target_feature(enable = "avx512f,avx512ifma")]
-    fn double_points(self, p: GVec) -> GVec {
-        let (x, y, z) = (load(&p.x.limbs), load(&p.y.limbs), load(&p.z.limbs));
-
-        let a = square_regs(x);
-        let b = square_regs(y);
-        let c0 = square_regs_loose(z);
-        let c = reduce_regs(add_raw(c0, c0));
-        let xy2 = square_regs_loose(reduce_regs(add_raw(x, y)));
-        let e = reduce_regs(sub_raw(sub_raw(xy2, a), b));
-        let g = reduce_regs(sub_raw(b, a));
-        let f = reduce_regs(sub_raw(g, c));
-        let zero = [_mm512_setzero_si512(); 5];
-        let h = reduce_regs(sub_raw(sub_raw(zero, a), b));
-
-        GVec {
-            x: FVec {
-                limbs: store(mul_regs(e, f)),
-            },
-            y: FVec {
-                limbs: store(mul_regs(g, h)),
-            },
-            t: FVec {
-                limbs: store(mul_regs(e, h)),
-            },
-            z: FVec {
-                limbs: store(mul_regs(f, g)),
-            },
+    fn fold(self, buckets: &[G], nb: usize, used: usize) -> G {
+        let mut sum = identity();
+        let mut weighted = identity();
+        for digit in (0..used).rev() {
+            let rows = core::array::from_fn(|lane| &raw const buckets[lane * nb + digit]);
+            // SAFETY: every pointer is a bucket in `buckets`.
+            sum = add_regs(sum, unsafe { load_points(rows) });
+            weighted = add_regs(weighted, sum);
         }
+        store_point(weighted).sum_lanes(self)
+    }
+
+    /// Straus accumulation with each group's table held as lane-wise multiples in registers'
+    /// layout, and each lookup gathering one entry per lane.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn straus_lanes<T>(
+        self,
+        terms: &[T],
+        windows: usize,
+        width: u32,
+        term: impl Fn(&T) -> (&GAffine, &[i16]),
+    ) -> G {
+        let entries = (1usize << (width - 1)) + 1;
+        let affine_identity = GAffine::IDENTITY;
+        let mut tables: Vec<Point> = Vec::with_capacity(terms.len().div_ceil(LANES) * entries);
+        for group in terms.chunks(LANES) {
+            let points = core::array::from_fn(|lane| {
+                group.get(lane).map_or(&raw const affine_identity, |item| {
+                    core::ptr::from_ref(term(item).0)
+                })
+            });
+            // SAFETY: every pointer is a term's point or a live local point.
+            let points = unsafe { load_affines(points) };
+            let mut multiple = identity();
+            tables.push(multiple);
+            for _ in 1..entries {
+                multiple = add_mixed_regs(multiple, points);
+                tables.push(multiple);
+            }
+        }
+
+        // A `Point` is 20 rows of `LANES` limbs, so limb `lane` of row `row` of entry `entry`
+        // sits `(entry * 20 + row) * LANES + lane` limbs into a table.
+        const ENTRY_LIMBS: usize = 20 * LANES;
+        let mut accumulator = identity();
+        let mut started = false;
+        for window in (0..windows).rev() {
+            if started {
+                for _ in 0..width {
+                    accumulator = double_regs(accumulator);
+                }
+            }
+            for (group, table) in terms.chunks(LANES).zip(tables.chunks_exact(entries)) {
+                let mut offsets = [0i64; LANES];
+                let mut negative = 0;
+                let mut any = false;
+                for (lane, item) in group.iter().enumerate() {
+                    let digit = term(item).1[window];
+                    let entry = usize::from(digit.unsigned_abs());
+                    assert!(entry < entries);
+                    offsets[lane] = (entry * ENTRY_LIMBS + lane) as i64;
+                    negative |= u8::from(digit < 0) << lane;
+                    any |= digit != 0;
+                }
+                if !any {
+                    continue;
+                }
+                // SAFETY: `offsets` is eight `i64`s.
+                let offsets = unsafe { _mm512_loadu_si512(offsets.as_ptr().cast()) };
+                let base = table.as_ptr().cast::<i64>();
+                let selected: Point = core::array::from_fn(|coordinate| {
+                    core::array::from_fn(|limb| {
+                        // SAFETY: every entry is below `entries`, so each lane's offset plus the
+                        // row stays inside `table`.
+                        unsafe {
+                            _mm512_i64gather_epi64::<8>(
+                                offsets,
+                                base.add((coordinate * 5 + limb) * LANES),
+                            )
+                        }
+                    })
+                });
+                let [x, y, t, z] = selected;
+                accumulator = add_regs(
+                    accumulator,
+                    [neg_lanes(x, negative), y, neg_lanes(t, negative), z],
+                );
+                started = true;
+            }
+        }
+        store_point(accumulator).sum_lanes(self)
     }
 
     // Field operations require inputs within FVec's limb bound. This keeps raw field
@@ -405,13 +691,8 @@ impl Backend {
             .iter()
             .enumerate()
             .fold(0u8, |mask, (lane, &select)| mask | ((select as u8) << lane));
-        let value = load(&value.limbs);
-        let zero = [_mm512_setzero_si512(); 5];
-        let negated = reduce_regs(sub_raw(zero, value));
         FVec {
-            limbs: store(core::array::from_fn(|limb| {
-                _mm512_mask_blend_epi64(mask, value[limb], negated[limb])
-            })),
+            limbs: store(neg_lanes(load(&value.limbs), mask)),
         }
     }
 
@@ -455,6 +736,18 @@ impl Backend {
         }
     }
 
+    /// Squares two vectors `k` times, interleaving their independent chains so that each chain's
+    /// multiply-accumulates fill the other's latency.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn pow2k_pair(self, [a, b]: [FVec; 2], k: u32) -> [FVec; 2] {
+        let (mut a, mut b) = (load(&a.limbs), load(&b.limbs));
+        for _ in 0..k {
+            a = square_regs(a);
+            b = square_regs(b);
+        }
+        [FVec { limbs: store(a) }, FVec { limbs: store(b) }]
+    }
+
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn square_field(self, a: FVec) -> FVec {
         FVec {
@@ -467,6 +760,36 @@ impl super::Backend for Backend {}
 
 impl super::msm::Backend for Backend {
     const STRIPES: usize = LANES;
+
+    #[inline(always)]
+    fn fill_buckets<T>(
+        self,
+        buckets: &mut [G],
+        nb: usize,
+        terms: &[T],
+        term: impl Fn(&T) -> (&GAffine, i16),
+    ) {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.fill(buckets, nb, terms, term) }
+    }
+
+    #[inline(always)]
+    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> G {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.fold(buckets, nb, used) }
+    }
+
+    #[inline(always)]
+    fn straus<T>(
+        self,
+        terms: &[T],
+        windows: usize,
+        width: u32,
+        term: impl Fn(&T) -> (&GAffine, &[i16]),
+    ) -> G {
+        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.straus_lanes(terms, windows, width, term) }
+    }
 }
 
 impl GBackend for Backend {

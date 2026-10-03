@@ -29,6 +29,7 @@ const BIAS_16P: [u64; 5] = [
 /// The five limbs use radix `2^51`. The representation is redundant: values need not be
 /// canonical, but every arithmetic operation accepts and returns limbs less than `2^52`.
 #[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
 pub struct F(pub [u64; 5]);
 
 // Secret-dependent selection goes through `subtle`, whose `Choice` sits behind an optimization
@@ -212,7 +213,7 @@ impl F {
     }
 
     /// Returns `self * rhs`.
-    #[inline]
+    #[inline(always)]
     pub fn mul(self, rhs: Self) -> Self {
         // Accumulate the nine schoolbook columns, then fold columns 5 through 8 down using
         // `2^255 = 19 (mod p)`. At the input bound, every folded column remains below `2^112`.
@@ -234,12 +235,17 @@ impl F {
     }
 
     /// Returns `self * self` using one product for each pair of distinct limbs.
-    #[inline]
+    #[inline(always)]
     pub fn square(self) -> Self {
         let limbs = self.0;
         let mut limbs_19 = limbs;
         for limb in &mut limbs_19[3..] {
             *limb *= 19;
+        }
+        // Each product of distinct limbs occurs twice, so it takes its left factor from `limbs_2`.
+        let mut limbs_2 = limbs;
+        for limb in &mut limbs_2[..4] {
+            *limb *= 2;
         }
 
         let mut c = [0u128; 5];
@@ -251,8 +257,8 @@ impl F {
                 } else {
                     (column - limbs.len(), limbs_19[j])
                 };
-                let product = u128::from(limbs[i]) * u128::from(rhs);
-                c[column] += if i == j { product } else { 2 * product };
+                let lhs = if i == j { limbs[i] } else { limbs_2[i] };
+                c[column] += u128::from(lhs) * u128::from(rhs);
             }
         }
         Self::from_wide(c)
@@ -392,11 +398,13 @@ pub trait FBackend: Copy {
         self.mul(a, a)
     }
 
-    /// Squares every lane `k` times, returning `a` unchanged when `k` is zero.
+    /// Squares every lane of each vector `k` times, returning `a` unchanged when `k` is zero.
     #[inline(always)]
-    fn pow2k(self, mut a: FVec, k: u32) -> FVec {
-        for _ in 0..k {
-            a = self.square(a);
+    fn pow2k<const N: usize>(self, mut a: [FVec; N], k: u32) -> [FVec; N] {
+        for value in &mut a {
+            for _ in 0..k {
+                *value = self.square(*value);
+            }
         }
         a
     }
@@ -410,8 +418,10 @@ pub trait FBackend: Copy {
 /// A compact point on the twisted Edwards curve in extended homogeneous coordinates.
 ///
 /// This is the scalar representation used directly for individual point operations and as the
-/// array-of-structures representation between vector operations.
+/// array-of-structures representation between vector operations. Its coordinates are laid out
+/// as 20 consecutive limbs, so backends can load several points straight into lanes.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct G {
     x: F,
     y: F,
@@ -447,6 +457,18 @@ impl G {
         let mut bytes = self.y.mul(z_inverse).to_bytes();
         bytes[31] |= u8::from(x.is_odd()) << 7;
         bytes
+    }
+
+    /// Converts this point to affine representation.
+    pub fn to_affine(self) -> GAffine {
+        let z_inverse = self.z.invert();
+        let x = self.x.mul(z_inverse);
+        let y = self.y.mul(z_inverse);
+        GAffine {
+            x,
+            y,
+            t2d: x.mul(y).mul(F::EDWARDS_D2),
+        }
     }
 
     /// Negates this point.
@@ -490,6 +512,7 @@ impl G {
     }
 
     /// Adds an affine point using its precomputed `2d*x*y` coordinate.
+    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
     #[inline]
     pub fn add_mixed(self, rhs: GAffine) -> Self {
         let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
@@ -528,6 +551,7 @@ impl G {
     }
 
     /// Multiplies this point by a public scalar bit sequence using variable-time double-and-add.
+    #[cfg(test)]
     pub fn scalar_mul(self, bits: impl IntoIterator<Item = bool>) -> Self {
         let mut result = Self::IDENTITY;
         for bit in bits {
@@ -535,21 +559,6 @@ impl G {
             if bit {
                 result = result.add(self);
             }
-        }
-        result
-    }
-
-    /// Multiplies this point by a secret 256-bit little-endian scalar.
-    ///
-    /// This performs one doubling and one addition per bit, selecting the result without
-    /// secret-dependent branches or indexing.
-    pub fn scalar_mul_secret(self, scalar: &[u8; 32]) -> Self {
-        let mut result = Self::IDENTITY;
-        for i in (0..256).rev() {
-            let doubled = result.double();
-            let added = doubled.add(self);
-            let bit = Choice::from(scalar[i / 8] >> (i % 8) & 1);
-            result = Self::conditional_select(&doubled, &added, bit);
         }
         result
     }
@@ -570,8 +579,11 @@ impl G {
 
 /// A compact affine point prepared for mixed addition.
 ///
-/// This stores individual affine points and their precomputed `2d*x*y` coordinate.
+/// This stores individual affine points and their precomputed `2d*x*y` coordinate. Its
+/// coordinates are laid out as 15 consecutive limbs, so backends can load several points straight
+/// into lanes.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct GAffine {
     x: F,
     y: F,
@@ -610,6 +622,47 @@ impl GAffine {
             1953934009299142,
         ]),
     };
+
+    /// `2^128` times the base point, prepared for mixed addition.
+    pub const BASEPOINT_128: Self = Self {
+        x: F([
+            78814272546852,
+            343446598238096,
+            1469662686845463,
+            446722075312752,
+            1339733442806879,
+        ]),
+        y: F([
+            770831939905131,
+            1066752177064823,
+            855905013023480,
+            1194941381303059,
+            1674322643330780,
+        ]),
+        t2d: F([
+            22893968530686,
+            2235758574399251,
+            1661465835630252,
+            925707319443452,
+            1203475116966621,
+        ]),
+    };
+
+    /// Compresses this point to its canonical Ed25519 encoding.
+    pub fn to_bytes(self) -> [u8; 32] {
+        let mut bytes = self.y.to_bytes();
+        bytes[31] |= u8::from(self.x.is_odd()) << 7;
+        bytes
+    }
+
+    /// Negates this point.
+    pub fn negate(self) -> Self {
+        Self {
+            x: self.x.neg(),
+            y: self.y,
+            t2d: self.t2d.neg(),
+        }
+    }
 
     /// Decompresses a point encoding, accepting non-canonical `y` values and negative zero
     /// (`x = 0` with the sign bit set) per ZIP215.
@@ -654,62 +707,68 @@ impl GAffine {
         }
     }
 
-    /// Decompresses eight point encodings with the square-root calculation performed lane-wise by
-    /// the selected backend.
-    pub fn decompress_batch<B: FBackend>(
+    /// Decompresses `N` groups of eight point encodings with the square-root calculation performed
+    /// lane-wise by the selected backend.
+    ///
+    /// The groups' exponentiation chains are independent, so a backend can overlap them.
+    pub fn decompress_batch<B: FBackend, const N: usize>(
         backend: B,
-        bytes: &[[u8; 32]; LANES],
-    ) -> [Option<Self>; LANES] {
-        let signs = bytes.map(|encoding| encoding[31] >> 7);
-        let ys = bytes.map(|encoding| F::from_bytes(&encoding));
-        let y = FVec::transpose(ys);
+        bytes: &[[[u8; 32]; LANES]; N],
+    ) -> [[Option<Self>; LANES]; N] {
+        let ys = bytes.map(|group| group.map(|encoding| F::from_bytes(&encoding)));
+        let y = ys.map(FVec::transpose);
         let one = FVec::splat(F::ONE);
 
         // Recover x from x^2 = u/v, where u = y^2 - 1 and v = d*y^2 + 1.
-        let y2 = backend.square(y);
-        let u = backend.sub(y2, one);
-        let v = backend.add(backend.mul(FVec::splat(F::EDWARDS_D), y2), one);
-        let uv = backend.mul(u, v);
-        let candidate = backend.mul(u, pow_p58(backend, uv));
-        let vxx = backend.mul(v, backend.square(candidate));
+        let y2 = y.map(|y| backend.square(y));
+        let u = y2.map(|y2| backend.sub(y2, one));
+        let v = y2.map(|y2| backend.add(backend.mul(FVec::splat(F::EDWARDS_D), y2), one));
+        let roots = pow_p58(backend, mul_each(backend, u, v));
 
-        let u_lanes = u.untranspose();
-        let negative_u_lanes = backend.neg(u).untranspose();
-        let vxx_lanes = vxx.untranspose();
-        let factors = array::from_fn(|i| {
-            if vxx_lanes[i].eq(&u_lanes[i]) {
-                Some(F::ONE)
-            } else if vxx_lanes[i].eq(&negative_u_lanes[i]) {
-                Some(F::SQRT_M1)
-            } else {
-                None
-            }
-        });
-        let factor_lanes = factors.map(|factor| factor.unwrap_or(F::ONE));
-        let x = backend.mul(candidate, FVec::transpose(factor_lanes));
-        let x_lanes = x.untranspose();
-        let negative_x_lanes = backend.neg(x).untranspose();
+        array::from_fn(|n| {
+            let (u, v, y, ys) = (u[n], v[n], y[n], ys[n]);
+            let signs = bytes[n].map(|encoding| encoding[31] >> 7);
+            let candidate = backend.mul(u, roots[n]);
+            let vxx = backend.mul(v, backend.square(candidate));
 
-        let final_x = array::from_fn(|i| {
-            if x_lanes[i].is_odd() == (signs[i] == 1) {
-                x_lanes[i]
-            } else {
-                negative_x_lanes[i]
-            }
-        });
-        let t2d_lanes = backend
-            .mul(
-                backend.mul(FVec::transpose(final_x), y),
-                FVec::splat(F::EDWARDS_D2),
-            )
-            .untranspose();
+            let u_lanes = u.untranspose();
+            let negative_u_lanes = backend.neg(u).untranspose();
+            let vxx_lanes = vxx.untranspose();
+            let factors = array::from_fn(|i| {
+                if vxx_lanes[i].eq(&u_lanes[i]) {
+                    Some(F::ONE)
+                } else if vxx_lanes[i].eq(&negative_u_lanes[i]) {
+                    Some(F::SQRT_M1)
+                } else {
+                    None
+                }
+            });
+            let factor_lanes = factors.map(|factor| factor.unwrap_or(F::ONE));
+            let x = backend.mul(candidate, FVec::transpose(factor_lanes));
+            let x_lanes = x.untranspose();
+            let negative_x_lanes = backend.neg(x).untranspose();
 
-        array::from_fn(|i| {
-            factors[i]?;
-            Some(Self {
-                x: final_x[i],
-                y: ys[i],
-                t2d: t2d_lanes[i],
+            let final_x = array::from_fn(|i| {
+                if x_lanes[i].is_odd() == (signs[i] == 1) {
+                    x_lanes[i]
+                } else {
+                    negative_x_lanes[i]
+                }
+            });
+            let t2d_lanes = backend
+                .mul(
+                    backend.mul(FVec::transpose(final_x), y),
+                    FVec::splat(F::EDWARDS_D2),
+                )
+                .untranspose();
+
+            array::from_fn(|i| {
+                factors[i]?;
+                Some(Self {
+                    x: final_x[i],
+                    y: ys[i],
+                    t2d: t2d_lanes[i],
+                })
             })
         })
     }
@@ -792,6 +851,28 @@ impl GVec {
         let sums = Self::add_pairs::<{ LANES / 2 }>(sums, backend);
         Self::add_pairs::<{ LANES / 4 }>(sums, backend)[0]
     }
+
+    /// Returns lane `i` of `table[index[i]]` in each lane `i`, negated where `negative[i]`.
+    ///
+    /// Variable-time, so the indices and signs must be public.
+    pub fn select_signed<B: FBackend>(
+        backend: B,
+        table: &[Self],
+        index: &[usize; LANES],
+        negative: &[bool; LANES],
+    ) -> Self {
+        let pick = |coordinate: fn(&Self) -> &FVec| FVec {
+            limbs: array::from_fn(|limb| {
+                array::from_fn(|lane| coordinate(&table[index[lane]]).limbs[limb][lane])
+            }),
+        };
+        Self {
+            x: backend.conditional_neg(pick(|point| &point.x), negative),
+            y: pick(|point| &point.y),
+            t: backend.conditional_neg(pick(|point| &point.t), negative),
+            z: pick(|point| &point.z),
+        }
+    }
 }
 
 /// Like `GVec`, but assuming that the point is in affine representation.
@@ -837,26 +918,40 @@ impl GAffineVec {
     }
 }
 
-/// Raises every lane to `2^250 - 1` using the standard addition chain.
-fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
-    let a = backend.square(value);
-    let a2 = backend.square(backend.square(a));
-    let b = backend.mul(value, a2);
-    let c = backend.mul(a, b);
-    let d = backend.square(c);
-    let e = backend.mul(b, d);
-    let f = backend.mul(backend.pow2k(e, 5), e);
-    let g = backend.mul(backend.pow2k(f, 10), f);
-    let h = backend.mul(backend.pow2k(g, 20), g);
-    let i = backend.mul(backend.pow2k(h, 10), f);
-    let j = backend.mul(backend.pow2k(i, 50), i);
-    let k = backend.mul(backend.pow2k(j, 100), j);
-    backend.mul(backend.pow2k(k, 50), i)
+/// Raises every lane of each vector to `2^250 - 1` using the standard addition chain.
+fn pow_2_250_minus_1<B: FBackend, const N: usize>(backend: B, value: [FVec; N]) -> [FVec; N] {
+    let mul = |a, b| mul_each(backend, a, b);
+    let a = backend.pow2k(value, 1);
+    let a2 = backend.pow2k(a, 2);
+    let b = mul(value, a2);
+    let c = mul(a, b);
+    let d = backend.pow2k(c, 1);
+    let e = mul(b, d);
+    let f = mul(backend.pow2k(e, 5), e);
+    let g = mul(backend.pow2k(f, 10), f);
+    let h = mul(backend.pow2k(g, 20), g);
+    let i = mul(backend.pow2k(h, 10), f);
+    let j = mul(backend.pow2k(i, 50), i);
+    let k = mul(backend.pow2k(j, 100), j);
+    mul(backend.pow2k(k, 50), i)
 }
 
-/// Raises every lane to `(p - 5) / 8 = 2^252 - 3` for point decompression.
-fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
-    backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
+/// Raises every lane of each vector to `(p - 5) / 8 = 2^252 - 3` for point decompression.
+fn pow_p58<B: FBackend, const N: usize>(backend: B, value: [FVec; N]) -> [FVec; N] {
+    mul_each(
+        backend,
+        value,
+        backend.pow2k(pow_2_250_minus_1(backend, value), 2),
+    )
+}
+
+/// Multiplies each vector of `a` by the corresponding vector of `b`.
+#[inline(always)]
+fn mul_each<B: FBackend, const N: usize>(backend: B, a: [FVec; N], mut b: [FVec; N]) -> [FVec; N] {
+    for (a, b) in a.into_iter().zip(&mut b) {
+        *b = backend.mul(a, *b);
+    }
+    b
 }
 
 /// Abstracts over group operations.
@@ -896,6 +991,9 @@ pub trait WithBackend {
     /// Run the computation with a concrete backend.
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
+
+// Constant-time multiplication of the Ed25519 basepoint, for key generation and signing.
+mod basepoint;
 
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;
