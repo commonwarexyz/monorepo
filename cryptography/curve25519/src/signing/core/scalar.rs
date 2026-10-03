@@ -219,19 +219,18 @@ impl Scalar {
     /// `256usize.div_ceil(width) + 1` unsigned windows' worth is always enough.
     pub const fn signed_digits<const N: usize>(&self, width: u32) -> [i32; N] {
         let half = 1i64 << (width - 1);
-        let full = 1i64 << width;
         let mut digits = [0i32; N];
         let mut carry = 0i64;
+        // Digits past the spare window stay zero: no window bits remain and the carry is zero.
+        let windows = 256usize.div_ceil(width as usize) + 1;
+        let end = if windows < N { windows } else { N };
         let mut i = 0;
-        while i < N {
+        while i < end {
+            // `raw` is at most `2^width`, so the carry is 1 exactly when `raw >= half`. Random
+            // digits make a branch on that comparison unpredictable.
             let raw = self.window(i, width) as i64 + carry;
-            if raw >= half {
-                digits[i] = (raw - full) as i32;
-                carry = 1;
-            } else {
-                digits[i] = raw as i32;
-                carry = 0;
-            }
+            carry = (raw + half) >> width;
+            digits[i] = (raw - (carry << width)) as i32;
             i += 1;
         }
         digits

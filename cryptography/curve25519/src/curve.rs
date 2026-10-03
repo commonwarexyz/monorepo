@@ -29,6 +29,7 @@ const BIAS_16P: [u64; 5] = [
 /// The five limbs use radix `2^51`. The representation is redundant: values need not be
 /// canonical, but every arithmetic operation accepts and returns limbs less than `2^52`.
 #[derive(Clone, Copy, Debug)]
+#[repr(transparent)]
 pub struct F(pub [u64; 5]);
 
 // Secret-dependent selection goes through `subtle`, whose `Choice` sits behind an optimization
@@ -410,8 +411,10 @@ pub trait FBackend: Copy {
 /// A compact point on the twisted Edwards curve in extended homogeneous coordinates.
 ///
 /// This is the scalar representation used directly for individual point operations and as the
-/// array-of-structures representation between vector operations.
+/// array-of-structures representation between vector operations. Its coordinates are laid out
+/// as 20 consecutive limbs, so backends can load several points straight into lanes.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct G {
     x: F,
     y: F,
@@ -570,8 +573,11 @@ impl G {
 
 /// A compact affine point prepared for mixed addition.
 ///
-/// This stores individual affine points and their precomputed `2d*x*y` coordinate.
+/// This stores individual affine points and their precomputed `2d*x*y` coordinate. Its
+/// coordinates are laid out as 15 consecutive limbs, so backends can load several points straight
+/// into lanes.
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct GAffine {
     x: F,
     y: F,
