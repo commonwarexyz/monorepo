@@ -1,22 +1,20 @@
 //! Policies that advance a batch's inactivity floor.
 //!
-//! [`merkleize`](super::any::batch::UnmerkleizedBatch::merkleize) and the store's
-//! [`apply_batch`](super::store::db::Db::apply_batch) read [`Policy::limits`] once. With
-//! [`Limits::Fixed`], the pass starts at the batch's inherited inactivity floor. While updates
-//! remain to decide, it moves the floor to the next active update and hands that update to
-//! [`Policy::decide`] as an [`Entry`]. Each inactive location the floor passes spends a skip.
-//! Keeping, evicting, or replacing the entry moves the floor one past it. The pass ends when
-//! `entries` updates are decided, when the policy stops at an entry, or when the floor reaches
-//! the batch's original tip. If neither an active update nor the original tip lies within the
-//! remaining skips, the floor advances by the remaining skips and the pass ends. The batch
-//! commits that floor, or the new commit location if its final state is empty.
+//! A batch reads [`Policy::limits`] once. Under [`Limits::Fixed`], a pass advances the floor from
+//! where the batch inherits it until `entries` updates are decided:
 //!
-//! Updates to keys the batch writes are inactive. Kept updates move to the tip as
-//! [`Limits::Proportional`] moves them. Evictions and replacements resolve as writes to their
-//! keys.
+//! - Each inactive location the floor passes spends a skip. Updates to keys the batch writes are
+//!   inactive.
+//! - Each active update the floor reaches goes to [`Policy::decide`] as an [`Entry`]. Keeping,
+//!   evicting, or replacing it moves the floor one past it. Stopping ends the pass with the floor
+//!   at it.
+//! - The pass also ends at the tip before the batch's writes. If the remaining skips cannot reach
+//!   the next active update or that tip, the floor advances by them and the pass ends.
 //!
-//! The pass reads only below the batch's original tip and below `entries + skips` locations past
-//! the inherited floor.
+//! Kept updates move to the tip as under [`Limits::Proportional`]. Evictions and replacements
+//! resolve as writes to their keys. The batch commits the floor the pass reached, or its commit
+//! location if its final state is empty. The pass reads only below the tip before the batch's
+//! writes and below `entries + skips` locations past the inherited floor.
 
 use crate::merkle::{Family, Location};
 use std::marker::PhantomData;
