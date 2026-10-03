@@ -142,7 +142,6 @@ use tracing::warn;
 
 pub mod batch;
 pub mod db;
-pub mod floor;
 pub mod operation;
 #[cfg(any(test, feature = "test-traits"))]
 pub mod traits;
@@ -2000,11 +1999,13 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    use crate::qmdb::any::{
+    use crate::qmdb::{
+        any::{
+            ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
+            traits::MerkleizedBatch as MerkleizedTrait,
+            unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
+        },
         floor::{Compact, Decision, Entry, Hold, Limits, Policy, Proportional},
-        ordered::{fixed::Db as OrderedFixedDb, variable::Db as OrderedVariableDb},
-        traits::MerkleizedBatch as MerkleizedTrait,
-        unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_parallel::Sequential;
@@ -2588,7 +2589,7 @@ pub(crate) mod test {
 
     /// Return the floor and the decided locations of a policy from `floor` that keeps every
     /// update, given the `active` locations below `tip`.
-    fn simulate(
+    pub(crate) fn simulate(
         active: &[u64],
         mut floor: u64,
         tip: u64,
@@ -6175,11 +6176,13 @@ mod bitmap_tests {
     //! variant, so one variant (`unordered::variable`) suffices as the test bed.
     use crate::{
         merkle::Location,
-        qmdb::any::{
-            BITMAP_CHUNK_BYTES,
+        qmdb::{
+            any::{
+                BITMAP_CHUNK_BYTES,
+                test::assert_rebuild_matches,
+                unordered::variable::test::{AnyTest, create_test_config},
+            },
             floor::Proportional,
-            test::assert_rebuild_matches,
-            unordered::variable::test::{AnyTest, create_test_config},
         },
     };
     use commonware_cryptography::{Hasher as _, Sha256};

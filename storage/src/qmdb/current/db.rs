@@ -1193,11 +1193,9 @@ mod tests {
     use crate::{
         merkle::{Bagging::ForwardFold, hasher::Standard as StandardHasher, mmb, mmr},
         qmdb::{
-            any::{
-                floor::Proportional,
-                traits::{DbAny, UnmerkleizedBatch as _},
-            },
+            any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
+            floor::Proportional,
         },
         translator::OneCap,
     };

@@ -10,7 +10,6 @@ use commonware_storage::{
     qmdb::{
         any::{
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
-            floor::Proportional,
             ordered::{
                 fixed::{
                     Db as OFixed,
@@ -29,6 +28,7 @@ use commonware_storage::{
             ordered::{fixed::Db as OCFixed, variable::Db as OCVariable},
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
         },
+        floor::Proportional,
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
     },

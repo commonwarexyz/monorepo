@@ -10,12 +10,13 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{floor::Proportional, ordered::Update, value::FixedEncoding as FixedEncodingGeneric},
+        any::{ordered::Update, value::FixedEncoding as FixedEncodingGeneric},
         current::{
             FixedConfig as Config,
             batch::{MerkleizedBatch, UnmerkleizedBatch},
             ordered::fixed::Db as CurrentDb,
         },
+        floor::Proportional,
     },
     translator::OneCap,
 };

@@ -521,7 +521,6 @@ pub mod tests {
         qmdb::{
             any::{
                 ValueEncoding,
-                floor::{Compact, Hold, Proportional},
                 operation::update,
                 test::{
                     Choice, Inspect, Links, Script, assert_exact, build, colliding_digest, counter,
@@ -536,6 +535,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             chain::Bounds,
+            floor::{Compact, Hold, Proportional},
             store::tests::{TestKey, TestValue},
             verify_proof,
         },

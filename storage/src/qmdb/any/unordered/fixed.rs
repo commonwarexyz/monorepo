@@ -149,7 +149,6 @@ pub(crate) mod test {
         qmdb::{
             SnapshotBuild as _,
             any::{
-                floor::{Compact, Proportional},
                 test::{
                     colliding_digest, fixed_db_config, fixed_db_config_partitioned,
                     fixed_db_config_with_strategy,
@@ -157,7 +156,9 @@ pub(crate) mod test {
                 unordered::{Update, fixed::Operation},
             },
             cache::Cache,
-            delete_key, update_key, verify_proof,
+            delete_key,
+            floor::{Compact, Proportional},
+            update_key, verify_proof,
         },
         translator::{OneCap, TwoCap},
     };

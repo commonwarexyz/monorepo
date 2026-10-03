@@ -151,7 +151,7 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         mmr,
-        qmdb::any::floor::{Compact, Proportional},
+        qmdb::floor::{Compact, Proportional},
         translator::TwoCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};

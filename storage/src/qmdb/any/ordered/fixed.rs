@@ -156,7 +156,6 @@ pub(crate) mod test {
         qmdb::{
             SnapshotBuild as _,
             any::{
-                floor::{Compact, Policy, Proportional},
                 ordered::{
                     Update,
                     test::{
@@ -166,6 +165,7 @@ pub(crate) mod test {
                 },
                 test::{fixed_db_config, fixed_db_config_partitioned},
             },
+            floor::{Compact, Policy, Proportional},
             verify_proof,
         },
         translator::{OneCap, TwoCap},

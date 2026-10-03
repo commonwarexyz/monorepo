@@ -10,7 +10,8 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Family as MerkleFamily, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{VariableConfig as Config, floor::Proportional, unordered::variable::Db},
+        any::{VariableConfig as Config, unordered::variable::Db},
+        floor::Proportional,
         verify_proof,
     },
     translator::TwoCap,

@@ -122,11 +122,11 @@ pub mod test {
         mmb, mmr,
         qmdb::{
             Error,
-            any::floor::Proportional,
             current::{
                 ordered::tests as shared,
                 tests::{fixed_config, fixed_config_partitioned},
             },
+            floor::Proportional,
         },
         translator::OneCap,
     };

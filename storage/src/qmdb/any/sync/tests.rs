@@ -2176,7 +2176,7 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb},
-        qmdb::any::{floor::Proportional, value::VariableEncoding},
+        qmdb::{any::value::VariableEncoding, floor::Proportional},
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;

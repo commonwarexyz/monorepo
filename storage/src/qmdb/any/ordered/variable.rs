@@ -155,13 +155,15 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         mmr,
-        qmdb::any::{
-            floor::{Compact, Proportional},
-            ordered::test::{
-                test_ordered_any_db_basic, test_ordered_any_db_empty,
-                test_ordered_any_update_collision_edge_case,
+        qmdb::{
+            any::{
+                ordered::test::{
+                    test_ordered_any_db_basic, test_ordered_any_db_empty,
+                    test_ordered_any_update_collision_edge_case,
+                },
+                test::variable_db_config,
             },
-            test::variable_db_config,
+            floor::{Compact, Proportional},
         },
         translator::TwoCap,
     };

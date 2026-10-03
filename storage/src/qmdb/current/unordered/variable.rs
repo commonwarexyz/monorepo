@@ -124,8 +124,8 @@ mod test {
     use crate::{
         mmr,
         qmdb::{
-            any::floor::Proportional,
             current::{tests::variable_config, unordered::tests as shared},
+            floor::Proportional,
         },
         translator::TwoCap,
     };

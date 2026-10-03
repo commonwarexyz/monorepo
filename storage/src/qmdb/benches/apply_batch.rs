@@ -13,9 +13,9 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::mmb::Family as Mmb,
-    qmdb::any::{
+    qmdb::{
+        any::traits::{BatchableDb, UnmerkleizedBatch},
         floor::Proportional,
-        traits::{BatchableDb, UnmerkleizedBatch},
     },
 };
 use commonware_utils::{NZU64, NZUsize, TestRng};

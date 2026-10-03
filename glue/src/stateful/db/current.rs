@@ -25,7 +25,6 @@ use commonware_storage::{
     qmdb::{
         Error,
         any::{
-            floor::Proportional,
             initial_root,
             operation::{Operation, Update},
             ordered, unordered,
@@ -36,6 +35,7 @@ use commonware_storage::{
             batch::{MerkleizedBatch, Staged, UnmerkleizedBatch},
             db::Db,
         },
+        floor::Proportional,
         operation::Key,
         sync::{self, Target as CurrentSyncTarget},
     },

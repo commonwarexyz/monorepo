@@ -16,7 +16,6 @@ use crate::{
         any::{
             self, ValueEncoding,
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
-            floor::{Limits, Policy},
             operation::{Operation, update},
         },
         bitmap::{Shared, fill_from},
@@ -25,6 +24,7 @@ use crate::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
         },
+        floor::{Limits, Policy},
         operation::Key,
     },
 };
@@ -513,8 +513,8 @@ where
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch. `policy` chooses how the floor advances (see
-    /// [`floor`](any::floor)). Pass [`Proportional`](any::floor::Proportional) for the default
-    /// compaction.
+    /// [`floor`](crate::qmdb::floor)). Pass [`Proportional`](crate::qmdb::floor::Proportional)
+    /// for the default compaction.
     ///
     /// # Errors
     ///
@@ -600,8 +600,8 @@ where
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch. `policy` chooses how the floor advances (see
-    /// [`floor`](any::floor)). Pass [`Proportional`](any::floor::Proportional) for the default
-    /// compaction.
+    /// [`floor`](crate::qmdb::floor)). Pass [`Proportional`](crate::qmdb::floor::Proportional)
+    /// for the default compaction.
     ///
     /// # Errors
     ///
@@ -671,8 +671,8 @@ where
     /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
     /// and return an `Arc<MerkleizedBatch>`.
     ///
-    /// `policy` chooses how the floor advances (see [`floor`](any::floor)). Pass
-    /// [`Proportional`](any::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
+    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///
@@ -737,8 +737,8 @@ where
     /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
     /// and return an `Arc<MerkleizedBatch>`.
     ///
-    /// `policy` chooses how the floor advances (see [`floor`](any::floor)). Pass
-    /// [`Proportional`](any::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
+    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///

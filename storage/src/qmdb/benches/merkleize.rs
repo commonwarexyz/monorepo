@@ -25,9 +25,9 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{self, full},
-    qmdb::any::{
+    qmdb::{
+        any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
         floor::Proportional,
-        traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
     },
     translator::EightCap,
 };

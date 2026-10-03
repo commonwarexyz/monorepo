@@ -13,10 +13,11 @@ use crate::{
     qmdb::{
         any::{
             self,
-            floor::Proportional,
             traits::{DbAny, UnmerkleizedBatch as _},
         },
-        current, immutable,
+        current,
+        floor::Proportional,
+        immutable,
     },
     translator::{OneCap, TwoCap},
 };
@@ -316,7 +317,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
 mod tests {
     use super::*;
     use crate::qmdb::{
-        any::floor::{Compact, Decision, Entry, Hold, Limits, Policy},
+        floor::{Compact, Decision, Entry, Hold, Limits, Policy},
         keyless, store,
     };
     use commonware_conformance::{Conformance, conformance_tests};
@@ -506,7 +507,7 @@ mod tests {
         (db, root)
     }
 
-    /// The policy a batch of the floor workload merkleizes with.
+    /// The policy a batch of the floor workload advances its floor with.
     #[derive(Clone, Copy)]
     enum Rule {
         /// [`Proportional`].
@@ -519,7 +520,7 @@ mod tests {
         Seeded { entries: usize, skips: u64 },
     }
 
-    /// The writes of a batch and the policy it merkleizes with.
+    /// The writes of a batch and the policy it advances its floor with.
     type Batch = (Vec<(Digest, Option<Digest>)>, Rule);
 
     /// A policy that keeps, evicts, replaces, or stops at each update by a rule over its
@@ -640,13 +641,13 @@ mod tests {
         }
     }
 
-    /// Floor-sensitive keyed workload. Returns the writes of each batch and the policy it
-    /// merkleizes with.
+    /// Floor-sensitive keyed workload. Returns the writes of each batch and the policy it advances
+    /// its floor with.
     ///
     /// After the first, each batch writes a few of many live keys, so each floor advance moves
     /// updates of unwritten keys and the number it moves shows in the root. Unless a step names
-    /// its policy, batches at indices 2, 4, and 6 modulo 8 merkleize with [`Hold`], with
-    /// [`Compact`] under small limits, and with [`Seeded`], and the rest with [`Proportional`].
+    /// its policy, batches at indices 2, 4, and 6 modulo 8 use [`Hold`], [`Compact`] under small
+    /// limits, and [`Seeded`], and the rest use [`Proportional`].
     ///
     /// 1. Create n keys and eight keys that share a translator bucket.
     /// 2. Update three live keys in each of 12 batches.
@@ -789,7 +790,7 @@ mod tests {
         (db, root)
     }
 
-    /// [`floor_batches`] on a store, whose own floor raise applies to every batch.
+    /// [`floor_batches`] on a store, each batch applied with its policy.
     struct StoreFloorStorage;
 
     impl StorageWorkload for StoreFloorStorage {
@@ -798,8 +799,24 @@ mod tests {
         async fn run(context: Ctx, seed: u64) -> Result<(), Self::Error> {
             let cfg = store_config("store", &context);
             let mut db = Store::init(context.child("db"), cfg, None).await?;
-            for (writes, _) in floor_batches(seed) {
-                (db, _) = db.apply_batch(writes.into_iter().collect()).await?;
+            for (writes, rule) in floor_batches(seed) {
+                let batch = writes.into_iter().collect();
+                (db, _) = match rule {
+                    Rule::Proportional => db.apply_batch(batch, &mut Proportional).await,
+                    Rule::Hold => db.apply_batch(batch, &mut Hold).await,
+                    Rule::Compact { entries, skips } => {
+                        let mut policy = Compact { entries, skips };
+                        db.apply_batch(batch, &mut policy).await
+                    }
+                    Rule::Seeded { entries, skips } => {
+                        let mut policy = Seeded {
+                            seed,
+                            entries,
+                            skips,
+                        };
+                        db.apply_batch(batch, &mut policy).await
+                    }
+                }?;
             }
             db.sync().await?;
             Ok(())

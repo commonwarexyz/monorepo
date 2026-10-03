@@ -2,14 +2,15 @@
 //!
 //! [`Proportional`] is the default compaction.
 //!
-//! [`merkleize`](super::batch::UnmerkleizedBatch::merkleize) reads [`Policy::limits`] once. With
-//! [`Limits::Fixed`], it starts at the batch's inherited inactivity floor. While updates remain
-//! to decide, it moves the floor to the next active update, spending a skip on each inactive
-//! location it passes, and hands that update to [`Policy::decide`] as an [`Entry`]. Keeping,
-//! evicting, or replacing the entry moves the floor one past it. The pass ends when `entries`
-//! updates are decided, when the policy stops at an entry, when the floor reaches the batch's
-//! original tip, or when the next active update, or the original tip if none remains, lies
-//! beyond the remaining skips, in which case the floor advances by the remaining skips. The
+//! [`merkleize`](super::any::batch::UnmerkleizedBatch::merkleize) and the store's
+//! [`apply_batch`](super::store::db::Db::apply_batch) read [`Policy::limits`] once. With
+//! [`Limits::Fixed`], the pass starts at the batch's inherited inactivity floor. While updates
+//! remain to decide, it moves the floor to the next active update, spending a skip on each
+//! inactive location it passes, and hands that update to [`Policy::decide`] as an [`Entry`].
+//! Keeping, evicting, or replacing the entry moves the floor one past it. The pass ends when
+//! `entries` updates are decided, when the policy stops at an entry, when the floor reaches the
+//! batch's original tip, or when the next active update, or the original tip if none remains,
+//! lies beyond the remaining skips, in which case the floor advances by the remaining skips. The
 //! batch commits that floor, or the new commit location if its final state is empty.
 //!
 //! Updates to keys the batch writes are inactive. Kept updates move to the tip as
@@ -29,8 +30,8 @@ type Brand<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limits {
     /// Move up to one active update to the tip for each operation the batch makes inactive: each
-    /// update it supersedes, each delete it appends, and its previous commit. [`Policy::decide`]
-    /// is not called.
+    /// update it supersedes, each delete it appends, and its previous commit. Moved updates lie
+    /// below the tip as it stood before the moves. [`Policy::decide`] is not called.
     Proportional,
     /// Decide at most `entries` active updates and pass at most `skips` inactive locations.
     Fixed {
@@ -62,7 +63,7 @@ pub trait Policy<F: Family, K, V> {
 /// ```
 /// use commonware_storage::{
 ///     merkle::Family,
-///     qmdb::any::floor::{Decision, Entry, Limits, Policy},
+///     qmdb::floor::{Decision, Entry, Limits, Policy},
 /// };
 ///
 /// struct Evict;
@@ -81,7 +82,7 @@ pub trait Policy<F: Family, K, V> {
 /// ```compile_fail
 /// use commonware_storage::{
 ///     merkle::Family,
-///     qmdb::any::floor::{Decision, Entry, Limits, Policy},
+///     qmdb::floor::{Decision, Entry, Limits, Policy},
 /// };
 ///
 /// struct Stash<F: Family>(Option<Entry<'static, F, u64, u64>>);

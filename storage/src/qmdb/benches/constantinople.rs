@@ -34,10 +34,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     merkle::{full, mmb},
-    qmdb::{
-        any::{FixedConfig, floor::Proportional},
-        current::FixedConfig as CurrentFixedConfig,
-    },
+    qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig, floor::Proportional},
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};

@@ -15,11 +15,9 @@
 //! the local lower bound.
 
 use crate::qmdb::{
-    any::{
-        floor::Proportional,
-        sync::tests::{ConfigOf, SyncTestHarness},
-    },
+    any::sync::tests::{ConfigOf, SyncTestHarness},
     current::tests::{fixed_config, variable_config},
+    floor::Proportional,
     sync::Database as SyncDatabase,
 };
 use commonware_cryptography::{Sha256, sha256::Digest};

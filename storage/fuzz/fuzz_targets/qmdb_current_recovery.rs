@@ -22,8 +22,8 @@ use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::floor::Proportional,
         current::{VariableConfig, unordered::variable::Db as Current},
+        floor::Proportional,
     },
     translator::TwoCap,
 };

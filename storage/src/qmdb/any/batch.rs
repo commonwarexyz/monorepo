@@ -12,13 +12,13 @@ use crate::{
         any::{
             ValueEncoding,
             db::Db,
-            floor::{Action, Entry, Limits, Policy},
             operation::{Operation, update},
             ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
         delete_known_loc,
+        floor::{Action, Entry, Limits, Policy},
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
     },
@@ -1649,8 +1649,8 @@ where
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::any::floor)). Pass
-    /// [`Proportional`](crate::qmdb::any::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
+    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///
@@ -1819,8 +1819,8 @@ where
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::any::floor)). Pass
-    /// [`Proportional`](crate::qmdb::any::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
+    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///
@@ -2501,8 +2501,8 @@ where
     /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
     /// and return an `Arc<MerkleizedBatch>`.
     ///
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::any::floor)). Pass
-    /// [`Proportional`](crate::qmdb::any::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
+    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///
@@ -2729,8 +2729,8 @@ where
     /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
     /// and return an `Arc<MerkleizedBatch>`.
     ///
-    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::any::floor)). Pass
-    /// [`Proportional`](crate::qmdb::any::floor::Proportional) for the default compaction.
+    /// `policy` chooses how the floor advances (see [`floor`](crate::qmdb::floor)). Pass
+    /// [`Proportional`](crate::qmdb::floor::Proportional) for the default compaction.
     ///
     /// # Errors
     ///
@@ -3832,14 +3832,13 @@ mod trait_impls {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         mmr,
         qmdb::{
             any::{
                 BITMAP_CHUNK_BYTES,
-                floor::{Decision, Entry, Hold, Proportional},
                 ordered::fixed::Db as OrderedFixedDb,
                 test::{colliding_digest, fixed_db_config},
                 traits::{DbAny, UnmerkleizedBatch as _},
@@ -3847,6 +3846,7 @@ mod tests {
                 value::FixedEncoding,
             },
             current,
+            floor::{Decision, Entry, Hold, Proportional},
         },
         translator::OneCap,
     };
@@ -3863,16 +3863,16 @@ mod tests {
 
     /// A tagged value that counts the clones of its original. A decoded value starts a new
     /// count.
-    struct CountedValue(u8, Arc<AtomicUsize>);
+    pub(crate) struct CountedValue(pub(crate) u8, Arc<AtomicUsize>);
 
     impl CountedValue {
         /// Return a value tagged `tag` with a new count.
-        fn new(tag: u8) -> Self {
+        pub(crate) fn new(tag: u8) -> Self {
             Self(tag, Arc::new(AtomicUsize::new(0)))
         }
 
         /// Return the number of clones of this value's original.
-        fn clones(&self) -> usize {
+        pub(crate) fn clones(&self) -> usize {
             self.1.load(AtomicOrdering::Relaxed)
         }
     }
@@ -3980,9 +3980,9 @@ mod tests {
     /// Evicts every update it reaches. Records each eviction's location, key, and value with the
     /// value's clone count before and after the eviction.
     #[derive(Default)]
-    struct Evict {
+    pub(crate) struct Evict {
         #[allow(clippy::type_complexity)]
-        evicted: Vec<(
+        pub(crate) evicted: Vec<(
             Location<mmr::Family>,
             sha256::Digest,
             CountedValue,
@@ -4302,9 +4302,9 @@ mod tests {
 
     /// Limits a pass to one entry on the first read of its limits and lifts every limit on later
     /// reads. Keeps every update and counts both.
-    struct Growing {
-        reads: Cell<usize>,
-        decided: usize,
+    pub(crate) struct Growing {
+        pub(crate) reads: Cell<usize>,
+        pub(crate) decided: usize,
     }
 
     impl Policy<mmr::Family, sha256::Digest, sha256::Digest> for Growing {

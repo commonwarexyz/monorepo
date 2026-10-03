@@ -27,12 +27,12 @@ pub mod tests {
             Error,
             any::{
                 ValueEncoding,
-                floor::Proportional,
                 operation::update::Unordered as UnorderedUpdate,
                 traits::{DbAny, UnmerkleizedBatch as _},
                 unordered::Operation,
             },
             current::{BitmapPrunedBits, proof::RangeProof, tests::apply_random_ops},
+            floor::Proportional,
             store::tests::{TestKey, TestValue},
         },
         translator::TwoCap,

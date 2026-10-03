@@ -371,7 +371,8 @@ mod tests {
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
         qmdb::{
-            any::{FixedConfig, floor::Proportional, unordered::fixed},
+            any::{FixedConfig, unordered::fixed},
+            floor::Proportional,
             sync,
         },
         translator::TwoCap,

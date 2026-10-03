@@ -9,12 +9,14 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::any::{
-        FixedConfig as Config,
-        batch::{MerkleizedBatch, UnmerkleizedBatch},
+    qmdb::{
+        any::{
+            FixedConfig as Config,
+            batch::{MerkleizedBatch, UnmerkleizedBatch},
+            ordered::{Update, fixed::Db as AnyDb},
+            value::FixedEncoding as FixedEncodingGeneric,
+        },
         floor::Proportional,
-        ordered::{Update, fixed::Db as AnyDb},
-        value::FixedEncoding as FixedEncodingGeneric,
     },
     translator::OneCap,
 };

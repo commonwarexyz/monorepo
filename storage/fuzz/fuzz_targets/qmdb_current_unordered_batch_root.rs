@@ -10,10 +10,11 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{floor::Proportional, unordered::fixed::Update},
+        any::unordered::fixed::Update,
         current::{
             FixedConfig as Config, batch::UnmerkleizedBatch, unordered::fixed::Db as CurrentDb,
         },
+        floor::Proportional,
     },
     translator::OneCap,
 };

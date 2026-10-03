@@ -99,6 +99,7 @@ pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
+pub mod floor;
 pub mod immutable;
 pub mod keyless;
 mod metrics;
@@ -1169,39 +1170,33 @@ where
     I: Index<Value = Location<F>>,
     C: Mutable<Item: Operation<F>>,
 {
-    /// Moves the given operation to the tip of the log if it is active, rendering its old location
-    /// inactive. If the operation was not active, then this is a no-op. Returns the helper and
-    /// whether the operation was moved.
-    async fn move_op_if_active(
-        mut self,
-        op: C::Item,
-        old_loc: Location<F>,
-    ) -> Result<(Self, bool), Error<F>> {
-        let Some(key) = op.key() else {
-            return Ok((self, false)); // operations without keys cannot be active
-        };
-
-        // If we find a snapshot entry corresponding to the operation, we know it's active.
-        let active = {
-            let Some(mut cursor) = self.snapshot.get_mut(key) else {
-                return Ok((self, false));
-            };
-            if cursor.find(|&loc| loc == old_loc) {
-                // Update the operation's snapshot location to point to tip.
-                cursor.update(Location::<F>::new(self.log.bounds().end));
-                true
-            } else {
-                false
+    /// Return the location and operation of the first active operation in `[loc, end)`, or
+    /// `None` if every operation in the range is inactive.
+    async fn active(
+        &self,
+        mut loc: Location<F>,
+        end: Location<F>,
+    ) -> Result<Option<(Location<F>, C::Item)>, Error<F>> {
+        while loc < end {
+            let op = self.log.read(*loc).await?;
+            let active = op
+                .key()
+                .is_some_and(|key| self.snapshot.get(key).any(|&active| active == loc));
+            if active {
+                return Ok(Some((loc, op)));
             }
-        };
-        if !active {
-            return Ok((self, false));
+            loc += 1;
         }
+        Ok(None)
+    }
 
-        // Apply the operation at tip.
-        (self.log, _) = self.log.append(&op).await?;
-
-        Ok((self, true))
+    /// Move the active operation at `loc` to the tip of the log as `op`, an update of its key.
+    async fn relocate(mut self, loc: Location<F>, op: &C::Item) -> Result<Self, Error<F>> {
+        let key = op.key().expect("updates have keys");
+        let tip = Location::new(self.log.bounds().end);
+        update_known_loc(self.snapshot, key, loc, tip);
+        (self.log, _) = self.log.append(op).await?;
+        Ok(self)
     }
 
     /// Raise the inactivity floor by taking one _step_, which involves searching below `tip` for
@@ -1210,20 +1205,14 @@ where
     /// Returns the helper and the new inactivity floor location, which is `tip` when no active
     /// operation remains below it.
     async fn raise_floor(
-        mut self,
-        mut inactivity_floor_loc: Location<F>,
+        self,
+        inactivity_floor_loc: Location<F>,
         tip: Location<F>,
     ) -> Result<(Self, Location<F>), Error<F>> {
-        while inactivity_floor_loc < tip {
-            let old_loc = inactivity_floor_loc;
-            inactivity_floor_loc += 1;
-            let op = self.log.read(*old_loc).await?;
-            let moved;
-            (self, moved) = self.move_op_if_active(op, old_loc).await?;
-            if moved {
-                break;
-            }
-        }
-        Ok((self, inactivity_floor_loc))
+        let Some((loc, op)) = self.active(inactivity_floor_loc, tip).await? else {
+            return Ok((self, tip));
+        };
+        let helper = self.relocate(loc, &op).await?;
+        Ok((helper, loc + 1))
     }
 }

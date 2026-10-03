@@ -508,7 +508,7 @@ hash = "a023b1399b8656e8e113787f935d10013606440d43c8cb7c818749f6f09fc2fd"
 
 ["commonware_storage::qmdb::conformance::tests::StorageConformance<StoreFloorStorage>"]
 n_cases = 200
-hash = "2ed9ad508de10e8600e307174d4255d537bccae2801ff800780acd480350cece"
+hash = "41e1e4693b5b53c49e36891d2fb7ccc138ff7837280e71d0b10c851f5b0b101d"
 
 ["commonware_storage::qmdb::current::ordered::tests::conformance::CodecConformance<constant::ExclusionProof<mmb::Family,U64,\nFixedEncoding<U64>,Sha256Digest,32>>"]
 n_cases = 65536

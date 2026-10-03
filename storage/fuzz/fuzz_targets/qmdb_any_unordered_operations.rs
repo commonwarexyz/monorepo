@@ -13,10 +13,10 @@ use commonware_storage::{
         any::{
             FixedConfig as Config,
             db::Db as AnyDb,
-            floor::Proportional,
             unordered::{Operation, Update},
             value::FixedEncoding,
         },
+        floor::Proportional,
         verify_proof,
     },
     translator::EightCap,

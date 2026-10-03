@@ -19,11 +19,9 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{self, full, mmb::Family as Mmb},
     qmdb::{
-        any::{
-            floor::Proportional,
-            traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
-        },
+        any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
         current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
+        floor::Proportional,
     },
     translator::EightCap,
 };

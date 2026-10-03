@@ -19,8 +19,8 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb},
     qmdb::{
-        any::floor::Proportional,
         current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+        floor::Proportional,
     },
     translator::TwoCap,
 };

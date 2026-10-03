@@ -13,12 +13,13 @@ use commonware_storage::{
     merkle::{Graftable, PendingChunk as _, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         self,
-        any::{floor::Proportional, ordered::fixed::Update, value::FixedEncoding},
+        any::{ordered::fixed::Update, value::FixedEncoding},
         current::{
             FixedConfig,
             ordered::{fixed::Db, proof::ExclusionProof},
             proof::constant::OperationProof,
         },
+        floor::Proportional,
     },
     translator::OneCap,
 };

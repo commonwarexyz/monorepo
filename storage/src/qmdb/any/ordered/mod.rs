@@ -443,10 +443,10 @@ mod test {
         qmdb::{
             any::{
                 self,
-                floor::Proportional,
                 traits::{DbAny, UnmerkleizedBatch as _},
             },
             current,
+            floor::Proportional,
         },
         translator::OneCap,
     };

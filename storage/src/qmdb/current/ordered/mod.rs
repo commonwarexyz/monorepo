@@ -38,7 +38,6 @@ pub mod tests {
             Error,
             any::{
                 ValueEncoding,
-                floor::Proportional,
                 ordered::{Operation, Update},
                 traits::{DbAny, UnmerkleizedBatch as _},
                 value::{FixedEncoding, VariableEncoding},
@@ -48,6 +47,7 @@ pub mod tests {
                 proof::{RangeProof, constant::OperationProof},
                 tests::apply_random_ops,
             },
+            floor::Proportional,
             store::tests::{TestKey, TestValue},
         },
         translator::OneCap,

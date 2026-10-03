@@ -125,12 +125,12 @@ pub mod test {
         merkle::full::Config as MerkleConfig,
         mmr,
         qmdb::{
-            any::floor::Proportional,
             current::{
                 FixedConfig,
                 tests::{fixed_config, fixed_config_partitioned},
                 unordered::tests as shared,
             },
+            floor::Proportional,
         },
         translator::{OneCap, TwoCap},
     };
