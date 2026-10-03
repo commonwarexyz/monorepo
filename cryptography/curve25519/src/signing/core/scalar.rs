@@ -167,6 +167,7 @@ impl Scalar {
     }
 
     /// Returns the bits of this scalar's canonical representative, most significant first.
+    #[cfg(test)]
     pub fn bits_be(&self) -> impl Iterator<Item = bool> + '_ {
         (0..256)
             .rev()
@@ -249,6 +250,106 @@ impl Scalar {
     pub fn mul_mod_l(&self, rhs: &Self) -> Self {
         barrett_reduce(limbs_mul_wide(&self.0, &rhs.0))
     }
+
+    /// Recodes this scalar into width-`W` non-adjacent form, least significant digit first.
+    ///
+    /// The digits sum to this scalar with weights `2^i`. Every nonzero digit is odd with
+    /// magnitude below `2^(W-1)`, and any `W` consecutive digits hold at most one nonzero digit.
+    pub const fn naf<const W: usize>(&self) -> [i8; 256] {
+        const { assert!(2 <= W && W <= 8) };
+        // A zero fifth limb lets windows starting near bit 255 read past it. A carry into the
+        // window at `position` is a pending `+1` at that bit. Scalars are below `2^253`, so
+        // every carry is absorbed by bit 255.
+        let limbs = [self.0[0], self.0[1], self.0[2], self.0[3], 0];
+        let width = 1u64 << W;
+        let mut digits = [0i8; 256];
+        let mut carry = 0;
+        let mut position = 0;
+        while position < 256 {
+            let (index, bit) = (position / 64, position % 64);
+            let mut bits = limbs[index] >> bit;
+            if bit + W > 64 {
+                bits |= limbs[index + 1] << (64 - bit);
+            }
+            let window = (bits & (width - 1)) + carry;
+            if window & 1 == 0 {
+                position += 1;
+                continue;
+            }
+            if window < width / 2 {
+                carry = 0;
+                digits[position] = window as i8;
+            } else {
+                carry = 1;
+                digits[position] = (window as i16 - width as i16) as i8;
+            }
+            position += W;
+        }
+        digits
+    }
+
+    /// Returns the low and high 128-bit halves of this scalar's canonical representative.
+    pub const fn halves(&self) -> (u128, u128) {
+        (
+            self.0[0] as u128 | (self.0[1] as u128) << 64,
+            self.0[2] as u128 | (self.0[3] as u128) << 64,
+        )
+    }
+
+    /// Returns `(u, v)` with `v = u*self (mod L)`, `0 < |u| < 2^127`, and `v < 2^126`.
+    ///
+    /// Runs the extended Euclidean algorithm on `(L, self)` and stops at the first remainder
+    /// below `2^126`, the half-size decomposition of Antipa et al., "Accelerated Verification of
+    /// ECDSA Signatures" (SAC 2005). Variable-time, so `self` must be public.
+    pub fn half_size(&self) -> (i128, u128) {
+        // Each remainder `r` is paired with its coefficient `t`, keeping `r = t*self (mod L)`.
+        // Coefficients alternate in sign and satisfy `|t1|*r0 <= L` for consecutive pairs, so
+        // stopping once `r1 < 2^126 <= r0` gives `|t1| <= L / 2^126 < 2^127`. Every partial
+        // coefficient lies between two consecutive ones, so `i128` never overflows.
+        let (mut r0, mut t0) = (L, 0i128);
+        let (mut r1, mut t1) = (self.0, 1i128);
+        while limbs_bits(&r1) > 126 {
+            // Reduces `r0` modulo `r1` by subtracting shifted copies of `r1`. Since
+            // `r0 < 2^253` and `r1 >= 2^126`, every shift is below 127.
+            while !limbs_lt(&r0, &r1) {
+                let mut shift = limbs_bits(&r0) - limbs_bits(&r1);
+                let mut shifted = limbs_shl(&r1, shift);
+                if limbs_lt(&r0, &shifted) {
+                    shift -= 1;
+                    shifted = limbs_shl(&r1, shift);
+                }
+                r0 = limbs_sub(&r0, &shifted);
+                t0 -= t1 << shift;
+            }
+            core::mem::swap(&mut r0, &mut r1);
+            core::mem::swap(&mut t0, &mut t1);
+        }
+        (t1, r1[0] as u128 | (r1[1] as u128) << 64)
+    }
+}
+
+/// Returns the bit length of a 256-bit integer.
+fn limbs_bits(a: &[u64; 4]) -> u32 {
+    for i in (0..4).rev() {
+        if a[i] != 0 {
+            return 64 * i as u32 + 64 - a[i].leading_zeros();
+        }
+    }
+    0
+}
+
+/// Returns `a << shift` for `shift < 256`, discarding bits above `2^256`.
+fn limbs_shl(a: &[u64; 4], shift: u32) -> [u64; 4] {
+    let words = (shift / 64) as usize;
+    let bits = shift % 64;
+    let mut out = [0u64; 4];
+    for i in words..4 {
+        out[i] = a[i - words] << bits;
+        if bits != 0 && i > words {
+            out[i] |= a[i - words - 1] >> (64 - bits);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -439,6 +540,82 @@ mod tests {
                     let windows = 256usize.div_ceil(width as usize) + 1;
                     assert!(digits[windows..].iter().all(|&digit| digit == 0));
                 }
+                Ok(())
+            });
+    }
+
+    fn check_naf<const W: usize>(scalar: &Scalar) {
+        let digits = scalar.naf::<W>();
+        let mut reconstructed = Scalar::ZERO;
+        let mut previous = None;
+        for (position, &digit) in digits.iter().enumerate().rev() {
+            reconstructed = reconstructed.add_mod_l(&reconstructed);
+            if digit == 0 {
+                continue;
+            }
+            assert_ne!(digit % 2, 0, "W={W} position={position}");
+            assert!(
+                digit.unsigned_abs() < 1 << (W - 1),
+                "W={W} position={position}"
+            );
+            if let Some(previous) = previous {
+                assert!(previous - position >= W, "W={W} position={position}");
+            }
+            previous = Some(position);
+            let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
+            let term = if digit < 0 {
+                magnitude.neg_mod_l()
+            } else {
+                magnitude
+            };
+            reconstructed = reconstructed.add_mod_l(&term);
+        }
+        assert_eq!(reconstructed.0, scalar.0, "W={W}");
+    }
+
+    #[test]
+    fn naf_reconstructs_value_with_sparse_odd_digits() {
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let scalar: Scalar = u.arbitrary()?;
+                check_naf::<2>(&scalar);
+                check_naf::<5>(&scalar);
+                check_naf::<8>(&scalar);
+                Ok(())
+            });
+    }
+
+    /// Checks [`Scalar::half_size`]'s bounds and congruence, including inputs that skip the
+    /// reduction loop and inputs whose first quotient spans over 100 bits.
+    #[test]
+    fn half_size_returns_short_multiple() {
+        let check = |scalar: Scalar| {
+            let (u, v) = scalar.half_size();
+            assert_ne!(u, 0);
+            assert!(u.unsigned_abs() < 1 << 127);
+            assert!(v < 1 << 126);
+            let magnitude = Scalar::from_u128(u.unsigned_abs());
+            let u = if u < 0 {
+                magnitude.neg_mod_l()
+            } else {
+                magnitude
+            };
+            assert_eq!(u.mul_mod_l(&scalar).0, Scalar::from_u128(v).0);
+        };
+
+        for value in [0, 1, 3, (1 << 126) - 1, 1 << 126, 1 << 127, u128::MAX] {
+            check(Scalar::from_u128(value));
+        }
+        check(Scalar([0, 0, 1, 0]));
+        check(Scalar([0, 0, 0, 1 << 59]));
+        check(Scalar(limbs_sub(&L, &[1, 0, 0, 0])));
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(1024)
+            .test(|u| {
+                check(u.arbitrary()?);
                 Ok(())
             });
     }

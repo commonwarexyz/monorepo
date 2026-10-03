@@ -630,23 +630,38 @@ fn zip215_decompression_and_group_laws() {
 
 #[cfg(test)]
 #[test]
-fn secret_scalar_multiplication_matches_public() {
-    commonware_invariants::minifuzz::Builder::default()
-        .with_seed(0)
-        .with_search_limit(32)
-        .test(|u| {
-            let scalar: [u8; 32] = u.arbitrary()?;
-            let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?)
-                .unwrap()
-                .to_extended();
-            let point = GAffine::BASEPOINT.to_extended().add(torsion);
-            let bits = (0..256).rev().map(|i| scalar[i / 8] >> (i % 8) & 1 == 1);
-            assert_eq!(
-                point.scalar_mul_secret(&scalar).to_bytes(),
-                point.scalar_mul(bits).to_bytes()
-            );
-            Ok(())
-        });
+fn basepoint_128_is_doubled_basepoint() {
+    let mut point = GAffine::BASEPOINT.to_extended();
+    for _ in 0..128 {
+        point = point.double();
+    }
+    let expected = point.to_affine();
+    let actual = GAffine::BASEPOINT_128;
+    assert_eq!(actual.x.to_bytes(), expected.x.to_bytes());
+    assert_eq!(actual.y.to_bytes(), expected.y.to_bytes());
+    assert_eq!(actual.t2d.to_bytes(), expected.t2d.to_bytes());
+}
+
+/// Affine conversion, compression, and negation agree with their extended counterparts on
+/// points with `Z != 1`, including every ZIP215 torsion point.
+#[cfg(test)]
+#[test]
+fn affine_conversion_matches_extended() {
+    for encoding in ZIP215_POINTS {
+        let torsion = GAffine::decompress(&encoding).unwrap().to_extended();
+        let point = GAffine::BASEPOINT.to_extended().double().add(torsion);
+        let affine = point.to_affine();
+        assert_eq!(affine.to_bytes(), point.to_bytes());
+
+        // Decompression recomputes `x` and `2d*x*y` from the canonical encoding.
+        let decoded = GAffine::decompress(&affine.to_bytes()).unwrap();
+        assert_eq!(affine.x.to_bytes(), decoded.x.to_bytes());
+        assert_eq!(affine.t2d.to_bytes(), decoded.t2d.to_bytes());
+
+        let negated = affine.negate();
+        assert_eq!(negated.to_bytes(), point.negate().to_bytes());
+        assert!(negated.to_extended().add(point).is_identity());
+    }
 }
 
 /// Checks the runtime dispatch path as one multi-operation computation.

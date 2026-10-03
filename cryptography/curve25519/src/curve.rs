@@ -213,7 +213,7 @@ impl F {
     }
 
     /// Returns `self * rhs`.
-    #[inline]
+    #[inline(always)]
     pub fn mul(self, rhs: Self) -> Self {
         // Accumulate the nine schoolbook columns, then fold columns 5 through 8 down using
         // `2^255 = 19 (mod p)`. At the input bound, every folded column remains below `2^112`.
@@ -235,12 +235,17 @@ impl F {
     }
 
     /// Returns `self * self` using one product for each pair of distinct limbs.
-    #[inline]
+    #[inline(always)]
     pub fn square(self) -> Self {
         let limbs = self.0;
         let mut limbs_19 = limbs;
         for limb in &mut limbs_19[3..] {
             *limb *= 19;
+        }
+        // Each product of distinct limbs occurs twice, so it takes its left factor from `limbs_2`.
+        let mut limbs_2 = limbs;
+        for limb in &mut limbs_2[..4] {
+            *limb *= 2;
         }
 
         let mut c = [0u128; 5];
@@ -252,8 +257,8 @@ impl F {
                 } else {
                     (column - limbs.len(), limbs_19[j])
                 };
-                let product = u128::from(limbs[i]) * u128::from(rhs);
-                c[column] += if i == j { product } else { 2 * product };
+                let lhs = if i == j { limbs[i] } else { limbs_2[i] };
+                c[column] += u128::from(lhs) * u128::from(rhs);
             }
         }
         Self::from_wide(c)
@@ -454,6 +459,18 @@ impl G {
         bytes
     }
 
+    /// Converts this point to affine representation.
+    pub fn to_affine(self) -> GAffine {
+        let z_inverse = self.z.invert();
+        let x = self.x.mul(z_inverse);
+        let y = self.y.mul(z_inverse);
+        GAffine {
+            x,
+            y,
+            t2d: x.mul(y).mul(F::EDWARDS_D2),
+        }
+    }
+
     /// Negates this point.
     pub fn negate(self) -> Self {
         Self {
@@ -495,6 +512,7 @@ impl G {
     }
 
     /// Adds an affine point using its precomputed `2d*x*y` coordinate.
+    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
     #[inline]
     pub fn add_mixed(self, rhs: GAffine) -> Self {
         let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
@@ -533,6 +551,7 @@ impl G {
     }
 
     /// Multiplies this point by a public scalar bit sequence using variable-time double-and-add.
+    #[cfg(test)]
     pub fn scalar_mul(self, bits: impl IntoIterator<Item = bool>) -> Self {
         let mut result = Self::IDENTITY;
         for bit in bits {
@@ -540,21 +559,6 @@ impl G {
             if bit {
                 result = result.add(self);
             }
-        }
-        result
-    }
-
-    /// Multiplies this point by a secret 256-bit little-endian scalar.
-    ///
-    /// This performs one doubling and one addition per bit, selecting the result without
-    /// secret-dependent branches or indexing.
-    pub fn scalar_mul_secret(self, scalar: &[u8; 32]) -> Self {
-        let mut result = Self::IDENTITY;
-        for i in (0..256).rev() {
-            let doubled = result.double();
-            let added = doubled.add(self);
-            let bit = Choice::from(scalar[i / 8] >> (i % 8) & 1);
-            result = Self::conditional_select(&doubled, &added, bit);
         }
         result
     }
@@ -618,6 +622,47 @@ impl GAffine {
             1953934009299142,
         ]),
     };
+
+    /// `2^128` times the base point, prepared for mixed addition.
+    pub const BASEPOINT_128: Self = Self {
+        x: F([
+            78814272546852,
+            343446598238096,
+            1469662686845463,
+            446722075312752,
+            1339733442806879,
+        ]),
+        y: F([
+            770831939905131,
+            1066752177064823,
+            855905013023480,
+            1194941381303059,
+            1674322643330780,
+        ]),
+        t2d: F([
+            22893968530686,
+            2235758574399251,
+            1661465835630252,
+            925707319443452,
+            1203475116966621,
+        ]),
+    };
+
+    /// Compresses this point to its canonical Ed25519 encoding.
+    pub fn to_bytes(self) -> [u8; 32] {
+        let mut bytes = self.y.to_bytes();
+        bytes[31] |= u8::from(self.x.is_odd()) << 7;
+        bytes
+    }
+
+    /// Negates this point.
+    pub fn negate(self) -> Self {
+        Self {
+            x: self.x.neg(),
+            y: self.y,
+            t2d: self.t2d.neg(),
+        }
+    }
 
     /// Decompresses a point encoding, accepting non-canonical `y` values and negative zero
     /// (`x = 0` with the sign bit set) per ZIP215.
@@ -946,6 +991,9 @@ pub trait WithBackend {
     /// Run the computation with a concrete backend.
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
+
+// Constant-time multiplication of the Ed25519 basepoint, for key generation and signing.
+mod basepoint;
 
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;

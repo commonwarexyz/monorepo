@@ -90,9 +90,7 @@ impl SigningKey {
         let mut wide_scalar = Zeroizing::new([0u8; 64]);
         wide_scalar[..32].copy_from_slice(&scalar_le_bytes[..]);
         let scalar = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&wide_scalar));
-        let point = GAffine::BASEPOINT
-            .to_extended()
-            .scalar_mul_secret(&scalar_le_bytes);
+        let point = G::mul_base_secret(&scalar_le_bytes).to_affine();
         let verifying_key = VerifyingKey {
             bytes: core::VerifyingKeyBytes::new(point.to_bytes()),
             point: Some(point),
@@ -116,10 +114,7 @@ impl SigningKey {
         );
         let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
         let nonce_bytes = Zeroizing::new(nonce.to_bytes());
-        let r_bytes = GAffine::BASEPOINT
-            .to_extended()
-            .scalar_mul_secret(&nonce_bytes)
-            .to_bytes();
+        let r_bytes = G::mul_base_secret(&nonce_bytes).to_bytes();
 
         let challenge_digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
@@ -217,7 +212,7 @@ pub struct VerifyingKey {
     /// signature verification, so that we can more efficiently parse them in batch.
     bytes: core::VerifyingKeyBytes,
     /// If available, the point associated with these bytes.
-    point: Option<G>,
+    point: Option<GAffine>,
 }
 
 impl PartialEq for VerifyingKey {
@@ -297,37 +292,12 @@ impl arbitrary::Arbitrary<'_> for VerifyingKey {
 
 impl VerifyingKey {
     fn verify_message(&self, msg: &[u8], sig: &Signature) -> bool {
-        let r_bytes: [u8; 32] = sig.bytes[..32].try_into().expect("signature is 64 bytes");
-        let s_bytes: [u8; 32] = sig.bytes[32..].try_into().expect("signature is 64 bytes");
-        let Some(s) = Scalar::from_canonical_bytes(&s_bytes) else {
-            return false;
-        };
-        let Some(r) = GAffine::decompress(&r_bytes) else {
-            return false;
-        };
-        let a = match self.point {
-            Some(point) => point,
-            None => {
-                let Some(point) = GAffine::decompress(self.bytes.as_bytes()) else {
-                    return false;
-                };
-                point.to_extended()
-            }
-        };
-
-        let digest: [u8; 64] = sha2::Sha512::new()
-            .chain(r_bytes)
-            .chain(self.bytes.as_bytes())
-            .chain(msg)
-            .finalize_fixed()
-            .into();
-        let k = Scalar::from_bytes_mod_order_wide(&digest);
-
-        let sb = GAffine::BASEPOINT.to_extended().scalar_mul(s.bits_be());
-        let ka = a.scalar_mul(k.bits_be());
-        sb.add(ka.add_mixed(r).negate())
-            .mul_by_cofactor()
-            .is_identity()
+        core::verify(
+            &self.bytes,
+            self.point.as_ref(),
+            &core::Signature::from_bytes(sig.bytes),
+            msg,
+        )
     }
 
     /// Verifies `sig` over the namespaced message, per the [module's validation
