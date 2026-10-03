@@ -8,10 +8,13 @@
 //! generated here are biased toward the shapes and lengths those
 //! specializations match on.
 
-use crate::Hasher;
+use crate::{Hasher, blake3::TASK_LEN};
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_parallel::Sequential;
+use commonware_parallel::{Rayon, Sequential};
+use commonware_utils::{NZUsize, TestRng};
 use core::{fmt::Debug, marker::PhantomData};
+use rand::Rng as _;
+use std::sync::OnceLock;
 
 /// Pick a contiguous message length biased toward the boundaries of the
 /// specialized paths: the pair kernels at 64 and 72 bytes, SHA-256's
@@ -57,6 +60,21 @@ fn arbitrary_batch_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
         17 => 2048,
         18 => 2049,
         _ => u.int_in_range(0..=256)?,
+    })
+}
+
+/// Pick an offset of at most five [TASK_LEN]s, biased toward the multiples of
+/// [TASK_LEN] where BLAKE3 splits long messages into subtrees, and toward one
+/// byte or one chunk to either side of them.
+fn arbitrary_offset(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
+    let tasks = u.int_in_range(1..=4)? * TASK_LEN;
+    Ok(match u.int_in_range(0..=5)? {
+        0 => tasks - 1024,
+        1 => tasks - 1,
+        2 => tasks,
+        3 => tasks + 1,
+        4 => tasks + 1024,
+        _ => tasks + u.int_in_range(0..=TASK_LEN)?,
     })
 }
 
@@ -272,6 +290,71 @@ impl<H: Hasher> BatchPlan<H> {
     }
 }
 
+/// A message of 63 KiB to 320 KiB, given as parts, to hash through
+/// [Hasher::hash_with] across a parallel strategy.
+pub struct ParallelPlan<H: Hasher> {
+    seed: u64,
+    len: usize,
+    cuts: Vec<usize>,
+    _hasher: PhantomData<H>,
+}
+
+impl<H: Hasher> Debug for ParallelPlan<H> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ParallelPlan")
+            .field("seed", &self.seed)
+            .field("len", &self.len)
+            .field("cuts", &self.cuts)
+            .finish()
+    }
+}
+
+impl<H: Hasher> Arbitrary<'_> for ParallelPlan<H> {
+    fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let len = arbitrary_offset(u)?;
+
+        // Cut anywhere, near a subtree boundary, or again at the previous cut
+        // (or the start) to leave an empty part.
+        let mut cuts = Vec::new();
+        for _ in 0..u.int_in_range(0..=3)? {
+            let cut = match u.int_in_range(0..=2)? {
+                0 => u.int_in_range(0..=len)?,
+                1 => arbitrary_offset(u)?.min(len),
+                _ => cuts.last().copied().unwrap_or(0),
+            };
+            cuts.push(cut);
+        }
+        cuts.sort_unstable();
+        Ok(Self {
+            seed: u.arbitrary()?,
+            len,
+            cuts,
+            _hasher: PhantomData,
+        })
+    }
+}
+
+impl<H: Hasher> ParallelPlan<H> {
+    /// Check that [Hasher::hash_with] across two workers agrees with
+    /// [Hasher::hash].
+    pub fn run(self) {
+        static STRATEGY: OnceLock<Rayon> = OnceLock::new();
+        let strategy = STRATEGY.get_or_init(|| Rayon::new(NZUsize!(2)).unwrap());
+
+        // Expand the seed into the message and cut it into parts.
+        let mut message = vec![0; self.len];
+        TestRng::new(self.seed).fill_bytes(&mut message);
+        let mut parts = Vec::with_capacity(self.cuts.len() + 1);
+        let mut start = 0;
+        for cut in self.cuts {
+            parts.push(&message[start..cut]);
+            start = cut;
+        }
+        parts.push(&message[start..]);
+        assert_eq!(H::hash_with(strategy, &parts), H::hash(&parts));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,6 +442,37 @@ mod tests {
     #[test]
     fn test_fuzz_hash_many_blake3() {
         test_fuzz_hash_many::<Blake3>();
+    }
+
+    /// Check long messages through a parallel strategy, and that the generator
+    /// reaches messages that fork, cuts at subtree boundaries, and empty middle
+    /// parts.
+    #[test]
+    fn test_fuzz_parallel_blake3() {
+        let mut saw_fork = false;
+        let mut saw_boundary = false;
+        let mut saw_empty = false;
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(256)
+            .test(|u| {
+                let plan = u.arbitrary::<ParallelPlan<Blake3>>()?;
+                let inner = |cut: &usize| (1..plan.len).contains(cut);
+                saw_fork |= plan.len >= 2 * TASK_LEN;
+                saw_boundary |= plan
+                    .cuts
+                    .iter()
+                    .any(|cut| inner(cut) && cut % TASK_LEN == 0);
+                saw_empty |= plan
+                    .cuts
+                    .windows(2)
+                    .any(|pair| pair[0] == pair[1] && inner(&pair[0]));
+                plan.run();
+                Ok(())
+            });
+        assert!(saw_fork);
+        assert!(saw_boundary);
+        assert!(saw_empty);
     }
 
     #[test]
