@@ -57,7 +57,7 @@ use commonware_utils::{NZU64, NZUsize, channel::oneshot};
 use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
 
 pub(crate) const DEFAULT_MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
-const POLL: Duration = Duration::from_millis(50);
+pub(crate) const POLL: Duration = Duration::from_millis(50);
 /// Marshal Twins' budget includes its scripted prefix and slower links.
 const MARSHAL_TWINS_LIVENESS_WINDOW: Duration = Duration::from_secs(360);
 const LEADER_TIMEOUT_MILLIS: u64 = 1_000;
@@ -92,6 +92,9 @@ pub(crate) trait TwinsBlockBuilder<P: Simplex>:
         reporter: DeliveryReporter<B<P>>,
     ) -> Self;
 
+    /// Walk `depth` ancestors past the parent on every propose and verify.
+    fn with_ancestry_depth(self, depth: u8) -> Self;
+
     fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &Ctx<P>) -> bool;
 }
 
@@ -112,6 +115,10 @@ impl<P: Simplex> TwinsBlockBuilder<P> for AlwaysAcceptBlockBuilderApp<Ctx<P>, Sc
             .with_reporter(reporter)
     }
 
+    fn with_ancestry_depth(self, depth: u8) -> Self {
+        Self::with_ancestry_depth(self, depth)
+    }
+
     fn rejects(_choice: ApplicationChoice, _config: FaultyConfig, _context: &Ctx<P>) -> bool {
         false
     }
@@ -128,6 +135,10 @@ impl<P: Simplex> TwinsBlockBuilder<P> for SelectedBlockBuilderApp<Ctx<P>, Scheme
         Self::new(choice, config, verification_delay)
             .with_block_contexts(block_contexts)
             .with_reporter(reporter)
+    }
+
+    fn with_ancestry_depth(self, depth: u8) -> Self {
+        Self::with_ancestry_depth(self, depth)
     }
 
     fn rejects(choice: ApplicationChoice, config: FaultyConfig, context: &Ctx<P>) -> bool {

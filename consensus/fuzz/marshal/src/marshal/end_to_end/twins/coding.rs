@@ -473,6 +473,7 @@ mod tests {
                 },
                 trailing_blocks: 1,
                 forwarding: ForwardPolicy::Disabled,
+                floor: None,
             },
         );
     }

@@ -383,17 +383,20 @@ pub(crate) fn check_local_blocks<B, D, K>(
     K: PublicKey,
 {
     check_in_order(idx, &app.delivered(), floor, stack);
-    check_parent_linkage(idx, &app.blocks(), genesis, stack);
+    check_parent_linkage(idx, &app.blocks(), genesis, floor, stack);
 }
 
 /// Invariant: every pair of consecutively delivered blocks is parent-linked.
 ///
 /// [`check_in_order`] runs first and guarantees that after exact duplicate
 /// deliveries are collapsed, the by-height snapshot is one contiguous chain.
+/// A chain that starts at a floor above genesis has its root below the floor,
+/// so only chains starting elsewhere must be rooted at genesis.
 pub(crate) fn check_parent_linkage<B, D, K>(
     idx: usize,
     blocks: &BTreeMap<Height, Arc<B>>,
     genesis: Sha256Digest,
+    floor: Height,
     stack: &str,
 ) where
     B: CertifiableBlock<Digest = Sha256Digest, Context = SimplexContext<D, K>>,
@@ -409,7 +412,7 @@ pub(crate) fn check_parent_linkage<B, D, K>(
                  stack={stack}",
                 block.digest(),
             );
-        } else {
+        } else if *height != floor {
             assert_eq!(
                 block.parent(),
                 genesis,
@@ -854,7 +857,7 @@ mod tests {
         let first = block(1, genesis, digest(0xB), 1);
         let blocks = BTreeMap::from([(Height::new(1), Arc::new(first))]);
 
-        check_parent_linkage(0, &blocks, genesis, "test");
+        check_parent_linkage(0, &blocks, genesis, Height::zero(), "test");
     }
 
     #[test]
@@ -868,7 +871,7 @@ mod tests {
             (Height::new(2), Arc::new(second)),
         ]);
 
-        check_parent_linkage(0, &blocks, genesis, "test");
+        check_parent_linkage(0, &blocks, genesis, Height::zero(), "test");
     }
 
     #[test]
@@ -882,7 +885,7 @@ mod tests {
             (Height::new(2), Arc::new(second)),
         ]);
 
-        check_parent_linkage(0, &blocks, genesis, "test");
+        check_parent_linkage(0, &blocks, genesis, Height::zero(), "test");
     }
 
     #[test]
