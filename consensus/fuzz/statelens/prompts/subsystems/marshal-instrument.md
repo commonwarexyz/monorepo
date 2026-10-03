@@ -65,3 +65,8 @@
   the act and assert there. The dispatching site has not learned what arrived in between.
 - Heights: record them relative to the processed floor, the last delivered height or the
   finalized tip, never raw. Never feed commitments or shard indices to a probe.
+- Tests: marshal's tests seed archives and metadata directly to stand for an earlier run
+  (`seed_inconsistent_restart_state`, `seed_processed_height`, `seed_cache_block`), and
+  enqueue resolver deliveries whose local annotations no request of the actor created.
+  Treat what the actor restores at startup as its own history, and an annotation on a
+  delivery, such as `Annotation::Finalized`, as the actor's own request.

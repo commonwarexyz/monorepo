@@ -10,11 +10,15 @@ extract *args:
 campaign *args:
     python3 scripts/statelens.py campaign "$@"
 
+# Run only the campaign's test gate on this checkout: just test [--profile P]
+test *args:
+    python3 scripts/statelens.py test-gate "$@"
+
 # Fuzz a target a campaign built: just run <target> [-- -fork=8 -max_total_time=600]
 run target *args:
     cd .. && just run "$@"
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--no-campaign] [--parallel] [--tmux] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--skip-campaign] [--parallel] [--tmux] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -25,14 +29,14 @@ fuzz target *args:
     target="$1"
     shift
     # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
-    # --no-campaign fuzzes the targets a campaign already built in this checkout,
+    # --skip-campaign fuzzes the targets a campaign already built in this checkout,
     # whatever its result, because a campaign refuses an instrumented checkout.
     parallel=no
     windows=no
     campaign=yes
     while [ $# -gt 0 ]; do
       case "$1" in
-        --no-campaign)          campaign=no; shift ;;
+        --skip-campaign)        campaign=no; shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --)                     shift; break ;;

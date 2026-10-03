@@ -1094,6 +1094,32 @@ class AgentInvocation(unittest.TestCase):
             self.assertIn("--effort", command, f"phase {phase} must carry the effort")
 
 
+class TestGate(unittest.TestCase):
+    """`just test` must run the campaign's own gate, for the profile the
+    checkout was instrumented with, or a fix would be checked against other tests."""
+
+    def test_the_campaign_and_the_recipe_share_one_command(self):
+        campaign = sl.Campaign.__new__(sl.Campaign)
+        campaign.test_toolchain, campaign.profile_name = "stable", "marshal"
+        self.assertEqual(campaign.test_command(), sl.gate_test_command("stable", "marshal"))
+
+    def test_each_profile_runs_its_own_filter(self):
+        for profile in ("simplex", "marshal"):
+            command = sl.gate_test_command("stable", profile)
+            self.assertEqual(command[:3], ["cargo", "+stable", "nextest"])
+            self.assertEqual(command[-1], sl.PROFILES[profile]["test_filter"])
+        self.assertIn("marshal::", sl.gate_test_command("", "marshal")[-1])
+        self.assertNotIn("marshal::", sl.gate_test_command("", "simplex")[-1])
+
+    def test_the_profile_comes_from_the_campaign_in_the_checkout(self):
+        with tempfile.TemporaryDirectory() as root:
+            sl_dir = pathlib.Path(root)
+            self.assertIsNone(sl.campaign_profile(sl_dir))
+            (sl_dir / "campaign").mkdir()
+            (sl_dir / "campaign" / "meta.json").write_text(json.dumps({"profile": "marshal"}))
+            self.assertEqual(sl.campaign_profile(sl_dir), "marshal")
+
+
 class CoverageSelection(unittest.TestCase):
     """`just coverage` takes the names `just fuzz` takes, so a marshal target must
     not be covered against the simplex profile's package, and a typo must name the

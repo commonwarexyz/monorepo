@@ -132,8 +132,11 @@ clone on a dedicated machine or container, and throw the clone away afterwards.
 
 Two conveniences: `just fuzz <target>` runs a campaign and then fuzzes one of its targets,
 inferring the profile from the target name; and `just clean` undoes what a campaign wrote,
-so a checkout can be reused. Note that in `consensus/fuzz/` and at the repository root,
-`just fuzz` is a different, pre-existing recipe that runs a package's fuzz targets.
+so a checkout can be reused. After fixing an instrumented checkout by hand, `just test`
+runs only the campaign's test gate on it, for the profile in `campaign/meta.json`, before
+you fuzz it with `just fuzz <profile> --skip-campaign`. Note that in `consensus/fuzz/` and at the
+repository root, `just fuzz` is a different, pre-existing recipe that runs a package's fuzz
+targets.
 
 A campaign adds the runtime module, the fuzz targets and the harness and runtime hooks to
 the tree, lets the agent bind every invariant of the profile's registries, audits those
@@ -173,14 +176,15 @@ them one after another; `--parallel` runs them together and writes each one's ou
 their output stays live and separate. Nothing bounds a run unless you pass
 `-max_total_time`, so a target runs until it stops. The sequential form warns about that,
 because there the first target would be the only one to run. With several targets at once,
-divide `-fork` between them rather than giving each the whole machine. `--no-campaign`
-skips the campaign and fuzzes the targets one already built in this checkout, whatever its
-result -- the way to keep going after a campaign that built its targets and then stopped,
-since a new campaign refuses an instrumented checkout:
+divide `-fork` between them rather than giving each the whole machine. `--skip-campaign`
+fuzzes the targets a campaign already built in this checkout, whatever its result -- the way
+to keep going after a campaign that built its targets and then stopped, since a new campaign
+refuses an instrumented checkout. Each target starts from whatever corpus its directory
+holds, as without the flag:
 
 ```
 just fuzz simplex --tmux -- -fork=5
-just fuzz marshal --no-campaign --parallel --tmux
+just fuzz marshal --skip-campaign --parallel --tmux
 just fuzz simplex --parallel -- -max_total_time=600 -fork=5
 STATELENS_JOBS=4 just fuzz marshal --parallel -- -max_total_time=600
 

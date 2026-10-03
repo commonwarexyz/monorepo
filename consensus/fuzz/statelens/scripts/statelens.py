@@ -435,6 +435,21 @@ def cargo(toolchain):
     return ["cargo"] + ([f"+{toolchain}"] if toolchain else [])
 
 
+def gate_test_command(toolchain, profile):
+    """The test gate's command (SPEC section 7.7) for `profile`."""
+    return cargo(toolchain) + [
+        "nextest",
+        "run",
+        "-p",
+        "commonware-consensus",
+        "--lib",
+        "--no-fail-fast",
+        "--ignore-default-filter",
+        "-E",
+        PROFILES[profile]["test_filter"],
+    ]
+
+
 def agent_name(config, flag):
     agent = flag or config["STATELENS_AGENT"]
     if agent not in AGENTS:
@@ -2633,6 +2648,32 @@ def cmd_targets(args):
     return 0
 
 
+def campaign_profile(sl_dir):
+    """The profile the campaign in this checkout ran with, from its `meta.json`."""
+    try:
+        return json.loads((sl_dir / "campaign" / "meta.json").read_text())["profile"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def cmd_test_gate(args):
+    """Runs only the test gate on the checkout as it stands (SPEC section 5.4).
+
+    It is the campaign's own command, so a fix to an instrumented checkout can be
+    checked before fuzzing it, without running a campaign again.
+    """
+    repo = repo_root()
+    sl_dir = repo / SL
+    profile = args.profile or campaign_profile(sl_dir)
+    if profile not in PROFILES:
+        raise Abort(1, "no campaign in this checkout names its profile; pass --profile")
+    command = gate_test_command(load_config(sl_dir)["STATELENS_TEST_TOOLCHAIN"], profile)
+    say(f"test-gate: {shlex.join(command)}")
+    code = subprocess.run(command, cwd=repo).returncode
+    say(f"test-gate: the test gate {'passed' if code == 0 else 'failed'}")
+    return 0 if code == 0 else 4
+
+
 def cmd_clean(args):
     """Undo what a campaign wrote, so a checkout can be reused (SPEC section 5.4)."""
     repo = repo_root()
@@ -3402,17 +3443,7 @@ class Campaign:
         ]
 
     def test_command(self):
-        return cargo(self.test_toolchain) + [
-            "nextest",
-            "run",
-            "-p",
-            "commonware-consensus",
-            "--lib",
-            "--no-fail-fast",
-            "--ignore-default-filter",
-            "-E",
-            self.profile["test_filter"],
-        ]
+        return gate_test_command(self.test_toolchain, self.profile_name)
 
     def common_values(self):
         return {"BASE": self.base, "PLAN": PLAN, "CHECK": shlex.join(self.check_command())}
@@ -4150,6 +4181,19 @@ def main(argv):
     coverage.add_argument(
         "targets", nargs="*", metavar="TARGET", help="a profile name or a StateLens target"
     )
+    test_gate = commands.add_parser(
+        "test-gate",
+        help="run only the campaign's test gate on this checkout",
+        description=(
+            "Runs the test gate's command (SPEC section 7.7) on the checkout as it "
+            "stands, for example after fixing an instrumented checkout by hand."
+        ),
+    )
+    test_gate.add_argument(
+        "--profile",
+        choices=sorted(PROFILES),
+        help="profile whose tests to run (default: the one in campaign/meta.json)",
+    )
     targets = commands.add_parser(
         "targets",
         help="the StateLens targets a profile builds, one per line",
@@ -4220,6 +4264,8 @@ def main(argv):
             return cmd_kb(args)
         if args.command == "targets":
             return cmd_targets(args)
+        if args.command == "test-gate":
+            return cmd_test_gate(args)
         if args.command == "coverage":
             return cmd_coverage(args)
         if args.command == "code":

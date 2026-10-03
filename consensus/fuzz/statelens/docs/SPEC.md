@@ -175,7 +175,8 @@ consensus/fuzz/statelens/
     statelens.rs                 runtime support module (Appendix A)
   scripts/
     statelens.py                 lint, lint-examples, lint-plan, lint-prompts, extract,
-                                 kb, code, ast, targets, campaign, coverage, clean
+                                 kb, code, ast, targets, campaign, test-gate, coverage,
+                                 clean
                                  (sections 5 to 7)
     test_statelens.py            tests for the quiet failures (section 5.9)
 ```
@@ -408,11 +409,15 @@ extract *args:
 campaign *args:
     python3 scripts/statelens.py campaign "$@"
 
+# Run only the campaign's test gate on this checkout: just test [--profile P]
+test *args:
+    python3 scripts/statelens.py test-gate "$@"
+
 # Fuzz a target a campaign built: just run <target> [-- -fork=8 -max_total_time=600]
 run target *args:
     cd .. && just run "$@"
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--no-campaign] [--parallel] [--tmux] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal> [--skip-campaign] [--parallel] [--tmux] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -423,14 +428,14 @@ fuzz target *args:
     target="$1"
     shift
     # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
-    # --no-campaign fuzzes the targets a campaign already built in this checkout,
+    # --skip-campaign fuzzes the targets a campaign already built in this checkout,
     # whatever its result, because a campaign refuses an instrumented checkout.
     parallel=no
     windows=no
     campaign=yes
     while [ $# -gt 0 ]; do
       case "$1" in
-        --no-campaign)          campaign=no; shift ;;
+        --skip-campaign)        campaign=no; shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
         --)                     shift; break ;;
@@ -603,6 +608,7 @@ prefixed with `statelens:`.
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
 | `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it. A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
 | `targets` | `targets [--profile P]`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary | 0 done |
+| `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 passed, 1 no profile, 4 failed |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]` (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD` | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
@@ -1129,8 +1135,10 @@ profile adds the marshal tests (section 8.3, step 6).
 The fuzz targets are built before the gate runs, so a failed gate leaves them in place. A
 failure without a `[statelens][` line is a test the instrumentation broke rather than an
 invariant it caught, and the operator judges whether it reaches the targets: a test double
-the harnesses do not use cannot. `just fuzz <profile|target> --no-campaign` then fuzzes the
+the harnesses do not use cannot. `just fuzz <profile|target> --skip-campaign` then fuzzes the
 built targets without a new campaign, which would refuse the instrumented checkout.
+After a fix to the instrumented checkout, `just test` runs this command alone, so the
+fix is checked before fuzzing it.
 
 ### 7.8 Step 7: hand-over
 
@@ -1955,7 +1963,12 @@ probes that tell the fuzzer when an execution reached a new internal state.
   return `None` without running the closure for a skipped replica. Never nest them. Add
   the fields you need to `Ghost` or `Global`, with `Default` types. Ghost state lives
   for one run: it is cleared when a new run starts (every fuzz input, every seed of a
-  test) and kept across a crash-restart within the run. `Ghost` is keyed by participant
+  test) and kept across a crash-restart within the run. Tests also start replicas on
+  storage they wrote directly, standing for an earlier run, so no ghost history lies
+  behind what such a replica restores. Where a check needs evidence of an earlier event,
+  accept what the replica itself holds -- a value passed along with the act, or one it
+  restored from storage -- and rely on ghost history only for what the implementation
+  keeps nowhere. `Ghost` is keyed by participant
   index, and a Twins run puts two engines behind one index, so history that must not
   merge across engines belongs in a `// [statelens] ghost:` field of the struct that owns
   it. To check it from another module, add a read-only accessor beside the field and tag
@@ -2462,6 +2475,11 @@ Last lines of its output:
   the act and assert there. The dispatching site has not learned what arrived in between.
 - Heights: record them relative to the processed floor, the last delivered height or the
   finalized tip, never raw. Never feed commitments or shard indices to a probe.
+- Tests: marshal's tests seed archives and metadata directly to stand for an earlier run
+  (`seed_inconsistent_restart_state`, `seed_processed_height`, `seed_cache_block`), and
+  enqueue resolver deliveries whose local annotations no request of the actor created.
+  Treat what the actor restores at startup as its own history, and an annotation on a
+  delivery, such as `Annotation::Finalized`, as the actor's own request.
 ~~~
 
 ### 13.15 `prompts/instrument-audit.md`

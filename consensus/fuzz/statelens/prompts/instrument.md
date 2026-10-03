@@ -121,7 +121,12 @@ probes that tell the fuzzer when an execution reached a new internal state.
   return `None` without running the closure for a skipped replica. Never nest them. Add
   the fields you need to `Ghost` or `Global`, with `Default` types. Ghost state lives
   for one run: it is cleared when a new run starts (every fuzz input, every seed of a
-  test) and kept across a crash-restart within the run. `Ghost` is keyed by participant
+  test) and kept across a crash-restart within the run. Tests also start replicas on
+  storage they wrote directly, standing for an earlier run, so no ghost history lies
+  behind what such a replica restores. Where a check needs evidence of an earlier event,
+  accept what the replica itself holds -- a value passed along with the act, or one it
+  restored from storage -- and rely on ghost history only for what the implementation
+  keeps nowhere. `Ghost` is keyed by participant
   index, and a Twins run puts two engines behind one index, so history that must not
   merge across engines belongs in a `// [statelens] ghost:` field of the struct that owns
   it. To check it from another module, add a read-only accessor beside the field and tag
