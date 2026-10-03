@@ -6,7 +6,7 @@ mod scalar;
 
 use crate::curve::{Backend, G, GAffine, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use commonware_parallel::{Sequential, Strategy};
 use msm::Term;
 use rand_core::CryptoRng;
@@ -75,6 +75,44 @@ fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
         bytes.copy_from_slice(&digest[k * 16..(k + 1) * 16]);
         Scalar::from_u128(u128::from_le_bytes(bytes))
     })
+}
+
+/// Returns every item's `(key, original index)` pair, ordered by key and then by index: the order
+/// a stable sort by key produces.
+///
+/// A counting pass over each key's leading bits places the pairs in buckets of about 8, and each
+/// bucket is then sorted alone. Keys that share their leading bits fall into one bucket, which then
+/// costs one ordinary sort.
+///
+/// `items.len()` must fit in `u32`.
+fn sort_keys(items: &[(&VerifyingKeyBytes, &Signature, &[u8])]) -> Vec<(VerifyingKeyBytes, u32)> {
+    let prefix = |key: &VerifyingKeyBytes| {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&key.0[..8]);
+        u64::from_be_bytes(bytes)
+    };
+    let bits = (items.len() / 8).max(2).ilog2().min(16);
+    let bucket = |key: &VerifyingKeyBytes| (prefix(key) >> (64 - bits)) as usize;
+
+    let mut starts = vec![0usize; (1 << bits) + 1];
+    for (key, _, _) in items {
+        starts[bucket(key) + 1] += 1;
+    }
+    for i in 1..starts.len() {
+        starts[i] += starts[i - 1];
+    }
+    let mut next = starts.clone();
+    let mut order = vec![(VerifyingKeyBytes([0; 32]), 0); items.len()];
+    for (i, (key, _, _)) in items.iter().enumerate() {
+        let slot = &mut next[bucket(key)];
+        order[*slot] = (**key, i as u32);
+        *slot += 1;
+    }
+    for run in starts.windows(2) {
+        order[run[0]..run[1]]
+            .sort_unstable_by(|x, y| (prefix(&x.0), &x.0, x.1).cmp(&(prefix(&y.0), &y.0, y.1)));
+    }
+    order
 }
 
 /// Groups `sorted` (pre-sorted `(key, original index)` pairs) into runs of equal keys, returned
@@ -336,14 +374,9 @@ fn verify_batch_inner<B: Backend>(
     let mut seed = [0u8; 32];
     rng.fill_bytes(&mut seed);
 
-    // Stable sorting keeps byte-identical keys in their original order, making the
-    // position-derived coefficients deterministic across supported strategies.
-    let mut order: Vec<(VerifyingKeyBytes, u32)> = items
-        .iter()
-        .enumerate()
-        .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
-        .collect();
-    strategy.sort_by(&mut order, |x, y| x.0.cmp(&y.0));
+    // Byte-identical keys keep their original order, making the position-derived coefficients
+    // deterministic across strategies.
+    let order = sort_keys(items);
 
     let Some((blocks, s_sum)) = scalar_phase(items, &order, &seed, strategy) else {
         return false;
@@ -555,6 +588,31 @@ mod tests {
             (VerifyingKeyBytes::new([3u8; 32]), 5),
         ];
         assert_eq!(group_ranges(&sorted), vec![(0, 2), (2, 3), (3, 6)]);
+    }
+
+    #[test]
+    fn sort_keys_matches_stable_sort() {
+        let signature = Signature::from_bytes([0; 64]);
+        let mut rng = commonware_utils::test_rng();
+        for n in [0, 1, 2, 15, 16, 17, 1000] {
+            // Random keys, keys repeated across the batch, and keys sharing their leading bits.
+            let keys: Vec<VerifyingKeyBytes> = (0..n)
+                .map(|i| {
+                    let mut key = [0u8; 32];
+                    rand_core::Rng::fill_bytes(&mut rng, &mut key);
+                    match i % 4 {
+                        0 => key[..8].fill(0xab),
+                        1 => key = [i as u8 % 3; 32],
+                        _ => {}
+                    }
+                    VerifyingKeyBytes::new(key)
+                })
+                .collect();
+            let items: Vec<_> = keys.iter().map(|key| (key, &signature, &[][..])).collect();
+            let mut expected: Vec<_> = keys.iter().copied().zip(0u32..).collect();
+            expected.sort_by_key(|x| x.0);
+            assert!(sort_keys(&items) == expected, "n={n}");
+        }
     }
 
     #[test]
