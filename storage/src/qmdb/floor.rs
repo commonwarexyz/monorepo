@@ -193,6 +193,11 @@ pub(crate) enum Action<V> {
 /// inactive and cannot be pruned until the floor passes them. When every batch moves one active
 /// update to the tip for each of them, the floor stays at most `3 * (n + 1)` operations behind
 /// the tip for `n` active keys.
+///
+/// While the key count holds steady, the floor stays about `2 * (n + 1)` operations behind the
+/// tip. Deletes shrink `n` while the floor sweeps over the active keys, and counting each delete
+/// as two steps limits a sweep to removing about half of them, which gives the `3 * (n + 1)`
+/// worst case.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Proportional;
 
