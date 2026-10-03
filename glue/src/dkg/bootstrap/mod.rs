@@ -308,10 +308,10 @@ impl<E, V, M, X, SS, T, D> Engine<E, V, M, X, SS, T, D>
 where
     E: CryptoRng + Spawner + Metrics + Clock + Storage + BufferPooler,
     V: Variant,
-    M: Manager<PublicKey = ed25519::PublicKey, Directory = D> + Clone,
-    X: Blocker<PublicKey = ed25519::PublicKey> + Clone,
+    M: Manager<PublicKey = ed25519::PublicKey, Directory = D>,
+    X: Blocker<PublicKey = ed25519::PublicKey>,
     SS: SecretStore,
-    T: Strategy + Clone,
+    T: Strategy,
     D: Directory<ed25519::PublicKey>,
     ed25519::Batch: BatchVerifier<PublicKey = ed25519::PublicKey> + Send + 'static,
 {

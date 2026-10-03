@@ -24,7 +24,6 @@ use commonware_cryptography::{
         },
         primitives::{group::Share, variant::Variant as BlsVariant},
     },
-    certificate::Scheme,
 };
 use commonware_macros::{select, select_loop};
 use commonware_p2p::Blocker;
@@ -625,7 +624,7 @@ where
     SS: SecretStore,
     T: Strategy,
     BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
-    S: Scheme + SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
+    S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
     A: Acknowledgement,
