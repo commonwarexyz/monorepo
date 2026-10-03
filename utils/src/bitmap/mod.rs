@@ -994,8 +994,8 @@ pub trait Readable<const N: usize> {
     /// Returns an iterator over the indices of set bits in `range`.
     ///
     /// Iteration starts at the first unpruned bit at or after `range.start` and stops
-    /// before `range.end` or the bitmap length, whichever is smaller. Empty or reversed
-    /// ranges yield no bits. Chunks beyond the range are not scanned.
+    /// before the smaller of `range.end` and the bitmap length. Empty or reversed ranges
+    /// yield no bits. Chunks beyond the range are not scanned.
     fn ones_iter_range(&self, range: Range<u64>) -> OnesIter<'_, Self, N>
     where
         Self: Sized,
@@ -1058,8 +1058,8 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 /// guard rather than a bare shared reference.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
-    /// Exclusive iteration bound, capped at `bitmap.len()` at construction. For layered
-    /// bitmaps, caching this avoids walking the layer chain on every `next`.
+    /// Exclusive iteration bound. Construction caps it at `bitmap.len()`. For layered bitmaps,
+    /// caching this avoids walking the layer chain on every `next`.
     len: u64,
     /// Bit index of bit 0 of `word`. Always a 64-bit word boundary relative to the start
     /// of its chunk, except when the iterator is constructed exhausted (then `len`).

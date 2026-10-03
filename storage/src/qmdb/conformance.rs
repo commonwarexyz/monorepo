@@ -511,7 +511,7 @@ mod tests {
         (db, root)
     }
 
-    /// [`keyed_batches`] on a store, applying every batch with [`Proportional`].
+    /// [`keyed_batches`] on a store with [`Proportional`] for every batch.
     struct StoreStorage;
 
     impl StorageWorkload for StoreStorage {
@@ -666,10 +666,10 @@ mod tests {
     /// Floor-sensitive keyed workload. Returns the writes of each batch and the policy it advances
     /// its floor with.
     ///
-    /// After the first, each batch writes a few of many live keys, so each floor advance moves
-    /// updates of unwritten keys and the number it moves shows in the root. Unless a step names
+    /// After the first, each batch writes a few of many live keys. Floor advances therefore move
+    /// updates of unwritten keys. The root shows how many each advance moves. Unless a step names
     /// its policy, batches at indices 2, 4, and 6 modulo 8 use [`Hold`], [`Compact`] under small
-    /// limits, and [`Seeded`], and the rest use [`Proportional`].
+    /// limits, and [`Seeded`] respectively. The rest use [`Proportional`].
     ///
     /// 1. Create n keys and eight keys that share a translator bucket.
     /// 2. Update three live keys in each of 12 batches.
@@ -812,7 +812,7 @@ mod tests {
         (db, root)
     }
 
-    /// [`floor_batches`] on a store, applying every batch with its policy.
+    /// [`floor_batches`] on a store with each batch's policy.
     struct StoreFloorStorage;
 
     impl StorageWorkload for StoreFloorStorage {

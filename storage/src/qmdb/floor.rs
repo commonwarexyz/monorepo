@@ -3,13 +3,13 @@
 //! [`merkleize`](super::any::batch::UnmerkleizedBatch::merkleize) and the store's
 //! [`apply_batch`](super::store::db::Db::apply_batch) read [`Policy::limits`] once. With
 //! [`Limits::Fixed`], the pass starts at the batch's inherited inactivity floor. While updates
-//! remain to decide, it moves the floor to the next active update, spending a skip on each
-//! inactive location it passes, and hands that update to [`Policy::decide`] as an [`Entry`].
+//! remain to decide, it moves the floor to the next active update and hands that update to
+//! [`Policy::decide`] as an [`Entry`]. Each inactive location the floor passes spends a skip.
 //! Keeping, evicting, or replacing the entry moves the floor one past it. The pass ends when
-//! `entries` updates are decided, when the policy stops at an entry, when the floor reaches the
-//! batch's original tip, or when the next active update, or the original tip if none remains,
-//! lies beyond the remaining skips, in which case the floor advances by the remaining skips. The
-//! batch commits that floor, or the new commit location if its final state is empty.
+//! `entries` updates are decided, when the policy stops at an entry, or when the floor reaches
+//! the batch's original tip. If neither an active update nor the original tip lies within the
+//! remaining skips, the floor advances by the remaining skips and the pass ends. The batch
+//! commits that floor, or the new commit location if its final state is empty.
 //!
 //! Updates to keys the batch writes are inactive. Kept updates move to the tip as
 //! [`Limits::Proportional`] moves them. Evictions and replacements resolve as writes to their
@@ -53,7 +53,7 @@ pub trait Policy<F: Family, K, V> {
     fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V>;
 }
 
-/// An active update at the floor, handed to [`Policy::decide`].
+/// An active update at the floor that [`Policy::decide`] receives.
 ///
 /// The entry borrows the update's key for `'a` and owns its value. `'a` is unique to one call of
 /// [`Policy::decide`], so the [`Decision`] an entry makes can only be returned from that call.
@@ -148,7 +148,7 @@ impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
         Decision::new(Action::Replace(value))
     }
 
-    /// Delete the key, returning the decision with the owned value. A policy that needs the key
+    /// Delete the key and return the decision with the owned value. A policy that needs the key
     /// clones [`key`](Self::key) first.
     pub fn evict(self) -> (Decision<'a, V>, V) {
         (Decision::new(Action::Evict), self.value)
@@ -179,7 +179,7 @@ impl<V> Decision<'_, V> {
 /// What the policy pass does with a decided update.
 #[derive(Debug)]
 pub(crate) enum Action<V> {
-    /// Move the update, rebuilt from its key and the value, to the tip.
+    /// Rebuild the update from its key and the value and move it to the tip.
     Keep(V),
     /// Leave the update in place and end the pass.
     Stop,
@@ -192,9 +192,9 @@ pub(crate) enum Action<V> {
 /// Advances the floor in proportion to the operations a batch makes inactive.
 ///
 /// Each update a batch supersedes, each delete it appends, and its previous commit become
-/// inactive and cannot be pruned until the floor passes them. Moving one active update to the tip
-/// for each of them keeps the floor at most `3 * (n + 1)` operations behind the tip, where `n` is
-/// the number of active keys, when every batch uses it.
+/// inactive and cannot be pruned until the floor passes them. When every batch moves one active
+/// update to the tip for each of them, the floor stays at most `3 * (n + 1)` operations behind
+/// the tip for `n` active keys.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Proportional;
 
@@ -228,7 +228,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Hold {
     }
 }
 
-/// Keeps every active update it reaches, within its limits.
+/// Keeps every active update it reaches within its limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Compact {
     /// The most active updates to keep.

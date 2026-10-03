@@ -1527,8 +1527,8 @@ pub(crate) mod test {
         db
     }
 
-    /// Record in `live` the location of each key's last update in `ops`, which start at `start`,
-    /// and remove each key `ops` last deletes.
+    /// Record in `live` the location of each key's last update in `ops` and remove each key
+    /// `ops` last deletes. The first operation in `ops` lies at `start`.
     fn replay<F: Family, U: Update>(
         live: &mut BTreeMap<U::Key, GenericLocation<F>>,
         start: GenericLocation<F>,
@@ -1547,7 +1547,7 @@ pub(crate) mod test {
         }
     }
 
-    /// Return the location of every live key's update, replayed from the retained log of `db`.
+    /// Replay the retained log of `db` and return the location of every live key's update.
     pub(crate) async fn live<F, C, I, H, U, const N: usize, S>(
         db: &Db<F, Context, C, I, H, U, N, S>,
     ) -> BTreeMap<U::Key, GenericLocation<F>>
@@ -2467,7 +2467,7 @@ pub(crate) mod test {
             }
         }
 
-        /// Return a policy with proportional limits, whose `decide` is never called.
+        /// Return a policy with proportional limits. The pass never calls its `decide`.
         pub(crate) const fn proportional(decide: D) -> Self {
             Self {
                 limits: Limits::Proportional,
@@ -2504,7 +2504,7 @@ pub(crate) mod test {
         Choice::Keep
     }
 
-    /// Merkleize `writes` on `batch` without moving the inactivity floor.
+    /// Merkleize `writes` on `batch` with [`Hold`].
     async fn hold_batch<F: Family, D>(
         db: &D,
         batch: D::Batch,
@@ -2521,7 +2521,7 @@ pub(crate) mod test {
             .unwrap()
     }
 
-    /// Apply `writes` as one batch that holds the inactivity floor.
+    /// Apply `writes` as one batch with [`Hold`].
     async fn hold<F: Family, D>(db: D, writes: &[(Digest, Option<Digest>)]) -> D
     where
         D: DbAny<F, Key = Digest, Value = Digest>,
@@ -2567,9 +2567,8 @@ pub(crate) mod test {
         D::span(&merkleized).inactivity_floor
     }
 
-    /// Return the ascending locations of the live updates of keys `writes` does not write,
-    /// replayed from the log of `db` and then from each of the pending `ancestors` (oldest
-    /// first).
+    /// Replay the log of `db`, then each of the pending `ancestors` (oldest first). Return the
+    /// ascending locations of the live updates of keys `writes` does not write.
     pub(crate) async fn active<F: Family, D: Inspect<F>>(
         db: &D,
         ancestors: &[&D::Merkleized],
@@ -2597,7 +2596,7 @@ pub(crate) mod test {
     }
 
     /// Return the floor and the decided locations of a policy from `floor` that keeps every
-    /// update, given the `active` locations below `tip`.
+    /// update at the `active` locations below `tip`.
     pub(crate) fn simulate(
         active: &[u64],
         mut floor: u64,
@@ -3064,8 +3063,7 @@ pub(crate) mod test {
 
     /// Evicting or replacing an update produces the same batch as deleting or writing its key
     /// in the batch. The update may resolve in the committed DB, in a live parent, or in a
-    /// grandparent applied and freed before merkleize, and every key shares one translated-key
-    /// bucket.
+    /// grandparent applied and freed before merkleize. Every key shares one translated-key bucket.
     pub(crate) async fn test_any_policy_decisions_match_writes<F, D>(
         _context: Context,
         db: D,
@@ -3146,7 +3144,7 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Staged merkleization with a policy, for tests generic over the update kind.
+    /// Staged merkleization with a policy over either update kind.
     pub(crate) trait StagedPolicy<D, F: Family>: Sized {
         /// The merkleized batch.
         type Merkleized;
@@ -3215,9 +3213,9 @@ pub(crate) mod test {
         }
     }
 
-    /// Writes staged in the batch supersede their keys' updates, which the policy passes as
-    /// inactive, and the batch matches a policy after the same writes. A staged key resolves in
-    /// the committed snapshot or in a live parent.
+    /// Writes staged in the batch supersede their keys' updates. The policy passes those updates
+    /// as inactive. The batch matches a policy after the same writes. A staged key resolves in the
+    /// committed snapshot or in a live parent.
     pub(crate) async fn test_any_policy_after_staged_writes<F, C, I, U, const N: usize, S>(
         _context: Context,
         db: Db<F, Context, C, I, Sha256, U, N, S>,
@@ -3404,7 +3402,7 @@ pub(crate) mod test {
         assert_eq!(db.root(), root);
         assert_eq!(db.get(&keys[1]).await.unwrap(), Some(make_value(101)));
 
-        // A fork replaces the chain of a pending batch, which then returns `StaleBatch` before
+        // A fork replaces the chain of a pending batch. The batch returns `StaleBatch` before
         // deciding any update.
         let parent = hold_batch(&db, db.new_batch(), &[(keys[3], Some(make_value(103)))]).await;
         let fork = hold_batch(&db, db.new_batch(), &[(keys[4], Some(make_value(104)))]).await;
@@ -3570,11 +3568,11 @@ pub(crate) mod test {
         }
     }
 
-    /// Merkleize `batch`, a child of the pending `ancestors` (oldest first), with a policy, and
-    /// apply the result to `db`. The policy writes the value `decisions` holds for a key (`None`
-    /// evicts) and keeps every other update. It decides the live update of every key in location
-    /// order, and the applied state serves `model` with the decisions recorded and keeps an exact
-    /// activity bitmap.
+    /// Merkleize `batch` with a policy and apply the result to `db`. `batch` is a child of the
+    /// pending `ancestors` (oldest first). The policy writes the value `decisions` holds for a key
+    /// (`None` evicts) and keeps every other update. It decides the live update of every key in
+    /// location order. The applied state serves `model` with the decisions recorded and keeps an
+    /// exact activity bitmap.
     async fn apply_decided<F: Family, D: Inspect<F>>(
         db: D,
         ancestors: &[&D::Merkleized],
@@ -3831,7 +3829,7 @@ pub(crate) mod test {
         model.apply(&grand);
         model.apply(&middle);
 
-        // A twin over the pending ancestors keeps every live update, some of which lie in the
+        // A twin over the pending ancestors keeps every live update. Some lie in the
         // grandparent's region.
         let expected = active(&db, &[&grandparent, &parent], &[]).await;
         let region = D::span(&grandparent).base.size..D::span(&grandparent).tip.size;
@@ -3906,8 +3904,8 @@ pub(crate) mod test {
 
     /// Apply a large batch of creates, hot-key updates, delete and recreate churn, shrinking by
     /// deleting the newest keys, bursts of creates followed by deletes of the newest keys, and
-    /// large mixed batches to `db`, drawing keys from `key` and values from `value`. `apply`
-    /// applies one batch and records the location of each live key in its map.
+    /// large mixed batches to `db`. Keys come from `key` and values from `value`. `apply` applies
+    /// one batch and records the location of each live key in its map.
     pub(crate) async fn churn<D, K, V, L>(
         mut db: D,
         key: impl Fn(u64) -> K,
@@ -4019,9 +4017,9 @@ pub(crate) mod test {
     /// `evicted`, stops at `stop`, and keeps every other update, then apply the chain. Returns
     /// the database and the decided updates.
     ///
-    /// The batch matches a twin that deletes `evicted` under the same policy, which decides the
-    /// same updates except the evicted ones. The batch writes each `live` key once and deletes
-    /// each evicted key once, and the applied state links the `live` keys (see
+    /// The batch matches a twin that deletes `evicted` under the same policy. The twin's policy
+    /// decides the same updates except the evicted ones. The batch writes each `live` key once and
+    /// deletes each evicted key once. The applied state links the `live` keys (see
     /// [`assert_links`]).
     async fn evict<F: Family, D: Links<F>>(
         db: D,
@@ -4157,8 +4155,8 @@ pub(crate) mod test {
         let parent = hold_batch(&db, db.new_batch(), &[(keys[4], Some(make_value(104)))]).await;
         let (start, _) = D::ops(&parent);
 
-        // Depth 1: a child of the parent evicts the same keys and keeps every other update,
-        // including the parent's update of the fifth key.
+        // Depth 1: a child of the parent evicts the same keys and keeps every other update. The
+        // kept updates include the parent's update of the fifth key.
         let live = BTreeMap::from([
             (keys[0], make_value(100)),
             (keys[2], make_value(2)),
@@ -4169,8 +4167,8 @@ pub(crate) mod test {
         assert!(visited.contains(&(start, keys[4], make_value(104))));
 
         // Recreate the evicted keys, then evict the smallest two keys together. Both share the
-        // largest key as their predecessor, which wraps to link to the third key and is rewritten
-        // once.
+        // largest key as their predecessor. The largest key wraps to link to the third key and is
+        // rewritten once.
         let db = hold(db, &recreate).await;
         let live = BTreeMap::from([
             (keys[2], make_value(2)),
@@ -4198,8 +4196,8 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// A policy reads every update it decides in one batched read of exactly those updates, even
-    /// when none is cached.
+    /// A policy over uncached updates reads every update it decides in one batched read of
+    /// exactly those updates.
     pub(crate) async fn test_any_policy_reads_in_one_read<F: Family, D>(
         context: Context,
         db: D,
@@ -4457,7 +4455,7 @@ pub(crate) mod test {
             let sibling = parent.new_batch::<Sha256>();
 
             // A twin over the pending parent evicts the committed key and keeps the parent's
-            // keys, deciding each live update once.
+            // keys. It decides each live update once.
             let evict = |k: &Digest| {
                 if *k == key(1) {
                     Choice::Evict

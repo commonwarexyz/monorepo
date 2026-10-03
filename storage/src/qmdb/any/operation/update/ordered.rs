@@ -51,7 +51,7 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     /// the resolved location cannot skip, so its deletes gain nothing from staging.
     const STAGES_DELETES: bool = false;
 
-    /// A record needs the update's `next_key`, and an ancestor's diff entry does not store it.
+    /// An ancestor's diff entry does not store the `next_key` a record needs.
     const STAGES_ANCESTORS: Option<K> = None;
 
     /// A collision sibling may be the predecessor whose `next_key` a delete rewrites.

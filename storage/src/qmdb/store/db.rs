@@ -530,9 +530,9 @@ where
         // Advance the floor with `policy`. An empty store has no active update to move or decide.
         if !self.is_empty() {
             self = match limits {
-                // Keep up to one active update for each operation the batch makes inactive, and one
-                // for the previous commit. Moves stop at the tip as it stood before them, so no
-                // update moves twice.
+                // Keep up to one active update for each update the batch supersedes, each delete
+                // it appends, and its previous commit. Moves stop at the tip as it stood before
+                // them, so no update moves twice.
                 Limits::Proportional => {
                     let tip = self.size();
                     let entries = steps + 1;
@@ -564,9 +564,9 @@ where
         Ok((self, start_loc..end_loc))
     }
 
-    /// Run `policy` from the inactivity floor over the active updates below `end`, deciding at
-    /// most `entries` updates and passing at most `skips` inactive locations, and set the floor
-    /// where the pass ends.
+    /// Run `policy` from the inactivity floor over the active updates below `end` and set the
+    /// floor where the pass ends. The pass decides at most `entries` updates and passes at most
+    /// `skips` inactive locations.
     async fn advance<P>(
         mut self,
         end: Location,
@@ -1470,8 +1470,8 @@ mod test {
 
     /// Apply `writes` as one batch, replay its operations into `live`, and assert that the batch
     /// moves each update at most once and that the floor trails the tip by at most `3 * (n + 1)`
-    /// operations, where `n` is the number of live keys. A key the batch writes may appear twice:
-    /// its write and one move of that write.
+    /// operations for `n` live keys. A key the batch writes may appear twice: its write and one
+    /// move of that write.
     async fn bounded(
         db: TestStore,
         live: &mut BTreeMap<Digest, Location>,
@@ -1507,8 +1507,8 @@ mod test {
         db
     }
 
-    /// Every batch of [`churn`] keeps the floor at most `3 * (n + 1)` operations behind the tip,
-    /// where `n` is the number of live keys.
+    /// Every batch of [`churn`] keeps the floor at most `3 * (n + 1)` operations behind the tip
+    /// for `n` live keys.
     #[test_traced("WARN")]
     fn test_store_floor_bound() {
         let executor = deterministic::Runner::default();
@@ -1818,7 +1818,8 @@ mod test {
         Sha256::hash(&[&i.to_be_bytes()])
     }
 
-    /// Return writes of `n` keys in ascending order, the `i`th with the value `digest(100 + i)`.
+    /// Return writes of `n` keys in ascending order. The `i`th write has the value
+    /// `digest(100 + i)`.
     fn seed(n: u64) -> Vec<(sha256::Digest, Option<sha256::Digest>)> {
         let mut keys: Vec<_> = (0..n).map(digest).collect();
         keys.sort();
@@ -1886,7 +1887,7 @@ mod test {
                     assert_eq!(reached, expected, "entries={entries} skips={skips}");
                     assert!(reached <= skips + decided.len() as u64);
 
-                    // Each decided update moves to the tip with its value, ahead of the commit.
+                    // Each decided update moves to the tip with its value before the commit.
                     assert_eq!(*range.start..*range.end, 12..13 + decided.len() as u64);
                     for (loc, (_, key, value)) in (12..).zip(&decided) {
                         let op = db.get_op(Location::new(loc)).await.unwrap();
@@ -1954,13 +1955,14 @@ mod test {
             let (db, _) = apply(db, seed.clone(), &mut Hold).await;
             let (key, value) = (seed[0].0, seed[0].1.unwrap());
 
-            // Stop at the first update, past the initial commit.
+            // Pass the initial commit and stop at the first update.
             let mut policy = Script::new(usize::MAX, u64::MAX, |_: &sha256::Digest| Choice::Stop);
             let (db, range) = apply(db, [], &mut policy).await;
             let first = Location::new(1);
             assert_eq!(policy.visited, [(first, key, value)]);
 
-            // The batch appends only its commit, whose floor is the stopped update's location.
+            // The batch appends only its commit and moves the floor to the stopped update's
+            // location.
             assert_eq!(*range.start..*range.end, 6..7);
             assert_eq!(db.inactivity_floor_loc(), first);
 
@@ -2020,7 +2022,7 @@ mod test {
         });
     }
 
-    /// [`Compact`] keeps the active updates it reaches within its limits, moving each to the tip
+    /// [`Compact`] keeps the active updates it reaches within its limits and moves each to the tip
     /// with its value.
     #[test_traced("WARN")]
     fn test_store_policy_compact() {
@@ -2043,7 +2045,7 @@ mod test {
             let (db, range) = apply(db, [], &mut policy).await;
             assert_eq!(*db.inactivity_floor_loc(), 4);
 
-            // The kept updates move to the tip with their values, ahead of the commit.
+            // The kept updates move to the tip with their values before the commit.
             assert_eq!(*range.start..*range.end, 8..11);
             for (loc, (key, value)) in (8..).zip(&seed[1..3]) {
                 let op = db.get_op(Location::new(loc)).await.unwrap();
@@ -2091,8 +2093,8 @@ mod test {
         });
     }
 
-    /// A policy that evicts committed and colliding-key updates owns each evicted value with no
-    /// clone, receives them in location order, and the evicted keys read `None` once the batch
+    /// A policy that evicts committed and colliding-key updates receives each evicted value in
+    /// location order and owns it with no clone. The evicted keys read `None` once the batch
     /// applies.
     #[test_traced("WARN")]
     fn test_store_policy_evicts_owned() {
@@ -2129,8 +2131,8 @@ mod test {
                 ]
             );
 
-            // The batch appends its write, a delete of each evicted key, and its commit, whose
-            // floor is the original tip.
+            // The batch appends its write, a delete of each evicted key, and its commit. The
+            // commit's floor is the original tip.
             assert_eq!(*range.start..*range.end, 6..11);
             let Operation::Update(Update(key, value)) = db.get_op(Location::new(6)).await.unwrap()
             else {
@@ -2155,8 +2157,8 @@ mod test {
         });
     }
 
-    /// A policy after writes passes each location the batch's writes supersede as inactive, keeps
-    /// and evicts the active updates it reaches, and its batch survives commit, reopen, and
+    /// A policy after writes passes each location the batch's writes supersede as inactive and
+    /// keeps and evicts the active updates it reaches. The batch survives commit, reopen, and
     /// prune.
     #[test_traced("WARN")]
     fn test_store_policy_keep_evict_and_recover() {
@@ -2224,7 +2226,7 @@ mod test {
         });
     }
 
-    /// A batch whose evictions empty the store commits its own location as the floor.
+    /// A batch whose evictions empty the store moves the floor to its commit.
     #[test_traced("WARN")]
     fn test_store_policy_empty() {
         deterministic::Runner::default().start(|context| async move {
@@ -2232,8 +2234,8 @@ mod test {
             let db = open(context.child("store"), "empty").await;
             let (db, _) = apply(db, seed(1), &mut Hold).await;
 
-            // The policy passes the initial commit and evicts the update, which ends the pass one
-            // past it. The empty store moves the floor to the commit that follows the delete.
+            // The policy passes the initial commit and evicts the update. The empty store moves
+            // the floor to the commit that follows the delete.
             let mut policy = Script::new(1, 1, |_: &sha256::Digest| Choice::Evict);
             let (db, range) = apply(db, [], &mut policy).await;
             assert_eq!(policy.locations(), [Location::new(1)]);
@@ -2248,7 +2250,7 @@ mod test {
     #[test_traced("WARN")]
     fn test_store_policy_reads_within_limits() {
         deterministic::Runner::default().start(|context| async move {
-            // Rewrite one key with a held floor, leaving the initial commit at 0, superseded
+            // Rewrite one key with a held floor. The log holds the initial commit at 0, superseded
             // updates and commits at 1..39, the only active update at 39, and a commit at 40.
             let mut db = open(context.child("store"), "reads").await;
             let key = digest(0);

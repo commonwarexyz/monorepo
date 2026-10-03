@@ -2016,8 +2016,8 @@ pub(crate) mod test {
         });
     }
 
-    /// Delete a key in a child batch whose predecessor shares its translated-key bucket,
-    /// merkleizing the child with `policy`, and check the predecessor's next_key.
+    /// In a child batch merkleized with `policy`, delete a key whose predecessor shares its
+    /// translated-key bucket, then check the predecessor's next_key.
     async fn child_delete_colliding_key<P>(context: deterministic::Context, policy: &mut P)
     where
         P: Policy<mmr::Family, Digest, Digest>,

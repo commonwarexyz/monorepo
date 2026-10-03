@@ -5118,7 +5118,7 @@ pub mod tests {
     }
 
     /// A child policy over a pending parent replaces and evicts committed updates and passes the
-    /// update the parent superseded, and the applied chain proves the results.
+    /// update the parent superseded. The applied chain proves the results.
     #[test_traced("INFO")]
     fn test_current_ordered_policy_replace_and_ancestor_proofs() {
         deterministic::Runner::default().start(|context| async move {
@@ -5229,7 +5229,7 @@ pub mod tests {
         });
     }
 
-    /// Evicting the only key empties an ordered database, which then proves the key's
+    /// Evicting the only key empties an ordered database. The empty database proves the key's
     /// exclusion through the commit.
     #[test_traced("INFO")]
     fn test_current_ordered_policy_to_empty_proves_exclusion() {
@@ -5278,8 +5278,8 @@ pub mod tests {
         });
     }
 
-    /// A child policy passes committed updates that an unapplied parent superseded without
-    /// reading them, using the speculative bitmap.
+    /// The speculative bitmap lets a child policy pass committed updates that an unapplied parent
+    /// superseded without reading them.
     #[test_traced("INFO")]
     fn test_current_policy_skips_updates_superseded_by_pending_parent() {
         deterministic::Runner::default().start(|context| async move {
@@ -5292,7 +5292,7 @@ pub mod tests {
             .await
             .unwrap();
 
-            // Commit ten keys, laid out in key order after the initial commit.
+            // Commit ten keys in key order after the initial commit.
             let mut keys: Vec<_> = (40..50).map(key).collect();
             keys.sort();
             let seed = keys
@@ -5340,7 +5340,7 @@ pub mod tests {
     }
 
     /// Instantiate the staged policy test for one current DB kind. A staged write supersedes its
-    /// key's update, which the policy passes as inactive, and the batch matches a policy after
+    /// key's update. The policy passes that update as inactive. The batch matches a policy after
     /// the same write and survives reopen.
     macro_rules! staged_policy_test {
         ($name:ident, $db:ty) => {
@@ -5447,10 +5447,9 @@ pub mod tests {
         OrderedFixedDb
     );
 
-    /// Any and Current policies over the same history decide the same updates and reach the same
-    /// floors without limits and when bound by entries, by skips, by both, or by zero entries,
-    /// through a pending parent that supersedes committed updates, and merkleize the same
-    /// operations.
+    /// Over the same history and a pending parent that supersedes committed updates, Any and
+    /// Current policies decide the same updates, reach the same floors, and merkleize the same
+    /// operations without limits and under entry, skip, combined, and zero-entry limits.
     #[test_traced("INFO")]
     fn test_current_policy_matches_any() {
         type AnyDb = crate::qmdb::any::unordered::fixed::Db<
@@ -5662,8 +5661,8 @@ pub mod tests {
         }
     }
 
-    /// [`test_any_activity_depths`] on a current database, whose raise and policy draw candidates
-    /// from the speculative bitmap.
+    /// [`test_any_activity_depths`] on a current database. Current raises and policies draw
+    /// candidates from the speculative bitmap.
     async fn test_current_activity_depths<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable,
@@ -5679,8 +5678,8 @@ pub mod tests {
 
     test_for_all_variants!(test_current_activity_depths, "WARN");
 
-    /// Define `$name`, which runs the Any test `$any` on a current database opened in `$partition`,
-    /// for every variant. Current raises and policies draw candidates from the speculative bitmap.
+    /// Define `$name` to run the Any test `$any` on a current database opened in `$partition` for
+    /// every variant. Current raises and policies draw candidates from the speculative bitmap.
     macro_rules! current_test {
         ($name:ident, $any:ident, $partition:literal) => {
             async fn $name<M, C, F, Fut>(context: Context, open_db: F)
@@ -5728,7 +5727,7 @@ pub mod tests {
     current_test!(test_current_policy_hold, test_any_policy_hold, "hold");
     current_test!(test_current_policy_stop, test_any_policy_stop, "stop");
 
-    /// [`test_any_policy_keep_evict_and_recover`] on a current database, whose policy draws
+    /// [`test_any_policy_keep_evict_and_recover`] on a current database. Current policies draw
     /// candidates from the speculative bitmap.
     async fn test_current_policy_keep_evict_and_recover<M, C, F, Fut>(context: Context, open_db: F)
     where
@@ -5747,8 +5746,8 @@ pub mod tests {
 
     test_for_all_variants!(test_current_policy_keep_evict_and_recover, "WARN");
 
-    /// [`test_any_ordered_policy_evictions_keep_links`] on a current database, which also proves
-    /// each link and each evicted key's exclusion.
+    /// [`test_any_ordered_policy_evictions_keep_links`] on a current database. The current
+    /// database also proves each link and each evicted key's exclusion.
     async fn test_current_ordered_policy_evictions_keep_links<M, C, F, Fut>(
         context: Context,
         open_db: F,

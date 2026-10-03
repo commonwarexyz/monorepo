@@ -103,8 +103,8 @@ impl<F: Family> StagedLoc<F> {
         }
     }
 
-    /// The committed location a write at this resolution supersedes, where `boundary` is the
-    /// committed boundary at merkleize.
+    /// The committed location a write at this resolution supersedes. `boundary` is the committed
+    /// boundary at merkleize.
     fn superseded(&self, boundary: Location<F>) -> Option<Location<F>> {
         match *self {
             Self::Committed(loc) => Some(loc),
@@ -302,8 +302,8 @@ struct Frozen<F: Family, U: update::Update> {
 }
 
 /// Pending mutations whose old locations were already resolved by staged reads or policy
-/// decisions, sorted by location. Each value is `Some` for an update and `None` for a delete.
-/// Only the unordered path stages deletes (an ordered delete cannot skip the deleted key's
+/// decisions. Entries are sorted by location. Each value is `Some` for an update and `None` for a
+/// delete. Only the unordered path stages deletes (an ordered delete cannot skip the deleted key's
 /// predecessor-bucket scan, so its deletes fall back to normal mutations).
 pub(crate) type StagedUpdates<F, U> = Vec<StagedUpdate<F, U>>;
 
@@ -343,14 +343,14 @@ struct Cursor<F: Family, U: update::Update> {
     entries: usize,
     /// Inactive locations left to pass.
     skips: u64,
-    /// Active updates read ahead, ascending.
+    /// Active updates read ahead in ascending location order.
     buffer: VecDeque<(StagedLoc<F>, U)>,
     /// Ascending locations in the read window of the keys the batch writes or stages. Snapshot
     /// collision siblings may be included.
     gathered: Vec<Location<F>>,
-    /// Kept updates, ascending.
+    /// Kept updates in ascending location order.
     kept: Vec<(Location<F>, U)>,
-    /// Evictions (`None`) and replacements at their keys' resolved locations, ascending.
+    /// Evictions (`None`) and replacements in ascending order of their keys' resolved locations.
     records: StagedUpdates<F, U>,
 }
 
@@ -484,7 +484,7 @@ where
     db: &'a Db<F, E, C, I, H, U, N, S>,
     mutations: BTreeMap<U::Key, Option<U::Value>>,
     merkleizer: Merkleizer<F, H, U, S>,
-    /// Existing-key locations of `mutations`, gathered by a policy pass.
+    /// Locations a policy pass gathered for the existing keys in `mutations`.
     existing: Option<Vec<Location<F>>>,
 }
 
@@ -1088,7 +1088,7 @@ where
         }
     }
 
-    /// Append `op` at the tip as `outcome` directs, recording its new location in `diff` or
+    /// Append `op` at the tip as `outcome` directs and record its new location in `diff` or
     /// `floor_diff`. Returns whether `op` moved.
     fn relocate(
         &self,
@@ -1137,9 +1137,9 @@ where
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
     /// caller gathered and read ahead of time, consumed by the raise before scanning live.
     ///
-    /// Under [`Limits::Fixed`], the raise is skipped. The floor stays where the policy pass left
-    /// it, or moves to the new commit location if the final state is empty, and each kept update
-    /// is classified and moved as the raise would move it.
+    /// Under [`Limits::Fixed`], the raise is skipped and each kept update is classified and moved
+    /// as the raise would move it. The floor stays where the policy pass left it. If the final
+    /// state is empty, the floor moves to the new commit location.
     #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, const N: usize>(
         mut self,
@@ -1279,9 +1279,8 @@ where
                         diff = job.await;
                     }
 
-                    // Classify each candidate against the pre-raise state (see
-                    // [`FloorOutcome`]), in candidate order. CommitFloor and other non-keyed
-                    // ops are inactive.
+                    // Classify each candidate against the pre-raise state in candidate order
+                    // (see [`FloorOutcome`]). CommitFloor and other non-keyed ops are inactive.
                     let outcomes: Vec<FloorOutcome<F>> = strategy.map_collect_vec(
                         zip_eq(read_candidates.iter(), resolved.iter().flatten()),
                         |(loc, op)| {
@@ -1320,8 +1319,8 @@ where
             floor = self.base_state.size + ops.len() as u64;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         } else if let Some(Frozen { kept, .. }) = frozen {
-            // Move each kept update that is still active, in location order, as the raise
-            // would move it. Classification is pure per update (see [`FloorOutcome`]).
+            // Move each still-active kept update in location order as the raise would move it.
+            // Classification is pure per update (see [`FloorOutcome`]).
             assert!(kept.is_sorted_by(|a, b| a.0 < b.0));
             assert!(kept.last().is_none_or(|(loc, _)| *loc < floor));
             if let Some(job) = diff_sort.take() {
@@ -2192,15 +2191,15 @@ where
     Operation<F, U>: Codec,
 {
     /// Under [`Limits::Fixed`], run `policy` over the batch's active updates from its inherited
-    /// floor, after the writes in the batch and `staged`, deciding at most `entries` updates and
-    /// passing at most `skips` inactive locations, and freeze the floor the pass reached for
-    /// merkleize. Candidates come from `fill`, which must meet the candidate contract of
-    /// `merkleize_with_floor_scan`. Under [`Limits::Proportional`], return the batch and `staged`
-    /// unchanged.
+    /// floor and freeze the floor the pass reached for merkleize. Updates that the batch's writes
+    /// or `staged` supersede count as inactive. The pass decides at most `entries` updates and
+    /// passes at most `skips` inactive locations. `fill` supplies the candidates and must meet the
+    /// candidate contract of `merkleize_with_floor_scan`. Under [`Limits::Proportional`], return
+    /// the batch and `staged` unchanged.
     ///
-    /// Returns `staged` merged with the policy's evictions and replacements, sorted by location.
-    /// Evictions the update kind cannot stage become batch mutations, which no earlier write
-    /// shares because the pass skips written keys.
+    /// Returns `staged` merged with the policy's evictions and replacements and sorted by
+    /// location. Evictions the update kind cannot stage become batch deletes. No earlier write
+    /// shares their keys because the pass never decides a written key.
     pub(crate) async fn advance<P>(
         mut self,
         staged: StagedUpdates<F, U>,
@@ -2304,7 +2303,7 @@ where
         let mut gathered_at = gathered.partition_point(|loc| *loc < scan);
         let mut staged_at = staged.partition_point(|(_, sloc, _, _)| sloc.loc() < scan);
         loop {
-            // The parent's commit at `tip - 1` is inactive, so candidates stop before it.
+            // The last commit at `tip - 1` is inactive, so candidates stop before it.
             let last = end.min(cursor.tip - 1);
             if scan >= last {
                 scan = end;
@@ -2318,8 +2317,8 @@ where
             let mut candidates = Vec::new();
             let mut need = cursor.entries;
             while need > 0 && scan < last {
-                // Each request adds at most the larger of the round's candidates and 64, so a round
-                // gathers at most twice the candidates before the cut, plus 64.
+                // Each request adds at most the larger of the round's candidate count and 64. A
+                // round therefore gathers at most 64 more than twice the candidates before the cut.
                 let start = candidates.len();
                 let limit = start.saturating_add(need.min(start.max(64)));
                 let next = fill(scan, *last, limit, &mut candidates);
@@ -2438,10 +2437,10 @@ where
 }
 
 impl<F: Family, U: update::Update> Cursor<F, U> {
-    /// Move the floor to the next read-ahead update and return it, spending a skip on each
-    /// inactive location passed. Without a read-ahead update, the floor moves to the scan
-    /// position and `None` is returned. When the target lies beyond the remaining skips, the
-    /// floor advances by them and `None` is returned.
+    /// Move the floor to the next read-ahead update and return it. Each inactive location passed
+    /// costs a skip. Without a read-ahead update, the floor moves to the scan position and `None`
+    /// is returned. When the target lies beyond the remaining skips, the floor advances by them
+    /// and `None` is returned.
     fn pop(&mut self) -> Option<(StagedLoc<F>, U)> {
         // Every location between the floor and the frontier is inactive, and passing each one
         // costs a skip. The floor therefore depends only on exact classification.
@@ -2472,8 +2471,7 @@ impl<F: Family, U: update::Update> Cursor<F, U> {
         self.kept.push((sloc.loc(), update));
     }
 
-    /// Write `value` for the decided update's `key` and `cached` payload, where `None` deletes
-    /// it.
+    /// Write `value` for the decided update's `key` and `cached` payload. `None` deletes the key.
     fn record(
         &mut self,
         sloc: StagedLoc<F>,
@@ -2571,7 +2569,7 @@ where
             existing,
         } = self;
 
-        // Resolve existing keys, reusing the locations a policy pass gathered.
+        // Resolve existing keys. Reuse their locations when a policy pass gathered them.
         let locations = existing.unwrap_or_else(|| m.gather_existing_locations(&mutations, db));
         let results = m.read_ops(&locations, &[], &db.log).await?;
 
@@ -2790,7 +2788,7 @@ where
             existing,
         } = self;
 
-        // Resolve existing keys, reusing the locations a policy pass gathered.
+        // Resolve existing keys. Reuse their locations when a policy pass gathered them.
         let locations = existing.unwrap_or_else(|| m.gather_existing_locations(&mutations, db));
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
@@ -3996,8 +3994,8 @@ pub(crate) mod tests {
     }
 
     /// A policy that evicts committed, pending-parent, and colliding-key updates owns each
-    /// evicted value, receives them in location order with no clone beyond the parent's read,
-    /// and the evicted keys read `None` once the batch applies.
+    /// evicted value and receives them in location order with no clone beyond the parent's read.
+    /// The evicted keys read `None` once the batch applies.
     async fn policy_evicts_owned<D>(db: D, child: fn(&D::Merkleized) -> D::Batch)
     where
         D: DbAny<mmr::Family, Key = sha256::Digest, Value = CountedValue>,
@@ -4045,9 +4043,9 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // The committed update arrives first and the parent's updates follow, in location
-        // order. Evicting clones nothing, committed values arrive unshared, and parent values
-        // carry only the clone their read takes.
+        // Evictions arrive in location order with the committed update first. Evicting clones
+        // nothing, committed values arrive unshared, and parent values carry only the clone their
+        // read takes.
         assert!(policy.evicted.is_sorted_by(|a, b| a.0 < b.0));
         let mut evicted: Vec<_> = policy
             .evicted

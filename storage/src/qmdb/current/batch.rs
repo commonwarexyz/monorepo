@@ -557,8 +557,8 @@ where
         };
         let (prepared, staged, prefetched) = match policy.limits() {
             Limits::Proportional => {
-                // Overlap the update resolution with a candidate prefetch, which the helper
-                // clamps to the committed prefix.
+                // Overlap the update resolution with a candidate prefetch. The helper clamps the
+                // prefetch to the committed prefix.
                 let (prepared, staged, prefetched) = inner
                     .resolve_updates_prefetched(updates, upserts, &db.any, fill)
                     .await?;
