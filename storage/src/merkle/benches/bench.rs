@@ -1,5 +1,6 @@
 use criterion::criterion_main;
 
+mod add_many;
 mod append;
 mod append_additional;
 mod flush;
@@ -9,6 +10,8 @@ mod prove_single_element;
 mod update;
 
 criterion_main!(
+    add_many::benches,
+    add_many::skewed,
     append::benches,
     append_additional::benches,
     flush::benches,

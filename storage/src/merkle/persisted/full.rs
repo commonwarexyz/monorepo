@@ -68,7 +68,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Encode and hash `items` across the strategy, adding their leaf digests in order.
-    pub(crate) fn add_many<Item: Write + Send + Sync>(
+    pub(crate) fn add_many<Item: Write + Sync>(
         self,
         hasher: &impl Hasher<F, Digest = D>,
         items: &[Item],

@@ -151,6 +151,26 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// instance of this family (i.e., it is not a position that would appear in a structure of any
     /// size).
     fn pos_to_height(pos: Position<Self>) -> u32;
+
+    /// Return the deterministic position of the node at `height` whose leftmost leaf is at
+    /// `leaf_start`, a multiple of `2^height`.
+    ///
+    /// The node is appended after the leaf that brings the leaf count to
+    /// [`subtree_birth_size`](Self::subtree_birth_size), and before the next leaf. So at a fixed
+    /// height, positions increase with `leaf_start`, and every other node of the subtree precedes
+    /// the node. For some families (e.g. MMB with delayed merging), a structure holding all of the
+    /// node's leaves may not contain the node yet, so its position is "virtual" until the
+    /// structure reaches the birth size.
+    ///
+    /// # Panics
+    ///
+    /// May panic if `subtree_birth_size` returns `None` for the same arguments.
+    fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
+
+    /// Return the leaf count at which the node at `height` whose leftmost leaf is at
+    /// `leaf_start` (a multiple of `2^height`) is created, or `None` if that count exceeds
+    /// [`MAX_LEAVES`](Self::MAX_LEAVES) and the node can never exist.
+    fn subtree_birth_size(leaf_start: Location<Self>, height: u32) -> Option<Location<Self>>;
 }
 
 /// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
@@ -255,23 +275,6 @@ pub trait Graftable: Family {
         grafting_height: u32,
     ) -> impl Iterator<Item = (Position<Self>, u32)> + Send;
 
-    /// Return the deterministic position of the node at `height` whose leftmost leaf is at
-    /// `leaf_start`.
-    ///
-    /// For some families, this position corresponds to a node that physically exists in any
-    /// structure containing those leaves. For others (e.g. MMB with delayed merging), it may be a
-    /// "virtual" position that no actual node occupies, but is still deterministic and unique for
-    /// the given leaf range and height.
-    ///
-    /// Used by grafting to map grafted-structure positions to ops-structure positions for domain
-    /// separation in hash pre-images.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the resulting position
-    /// computation overflows the bounds of the underlying numeric types.
-    fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
-
     /// Return the location of the leftmost leaf covered by the node at `pos` with `height`. For a
     /// leaf (height 0), returns its own location.
     ///
@@ -287,7 +290,7 @@ pub trait Graftable: Family {
     /// For families without delayed merging (e.g. MMR), a node exists as soon as all leaves
     /// in its span have been appended. For families with delayed merging (e.g. MMB), the
     /// node is created some number of leaf insertions _after_ its last leaf, so the birth
-    /// size is larger. The MMB override accounts for this delay.
+    /// size is larger. This is [`Family::subtree_birth_size`] of the node's leftmost leaf.
     ///
     /// This is used by the grafted-tree pruning logic to determine when a chunk-pair's
     /// parent has been born in the ops tree, which controls when it is safe to prune the
@@ -295,11 +298,11 @@ pub trait Graftable: Family {
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if arithmetic overflows.
+    /// Panics if `height` is excessively large (e.g., `>= 63`), if arithmetic overflows, or if the
+    /// node's birth size would exceed [`MAX_LEAVES`](Family::MAX_LEAVES).
     fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
-        let leftmost = *Self::leftmost_leaf(pos, height);
-        let width = 1u64.checked_shl(height).expect("height excessively large");
-        leftmost.checked_add(width).expect("birth size overflow")
+        *Self::subtree_birth_size(Self::leftmost_leaf(pos, height), height)
+            .expect("birth size overflow")
     }
 }
 
