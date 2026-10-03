@@ -8,8 +8,7 @@
 //! security.
 
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
-// Every public item here is currently ALPHA, so the `commonware_stability_BETA`+ builds (which
-// compile everything out) legitimately have no live callers of the internal modules below.
+// Higher stability builds can leave internal arithmetic without live callers.
 #![cfg_attr(
     any(
         commonware_stability_BETA,
@@ -24,7 +23,8 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
-commonware_macros::stability_mod!(ALPHA, mod curve);
+commonware_macros::stability_mod!(BETA, mod curve);
+commonware_macros::stability_mod!(BETA, pub mod batch);
 commonware_macros::stability_mod!(ALPHA, pub mod key_exchange);
 commonware_macros::stability_mod!(ALPHA, pub mod signing);
 

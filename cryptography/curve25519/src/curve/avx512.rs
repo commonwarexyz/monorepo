@@ -463,7 +463,9 @@ impl Backend {
     }
 }
 
-impl super::Backend for Backend {}
+impl super::Backend for Backend {
+    const IS_ACCELERATED: bool = true;
+}
 
 impl super::msm::Backend for Backend {
     const STRIPES: usize = LANES;

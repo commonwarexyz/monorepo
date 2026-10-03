@@ -667,7 +667,9 @@ impl GBackend for Backend {
     }
 }
 
-impl super::Backend for Backend {}
+impl super::Backend for Backend {
+    const IS_ACCELERATED: bool = true;
+}
 
 /// Adds a signed affine point to each of two extended points.
 ///
