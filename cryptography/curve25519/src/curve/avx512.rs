@@ -486,9 +486,17 @@ impl FBackend for Backend {
     }
 
     #[inline(always)]
-    fn pow2k(self, a: FVec, k: u32) -> FVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
-        unsafe { self.pow2k_field(a, k) }
+    fn pow2k<const N: usize>(self, mut a: [FVec; N], k: u32) -> [FVec; N] {
+        let (pairs, rest) = a.as_chunks_mut::<2>();
+        for pair in pairs {
+            // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+            *pair = unsafe { self.pow2k_pair(*pair, k) };
+        }
+        for value in rest {
+            // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
+            *value = unsafe { self.pow2k_field(*value, k) };
+        }
+        a
     }
 
     #[inline(always)]
@@ -726,6 +734,18 @@ impl Backend {
         FVec {
             limbs: store(value),
         }
+    }
+
+    /// Squares two vectors `k` times, interleaving their independent chains so that each chain's
+    /// multiply-accumulates fill the other's latency.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn pow2k_pair(self, [a, b]: [FVec; 2], k: u32) -> [FVec; 2] {
+        let (mut a, mut b) = (load(&a.limbs), load(&b.limbs));
+        for _ in 0..k {
+            a = square_regs(a);
+            b = square_regs(b);
+        }
+        [FVec { limbs: store(a) }, FVec { limbs: store(b) }]
     }
 
     #[target_feature(enable = "avx512f,avx512ifma")]

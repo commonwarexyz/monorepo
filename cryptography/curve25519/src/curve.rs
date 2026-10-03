@@ -393,11 +393,13 @@ pub trait FBackend: Copy {
         self.mul(a, a)
     }
 
-    /// Squares every lane `k` times, returning `a` unchanged when `k` is zero.
+    /// Squares every lane of each vector `k` times, returning `a` unchanged when `k` is zero.
     #[inline(always)]
-    fn pow2k(self, mut a: FVec, k: u32) -> FVec {
-        for _ in 0..k {
-            a = self.square(a);
+    fn pow2k<const N: usize>(self, mut a: [FVec; N], k: u32) -> [FVec; N] {
+        for value in &mut a {
+            for _ in 0..k {
+                *value = self.square(*value);
+            }
         }
         a
     }
@@ -660,62 +662,68 @@ impl GAffine {
         }
     }
 
-    /// Decompresses eight point encodings with the square-root calculation performed lane-wise by
-    /// the selected backend.
-    pub fn decompress_batch<B: FBackend>(
+    /// Decompresses `N` groups of eight point encodings with the square-root calculation performed
+    /// lane-wise by the selected backend.
+    ///
+    /// The groups' exponentiation chains are independent, so a backend can overlap them.
+    pub fn decompress_batch<B: FBackend, const N: usize>(
         backend: B,
-        bytes: &[[u8; 32]; LANES],
-    ) -> [Option<Self>; LANES] {
-        let signs = bytes.map(|encoding| encoding[31] >> 7);
-        let ys = bytes.map(|encoding| F::from_bytes(&encoding));
-        let y = FVec::transpose(ys);
+        bytes: &[[[u8; 32]; LANES]; N],
+    ) -> [[Option<Self>; LANES]; N] {
+        let ys = bytes.map(|group| group.map(|encoding| F::from_bytes(&encoding)));
+        let y = ys.map(FVec::transpose);
         let one = FVec::splat(F::ONE);
 
         // Recover x from x^2 = u/v, where u = y^2 - 1 and v = d*y^2 + 1.
-        let y2 = backend.square(y);
-        let u = backend.sub(y2, one);
-        let v = backend.add(backend.mul(FVec::splat(F::EDWARDS_D), y2), one);
-        let uv = backend.mul(u, v);
-        let candidate = backend.mul(u, pow_p58(backend, uv));
-        let vxx = backend.mul(v, backend.square(candidate));
+        let y2 = y.map(|y| backend.square(y));
+        let u = y2.map(|y2| backend.sub(y2, one));
+        let v = y2.map(|y2| backend.add(backend.mul(FVec::splat(F::EDWARDS_D), y2), one));
+        let roots = pow_p58(backend, mul_each(backend, u, v));
 
-        let u_lanes = u.untranspose();
-        let negative_u_lanes = backend.neg(u).untranspose();
-        let vxx_lanes = vxx.untranspose();
-        let factors = array::from_fn(|i| {
-            if vxx_lanes[i].eq(&u_lanes[i]) {
-                Some(F::ONE)
-            } else if vxx_lanes[i].eq(&negative_u_lanes[i]) {
-                Some(F::SQRT_M1)
-            } else {
-                None
-            }
-        });
-        let factor_lanes = factors.map(|factor| factor.unwrap_or(F::ONE));
-        let x = backend.mul(candidate, FVec::transpose(factor_lanes));
-        let x_lanes = x.untranspose();
-        let negative_x_lanes = backend.neg(x).untranspose();
+        array::from_fn(|n| {
+            let (u, v, y, ys) = (u[n], v[n], y[n], ys[n]);
+            let signs = bytes[n].map(|encoding| encoding[31] >> 7);
+            let candidate = backend.mul(u, roots[n]);
+            let vxx = backend.mul(v, backend.square(candidate));
 
-        let final_x = array::from_fn(|i| {
-            if x_lanes[i].is_odd() == (signs[i] == 1) {
-                x_lanes[i]
-            } else {
-                negative_x_lanes[i]
-            }
-        });
-        let t2d_lanes = backend
-            .mul(
-                backend.mul(FVec::transpose(final_x), y),
-                FVec::splat(F::EDWARDS_D2),
-            )
-            .untranspose();
+            let u_lanes = u.untranspose();
+            let negative_u_lanes = backend.neg(u).untranspose();
+            let vxx_lanes = vxx.untranspose();
+            let factors = array::from_fn(|i| {
+                if vxx_lanes[i].eq(&u_lanes[i]) {
+                    Some(F::ONE)
+                } else if vxx_lanes[i].eq(&negative_u_lanes[i]) {
+                    Some(F::SQRT_M1)
+                } else {
+                    None
+                }
+            });
+            let factor_lanes = factors.map(|factor| factor.unwrap_or(F::ONE));
+            let x = backend.mul(candidate, FVec::transpose(factor_lanes));
+            let x_lanes = x.untranspose();
+            let negative_x_lanes = backend.neg(x).untranspose();
 
-        array::from_fn(|i| {
-            factors[i]?;
-            Some(Self {
-                x: final_x[i],
-                y: ys[i],
-                t2d: t2d_lanes[i],
+            let final_x = array::from_fn(|i| {
+                if x_lanes[i].is_odd() == (signs[i] == 1) {
+                    x_lanes[i]
+                } else {
+                    negative_x_lanes[i]
+                }
+            });
+            let t2d_lanes = backend
+                .mul(
+                    backend.mul(FVec::transpose(final_x), y),
+                    FVec::splat(F::EDWARDS_D2),
+                )
+                .untranspose();
+
+            array::from_fn(|i| {
+                factors[i]?;
+                Some(Self {
+                    x: final_x[i],
+                    y: ys[i],
+                    t2d: t2d_lanes[i],
+                })
             })
         })
     }
@@ -865,26 +873,40 @@ impl GAffineVec {
     }
 }
 
-/// Raises every lane to `2^250 - 1` using the standard addition chain.
-fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
-    let a = backend.square(value);
-    let a2 = backend.square(backend.square(a));
-    let b = backend.mul(value, a2);
-    let c = backend.mul(a, b);
-    let d = backend.square(c);
-    let e = backend.mul(b, d);
-    let f = backend.mul(backend.pow2k(e, 5), e);
-    let g = backend.mul(backend.pow2k(f, 10), f);
-    let h = backend.mul(backend.pow2k(g, 20), g);
-    let i = backend.mul(backend.pow2k(h, 10), f);
-    let j = backend.mul(backend.pow2k(i, 50), i);
-    let k = backend.mul(backend.pow2k(j, 100), j);
-    backend.mul(backend.pow2k(k, 50), i)
+/// Raises every lane of each vector to `2^250 - 1` using the standard addition chain.
+fn pow_2_250_minus_1<B: FBackend, const N: usize>(backend: B, value: [FVec; N]) -> [FVec; N] {
+    let mul = |a, b| mul_each(backend, a, b);
+    let a = backend.pow2k(value, 1);
+    let a2 = backend.pow2k(a, 2);
+    let b = mul(value, a2);
+    let c = mul(a, b);
+    let d = backend.pow2k(c, 1);
+    let e = mul(b, d);
+    let f = mul(backend.pow2k(e, 5), e);
+    let g = mul(backend.pow2k(f, 10), f);
+    let h = mul(backend.pow2k(g, 20), g);
+    let i = mul(backend.pow2k(h, 10), f);
+    let j = mul(backend.pow2k(i, 50), i);
+    let k = mul(backend.pow2k(j, 100), j);
+    mul(backend.pow2k(k, 50), i)
 }
 
-/// Raises every lane to `(p - 5) / 8 = 2^252 - 3` for point decompression.
-fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
-    backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
+/// Raises every lane of each vector to `(p - 5) / 8 = 2^252 - 3` for point decompression.
+fn pow_p58<B: FBackend, const N: usize>(backend: B, value: [FVec; N]) -> [FVec; N] {
+    mul_each(
+        backend,
+        value,
+        backend.pow2k(pow_2_250_minus_1(backend, value), 2),
+    )
+}
+
+/// Multiplies each vector of `a` by the corresponding vector of `b`.
+#[inline(always)]
+fn mul_each<B: FBackend, const N: usize>(backend: B, a: [FVec; N], mut b: [FVec; N]) -> [FVec; N] {
+    for (a, b) in a.into_iter().zip(&mut b) {
+        *b = backend.mul(a, *b);
+    }
+    b
 }
 
 /// Abstracts over group operations.

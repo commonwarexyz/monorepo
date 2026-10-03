@@ -339,14 +339,18 @@ fn repeated_squaring_matches_scalar() {
                 F([1 << 51; 5]),
                 F([0x123456789abcd, 7, MASK_52 - 1, 42, 1]),
             ]);
-            for input in [max, mixed] {
-                for k in [0, 1, 2, 5, 10, 20, 50, 100] {
-                    let actual = backend.pow2k(input, k);
-                    if k == 0 {
-                        assert_eq!(actual.limbs, input.limbs);
+            let inputs = [max, mixed];
+            for k in [0, 1, 2, 5, 10, 20, 50, 100] {
+                let interleaved = backend.pow2k(inputs, k);
+                for (input, interleaved) in inputs.into_iter().zip(interleaved) {
+                    let [single] = backend.pow2k([input], k);
+                    for actual in [single, interleaved] {
+                        if k == 0 {
+                            assert_eq!(actual.limbs, input.limbs);
+                        }
+                        let expected = FVec::transpose(input.untranspose().map(|v| v.pow2k(k)));
+                        assert_f_eq(actual, expected, "repeated squaring");
                     }
-                    let expected = FVec::transpose(input.untranspose().map(|v| v.pow2k(k)));
-                    assert_f_eq(actual, expected, "repeated squaring");
                 }
             }
         }
@@ -490,14 +494,18 @@ fn fuzz_group_matches_portable<B: Backend>(
 ) -> arbitrary::Result<()> {
     let reference = super::portable::Backend::new();
     let encodings: [[u8; 32]; LANES] = u.arbitrary()?;
-    let decoded = GAffine::decompress_batch(backend, &encodings);
+    let reversed = array::from_fn(|i| encodings[LANES - 1 - i]);
+    let [single] = GAffine::decompress_batch(backend, &[encodings]);
+    let [paired, paired_reversed] = GAffine::decompress_batch(backend, &[encodings, reversed]);
     let lanes = array::from_fn(|i| {
         let scalar = GAffine::decompress(&encodings[i]);
-        assert_eq!(
-            decoded[i].map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
-            scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
-            "decompression lane {i}",
-        );
+        for decoded in [single[i], paired[i], paired_reversed[LANES - 1 - i]] {
+            assert_eq!(
+                decoded.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+                scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+                "decompression lane {i}",
+            );
+        }
         scalar.unwrap_or(GAffine::IDENTITY)
     });
     let affine = GAffineVec::transpose(lanes);
@@ -578,13 +586,18 @@ fn zip215_decompression_and_group_laws() {
             }
             for chunk in encodings.chunks(LANES) {
                 let bytes = array::from_fn(|i| chunk[i % chunk.len()]);
-                let decoded = GAffine::decompress_batch(backend, &bytes);
+                let reversed = array::from_fn(|i| bytes[LANES - 1 - i]);
+                let [single] = GAffine::decompress_batch(backend, &[bytes]);
+                let [paired, paired_reversed] =
+                    GAffine::decompress_batch(backend, &[bytes, reversed]);
                 let lanes = array::from_fn(|i| {
                     let scalar = GAffine::decompress(&bytes[i]);
-                    assert_eq!(
-                        decoded[i].map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
-                        scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
-                    );
+                    for decoded in [single[i], paired[i], paired_reversed[LANES - 1 - i]] {
+                        assert_eq!(
+                            decoded.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
+                            scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
+                        );
+                    }
                     scalar.unwrap_or(GAffine::IDENTITY)
                 });
                 let p = GVec::transpose(lanes.map(GAffine::to_extended));

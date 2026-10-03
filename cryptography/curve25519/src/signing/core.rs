@@ -1,5 +1,6 @@
 //! Ed25519 batch verification internals.
 
+mod hash;
 mod msm;
 mod scalar;
 
@@ -93,30 +94,35 @@ fn group_ranges(sorted: &[(VerifyingKeyBytes, u32)]) -> Vec<(u32, u32)> {
     out
 }
 
+/// Signatures per [`scalar_phase`] unit: one per [`hash::LANES`] lane, covering whole
+/// [`batch_coefficients`] blocks.
+const UNIT: usize = hash::LANES;
+const _: () = assert!(UNIT.is_multiple_of(4));
+
 /// One [`scalar_phase`] output block: the `z*h` scalars (each signature's contribution to its
-/// signer's coalesced `A` term) and `z` scalars (each `R` point's own MSM scalar) for the four
-/// consecutive sorted positions covered by one [`batch_coefficients`] block, plus the block's
-/// `sum(z*s)` contribution to the coalesced basepoint scalar.
+/// signer's coalesced `A` term) and `z` scalars (each `R` point's own MSM scalar) for the
+/// [`UNIT`] consecutive sorted positions of one unit, plus the unit's `sum(z*s)` contribution to
+/// the coalesced basepoint scalar.
 struct ScalarBlock {
-    zh: [Scalar; 4],
-    zr: [Scalar; 4],
+    zh: [Scalar; UNIT],
+    zr: [Scalar; UNIT],
     zs_sum: Scalar,
     valid: bool,
 }
 
-/// The per-signature scalar phase, parallel over the sorted batch's coefficient blocks: for each
-/// sorted position, derives `z` (see [`batch_coefficients`]), rejects a non-canonical `s`,
-/// computes the challenge `h = H(R || A || M)`, and packs `z*h`/`z` into that position's
+/// The per-signature scalar phase, parallel over [`UNIT`]-signature units of the sorted batch:
+/// for each sorted position, derives `z` (see [`batch_coefficients`]), rejects a non-canonical
+/// `s`, computes the challenge `h = H(R || A || M)`, and packs `z*h`/`z` into that position's
 /// [`ScalarBlock`] slot. Returns the blocks together with `sum(z*s) mod L` -- the coalesced
 /// basepoint scalar -- or `None` if any `s` was non-canonical (a structurally invalid signature,
 /// rejected before point decompression begins).
 ///
-/// The parallel unit is one 4-signature block -- the finest split that never derives a
-/// coefficient block twice -- produced as a value and collected, so there is no output array to
-/// pre-zero or scatter into, and the pool's demand-driven splitting balances the pass at block
-/// granularity: a late-waking worker simply takes fewer blocks (see [`decompress_phase`] for the
-/// same principle). This phase touches no curve points: it is uniform per signature regardless
-/// of how the batch's signers are distributed.
+/// The parallel unit fills every [`hash::digest`] lane and never derives a coefficient block
+/// twice. It is produced as a value and collected, so there is no output array to pre-zero or
+/// scatter into, and the pool's demand-driven splitting balances the pass at unit granularity: a
+/// late-waking worker simply takes fewer units (see [`decompress_phase`] for the same
+/// principle). This phase touches no curve points: it is uniform per signature regardless of how
+/// the batch's signers are distributed.
 fn scalar_phase(
     items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
     order: &[(VerifyingKeyBytes, u32)],
@@ -124,27 +130,40 @@ fn scalar_phase(
     strategy: &impl Strategy,
 ) -> Option<(Vec<ScalarBlock>, Scalar)> {
     let n = items.len();
-    let body = |block: usize| {
-        let coefficients = batch_coefficients(seed, block as u64);
-        let mut zh = [Scalar::ZERO; 4];
-        let mut zr = [Scalar::ZERO; 4];
+    let body = |unit: usize| {
+        let start = UNIT * unit;
+        let positions = &order[start..n.min(start + UNIT)];
+        let mut z = [Scalar::ZERO; UNIT];
+        for (block, coefficients) in z
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .take(positions.len().div_ceil(4))
+            .enumerate()
+        {
+            *coefficients = batch_coefficients(seed, (start / 4 + block) as u64);
+        }
+        let mut messages: [[&[u8]; 3]; UNIT] = [[&[]; 3]; UNIT];
+        for (message, &(_, index)) in messages.iter_mut().zip(positions) {
+            let (a_bytes, sig, msg) = items[index as usize];
+            *message = [&sig.r, a_bytes.as_bytes(), msg];
+        }
+        let digests = hash::digest(&messages[..positions.len()]);
+
+        let mut zh = [Scalar::ZERO; UNIT];
+        let mut zr = [Scalar::ZERO; UNIT];
         let mut zs_sum = Scalar::ZERO;
         let mut valid = true;
-        for (j, z) in coefficients.into_iter().enumerate() {
-            let i = 4 * block + j;
-            if i >= n {
-                break;
-            }
-            let (a_bytes, sig, msg) = items[order[i].1 as usize];
+        for (j, &(_, index)) in positions.iter().enumerate() {
+            let (_, sig, _) = items[index as usize];
             let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
                 valid = false;
                 continue;
             };
-            let digest = sha512(&[&sig.r, a_bytes.as_bytes(), msg]);
-            let h = Scalar::from_bytes_mod_order_wide(&digest);
-            zh[j] = z.mul_mod_l(&h);
-            zr[j] = z;
-            zs_sum = zs_sum.add_mod_l(&z.mul_mod_l(&s));
+            let h = Scalar::from_bytes_mod_order_wide(&digests[j]);
+            zh[j] = z[j].mul_mod_l(&h);
+            zr[j] = z[j];
+            zs_sum = zs_sum.add_mod_l(&z[j].mul_mod_l(&s));
         }
         ScalarBlock {
             zh,
@@ -154,7 +173,7 @@ fn scalar_phase(
         }
     };
 
-    let blocks: Vec<ScalarBlock> = strategy.map_collect_vec(0..n.div_ceil(4), body);
+    let blocks: Vec<ScalarBlock> = strategy.map_collect_vec(0..n.div_ceil(UNIT), body);
     let mut s_sum = Scalar::ZERO;
     for block in &blocks {
         if !block.valid {
@@ -165,15 +184,62 @@ fn scalar_phase(
     Some((blocks, s_sum))
 }
 
+/// Decompresses the `N` consecutive units starting at `first` with one backend batch and appends
+/// their MSM terms to `terms`, padding entries at or past `count` with identity/zero terms.
+///
+/// Returns whether every encoding decompressed.
+fn decompress_units<B: Backend, const N: usize>(
+    backend: B,
+    first: usize,
+    count: usize,
+    resolve: &impl Fn(usize) -> ([u8; 32], Scalar),
+    width: u32,
+    terms: &mut Vec<[Term; LANES]>,
+) -> bool {
+    let mut identity_encoding = [0u8; 32];
+    identity_encoding[0] = 1;
+    let resolved: [[_; LANES]; N] = core::array::from_fn(|unit| {
+        core::array::from_fn(|lane| {
+            let index = (first + unit) * LANES + lane;
+            if index < count {
+                resolve(index)
+            } else {
+                (identity_encoding, Scalar::ZERO)
+            }
+        })
+    });
+    let bytes = resolved.map(|unit| unit.map(|(bytes, _)| bytes));
+    let points = GAffine::decompress_batch(backend, &bytes);
+    let placeholder = || Term::new(GAffine::IDENTITY, &Scalar::ZERO, width);
+    let mut valid = true;
+    for (unit, (resolved, points)) in resolved.iter().zip(points).enumerate() {
+        let base = (first + unit) * LANES;
+        terms.push(core::array::from_fn(|lane| {
+            if base + lane >= count {
+                return placeholder();
+            }
+            points[lane].map_or_else(
+                || {
+                    valid = false;
+                    placeholder()
+                },
+                |point| Term::new(point, &resolved[lane].1, width),
+            )
+        }));
+    }
+    valid
+}
+
 /// The decompression phase: turns a flat worklist of `count` point encodings (resolved by index
 /// via `resolve`, which returns an encoding and its already-final MSM scalar) into MSM terms, in
 /// one parallel pass over [`LANES`]-sized units -- the finest split that keeps the sqrt kernel
 /// running 8-wide (see [`GAffine::decompress_batch`]), so the pool's demand-driven
 /// splitting balances the pass at ~7us granularity and a late-waking worker simply takes fewer
-/// units. Each fixed partition builds one exactly sized term vector, then the parallel fold joins
-/// validity and vectors of those buffers without shared state or copying point data. The final
-/// unit is padded with identity/zero terms, keeping decompression SIMD-wide without changing the
-/// MSM.
+/// units. Each partition decompresses its units in pairs (see [`decompress_units`]), giving the
+/// backend two independent square-root chains to overlap. Each fixed partition builds one exactly
+/// sized term vector, then the parallel fold joins validity and vectors of those buffers without
+/// shared state or copying point data. The final unit is padded with identity/zero terms, keeping
+/// decompression SIMD-wide without changing the MSM.
 ///
 /// Returns `None` if any encoding fails to decompress.
 fn decompress_phase<B, F>(
@@ -210,38 +276,18 @@ where
         start += len;
     }
 
-    let placeholder = Term::new(GAffine::IDENTITY, &Scalar::ZERO, width);
-    let mut identity_encoding = [0u8; 32];
-    identity_encoding[0] = 1;
-
     let (valid, chunks) = strategy.fold(
         ranges,
         || (true, Vec::new()),
         |(valid, mut chunks), range| {
             let mut chunk_valid = true;
             let mut terms = Vec::with_capacity(range.len());
-            for unit in range {
-                let base = unit * LANES;
-                let mut resolved = [(identity_encoding, Scalar::ZERO); LANES];
-                for (lane, item) in resolved.iter_mut().enumerate() {
-                    if base + lane < count {
-                        *item = resolve(base + lane);
-                    }
-                }
-                let bytes = resolved.map(|(bytes, _)| bytes);
-                let points = GAffine::decompress_batch(backend, &bytes);
-                terms.push(core::array::from_fn(|lane| {
-                    if base + lane >= count {
-                        return placeholder;
-                    }
-                    points[lane].map_or_else(
-                        || {
-                            chunk_valid = false;
-                            placeholder
-                        },
-                        |point| Term::new(point, &resolved[lane].1, width),
-                    )
-                }));
+            for unit in range.clone().step_by(2) {
+                chunk_valid &= if unit + 1 < range.end {
+                    decompress_units::<_, 2>(backend, unit, count, &resolve, width, &mut terms)
+                } else {
+                    decompress_units::<_, 1>(backend, unit, count, &resolve, width, &mut terms)
+                };
             }
             chunks.push(terms);
             (valid && chunk_valid, chunks)
@@ -302,7 +348,7 @@ fn verify_batch_inner<B: Backend>(
     let Some((blocks, s_sum)) = scalar_phase(items, &order, &seed, strategy) else {
         return false;
     };
-    let zr = |i: usize| blocks[i / 4].zr[i % 4];
+    let zr = |i: usize| blocks[i / UNIT].zr[i % UNIT];
     // A signer's coalesced scalar: the sum of its contiguous sorted run's `z*h` scalars. Cheap
     // mod-L additions, computed lazily (each group is resolved exactly once, by the worklist
     // entry for its `A` term), so the summing itself rides inside a parallel phase. A batch
@@ -311,7 +357,7 @@ fn verify_batch_inner<B: Backend>(
     // point arithmetic.
     let group_scalar = |(start, end): (u32, u32)| {
         (start as usize..end as usize).fold(Scalar::ZERO, |acc, i| {
-            acc.add_mod_l(&blocks[i / 4].zh[i % 4])
+            acc.add_mod_l(&blocks[i / UNIT].zh[i % UNIT])
         })
     };
 
@@ -448,6 +494,82 @@ mod tests {
             batch_coefficients(&seed, 0)[0].to_bytes(),
             batch_coefficients(&[8u8; 32], 0)[0].to_bytes()
         );
+    }
+
+    /// [`decompress_phase`] decompresses consecutive units in pairs and a partition's trailing unit
+    /// alone. Every entry must become one term carrying its own point and scalar, and an
+    /// undecodable encoding in any position must reject the worklist.
+    #[test]
+    fn decompress_phase_pairs_units() {
+        struct Check;
+
+        impl WithBackend for Check {
+            type Output = ();
+
+            fn call<B: Backend>(self, backend: B) {
+                // Entry `i` encodes `(i + 1)*B` and carries scalar `i + 1`.
+                let base = GAffine::BASEPOINT.to_extended();
+                let mut point = base;
+                let encodings: Vec<[u8; 32]> = (0..18 * LANES + 3)
+                    .map(|_| {
+                        let encoding = point.to_bytes();
+                        point = point.add(base);
+                        encoding
+                    })
+                    .collect();
+                let scalar = |i: usize| Scalar::from_u128(i as u128 + 1);
+                let invalid = (2..=u8::MAX)
+                    .map(|y| {
+                        let mut encoding = [0; 32];
+                        encoding[0] = y;
+                        encoding
+                    })
+                    .find(|encoding| GAffine::decompress(encoding).is_none())
+                    .unwrap();
+
+                // One to four units in one partition, and nineteen units in partitions of ten
+                // and nine.
+                for count in [
+                    1,
+                    LANES,
+                    LANES + 1,
+                    2 * LANES,
+                    3 * LANES - 1,
+                    3 * LANES + 1,
+                    4 * LANES,
+                    18 * LANES + 3,
+                ] {
+                    // The terms sum to `sum((i + 1)^2)*B`.
+                    let width = msm::width_for(count, 1);
+                    let resolve = |i: usize| (encodings[i], scalar(i));
+                    let terms = decompress_phase(backend, count, resolve, width, &Sequential)
+                        .expect("valid encodings decompress");
+                    let units: usize = terms.iter().map(Vec::len).sum();
+                    assert_eq!(units, count.div_ceil(LANES));
+                    let chunks: Vec<&[Term]> =
+                        terms.iter().map(|chunk| chunk.as_flattened()).collect();
+                    let actual = msm::multiscalar_mul(backend, &chunks, width, &Sequential);
+                    let total: u128 = (1..=count as u128).map(|i| i * i).sum();
+                    let expected = base.scalar_mul(Scalar::from_u128(total).bits_be());
+                    assert_eq!(actual.to_bytes(), expected.to_bytes(), "count {count}");
+
+                    // An undecodable encoding in the first unit, the second unit, the middle, or
+                    // the last unit rejects.
+                    for bad in [0, LANES.min(count - 1), count / 2, count - 1] {
+                        let resolve = |i: usize| {
+                            let encoding = if i == bad { invalid } else { encodings[i] };
+                            (encoding, scalar(i))
+                        };
+                        assert!(
+                            decompress_phase(backend, count, resolve, width, &Sequential).is_none(),
+                            "count {count}, bad {bad}",
+                        );
+                    }
+                }
+            }
+        }
+
+        with_backend(Check);
     }
 
     type BatchItem = (VerifyingKeyBytes, Signature, Vec<u8>);

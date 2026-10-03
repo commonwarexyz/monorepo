@@ -531,6 +531,24 @@ impl FBackend for Backend {
     fn square(self, a: FVec) -> FVec {
         map_f(a, square_regs)
     }
+
+    /// Keeps every tile of a vector in registers across all `k` squarings, interleaving the
+    /// tiles' independent chains.
+    #[inline(always)]
+    fn pow2k<const N: usize>(self, mut a: [FVec; N], k: u32) -> [FVec; N] {
+        for value in &mut a {
+            let mut tiles: [Regs; TILES] = core::array::from_fn(|tile| load(&value.limbs, tile));
+            for _ in 0..k {
+                for tile in &mut tiles {
+                    *tile = square_regs(*tile);
+                }
+            }
+            for (tile, regs) in tiles.into_iter().enumerate() {
+                store(regs, &mut value.limbs, tile);
+            }
+        }
+        a
+    }
 }
 
 /// Packs two independent field elements into register lanes.
