@@ -345,12 +345,20 @@ impl<P: PublicKey> CertificatePoison<P> {
 /// notarization for a proposal no node can supply.
 ///
 /// Models the byzantine peer of the backfill attack: asked for the certificate
-/// of a view the cluster nullified, it serves a genuine notarization instead of
-/// the covering nullification. The notarization verifies, so the requester
-/// accepts it and waits for its proposal to certify, but no node holds that
-/// block, so certification never completes. Every later response is forwarded
-/// unchanged: a node that re-fetches the view is answered honestly, which is
-/// what separates a recoverable stall from a permanent one.
+/// of a view the cluster nullified, it serves a notarization instead of the
+/// covering nullification. The notarization is forged with a quorum of the
+/// fixture's keys, honest ones included, so it verifies: the requester accepts
+/// it and waits for its proposal to certify, but no node holds that block, so
+/// certification never completes. Every later response is forwarded unchanged:
+/// a node that re-fetches the view is answered honestly, which is what
+/// separates a recoverable stall from a permanent one.
+///
+/// Only a view the `poisonable` predicate admits is rewritten. A certificate
+/// conflicting with the leader's proposal is evidence that the leader signed
+/// two payloads for the round, and the voter blames the round's leader whoever
+/// signed the certificate, so forging one over a view an honest node leads
+/// makes peers treat that node as faulty too and takes the run past its fault
+/// budget.
 ///
 /// A node in `observer` mode never rewrites anything: it only records the
 /// requests the poisoned node asks it to serve, which is how that node's
@@ -379,8 +387,10 @@ struct RequestObserver<P> {
     tracked: P,
 }
 
-/// Signing material for the notarization a poisoned response carries.
+/// What a poisoned response is built from: the views eligible for one, and the
+/// signing material for the notarization it carries.
 struct PoisonForge<S, D> {
+    poisonable: Box<dyn Fn(View) -> bool + Send>,
     schemes: Vec<S>,
     epoch: Epoch,
     payload: D,
@@ -392,16 +402,20 @@ where
     S: Scheme<D>,
     R: Receiver<PublicKey = S::PublicKey>,
 {
+    /// Poisons the first nullification answer this node requested for a view
+    /// `poisonable` admits.
     pub const fn new(
         inner: R,
         schemes: Vec<S>,
         epoch: Epoch,
         payload: D,
+        poisonable: Box<dyn Fn(View) -> bool + Send>,
         poison: Option<CertificatePoison<S::PublicKey>>,
     ) -> Self {
         Self {
             inner,
             forge: Some(PoisonForge {
+                poisonable,
                 schemes,
                 epoch,
                 payload,
@@ -537,6 +551,15 @@ where
         // Rewriting an answer to a request this node never sent attacks
         // nothing: the resolver discards it as unsolicited.
         if requested != Some(view) {
+            return Ok((peer, message));
+        }
+        // Framing the view's leader is out of the threat model unless that
+        // leader is already the byzantine node.
+        if !self
+            .forge
+            .as_ref()
+            .is_some_and(|forge| (forge.poisonable)(view))
+        {
             return Ok((peer, message));
         }
         let Some(poisoned) = self.unavailable_notarization(id, view) else {
@@ -1622,6 +1645,7 @@ mod tests {
             schemes.clone(),
             Epoch::new(EPOCH),
             Sha256Digest([0xEE; 32]),
+            Box::new(|_| true),
             Some(poison.clone()),
         );
 
@@ -1654,5 +1678,93 @@ mod tests {
         assert_eq!(poison.retries_answered(), 0);
         futures::executor::block_on(receiver.recv()).unwrap();
         assert_eq!(poison.retries_answered(), 1);
+    }
+
+    #[test]
+    fn certificate_poison_only_rewrites_poisonable_views() {
+        let (participants, schemes) = fixture(b"certificate_poison_predicate");
+        let poisonable = View::new(4);
+        let nullification = |view: View| {
+            let nullifies: Vec<_> = schemes[..3]
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Round::new(Epoch::new(EPOCH), view))
+                        .unwrap()
+                })
+                .collect();
+            Certificate::<MockScheme, Sha256Digest>::Nullification(
+                Nullification::from_nullifies(&schemes[0], non_empty![@&nullifies], &Sequential)
+                    .unwrap(),
+            )
+            .encode()
+        };
+        let response = |id: u64, view: View| {
+            ResolverMessage::<U64> {
+                id,
+                payload: ResolverPayload::Response(nullification(view)),
+            }
+            .encode()
+        };
+        let request = |id: u64, view: View| {
+            ResolverMessage::<U64> {
+                id,
+                payload: ResolverPayload::Request(U64::from(view)),
+            }
+            .encode()
+        };
+        let poison = CertificatePoison::new();
+
+        let observer = QueueReceiver {
+            messages: VecDeque::from([
+                (participants[0].clone(), request(1, View::new(3)).into()),
+                (participants[0].clone(), request(2, poisonable).into()),
+            ]),
+        };
+        let mut observer = CertificatePoisonReceiver::<MockScheme, Sha256Digest, _>::observer(
+            observer,
+            participants[1].clone(),
+            participants[0].clone(),
+            Some(poison.clone()),
+        );
+        for _ in 0..2 {
+            futures::executor::block_on(observer.recv()).unwrap();
+        }
+
+        let receiver = QueueReceiver {
+            messages: VecDeque::from([
+                (participants[1].clone(), response(1, View::new(3)).into()),
+                (participants[1].clone(), response(2, poisonable).into()),
+            ]),
+        };
+        let mut receiver = CertificatePoisonReceiver::<MockScheme, Sha256Digest, _>::new(
+            receiver,
+            schemes.clone(),
+            Epoch::new(EPOCH),
+            Sha256Digest([0xEE; 32]),
+            Box::new(move |view| view == poisonable),
+            Some(poison.clone()),
+        );
+
+        // An answer for a view the predicate rejects is forwarded untouched and
+        // leaves the poison unarmed, so the next poisonable view can still fire.
+        let (_, received) = futures::executor::block_on(receiver.recv()).unwrap();
+        assert_eq!(received.as_ref(), response(1, View::new(3)).as_ref());
+        assert_eq!(poison.view(), None);
+
+        let (_, received) = futures::executor::block_on(receiver.recv()).unwrap();
+        let decoded = ResolverMessage::<U64>::decode(received).unwrap();
+        let ResolverPayload::Response(payload) = decoded.payload else {
+            panic!("poisoned message must stay a response");
+        };
+        let certificate = Certificate::<MockScheme, Sha256Digest>::decode_cfg(
+            payload,
+            &schemes[0].certificate_codec_config(),
+        )
+        .unwrap();
+        let Certificate::Notarization(notarization) = certificate else {
+            panic!("nullification response must be replaced by a notarization");
+        };
+        assert_eq!(notarization.view(), poisonable);
+        assert_eq!(poison.view(), Some(poisonable));
     }
 }

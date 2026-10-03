@@ -74,18 +74,22 @@ use commonware_consensus::{
             harness::{LINK, NUM_VALIDATORS},
         },
     },
-    simplex::scheme::Scheme as SimplexScheme,
-    types::{Epoch, TermLength, View},
+    simplex::{
+        elector::{Config as _, Elector as _},
+        scheme::Scheme as SimplexScheme,
+    },
+    types::{Epoch, Participant, Round, TermLength, View},
 };
 use commonware_consensus_fuzz_core::{
-    BYZANTINE_IDX, FAULT_PHASE,
+    BYZANTINE_IDX, FAULT_PHASE, PINNED_OPTIMISTIC_VIEWS,
     network::{CertificatePoison, CertificatePoisonReceiver},
     simplex::Simplex,
     start_disrupter_with_epoch,
     utils::{Partition, SetPartition, apply_partition},
 };
 use commonware_cryptography::{
-    Committable as _, Digestible as _, certificate::ConstantProvider,
+    Committable as _, Digestible as _,
+    certificate::{ConstantProvider, Scheme as _},
     sha256::Digest as Sha256Digest,
 };
 use commonware_p2p::simulated::Link;
@@ -120,6 +124,27 @@ const POISON_IDX: usize = NUM_VALIDATORS as usize - 1;
 /// Payload of the notarization the poisoned response serves. No node proposes
 /// it, so no node can supply the block behind it.
 const UNAVAILABLE_PAYLOAD: Sha256Digest = Sha256Digest([0xEE; 32]);
+
+/// Views led by [`BYZANTINE_IDX`], read from the elector the honest engines run.
+///
+/// The only views the certificate poison may rewrite. A voter that holds a
+/// certificate conflicting with its round's proposal treats the round's leader
+/// as an equivocator and blocks it, so a forgery over a view an honest node
+/// leads turns that node into a second fault and takes the run past `f = 1`,
+/// where no liveness is promised. Reading the schedule from the elector keeps
+/// this aligned with the engines if the rotation, shuffle or term length
+/// changes; it assumes a certificate-independent schedule, which every elector
+/// in this harness has.
+fn byzantine_led<P: Simplex>(
+    scheme: &SchemeOf<P>,
+    term_length: TermLength,
+) -> impl Fn(View) -> bool + Send + 'static {
+    let elector = P::elector(term_length, PINNED_OPTIMISTIC_VIEWS).build(scheme.participants());
+    move |view| {
+        elector.elect(Round::new(Epoch::zero(), view), None)
+            == Participant::from_usize(BYZANTINE_IDX)
+    }
+}
 
 struct MarshalDisrupterInputDebug<'a>(&'a MarshalDisrupterInput);
 
@@ -327,6 +352,10 @@ pub fn fuzz_marshal_standard_block_dissemination<P: Simplex>(input: MarshalDisru
 /// asks for a block nobody can serve. The node must still obtain the
 /// certificate it is missing (by re-fetching the view) or it can never vote
 /// again, and the cluster loses the quorum it needs to finalize.
+///
+/// Only a view the byzantine node leads is poisoned: the forgery is evidence
+/// against that view's leader, so poisoning an honest-led view would get an
+/// honest node blocked and break the fault budget the liveness check assumes.
 pub fn fuzz_marshal_standard_certificate_poison<P: Simplex>(mut input: MarshalDisrupterInput) {
     // A backfill fetch needs a certificate gap at one node while the others
     // move on. With n=4 every topology partition also breaks the quorum that
@@ -459,6 +488,7 @@ fn run_standard_disrupter<P: Simplex>(
                         schemes.clone(),
                         Epoch::zero(),
                         UNAVAILABLE_PAYLOAD,
+                        Box::new(byzantine_led::<P>(&scheme, term_length)),
                         poison.clone(),
                     )
                 } else {
@@ -741,6 +771,29 @@ mod tests {
                 forwarding: ForwardPolicy::Disabled,
             });
         }
+    }
+
+    /// The poison must stay armed on some views and off the rest: a predicate
+    /// that never matches would quietly reduce the target to the plain
+    /// disrupter, and one that matches everything restores the false positive.
+    #[cfg(feature = "mocks")]
+    #[test]
+    fn byzantine_led_tracks_the_rotating_schedule() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (_, schemes) = SimplexCertificateMock::setup(
+                &mut context,
+                commonware_consensus_fuzz_core::NAMESPACE,
+                NUM_VALIDATORS,
+            );
+            let poisonable = byzantine_led::<SimplexCertificateMock>(&schemes[0], TermLength::ONE);
+            for view in 1..=3 * u64::from(NUM_VALIDATORS) {
+                assert_eq!(
+                    poisonable(View::new(view)),
+                    view % u64::from(NUM_VALIDATORS) == BYZANTINE_IDX as u64,
+                    "view {view}"
+                );
+            }
+        });
     }
 
     #[test]
