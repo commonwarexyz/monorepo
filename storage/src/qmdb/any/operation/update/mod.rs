@@ -30,10 +30,14 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     /// When false, staged deletes fall back to normal mutations.
     const STAGES_DELETES: bool;
 
-    /// Whether merkleize may stage a read that resolved in an uncommitted ancestor's diff.
-    /// `Some` supplies the cached payload recorded for such a read. `None` leaves those
-    /// slots unresolved, so their updates fall back to normal mutations.
+    /// What [`stage`](crate::qmdb::any::batch::UnmerkleizedBatch::stage) records for a read that
+    /// resolves in an ancestor batch, or `None` if it cannot record one. A write to an unrecorded
+    /// key resolves at merkleize like any other write.
     const STAGES_ANCESTORS: Option<Self::Cached>;
+
+    /// Whether merkleize gathers the snapshot collision siblings of written keys that are active
+    /// in an ancestor's diff.
+    const SIBLINGS: bool;
 
     /// The updated key.
     fn key(&self) -> &Self::Key;
@@ -52,6 +56,16 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
 
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
+}
+
+/// Splits an update into its owned key, value, and cached payload, and rebuilds it from them.
+pub(crate) trait Parts: Update {
+    /// Consumes the update and returns its owned key, value, and [`cached`](Update::cached)
+    /// payload.
+    fn into_parts(self) -> (Self::Key, Self::Value, Self::Cached);
+
+    /// Rebuilds the update that [`into_parts`](Self::into_parts) split.
+    fn from_parts(key: Self::Key, value: Self::Value, cached: Self::Cached) -> Self;
 }
 
 #[cfg(test)]

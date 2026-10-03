@@ -8,9 +8,10 @@
 //! Reads through an invalidated `MerkleizedBatch` (see its "Branch validity" docs) return
 //! inconsistent bytes; callers must drop invalid batches.
 
+#[cfg(test)]
+use commonware_utils::bitmap::Readable as _;
 use commonware_utils::{
     bitmap,
-    bitmap::Readable as _,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
@@ -43,18 +44,12 @@ impl<const N: usize> Shared<N> {
         self.read().ones_iter_from(from).next()
     }
 
-    /// Find the first set bit in `[from, end)` under one read lock.
-    /// No chunks beyond this range are scanned.
-    pub(crate) fn first_one(&self, from: u64, end: u64) -> Option<u64> {
-        self.read().ones_iter_range(from..end).next()
-    }
-
     /// Fill `out` with up to `limit` floor-raise candidates in `[scan_from, tip)`, holding a single
     /// read guard for the whole batch. Returns the next `scan_from`.
     ///
     /// The candidate sequence is identical to repeatedly calling `any::batch::next_candidate`
     /// (the test oracle): set bits in the committed prefix are returned in order via one
-    /// `ones_iter_from`, then locations at or beyond the committed boundary are returned
+    /// `ones_iter_range`, then locations at or beyond the committed boundary are returned
     /// sequentially.
     pub(crate) fn fill_candidates<T: From<u64>>(
         &self,
@@ -79,7 +74,7 @@ impl<const N: usize> Shared<N> {
 }
 
 /// Core floor-raise scan over any [`bitmap::Readable`]: set bits in `[scan_from, min(len, tip))`
-/// ascending via one `ones_iter_from`, then locations in `[max(scan_from, len), tip)`
+/// ascending via one `ones_iter_range`, then locations in `[max(scan_from, len), tip)`
 /// sequentially. Fills `out` with up to `limit` candidates and returns the next `scan_from`.
 ///
 /// The bitmap is read once per chunk (through the iterator), so a `B` whose reads go through
@@ -96,15 +91,13 @@ pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
 
     let mut scan = scan_from;
     if scan < committed_end {
-        let mut ones = bitmap.ones_iter_from(scan);
+        let mut ones = bitmap.ones_iter_range(scan..committed_end);
         while out.len() < limit {
-            match ones.next() {
-                Some(idx) if idx < committed_end => {
-                    out.push(idx.into());
-                    scan = idx + 1;
-                }
-                _ => break,
-            }
+            let Some(idx) = ones.next() else {
+                break;
+            };
+            out.push(idx.into());
+            scan = idx + 1;
         }
     }
     while out.len() < limit {

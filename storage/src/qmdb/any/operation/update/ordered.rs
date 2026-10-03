@@ -1,7 +1,10 @@
 use crate::qmdb::{
     any::{
         FixedValue, VariableValue,
-        operation::{Update as UpdateTrait, update::sealed::Sealed},
+        operation::{
+            Update as UpdateTrait,
+            update::{Parts, sealed::Sealed},
+        },
         value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
     operation::Key,
@@ -48,9 +51,11 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     /// the resolved location cannot skip, so its deletes gain nothing from staging.
     const STAGES_DELETES: bool = false;
 
-    /// An ordered staged read caches the resolved op's next-key pointer, which an ancestor
-    /// diff entry does not carry, so ancestor resolutions fall back to normal mutations.
+    /// An ancestor's diff entry does not store the `next_key` a record needs.
     const STAGES_ANCESTORS: Option<K> = None;
+
+    /// A collision sibling may be the predecessor whose `next_key` a delete rewrites.
+    const SIBLINGS: bool = true;
 
     fn key(&self) -> &K {
         &self.key
@@ -80,6 +85,20 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
             hex(&self.next_key),
             hex(&self.value.encode())
         )
+    }
+}
+
+impl<K: Key, V: ValueEncoding> Parts for Update<K, V> {
+    fn into_parts(self) -> (K, V::Value, K) {
+        (self.key, self.value, self.next_key)
+    }
+
+    fn from_parts(key: K, value: V::Value, next_key: K) -> Self {
+        Self {
+            key,
+            value,
+            next_key,
+        }
     }
 }
 

@@ -7,7 +7,10 @@ use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deter
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
-    qmdb::current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+    qmdb::{
+        current::{FixedConfig as Config, unordered::fixed::Db as CurrentDb},
+        floor::Proportional,
+    },
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
@@ -107,7 +110,7 @@ async fn commit_pending<F: Graftable>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
     let (db, _) = db
         .apply_batch(merkleized)
         .await

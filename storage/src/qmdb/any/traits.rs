@@ -2,12 +2,12 @@
 
 use crate::{
     merkle::{Family, Location, Proof},
-    qmdb::{Error, operation::Key},
+    qmdb::{Error, floor::Policy, operation::Key},
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use commonware_runtime::Handle;
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
 
 /// Unmerkleized batch of operations.
@@ -17,32 +17,17 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     type V;
     type Metadata;
     type Merkleized: MerkleizedBatch;
-    type Update: super::operation::Update<Key = Self::K, Value = Self::V>;
 
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     fn write(self, key: Self::K, value: Option<Self::V>) -> Self;
 
-    /// Disable automatic floor raising for this batch.
-    fn with_manual_floor(self) -> Self;
-
-    /// Evict the next active update, skipping at most `quota` inactive operations.
-    #[allow(clippy::type_complexity)]
-    fn pop_active(
-        self,
-        db: &Db,
-        quota: Option<NonZeroUsize>,
-    ) -> impl Future<
-        Output = Result<
-            (Self, super::batch::Popped<Self::Family, Self::Update>),
-            Error<Self::Family>,
-        >,
-    >;
-
-    /// Resolve mutations, compute the new root, and return a merkleized batch.
-    fn merkleize(
+    /// Resolve mutations, advance the inactivity floor with `policy`, compute the new root, and
+    /// return a merkleized batch.
+    fn merkleize<P: Policy<Self::Family, Self::K, Self::V> + Send>(
         self,
         db: &Db,
         metadata: Option<Self::Metadata>,
+        policy: &mut P,
     ) -> impl Future<Output = Result<Self::Merkleized, Error<Self::Family>>>;
 }
 
