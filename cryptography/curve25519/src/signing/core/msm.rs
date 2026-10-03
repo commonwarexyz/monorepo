@@ -75,11 +75,23 @@ impl Term {
     /// Recodes `scalar` at `width` (the batch-wide value from [`width_for`]; every term of one
     /// MSM must use the same width).
     pub(super) fn new(point: GAffine, scalar: &Scalar, width: u32) -> Self {
-        let digits: [i32; MAX_WINDOWS] = scalar.signed_digits(width);
+        let mut term = Self::zero(point);
+        term.recode(scalar, width);
+        term
+    }
+
+    /// A term for `point` with scalar zero.
+    pub(super) const fn zero(point: GAffine) -> Self {
         Self {
             point,
-            digits: digits.map(|d| d as i16),
+            digits: [0; MAX_WINDOWS],
         }
+    }
+
+    /// Replaces this term's scalar with `scalar`, recoded as in [`Term::new`].
+    pub(super) fn recode(&mut self, scalar: &Scalar, width: u32) {
+        let digits: [i32; MAX_WINDOWS] = scalar.signed_digits(width);
+        self.digits = digits.map(|d| d as i16);
     }
 }
 
