@@ -249,8 +249,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "reed_solomon_engine_ssse3"
-path = "fuzz_targets/reed_solomon_engine_ssse3.rs"
+name = "reed_solomon_engine_avx512"
+path = "fuzz_targets/reed_solomon_engine_avx512.rs"
 test = false
 doc = false
 bench = false
