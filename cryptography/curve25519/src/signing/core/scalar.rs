@@ -190,7 +190,9 @@ impl Scalar {
 
     /// Returns the base-`2^width` digit at position `index`, i.e. bits `[index*width,
     /// index*width+width)` of this scalar's canonical representative, as an unsigned integer.
-    pub const fn window(&self, index: usize, width: u32) -> usize {
+    ///
+    /// `width` must be below 32.
+    pub const fn window(&self, index: usize, width: u32) -> u32 {
         let bit_start = index * width as usize;
         if bit_start >= 256 {
             return 0;
@@ -201,7 +203,7 @@ impl Scalar {
         if bit_offset + width > 64 && limb_index + 1 < 4 {
             digit |= self.0[limb_index + 1] << (64 - bit_offset);
         }
-        (digit as usize) & ((1usize << width) - 1)
+        (digit & ((1u64 << width) - 1)) as u32
     }
 
     /// Recodes this scalar into `N` signed, base-`2^width` digits (each in
@@ -217,21 +219,17 @@ impl Scalar {
     /// 2^width * 2^(width*i)`, and that `2^width` term is exactly one unit of the next digit's
     /// weight. `N` must be large enough that the final carry (at most `1`) has a digit to land in;
     /// `256usize.div_ceil(width) + 1` unsigned windows' worth is always enough.
-    pub const fn signed_digits<const N: usize>(&self, width: u32) -> [i32; N] {
+    pub fn signed_digits<const N: usize>(&self, width: u32) -> [i32; N] {
         let half = 1i64 << (width - 1);
-        let full = 1i64 << width;
         let mut digits = [0i32; N];
         let mut carry = 0i64;
         let mut i = 0;
         while i < N {
-            let raw = self.window(i, width) as i64 + carry;
-            if raw >= half {
-                digits[i] = (raw - full) as i32;
-                carry = 1;
-            } else {
-                digits[i] = raw as i32;
-                carry = 0;
-            }
+            // `raw` is at most `2^width`, so the carry is 1 exactly when `raw >= half`. Random
+            // digits make a branch on that comparison unpredictable.
+            let raw = i64::from(self.window(i, width)) + carry;
+            carry = (raw + half) >> width;
+            digits[i] = (raw - (carry << width)) as i32;
             i += 1;
         }
         digits
@@ -476,8 +474,7 @@ mod tests {
                         for offset in 0..width as usize {
                             let bit = index * width as usize + offset;
                             if bit < 256 {
-                                expected |=
-                                    usize::from((bytes[bit / 8] >> (bit % 8)) & 1) << offset;
+                                expected |= u32::from((bytes[bit / 8] >> (bit % 8)) & 1) << offset;
                             }
                         }
                         assert_eq!(scalar.window(index, width), expected);

@@ -785,7 +785,7 @@ fn bucket_fill_matches_scalar_sum_for_every_geometry() {
                     buckets.as_flattened_mut(),
                     NB,
                     piece,
-                    |term| *term,
+                    |(point, digit)| (point, *digit),
                 );
             }
             let actual = buckets

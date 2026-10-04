@@ -29,7 +29,7 @@ pub trait Backend: GBackend + Send + Sync {
         buckets: &mut [G],
         nb: usize,
         terms: &[T],
-        term: impl Fn(&T) -> (GAffine, i16),
+        term: impl Fn(&T) -> (&GAffine, i16),
     ) {
         fill_buckets(
             |current, incoming, negative| {
@@ -89,7 +89,7 @@ pub fn fill_buckets<const STRIPES: usize, T>(
     buckets: &mut [G],
     nb: usize,
     terms: &[T],
-    term: impl Fn(&T) -> (GAffine, i16),
+    term: impl Fn(&T) -> (&GAffine, i16),
 ) {
     let identity_point = GAffine::IDENTITY;
     for wave in terms.chunks(STRIPES) {
@@ -102,10 +102,10 @@ pub fn fill_buckets<const STRIPES: usize, T>(
             let (point, digit) = term(item);
             if digit > 0 {
                 bucket_index[lane] = Some(digit as usize - 1);
-                incoming[lane] = point;
+                incoming[lane] = *point;
             } else if digit < 0 {
                 bucket_index[lane] = Some(digit.unsigned_abs() as usize - 1);
-                incoming[lane] = point;
+                incoming[lane] = *point;
                 negative[lane] = true;
             }
             if let Some(i) = bucket_index[lane] {
@@ -189,6 +189,87 @@ fn fold_preserves_every_bucket_weight() {
                     assert!(
                         actual.add(expected.negate()).is_identity(),
                         "width={width} used={used}"
+                    );
+                }
+            }
+        }
+    }
+    crate::curve::WithBackend::call(Check, crate::curve::test_backend());
+    crate::curve::with_backend(Check);
+}
+
+/// Checks every bucket a backend fills against a scalar fill, with edge digits on every stripe.
+#[test]
+fn fill_matches_scalar_fill_for_edge_digits() {
+    struct Check;
+    impl crate::curve::WithBackend for Check {
+        type Output = ();
+        fn call<B: crate::curve::Backend>(self, backend: B) {
+            let base = GAffine::BASEPOINT.to_extended();
+            let torsion = GAffine::decompress(&[0; 32]).unwrap();
+            let mixed = GAffine::decompress(&base.add(torsion.to_extended()).to_bytes()).unwrap();
+            let points = [
+                GAffine::IDENTITY,
+                GAffine::BASEPOINT,
+                torsion,
+                mixed,
+                GAffine::BASEPOINT,
+            ];
+            for width in [6, 10] {
+                let nb = 1usize << (width - 1);
+                let edge = nb as i16;
+                let cycle = [1, -1, 2, -2, edge - 1, 1 - edge, edge, -edge, 0];
+
+                // Sixteen zero digits, eight digits of `-nb`, each cycle digit on every stripe, and
+                // five trailing digits of `nb`.
+                let terms: Vec<(GAffine, i16)> = (0..16 + 8 + 72 + 5)
+                    .map(|i| {
+                        let digit = match i {
+                            0..16 => 0,
+                            16..24 => -edge,
+                            24..96 => cycle[((i - 24) / 8 + (i - 24) % 8) % cycle.len()],
+                            _ => edge,
+                        };
+                        (points[i % points.len()], digit)
+                    })
+                    .collect();
+                for split in [0, 37] {
+                    // Fill a scalar reference, restarting stripes at each piece.
+                    let mut expected = vec![G::IDENTITY; B::STRIPES * nb];
+                    for piece in [&terms[..split], &terms[split..]] {
+                        for (j, &(point, digit)) in piece.iter().enumerate() {
+                            if digit != 0 {
+                                let point = point.to_extended();
+                                let point = if digit < 0 { point.negate() } else { point };
+                                let slot =
+                                    (j % B::STRIPES) * nb + usize::from(digit.unsigned_abs()) - 1;
+                                expected[slot] = expected[slot].add(point);
+                            }
+                        }
+                    }
+
+                    // Fill through the backend with a guard point after the last bucket.
+                    let mut storage = vec![G::IDENTITY; B::STRIPES * nb + 1];
+                    storage[B::STRIPES * nb] = base;
+                    for piece in [&terms[..split], &terms[split..]] {
+                        backend.fill_buckets(
+                            &mut storage[..B::STRIPES * nb],
+                            nb,
+                            piece,
+                            |(point, digit)| (point, *digit),
+                        );
+                    }
+                    for (bucket, (actual, expected)) in storage.iter().zip(&expected).enumerate() {
+                        assert!(
+                            actual.add(expected.negate()).is_identity(),
+                            "width={width} split={split} bucket={bucket}"
+                        );
+                    }
+                    let guard = storage[B::STRIPES * nb];
+                    assert_eq!(
+                        [guard.x.0, guard.y.0, guard.t.0, guard.z.0],
+                        [base.x.0, base.y.0, base.t.0, base.z.0],
+                        "width={width} split={split}"
                     );
                 }
             }

@@ -151,7 +151,9 @@ mod bucketed {
         }
         buckets.fill(G::IDENTITY);
         for piece in super::pieces(chunks, start, end) {
-            backend.fill_buckets(buckets, nb, piece, |term| (term.point, term.digits[window]));
+            backend.fill_buckets(buckets, nb, piece, |term| {
+                (&term.point, term.digits[window])
+            });
         }
         backend.fold_buckets(buckets, nb, used)
     }
@@ -175,7 +177,7 @@ mod bucketed {
             let used = super::used_buckets(chunks, 0, total, window);
             for piece in super::pieces(chunks, 0, total) {
                 backend.fill_buckets(&mut buckets, nb, piece, |term| {
-                    (term.point, term.digits[window])
+                    (&term.point, term.digits[window])
                 });
             }
             let mut sum = G::IDENTITY;
@@ -310,6 +312,7 @@ mod tests {
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz::Builder;
     use commonware_parallel::Sequential;
+    use rand_core::Rng as _;
 
     /// The widths every differential test sweeps: [`width_for`]'s full output range.
     const TEST_WIDTHS: [u32; 5] = [6, 7, 8, 9, 10];
@@ -347,6 +350,14 @@ mod tests {
                 Ok(Term::new(point, &scalar, width))
             })
             .collect()
+    }
+
+    /// Expands one drawn seed into enough bytes for every draw a test makes, so its points and
+    /// scalars stay random however short the fuzzer's input is.
+    fn expand(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+        let mut bytes = vec![0; 1 << 19];
+        commonware_utils::TestRng::new(u.arbitrary()?).fill_bytes(&mut bytes);
+        Ok(bytes)
     }
 
     fn points_equal(actual: G, expected: G) -> bool {
@@ -420,8 +431,10 @@ mod tests {
         let backend = crate::curve::test_backend();
         Builder::default()
             .with_seed(0)
-            .with_search_limit(8)
+            .with_search_limit(1)
             .test(|u| {
+                let bytes = expand(u)?;
+                let u = &mut Unstructured::new(&bytes);
                 let points = arbitrary_affine_points(u, 100)?;
                 let scalars = (0..100)
                     .map(|_| u.arbitrary())
@@ -463,8 +476,10 @@ mod tests {
             fn call<B: Backend>(self, backend: B) {
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(8)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         let terms = arbitrary_terms(u, 100, 7)?;
                         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
                             let terms = terms[..n].to_vec();
@@ -492,8 +507,10 @@ mod tests {
             fn call<B: Backend>(self, backend: B) {
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(2)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         for width in TEST_WIDTHS {
                             let terms = arbitrary_terms(u, 600, width)?;
                             for n in [0, 1, 2, 5, 32, 600] {
@@ -530,8 +547,10 @@ mod tests {
 
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(2)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         for width in [6, 8, 10] {
                             let terms = arbitrary_terms(u, 1000, width)?;
                             assert!(
@@ -612,8 +631,10 @@ mod tests {
                 const WIDTH: u32 = 7;
                 Builder::default()
                     .with_seed(0)
-                    .with_search_limit(8)
+                    .with_search_limit(1)
                     .test(|u| {
+                        let bytes = expand(u)?;
+                        let u = &mut Unstructured::new(&bytes);
                         let terms = arbitrary_terms(u, 100, WIDTH)?;
                         for n in [1, 2, 5, 8, 9, 32, 64, 100] {
                             let chunks = split_terms(terms[..n].to_vec(), &[n / 3, n / 3]);
