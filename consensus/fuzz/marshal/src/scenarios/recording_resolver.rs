@@ -131,18 +131,29 @@ impl<P: Simplex> RecordingResolver<P> {
         let Some(value) = self.auto_delivery.lock().take() else {
             return;
         };
+        let response = self.inject(key, subscriber, span, value);
+        self.delivery_responses.lock().push(response);
+    }
+
+    /// Delivers `value` for `key` through the held handler, as a peer response.
+    fn inject(
+        &self,
+        key: Key<Sha256Digest>,
+        annotation: Annotation,
+        span: tracing::Span,
+        value: Bytes,
+    ) -> oneshot::Receiver<bool> {
         let mut handler = self
             .handler
             .clone()
-            .expect("armed delivery requires an injection handler");
-        let response = handler.deliver(
+            .expect("scripted delivery requires an injection handler");
+        handler.deliver(
             Delivery {
                 key,
-                subscribers: NonEmptyVec::new((subscriber, span)),
+                subscribers: NonEmptyVec::new((annotation, span)),
             },
             value,
-        );
-        self.delivery_responses.lock().push(response);
+        )
     }
 
     /// Arm a payload for the next fetch, which is delivered through the held
@@ -157,6 +168,17 @@ impl<P: Simplex> RecordingResolver<P> {
             replaced.is_none(),
             "recording resolver already has an automatic delivery"
         );
+    }
+
+    /// Deliver `value` for `key` under `annotation` as a peer response to a
+    /// fetch the actor issued, and return the actor's verdict.
+    pub(crate) fn deliver(
+        &self,
+        key: Key<Sha256Digest>,
+        annotation: Annotation,
+        value: Bytes,
+    ) -> oneshot::Receiver<bool> {
+        self.inject(key, annotation, tracing::Span::none(), value)
     }
 
     /// Await the actor's validation verdict for the most recent armed delivery.

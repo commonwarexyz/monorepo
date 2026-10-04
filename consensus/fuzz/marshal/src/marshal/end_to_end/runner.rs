@@ -49,12 +49,13 @@ use super::{
         AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, DeliveryReporter,
         FaultyConfig,
     },
-    block_disrupter, coding_disrupter,
+    block_disrupter,
+    coding_disrupter::{self, CodingFaults},
     coding_stack::{
-        CodingB, CodingCtx, CommitmentOf, coding_genesis, coding_marshaled, setup_validator_coding,
-        start_engine_coding_with_networks,
+        CodingB, CodingCtx, CommitmentOf, DigestLookups, coding_genesis, coding_marshaled,
+        sample_shards_mailbox_size, setup_validator_coding, start_engine_coding_with_networks,
     },
-    input::MarshalDisrupterInput,
+    input::{MAX_ANCESTRY_DEPTH, MarshalDisrupterInput},
     invariants::{self, CertificationAgreementInvariant, HeaderMismatchInvariant},
     twins::{
         B, Ctx, ObservedMarshal, PublicKeyOf, SchemeOf,
@@ -71,7 +72,7 @@ use commonware_consensus::{
         Start,
         mocks::{
             application::Application,
-            harness::{LINK, NUM_VALIDATORS},
+            harness::{LINK, NUM_VALIDATORS, TEST_QUOTA},
         },
     },
     simplex::{
@@ -95,6 +96,7 @@ use commonware_cryptography::{
 use commonware_p2p::simulated::Link;
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::{FuzzRng, NZUsize, probability, sync::Mutex};
+use rand::RngExt as _;
 use std::{
     fmt::{self, Write as _},
     num::NonZeroUsize,
@@ -598,8 +600,41 @@ fn run_standard_disrupter<P: Simplex>(
 ///
 /// The Commitment-typed disrupter signs conflicting coding proposals with the
 /// Byzantine identity's key, so notarize and finalize equivocations reach the
-/// honest engines instead of being discarded during decoding.
+/// honest engines instead of being discarded during decoding. It also holds
+/// the shard channel: it replays mutated honest shards under its own identity
+/// and, on the views it leads, may propose coded blocks whose commitment does
+/// not describe their bytes. Honest shard engines must block it and still
+/// reconstruct from the honest quorum.
 pub fn fuzz_marshal_coding_disrupter<P>(input: MarshalDisrupterInput)
+where
+    P: Simplex,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
+{
+    run_coding_disrupter::<P>(input, false);
+}
+
+/// The cluster of [`fuzz_marshal_coding_disrupter`] with a Byzantine node that
+/// only answers backfill requests.
+///
+/// Every block it serves decodes as a coded block but does not match the
+/// commitment it is delivered under: another block under the requested coding
+/// config, the right digest under another config, or another block claiming the
+/// requested digest. Notarized-proposal requests are answered under a forged
+/// quorum notarization, which the requester must reject together with the
+/// block. The requester must block the responder and fetch elsewhere. The node
+/// is otherwise silent, so it stays an eligible backfill peer; lossy links on
+/// the last node make it fall behind, so it backfills.
+pub fn fuzz_marshal_coding_block_poison<P>(mut input: MarshalDisrupterInput)
+where
+    P: Simplex,
+    SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
+{
+    input.partition = Partition::Connected;
+    input.degraded_network = true;
+    run_coding_disrupter::<P>(input, true);
+}
+
+fn run_coding_disrupter<P>(input: MarshalDisrupterInput, poison: bool)
 where
     P: Simplex,
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
@@ -635,37 +670,79 @@ where
         block_contexts.record(genesis_digest, genesis.inner().context());
         let mut fault_rng = FuzzRng::new(input.raw_bytes.clone());
         let faulty_config = FaultyConfig::new(&mut fault_rng, View::new(0));
+        // Stack axes the input does not model: a shard mailbox small enough to
+        // overflow under normal load, ancestry walks that fetch missing
+        // ancestors by commitment, and digest-keyed marshal lookups.
+        let shards_mailbox_size = sample_shards_mailbox_size(&mut fault_rng);
+        let ancestry_depth = fault_rng.random_range(0..=MAX_ANCESTRY_DEPTH);
+        let digest_lookups = fault_rng.random_range(0..2u8) == 1;
+        let mut disrupter_rng = Some(fault_rng);
         let stack_label: Arc<str> =
             "application=always-accept marshal=coding max_pending_acks=64".into();
-        let probe_input: Arc<str> = format!("{:?}", MarshalDisrupterInputDebug(&input)).into();
+        let probe_input: Arc<str> = format!(
+            "{:?} poison={poison} shards_mailbox_size={shards_mailbox_size} \
+             ancestry_depth={ancestry_depth} digest_lookups={digest_lookups}",
+            MarshalDisrupterInputDebug(&input)
+        )
+        .into();
         let certification_agreement = CertificationAgreementInvariant::coding(stack_label.clone());
 
         let mut honest_apps: Vec<(usize, Application<CodingB<P>>)> = Vec::new();
 
         for (idx, validator) in participants.iter().enumerate() {
             let scheme = schemes[idx].clone();
-            let (vote, certificate, resolver) =
-                register_engine_networks::<P>(&oracle, validator.clone()).await;
+            let validator_ctx = context
+                .child("validator")
+                .with_attribute("public_key", validator);
 
             if idx == BYZANTINE_IDX {
+                // The honest stacks register backfill=1 and shards=2. The
+                // poisoner holds only the backfill channel: honest resolvers
+                // never ask a blocked peer, and equivocation gets a peer blocked
+                // at once.
+                let control = oracle.control(validator.clone());
+                let rng = disrupter_rng.take().expect("one byzantine node");
+                if poison {
+                    let backfill = control
+                        .register(1, TEST_QUOTA)
+                        .await
+                        .expect("byzantine backfill channel registration failed");
+                    coding_disrupter::start_backfill_poison::<P>(
+                        validator_ctx.child("poisoner"),
+                        schemes.clone(),
+                        backfill,
+                        rng,
+                    );
+                    continue;
+                }
+                let shards = control
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .expect("byzantine shard channel registration failed");
+                let (vote, certificate, resolver) =
+                    register_engine_networks::<P>(&oracle, validator.clone()).await;
+                let faults = CodingFaults {
+                    shards: Some((
+                        shards,
+                        Box::new(byzantine_led::<P>(&scheme, TermLength::ONE)),
+                    )),
+                    rng,
+                };
                 coding_disrupter::start::<P>(
-                    context
-                        .child("validator")
-                        .with_attribute("public_key", validator)
-                        .child("disrupter"),
+                    validator_ctx.child("disrupter"),
                     scheme,
                     input.strategy,
                     required,
                     vote,
                     certificate,
                     resolver,
+                    faults,
                 );
                 continue;
             }
 
-            let validator_ctx = context
-                .child("validator")
-                .with_attribute("public_key", validator);
+            let (vote, certificate, resolver) =
+                register_engine_networks::<P>(&oracle, validator.clone()).await;
             let provider = ConstantProvider::new(scheme.clone());
             let node = setup_validator_coding::<P>(
                 validator_ctx.child("marshal"),
@@ -677,15 +754,21 @@ where
                 None,
                 idx,
                 stack_label.clone(),
+                shards_mailbox_size,
             )
             .await;
             honest_apps.push((idx, node.application.clone()));
 
+            let application = DigestLookups::<P, _>::new(
+                AlwaysAcceptBlockBuilderApp::<CodingCtx<P>, SchemeOf<P>, CodingB<P>>::default()
+                    .with_ancestry_depth(ancestry_depth)
+                    .with_block_contexts(block_contexts.clone()),
+                digest_lookups.then(|| node.mailbox.clone()),
+            );
             let marshaled = coding_marshaled::<P, _>(
                 &validator_ctx,
                 provider,
-                AlwaysAcceptBlockBuilderApp::<CodingCtx<P>, SchemeOf<P>, CodingB<P>>::default()
-                    .with_block_contexts(block_contexts.clone()),
+                application,
                 node.mailbox.clone(),
                 node.shards,
             );
@@ -810,5 +893,22 @@ mod tests {
             },
             forwarding: ForwardPolicy::Disabled,
         });
+    }
+
+    /// Several Byzantine-led views with shard and backfill faults armed; the
+    /// honest nodes must still reach the target.
+    #[test]
+    fn coding_block_poison_runs_under_certificate_mock() {
+        for seed in [vec![0], vec![7, 42, 199, 3, 88]] {
+            fuzz_marshal_coding_block_poison::<SimplexCertificateMock>(MarshalDisrupterInput {
+                raw_bytes: seed,
+                required_containers: 6,
+                term_length: commonware_consensus::types::TermLength::ONE,
+                degraded_network: true,
+                partition: Partition::Connected,
+                strategy: StrategyChoice::AnyScope,
+                forwarding: ForwardPolicy::Disabled,
+            });
+        }
     }
 }

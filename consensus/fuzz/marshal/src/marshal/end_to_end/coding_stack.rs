@@ -8,7 +8,7 @@
 //! than a `Sha256Digest`).
 
 use super::{
-    app::{BuildableBlock, DeliveryReporter},
+    app::{BlockContextRegistry, BuildableBlock, DeliveryReporter},
     twins::{PublicKeyOf, SchemeOf},
 };
 use bytes::BufMut;
@@ -18,11 +18,12 @@ use commonware_consensus::{
     Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay,
     marshal::{
         Config, Start,
+        ancestry::Ancestry,
         coding::{
             Coding, Marshaled, MarshaledConfig, shards,
             types::{CodedBlock, hash_context},
         },
-        core::{Actor, Mailbox},
+        core::{Actor, DigestFallback, Mailbox},
         mocks::{
             application::Application,
             block::Block as MockBlock,
@@ -45,12 +46,32 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, Verifier as _},
     sha256::Digest as Sha256Digest,
 };
+use commonware_macros::select;
 use commonware_p2p::{Receiver, Sender, simulated::Oracle};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    Clock as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
 use commonware_storage::archive::immutable;
-use commonware_utils::{NZU64, NZUsize};
-use std::{fmt, num::NonZeroUsize, sync::Arc, time::Duration};
+use commonware_utils::{FuzzRng, NZU64, NZUsize};
+use rand::RngExt as _;
+use std::{fmt, future::Future, num::NonZeroUsize, sync::Arc, time::Duration};
+
+/// Largest block the shard engines accept.
+pub(crate) const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
+
+/// Largest shard mailbox the harnesses sample.
+const MAX_SHARDS_MAILBOX_SIZE: usize = 16;
+
+/// Samples a shard mailbox size. Half of the runs take a size of one or two,
+/// which overflows under normal load: the only way into the overflow policy.
+pub(crate) fn sample_shards_mailbox_size(rng: &mut FuzzRng) -> NonZeroUsize {
+    if rng.random_range(0..2u8) == 0 {
+        NZUsize!(rng.random_range(1..=2))
+    } else {
+        NZUsize!(rng.random_range(1..=MAX_SHARDS_MAILBOX_SIZE))
+    }
+}
 
 /// Consensus payload for the coding variant: a commitment over the block, its
 /// coding root, and its context.
@@ -185,6 +206,7 @@ pub(crate) async fn setup_validator_coding<P: Simplex>(
     pending_ack_invariant_limit: Option<NonZeroUsize>,
     validator_idx: usize,
     stack: Arc<str>,
+    shards_mailbox_size: NonZeroUsize,
 ) -> CodingValidator<P>
 where
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
@@ -241,10 +263,10 @@ where
     let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
         scheme_provider: provider,
         blocker: oracle.control(validator.clone()),
-        max_block_size: NZUsize!(1024 * 1024),
+        max_block_size: MAX_BLOCK_SIZE,
         block_codec_cfg: (),
         strategy: Sequential,
-        mailbox_size: NZUsize!(10),
+        mailbox_size: shards_mailbox_size,
         peer_buffer_size: NZUsize!(64),
         records: NZUsize!(16),
         background_channel_capacity: NZUsize!(1024),
@@ -371,6 +393,245 @@ where
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
         },
     )
+}
+
+/// Longest wait for a digest subscription to resolve before it is abandoned.
+const DIGEST_SUBSCRIPTION_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Application wrapper issuing the digest-keyed marshal lookups the coding
+/// wrapper never makes itself.
+///
+/// `Marshaled` keys every lookup by commitment, so the digest index of the
+/// shard engine is only reachable through the public mailbox API. Each
+/// proposal subscribes to its own digest before marshal can know the block and
+/// looks its parent up by digest; each verification looks the candidate up by
+/// digest. A lookup that returns a block must return the block asked for.
+pub(crate) struct DigestLookups<P: Simplex, A> {
+    inner: A,
+    /// Marshal mailbox to probe; `None` passes every call straight through.
+    mailbox: Option<Mailbox<SchemeOf<P>, CodingVariant<P>>>,
+}
+
+impl<P: Simplex, A> DigestLookups<P, A> {
+    pub(crate) const fn new(
+        inner: A,
+        mailbox: Option<Mailbox<SchemeOf<P>, CodingVariant<P>>>,
+    ) -> Self {
+        Self { inner, mailbox }
+    }
+
+    fn subscribe(&self, runtime: &deterministic::Context, digest: Sha256Digest) {
+        let Some(mailbox) = &self.mailbox else {
+            return;
+        };
+        let subscription = mailbox.subscribe_by_digest(digest, DigestFallback::Wait);
+        runtime
+            .child("digest_subscription")
+            .spawn(move |runtime| async move {
+                select! {
+                    result = subscription => {
+                        if let Ok(block) = result {
+                            assert_eq!(block.digest(), digest, "digest subscription served another block");
+                        }
+                    },
+                    _ = runtime.sleep(DIGEST_SUBSCRIPTION_TIMEOUT) => {},
+                }
+            });
+    }
+
+    fn lookup(&self, digest: Sha256Digest) -> impl Future<Output = ()> + Send + 'static {
+        let mailbox = self.mailbox.clone();
+        async move {
+            let Some(mailbox) = mailbox else {
+                return;
+            };
+            if let Some(block) = mailbox.get_block(&digest).await {
+                assert_eq!(
+                    block.digest(),
+                    digest,
+                    "digest lookup returned another block"
+                );
+            }
+        }
+    }
+}
+
+impl<P: Simplex, A: Clone> Clone for DigestLookups<P, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            mailbox: self.mailbox.clone(),
+        }
+    }
+}
+
+impl<P, A> commonware_consensus::Application<deterministic::Context> for DigestLookups<P, A>
+where
+    P: Simplex,
+    A: commonware_consensus::Application<
+            deterministic::Context,
+            SigningScheme = SchemeOf<P>,
+            Context = CodingCtx<P>,
+            Block = CodingB<P>,
+            Input = (),
+        >,
+{
+    type SigningScheme = SchemeOf<P>;
+    type Context = CodingCtx<P>;
+    type Block = CodingB<P>;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Option<Self::Block> {
+        let runtime = context.0.child("digest_lookups");
+        let block = self.inner.propose(context, ancestry, input).await?;
+        self.subscribe(&runtime, block.digest());
+        self.lookup(block.parent()).await;
+        Some(block)
+    }
+
+    async fn verify(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        let runtime = context.0.child("digest_lookups");
+        let candidate = ancestry.peek().map(|block| block.digest());
+        let verdict = self.inner.verify(context, ancestry).await;
+        if let Some(digest) = candidate {
+            self.subscribe(&runtime, digest);
+            self.lookup(digest).await;
+        }
+        verdict
+    }
+}
+
+/// How a Byzantine proposer's block departs from the one its application built.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProposalFault {
+    /// Embeds the previous view's context, so the commitment's context digest
+    /// does not bind the round it is proposed in.
+    StaleContext,
+    /// Links to a digest no block has.
+    WrongParent,
+    /// Skips a height above its parent.
+    SkippedHeight,
+}
+
+impl ProposalFault {
+    /// Decodes bits 6-7 of a stack selector byte; zero selects an honest proposer.
+    pub(crate) const fn from_selector(selector: u8) -> Option<Self> {
+        match (selector >> 6) & 0b11 {
+            1 => Some(Self::StaleContext),
+            2 => Some(Self::WrongParent),
+            3 => Some(Self::SkippedHeight),
+            _ => None,
+        }
+    }
+}
+
+/// Application of a Byzantine identity whose proposals carry a header fault.
+///
+/// `Marshaled` encodes whatever block the application returns, so the fault
+/// reaches the honest verifiers as a well-formed coded block: a stale context
+/// fails their proposal check, a wrong parent or a skipped height fails the
+/// reconstructed block's validation. Honest applications never wrap.
+pub(crate) struct FaultyProposer<P: Simplex, A> {
+    inner: A,
+    /// `None` proposes exactly what the inner application built.
+    fault: Option<ProposalFault>,
+    block_contexts: BlockContextRegistry<CodingCtx<P>>,
+}
+
+impl<P: Simplex, A> FaultyProposer<P, A> {
+    pub(crate) const fn new(
+        inner: A,
+        fault: Option<ProposalFault>,
+        block_contexts: BlockContextRegistry<CodingCtx<P>>,
+    ) -> Self {
+        Self {
+            inner,
+            fault,
+            block_contexts,
+        }
+    }
+}
+
+impl<P: Simplex, A: Clone> Clone for FaultyProposer<P, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            fault: self.fault,
+            block_contexts: self.block_contexts.clone(),
+        }
+    }
+}
+
+impl<P, A> commonware_consensus::Application<deterministic::Context> for FaultyProposer<P, A>
+where
+    P: Simplex,
+    A: commonware_consensus::Application<
+            deterministic::Context,
+            SigningScheme = SchemeOf<P>,
+            Context = CodingCtx<P>,
+            Block = CodingB<P>,
+            Input = (),
+        >,
+{
+    type SigningScheme = SchemeOf<P>;
+    type Context = CodingCtx<P>;
+    type Block = CodingB<P>;
+    type Input = ();
+
+    async fn propose(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+        input: Self::Input,
+    ) -> Option<Self::Block> {
+        let consensus_context = context.1.clone();
+        let block = self.inner.propose(context, ancestry, input).await?;
+        let Some(fault) = self.fault else {
+            return Some(block);
+        };
+        let (block_context, parent, height) = match fault {
+            ProposalFault::StaleContext => {
+                let round = consensus_context.round;
+                let stale = CodingCtx::<P> {
+                    round: Round::new(
+                        round.epoch(),
+                        View::new(round.view().get().saturating_sub(1)),
+                    ),
+                    leader: consensus_context.leader,
+                    parent: consensus_context.parent,
+                };
+                (stale, block.parent(), block.height())
+            }
+            ProposalFault::WrongParent => (
+                consensus_context,
+                Sha256::hash(&[b"coding-wrong-parent", block.parent().as_ref()]),
+                block.height(),
+            ),
+            ProposalFault::SkippedHeight => {
+                (consensus_context, block.parent(), block.height().next())
+            }
+        };
+        let block = CodingB::<P>::build(block_context, parent, height, height.get());
+        self.block_contexts.record(block.digest(), block.context());
+        Some(block)
+    }
+
+    async fn verify(
+        &mut self,
+        context: (deterministic::Context, Self::Context),
+        ancestry: impl Ancestry<Self::Block>,
+    ) -> bool {
+        self.inner.verify(context, ancestry).await
+    }
 }
 
 /// Starts a coding Simplex engine on caller-supplied network channels.
