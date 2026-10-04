@@ -160,7 +160,7 @@ Tracing spans are discrete, time-bounded units of work exported to OTLP. They ar
 
 ### Actor boundaries, levels, and errors
 
-Implicit tracing context does not cross a mailbox. Carry the caller-created `Span` in the message and re-enter it with `.instrument(span)` while processing. At dequeue, create a child span so queue wait and processing time are separate. Borrow the carried span as that child's parent (`parent: &span`): tracing drops an owned parent before registering the child, so the subscriber panics if that was the last handle. The `owned_span_parent` lint rejects owned span parents and `follows_from` sources.
+Implicit tracing context does not cross a mailbox. Carry the caller-created `Span` in the message and re-enter it with `.instrument(span)` while processing. At dequeue, create a child span so queue wait and processing time are separate. Borrow the carried span as that child's parent (`parent: &span`): tracing drops an owned parent before registering the child, so `tracing-subscriber`'s registry panics if that was the last handle. The `owned_span_parent` lint rejects owned span parents and `follows_from` sources.
 
 Use `info` for lifecycle and per-block work; use `debug` or `trace` for chatty or large-data spans. Record errors only on root spans, avoiding the same failure at every stack level.
 
