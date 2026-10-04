@@ -102,6 +102,16 @@ impl<F: Family> StagedLoc<F> {
             Self::Committed(loc) | Self::Ancestor { loc, .. } => *loc,
         }
     }
+
+    /// The committed location a write at this resolution supersedes. `boundary` is the committed
+    /// boundary at merkleize.
+    fn superseded(&self, boundary: Location<F>) -> Option<Location<F>> {
+        match *self {
+            Self::Committed(loc) => Some(loc),
+            Self::Ancestor { loc, .. } if loc < boundary => Some(loc),
+            Self::Ancestor { base_old_loc, .. } => base_old_loc,
+        }
+    }
 }
 
 /// Staged update entry: key, resolved location, cached payload from the old update, and
@@ -182,16 +192,20 @@ fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool 
     items.get(*cursor) == Some(target)
 }
 
-/// Merge two key-sorted diffs with disjoint keys into one sorted diff.
-fn merge_sorted_diffs<K: Ord, F: Family, V>(
-    a: DiffVec<K, F, V>,
-    b: DiffVec<K, F, V>,
-) -> DiffVec<K, F, V> {
+/// Merge the `less`-sorted vectors `a` and `b` into one sorted vector. On ties, the element from
+/// `b` comes first.
+fn merge_by<T>(a: Vec<T>, b: Vec<T>, less: impl Fn(&T, &T) -> bool) -> Vec<T> {
+    if b.is_empty() {
+        return a;
+    }
+    if a.is_empty() {
+        return b;
+    }
     let mut merged = Vec::with_capacity(a.len() + b.len());
     let mut a = a.into_iter().peekable();
     let mut b = b.into_iter().peekable();
     while let (Some(x), Some(y)) = (a.peek(), b.peek()) {
-        if x.0 < y.0 {
+        if less(x, y) {
             merged.push(a.next().expect("peeked"));
         } else {
             merged.push(b.next().expect("peeked"));
@@ -456,12 +470,34 @@ fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy
     None
 }
 
-/// Outcome of classifying one floor-raise candidate against the batch diff, ancestor
-/// diffs, and committed snapshot.
+/// Resolve `key`'s operation at `loc` against the ancestor chain (immediate parent first).
+/// Returns `None` when the nearest ancestor entry for `key` is not an update at `loc`. When no
+/// ancestor writes `key`, `loc` must have its committed bit set, and the result is
+/// [`StagedLoc::Committed`].
+fn locate<F: Family, D: Digest, U: update::Update, S: Strategy>(
+    ancestors: &[AncestorBatch<F, D, U, S>],
+    loc: Location<F>,
+    key: &U::Key,
+) -> Option<StagedLoc<F>> {
+    let Some(entry) = resolve_in_ancestors(ancestors, key) else {
+        return Some(StagedLoc::Committed(loc));
+    };
+    (entry.loc() == Some(loc)).then(|| StagedLoc::Ancestor {
+        loc,
+        base_old_loc: entry.base_old_loc(),
+    })
+}
+
+/// Outcome of classifying one floor-raise candidate or policy-kept update against the batch diff
+/// and the ancestor diffs. A keyed operation is active when the nearest diff entry for its key
+/// points at it, or when no diff holds its key. The latter holds for a candidate because, below
+/// the database's size, candidates are only locations whose committed bit is set, and that bit
+/// marks a key's live update. It holds for a kept update because the update was active when the
+/// policy decided it.
 ///
 /// Classification is a pure function of the pre-raise state: at most one candidate per key
-/// can be active (the bitmap holds exactly one set bit per committed key, and each diff or
-/// ancestor entry resolves a key to a single location), and a move only rewrites the moved
+/// can be active (the committed bitmap holds exactly one set bit per active key, and each diff
+/// or ancestor entry resolves a key to a single location), and a move only rewrites the moved
 /// key's own diff entry to a location above the scan tip. Classifying all candidates
 /// against a single snapshot of the diff therefore yields the same outcomes as the
 /// interleaved sequential walk, which lets the per-candidate work run sharded across the
@@ -998,6 +1034,68 @@ where
         })
     }
 
+    /// Classify the operation on `key` at `loc` against the key-sorted batch `diff` and the
+    /// ancestor diffs (see [`FloorOutcome`]).
+    fn classify(
+        &self,
+        diff: &DiffSlice<U::Key, F, U::Value>,
+        loc: Location<F>,
+        key: &U::Key,
+    ) -> FloorOutcome<F> {
+        match diff.binary_search_by(|(k, _)| k.cmp(key)) {
+            Ok(idx) if diff[idx].1.loc() == Some(loc) => FloorOutcome::MoveExisting {
+                idx,
+                base_old_loc: diff[idx].1.base_old_loc(),
+            },
+            Ok(_) => FloorOutcome::Inactive,
+            Err(_) => locate(&self.ancestors, loc, key).map_or(FloorOutcome::Inactive, |sloc| {
+                FloorOutcome::MoveNew {
+                    base_old_loc: sloc.superseded(self.db_state.size),
+                }
+            }),
+        }
+    }
+
+    /// Append `op` at the tip as `outcome` directs and record its new location in `diff` or
+    /// `floor_diff`. Returns whether `op` moved.
+    fn relocate(
+        &self,
+        ops: &mut Vec<Operation<F, U>>,
+        diff: &mut DiffSlice<U::Key, F, U::Value>,
+        floor_diff: &mut DiffVec<U::Key, F, U::Value>,
+        op: Operation<F, U>,
+        outcome: FloorOutcome<F>,
+    ) -> bool {
+        match outcome {
+            FloorOutcome::Inactive => return false,
+            FloorOutcome::MoveExisting { idx, base_old_loc } => {
+                let new_loc = self.base_state.size + ops.len() as u64;
+                let value = extract_update_value(&op);
+                ops.push(op);
+                diff[idx].1 = DiffEntry::Active {
+                    value,
+                    loc: new_loc,
+                    base_old_loc,
+                };
+            }
+            FloorOutcome::MoveNew { base_old_loc } => {
+                let key = op.key().cloned().expect("moved op has a key");
+                let new_loc = self.base_state.size + ops.len() as u64;
+                let value = extract_update_value(&op);
+                ops.push(op);
+                floor_diff.push((
+                    key,
+                    DiffEntry::Active {
+                        value,
+                        loc: new_loc,
+                        base_old_loc,
+                    },
+                ));
+            }
+        }
+        true
+    }
+
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
     /// merkleize, diff merge, and `MerkleizedBatch` construction.
     ///
@@ -1142,53 +1240,15 @@ where
                         diff = job.await;
                     }
 
-                    // Classify read candidates against the pre-raise state (see
-                    // [`FloorOutcome`]). Revalidation is required even for candidates whose
-                    // committed bitmap bit is set: an uncommitted ancestor diff may supersede
-                    // the committed location, and that is not reflected in the bitmap.
-                    let classify = |candidate: Location<F>, op: &Operation<F, U>| {
-                        let Some(key) = op.key() else {
-                            return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
-                        };
-                        match diff.binary_search_by(|(k, _)| k.cmp(key)) {
-                            Ok(idx) => {
-                                let entry = &diff[idx].1;
-                                if entry.loc() == Some(candidate) {
-                                    FloorOutcome::MoveExisting {
-                                        idx,
-                                        base_old_loc: entry.base_old_loc(),
-                                    }
-                                } else {
-                                    FloorOutcome::Inactive
-                                }
-                            }
-                            Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
-                                || {
-                                    if db.snapshot.get(key).any(|&l| l == candidate) {
-                                        FloorOutcome::MoveNew {
-                                            base_old_loc: Some(candidate),
-                                        }
-                                    } else {
-                                        FloorOutcome::Inactive
-                                    }
-                                },
-                                |entry| {
-                                    if entry.loc() == Some(candidate) {
-                                        FloorOutcome::MoveNew {
-                                            base_old_loc: entry.base_old_loc(),
-                                        }
-                                    } else {
-                                        FloorOutcome::Inactive
-                                    }
-                                },
-                            ),
-                        }
-                    };
-
-                    // Classify each candidate against the pre-raise state, in candidate order.
+                    // Classify each candidate against the pre-raise state in candidate order
+                    // (see [`FloorOutcome`]). A CommitFloor has no key and is inactive.
                     let outcomes: Vec<FloorOutcome<F>> = strategy.map_collect_vec(
                         zip_eq(read_candidates.iter(), resolved.iter().flatten()),
-                        |(loc, op)| classify(*loc, op),
+                        |(loc, op)| {
+                            op.key().map_or(FloorOutcome::Inactive, |key| {
+                                self.classify(&diff, *loc, key)
+                            })
+                        },
                     );
                     (resolved, outcomes)
                 };
@@ -1206,32 +1266,8 @@ where
                     }
                     let op = reads.next().expect("one read per candidate");
                     let outcome = outcomes.next().expect("one outcome per read candidate");
-                    match outcome {
-                        FloorOutcome::Inactive => continue,
-                        FloorOutcome::MoveExisting { idx, base_old_loc } => {
-                            let new_loc = self.base_state.size + ops.len() as u64;
-                            let value = extract_update_value(&op);
-                            ops.push(op);
-                            diff[idx].1 = DiffEntry::Active {
-                                value,
-                                loc: new_loc,
-                                base_old_loc,
-                            };
-                        }
-                        FloorOutcome::MoveNew { base_old_loc } => {
-                            let key = op.key().cloned().expect("moved op has a key");
-                            let new_loc = self.base_state.size + ops.len() as u64;
-                            let value = extract_update_value(&op);
-                            ops.push(op);
-                            floor_diff.push((
-                                key,
-                                DiffEntry::Active {
-                                    value,
-                                    loc: new_loc,
-                                    base_old_loc,
-                                },
-                            ));
-                        }
+                    if !self.relocate(&mut ops, &mut diff, &mut floor_diff, op, outcome) {
+                        continue;
                     }
                     moved += 1;
                     if moved >= total_steps {
@@ -1263,7 +1299,7 @@ where
             diff_merge = Some(db.strategy().spawn(merge_len, move |strategy| {
                 let mut floor_diff = floor_diff;
                 strategy.sort_by(&mut floor_diff, |a, b| a.0.cmp(&b.0));
-                let diff = merge_sorted_diffs(diff, floor_diff);
+                let diff = merge_by(diff, floor_diff, |a, b| a.0 < b.0);
                 assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
                 diff
             }));
@@ -2133,11 +2169,9 @@ where
     /// the same candidate source the callback scans (see [`PrefetchedCandidates`]).
     ///
     /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// and across successive calls (the floor raise asserts this). It must yield every location
+    /// that may hold an active update in this chain (see [`FloorOutcome`]), and below the
+    /// database's size only locations whose committed bit is set.
     pub(crate) async fn merkleize_with_floor_scan(
         self,
         metadata: Option<V::Value>,
@@ -2212,11 +2246,6 @@ where
         // produce. Resolutions whose ancestor is still alive keep their recorded base. If
         // that ancestor commits before this batch is applied, `apply_batch` resolves the
         // key in the ancestor's traveling diff and supersedes its entry's location instead.
-        let staged_base_old_loc = |sloc: StagedLoc<F>| match sloc {
-            StagedLoc::Committed(loc) => Some(loc),
-            StagedLoc::Ancestor { loc, .. } if *loc < m.db_state.size => Some(loc),
-            StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
-        };
         let mut cached = staged_updates.into_iter().peekable();
         for (op, &old_loc) in zip_eq(results, &locations) {
             while cached
@@ -2224,7 +2253,7 @@ where
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
             {
                 let (key, sloc, (), mutation) = cached.next().expect("peeked entry exists");
-                emit(key, staged_base_old_loc(sloc), mutation);
+                emit(key, sloc.superseded(m.db_state.size), mutation);
             }
 
             let key = op.into_key().expect("updates should have a key");
@@ -2253,7 +2282,7 @@ where
             emit(key, base_old_loc, mutation);
         }
         for (key, sloc, (), mutation) in cached {
-            emit(key, staged_base_old_loc(sloc), mutation);
+            emit(key, sloc.superseded(m.db_state.size), mutation);
         }
 
         // Process all creates in key order, including parent-deleted keys being
@@ -2356,11 +2385,9 @@ where
     /// op generation directly) and accepting the floor-raise candidate source.
     ///
     /// The callback must yield candidates in ascending location order, both within one call
-    /// and across successive calls (the floor raise asserts this). It may skip locations only
-    /// when it knows they are inactive. The floor-raise loop revalidates each returned
-    /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
-    /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
-    /// be set for locations superseded by an overlay in this chain.
+    /// and across successive calls (the floor raise asserts this). It must yield every location
+    /// that may hold an active update in this chain (see [`FloorOutcome`]), and below the
+    /// database's size only locations whose committed bit is set.
     pub(crate) async fn merkleize_with_floor_scan(
         self,
         metadata: Option<V::Value>,
@@ -3541,9 +3568,9 @@ mod tests {
         }
     }
 
-    /// `merge_sorted_diffs` matches `extend` + `sort_by_key` for disjoint, sorted diffs.
+    /// `merge_by` on keys matches `extend` + `sort_by_key` for disjoint, sorted diffs.
     #[test]
-    fn merge_sorted_diffs_matches_sort() {
+    fn merge_by_matches_sort() {
         let mut rng = test_rng();
         for _ in 0..50 {
             // Disjoint key sets: evens on one side, odds on the other.
@@ -3562,7 +3589,7 @@ mod tests {
             reference.extend(b.clone());
             reference.sort_by_key(|x| x.0);
 
-            let merged = merge_sorted_diffs(a, b);
+            let merged = merge_by(a, b, |x, y| x.0 < y.0);
             assert_eq!(merged.len(), reference.len());
             for ((mk, me), (rk, re)) in merged.iter().zip(&reference) {
                 assert_eq!(mk, rk);

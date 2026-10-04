@@ -1903,8 +1903,7 @@ mod tests {
 
             // Prefetch-then-live handoff: the prefetch is clamped to the committed
             // boundary and the live scan resumes from the continuation with the
-            // post-batch tip. Nothing the raise must revalidate may be lost across the
-            // handoff (false negatives are forbidden): every set bit in `[floor, len)`
+            // post-batch tip. The handoff emits exactly every set bit in `[floor, len)`
             // and every location in `[len, tip)`.
             let tip = len + 3;
             let cap = tip as usize;
@@ -1913,14 +1912,11 @@ mod tests {
                 let mut got = Vec::new();
                 let next = fill_candidates(&chain, Location::new(floor), committed, cap, &mut got);
                 fill_candidates(&chain, next, tip, cap, &mut got);
-                assert!(got.is_sorted_by(|a, b| a < b), "{name} floor={floor}");
-                for loc in floor..tip {
-                    let must_emit = loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc);
-                    assert!(
-                        !must_emit || got.contains(&Location::new(loc)),
-                        "{name} floor={floor} lost {loc}"
-                    );
-                }
+                let want: Vec<Location> = (floor..tip)
+                    .filter(|&loc| loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc))
+                    .map(Location::new)
+                    .collect();
+                assert_eq!(got, want, "{name} floor={floor}");
             }
         }
     }

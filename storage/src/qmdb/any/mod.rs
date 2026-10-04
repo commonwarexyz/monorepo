@@ -256,7 +256,9 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         index::Unordered as UnorderedIndex,
-        journal::contiguous::{Mutable, fixed::Config as FConfig, variable::Config as VConfig},
+        journal::contiguous::{
+            Contiguous as _, Mutable, fixed::Config as FConfig, variable::Config as VConfig,
+        },
         merkle::Location as GenericLocation,
         qmdb::{
             any::{FixedConfig, MerkleConfig, VariableConfig, db::Db},
@@ -1429,6 +1431,7 @@ pub(crate) mod test {
             db.active_keys,
             "live snapshot entries diverged from active keys",
         );
+        assert_exact(&db).await;
 
         // Capture the live state, then commit, drop, and rebuild from the log.
         let live = observe(&db, keys).await;
@@ -1470,6 +1473,7 @@ pub(crate) mod test {
         );
         assert_eq!(rebuilt.root, live.root, "root diverged on reopen");
         assert_eq!(rebuilt.values, live.values, "values diverged on reopen");
+        assert_exact(&db).await;
         db
     }
 
@@ -1490,6 +1494,78 @@ pub(crate) mod test {
                 }
                 Operation::CommitFloor(..) => {}
             }
+        }
+    }
+
+    /// Replay the retained log of `db` and return the location of every live key's update.
+    pub(crate) async fn live<F, C, I, H, U, const N: usize, S>(
+        db: &Db<F, Context, C, I, H, U, N, S>,
+    ) -> BTreeMap<U::Key, GenericLocation<F>>
+    where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>>,
+        H: Hasher,
+        U: Update,
+        S: Strategy,
+        Operation<F, U>: Codec,
+    {
+        let bounds = db.bounds();
+        let positions: Vec<u64> = (*bounds.start..*bounds.end).collect();
+        let ops = db.log.read_many(&positions).await.unwrap();
+        let mut live = BTreeMap::new();
+        replay(&mut live, bounds.start, &ops);
+        live
+    }
+
+    /// Assert that the activity bitmap of `db` is exact against a replay of its retained log.
+    /// The bitmap covers the log. Every unpruned bit is set if and only if its location holds a
+    /// live update or the last commit, and every live update lies at or above the inactivity
+    /// floor. The active key count matches the live keys, and the snapshot maps each live key to
+    /// its update and holds no other entry.
+    pub(crate) async fn assert_exact<F, C, I, H, U, const N: usize, S>(
+        db: &Db<F, Context, C, I, H, U, N, S>,
+    ) where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>>,
+        H: Hasher,
+        U: Update,
+        S: Strategy,
+        Operation<F, U>: Codec,
+    {
+        let live = live(db).await;
+        let size = *db.bounds().end;
+        let floor = db.inactivity_floor_loc();
+        assert!(
+            live.values().all(|loc| *loc >= floor),
+            "a live update lies below the inactivity floor",
+        );
+        let active: BTreeSet<u64> = live.values().map(|loc| **loc).chain([size - 1]).collect();
+        let bitmap = &db.bitmap;
+        assert_eq!(bitmap.len(), size, "bitmap length diverged from the log");
+        for loc in bitmap.pruned_bits()..size {
+            assert_eq!(
+                bitmap.get_bit(loc),
+                active.contains(&loc),
+                "bit {loc} diverged from the log",
+            );
+        }
+        assert_eq!(
+            db.active_keys,
+            live.len(),
+            "active keys diverged from the log"
+        );
+        assert_eq!(
+            db.snapshot.items(),
+            live.len(),
+            "snapshot entries diverged from the log",
+        );
+        for (key, loc) in &live {
+            assert!(
+                db.snapshot.get(key).any(|entry| entry == loc),
+                "snapshot misses the live update at {loc}",
+            );
         }
     }
 
@@ -3948,25 +4024,14 @@ mod bitmap_tests {
         });
     }
 
-    /// Floor-scan falls through to the uncommitted tail when the committed bitmap region runs
-    /// out of active bits.
+    /// Floor scans cross the committed bitmap boundary into uncommitted ancestor operations.
     ///
-    /// `next_candidate` returns set-bit locations within `[floor, bitmap.len)` (skipping inactive
-    /// ones), then sequential candidates beyond `bitmap.len` (uncommitted ancestor ops not
-    /// tracked in the bitmap). The floor-raise loop's per-candidate revalidation is the only
-    /// thing that prevents stale ancestor locations from being moved when a child batch
-    /// supersedes the same key.
+    /// A child overwrites its parent's update of a committed key, so classification must keep the
+    /// superseded ancestor location out of the floor moves. The anchor overwrite and the previous
+    /// commit provide the move budget.
     ///
-    /// Setup: 1 committed key + uncommitted parent re-touching that key + uncommitted child that
-    /// supersedes the key AND writes many other keys. The added user mutations push
-    /// `total_steps` past the active bits available in the committed region, forcing the scan
-    /// to walk into the tail.
-    ///
-    /// Failure modes caught:
-    /// - tail-fallthrough boundary off-by-one → wrong root,
-    /// - missing floor-raise revalidation → parent's superseded loc gets moved → divergent
-    ///   root,
-    /// - bitmap state inconsistent with `init_from_log` → oracle reopen mismatch.
+    /// Applying the child publishes its latest values. Rebuilding independently checks the root
+    /// and activity state after the scan.
     #[test_traced]
     fn floor_scan_falls_through_to_uncommitted_tail() {
         deterministic::Runner::default().start(|context| async move {
@@ -3998,9 +4063,7 @@ mod bitmap_tests {
                 "parent must extend past committed bitmap to exercise the tail path",
             );
 
-            // Uncommitted child: supersede anchor + add 16 more writes. The extra user_steps
-            // ensure `total_steps` exceeds active bits in the committed region, forcing the
-            // floor-raise scan into the uncommitted tail.
+            // The uncommitted child supersedes the anchor and creates 16 other keys.
             let others: Vec<_> = (0..16u64)
                 .map(|i| Sha256::hash(&[&(1000 + i).to_be_bytes()]))
                 .collect();
@@ -4019,8 +4082,6 @@ mod bitmap_tests {
             );
             let expected_root = child.root();
 
-            // Apply. If tail-fallthrough or revalidation were wrong, the produced root would
-            // diverge from the merkleize-time root.
             let (db, _) = db.apply_batch(child).await.unwrap();
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));
