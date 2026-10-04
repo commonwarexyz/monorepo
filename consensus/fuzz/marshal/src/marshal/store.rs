@@ -30,7 +30,9 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_p2p::{Recipients, simulated::Oracle};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Clock, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_runtime::{
+    Clock, Handle, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+};
 use commonware_storage::{
     archive::{Identifier as ArchiveIdentifier, prunable},
     translator::EightCap,
@@ -59,6 +61,7 @@ async fn setup_prunable_validator_cert_mock(
     Mailbox<CertScheme, StoreVariant>,
     buffered::Mailbox<K, B>,
     Application<B>,
+    Handle<()>,
 ) {
     let control = oracle.control(validator.clone());
     let provider = ConstantProvider::new(schemes[0].clone());
@@ -156,13 +159,13 @@ async fn setup_prunable_validator_cert_mock(
     )
     .await;
     let application = Application::<B>::default();
-    if unbuffered {
-        actor.start_unbuffered(application.clone(), resolver);
+    let handle = if unbuffered {
+        actor.start_unbuffered(application.clone(), resolver)
     } else {
-        actor.start(application.clone(), buffer.clone(), resolver);
-    }
+        actor.start(application.clone(), buffer.clone(), resolver)
+    };
 
-    (mailbox, buffer, application)
+    (mailbox, buffer, application, handle)
 }
 
 const NUM_BLOCKS: u64 = 16;
@@ -583,6 +586,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
         .await;
         let mut application = setup.2;
         let mut mailbox = setup.0;
+        let mut actor_handle = setup.3;
 
         for op in input.ops {
             match op {
@@ -717,7 +721,12 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                 StoreOp::Restart => {
                     drop(mailbox);
                     drop(application);
+                    // Let the actor exit on its closed mailbox, then abort it if it is
+                    // still busy so its archives are released before the same
+                    // partitions reopen.
                     context.sleep(EVENT_SETTLE).await;
+                    actor_handle.abort();
+                    let _ = actor_handle.await;
                     let setup = setup_prunable_validator_cert_mock(
                         context.child("validator_restart"),
                         &oracle,
@@ -730,6 +739,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                     .await;
                     application = setup.2;
                     mailbox = setup.0;
+                    actor_handle = setup.3;
                 }
                 StoreOp::ObserveApplication => {
                     let _ = application.tip();
@@ -943,6 +953,38 @@ mod tests {
             StoreOp::ReportFinalization { block_idx: 6 },
             StoreOp::ObserveApplication,
         ];
+        for unbuffered in [false, true] {
+            fuzz_marshal_actor_store(MarshalActorStoreInput {
+                raw_bytes: vec![0],
+                ops: ops.clone(),
+                unbuffered,
+            });
+        }
+    }
+
+    /// Bursts keep the actor busy past the settle period, so `Restart` has to
+    /// stop it before reopening its archives. The burst sizes are the ones from
+    /// the campaign input that reopened them while the actor was still alive.
+    #[test]
+    fn restart_stops_a_busy_actor() {
+        let bytes = [0u8; 64];
+        let mut unstructured = arbitrary::Unstructured::new(&bytes);
+        let mut ops = MarshalActorStoreInput::arbitrary(&mut unstructured)
+            .unwrap()
+            .ops;
+        ops.extend([
+            StoreOp::MessageBurst {
+                block_idx: 2,
+                count: 13,
+            },
+            StoreOp::MessageBurst {
+                block_idx: 2,
+                count: 179,
+            },
+            StoreOp::Restart,
+            StoreOp::SeedBlock { block_idx: 0 },
+            StoreOp::ObserveApplication,
+        ]);
         for unbuffered in [false, true] {
             fuzz_marshal_actor_store(MarshalActorStoreInput {
                 raw_bytes: vec![0],
