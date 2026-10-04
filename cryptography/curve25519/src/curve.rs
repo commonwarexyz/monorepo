@@ -12,16 +12,23 @@ use subtle::{Choice, ConditionallySelectable};
 /// all lanes can use smaller tiles directly.
 pub const LANES: usize = 8;
 
-/// The low 51 bits: what a limb holds once carries have been propagated out of it.
-const MASK_51: u64 = (1 << 51) - 1;
+/// The number of limbs in a field element.
+const LIMBS: usize = 5;
 
-/// `16*p`, decomposed limb-wise at radix 51, used to make subtraction underflow-free.
-const BIAS_16P: [u64; 5] = [
-    16 * ((1u64 << 51) - 19),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
-    16 * ((1u64 << 51) - 1),
+/// The radix exponent: each limb holds `LIMB_BITS` bits once carries have been propagated out of
+/// it, so a field element is `sum(limb[i] * 2^(LIMB_BITS * i))`.
+const LIMB_BITS: usize = 51;
+
+/// The low [`LIMB_BITS`] bits: what a limb holds once carries have been propagated out of it.
+const MASK_51: u64 = (1 << LIMB_BITS) - 1;
+
+/// `16*p`, decomposed limb-wise at radix `2^LIMB_BITS`, used to make subtraction underflow-free.
+const BIAS_16P: [u64; LIMBS] = [
+    16 * ((1u64 << LIMB_BITS) - 19),
+    16 * ((1u64 << LIMB_BITS) - 1),
+    16 * ((1u64 << LIMB_BITS) - 1),
+    16 * ((1u64 << LIMB_BITS) - 1),
+    16 * ((1u64 << LIMB_BITS) - 1),
 ];
 
 /// A base field element in the field of order `p = 2^255 - 19`.
@@ -30,7 +37,7 @@ const BIAS_16P: [u64; 5] = [
 /// canonical, but every arithmetic operation accepts and returns limbs less than `2^52`.
 #[derive(Clone, Copy, Debug)]
 #[repr(transparent)]
-pub struct F(pub [u64; 5]);
+pub struct F(pub [u64; LIMBS]);
 
 // Secret-dependent selection goes through `subtle`, whose `Choice` sits behind an optimization
 // barrier so the compiler cannot prove the mask is 0/-1 and lower the select to a branch.
@@ -82,9 +89,9 @@ impl F {
             u64::from_le_bytes(chunk)
         };
 
-        let mut limbs = [0; 5];
+        let mut limbs = [0; LIMBS];
         for (i, limb) in limbs.iter_mut().enumerate() {
-            let bit = i * 51;
+            let bit = i * LIMB_BITS;
             let offset = (bit / 8).min(bytes.len() - 8);
             *limb = (load8(offset) >> (bit - 8 * offset)) & MASK_51;
         }
@@ -94,27 +101,29 @@ impl F {
     /// Restores the `< 2^52` limb bound without canonicalizing the field element.
     ///
     /// Inputs must have limbs below `2^63`.
-    #[inline]
-    fn reduce(mut l: [u64; 5]) -> Self {
-        for i in 0..l.len() - 1 {
-            l[i + 1] += l[i] >> 51;
+    #[inline(always)]
+    const fn reduce(mut l: [u64; LIMBS]) -> Self {
+        let mut i = 0;
+        while i < LIMBS - 1 {
+            l[i + 1] += l[i] >> LIMB_BITS;
             l[i] &= MASK_51;
+            i += 1;
         }
 
         // The carry out of limb 4 has at most 13 bits, so the fold stays below the `2^52` limb
         // bound for every input and the compiler drops the multiply's overflow check.
-        const _: () = assert!(MASK_51 + (u64::MAX >> 51) * 19 < 1 << 52);
-        l[0] += (l[4] >> 51) * 19;
-        l[4] &= MASK_51;
+        const _: () = assert!(MASK_51 + (u64::MAX >> LIMB_BITS) * 19 < 1 << (LIMB_BITS + 1));
+        l[0] += (l[LIMBS - 1] >> LIMB_BITS) * 19;
+        l[LIMBS - 1] &= MASK_51;
         Self(l)
     }
 
     /// Carry-propagates the limbs for canonical serialization.
     ///
     /// The returned limbs are below `2^51`, except limb 1, which may equal `2^51`.
-    fn carry(&self) -> Self {
+    const fn carry(&self) -> Self {
         let mut l = Self::reduce(self.0).0;
-        l[1] += l[0] >> 51;
+        l[1] += l[0] >> LIMB_BITS;
         l[0] &= MASK_51;
         Self(l)
     }
@@ -126,23 +135,23 @@ impl F {
         // Adding 19 overflows bit 255 exactly when l >= p.
         let mut q = 19;
         for &limb in &l {
-            q = (limb + q) >> 51;
+            q = (limb + q) >> LIMB_BITS;
         }
 
         l[0] += 19 * q;
-        for i in 0..l.len() - 1 {
-            l[i + 1] += l[i] >> 51;
+        for i in 0..LIMBS - 1 {
+            l[i + 1] += l[i] >> LIMB_BITS;
             l[i] &= MASK_51;
         }
-        l[4] &= MASK_51;
+        l[LIMBS - 1] &= MASK_51;
 
         let mut words = [0u64; 4];
         for (i, limb) in l.into_iter().enumerate() {
-            let bit = i * 51;
+            let bit = i * LIMB_BITS;
             let word = bit / 64;
             let shift = bit % 64;
             words[word] |= limb << shift;
-            if shift > 64 - 51 {
+            if shift > 64 - LIMB_BITS {
                 words[word + 1] |= limb >> (64 - shift);
             }
         }
@@ -174,68 +183,93 @@ impl F {
     }
 
     /// Returns `self + rhs`.
-    #[inline]
-    pub fn add(self, rhs: Self) -> Self {
-        Self::reduce(array::from_fn(|i| self.0[i] + rhs.0[i]))
+    #[inline(always)]
+    pub const fn add(self, rhs: Self) -> Self {
+        let mut l = self.0;
+        let mut i = 0;
+        while i < l.len() {
+            l[i] += rhs.0[i];
+            i += 1;
+        }
+        Self::reduce(l)
     }
 
     /// Returns `self - rhs`.
-    #[inline]
-    pub fn sub(self, rhs: Self) -> Self {
-        Self::reduce(array::from_fn(|i| self.0[i] + BIAS_16P[i] - rhs.0[i]))
+    #[inline(always)]
+    pub const fn sub(self, rhs: Self) -> Self {
+        let mut l = self.0;
+        let mut i = 0;
+        while i < l.len() {
+            l[i] = l[i] + BIAS_16P[i] - rhs.0[i];
+            i += 1;
+        }
+        Self::reduce(l)
     }
 
     /// Returns `-self`.
-    #[inline]
-    pub fn neg(self) -> Self {
+    #[inline(always)]
+    pub const fn neg(self) -> Self {
         Self::ZERO.sub(self)
     }
 
-    /// Reduces five wide radix-`2^51` columns to the scalar limb bound.
-    #[inline]
-    fn from_wide(mut c: [u128; 5]) -> Self {
+    /// Reduces [`LIMBS`] wide radix-`2^LIMB_BITS` columns to the scalar limb bound.
+    #[inline(always)]
+    const fn from_wide(mut c: [u128; LIMBS]) -> Self {
         const MASK: u128 = MASK_51 as u128;
-        for i in 0..4 {
-            c[i + 1] += c[i] >> 51;
+        let mut i = 0;
+        while i < LIMBS - 1 {
+            c[i + 1] += c[i] >> LIMB_BITS;
             c[i] &= MASK;
+            i += 1;
         }
 
         // The carry out of column 4 has at most 77 bits, so the fold stays below `2^102` for
         // every input, the final carry keeps limb 1 below the `2^52` limb bound, and the compiler
         // drops the multiply's overflow check.
-        const _: () = assert!(MASK + (u128::MAX >> 51) * 19 < 1 << 102);
-        c[0] += 19 * (c[4] >> 51);
-        c[4] &= MASK;
-        c[1] += c[0] >> 51;
+        const _: () = assert!(MASK + (u128::MAX >> LIMB_BITS) * 19 < 1 << (2 * LIMB_BITS));
+        c[0] += 19 * (c[LIMBS - 1] >> LIMB_BITS);
+        c[LIMBS - 1] &= MASK;
+        c[1] += c[0] >> LIMB_BITS;
         c[0] &= MASK;
 
-        Self(array::from_fn(|i| c[i] as u64))
+        Self([
+            c[0] as u64,
+            c[1] as u64,
+            c[2] as u64,
+            c[3] as u64,
+            c[4] as u64,
+        ])
     }
 
     /// Returns `self * rhs`.
-    #[inline]
-    pub fn mul(self, rhs: Self) -> Self {
+    #[inline(always)]
+    pub const fn mul(self, rhs: Self) -> Self {
         // Accumulate the nine schoolbook columns, then fold columns 5 through 8 down using
         // `2^255 = 19 (mod p)`. At the input bound, every folded column remains below `2^112`.
-        let mut c = [0u128; 9];
-        for (i, a) in self.0.into_iter().enumerate() {
-            for (c, b) in c[i..].iter_mut().zip(rhs.0) {
-                *c += u128::from(a) * u128::from(b);
+        let mut c = [0u128; 2 * LIMBS - 1];
+        let mut i = 0;
+        while i < LIMBS {
+            let mut j = 0;
+            while j < LIMBS {
+                c[i + j] += self.0[i] as u128 * rhs.0[j] as u128;
+                j += 1;
             }
+            i += 1;
         }
-        let (low, high) = c.split_at_mut(5);
-        for (low, high) in low.iter_mut().zip(high) {
+        let mut i = 0;
+        while i < LIMBS - 1 {
             // On AArch64, a checked u128 multiply lowers to a branch on the operand's magnitude.
             // Every column stays below `2^107` at the input bound, so assert that bound and
             // multiply without a check.
-            assert!(*high < 1 << 107);
-            *low += high.wrapping_mul(19);
+            assert!(c[i + LIMBS] < 1 << 107);
+            c[i] += c[i + LIMBS].wrapping_mul(19);
+            i += 1;
         }
         Self::from_wide([c[0], c[1], c[2], c[3], c[4]])
     }
 
     /// Returns `self * self` using one product for each pair of distinct limbs.
-    #[inline]
+    #[inline(always)]
     pub fn square(self) -> Self {
         let limbs = self.0;
         let mut limbs_19 = limbs;
@@ -243,7 +277,13 @@ impl F {
             *limb *= 19;
         }
 
-        let mut c = [0u128; 5];
+        // Each product of distinct limbs occurs twice, so it takes its left factor from `limbs_2`.
+        let mut limbs_2 = limbs;
+        for limb in &mut limbs_2[..LIMBS - 1] {
+            *limb *= 2;
+        }
+
+        let mut c = [0u128; LIMBS];
         for i in 0..limbs.len() {
             for j in i..limbs.len() {
                 let column = i + j;
@@ -252,8 +292,8 @@ impl F {
                 } else {
                     (column - limbs.len(), limbs_19[j])
                 };
-                let product = u128::from(limbs[i]) * u128::from(rhs);
-                c[column] += if i == j { product } else { 2 * product };
+                let lhs = if i == j { limbs[i] } else { limbs_2[i] };
+                c[column] += u128::from(lhs) * u128::from(rhs);
             }
         }
         Self::from_wide(c)
@@ -320,7 +360,7 @@ pub struct FVec {
     // We could have a dynamic number of lanes here, depending on the backend,
     // but it's easier to just have a fixed number, perhaps dispatching several
     // instructions for backends with fewer lanes.
-    limbs: [[u64; LANES]; 5],
+    limbs: [[u64; LANES]; LIMBS],
 }
 
 impl FVec {
@@ -339,7 +379,7 @@ impl FVec {
 
     /// Transposes scalar field elements into limb rows.
     pub fn transpose(lanes: [F; LANES]) -> Self {
-        let mut limbs = [[0u64; LANES]; 5];
+        let mut limbs = [[0u64; LANES]; LIMBS];
         for (i, lane) in lanes.iter().enumerate() {
             for (row, value) in limbs.iter_mut().zip(lane.0) {
                 row[i] = value;
@@ -422,18 +462,6 @@ pub struct G {
     z: F,
 }
 
-impl ConditionallySelectable for G {
-    #[inline]
-    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
-        Self {
-            x: F::conditional_select(&a.x, &b.x, choice),
-            y: F::conditional_select(&a.y, &b.y, choice),
-            t: F::conditional_select(&a.t, &b.t, choice),
-            z: F::conditional_select(&a.z, &b.z, choice),
-        }
-    }
-}
-
 impl G {
     /// The neutral element, `(0, 1)` in affine coordinates.
     pub const IDENTITY: Self = Self {
@@ -452,8 +480,20 @@ impl G {
         bytes
     }
 
+    /// Converts this point to affine representation.
+    pub fn to_affine(self) -> GAffine {
+        let z_inverse = self.z.invert();
+        let x = self.x.mul(z_inverse);
+        let y = self.y.mul(z_inverse);
+        GAffine {
+            x,
+            y,
+            t2d: x.mul(y).mul(F::EDWARDS_D2),
+        }
+    }
+
     /// Negates this point.
-    pub fn negate(self) -> Self {
+    pub const fn negate(self) -> Self {
         Self {
             x: self.x.neg(),
             y: self.y,
@@ -463,8 +503,8 @@ impl G {
     }
 
     /// Adds two points using the complete unified formula for `a = -1`.
-    #[inline]
-    pub fn add(self, rhs: Self) -> Self {
+    #[inline(always)]
+    pub const fn add(self, rhs: Self) -> Self {
         // Hisil-Wong-Carter-Dawson, "Twisted Edwards Curves Revisited",
         // add-2008-hwcd-3 specialized to a = -1:
         //
@@ -493,8 +533,9 @@ impl G {
     }
 
     /// Adds an affine point using its precomputed `2d*x*y` coordinate.
-    #[inline]
-    pub fn add_mixed(self, rhs: GAffine) -> Self {
+    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
+    #[inline(always)]
+    pub const fn add_mixed(self, rhs: GAffine) -> Self {
         let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
         let b = self.y.add(self.x).mul(rhs.y.add(rhs.x));
         let c = self.t.mul(rhs.t2d);
@@ -531,6 +572,7 @@ impl G {
     }
 
     /// Multiplies this point by a public scalar bit sequence using variable-time double-and-add.
+    #[cfg(test)]
     pub fn scalar_mul(self, bits: impl IntoIterator<Item = bool>) -> Self {
         let mut result = Self::IDENTITY;
         for bit in bits {
@@ -538,21 +580,6 @@ impl G {
             if bit {
                 result = result.add(self);
             }
-        }
-        result
-    }
-
-    /// Multiplies this point by a secret 256-bit little-endian scalar.
-    ///
-    /// This performs one doubling and one addition per bit, selecting the result without
-    /// secret-dependent branches or indexing.
-    pub fn scalar_mul_secret(self, scalar: &[u8; 32]) -> Self {
-        let mut result = Self::IDENTITY;
-        for i in (0..256).rev() {
-            let doubled = result.double();
-            let added = doubled.add(self);
-            let bit = Choice::from(scalar[i / 8] >> (i % 8) & 1);
-            result = Self::conditional_select(&doubled, &added, bit);
         }
         result
     }
@@ -617,6 +644,31 @@ impl GAffine {
         ]),
     };
 
+    /// `2^128` times the base point, prepared for mixed addition.
+    pub const BASEPOINT_128: Self = Self {
+        x: F([
+            78814272546852,
+            343446598238096,
+            1469662686845463,
+            446722075312752,
+            1339733442806879,
+        ]),
+        y: F([
+            770831939905131,
+            1066752177064823,
+            855905013023480,
+            1194941381303059,
+            1674322643330780,
+        ]),
+        t2d: F([
+            22893968530686,
+            2235758574399251,
+            1661465835630252,
+            925707319443452,
+            1203475116966621,
+        ]),
+    };
+
     /// Decompresses a point encoding, accepting non-canonical `y` values and negative zero
     /// (`x = 0` with the sign bit set) per ZIP215.
     pub fn decompress(bytes: &[u8; 32]) -> Option<Self> {
@@ -650,8 +702,15 @@ impl GAffine {
         })
     }
 
+    /// Compresses this point to its canonical Ed25519 encoding.
+    pub fn to_bytes(self) -> [u8; 32] {
+        let mut bytes = self.y.to_bytes();
+        bytes[31] |= u8::from(self.x.is_odd()) << 7;
+        bytes
+    }
+
     /// Converts this affine point to extended homogeneous representation.
-    pub fn to_extended(self) -> G {
+    pub const fn to_extended(self) -> G {
         G {
             x: self.x,
             y: self.y,
@@ -902,6 +961,9 @@ pub trait WithBackend {
     /// Run the computation with a concrete backend.
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
+
+// Constant-time multiplication of the Ed25519 basepoint, for key generation and signing.
+mod basepoint;
 
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;

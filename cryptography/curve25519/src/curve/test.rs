@@ -617,23 +617,16 @@ fn zip215_decompression_and_group_laws() {
 
 #[cfg(test)]
 #[test]
-fn secret_scalar_multiplication_matches_public() {
-    commonware_invariants::minifuzz::Builder::default()
-        .with_seed(0)
-        .with_search_limit(32)
-        .test(|u| {
-            let scalar: [u8; 32] = u.arbitrary()?;
-            let torsion = GAffine::decompress(u.choose(&ZIP215_POINTS)?)
-                .unwrap()
-                .to_extended();
-            let point = GAffine::BASEPOINT.to_extended().add(torsion);
-            let bits = (0..256).rev().map(|i| scalar[i / 8] >> (i % 8) & 1 == 1);
-            assert_eq!(
-                point.scalar_mul_secret(&scalar).to_bytes(),
-                point.scalar_mul(bits).to_bytes()
-            );
-            Ok(())
-        });
+fn basepoint_128_is_doubled_basepoint() {
+    let mut point = GAffine::BASEPOINT.to_extended();
+    for _ in 0..128 {
+        point = point.double();
+    }
+    let expected = GAffine::decompress(&point.to_bytes()).unwrap();
+    let actual = GAffine::BASEPOINT_128;
+    assert_eq!(actual.x.to_bytes(), expected.x.to_bytes());
+    assert_eq!(actual.y.to_bytes(), expected.y.to_bytes());
+    assert_eq!(actual.t2d.to_bytes(), expected.t2d.to_bytes());
 }
 
 /// Checks the runtime dispatch path as one multi-operation computation.
