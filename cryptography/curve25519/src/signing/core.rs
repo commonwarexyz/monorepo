@@ -1,9 +1,9 @@
-//! Ed25519 batch verification internals.
+//! Ed25519 verification internals.
 
 mod msm;
 mod scalar;
 
-use crate::curve::{Backend, GAffine, LANES, WithBackend, with_backend};
+use crate::curve::{Backend, G, GAffine, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::Strategy;
@@ -346,6 +346,108 @@ fn verify_batch_inner<B: Backend>(
     result.mul_by_cofactor().is_identity()
 }
 
+/// Width of the non-adjacent forms [`straus`] recodes its scalars into.
+const NAF_WIDTH: usize = 5;
+
+/// Computes `sum(scalar*point)` over `terms` with Straus's method: one doubling chain shared by
+/// every term, adding `digit*point` at each nonzero digit of the scalars' non-adjacent forms from
+/// a per-term table of odd multiples `point, 3*point, ..., 15*point`.
+///
+/// Variable-time, so the points and scalars must be public.
+fn straus<const N: usize>(terms: [(G, Scalar); N]) -> G {
+    // Width-5 non-adjacent form: every nonzero digit is odd with magnitude at most 15, and at
+    // least four zeros separate nonzero digits, so few positions need an addition.
+    let digits = terms.map(|(_, scalar)| scalar.naf::<NAF_WIDTH>());
+
+    // Each table holds the odd multiples `point, 3*point, ..., 15*point`, built by repeatedly
+    // adding `2*point`, so a digit `d` selects entry `|d| / 2`.
+    let tables = terms.map(|(point, _)| {
+        let double = point.double();
+        let mut table = [point; 1 << (NAF_WIDTH - 2)];
+        let mut multiple = point;
+        for entry in &mut table[1..] {
+            multiple = multiple.add(double);
+            *entry = multiple;
+        }
+        table
+    });
+
+    // The shared doubling chain starts at the highest nonzero digit of any scalar. If every
+    // scalar is zero, so is the sum.
+    let Some(top) = digits
+        .iter()
+        .filter_map(|digits| digits.iter().rposition(|&digit| digit != 0))
+        .max()
+    else {
+        return G::IDENTITY;
+    };
+
+    // Horner's rule over digit positions, most significant first: double the running sum once
+    // per position, then add each term's selected multiple, negated for a negative digit.
+    let mut sum = G::IDENTITY;
+    for i in (0..=top).rev() {
+        sum = sum.double();
+        for (digits, table) in digits.iter().zip(&tables) {
+            let digit = digits[i];
+            if digit != 0 {
+                let mut multiple = table[digit.unsigned_abs() as usize / 2];
+                if digit < 0 {
+                    multiple = multiple.negate();
+                }
+                sum = sum.add(multiple);
+            }
+        }
+    }
+    sum
+}
+
+/// Verifies one signature per the [module's validation criteria](super).
+///
+/// `a_point`, when present, must be the point `a_bytes` encodes.
+pub fn verify(
+    a_bytes: &VerifyingKeyBytes,
+    a_point: Option<&G>,
+    sig: &Signature,
+    msg: &[u8],
+) -> bool {
+    let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
+        return false;
+    };
+    let Some(r) = GAffine::decompress(&sig.r) else {
+        return false;
+    };
+    let a = match a_point {
+        Some(point) => *point,
+        None => {
+            let Some(point) = GAffine::decompress(a_bytes.as_bytes()) else {
+                return false;
+            };
+            point.to_extended()
+        }
+    };
+    let h = Scalar::from_bytes_mod_order_wide(&sha512(&[&sig.r, a_bytes.as_bytes(), msg]));
+
+    // With `v = u*h (mod L)`, `[8](u*s*B - u*R - v*A) = u*[8](s*B - R - h*A)` because `[8]`
+    // maps every point into the prime-order subgroup. Since `0 < |u| < L`, one side is the
+    // identity exactly when the other is. The combination below is `sign(u)` times the left
+    // side, with `u*s` split at bit 128 so that all four scalars are below `2^128`.
+    let (u, v) = h.half_size();
+    let a = if u < 0 { a } else { a.negate() };
+    let u = Scalar::from_u128(u.unsigned_abs());
+    let (low, high) = s.mul_mod_l(&u).halves();
+    straus([
+        (GAffine::BASEPOINT.to_extended(), Scalar::from_u128(low)),
+        (
+            GAffine::BASEPOINT_128.to_extended(),
+            Scalar::from_u128(high),
+        ),
+        (r.to_extended().negate(), u),
+        (a, Scalar::from_u128(v)),
+    ])
+    .mul_by_cofactor()
+    .is_identity()
+}
+
 struct VerifyBatchCall<'a, 'b, R, S> {
     rng: &'a mut R,
     items: &'a [(&'b VerifyingKeyBytes, &'b Signature, &'b [u8])],
@@ -420,6 +522,32 @@ mod tests {
             (VerifyingKeyBytes::new([2u8; 32]), 1),
         ];
         assert_eq!(group_ranges(&sorted), vec![(0, 1), (1, 2)]);
+    }
+
+    /// [`straus`] matches independent double-and-add over points with torsion components and
+    /// scalars of every size.
+    #[test]
+    fn straus_matches_double_and_add() {
+        assert!(straus([(GAffine::BASEPOINT.to_extended(), Scalar::ZERO)]).is_identity());
+        Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| {
+                let mut terms = [(G::IDENTITY, Scalar::ZERO); 4];
+                for term in &mut terms {
+                    let encoding: [u8; 32] = u.arbitrary()?;
+                    let point = GAffine::decompress(&encoding).unwrap_or(GAffine::BASEPOINT);
+                    let torsion = GAffine::decompress(u.choose(&crate::test::ZIP215_POINTS)?)
+                        .unwrap()
+                        .to_extended();
+                    *term = (point.to_extended().add(torsion), u.arbitrary()?);
+                }
+                let expected = terms.iter().fold(G::IDENTITY, |sum, (point, scalar)| {
+                    sum.add(point.scalar_mul(scalar.bits_be()))
+                });
+                assert!(straus(terms).add(expected.negate()).is_identity());
+                Ok(())
+            });
     }
 
     #[test]
