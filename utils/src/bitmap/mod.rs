@@ -988,17 +988,27 @@ pub trait Readable<const N: usize> {
     where
         Self: Sized,
     {
-        let len = self.len();
-        let pruned_start = self.pruned_bits();
-        let pos = pos.max(pruned_start);
+        self.ones_iter_range(pos..u64::MAX)
+    }
+
+    /// Returns an iterator over the indices of set bits in `range`.
+    ///
+    /// Iteration starts at the first unpruned bit at or after `range.start` and stops before the
+    /// smaller of `range.end` and the bitmap length. Empty or reversed ranges yield no bits.
+    fn ones_iter_range(&self, range: Range<u64>) -> OnesIter<'_, Self, N>
+    where
+        Self: Sized,
+    {
+        let end = range.end.min(self.len());
+        let pos = range.start.max(self.pruned_bits());
         let mut iter = OnesIter {
             bitmap: self,
-            len,
-            base: len,
+            end,
+            base: end,
             word: 0,
             chunk: [0; N],
         };
-        if pos < len {
+        if pos < end {
             let chunk_idx = BitMap::<N>::to_chunk_index(pos);
             let chunk_start = chunk_idx as u64 * BitMap::<N>::CHUNK_SIZE_BITS;
             iter.chunk = self.get_chunk(chunk_idx);
@@ -1038,20 +1048,23 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 /// If the starting position falls within a pruned region, iteration
 /// begins at the first unpruned bit.
 ///
-/// `len` and the current chunk are read from the bitmap once and reused (the chunk until
-/// iteration crosses into the next one), so the bitmap's contents must not change for the
-/// iterator's lifetime. Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the
-/// immutable borrow. A `Readable` whose reads go through interior mutability (e.g. a
-/// lock-guarded shared bitmap) instead requires the caller to prevent concurrent mutation
-/// across the whole iteration, for example by constructing the iterator from a held read
-/// guard rather than a bare shared reference.
+/// The bitmap's length and the current chunk are read once and reused (the chunk until iteration
+/// crosses into the next one), so the bitmap's contents must not change for the iterator's
+/// lifetime.
+///
+/// Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the immutable borrow.
+///
+/// A `Readable` whose reads go through interior mutability (e.g. a lock-guarded shared bitmap)
+/// instead requires the caller to prevent concurrent mutation across the whole iteration, for
+/// example by constructing the iterator from a held read guard rather than a bare shared
+/// reference.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
-    /// Cached `bitmap.len()` at iterator construction. For layered bitmaps, `len()`
-    /// walks the layer chain, so caching this avoids that walk on every `next`.
-    len: u64,
+    /// The exclusive end of iteration: the range's end, capped at the bitmap's length when the
+    /// iterator is constructed.
+    end: u64,
     /// Bit index of bit 0 of `word`. Always a 64-bit word boundary relative to the start
-    /// of its chunk, except when the iterator is constructed exhausted (then `len`).
+    /// of its chunk, except when the iterator is constructed exhausted (then `end`).
     base: u64,
     /// Set bits of the bitmap word at `base` that have not been yielded yet.
     word: u64,
@@ -1062,9 +1075,9 @@ pub struct OnesIter<'a, B, const N: usize> {
 }
 
 impl<B: Readable<N>, const N: usize> OnesIter<'_, B, N> {
-    /// Load the word at `base` from `chunk`, masking off bits at or beyond `len`.
+    /// Load the word at `base` from `chunk`, masking off bits at or beyond `end`.
     ///
-    /// Requires `base < len` and that `chunk` is the chunk containing `base`. Chunks
+    /// Requires `base < end` and that `chunk` is the chunk containing `base`. Chunks
     /// shorter than a word (`N < 8`) and trailing sub-word regions (`N % 8 != 0`) are
     /// zero-padded.
     fn load_word(&self) -> u64 {
@@ -1073,7 +1086,7 @@ impl<B: Readable<N>, const N: usize> OnesIter<'_, B, N> {
         let mut buf = [0u8; 8];
         buf[..take].copy_from_slice(&self.chunk[off..off + take]);
         let mut word = u64::from_le_bytes(buf);
-        let rem = self.len - self.base;
+        let rem = self.end - self.base;
         if rem < 64 {
             word &= (1 << rem) - 1;
         }
@@ -1094,7 +1107,7 @@ impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
             let same_chunk = rel + 64 < chunk_bits;
             let stride = if same_chunk { 64 } else { chunk_bits - rel };
             let next = self.base.checked_add(stride)?;
-            if next >= self.len {
+            if next >= self.end {
                 return None;
             }
             self.base = next;
@@ -1965,6 +1978,45 @@ mod tests {
         assert!(collected[32]);
         assert!(!collected[33]);
         assert!(collected[34]);
+    }
+
+    /// Check that `ones_iter_range` yields exactly the set bits of the range between every pair of
+    /// `bounds`, including empty, reversed, and past-the-end ranges, over `len` bits of
+    /// `N`-byte chunks.
+    fn check_ones_iter_range<const N: usize>(
+        len: u64,
+        bounds: impl iter::Iterator<Item = u64> + Clone,
+    ) {
+        let mut bitmap = BitMap::<N>::new();
+        for bit in 0..len {
+            bitmap.push(bit % 3 == 0);
+        }
+        for start in bounds.clone() {
+            for end in bounds.clone() {
+                let expected: Vec<_> = (start..end.min(len))
+                    .filter(|&bit| bitmap.get(bit))
+                    .collect();
+                let mut ones = bitmap.ones_iter_range(start..end);
+                assert_eq!(
+                    ones.by_ref().collect::<Vec<_>>(),
+                    expected,
+                    "N={N}, {start}..{end}"
+                );
+                assert_eq!(ones.next(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ones_iter_range() {
+        // Every range over two and a bit 9-byte chunks.
+        check_ones_iter_range::<9>(150, 0..=151);
+
+        // Ranges over 64-byte chunks whose bounds fall at, beside, and inside 64-bit words.
+        check_ones_iter_range::<64>(
+            1100,
+            (0..=1101).filter(|bit| matches!(bit % 64, 0 | 1 | 32 | 63)),
+        );
     }
 
     #[test]
