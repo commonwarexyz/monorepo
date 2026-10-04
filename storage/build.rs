@@ -29,13 +29,12 @@
 //! `Standard<Sha256>` and the subtree reconstruction of `src/merkle/proof.rs`),
 //! its bodies read from rustc's MIR too (`sandblaster/verifier/verifier.sbmir`;
 //! re-extract it after editing `hasher.rs`, `proof.rs` or the position
-//! files). Its §15 gates are not complete yet (examples, sections and its
-//! lock), so it uses the development aid `compile_lifted_pending_gates` (to
-//! be removed before landing): proofs and MIR theorems are checked, the gates
-//! are reported, not enforced, and it issues no verdict
-//! (`OUT_DIR/verifier-pending.txt`, `NOT VERIFIED — DEVELOPMENT BUILD: PROOFS
-//! CHECKED, §15 GATES PENDING`).
+//! files). Its specification lock is accepted
+//! (`sandblaster/verifier/SPEC.lock`), so it is `compile_lifted` as well: every
+//! §15 gate (including spec mutation), every per-function MIR theorem and the
+//! lift conformance check must pass, and a passing build writes the verdict to
+//! `OUT_DIR/verifier-verified.txt`.
 fn main() {
     sandblaster::build::compile_lifted("sandblaster/mmr/mod.rs", "mmr");
-    sandblaster::build::compile_lifted_pending_gates("sandblaster/verifier/mod.rs", "verifier");
+    sandblaster::build::compile_lifted("sandblaster/verifier/mod.rs", "verifier");
 }

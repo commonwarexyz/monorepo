@@ -1,0 +1,71 @@
+;; rustc's MIR of `fx_lk_rec::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_lk_rec")
+(module "fx_lk_rec::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "6d717c328be884f18fab9b2a651172ee6729dfbce029aa46808203a42d0376cd")
+(root "fx_lk_rec::a::Pos::new")
+(root "fx_lk_rec::a::depth")
+(root "<fx_lk_rec::a::Pos as std::clone::Clone>::clone")
+(note "fx_lk_rec::a::Pos::left_out: not extracted: a host function (SBMIR_SKIP_FNS)")
+(adt-def "a::Pos" (path "fx_lk_rec::a::Pos") (kind struct) (args ())
+  (variant 0 "Pos" 0 (field "0" u64) (no-glue)))
+(fn "fx_lk_rec::a::Pos::new"
+  (kind root) (def "fx_lk_rec::a::Pos::new") (args ())
+  (item inherent (adt "a::Pos") "new")
+  (span "src/a.rs" 5 5)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 u64 imm))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "a::Pos") 0) (copy (p 1))) (at "src/a.rs" 6 9))
+    (return (at "src/a.rs" 7 6)))
+)
+(fn "fx_lk_rec::a::depth"
+  (kind root) (def "fx_lk_rec::a::depth") (args ())
+  (item fn "depth")
+  (span "src/a.rs" 14 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 bool mut)
+    (3 u32 mut)
+    (4 u32 mut)
+    (5 (tuple u32 bool) mut))
+  (debug "h" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (bin eq (copy (p 1)) (int u32 0)) (at "src/a.rs" 15 8))
+    (switch (move (p 2)) (0 2) (otherwise 1) (at "src/a.rs" 15 8)))
+  (bb 1
+    (assign (p 0) (use (int u32 0)) (at "src/a.rs" 15 17))
+    (goto 5 (at "src/a.rs" 15 5)))
+  (bb 2
+    (assign (p 5) (checked sub (copy (p 1)) (int u32 1)) (at "src/a.rs" 15 34))
+    (assert (move (p 5 (field 1 bool))) false overflow 3 (at "src/a.rs" 15 34)))
+  (bb 3
+    (assign (p 4) (use (move (p 5 (field 0 u32)))) (at "src/a.rs" 15 34))
+    (call (fn "fx_lk_rec::a::depth") (args (move (p 4))) (p 3) 4 (at "src/a.rs" 15 28)))
+  (bb 4
+    (assign (p 0) (bin or (move (p 3)) (int u32 1)) (at "src/a.rs" 15 28))
+    (goto 5 (at "src/a.rs" 15 5)))
+  (bb 5
+    (return (at "src/a.rs" 16 2)))
+)
+(fn "<fx_lk_rec::a::Pos as std::clone::Clone>::clone"
+  (kind root) (def "<fx_lk_rec::a::Pos as std::clone::Clone>::clone") (args ())
+  (item impl (adt "a::Pos") "Clone" () "clone")
+  (span "src/a.rs" 1 10)
+  (argc 1)
+  (locals
+    (0 (adt "a::Pos") mut)
+    (1 (ref shared (adt "a::Pos")) imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 0) (use (copy (p 1 deref))) (at "src/a.rs" 1 10))
+    (return (at "src/a.rs" 1 15)))
+)

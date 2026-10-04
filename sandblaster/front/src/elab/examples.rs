@@ -353,7 +353,7 @@ impl<'a> Elab<'a> {
         };
         let path = self.krate.item(item).path.to_string();
         let msg = format!("{what} `{path}` depends on the {kind} `{shown}`");
-        let note = "a specification may use spec functions, spec constants and established exec functions only (refined, with an injective view, by a proven `#[refines]` earlier in the crate); otherwise any implementation would \"refine\" a spec written in terms of itself — transcribe the definition into `spec::` (DESIGN.md §15.1)".to_string();
+        let note = "a specification may use spec functions, spec constants and established exec functions only (refined, with an injective view, by a proven `#[refines]` earlier in the crate, or a lifted function whose laws-file contract is an equation `ret == E` with `E` spec-closed); otherwise any implementation would \"refine\" a spec written in terms of itself — transcribe the definition into `spec::` (DESIGN.md §15.1)".to_string();
         if surface {
             self.diag(Diagnostic::error(DiagKind::SpecDependsOnImpl, span, msg).note(note));
         } else if !self.s1.closure.iter().any(|c| c.item == item && c.kind == ClosureKind::DependsOnImpl) {

@@ -305,6 +305,9 @@ pub fn in_place_record(h: &InPlaceInfo<'_>, facts: &LiftFacts) -> String {
     for (f, r) in &facts.host_obligations {
         s.push_str(&format!("// Host obligation (a precondition, proven at every lifted call, unchecked at host calls): `{f}` requires `{r}`.\n"));
     }
+    for (f, b) in &facts.host_depth_bounds {
+        s.push_str(&format!("// Host obligation (a recursion depth bound, the stack safety of DESIGN.md §3.7: proven at every lifted call, unchecked at host calls): `{f}` needs `{b}`.\n"));
+    }
     if !h.host_models.is_empty() {
         s.push_str(&format!("// Host models the proofs assume: {}.\n", h.host_models.join(", ")));
     }

@@ -34,10 +34,9 @@ document and the plan. The sources read were:
   optimizer was built on those programs, so they are regression evidence,
   not evidence of generality (DESIGN.md §8.2 item 11).
 
-The scratch artifacts cited live under
-`/private/tmp/claude-501/-Users-patrickogrady-code-rust-bend/72493b40-f160-45c5-b091-0471a0b217d9/scratchpad/optdesign/`,
-written `$O` below. That directory is ephemeral; plan milestone O1 imports it
-into the repository.
+The scratch artifacts cited lived in a session scratch directory outside
+the repository (`optdesign/`), written `$O` below. That directory was
+ephemeral; plan milestone O1 imports it into the repository.
 
 ---
 
@@ -2334,12 +2333,17 @@ and the template passes it `multiplier` = the proven per-item cost.
 This was called the "anti-overfitting matrix"; it lists only the target
 workloads the features were built for, so it shows coverage, not
 generality. Every number measured on these workloads and on the corpus
-below is a development-set number. The held-out evaluation
-(`sandblaster/bench/heldout/REPORT.md`, 2026-10-02) is the generality
-evidence, and so far it is negative: 0 of 31 held-out functions changed
-(optimizer-only geomean 1.02 default layout, 1.005 aligned); none of the
-capabilities below fired on held-out code, because no held-out loop reached
-the optimizer.
+below is a development-set number. The held-out evaluation is the
+generality evidence, and so far it is negative. Held-out v2
+(`sandblaster/bench/heldout-v2/REPORT.md`, 2026-10-03): 0 of 30 functions
+changed (optimizer-only geomean 1.007 default layout, 1.002 aligned,
+placement noise); no loop is summarized (the two loops that reach the
+optimizer are kept), so none of the capabilities below fired on it.
+Held-out v1 (`sandblaster/bench/heldout/REPORT.md`, first run 2026-10-02:
+0 of 31 changed, 1.02 / 1.005, no held-out loop reached the optimizer) is
+development data now; after stage finish-A 3 of its 31 are rewritten, none
+faster (`read_u32_le`, for which the cost model predicted 0.70, measures
+1.07–1.12 against rustc: slower in all three binaries).
 
 | Capability | QMDB | Reed–Solomon | curve25519 | BLS/VROOM |
 | --- | :-: | :-: | :-: | :-: |

@@ -231,7 +231,7 @@ pub fn eval_in(out: &elab::Output, krate: &Crate, fn_path: &str, args: &str) -> 
     }
     let bad: Vec<String> = out.defs.iter().filter(|d| !matches!(d.status, DefStatus::Checked | DefStatus::Deferred(_))).map(|d| format!("{} ({})", d.name, def_status_str(&d.status))).collect();
     if !bad.is_empty() {
-        return Err(format!("eval needs every definition checked; not checked: {}", bad.join(", ")));
+        return Err(format!("{EVAL_NOT_CHECKED}; not checked: {}", bad.join(", ")));
     }
     let g = *out.fn_globals.get(&id).ok_or_else(|| format!("`{path}` was not elaborated"))?;
     let rels = out.env.global_param_rels(g).ok_or("no parameter list")?;
@@ -254,7 +254,8 @@ pub fn eval_in(out: &elab::Output, krate: &Crate, fn_path: &str, args: &str) -> 
         args.push((r, a));
     }
     let term = mk::apps(mk::global(g), args);
-    let mut b = Budget { steps: 50_000_000_000 };
+    const EVAL_STEPS: u64 = 50_000_000_000;
+    let mut b = Budget { steps: EVAL_STEPS };
     let t = Instant::now();
     let v = out.env.eval_opaque(&VEnv::default(), Lvl(0), &term, &|_| false, &mut b).map_err(|e| format!("evaluation failed: {e:?}"))?;
     // The kernel unfolds a recursive global only when a speculative
@@ -269,7 +270,7 @@ pub fn eval_in(out: &elab::Output, krate: &Crate, fn_path: &str, args: &str) -> 
     let t_eval = t.elapsed();
     let r = conv.json(&f.ret, &v)?.render();
     if std::env::var_os("SANDBLASTER_TRACE_EVAL").is_some() {
-        eprintln!("eval {path}: evaluated in {t_eval:?} ({rounds} manual unfolding(s)), read back in {:?}", t.elapsed() - t_eval);
+        eprintln!("eval {path}: evaluated in {t_eval:?} ({} kernel step(s), {rounds} manual unfolding(s)), read back in {:?}", EVAL_STEPS - b.steps, t.elapsed() - t_eval);
     }
     Ok(r)
 }
@@ -401,15 +402,29 @@ impl Unfolder<'_, '_> {
 
 /// `sandblaster eval`: elaborates the crate's exec code and evaluates
 /// `fn_path(args)` with the kernel evaluator (see [`eval_in`]). Prints a
-/// value, never a verdict.
+/// value, never a verdict. A lifted crate's exec functions can depend on
+/// ghost items (the attachments of its laws and proof files: measures,
+/// summaries, the spec functions their contracts read), which the
+/// exec-only elaboration leaves out; when it does not check every
+/// definition, the whole crate is elaborated (proofs included) instead.
 pub fn eval_json(c: &Checked, fn_path: &str, args: &str) -> Result<String, String> {
     let k = c.krate.as_ref().ok_or("the crate has front-end errors")?;
     if !c.ok() {
         return Err("the crate has front-end errors".into());
     }
     let opts = VerifyOptions { exec_only: true, ..Default::default() };
-    with_elaboration(k, &opts, |out| eval_in(out, k, fn_path, args))
+    match with_elaboration(k, &opts, |out| eval_in(out, k, fn_path, args)) {
+        Err(e) if e.starts_with(EVAL_NOT_CHECKED) => {
+            let full = VerifyOptions { exec_only: false, ..Default::default() };
+            with_elaboration(k, &full, |out| eval_in(out, k, fn_path, args))
+        }
+        r => r,
+    }
 }
+
+/// The start of [`eval_in`]'s error for an elaboration that did not check
+/// every definition.
+const EVAL_NOT_CHECKED: &str = "eval needs every definition checked";
 
 /// The result of [`verify_and_optimize`]: proofs and, when they checked,
 /// the optimized stage output (header [`canon::STAGE`]).

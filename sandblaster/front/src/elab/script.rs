@@ -535,7 +535,7 @@ impl<'a> Elab<'a> {
                         self.env.lookup_global(n).ok_or_else(|| ElabError { span: sp, msg: format!("no ghost-library definition `{n}`"), kind: ErrKind::Unsupported })?
                     }
                 };
-                self.unfold_goal(g, goal, rest, kind, span, sp, 0, 0)
+                self.unfold_goal(g, goal, rest, kind, span, sp, 0, 0, &[], &[])
             }
             ScriptKind::Rewrite { eq, rev, motive } => self.rewrite_step(eq, *rev, motive.as_ref(), rest, goal, kind, span, sp),
             ScriptKind::Match { scrut, arms } => self.script_match(scrut, arms, goal, kind, span, sp),
@@ -1169,7 +1169,7 @@ impl<'a> Elab<'a> {
     /// *term*: the other calls stay folded (a closing statement after
     /// `unfold` sees only what was unfolded).
     #[allow(clippy::too_many_arguments)]
-    fn unfold_goal(&mut self, g: sandblaster_kernel::term::GlobalId, goal: Val, rest: &'a [ScriptStmt], kind: ObligationKind, span: Span, sp: Span, n: u32, budget: u32) -> R<Tm> {
+    fn unfold_goal(&mut self, g: sandblaster_kernel::term::GlobalId, goal: Val, rest: &'a [ScriptStmt], kind: ObligationKind, span: Span, sp: Span, n: u32, budget: u32, bodies: &[Tm], written: &[Tm]) -> R<Tm> {
         let d = self.depth();
         let gt = goal.at(d);
         // a transparent non-recursive definition: replace its applications
@@ -1191,11 +1191,35 @@ impl<'a> Elab<'a> {
         // later rounds take no more of those steps than the goal had such
         // applications, so the calls a recursive body brings in stay folded;
         // calls in the arms of a boolean `&&` or `if` stay folded as before)
+        //
+        // A later round never unfolds a call that a body unfolded by an
+        // earlier round brings in (`bodies`): such a call is the recursion,
+        // and `unfold` abstracts every occurrence of what it unfolds, so a
+        // copy of it written elsewhere in the goal (the other side of
+        // `rebuild(s, ..) == match rebuild(left_half(s), ..).3 { .. }`)
+        // would unfold the body's own calls with it — one round per call,
+        // each copying the body into every occurrence, until the goal is
+        // too large to read back (finish-B: auto then reported the
+        // scrutinee `disjoint(s, range)` as absent from a goal it could not
+        // read). The calls a recursive body brings in stay folded, as
+        // stated above, wherever else they are written.
         let budget = if n == 0 { prop_apps(&gt, g, arity).len().min(8) as u32 } else { budget };
+        // the calls of `g` the goal writes outside binders (as the first
+        // round found them): the copies the unfolded bodies bring in are
+        // given these very terms when the rounds end (`share_calls`)
+        let top: Vec<Tm>;
+        let written = if n == 0 {
+            top = top_apps(&gt, g, arity);
+            &top[..]
+        } else {
+            written
+        };
+        let env = &self.env;
+        let fresh = |occ: &Tm| !bodies.iter().any(|b| super::tm::abstract_syntactic(env, b, occ).is_some());
         let found = if n == 0 {
             find_app_prop(&gt, g, arity).or_else(|| find_app_under(&gt, g, arity))
         } else {
-            find_app(&gt, g, arity).or_else(|| if n < budget { find_app_prop(&gt, g, arity) } else { None })
+            find_app_where(&gt, g, arity, &fresh).or_else(|| if n < budget { find_app_prop(&gt, g, arity).filter(|occ| fresh(occ)) } else { None })
         };
         let step = match found {
             Some(occ) => self.delta_motive(g, &gt, &occ, sp)?,
@@ -1206,12 +1230,45 @@ impl<'a> Elab<'a> {
                 self.diags.push(Diagnostic::warning(DiagKind::Script, sp, "`unfold`: no application of this function in the goal").note("the goal is unchanged; `unfold(f)` rewrites the calls of `f` written in the goal (after the earlier steps)"));
                 return self.script_rest(rest, goal, kind, span, sp);
             }
+            let goal = self.share_calls(goal, written);
             return self.hoist_facts(goal, rest, kind, span, sp, 0);
         };
         let ngt = super::tm::simp_redexes(&super::tm::subst0(&m, &rhs_t));
-        let p = if n < 8 { self.unfold_goal(g, Val::new(ngt, d), rest, kind, span, sp, n + 1, budget)? } else { self.hoist_facts(Val::new(ngt, d), rest, kind, span, sp, 0)? };
+        let mut seen: Vec<Tm> = bodies.to_vec();
+        seen.push(rhs_t.clone());
+        let p = if n < 8 {
+            self.unfold_goal(g, Val::new(ngt, d), rest, kind, span, sp, n + 1, budget, &seen, written)?
+        } else {
+            let goal = self.share_calls(Val::new(ngt, d), written);
+            self.hoist_facts(goal, rest, kind, span, sp, 0)?
+        };
         let eq = mk::apps(mk::global(self.p.g("eq::sym")), [(Rel::Rel, r_t.clone()), (Rel::Rel, occ.clone()), (Rel::Rel, rhs_t.clone()), (Rel::Rel, delta)]);
         Ok(Rc::new(Term::Transport { ty: r_t, lhs: rhs_t, rhs: occ, eq, motive: m, val: p }))
+    }
+
+    /// The goal with every copy of a call in `written` (a call of the
+    /// unfolded function the goal writes outside binders) replaced by that
+    /// call's own term. A copy an unfolded body brought in is the same
+    /// call up to its proofs — convertible, the proofs are irrelevant —
+    /// but its proofs come from the body's path facts (the call `f(&xs[1..])`
+    /// in the arm `Some(head)` of the body's `match xs.first()` proves
+    /// `1 <= xs.len()` from that arm's equation), so a later `rewrite` of
+    /// the body's scrutinee could not generalize the arm's equation: the
+    /// rewritten goal would not be well-typed (finish-B: QMDB's
+    /// `fold_back_is`, `unfold(fold_back); rewrite(xs.first() == Some(&y))`).
+    /// The written call's proofs hold wherever the copy is.
+    fn share_calls(&self, goal: Val, written: &[Tm]) -> Val {
+        if written.is_empty() {
+            return goal;
+        }
+        let d = self.depth();
+        let mut t = goal.at(d);
+        for w in written {
+            if let Some(m) = super::tm::abstract_syntactic(&self.env, &t, w) {
+                t = super::tm::subst0(&m, w);
+            }
+        }
+        Val::new(t, d)
     }
 
     /// For a `bv()` goal `Eq(A, l, r)` whose sides evaluate to arrays or
@@ -1821,6 +1878,68 @@ fn find_app(t: &Tm, g: sandblaster_kernel::term::GlobalId, arity: usize) -> Opti
         Term::Pair { fst, snd, .. } => find_app(fst, g, arity).or_else(|| find_app(snd, g, arity)),
         _ => None,
     }
+}
+
+/// [`find_app`], skipping the applications `keep` rejects (searching on in
+/// their arguments).
+fn find_app_where(t: &Tm, g: sandblaster_kernel::term::GlobalId, arity: usize, keep: &dyn Fn(&Tm) -> bool) -> Option<Tm> {
+    let (h, args) = super::items::spine(t);
+    if let Term::Global(x) = &*h
+        && *x == g
+        && args.len() == arity
+    {
+        if keep(t) {
+            return Some(t.clone());
+        }
+        return args.iter().find_map(|a| find_app_where(a, g, arity, keep));
+    }
+    match &**t {
+        Term::App { fun, arg, .. } => find_app_where(fun, g, arity, keep).or_else(|| find_app_where(arg, g, arity, keep)),
+        Term::Eq { lhs, rhs, ty } => find_app_where(lhs, g, arity, keep).or_else(|| find_app_where(rhs, g, arity, keep)).or_else(|| find_app_where(ty, g, arity, keep)),
+        Term::Prim { args, .. } => args.iter().find_map(|a| find_app_where(a, g, arity, keep)),
+        Term::Ctor { args, .. } => args.iter().find_map(|a| find_app_where(a, g, arity, keep)),
+        Term::Fst(x) | Term::Snd(x) => find_app_where(x, g, arity, keep),
+        Term::Match { scrut, .. } => find_app_where(scrut, g, arity, keep),
+        Term::Pair { fst, snd, .. } => find_app_where(fst, g, arity, keep).or_else(|| find_app_where(snd, g, arity, keep)),
+        _ => None,
+    }
+}
+
+/// The applications of `g` (with `arity` arguments) in `t` outside binders,
+/// in order (each once; also those inside the arguments of another).
+fn top_apps(t: &Tm, g: sandblaster_kernel::term::GlobalId, arity: usize) -> Vec<Tm> {
+    fn go(t: &Tm, g: sandblaster_kernel::term::GlobalId, arity: usize, out: &mut Vec<Tm>) {
+        let (h, args) = super::items::spine(t);
+        if let Term::Global(x) = &*h
+            && *x == g
+            && args.len() == arity
+            && !out.iter().any(|o| Rc::ptr_eq(o, t))
+        {
+            out.push(t.clone());
+        }
+        match &**t {
+            Term::App { fun, arg, .. } => {
+                go(fun, g, arity, out);
+                go(arg, g, arity, out);
+            }
+            Term::Eq { lhs, rhs, ty } => {
+                go(lhs, g, arity, out);
+                go(rhs, g, arity, out);
+                go(ty, g, arity, out);
+            }
+            Term::Prim { args, .. } | Term::Ctor { args, .. } => args.iter().for_each(|a| go(a, g, arity, out)),
+            Term::Fst(x) | Term::Snd(x) => go(x, g, arity, out),
+            Term::Match { scrut, .. } => go(scrut, g, arity, out),
+            Term::Pair { fst, snd, .. } => {
+                go(fst, g, arity, out);
+                go(snd, g, arity, out);
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    go(t, g, arity, &mut out);
+    out
 }
 
 /// The applications of `g` written in the goal's logical structure: in each

@@ -96,6 +96,16 @@ original code: 28 of 33 functions compile to identical machine code and the
 other 5 differ only in the addresses of each copy's constant data, exactly
 as the A/A pair does; geomean 1.003 (default) / 1.002 (aligned).
 
+**Verified Commonware code in this tree.** Three modules are verified by
+their crate's `build.rs`, each with an accepted specification lock and
+every §15 gate enforced (a failed proof or gate fails the crate's build):
+
+| module | mode | lifted functions with a kernel-checked MIR theorem | lock root |
+| --- | --- | ---: | --- |
+| commonware-codec's varint (`codec/sandblaster/varint`) | module (`compile_module`) | 63 of 63 | `f0021c19…` |
+| commonware-storage's MMR position and peak arithmetic (`storage/sandblaster/mmr`) | in place (`compile_lifted`) | 69 of 69 | `1d8d5969…` |
+| the first set of storage's Merkle proof verifier (`storage/sandblaster/verifier`: `hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree reconstruction): 8 laws, 2,642 obligations | in place (`compile_lifted`) | 69 of 69 | `3e969a79…` |
+
 ## What the code looks like
 
 Exec code is plain Rust with contracts where needed (`fixtures/qmdb/sandblaster/merkle.rs`):
@@ -169,6 +179,10 @@ machine). Only proven, evidence-backed variants are dispatched.
 | [`macros/`](macros), [`memguard/`](memguard), [`rulegen/`](rulegen) | erasing proc macros; the allocation cap; offline rule discovery for the optimizer |
 | [`fixtures/qmdb/`](fixtures/qmdb) | the QMDB port's DSL sources, laws, proofs, locks and fixtures (a test fixture of the toolchain's suites) |
 | [`bench/opt-corpus/`](bench/opt-corpus) | the optimizer corpus harness |
+| [`bench/heldout-v2/`](bench/heldout-v2), [`bench/heldout/`](bench/heldout) | the held-out evaluation (v2, frozen) and its retired predecessor (v1, development data now) |
+| [`bench/heldout-harness/`](bench/heldout-harness), [`bench/shipped-harness/`](bench/shipped-harness) | the fair harnesses: the optimizer against rustc on held-out code; the shipped verified code against the original Commonware functions |
+| [`tools/gates/`](tools/gates) | the optimizer fairness gates (G6 frozen inputs, fair baseline) |
+| [`mirx/`](mirx) | the MIR extractor (a rustc driver on a pinned nightly) |
 | [`docs/`](docs) | the proof guide, the optimizer design and plan, the QMDB specification design |
 
 ## Using it

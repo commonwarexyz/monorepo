@@ -688,9 +688,47 @@ impl<'a> Elab<'a> {
             && let Some(Some(cen)) = &f.spec.contract_ensures
             && !failed
         {
-            self.contract_def(id, cen, eg, &binders, &full_goal, &app, &ret_ty, span)?;
+            let cg = self.contract_def(id, cen, eg, &binders, &full_goal, &app, &ret_ty, span)?;
+            self.establish_by_contract(id, g, cg, arity);
+        } else if en.is_some() && f.spec.contract_ensures.is_none() {
+            self.establish_by_contract(id, g, eg, arity);
         }
         Ok(())
+    }
+
+    /// A lifted exec function whose contract (the laws file's `ensures`,
+    /// DESIGN.md §15.6) is an equation `ret == E` — `E` not mentioning the
+    /// function and spec-closed — is determined by it at once, at the
+    /// identity view, as a `#[refines(E)]` would determine it: every
+    /// implementation that satisfies it returns `E` on every valid input.
+    /// It is therefore **established** for spec closure (§15.1: "fully
+    /// specified in an earlier section with an identity view"): a
+    /// specification may build its values (`Position::new(x)`, whose
+    /// contract is `ret == Position(x, PhantomData)`, for a type whose
+    /// fields the laws file cannot name). Only once the contract lemma
+    /// `lemma` checked.
+    fn establish_by_contract(&mut self, id: ItemId, g: GlobalId, lemma: GlobalId, arity: u32) {
+        let lifted = self.krate.modules.get(self.krate.item(id).module.0 as usize).is_some_and(|m| m.lifted && !m.ghost);
+        if !lifted || !self.defs.iter().any(|d| d.global == Some(lemma) && d.status == super::DefStatus::Checked) {
+            return;
+        }
+        let Some(ty) = self.env.global_type(lemma) else { return };
+        // `let ret = f x h; Eq(T, ret, E)` (`ensures_prop`), `E` free of `ret`
+        let stmt = strip_pis(&ty, arity);
+        let Term::Let { val, body, .. } = &*stmt else { return };
+        let Term::Eq { lhs, rhs, .. } = &**body else { return };
+        if !matches!(&**lhs, Term::Var(sandblaster_kernel::term::Idx(0))) || sandblaster_kernel::util::occurs(rhs, 0) {
+            return;
+        }
+        let (head, args) = super::items::spine(val);
+        if !matches!(&*head, Term::Global(h) if *h == g) || args.len() != arity as usize {
+            return;
+        }
+        let e = shift(rhs, -1);
+        if super::tm::any_node(&e, &mut |n| matches!(n, Term::Global(h) if *h == g)) || self.closure_violation(&[e], &[]).is_some() {
+            return;
+        }
+        self.s1.established.insert(g);
     }
 
     /// `f::contract : Π(T..)(x..)(h : P..). L[x, f x h]` (DESIGN.md §15.6):
@@ -700,7 +738,7 @@ impl<'a> Elab<'a> {
     /// summaries). `f::contract` is what `SPEC.lock` holds and what §15.5
     /// takes as `f`'s hypothesis; `f::ensures` stays the fact at call sites.
     #[allow(clippy::too_many_arguments)]
-    fn contract_def(&mut self, id: ItemId, cen: &'a Ensures, eg: sandblaster_kernel::term::GlobalId, binders: &[super::items::TBinder], full: &Tm, app: &Tm, ret_ty: &Tm, span: Span) -> R<()> {
+    fn contract_def(&mut self, id: ItemId, cen: &'a Ensures, eg: sandblaster_kernel::term::GlobalId, binders: &[super::items::TBinder], full: &Tm, app: &Tm, ret_ty: &Tm, span: Span) -> R<GlobalId> {
         let name = format!("{}::contract", self.krate.item(id).path);
         let goal = self.ensures_prop(cen, ret_ty, app.clone(), span)?;
         let ty = pi_tele(binders, goal.clone());
@@ -718,8 +756,7 @@ impl<'a> Elab<'a> {
         let proof = proof?;
         let failed = self.f.failed;
         let lam = lam_tele(binders, proof);
-        self.add_definition(&name, DefKind::Ensures, Some(id), ty, lam, Recursion::None, binders.len() as u32, false, failed, span)?;
-        Ok(())
+        self.add_definition(&name, DefKind::Ensures, Some(id), ty, lam, Recursion::None, binders.len() as u32, false, failed, span)
     }
 
     /// The induction hypotheses of a leaf of the `ensures` walk of a

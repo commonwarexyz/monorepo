@@ -27,6 +27,7 @@ members = [
     "lk_host",
     "lk_paths",
     "lk_prim",
+    "lk_rec",
     "lo_asserts",
     "lo_expect",
     "lo_halve",

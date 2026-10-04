@@ -43,12 +43,17 @@
 //!   host children is not;
 //! * a module with a host child module (`mod child;`, left out by the
 //!   lift) has every private function and method host-callable; one whose
-//!   only child is `#[cfg(test)]` does not, and a private method its own
-//!   left-out code calls is reported, not counted;
+//!   only child is `#[cfg(test)]` does not, except a private method its own
+//!   left-out code calls (`Tick::left_out` calls `sixth`), which is;
 //! * a proof file's precondition on any locked item (a function a law
 //!   mentions, off the boundary) is refused, the same from the laws file is
 //!   the locked contract; a proof file's plain termination measure stays
 //!   out of the lock, the laws file's is part of the contract's source.
+//!
+//! On `mir_fixtures/lk_rec` (`src/a.rs`, whose left-out `left_out` calls
+//! the private non-tail recursive `depth`): `depth` is host-callable, its
+//! depth bound a host obligation the laws file states (the lock holds it,
+//! the record lists it); the same bound from the proof file is refused.
 //!
 //! And on `lk_prim`: a lifted function's source text is its lifted
 //! signature, while a DSL function keeps its source as written; a laws
@@ -225,6 +230,35 @@ fn verified(laws: &str, proof: &str) -> Run {
     let r = run(laws, proof);
     assert!(r.verified, "the crate does not verify:\n{}", r.explain());
     r
+}
+
+// ---------------------------------------------------------------------
+// a laws-file contract that is an equation establishes its function
+// ---------------------------------------------------------------------
+
+/// A spec function that builds a position with `Pos::new` (the laws file
+/// cannot name `Pos`'s field) and its known answer.
+const THREE: &str = "\n/// The position 3.\n#[spec]\n#[example(three() == Pos::new(3u64))]\npub fn three() -> Pos {\n    Pos::new(3u64)\n}\n";
+
+#[test]
+fn an_equation_contract_establishes_a_lifted_function_for_spec_closure() {
+    // `Pos::new`'s contract `ret == Pos(x)` determines it at once (DESIGN.md
+    // §15.1): a specification may build positions with it
+    let r = verified(&format!("{BASE}{FROM_POS}{FROM_LOC}{HLF_LAWS}{}{THREE}", half_contract("laws")), "");
+    assert!(!r.rendered.contains("depends on the exec function"), "{}", r.rendered);
+    assert!(r.surface_errors.is_empty(), "{}", r.explain());
+    // the spec function's hash pins `Pos::new`'s contract
+    assert!(r.keys().contains(&"boundary-fn:crate::a::Pos::new"), "{}", r.explain());
+}
+
+#[test]
+fn a_contract_that_is_not_an_equation_does_not_establish() {
+    // the twin: `ret.0 == x` determines `Pos::new` as well, but is not an
+    // equation of its result: a specification built on it is refused
+    let base = BASE.replace("ensures(|ret: Pos| ret == Pos(x));", "ensures(|ret: Pos| ret.0 == x);");
+    assert_ne!(base, BASE);
+    let r = run(&format!("{base}{FROM_POS}{FROM_LOC}{HLF_LAWS}{}{THREE}", half_contract("laws")), "");
+    assert!(r.rendered.contains("depends on the exec function `crate::a::Pos::new`"), "{}", r.rendered);
 }
 
 // ---------------------------------------------------------------------
@@ -592,24 +626,87 @@ fn a_private_function_a_host_child_module_can_call_is_host_callable() {
     let a = k.modules.iter().find(|m| m.path.to_string() == "crate::a").unwrap();
     assert_eq!(a.host_access.host_children, vec!["child".to_string()]);
     // the twin: `b`'s only child is `#[cfg(test)] mod tests`, so its private
-    // free function and methods stay internal
-    for f in ["crate::b::seventh", "crate::b::Tick::fifth", "crate::b::Tick::sixth"] {
+    // free function and methods stay internal ...
+    for f in ["crate::b::seventh", "crate::b::Tick::fifth"] {
         assert!(!host.iter().any(|h| h == f), "`{f}` is not host-callable: {host:?}");
     }
     let b = k.modules.iter().find(|m| m.path.to_string() == "crate::b").unwrap();
     assert!(b.host_access.host_children.is_empty(), "{:?}", b.host_access);
-    // `Tick::left_out` (`unverified_fns`, host code) calls `sixth`: reported,
-    // not counted (DESIGN.md §15.5)
-    let warned = |f: &str| c.diags.list.iter().any(|d| d.severity == Severity::Warning && d.msg.contains(&format!("`{f}`")) && d.msg.contains("called by host code the lift leaves out"));
-    assert!(warned("crate::b::Tick::sixth"), "{}", c.render());
-    assert!(!warned("crate::b::Tick::fifth") && !warned("crate::b::seventh"), "{}", c.render());
+    // ... except what its own left-out code calls: `Tick::left_out`
+    // (`unverified_fns`, host code) calls `sixth`, which is host-callable
+    // (DESIGN.md §15.5), not `fifth`
+    assert!(host.iter().any(|h| h == "crate::b::Tick::sixth"), "{host:?}");
+    let left_out: Vec<String> = sandblaster_front::validate::left_out_callers(k).into_iter().map(|i| k.item(i).path.to_string()).collect();
+    assert_eq!(left_out, vec!["crate::b::Tick::sixth".to_string()]);
+    assert!(!c.diags.list.iter().any(|d| d.severity == Severity::Warning && d.msg.contains("sixth")), "{}", c.render());
     // and the lock holds the host-callable private functions
     let r = run_checked(c);
     assert!(r.verified, "{}", r.explain());
-    for key in ["boundary-fn:crate::a::quarter", "boundary-fn:crate::a::Pos::third"] {
+    for key in ["boundary-fn:crate::a::quarter", "boundary-fn:crate::a::Pos::third", "boundary-fn:crate::b::Tick::sixth"] {
         assert!(r.keys().contains(&key), "{}", r.explain());
     }
-    assert!(!r.keys().iter().any(|k| k.contains("seventh") || k.contains("sixth")), "{}", r.explain());
+    assert!(r.gate.iter().any(|g| g.contains("sixth")), "§15.5 names `sixth` (no contract):\n{}", r.explain());
+    assert!(!r.keys().iter().any(|k| k.contains("seventh") || k.contains("fifth")), "{}", r.explain());
+}
+
+// ---------------------------------------------------------------------
+// a private function left-out code calls, with a depth bound (`lk_rec`)
+// ---------------------------------------------------------------------
+
+const RA_SRC: &str = include_str!("mir_fixtures/lk_rec/src/a.rs");
+const RA_MIR: &str = include_str!("mir_fixtures/lk_rec/a.sbmir");
+
+/// The DSL root of `lk_rec`: `src/a.rs` lifted in place, its method
+/// `Pos::left_out` (which calls the private `depth`) declared unverified
+/// host code.
+const REC_ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n\n#[lift(in_place, mir = \"a.sbmir\", unverified_fns = \"Pos::left_out\")]\n#[path = \"../../src/a.rs\"]\nmod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n\npub use a::Pos;\n";
+
+/// `depth`'s precondition and depth bound (non-tail recursion, DESIGN.md
+/// §3.7): a host obligation.
+const DEPTH_BOUND: &str = "\n/// `depth` recurses `h` deep: host code keeps `h` at most 64.\n#[lift_attach(crate::a::depth)]\nfn depth_bound() {\n    requires(h <= 64u32);\n    decreases(h, max = 64);\n}\n";
+
+/// The contracts of the host-callable functions (`Pos::new`, `depth`).
+const REC_CONTRACTS: &str = "\n#[lift_attach(crate::a::Pos::new)]\nfn pos_new() {\n    ensures(|ret: crate::a::Pos| ret == crate::a::Pos(x));\n}\n\n#[lift_attach(crate::a::depth)]\nfn depth_value() {\n    ensures(|ret: u32| ret == (if h == 0u32 { 0u32 } else { 1u32 }));\n}\n";
+
+/// The front end on `lk_rec`.
+fn check_rec(laws: &str, proof: &str) -> Checked {
+    let laws = format!("use sandblaster::prelude::*;\n\n{laws}");
+    let proof = format!("use sandblaster::prelude::*;\n\n{proof}");
+    let fs = MemFs::from_files([(R, REC_ROOT), (A, RA_SRC), (L, laws.as_str()), (P, proof.as_str()), (M, RA_MIR)]);
+    driver::check(Path::new(R), &fs, &TargetInfo::aarch64_apple_darwin())
+}
+
+#[test]
+fn a_depth_bound_of_a_host_callable_function_is_a_host_obligation_of_the_laws_file() {
+    let c = check_rec(&format!("{DEPTH_BOUND}{REC_CONTRACTS}"), "");
+    // `depth` is private, `src/a.rs` has no host child module, but the
+    // left-out `Pos::left_out` calls it: host-callable, so a boundary function;
+    // its depth bound is not a boundary error (a host obligation)
+    assert!(c.ok(), "{}", c.render());
+    let k = c.krate.as_ref().unwrap();
+    let host: Vec<String> = sandblaster_front::validate::in_place_host_fns(k).into_iter().map(|i| k.item(i).path.to_string()).collect();
+    assert!(host.iter().any(|h| h == "crate::a::depth"), "{host:?}");
+    let obligations = &c.lift_facts.host_depth_bounds;
+    assert!(obligations.iter().any(|(f, b)| f.contains("depth") && b.contains("<= 64")), "the record lists the depth bound: {obligations:?}");
+    // the lock holds it with the contract (the laws file's statement), and
+    // §15.5 determines `depth` by its contract
+    let r = run_checked(c);
+    assert!(r.verified, "{}", r.explain());
+    assert!(r.surface_errors.is_empty(), "{}", r.explain());
+    assert!(r.source("boundary-fn:crate::a::depth").contains("decreases(h, max = 64)"), "{}", r.source("boundary-fn:crate::a::depth"));
+    assert!(!r.gate.iter().any(|g| g.contains("depth")), "{}", r.explain());
+}
+
+#[test]
+fn a_depth_bound_of_a_host_callable_function_from_the_proof_file_is_refused() {
+    // the twin: the same bound attached from the proof file would put a
+    // proof file's statement into the lock
+    let r = run_checked(check_rec(REC_CONTRACTS, DEPTH_BOUND));
+    assert!(
+        r.surface_errors.iter().any(|e| e.contains("`crate::a::depth`") && e.contains("recursion depth bound") && e.contains("`crate::proof`")),
+        "the refusal names the item and the proof file:\n{}",
+        r.explain()
+    );
 }
 
 // ---------------------------------------------------------------------

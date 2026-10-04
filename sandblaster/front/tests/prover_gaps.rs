@@ -22,6 +22,31 @@
 //! * a match-shaped hypothesis (an irrelevant `use_hyp` instance) passed to a
 //!   lemma: the elaborator promotes the proof by cases instead of handing the
 //!   kernel an irrelevant variable in a relevant position.
+//!
+//! Three more, from the verifier's laws (storage/sandblaster/verifier: the
+//! first two were worked around there with case lemmas, the third had kept
+//! a law to walks that collect nothing):
+//!
+//! * one stuck term given three constructor values: the second equation
+//!   joined from them was built at the depth before the first one's
+//!   saturation pushed its facts, its variables pointing at later binders
+//!   (`elems` read as `sibs`), and the kernel rejected the proof ("mixing
+//!   list types");
+//! * `unfold(f)` of a recursive `f` unfolded, in its later rounds, a call
+//!   the unfolded body brings in wherever else the goal names it (the other
+//!   side of `f(s) == match f(left(s)).3 { .. }`), copying the body into
+//!   every occurrence until the goal could not be read back — auto then
+//!   reported the body's `if` scrutinee as absent ("does not occur
+//!   relevantly"). The calls a recursive body brings in stay folded, and
+//!   a copy of a call the goal also writes is given that written call's
+//!   term: its own proofs come from the body's path equation (`&xs[1..]`
+//!   in the arm `Some(head)` of `match xs.first()`), which a later
+//!   `rewrite` of that scrutinee could not generalize;
+//! * a script `rewrite(e == C(v))` of a goal that matches on `e`: the
+//!   rewrite's motive kept the match's path-equation argument `refl(e)`
+//!   (an irrelevant proof the abstraction does not touch) where the match,
+//!   now on the motive variable `y`, takes a proof of `y == y`, and the
+//!   kernel rejected the proof. That argument is now `refl(y)`.
 
 #[path = "spec15_util.rs"]
 mod util;
@@ -518,4 +543,228 @@ fn a_match_shaped_hypothesis_reaches_a_lemma() {
     assert!(r.front_ok, "{}", r.rendered);
     assert!(r.unproven.iter().any(|(d, k, _)| d.contains("pick::complete") && k == "callee-requires"), "the wrong requires proved:\n{}", r.explain());
     no_rejection(&r);
+}
+
+// ---------------------------------------------------------------------------
+// 5. One stuck term, three constructor values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_term_with_three_values_joins_at_the_current_depth() {
+    // saturating `o == Some(z)` joins it with the two other values: the
+    // first join pushes `Some(z) == Some(x)` and its injectivity before the
+    // second builds `Some(z) == Some(y)` (the claim), whose proof must be at
+    // that later depth; the parameters after them have other types, so a
+    // proof built at the earlier depth is rejected by the kernel
+    let r = run_plain(
+        r#"
+/// The second joined equation is the claim.
+#[lemma]
+fn three_values(o: Option<Seq<u8>>, x: Seq<u8>, y: Seq<u8>, z: Seq<u8>, pad: u64, q: Seq<u64>) {
+    requires(o == Some(x) && o == Some(y) && o == Some(z));
+    ensures(Some(z) == Some(y));
+    follows();
+}
+/// Negative twin: another value.
+#[lemma]
+fn three_values_bad(o: Option<Seq<u8>>, x: Seq<u8>, y: Seq<u8>, z: Seq<u8>, pad: u64, q: Seq<u64>) {
+    requires(o == Some(x) && o == Some(y) && o == Some(z));
+    ensures(Some(z) == Some(seq![1u8]));
+    follows();
+}
+"#,
+    );
+    proven(&r, "three_values");
+    refuted(&r, "three_values_bad");
+}
+
+// ---------------------------------------------------------------------------
+// 6. `unfold` of a recursive function: the body's calls stay folded
+// ---------------------------------------------------------------------------
+
+const TRI: &str = r#"
+/// A recursive spec function whose body calls itself once.
+#[spec]
+#[decreases(n)]
+#[example(tri(3) == 6)]
+pub fn tri(n: Nat) -> Nat {
+    if n == 0 { 0 } else { tri(n - 1) + n }
+}
+"#;
+
+#[test]
+fn unfold_leaves_the_bodys_calls_folded() {
+    // the right side names `tri(n - 1)`, the call `tri(n)`'s body brings
+    // in: after `unfold(tri)` both sides still show it folded (a later
+    // round would unfold it, with every copy in the body, into the
+    // grandchild call `tri(n - 1 - 1)`)
+    let r = run_plain(&format!(
+        r#"{TRI}
+/// One step.
+#[lemma]
+fn tri_step(n: Nat, k: Nat) {{
+    requires(n > 0 && tri(n - 1) == k);
+    ensures(tri(n) == tri(n - 1) + n);
+    unfold(tri);
+    show();
+    rewrite(tri(n - 1) == k);
+    follows();
+}}
+/// Negative twin.
+#[lemma]
+fn tri_step_bad(n: Nat, k: Nat) {{
+    requires(n > 0 && tri(n - 1) == k);
+    ensures(tri(n) == tri(n - 1) + n + 1);
+    unfold(tri);
+    rewrite(tri(n - 1) == k);
+    follows();
+}}
+"#
+    ));
+    proven(&r, "tri_step");
+    refuted(&r, "tri_step_bad");
+    let shown = r.rendered.split("warning[script]: show()").nth(1).unwrap_or_else(|| panic!("no show() output:\n{}", r.rendered));
+    let goal = shown.lines().find(|l| l.contains("| goal:")).unwrap_or_else(|| panic!("no goal line:\n{shown}"));
+    assert!(goal.contains("#iadd(crate::proof::tri #isub(n, 1int), n))"), "the right side's call was unfolded:\n{goal}");
+    assert!(!goal.contains("#isub(#isub(n, 1int), 1int)"), "a call the body brought in was unfolded:\n{goal}");
+}
+
+#[test]
+fn unfold_of_a_walk_over_both_halves_states_one_step() {
+    // the shape of a subtree walk (the verifier's `rebuild`): the left
+    // half's result, reused, and the right half from where it stopped
+    let r = run_plain(
+        r#"
+/// A recursive function returning a pair, its recursive results reused.
+#[spec]
+#[decreases(n)]
+#[example(walk(1, 0) == (2, 1))]
+pub fn walk(n: Nat, x: Int) -> (Int, Int) {
+    if n == 0 {
+        (x, x + 1)
+    } else {
+        let l = walk(n - 1, x);
+        let r = walk(n - 1, l.0 + l.1);
+        (l.0 + r.1, r.0)
+    }
+}
+/// One step of `walk`, stated over its recursive calls.
+#[lemma]
+fn walk_node(n: Nat, x: Int) {
+    requires(n > 0);
+    ensures(walk(n, x) == (walk(n - 1, x).0 + walk(n - 1, walk(n - 1, x).0 + walk(n - 1, x).1).1, walk(n - 1, walk(n - 1, x).0 + walk(n - 1, x).1).0));
+    unfold(walk);
+    follows();
+}
+/// Negative twin: a component swapped.
+#[lemma]
+fn walk_node_bad(n: Nat, x: Int) {
+    requires(n > 0);
+    ensures(walk(n, x) == (walk(n - 1, x).0 + walk(n - 1, walk(n - 1, x).0 + walk(n - 1, x).1).0, walk(n - 1, walk(n - 1, x).0 + walk(n - 1, x).1).0));
+    unfold(walk);
+    follows();
+}
+"#,
+    );
+    proven(&r, "walk_node");
+    refuted(&r, "walk_node_bad");
+}
+
+const FOLD_ROOT: &str = "mod exec;\n#[cfg(sandblaster)]\n#[path = \"PROOF.rs\"]\nmod proof;\npub use exec::join;\n";
+
+/// QMDB's `fold_back` shape: a non-tail recursion over a slice whose
+/// recursive call carries proofs (its precondition, its depth bound and the
+/// bound of `&xs[1..]`, which the arm `Some(head)` of `match xs.first()`
+/// knows from its path equation).
+const FOLD_EXEC: &str = r#"//! Exec part.
+use sandblaster::prelude::*;
+
+/// Attach `head` in front of an optional fold.
+pub fn join(head: &u8, tail: Option<u8>) -> Option<u8> {
+    match tail {
+        None => Some(*head),
+        Some(t) => Some(if t < *head { t } else { *head }),
+    }
+}
+
+/// The least element, from the right.
+#[requires(xs.len() <= 64usize)]
+#[decreases(xs.len(), max = 64)]
+pub(crate) fn fold_back(xs: &[u8]) -> Option<u8> {
+    match xs.first() {
+        None => None,
+        Some(head) => join(head, fold_back(&xs[1..])),
+    }
+}
+"#;
+
+#[test]
+fn unfold_then_rewrite_the_bodys_scrutinee() {
+    // after `unfold(fold_back)` the arm `Some(head)` holds a copy of the
+    // right side's `fold_back(&xs[1..])` whose proofs come from the arm's
+    // equation; it is given the right side's term, so rewriting
+    // `xs.first()` generalizes that equation (QMDB's `fold_back_is`)
+    let run = |claim: &str| {
+        let proof = format!(
+            r#"//! Probe.
+use sandblaster::prelude::*;
+/// One step of the fold.
+#[lemma]
+fn step(xs: &[u8], y: u8) {{
+    requires(xs.len() >= 1usize && xs.len() <= 64usize && xs.first() == Some(&y));
+    ensures({claim});
+    unfold(crate::exec::fold_back);
+    rewrite(xs.first() == Some(&y));
+    follows();
+}}
+"#
+        );
+        run_files(&[("r/mod.rs", FOLD_ROOT), ("r/exec.rs", FOLD_EXEC), ("r/PROOF.rs", &proof)])
+    };
+    let r = run("crate::exec::fold_back(xs) == crate::exec::join(&y, crate::exec::fold_back(&xs[1..]))");
+    proven(&r, "step");
+    // negative twin: the head left out
+    let r = run("crate::exec::fold_back(xs) == crate::exec::fold_back(&xs[1..])");
+    refuted(&r, "step");
+}
+
+// ---------------------------------------------------------------------------
+// 7. A script rewrite of a match's scrutinee
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rewriting_a_matched_term_keeps_the_match_well_typed() {
+    // the goal is the dependent-match idiom `match walk(x).1 as z return
+    // Π(e : walk(x).1 == z). .. end refl(walk(x).1)`; rewriting `walk(x).1`
+    // to `Some(v)` must give the path-equation argument the motive
+    // variable's `refl` too (the kernel rejected `refl(walk(x).1)` there)
+    let r = run_plain(
+        r#"
+/// A walk: what is left, and the answer (opaque: its value is unknown).
+#[spec]
+#[opaque]
+#[example(walk(3) == (3, Some(3)))]
+pub fn walk(x: u8) -> (u8, Option<u8>) {
+    (x, Some(x))
+}
+/// The answer's value, by rewriting the match's scrutinee.
+#[lemma]
+fn rw_scrut(x: u8, v: u8) {
+    requires(walk(x).1 == Some(v));
+    ensures(match walk(x).1 { Some(y) => y == v, None => false });
+    rewrite(walk(x).1 == Some(v));
+    follows();
+}
+/// Negative twin: another value.
+#[lemma]
+fn rw_scrut_bad(x: u8, v: u8) {
+    requires(walk(x).1 == Some(v));
+    ensures(match walk(x).1 { Some(y) => y != v, None => false });
+    rewrite(walk(x).1 == Some(v));
+    follows();
+}
+"#,
+    );
+    proven(&r, "rw_scrut");
+    refuted(&r, "rw_scrut_bad");
 }

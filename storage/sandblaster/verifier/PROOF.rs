@@ -4,7 +4,7 @@
 //! host files.
 
 use sandblaster::prelude::*;
-use crate::merkle::{Digest, Position};
+use crate::merkle::{Digest, Location, Position};
 use crate::merkle::hasher::Standard;
 
 // ---------------------------------------------------------------------------
@@ -112,13 +112,6 @@ fn children_facts() {
 // The subtree reconstruction (`proof.rs`)
 // ---------------------------------------------------------------------------
 
-/// `reconstruct_digest` recurses once per level of the subtree: its height
-/// is below 64 (a `u64` leaf count), so the recursion is at most 64 deep.
-#[lift_attach(crate::merkle::proof::Subtree::reconstruct_digest)]
-fn reconstruct_digest_measure() {
-    decreases(self.height, max = 64);
-}
-
 /// A well-shaped subtree is at most 62 high (its `2^height` leaves fit in
 /// `2^62`), with its bounds as integers.
 #[lemma]
@@ -130,9 +123,9 @@ fn shape_bounds(s: crate::merkle::proof::Subtree) {
     follows();
 }
 
-/// `children`: the halves of a well-shaped subtree are well shaped, one
-/// level down: the left child at `pos - 2^height`, the right one at
-/// `pos - 1`, the right one's leaves after the left one's.
+/// `children`: its contract (the halves) in the words it computes them
+/// (`1 << (height - 1)` is `2^(height - 1)`, and so is the right half's
+/// offset); the halves are well shaped, one level down.
 #[lift_attach(crate::merkle::proof::Subtree::children)]
 fn children_of_subtree_facts() {
     opaque();
@@ -142,24 +135,51 @@ fn children_of_subtree_facts() {
         crate::proofs::shl_one(self.height - 1u32);
         crate::stdlib::bits::pow2_step(self.height as Int);
         crate::stdlib::bits::pow2_step((self.height as Int) + 1);
+        crate::proofs::right_start(self);
+        crate::proofs::halves_are(self);
+        crate::proofs::halves_facts(self);
     }
-    ensures(|r: (crate::merkle::proof::Subtree, crate::merkle::proof::Subtree)| crate::laws::well_shaped(r.0) && crate::laws::well_shaped(r.1)
-        && r.0.height == self.height - 1u32 && r.1.height == self.height - 1u32
-        && (r.0.pos.0 as Int) == (self.pos.0 as Int) - pow2(self.height as Int)
-        && (r.1.pos.0 as Int) == (self.pos.0 as Int) - 1
-        && r.0.leaf_start.0 == self.leaf_start.0
-        && (r.1.leaf_start.0 as Int) == (self.leaf_start.0 as Int) + pow2((self.height as Int) - 1));
+    ensures(|ret: (Subtree, Subtree)| crate::laws::well_shaped(ret.0) && crate::laws::well_shaped(ret.1)
+        && ret.0.height == self.height - 1u32 && ret.1.height == self.height - 1u32);
 }
 
-/// `leaf_end`: `1 << height` is `2^height`.
+/// The first leaf of the right half as `children` computes it
+/// (`leaf_start + (1 << (height - 1))`) and as `right_half` states it.
+#[lemma]
+fn right_start(s: crate::merkle::proof::Subtree) {
+    requires(s.height >= 1u32 && s.height <= 62u32 && ((1u64 << (s.height - 1u32)) as Int) == pow2((s.height as Int) - 1)
+        && (s.leaf_start.0 as Int) + pow2((s.height as Int) - 1) < pow2(64));
+    ensures(Location::new(s.leaf_start.0 + (1u64 << (s.height - 1u32))) == Location::new(((s.leaf_start.0 as Int) + pow2((s.height as Int) - 1)) as u64));
+    assert(s.leaf_start.0 + (1u64 << (s.height - 1u32)) == ((s.leaf_start.0 as Int) + pow2((s.height as Int) - 1)) as u64, { by_arithmetic(); });
+    follows();
+}
+
+/// The halves of a well-shaped subtree above the leaves, with the height
+/// as `children` computes it (`height - 1`): the left one at
+/// `pos - 2^height`, the right one at `pos - 1` over the leaves from
+/// `leaf_start + 2^(height - 1)`.
+#[lemma]
+fn halves_are(s: crate::merkle::proof::Subtree) {
+    requires(crate::laws::well_shaped(s) && s.height >= 1u32);
+    ensures(crate::laws::left_half(s) == crate::merkle::proof::Subtree { pos: Position::new(((s.pos.0 as Int) - pow2(s.height as Int)) as u64), height: s.height - 1u32, leaf_start: s.leaf_start }
+        && crate::laws::right_half(s) == crate::merkle::proof::Subtree { pos: Position::new(((s.pos.0 as Int) - 1) as u64), height: s.height - 1u32, leaf_start: Location::new(((s.leaf_start.0 as Int) + pow2((s.height as Int) - 1)) as u64) });
+    assert(((s.height as Int) - 1) as u32 == s.height - 1u32, { by_arithmetic(); });
+    unfold(crate::laws::left_half);
+    unfold(crate::laws::right_half);
+    follows();
+}
+
+/// `leaf_end` (internal: only `is_before` and `is_inside` call it) needs a
+/// well-shaped subtree; `1 << height` is `2^height`.
 #[lift_attach(crate::merkle::proof::Subtree::leaf_end)]
 fn leaf_end_facts() {
+    requires(crate::laws::well_shaped(self));
     opaque();
     at_start! {
         crate::proofs::shape_bounds(self);
         crate::proofs::shl_one(self.height);
     }
-    ensures(|r: crate::merkle::Location| (r.0 as Int) == (self.leaf_start.0 as Int) + pow2(self.height as Int));
+    ensures(|ret: crate::merkle::Location| (ret.0 as Int) == (self.leaf_start.0 as Int) + pow2(self.height as Int));
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +320,7 @@ fn is_outside_summary() {
         crate::words::location_ge(self.leaf_start, range.end);
         crate::words::location_le(self.leaf_end(), range.start);
     }
-    ensures(|r: bool| r == crate::laws::disjoint(self, *range));
+    ensures(|ret: bool| ret == crate::laws::disjoint(self, *range));
 }
 
 /// `is_outside` is `disjoint`.
@@ -333,22 +353,7 @@ fn location_inj(p: crate::merkle::Location, q: crate::merkle::Location) {
 fn children_are_halves(s: crate::merkle::proof::Subtree) {
     requires(crate::laws::well_shaped(s) && s.height >= 1u32);
     ensures(s.children() == (crate::laws::left_half(s), crate::laws::right_half(s)));
-    crate::proofs::shape_bounds(s);
     let c = s.children();
-    let lp = ((s.pos.0 as Int) - pow2(s.height as Int)) as u64;
-    let rp = ((s.pos.0 as Int) - 1) as u64;
-    let rs = ((s.leaf_start.0 as Int) + pow2((s.height as Int) - 1)) as u64;
-    let ch = ((s.height as Int) - 1) as u32;
-    u64_of_int(c.0.pos.0, (s.pos.0 as Int) - pow2(s.height as Int));
-    u64_of_int(c.1.pos.0, (s.pos.0 as Int) - 1);
-    u64_of_int(c.1.leaf_start.0, (s.leaf_start.0 as Int) + pow2((s.height as Int) - 1));
-    assert(c.0.height == ch && c.1.height == ch, { by_arithmetic(); });
-    position_inj(c.0.pos, Position::new(lp));
-    position_inj(c.1.pos, Position::new(rp));
-    location_inj(c.0.leaf_start, s.leaf_start);
-    location_inj(c.1.leaf_start, crate::merkle::Location::new(rs));
-    assert(c.0 == crate::laws::left_half(s), { unfold(crate::laws::left_half); follows(); });
-    assert(c.1 == crate::laws::right_half(s), { unfold(crate::laws::right_half); follows(); });
     follows();
 }
 
@@ -374,17 +379,6 @@ fn skip_at(a: &[Digest], c: usize, d: Digest, y: Seq<Digest>) {
     });
     crate::stdlib::bridges::slice_get::<Digest>(a, seq![..a], c);
     follows();
-}
-
-/// Digests whose part from `c` on is `x ++ y`: there are at least `c + |x|`.
-#[lemma]
-fn skip_len_after(a: &[Digest], c: Nat, x: Seq<Digest>, y: Seq<Digest>) {
-    requires(c <= (a.len() as Nat) && seq![..a].skip(c) == seq![..x, ..y]);
-    ensures(c + x.len() <= (a.len() as Nat));
-    crate::stdlib::seqs::skip_len::<Digest>(seq![..a], c);
-    crate::stdlib::seqs::len_app::<Digest>(x, y);
-    assert(seq![..a].len() == (a.len() as Nat), { follows(); });
-    by_arithmetic();
 }
 
 /// Byte strings that are `e ++ rest`: the first item is `e`, the rest `rest`.
@@ -436,7 +430,886 @@ fn halves_facts(s: crate::merkle::proof::Subtree) {
         && crate::laws::left_half(s).height == s.height - 1u32 && crate::laws::right_half(s).height == s.height - 1u32
         && crate::laws::left_half(s).leaf_start.0 == s.leaf_start.0
         && (crate::laws::right_half(s).leaf_start.0 as Int) == (s.leaf_start.0 as Int) + pow2((s.height as Int) - 1));
-    let c = s.children();
-    children_are_halves(s);
+    crate::proofs::shape_bounds(s);
+    crate::proofs::halves_are(s);
+    crate::stdlib::bits::pow2_step(s.height as Int);
+    crate::stdlib::bits::pow2_step((s.height as Int) + 1);
+    crate::words::well_shaped_is(crate::laws::left_half(s));
+    crate::words::well_shaped_is(crate::laws::right_half(s));
     follows();
+}
+
+// ---------------------------------------------------------------------------
+// The position arithmetic's contracts (as in `sandblaster/mmr/PROOF.rs`)
+// ---------------------------------------------------------------------------
+
+/// `location_to_position`: the node count before the leaf (opaque to its
+/// callers: they use this summary, not its body's `expect`).
+#[lift_attach(crate::merkle::mmr::Family::location_to_position)]
+fn location_to_position_summary() {
+    opaque();
+    at_start! {
+        crate::stdlib::bits::count_ones_u64(loc.0);
+        crate::proofs::double_fits(loc.0);
+    }
+    ensures(|ret: Position| (ret.0 as Int) == crate::laws::mmr_size(loc.0 as Int));
+}
+
+/// `checked_mul(2)` of a location up to `2^62` does not overflow (the
+/// test in the form `checked_mul` makes it).
+#[lemma]
+fn double_fits(x: u64) {
+    requires((x as Int) <= pow2(62));
+    ensures(((x as Int) * 2 <= 18446744073709551615) == true);
+    follows();
+}
+
+/// `Position::try_from(Location)` (opaque to its callers).
+#[lift_attach(crate::merkle::position::Position::try_from__Location)]
+fn try_from_summary() {
+    opaque();
+    ensures(|ret: crate::__lift::Result<Position, crate::merkle::Error>| match ret {
+        crate::__lift::Result::Ok(q) => (loc.0 as Int) <= pow2(62) && (q.0 as Int) == crate::laws::mmr_size(loc.0 as Int),
+        crate::__lift::Result::Err(_) => (loc.0 as Int) > pow2(62),
+    });
+}
+
+/// From the summary (the call in a proof step brings it in).
+#[proof]
+fn location_to_position_counts_nodes(loc: Location) {
+    let r = crate::merkle::mmr::Family::location_to_position(loc);
+    follows();
+}
+
+/// Positions with equal values are equal (the marker carries nothing).
+#[lemma]
+fn position_ext(a: Position, b: Position) {
+    requires(a.0 == b.0);
+    ensures(a == b);
+    match a {
+        Position(x, p) => match b {
+            Position(y, q) => match p {
+                crate::__lift::PhantomData => match q {
+                    crate::__lift::PhantomData => follows(),
+                },
+            },
+        },
+    }
+}
+
+/// `location_to_position` is pinned by its law.
+#[proof(complete = crate::merkle::mmr::Family::location_to_position)]
+fn location_to_position_determined(loc: Location) {
+    use_hyp(0, loc);
+    use_real(0, loc);
+    apply(position_ext);
+}
+
+/// `order` by cases (its definition).
+#[lemma]
+fn order_def(a: Int, b: Int) {
+    ensures(crate::laws::order(a, b) == (if a < b { crate::__lift::Ordering::Less } else if a == b { crate::__lift::Ordering::Equal } else { crate::__lift::Ordering::Greater }));
+    by_unfolding(crate::laws::order);
+}
+
+/// `Position::cmp` compares the values.
+#[lift_attach(crate::merkle::position::Position::cmp)]
+fn position_cmp_facts() {
+    at_start! {
+        crate::proofs::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// `Position::partial_cmp` with a `u64` compares the value.
+#[lift_attach(crate::merkle::position::Position::partial_cmp__u64)]
+fn position_partial_cmp_u64_facts() {
+    at_start! {
+        crate::proofs::order_def(self.0 as Int, *other as Int);
+    }
+}
+
+/// `Location::cmp` compares the values.
+#[lift_attach(crate::merkle::location::Location::cmp)]
+fn location_cmp_facts() {
+    at_start! {
+        crate::proofs::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// `Location::partial_cmp` with a `u64` compares the value.
+#[lift_attach(crate::merkle::location::Location::partial_cmp__u64)]
+fn location_partial_cmp_u64_facts() {
+    at_start! {
+        crate::proofs::order_def(self.0 as Int, *other as Int);
+    }
+}
+
+/// `Position::partial_cmp` compares the values (through `cmp`).
+#[lift_attach(crate::merkle::position::Position::partial_cmp)]
+fn position_partial_cmp_facts() {
+    at_start! {
+        crate::proofs::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// `Location::partial_cmp` compares the values (through `cmp`).
+#[lift_attach(crate::merkle::location::Location::partial_cmp)]
+fn location_partial_cmp_facts() {
+    at_start! {
+        crate::proofs::order_def(self.0 as Int, other.0 as Int);
+    }
+}
+
+/// `u64`'s `partial_cmp` with a position compares the value.
+#[lift_attach(crate::merkle::position::u64__partial_cmp__Position)]
+fn u64_partial_cmp_position_facts() {
+    at_start! {
+        crate::proofs::order_def(self_ as Int, other.0 as Int);
+    }
+}
+
+/// `u64`'s `partial_cmp` with a location compares the value.
+#[lift_attach(crate::merkle::location::u64__partial_cmp__Location)]
+fn u64_partial_cmp_location_facts() {
+    at_start! {
+        crate::proofs::order_def(self_ as Int, other.0 as Int);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The hasher's contracts
+// ---------------------------------------------------------------------------
+
+/// One part hashes as itself.
+#[lemma]
+fn concat_one(a: &[u8]) {
+    ensures(crate::sha256::concat(&[a]) == seq![..a]);
+    by_unfolding(crate::sha256::concat);
+}
+
+/// `digest`: the one part it hashes.
+#[lift_attach(crate::merkle::hasher::Standard::digest)]
+fn digest_facts() {
+    at_start! {
+        crate::proofs::concat_one(data);
+    }
+}
+
+/// `fold`: the two parts it hashes.
+#[lift_attach(crate::merkle::hasher::Standard::fold)]
+fn fold_facts() {
+    at_start! {
+        crate::proofs::concat_two(acc, peak);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `reconstruct_digest`'s contract (`rebuild`)
+// ---------------------------------------------------------------------------
+
+/// One step of `rebuild` on a subtree outside the range: the next digest.
+#[lemma]
+fn rebuild_outside(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::disjoint(s, range));
+    ensures(crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (match siblings.get(cursor) {
+        Some(d) => (elements, ((cursor as Int) + 1) as usize, collected, crate::__lift::Result::Ok(*d)),
+        None => (elements, cursor, collected, crate::__lift::Result::Err(crate::merkle::proof::ReconstructionError::MissingDigests)),
+    }));
+    unfold(crate::laws::rebuild);
+    follows();
+}
+
+
+/// `rebuild`'s node case after its left half returned `dl`: the right half,
+/// then the node.
+#[spec]
+// known_answers.py: `rebuild subtree at 2, range 1..3`, `rebuild subtree at 5 after it, then the root`
+#[example(after_left(crate::merkle::proof::Subtree { pos: Position::new(6u64), height: 2u32, leaf_start: Location::new(0u64) }, crate::__lift::Range { start: Location::new(1u64), end: Location::new(3u64) }, &[hex!("2ae1c19c 0cbd378e 46c927a9 f3611923 ec07cc1a e357502a 09536d45 5275cf21"), hex!("13ab0e82 105ce64b d07ff85d 4e8b8b66 245bae76 a1a4ccf9 344da003 051f6537")], (&[&[3u8]], 1usize, None, crate::__lift::Result::Ok(hex!("bf7c6368 0c5908e6 5cc9aa23 85bf7cfc 24e5c78a 3a28babb 28ce2670 0e479b71"))), hex!("bf7c6368 0c5908e6 5cc9aa23 85bf7cfc 24e5c78a 3a28babb 28ce2670 0e479b71")).1 == 2usize)]
+#[example(after_left(crate::merkle::proof::Subtree { pos: Position::new(6u64), height: 2u32, leaf_start: Location::new(0u64) }, crate::__lift::Range { start: Location::new(1u64), end: Location::new(3u64) }, &[hex!("2ae1c19c 0cbd378e 46c927a9 f3611923 ec07cc1a e357502a 09536d45 5275cf21"), hex!("13ab0e82 105ce64b d07ff85d 4e8b8b66 245bae76 a1a4ccf9 344da003 051f6537")], (&[&[3u8]], 1usize, None, crate::__lift::Result::Ok(hex!("bf7c6368 0c5908e6 5cc9aa23 85bf7cfc 24e5c78a 3a28babb 28ce2670 0e479b71"))), hex!("bf7c6368 0c5908e6 5cc9aa23 85bf7cfc 24e5c78a 3a28babb 28ce2670 0e479b71")).3 == crate::__lift::Result::Ok(hex!("760de5f6 3faa89b2 66b490d3 4dcf1e04 3fbac001 eb1843fb 072a8d12 512f87cd")))]
+fn after_left(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, siblings: &[Digest], l: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>), dl: Digest) -> (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>) {
+    match crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2).3 {
+        crate::__lift::Result::Err(e) => (crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2).0, crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2).1, crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2).2, crate::__lift::Result::Err(e)),
+        crate::__lift::Result::Ok(dr) => (
+            crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2).0,
+            crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2).1,
+            crate::proofs::record(crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2).2, (crate::laws::left_half(s).pos, dl), (crate::laws::right_half(s).pos, dr)),
+            crate::__lift::Result::Ok(crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr))),
+        ),
+    }
+}
+
+/// Two pairs pushed to the collected digests, when they are collected (as
+/// `reconstruct_digest` pushes them).
+#[spec]
+#[example(record(None, (Position::new(1u64), [1u8; 32]), (Position::new(2u64), [2u8; 32])) == None)]
+#[example(record(Some(seq![]), (Position::new(1u64), [1u8; 32]), (Position::new(2u64), [2u8; 32])) == Some(seq![(Position::new(1u64), [1u8; 32]), (Position::new(2u64), [2u8; 32])]))]
+fn record(col: Option<Seq<(Position, Digest)>>, a: (Position, Digest), b: (Position, Digest)) -> Option<Seq<(Position, Digest)>> {
+    match col {
+        Some(c) => Some(crate::__lift_model::vec_push(crate::__lift_model::vec_push(c, a), b)),
+        None => None,
+    }
+}
+
+/// `record` as `rebuild` states it: the two pairs appended.
+#[lemma]
+fn record_spec(col: Option<Seq<(Position, Digest)>>, a: (Position, Digest), b: (Position, Digest)) {
+    ensures(crate::proofs::record(col, a, b) == (match col { Some(c) => Some(seq![..c, a, b]), None => None }));
+    match col {
+        Some(c) => {
+            unfold(crate::proofs::record);
+            unfold(crate::__lift_model::vec_push);
+            sandblaster::lemmas::seq::append_assoc::<(Position, Digest)>(c, seq![a], seq![b]);
+            follows();
+        }
+        None => {
+            unfold(crate::proofs::record);
+            follows();
+        }
+    }
+}
+
+/// `record_spec` for every argument.
+#[lemma]
+fn record_spec_all() {
+    ensures(forall(|col: Option<Seq<(Position, Digest)>>, a: (Position, Digest), b: (Position, Digest)| crate::proofs::record(col, a, b) == (match col { Some(c) => Some(seq![..c, a, b]), None => None })));
+    follows();
+}
+
+/// `rebuild` one step: its definition at these arguments.
+#[lemma]
+fn rebuild_step(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    ensures(crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (if crate::laws::disjoint(s, range) {
+        match siblings.get(cursor) {
+            Some(d) => (elements, ((cursor as Int) + 1) as usize, collected, crate::__lift::Result::Ok(*d)),
+            None => (elements, cursor, collected, crate::__lift::Result::Err(crate::merkle::proof::ReconstructionError::MissingDigests)),
+        }
+    } else if s.height == 0u32 {
+        match elements.split_first() {
+            Some(p) => (p.1, cursor, collected, crate::__lift::Result::Ok(crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, *p.0)))),
+            None => (elements, cursor, collected, crate::__lift::Result::Err(crate::merkle::proof::ReconstructionError::MissingElements)),
+        }
+    } else {
+        let l = crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected);
+        match l.3 {
+            crate::__lift::Result::Err(e) => (l.0, l.1, l.2, crate::__lift::Result::Err(e)),
+            crate::__lift::Result::Ok(dl) => {
+                let r = crate::laws::rebuild(crate::laws::right_half(s), range, l.0, siblings, l.1, l.2);
+                match r.3 {
+                    crate::__lift::Result::Err(e) => (r.0, r.1, r.2, crate::__lift::Result::Err(e)),
+                    crate::__lift::Result::Ok(dr) => (
+                        r.0,
+                        r.1,
+                        match r.2 {
+                            Some(c) => Some(seq![..c, (crate::laws::left_half(s).pos, dl), (crate::laws::right_half(s).pos, dr)]),
+                            None => None,
+                        },
+                        crate::__lift::Result::Ok(crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr))),
+                    ),
+                }
+            }
+        }
+    }));
+    by_unfolding(crate::laws::rebuild);
+}
+
+/// `rebuild` one step on a node, as `reconstruct_digest`'s tests find it
+/// (the conclusion is a fact of its node branch, whose path facts are the
+/// hypotheses).
+#[lemma]
+fn rebuild_case_node(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s));
+    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (match crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).3 {
+        crate::__lift::Result::Err(e) => (crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).0, crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).1, crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).2, crate::__lift::Result::Err(e)),
+        crate::__lift::Result::Ok(dl) => crate::proofs::after_left(s, range, siblings, crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected), dl),
+    }))));
+    is_outside_is_disjoint(s, range);
+    if crate::laws::disjoint(s, range) {
+        assert(s.is_outside(&range) == true, { follows(); });
+        follows();
+    } else if s.height == 0u32 {
+        assert((s.height == 0u32) == true, { follows(); });
+        follows();
+    } else {
+        rebuild_node(s, range, elements, siblings, cursor, collected);
+        follows();
+    }
+}
+
+/// A node whose left half fails: the left half's state and error (a
+/// forward rule: its hypotheses are the left half's induction hypothesis
+/// and the code's path facts, its conclusion the node's value).
+#[lemma]
+fn node_left_fails(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s));
+    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|x: crate::merkle::proof::ReconstructionError| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Err(x), crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (t.0, t.1, t.2, crate::__lift::Result::Err(x)))))))));
+    rebuild_case_node(s, range, elements, siblings, cursor, collected);
+    if s.height >= 1u32 {
+        children_are_halves(s);
+        follows();
+    } else {
+        follows();
+    }
+}
+
+/// A node whose right half fails: the right half's state and error.
+#[lemma]
+fn node_right_fails(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s));
+    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dl: Digest| forall(|u: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|x: crate::merkle::proof::ReconstructionError| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Ok(dl), implies(u == crate::laws::rebuild(s.children().1, range, t.0, siblings, t.1, t.2), implies(u.3 == crate::__lift::Result::Err(x), crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (u.0, u.1, u.2, crate::__lift::Result::Err(x)))))))))))));
+    rebuild_case_node(s, range, elements, siblings, cursor, collected);
+    if s.height >= 1u32 {
+        children_are_halves(s);
+        follows();
+    } else {
+        follows();
+    }
+}
+
+/// A node whose halves both rebuild, collecting: the right half's elements
+/// and cursor, the two halves' pairs pushed, and the node digest (in the
+/// words `reconstruct_digest` computes them; the last hypothesis is
+/// `node_digest`'s summary at its call).
+#[lemma]
+fn node_rebuilds_collecting(h: Standard, s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s));
+    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dl: Digest| forall(|u: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dr: Digest| forall(|c: Seq<(Position, Digest)>| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Ok(dl), implies(u == crate::laws::rebuild(s.children().1, range, t.0, siblings, t.1, t.2), implies(u.3 == crate::__lift::Result::Ok(dr), implies(h.node_digest(s.pos, &dl, &dr) == crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr)), implies(u.2 == Some(c), crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (u.0, u.1, Some(crate::__lift_model::vec_push(crate::__lift_model::vec_push(c, (s.children().0.pos, dl)), (s.children().1.pos, dr))), crate::__lift::Result::Ok(h.node_digest(s.pos, &dl, &dr)))))))))))))))));
+    rebuild_case_node(s, range, elements, siblings, cursor, collected);
+    if s.height >= 1u32 {
+        children_are_halves(s);
+        follows();
+    } else {
+        follows();
+    }
+}
+
+/// A node whose halves both rebuild, not collecting.
+#[lemma]
+fn node_rebuilds_quietly(h: Standard, s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s));
+    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dl: Digest| forall(|u: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dr: Digest| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Ok(dl), implies(u == crate::laws::rebuild(s.children().1, range, t.0, siblings, t.1, t.2), implies(u.3 == crate::__lift::Result::Ok(dr), implies(h.node_digest(s.pos, &dl, &dr) == crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr)), implies(u.2 == None, crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (u.0, u.1, None, crate::__lift::Result::Ok(h.node_digest(s.pos, &dl, &dr))))))))))))))));
+    rebuild_case_node(s, range, elements, siblings, cursor, collected);
+    if s.height >= 1u32 {
+        children_are_halves(s);
+        follows();
+    } else {
+        follows();
+    }
+}
+
+/// `reconstruct_digest`: `rebuild`'s step at its arguments, and at a node
+/// its step in the words the code computes it (`children`, `vec_push`).
+#[lift_attach(crate::merkle::proof::Subtree::reconstruct_digest)]
+fn reconstruct_digest_facts() {
+    at_start! {
+        crate::proofs::rebuild_step(self, *range, elements, siblings, cursor, collected);
+        crate::proofs::node_left_fails(self, *range, elements, siblings, cursor, collected);
+        crate::proofs::node_right_fails(self, *range, elements, siblings, cursor, collected);
+        crate::proofs::node_rebuilds_collecting(*hasher, self, *range, elements, siblings, cursor, collected);
+        crate::proofs::node_rebuilds_quietly(*hasher, self, *range, elements, siblings, cursor, collected);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Honest proofs (`honest_proofs_rebuild_the_subtree`)
+// ---------------------------------------------------------------------------
+
+/// An index below a slice's length has an item.
+#[lemma]
+fn get_in_bounds(xs: &[&[u8]], i: usize) {
+    requires((i as Int) < (xs.len() as Int));
+    ensures(xs.get(i).is_some());
+    follows();
+}
+
+/// `rebuild` on a leaf in the range: the first element, hashed.
+#[lemma]
+fn rebuild_leaf(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elems: &[&[u8]], e: &[u8], rest: Seq<&[u8]>, sibs: &[Digest], c: usize, col: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s) && crate::laws::disjoint(s, range) == false && (s.height == 0u32) == true && seq![..elems] == seq![e, ..rest]);
+    ensures(seq![..crate::laws::rebuild(s, range, elems, sibs, c, col).0] == rest && crate::laws::rebuild(s, range, elems, sibs, c, col).1 == c
+        && crate::laws::rebuild(s, range, elems, sibs, c, col).3 == crate::__lift::Result::Ok(crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, e))));
+    unfold(crate::laws::rebuild);
+    match elems.split_first() {
+        Some(v) => {
+            sandblaster::lemmas::slice::split_first_some::<&[u8]>(elems, v.0, v.1);
+            assert(seq![..elems] == seq![v.0, ..v.1], { follows(); });
+            assert(*v.0 == e && seq![..v.1] == rest, { follows(); });
+            assert(crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, *v.0)) == crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, e)), {
+                rewrite(*v.0 == e);
+                follows();
+            });
+            rewrite(crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, *v.0)) == crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, e)));
+            follows();
+        }
+        None => {
+            items_first(elems, e, rest);
+            sandblaster::lemmas::slice::split_first_none::<&[u8]>(elems);
+            assert(elems.is_empty(), { follows(); });
+            by_contradiction();
+        }
+    }
+}
+
+/// `rebuild` on a node: its left half, then (`after_left`) the rest.
+#[lemma]
+fn rebuild_node(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elems: &[&[u8]], sibs: &[Digest], c: usize, col: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s) && crate::laws::disjoint(s, range) == false && (s.height == 0u32) == false);
+    ensures(crate::laws::rebuild(s, range, elems, sibs, c, col) == (match crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).3 {
+        crate::__lift::Result::Err(e) => (crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).0, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).1, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).2, crate::__lift::Result::Err(e)),
+        crate::__lift::Result::Ok(dl) => crate::proofs::after_left(s, range, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col), dl),
+    }));
+    unfold(crate::laws::rebuild);
+    unfold(crate::proofs::after_left);
+    follows();
+}
+
+/// The induction behind `honest_proofs_rebuild_the_subtree` (its
+/// statement, by induction on the height).
+#[lemma]
+#[decreases(s.height)]
+fn rebuilds(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, leaves: &[&[u8]], elems: &[&[u8]], rest: Seq<&[u8]>, sibs: &[Digest], c: usize, more: Seq<Digest>, col: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s) && (s.leaf_start.0 as Int) + pow2(s.height as Int) <= (leaves.len() as Int));
+    requires(seq![..elems] == seq![..crate::laws::leaves_in(s, range, leaves), ..rest]);
+    requires(seq![..sibs].skip(c as Nat) == seq![..crate::laws::sibling_digests(s, range, leaves), ..more]);
+    ensures(seq![..crate::laws::rebuild(s, range, elems, sibs, c, col).0] == rest && (crate::laws::rebuild(s, range, elems, sibs, c, col).1 as Int) == (c as Int) + crate::laws::sibling_digests(s, range, leaves).len()
+        && crate::laws::rebuild(s, range, elems, sibs, c, col).3 == crate::__lift::Result::Ok(crate::laws::subtree_root(s, leaves)));
+    crate::proofs::shape_bounds(s);
+    if crate::laws::disjoint(s, range) {
+        // the whole subtree is one sibling digest
+        assert(crate::laws::sibling_digests(s, range, leaves) == seq![crate::laws::subtree_root(s, leaves)], { by_unfolding(crate::laws::sibling_digests); });
+        assert(crate::laws::leaves_in(s, range, leaves) == seq![], { by_unfolding(crate::laws::leaves_in); });
+        skip_at(sibs, c, crate::laws::subtree_root(s, leaves), more);
+        rebuild_outside(s, range, elems, sibs, c, col);
+        follows();
+    } else if s.height == 0u32 {
+        // a leaf in the range: one element
+        crate::stdlib::bits::pow2_same(s.height as Int, 0);
+        get_in_bounds(leaves, s.leaf_start.0 as usize);
+        match leaves.get(s.leaf_start.0 as usize) {
+            Some(e) => {
+                assert(crate::laws::leaves_in(s, range, leaves) == seq![*e], { by_unfolding(crate::laws::leaves_in); });
+                assert(crate::laws::sibling_digests(s, range, leaves) == seq![], { by_unfolding(crate::laws::sibling_digests); });
+                assert(crate::laws::subtree_root(s, leaves) == crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, *e)), { by_unfolding(crate::laws::subtree_root); });
+                rebuild_leaf(s, range, elems, *e, rest, sibs, c, col);
+                follows();
+            }
+            None => by_contradiction(),
+        }
+    } else {
+        // an internal node: the left half, then the right half
+        halves_facts(s);
+        crate::stdlib::bits::pow2_step(s.height as Int);
+        crate::proofs::shape_bounds(crate::laws::left_half(s));
+        crate::proofs::shape_bounds(crate::laws::right_half(s));
+        assert(crate::laws::leaves_in(s, range, leaves) == seq![..crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), ..crate::laws::leaves_in(crate::laws::right_half(s), range, leaves)], { by_unfolding(crate::laws::leaves_in); });
+        assert(crate::laws::sibling_digests(s, range, leaves) == seq![..crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves), ..crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves)], { by_unfolding(crate::laws::sibling_digests); });
+        crate::stdlib::bits::pow2_same((crate::laws::left_half(s).height as Int), (s.height as Int) - 1);
+        crate::stdlib::bits::pow2_same((crate::laws::right_half(s).height as Int), (s.height as Int) - 1);
+        sandblaster::lemmas::nat::pow2_pos((s.height as Int) - 1);
+        assert((crate::laws::left_half(s).leaf_start.0 as Int) + pow2(crate::laws::left_half(s).height as Int) <= (leaves.len() as Int), { by_arithmetic(); });
+        assert((crate::laws::right_half(s).leaf_start.0 as Int) + pow2(crate::laws::right_half(s).height as Int) <= (leaves.len() as Int), { by_arithmetic(); });
+        calc! {
+            seq![..elems]
+                == seq![..crate::laws::leaves_in(s, range, leaves), ..rest] by { follows(); };
+                == seq![..seq![..crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), ..crate::laws::leaves_in(crate::laws::right_half(s), range, leaves)], ..rest] by {
+                    rewrite(crate::laws::leaves_in(s, range, leaves) == seq![..crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), ..crate::laws::leaves_in(crate::laws::right_half(s), range, leaves)]);
+                    follows();
+                };
+                == seq![..crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), ..seq![..crate::laws::leaves_in(crate::laws::right_half(s), range, leaves), ..rest]] by { assoc_items(crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), crate::laws::leaves_in(crate::laws::right_half(s), range, leaves), rest); follows(); };
+        }
+        calc! {
+            seq![..sibs].skip(c as Nat)
+                == seq![..crate::laws::sibling_digests(s, range, leaves), ..more] by { follows(); };
+                == seq![..seq![..crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves), ..crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves)], ..more] by {
+                    rewrite(crate::laws::sibling_digests(s, range, leaves) == seq![..crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves), ..crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves)]);
+                    follows();
+                };
+                == seq![..crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves), ..seq![..crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves), ..more]] by { assoc_digests(crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves), crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves), more); follows(); };
+        }
+        // the left half (induction), from where the node starts
+        rebuilds(crate::laws::left_half(s), range, leaves, elems, seq![..crate::laws::leaves_in(crate::laws::right_half(s), range, leaves), ..rest], sibs, c, seq![..crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves), ..more], col);
+        skip_after(sibs, c as Nat, crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves), seq![..crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves), ..more]);
+        assert((crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).1 as Nat) == (c as Nat) + crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves).len(), { by_arithmetic(); });
+        assert(seq![..sibs].skip(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).1 as Nat) == seq![..crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves), ..more], {
+            rewrite((crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).1 as Nat) == (c as Nat) + crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves).len());
+            follows();
+        });
+        // the right half (induction), from where the left half stopped
+        rebuilds(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).0, rest, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).1, more, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).2);
+        // the node: the halves' digests hashed
+        assert(crate::laws::subtree_root(s, leaves) == crate::sha256::sha256(crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves))), { by_unfolding(crate::laws::subtree_root); });
+        crate::stdlib::seqs::len_app::<Digest>(crate::laws::sibling_digests(crate::laws::left_half(s), range, leaves), crate::laws::sibling_digests(crate::laws::right_half(s), range, leaves));
+        rewrite(rebuild_node(s, range, elems, sibs, c, col));
+        rewrite(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col).3 == crate::__lift::Result::Ok(crate::laws::subtree_root(crate::laws::left_half(s), leaves)));
+        unfold(crate::proofs::after_left);
+        follows();
+    }
+}
+
+#[proof]
+fn honest_proofs_rebuild_the_subtree(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, leaves: &[&[u8]], elements: &[&[u8]], rest: Seq<&[u8]>, siblings: &[Digest], cursor: usize, more: Seq<Digest>, collected: Option<Seq<(Position, Digest)>>) {
+    rebuilds(s, range, leaves, elements, rest, siblings, cursor, more, collected);
+    follows();
+}
+
+// ---------------------------------------------------------------------------
+// Forged proofs (`rebuilding_binds_the_elements`)
+// ---------------------------------------------------------------------------
+
+/// Two leaf messages at one position are equal only for equal elements.
+#[lemma]
+fn leaf_message_inj(p: u64, a: &[u8], b: &[u8]) {
+    requires(crate::laws::leaf_message(p, a) == crate::laws::leaf_message(p, b));
+    ensures(a == b);
+    crate::stdlib::seqs::append_inj::<u8>(seq![..p.to_be_bytes()], seq![..a], seq![..p.to_be_bytes()], seq![..b]);
+    bytes_inj(a, b);
+    follows();
+}
+
+/// Two node messages at one position are equal only for equal children.
+#[lemma]
+fn node_message_inj(p: u64, l: Digest, r: Digest, l2: Digest, r2: Digest) {
+    requires(crate::laws::node_message(p, l, r) == crate::laws::node_message(p, l2, r2));
+    ensures(l == l2 && r == r2);
+    crate::stdlib::seqs::append_inj::<u8>(seq![..p.to_be_bytes()], seq![..l, ..r], seq![..p.to_be_bytes()], seq![..l2, ..r2]);
+    crate::stdlib::seqs::append_inj::<u8>(seq![..l], seq![..r], seq![..l2], seq![..r2]);
+    digest_bytes_inj(l, l2);
+    digest_bytes_inj(r, r2);
+    follows();
+}
+
+/// Two walks that start alike are one walk.
+#[lemma]
+fn rebuild_same_start(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, e1: &[&[u8]], e2: &[&[u8]], sibs: &[Digest], c1: usize, c2: usize, col1: Option<Seq<(Position, Digest)>>, col2: Option<Seq<(Position, Digest)>>) {
+    requires(e1 == e2 && c1 == c2 && col1 == col2);
+    ensures(crate::laws::rebuild(s, range, e1, sibs, c1, col1).0 == crate::laws::rebuild(s, range, e2, sibs, c2, col2).0
+        && crate::laws::rebuild(s, range, e1, sibs, c1, col1).1 == crate::laws::rebuild(s, range, e2, sibs, c2, col2).1
+        && crate::laws::rebuild(s, range, e1, sibs, c1, col1).2 == crate::laws::rebuild(s, range, e2, sibs, c2, col2).2
+        && crate::laws::rebuild(s, range, e1, sibs, c1, col1).3 == crate::laws::rebuild(s, range, e2, sibs, c2, col2).3);
+    rewrite(e1 == e2);
+    rewrite(c1 == c2);
+    rewrite(col1 == col2);
+    follows();
+}
+
+/// A walk that collects nothing returns nothing collected.
+#[lemma]
+#[decreases(s.height)]
+fn rebuild_stays_quiet(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elems: &[&[u8]], sibs: &[Digest], c: usize) {
+    requires(crate::laws::well_shaped(s));
+    ensures(crate::laws::rebuild(s, range, elems, sibs, c, None).2 == None);
+    crate::proofs::shape_bounds(s);
+    if crate::laws::disjoint(s, range) {
+        rebuild_outside(s, range, elems, sibs, c, None);
+        follows();
+    } else if s.height == 0u32 {
+        unfold(crate::laws::rebuild);
+        follows();
+    } else {
+        halves_facts(s);
+        rebuild_stays_quiet(crate::laws::left_half(s), range, elems, sibs, c);
+        // the right half starts with what the left half collected: nothing
+        rebuild_same_start(crate::laws::right_half(s), range, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).2, None);
+        rebuild_stays_quiet(crate::laws::right_half(s), range, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1);
+        rewrite(rebuild_node(s, range, elems, sibs, c, None));
+        match crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 {
+            crate::__lift::Result::Err(ex) => {
+                rewrite(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 == crate::__lift::Result::Err(ex));
+                follows();
+            }
+            crate::__lift::Result::Ok(dl) => {
+                rewrite(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 == crate::__lift::Result::Ok(dl));
+                record_spec_all();
+                follows();
+            }
+        }
+    }
+}
+
+/// Collecting pairs or not, a walk takes the same elements and digests and
+/// gives the same result (only what it records differs).
+#[lemma]
+#[decreases(s.height)]
+fn rebuild_ignores_collected(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elems: &[&[u8]], sibs: &[Digest], c: usize, col: Option<Seq<(Position, Digest)>>) {
+    requires(crate::laws::well_shaped(s));
+    ensures(crate::laws::rebuild(s, range, elems, sibs, c, col).0 == crate::laws::rebuild(s, range, elems, sibs, c, None).0
+        && crate::laws::rebuild(s, range, elems, sibs, c, col).1 == crate::laws::rebuild(s, range, elems, sibs, c, None).1
+        && crate::laws::rebuild(s, range, elems, sibs, c, col).3 == crate::laws::rebuild(s, range, elems, sibs, c, None).3);
+    crate::proofs::shape_bounds(s);
+    if crate::laws::disjoint(s, range) {
+        rebuild_outside(s, range, elems, sibs, c, col);
+        rebuild_outside(s, range, elems, sibs, c, None);
+        follows();
+    } else if s.height == 0u32 {
+        rebuild_step(s, range, elems, sibs, c, col);
+        rebuild_step(s, range, elems, sibs, c, None);
+        follows();
+    } else {
+        halves_facts(s);
+        let l = crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, col);
+        let lq = crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None);
+        // the left halves: one walk (induction), the quiet one recording nothing
+        rebuild_ignores_collected(crate::laws::left_half(s), range, elems, sibs, c, col);
+        rebuild_stays_quiet(crate::laws::left_half(s), range, elems, sibs, c);
+        // the right halves start alike: one walk (induction)
+        rebuild_ignores_collected(crate::laws::right_half(s), range, l.0, sibs, l.1, l.2);
+        rebuild_same_start(crate::laws::right_half(s), range, l.0, lq.0, sibs, l.1, lq.1, None, lq.2);
+        let r = crate::laws::rebuild(crate::laws::right_half(s), range, l.0, sibs, l.1, l.2);
+        let rq = crate::laws::rebuild(crate::laws::right_half(s), range, lq.0, sibs, lq.1, lq.2);
+        rewrite(rebuild_node(s, range, elems, sibs, c, col));
+        rewrite(rebuild_node(s, range, elems, sibs, c, None));
+        // by the quiet walk's results (the collecting walk's are the same)
+        match lq.3 {
+            crate::__lift::Result::Err(e) => {
+                rewrite(l.3 == crate::__lift::Result::Err(e));
+                follows();
+            }
+            crate::__lift::Result::Ok(dl) => {
+                rewrite(l.3 == crate::__lift::Result::Ok(dl));
+                match rq.3 {
+                    crate::__lift::Result::Err(e) => {
+                        rewrite(r.3 == crate::__lift::Result::Err(e));
+                        follows();
+                    }
+                    crate::__lift::Result::Ok(dr) => {
+                        rewrite(r.3 == crate::__lift::Result::Ok(dr));
+                        follows();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Two different messages with one digest are a collision.
+#[lemma]
+fn differ_collide(m: Seq<u8>, t: Seq<u8>) {
+    requires((m == t) == false && crate::sha256::sha256(m) == crate::sha256::sha256(t));
+    ensures(crate::sha256::collision(Some((m, t))));
+    by_unfolding(crate::sha256::collision);
+}
+
+/// `rebuild_clash` one step on a leaf in the range.
+#[lemma]
+fn clash_leaf_eq(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, leaves: &[&[u8]], elems: &[&[u8]], sibs: &[Digest], c: usize) {
+    requires(crate::laws::disjoint(s, range) == false && (s.height == 0u32) == true);
+    ensures(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == (match elems.split_first() {
+        Some(p) => match leaves.get(s.leaf_start.0 as usize) {
+            Some(e) => if crate::laws::leaf_message(s.pos.0, *p.0) == crate::laws::leaf_message(s.pos.0, e) { None } else { Some((crate::laws::leaf_message(s.pos.0, *p.0), crate::laws::leaf_message(s.pos.0, e))) },
+            None => None,
+        },
+        None => None,
+    }));
+    if crate::laws::disjoint(s, range) {
+        by_contradiction();
+    } else if s.height == 0u32 {
+        unfold(crate::laws::rebuild_clash);
+        follows();
+    } else {
+        by_contradiction();
+    }
+}
+
+/// Byte strings split as their first and the rest, as sequences.
+#[lemma]
+fn items_split(elems: &[&[u8]]) {
+    ensures(match elems.split_first() { Some(p) => seq![..elems] == seq![*p.0, ..p.1], None => seq![..elems] == seq![] });
+    match elems.split_first() {
+        Some(v) => {
+            sandblaster::lemmas::slice::split_first_some::<&[u8]>(elems, v.0, v.1);
+            follows();
+        }
+        None => {
+            sandblaster::lemmas::slice::split_first_none::<&[u8]>(elems);
+            assert(elems.is_empty(), { follows(); });
+            sandblaster::lemmas::slice::is_empty_nil::<&[u8]>(elems);
+            follows();
+        }
+    }
+}
+
+/// `rebuild_clash` on a leaf of the range whose first element is `x` and
+/// whose own element is `e`: the two leaf messages, when they differ.
+#[lemma]
+fn clash_leaf_at(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, leaves: &[&[u8]], elems: &[&[u8]], sibs: &[Digest], c: usize, x: &[u8], rest: &[&[u8]], e: &[u8]) {
+    requires(crate::laws::disjoint(s, range) == false && (s.height == 0u32) == true);
+    requires(elems.split_first() == Some((&x, rest)) && leaves.get(s.leaf_start.0 as usize) == Some(&e));
+    ensures(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == (if crate::laws::leaf_message(s.pos.0, x) == crate::laws::leaf_message(s.pos.0, e) { None } else { Some((crate::laws::leaf_message(s.pos.0, x), crate::laws::leaf_message(s.pos.0, e))) }));
+    clash_leaf_eq(s, range, leaves, elems, sibs, c);
+    rewrite(clash_leaf_eq(s, range, leaves, elems, sibs, c));
+    rewrite(elems.split_first() == Some((&x, rest)));
+    rewrite(leaves.get(s.leaf_start.0 as usize) == Some(&e));
+    follows();
+}
+
+/// `binds` on a leaf of the range: its element, or two leaf messages with
+/// one digest.
+#[lemma]
+fn binds_leaf(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, leaves: &[&[u8]], elems: &[&[u8]], sibs: &[Digest], c: usize) {
+    requires(crate::laws::well_shaped(s) && crate::laws::disjoint(s, range) == false && (s.height == 0u32) == true && (s.leaf_start.0 as Int) + pow2(s.height as Int) <= (leaves.len() as Int));
+    requires(crate::laws::rebuild(s, range, elems, sibs, c, None).3 == crate::__lift::Result::Ok(crate::laws::subtree_root(s, leaves)));
+    ensures(implies(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == None, seq![..elems] == seq![..crate::laws::leaves_in(s, range, leaves), ..crate::laws::rebuild(s, range, elems, sibs, c, None).0])
+        && implies(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) != None, crate::sha256::collision(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c))));
+    crate::stdlib::bits::pow2_same(s.height as Int, 0);
+    get_in_bounds(leaves, s.leaf_start.0 as usize);
+    rebuild_step(s, range, elems, sibs, c, None);
+    clash_leaf_eq(s, range, leaves, elems, sibs, c);
+    items_split(elems);
+    match leaves.get(s.leaf_start.0 as usize) {
+        Some(e) => {
+            assert(crate::laws::leaves_in(s, range, leaves) == seq![*e], { by_unfolding(crate::laws::leaves_in); });
+            assert(crate::laws::subtree_root(s, leaves) == crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, e)), { by_unfolding(crate::laws::subtree_root); });
+            match elems.split_first() {
+                Some(v) => {
+                    assert(seq![..elems] == seq![*v.0, ..v.1], { follows(); });
+                    rebuild_leaf(s, range, elems, *v.0, seq![..v.1], sibs, c, None);
+                    clash_leaf_at(s, range, leaves, elems, sibs, c, *v.0, v.1, *e);
+                    assert(crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, *v.0)) == crate::sha256::sha256(crate::laws::leaf_message(s.pos.0, e)), { follows(); });
+                    if crate::laws::leaf_message(s.pos.0, *v.0) == crate::laws::leaf_message(s.pos.0, e) {
+                        leaf_message_inj(s.pos.0, *v.0, e);
+                        assert(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == None, { follows(); });
+                        rewrite(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == None);
+                        // the elements are the leaf's, then what is left
+                        rewrite(crate::laws::leaves_in(s, range, leaves) == seq![*e]);
+                        rewrite(seq![..elems] == seq![*v.0, ..v.1]);
+                        rewrite(seq![..crate::laws::rebuild(s, range, elems, sibs, c, None).0] == seq![..v.1]);
+                        follows();
+                    } else {
+                        differ_collide(crate::laws::leaf_message(s.pos.0, *v.0), crate::laws::leaf_message(s.pos.0, e));
+                        assert(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == Some((crate::laws::leaf_message(s.pos.0, *v.0), crate::laws::leaf_message(s.pos.0, e))), { follows(); });
+                        rewrite(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == Some((crate::laws::leaf_message(s.pos.0, *v.0), crate::laws::leaf_message(s.pos.0, e))));
+                        follows();
+                    }
+                }
+                None => {
+                    // no element: the leaf's step fails
+                    assert(crate::laws::rebuild(s, range, elems, sibs, c, None).3 == crate::__lift::Result::Err(crate::merkle::proof::ReconstructionError::MissingElements), { follows(); });
+                    by_contradiction();
+                }
+            }
+        }
+        None => by_contradiction(),
+    }
+}
+
+/// The induction behind `rebuilding_binds_the_elements` (a walk that
+/// collects nothing): when no pair is named, the elements were the leaves'
+/// (then what is left), and a named pair is a collision.
+#[lemma]
+#[decreases(s.height)]
+fn binds(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, leaves: &[&[u8]], elems: &[&[u8]], sibs: &[Digest], c: usize) {
+    requires(crate::laws::well_shaped(s) && (s.leaf_start.0 as Int) + pow2(s.height as Int) <= (leaves.len() as Int));
+    requires(crate::laws::rebuild(s, range, elems, sibs, c, None).3 == crate::__lift::Result::Ok(crate::laws::subtree_root(s, leaves)));
+    ensures(implies(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == None, seq![..elems] == seq![..crate::laws::leaves_in(s, range, leaves), ..crate::laws::rebuild(s, range, elems, sibs, c, None).0])
+        && implies(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) != None, crate::sha256::collision(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c))));
+    crate::proofs::shape_bounds(s);
+    if crate::laws::disjoint(s, range) {
+        // nothing used, nothing named
+        assert(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == None, { by_unfolding(crate::laws::rebuild_clash); });
+        assert(crate::laws::leaves_in(s, range, leaves) == seq![], { by_unfolding(crate::laws::leaves_in); });
+        rebuild_outside(s, range, elems, sibs, c, None);
+        follows();
+    } else if s.height == 0u32 {
+        binds_leaf(s, range, leaves, elems, sibs, c);
+        follows();
+    } else {
+        // a node: two node messages with one digest, or its halves' digests
+        // are their own and each half binds its elements
+        halves_facts(s);
+        crate::stdlib::bits::pow2_step(s.height as Int);
+        crate::proofs::shape_bounds(crate::laws::left_half(s));
+        crate::proofs::shape_bounds(crate::laws::right_half(s));
+        crate::stdlib::bits::pow2_same((crate::laws::left_half(s).height as Int), (s.height as Int) - 1);
+        crate::stdlib::bits::pow2_same((crate::laws::right_half(s).height as Int), (s.height as Int) - 1);
+        sandblaster::lemmas::nat::pow2_pos((s.height as Int) - 1);
+        assert((crate::laws::left_half(s).leaf_start.0 as Int) + pow2(crate::laws::left_half(s).height as Int) <= (leaves.len() as Int), { by_arithmetic(); });
+        assert((crate::laws::right_half(s).leaf_start.0 as Int) + pow2(crate::laws::right_half(s).height as Int) <= (leaves.len() as Int), { by_arithmetic(); });
+        assert(crate::laws::leaves_in(s, range, leaves) == seq![..crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), ..crate::laws::leaves_in(crate::laws::right_half(s), range, leaves)], { by_unfolding(crate::laws::leaves_in); });
+        assert(crate::laws::subtree_root(s, leaves) == crate::sha256::sha256(crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves))), { by_unfolding(crate::laws::subtree_root); });
+        match crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 {
+            crate::__lift::Result::Err(ex) => {
+                assert(crate::laws::rebuild(s, range, elems, sibs, c, None).3 == crate::__lift::Result::Err(ex), {
+                    rewrite(rebuild_node(s, range, elems, sibs, c, None));
+                    rewrite(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 == crate::__lift::Result::Err(ex));
+                    follows();
+                });
+                by_contradiction();
+            }
+            crate::__lift::Result::Ok(dl) => {
+                // the right half starts with what the left half collected: nothing
+                rebuild_stays_quiet(crate::laws::left_half(s), range, elems, sibs, c);
+                rebuild_same_start(crate::laws::right_half(s), range, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).2, None);
+                match crate::laws::rebuild(crate::laws::right_half(s), range, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, None).3 {
+                    crate::__lift::Result::Err(ex) => {
+                        assert(crate::laws::rebuild(s, range, elems, sibs, c, None).3 == crate::__lift::Result::Err(ex), {
+                            rewrite(rebuild_node(s, range, elems, sibs, c, None));
+                            rewrite(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 == crate::__lift::Result::Ok(dl));
+                            unfold(crate::proofs::after_left);
+                            follows();
+                        });
+                        by_contradiction();
+                    }
+                    crate::__lift::Result::Ok(dr) => {
+                        assert(crate::laws::rebuild(s, range, elems, sibs, c, None).3 == crate::__lift::Result::Ok(crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr))), {
+                            rewrite(rebuild_node(s, range, elems, sibs, c, None));
+                            rewrite(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 == crate::__lift::Result::Ok(dl));
+                            unfold(crate::proofs::after_left);
+                            follows();
+                        });
+                        assert(crate::laws::rebuild(s, range, elems, sibs, c, None).0 == crate::laws::rebuild(crate::laws::right_half(s), range, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, None).0, {
+                            rewrite(rebuild_node(s, range, elems, sibs, c, None));
+                            rewrite(crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).3 == crate::__lift::Result::Ok(dl));
+                            unfold(crate::proofs::after_left);
+                            follows();
+                        });
+                        assert(crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr)) == crate::sha256::sha256(crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves))), { follows(); });
+                        assert(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == (if crate::laws::node_message(s.pos.0, dl, dr) == crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves)) { match crate::laws::rebuild_clash(crate::laws::left_half(s), range, leaves, elems, sibs, c) { Some(x) => Some(x), None => crate::laws::rebuild_clash(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1) } } else { Some((crate::laws::node_message(s.pos.0, dl, dr), crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves)))) }), { unfold(crate::laws::rebuild_clash); follows(); });
+                        if crate::laws::node_message(s.pos.0, dl, dr) == crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves)) {
+                            // each half rebuilt its own digest: each binds its elements, or names a collision
+                            node_message_inj(s.pos.0, dl, dr, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves));
+                            binds(crate::laws::left_half(s), range, leaves, elems, sibs, c);
+                            binds(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1);
+                            match crate::laws::rebuild_clash(crate::laws::left_half(s), range, leaves, elems, sibs, c) {
+                                Some(x) => {
+                                    assert(crate::laws::rebuild_clash(crate::laws::left_half(s), range, leaves, elems, sibs, c) != None, { follows(); });
+                                    assert(crate::sha256::collision(crate::laws::rebuild_clash(crate::laws::left_half(s), range, leaves, elems, sibs, c)), { follows(); });
+                                    assert(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == crate::laws::rebuild_clash(crate::laws::left_half(s), range, leaves, elems, sibs, c), { follows(); });
+                                    rewrite(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == crate::laws::rebuild_clash(crate::laws::left_half(s), range, leaves, elems, sibs, c));
+                                    follows();
+                                }
+                                None => {
+                                    assert(seq![..elems] == seq![..crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), ..crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0], { follows(); });
+                                    assert(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == crate::laws::rebuild_clash(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1), { follows(); });
+                                    rewrite(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == crate::laws::rebuild_clash(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1));
+                                    match crate::laws::rebuild_clash(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1) {
+                                        Some(y) => {
+                                            assert(crate::laws::rebuild_clash(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1) != None, { follows(); });
+                                            assert(crate::sha256::collision(crate::laws::rebuild_clash(crate::laws::right_half(s), range, leaves, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1)), { follows(); });
+                                            follows();
+                                        }
+                                        None => {
+                                            assert(seq![..crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0] == seq![..crate::laws::leaves_in(crate::laws::right_half(s), range, leaves), ..crate::laws::rebuild(crate::laws::right_half(s), range, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, None).0], { follows(); });
+                                            assoc_items(crate::laws::leaves_in(crate::laws::left_half(s), range, leaves), crate::laws::leaves_in(crate::laws::right_half(s), range, leaves), seq![..crate::laws::rebuild(crate::laws::right_half(s), range, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).0, sibs, crate::laws::rebuild(crate::laws::left_half(s), range, elems, sibs, c, None).1, None).0]);
+                                            follows();
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            differ_collide(crate::laws::node_message(s.pos.0, dl, dr), crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves)));
+                            assert(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == Some((crate::laws::node_message(s.pos.0, dl, dr), crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves)))), { follows(); });
+                            rewrite(crate::laws::rebuild_clash(s, range, leaves, elems, sibs, c) == Some((crate::laws::node_message(s.pos.0, dl, dr), crate::laws::node_message(s.pos.0, crate::laws::subtree_root(crate::laws::left_half(s), leaves), crate::laws::subtree_root(crate::laws::right_half(s), leaves)))));
+                            follows();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[proof]
+fn rebuilding_binds_the_elements(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, leaves: &[&[u8]], elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
+    rebuild_ignores_collected(s, range, elements, siblings, cursor, collected);
+    binds(s, range, leaves, elements, siblings, cursor);
+    if crate::laws::rebuild_clash(s, range, leaves, elements, siblings, cursor) == None { follows(); } else { follows(); }
 }

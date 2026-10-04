@@ -313,14 +313,14 @@ green, speed of the result and the human review load.
      loading the extraction, the signature checks, the loop attachments
      read with the MIR's locals typed, the declared contracts). The
      structured reading S that the laws and proofs are about is
-     **untrusted**: `mir/read.rs` (2,433) proposes it, `mir/cfg.rs` (298;
+     **untrusted**: `mir/read.rs` (2,975) proposes it, `mir/cfg.rs` (298;
      it also gives L its ranks, loop headers and panicking blocks, which
      only place fuel, every decrease being kernel-checked, or read a block
      as `None`) steers it, and every verified build checks, per lifted
      function, the kernel theorem `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0
      (Some init(x̄)) = Some(erase(S_f x̄))` (total correctness, including the
      final `&mut` referents), proven by the untrusted walker
-     (`mir/simproof.rs`, 4,565, and the rest of `mir/checked.rs`) and
+     (`mir/simproof.rs`, 5,014, and the rest of `mir/checked.rs`, 1,889) and
      checked by the kernel, or the module is not verified (the theorem
      gate; varint 63 of 63, the MMR 69 of 69 — 76 of 76 before the
      hand-written `opt.rs` alternatives were removed — the verifier's set 1
@@ -377,9 +377,12 @@ green, speed of the result and the human review load.
    makes the include name that copy (textual, like module mode's scan).
 
    Size: the source's reading (skeleton, expression reading, prelude,
-   model) is 4,884 code lines (`lift.rs` 3,781 less the MIR glue's 202,
-   `lift_open.rs` 1,138, prelude 108, model 59), down from 7,443 before
-   the source's reading of bodies was deleted (`docs/mir-lift.md` §6 step
+   model) is ≈ 5.26k code lines on the merged tree of stage finish-A
+   (`lift.rs` 4,174 less the MIR glue's ≈ 260 counted below, with the
+   conformance check's test hook, `lift_open.rs` 1,165, prelude 108, model
+   71); it was 4,884 right after the source's reading of bodies was deleted
+   (`lift.rs` 3,781 less the MIR glue's 202, `lift_open.rs` 1,138, prelude
+   108, model 59), and 7,443 before that deletion (`docs/mir-lift.md` §6 step
    3: `lift.rs` 4,443, `lift_open.rs` 2,665, the combinator templates 131,
    prelude 145, model 59); the bodies' trusted reading is 3,992 (the
    literal reading, its statement and parse, the names, the printer; 3,801
@@ -398,8 +401,10 @@ green, speed of the result and the human review load.
    structured one (§6 step 5, done). commonware-codec's varint is verified this
    way with its laws and proofs unchanged, commonware-storage's MMR in
    place with its laws unchanged, and the first set of its Merkle proof verifier
-   (`hasher.rs` at `Standard<Sha256>`, `Subtree::reconstruct_digest`) with
-   its laws and proofs unchanged.
+   (`hasher.rs` at `Standard<Sha256>`, `Subtree::reconstruct_digest`) in
+   place: its laws and proofs were unchanged by the move to MIR, and have
+   since grown to 8 laws (from 5) with an accepted lock (§2.1, "In
+   place").
    **Mitigation: the lift conformance check** (`sandblaster/front/src/conform.rs`;
    its module docs are the full description), which every module-mode build of a lifted module
    (and every `compile_lifted` build of an in-place one, §2.1)
@@ -928,16 +933,25 @@ host/
   harness added to each in-place file, and drives every function at the
   declared instances (open traits included) against the kernel's
   evaluation (`crate::conform::check_in_place`, `docs/mir-lift.md` §5):
-  the MMR passes (0 mismatches); the verifier's set 1 has no value
-  mismatch but 16 `reconstruct_digest` inputs exhaust the kernel's step
-  budget, so the check does not pass for it yet and `compile_lifted`
-  would issue no verdict for that crate until it does. commonware-storage's MMR position arithmetic is the first
+  the MMR and the verifier's set 1 pass (0 mismatches; the verifier on
+  25,623 inputs of 70 functions, `docs/mir-lift.md` §5). commonware-storage's MMR position arithmetic is the first
   in-place crate (`storage/sandblaster/mmr`); the first set of its Merkle
   proof verifier (`hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree
   reconstruction; SEMANTICS.md §19.10) is the second
-  (`storage/sandblaster/verifier`).
-* **Development aid, to be removed before any landing:
-  `sandblaster::build::compile_lifted_pending_gates(root, name)`.** While an
+  (`storage/sandblaster/verifier`). Both are verified: each has an
+  accepted specification lock, and `storage/build.rs` builds both with
+  `compile_lifted` (every §15 gate enforced, spec mutation included, every
+  MIR theorem and the lift conformance check). The MMR: 69 of 69 MIR
+  theorems, lock root `1d8d5969…` (208 items). The verifier's set 1: 8 laws,
+  2,642 obligations, 69 of 69 MIR theorems, lock root `3e969a79…` (272
+  items). (codec's varint, module mode: 63 of 63, lock root `f0021c19…`.)
+* **Development aid, unused, to be deleted:
+  `sandblaster::build::compile_lifted_pending_gates(root, name)`.** No root
+  calls it any more: both in-place crates switched to `compile_lifted` once
+  their locks were accepted. The entry point (and the driver's
+  `GateUse::Pending` path, which `tests/lift_open.rs` and
+  `tests/lowered_use.rs` still drive) is still
+  in the code. What it does: while an
   in-place crate's specification lock is not accepted, it checks every
   proof and law (a failure fails the build) and runs the §15.8 gates but
   only reports their findings. It is an opt-out of §15.8 (which allows
@@ -948,10 +962,8 @@ host/
   `<name>-verified.txt` with a `NOT VERIFIED` stub, sets the report's
   `status` to the same line and warns on every build. The lift conformance
   check runs only after every gate passed and is reported as not run
-  otherwise. It exists only because the lock now holds just the review
-  surface and the MMR crate's gates are not all green yet; once its lock
-  is accepted the host switches to `compile_lifted` and this entry point
-  is deleted.
+  otherwise. It existed only while the in-place crates' gates were not
+  all green; with both locks accepted it has no user left.
 
 ---------------------------------------------------------------------------
 
@@ -1234,7 +1246,7 @@ obligations. As the **first statement** of a loop body it may declare
 | `if c { steps } else { steps }` | case split on a bool. Terminal. |
 | `cases(k in a..b) { steps }` (inside `proof!{}`; in ghost fn bodies, where this is not Rust syntax, write `cases(k, a..b, { steps })`) | finite enumeration of an integer whose range auto can prove (≤ 256 cases); each case closed by evaluation + steps + auto. Terminal. |
 | `witness(e1, .., en);` | instantiate an `exists` goal |
-| `unfold(f);` | unfold the applications of `f` written in the goal term (a transparent non-recursive `f` by conversion, a recursive or opaque one by `Delta`); the rest of the goal stays folded, and with no application the goal is unchanged (a warning) |
+| `unfold(f);` | unfold the applications of `f` written in the goal term (a transparent non-recursive `f` by conversion, a recursive or opaque one by `Delta`); the rest of the goal stays folded, as do the calls an unfolded recursive body brings in (also where the goal writes the same call elsewhere), and with no application the goal is unchanged (a warning) |
 | `rewrite(h);` `rewrite_rev(h);` `rewrite(h, \|x\| p);` | rewrite the goal with an equation (optionally with an explicit motive, like Bend's `%e : P`) |
 | `exact(term);` | close the goal with a term (spec expression / lemma application) |
 | `bv();` | close an equality goal with `BvRefl` (word algebra, §9.8); a goal with a shift by a variable amount, `/` or `%` goes to linear arithmetic with the built-in shift and `pow2` rules, using only the facts that bound its shift amounts and `pow2` exponents (`s < 8`), so it is still a word identity |
@@ -2863,7 +2875,12 @@ for `#[example]` (§15.7), and are erased from the build.
   and types of its members (opaque bodies, loop helpers, `::ensures` and
   prelude definitions included). A function is **established** when it is
   fully specified (§15.5) in an earlier section with an identity or injective
-  view. A spec item (spec fn, spec constant, view, representation relation,
+  view: by a determining `#[refines]` with an injective view, or — for a
+  lifted function — by a laws-file contract that is an equation `ret == E`
+  with `E` spec-closed and free of the function, which determines it at
+  once at the identity view (`Position::new`'s `ret == Position(pos,
+  PhantomData)` lets a specification build positions, whose fields the
+  laws file cannot name). A spec item (spec fn, spec constant, view, representation relation,
   invariant, evidence proposition, example) is **spec-closed** when every
   exec global in its `Refs*`, not descending into established functions, is
   established. Referring to any other exec function or exec constant is
@@ -3124,23 +3141,32 @@ section.
     declared would be on the boundary; a module whose only child is
     `mod tests` keeps its private functions internal.
 
+  - every private function and private inherent method that the host
+    source declares and that the module's *own* left-out code calls by
+    name — an `unverified_fns` method, an `unverified_impls` impl, an item
+    outside `items = ..`, a feature-gated item: the lift records the names
+    that code calls (by name, an over-approximation within the module) and
+    each private function under one of them is host-callable
+    (`validate::left_out_callers`). The verifier's
+    `Subtree::reconstruct_digest`, `is_outside`, `is_inside`, `children`
+    and `is_before`, called by the left-out `Proof::reconstruct_root_inner`
+    and `Subtree::collect_*`, are host-callable this way.
+
   A loop helper the lift splits off stays internal, and so does every
-  private function of a module without host children. The module's *own*
-  left-out code — an `unverified_fns` method, an `unverified_impls` impl,
-  an item outside `items = ..`, a feature-gated item — can call its
-  private functions too: the lift records the names that code calls and
-  the build reports each private function it calls as a warning
-  (`validate::left_out_callers`), but does not yet count it. The one
-  instance today is the verifier's `Subtree::reconstruct_digest` (and
-  `is_outside`, `is_inside`, `children`, `is_before`), called by the
-  left-out `Proof::reconstruct_root_inner` and `Subtree::collect_*`:
-  counting them needs `reconstruct_digest`'s depth bound stated in the
-  verifier's laws file and a decision on depth bounds of in-place
-  functions as host obligations (§3.1 refuses a depth bound on a boundary
-  function; a `requires` there is a host obligation). The host-callable
-  functions are boundary functions: §15.5 requires their contracts and
-  the lock holds them (`validate::in_place_host_fns`,
-  `validate::host_visible`, `hir::HostAccess`).
+  private function of a module without host children that no left-out
+  code calls. The host-callable functions are boundary functions: §15.5
+  requires their contracts and the lock holds them
+  (`validate::in_place_host_fns`, `validate::host_visible`,
+  `hir::HostAccess`). A precondition and a recursion depth bound
+  (`decreases(e, max = C)`, §3.7) of a host-callable function of an
+  in-place module are **host obligations**: §3.1's boundary rule refuses
+  neither there (host code calls the function directly, whatever the DSL
+  root exports), the record lists both (`Host obligation …`), and, as
+  every precondition of a locked item, only the laws file may state them
+  (§15.6: the same attachment from a proof file is a surface error). A
+  depth bound is a stack-safety statement the host must meet, so the
+  laws file documents it as such (the verifier's `reconstruct_digest`:
+  `decreases(self.height, max = 64)`, met by every well-shaped subtree).
 
 * **Sections are computed, never declared.** They are the strongly connected
   components of the graph "law or contract mentions exec function",
@@ -3156,7 +3182,9 @@ section.
   others are fixed only relative to them.
 * **Hypotheses.** `H(R)` = the laws mentioning `R` (never a
   `#[definitional]` law, which restates a definition and is not a
-  guarantee), plus the `ensures`, refinement lemmas and type invariants of
+  guarantee; a law that reaches an established member only through the
+  definition of a spec function it names does not mention it: there the
+  member is a fixed function, as a spec function is), plus the `ensures`, refinement lemmas and type invariants of
   `R`'s functions, each re-elaborated with `R` abstracted. A hypothesis that
   mentions `R` but did not verify blocks the section.
 * **Statement.** For each `p ∈ P(R)`, `Env::abstract_section` (kernel,

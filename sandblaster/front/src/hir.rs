@@ -612,8 +612,9 @@ pub struct Module {
 /// is compiled outside tests (not `#[cfg(test)]`). The module's own
 /// left-out code (an `unverified_fns` method, an `unverified_impls` impl,
 /// an item not among `items = ..`, a feature-gated item) may call a
-/// private function too: those calls are recorded (`called`) and reported
-/// (`validate::left_out_callers`), not yet counted. Filled by the lift
+/// private function too: those calls are recorded (`called`), and every
+/// private function it calls by name is host-callable as well
+/// (`validate::left_out_callers`). Filled by the lift
 /// ([`crate::lift::LiftFacts::host_access`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HostAccess {
@@ -627,7 +628,9 @@ pub struct HostAccess {
     pub private_methods: std::collections::BTreeSet<String>,
     /// The names the left-out code calls: method names (`x.m(..)`), the last
     /// segment of a qualified path (`Self::m`, `T::m`) and single-segment
-    /// paths (`f(..)`), and every identifier inside a macro call.
+    /// paths (`f(..)`), and every identifier inside a macro call. A private
+    /// function the host source declares under one of these names is
+    /// host-callable (by name: an over-approximation within the module).
     pub called: std::collections::BTreeSet<String>,
 }
 

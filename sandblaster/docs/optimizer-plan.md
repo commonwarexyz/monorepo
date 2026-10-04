@@ -1096,12 +1096,22 @@ Owner: targets.
 Every target below is measured on the development set (QMDB, the corpus,
 the programs the features were built for). They are regression gates: on
 their own they cannot justify a new feature, and none is evidence that the
-optimizer is general or beats rustc. The held-out evaluation
-(`sandblaster/bench/heldout/REPORT.md`, first run 2026-10-02) found the
-optimizer changes 0 of 31 held-out functions (optimizer-only geomean 1.02
-default layout, 1.005 aligned, vs rustc on the same source): no held-out loop
-reaches the optimizer (the MIR reader and exec-only elaboration refuse 28 of
-31). Repeat it at every milestone and publish it next to these targets.
+optimizer is general or beats rustc. The held-out evaluation is held-out
+v2 (`sandblaster/bench/heldout-v2/REPORT.md`, 2026-10-03, frozen before the
+reader and optimizer work it judges): the optimizer changes 0 of 30
+functions (optimizer-only geomean 1.007 default layout, 1.002 aligned, vs
+rustc on the same source; placement noise, the A/A control spreading
+0.87–1.19); 9 are refused by the MIR reader, 11 by exec-only elaboration,
+and of the 10 that reach the optimizer none is lowered; its monorepo half
+H2-v2 is empty (the frozen rule accepted none of 869 candidates). Held-out
+v1 (`sandblaster/bench/heldout/REPORT.md`, first run 2026-10-02: 0 of 31
+changed, 1.02 / 1.005) is development data now; re-run after stage
+finish-A, 3 of 31 are rewritten and none is faster (`read_u32_le`, predicted
+0.70, measures 1.07–1.12). The shipped verified code (codec's varint,
+storage's MMR and verifier set 1, `sandblaster/bench/shipped-harness/REPORT.md`)
+is the original code: geomean 1.003, 28 of 33 functions identical machine
+code. Repeat the held-out evaluation at every milestone and publish it next
+to these targets.
 
 ### 4.1 QMDB (zero source changes; same-binary A/B on emitted code)
 

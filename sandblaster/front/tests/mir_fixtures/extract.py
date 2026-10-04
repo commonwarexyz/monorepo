@@ -63,6 +63,7 @@ FIXTURES = [
     ("lk_prim", "lk_prim", "a", "a.sbmir", []),
     ("lk_paths", "lk_paths", "a,b", "ab.sbmir", []),
     ("lk_host", "lk_host", "a,b", "ab.sbmir", ["--skip-fns", "Tick::left_out", "--items", "a::child="]),
+    ("lk_rec", "lk_rec", "a", "a.sbmir", ["--skip-fns", "Pos::left_out"]),
     # tests/aug_int_toolchain.rs
     ("ai_err", "ai_err", "w", "w.sbmir", []),
     ("ai_signed", "ai_signed", "s", "s.sbmir", []),

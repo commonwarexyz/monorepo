@@ -200,6 +200,10 @@ pub struct LiftFacts {
     /// Lifted functions with a `requires` attachment: at the boundary a
     /// precondition the host must meet (`(function, requires)`).
     pub host_obligations: Vec<(String, String)>,
+    /// Lifted functions with a recursion depth bound (`decreases(e, max =
+    /// C)`, DESIGN.md §3.7): at the boundary a stack-depth bound the host
+    /// must meet (`(function, "e <= C")`).
+    pub host_depth_bounds: Vec<(String, String)>,
     /// Open traits at their verified instance (`(trait, instance)`).
     pub open_instances: Vec<(String, String)>,
     /// The host models of a crate lifted in place (`#[lift(host)]` type
@@ -727,6 +731,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     facts.test_hook = test_hook::get();
     facts.conform_skipped = std::mem::take(&mut cx.conform_skipped);
     facts.host_obligations = std::mem::take(&mut cx.open.host_obligations);
+    facts.host_depth_bounds = std::mem::take(&mut cx.open.host_depth_bounds);
     let mut inst: Vec<(String, String)> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p))).collect();
     inst.sort();
     facts.open_instances = inst;
@@ -2189,6 +2194,14 @@ impl Ctx {
                     drop(rw);
                     if f.attrs.iter().any(|a| a.path().is_ident("decreases")) {
                         self.errors.push((at.spans[i], "`decreases(..);` twice for the same function".into(), vec![]));
+                    }
+                    // a depth bound (`max = C`): at the boundary a stack-depth
+                    // bound the host must meet (listed, like a precondition)
+                    if let Some(max) = c.args.iter().skip(1).find_map(|a| match a {
+                        syn::Expr::Assign(x) if matches!(&*x.left, syn::Expr::Path(p) if p.path.is_ident("max")) => Some(x.right.to_token_stream().to_string()),
+                        _ => None,
+                    }) {
+                        self.open.host_depth_bounds.push((orig_name.clone(), format!("{} <= {max}", c.args[0].to_token_stream())));
                     }
                     f.attrs.push(syn::parse_quote!(#[decreases(#(#args),*)]));
                     srcs.push(at.src_attr(i, "decreases"));

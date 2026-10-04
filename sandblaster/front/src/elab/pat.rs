@@ -12,7 +12,9 @@
 //! * otherwise the first column with a refutable pattern in the first row is
 //!   tested:
 //!   - single-constructor types (tuples, structs) are **projected** (no
-//!     test, no path equation: fields are `πₖ`);
+//!     test, no path equation: fields are `πₖ`); in exec and spec bodies a
+//!     recursive self-call is bound by a `let` first, so the call is
+//!     evaluated once, not once per field;
 //!   - `Option`, enums and `bool` get one dependent match (§7.2) with an arm
 //!     per constructor, rows specialized per constructor;
 //!   - integer literals and ranges are comparisons (`eq`, `le`) in dependent
@@ -32,7 +34,7 @@
 //! `let` patterns use the same compiler with one row; `let … else` adds the
 //! wildcard row running the diverging `else` block.
 
-use sandblaster_kernel::term::{PrimOp, Rel, Tm, Width};
+use sandblaster_kernel::term::{PrimOp, Rel, Term, Tm, Width};
 use sandblaster_kernel::util::mk;
 
 use super::exec::{Answer, K};
@@ -237,6 +239,23 @@ impl<'a> Elab<'a> {
         let ty = occ.ty.peel_refs().clone();
         let nctors = self.ctor_count(&ty, span)?;
         let (ind, params) = self.ind_of(&ty, span)?;
+        if nctors == 1 && self.f.mode == super::Mode::Exec && is_self_call(&occ.val.at(self.depth())) && self.ctor_field_tys(&ty, 0, span)?.len() >= 2 {
+            // a recursive self-call (`let (a, b) = f(x);` in `f`) is bound
+            // once and projected through its variable: each projection of
+            // the term itself would be a copy of the call, which evaluation
+            // (the kernel's, the reference evaluator's) computes once per
+            // projection — exponentially in the depth of the recursion
+            // (`reconstruct_digest`'s state tuple). The `let` is
+            // transparent: proofs see the same value.
+            let t = occ.val.at(self.depth());
+            let tty = self.ty(&ty, span)?;
+            return self.let_in("t", Rel::Rel, tty, t, &mut |s, lvl| {
+                let mut occs2 = occs.clone();
+                occs2[c] = Occ { val: Val::new(s.f.scope.var(lvl), s.depth()), ty: occ.ty.clone() };
+                let bound = occs2[c].clone();
+                s.compile_ctor(occs2, rows.clone(), c, &bound, guards, answer, span, on_arm)
+            });
+        }
         if nctors == 1 {
             // a projected struct with an invariant: its facts first, so the
             // field bindings have them (§15.3)
@@ -689,4 +708,14 @@ fn specialize<'a>(occs: &[Occ], rows: Vec<Row<'a>>, c: usize, ci: u32, n: usize,
         out.push(Row { pats, binds: r.binds, arm: r.arm });
     }
     (new_occs, out)
+}
+
+/// Whether `t` is the definition's own recursive call (`Rec`), which
+/// [`Elab::compile_ctor`] binds once before projecting it: a recursion
+/// that destructures its own result would otherwise evaluate the call
+/// once per field at every level (exponentially in the depth). Other
+/// calls stay in place (a constant factor, and the shape the
+/// checked-structuring walker and the provers expect).
+fn is_self_call(t: &Tm) -> bool {
+    matches!(&**t, Term::Rec { .. })
 }

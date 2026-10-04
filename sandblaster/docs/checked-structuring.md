@@ -46,7 +46,11 @@ recognized by its exact path — and ran the final validation; the trusted
 part is ≈ 4.29k code lines (≈ 4.97k when this workflow began). Stage finish-A made the shipped
 code's theorems the only check of a rewrite of a module read from MIR (§5.13; the structural
 comparison refused correct code) and added L's slice leaves; the trusted part is ≈ 4.55k code
-lines, with the stages since tcb-review counted (§7). The implementation log is the next
+lines, with the stages since tcb-review counted (§7). After stage finish-A the verifier's set 1
+was finished as well: its laws grew to 8, its lock was accepted (272 items, root `3e969a79…`), and
+`storage/build.rs` now builds both in-place roots with `compile_lifted` (2,642 obligations, 69 of 69
+theorems for the verifier); no root uses the pending-gates build any more, so the stage logs' mentions
+of the verifier's "development build" describe the tree of their day. The implementation log is the next
 section; the design follows it, updated where the implementation differs. This note does not change
 `SEMANTICS.md`.
 

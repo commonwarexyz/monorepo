@@ -277,7 +277,8 @@ pub struct Output {
     /// Spec-closure, fuel and mirror findings of spec items outside the S1
     /// surface (legacy `#[spec] fn`s): errors of the §15.8 gate.
     pub spec_closure: Vec<examples::ClosureRecord>,
-    /// Exec functions established by a determining refinement (§15.1).
+    /// Exec functions established by a determining refinement, or by a
+    /// laws-file contract that is an equation `ret == E` (§15.1).
     pub established: Vec<GlobalId>,
     /// The findings of the law rules (§15.1 LR1–LR10 but LR8; S3):
     /// recorded, and enforced by the §15.8 gate

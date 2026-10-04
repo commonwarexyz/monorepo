@@ -515,12 +515,18 @@ pub fn exported_functions(krate: &Crate) -> Vec<ItemId> {
 /// * every private function and private inherent method the host source
 ///   declares, when the module has a host child module (one the lift
 ///   leaves out, compiled outside tests): Rust lets a module's
-///   descendants call its private items ([`crate::hir::HostAccess`]).
+///   descendants call its private items ([`crate::hir::HostAccess`]);
+/// * every private function and private inherent method the host source
+///   declares that the module's own left-out code calls by name (an
+///   `unverified_fns` method, an `unverified_impls` impl, an item outside
+///   `items = ..`, a feature-gated item: [`left_out_callers`]).
 ///
 /// They seed [`Crate::reachable`], so they are boundary functions: §15.5
-/// requires their contracts and the lock holds them. The lift's own
-/// helpers (loop functions) and the private functions of a module without
-/// host child modules stay internal.
+/// requires their contracts and the lock holds them; a precondition or a
+/// depth bound of one is a host obligation (stated in the laws file). The
+/// lift's own helpers (loop functions) and the private functions of a
+/// module without host child modules that no left-out code calls stay
+/// internal.
 pub fn in_place_host_fns(krate: &Crate) -> Vec<ItemId> {
     krate.items.iter().filter(|it| is_in_place_host_fn(krate, it)).map(|it| it.id).collect()
 }
@@ -554,15 +560,25 @@ pub fn is_in_place_host_fn(krate: &Crate, it: &Item) -> bool {
     }
     let name = host_name(it);
     let host_private = if f.owner.is_some() { m.host_access.private_methods.contains(&name) } else { it.vis == Vis::Private };
-    if host_private { m.host_access.private_callable(&name) } else { it.vis != Vis::Private }
+    if host_private { m.host_access.private_callable(&name) || left_out_called(m, it, f, &name) } else { it.vis != Vis::Private }
+}
+
+/// Whether the function `it` (`name` as [`host_name`] gives it) is a
+/// private function or private inherent method the host source of `m`
+/// declares — not a helper the lift split off — that the module's own
+/// left-out code calls by name ([`crate::hir::HostAccess::called`]).
+fn left_out_called(m: &Module, it: &Item, f: &FnDef, name: &str) -> bool {
+    let declared_private = if f.owner.is_some() { m.host_access.private_methods.contains(name) } else { it.vis == Vis::Private && m.host_access.private_fns.contains(name) };
+    declared_private && m.host_access.called.contains(name.rsplit("::").next().unwrap_or(name))
 }
 
 /// The private functions of the in-place lifted modules that code the
 /// lift leaves out calls by name (an `unverified_fns` method, an
 /// `unverified_impls` impl, an item outside `items = ..`) and that are not
-/// host-callable through a host child module: host code relies on them,
-/// but §15.5 does not count them yet (DESIGN.md §15.5). Reported as
-/// warnings.
+/// host-callable through a host child module: host code relies on what
+/// they return, so they are host-callable functions like the others
+/// ([`is_in_place_host_fn`], DESIGN.md §15.5) — boundary functions whose
+/// contracts §15.5 requires and the lock holds.
 pub fn left_out_callers(krate: &Crate) -> Vec<ItemId> {
     krate
         .items
@@ -571,8 +587,7 @@ pub fn left_out_callers(krate: &Crate) -> Vec<ItemId> {
             let ItemKind::Fn(f) = &it.kind else { return false };
             let Some(m) = krate.modules.get(it.module.0 as usize).filter(|m| m.lifted && !m.ghost) else { return false };
             let name = host_name(it);
-            let declared_private = if f.owner.is_some() { m.host_access.private_methods.contains(&name) } else { it.vis == Vis::Private && m.host_access.private_fns.contains(&name) };
-            !it.ghost && f.kind == FnKind::Exec && declared_private && !m.host_access.private_callable(&name) && m.host_access.called.contains(name.rsplit("::").next().unwrap_or(&name))
+            !it.ghost && f.kind == FnKind::Exec && !m.host_access.private_callable(&name) && left_out_called(m, it, f, &name)
         })
         .map(|it| it.id)
         .collect()
@@ -899,22 +914,15 @@ fn compute_boundary(krate: &mut Crate, res: &Resolver, diags: &mut Diagnostics) 
         if let ItemKind::Fn(f) = &it.kind
             && host_visible(krate, it)
         {
-            // a lifted function's `requires` is a host obligation (listed in
-            // the record of a crate verified in place), not a boundary error
+            // a lifted function's `requires` and depth bound are host
+            // obligations (listed in the record of a crate verified in
+            // place), not boundary errors
             let lifted = krate.modules.get(it.module.0 as usize).is_some_and(|m| m.lifted);
             check_boundary_fn(krate, it, f, lifted, diags);
         }
     }
     krate.boundary = exports;
     krate.reachable = reachable;
-    for id in left_out_callers(krate) {
-        let it = krate.item(id);
-        let sp = krate.fn_def(id).map(|f| f.sig_span).unwrap_or(it.span);
-        diags.push(
-            Diagnostic::warning(DiagKind::Boundary, sp, format!("the private function `{}` of an in-place module is called by host code the lift leaves out of its file", it.path))
-                .note("that code (an `unverified_fns` method, an `unverified_impls` impl or an item outside `items = ..`) relies on what it returns, but §15.5 does not count it among the host-callable functions yet: it has no locked contract (DESIGN.md §15.5)"),
-        );
-    }
 }
 
 /// The live boundary rules of §3.1 for a `pub` function reachable from the
@@ -925,7 +933,11 @@ fn check_boundary_fn(krate: &Crate, it: &Item, f: &FnDef, lifted: bool, diags: &
     let hint = "remove `pub` (e.g. `pub(crate)`) and export a total wrapper that establishes it";
     for b in f.irr_binders() {
         let d = match b {
-            IrrBinder::Requires if lifted => continue,
+            // a lifted function's `requires` and depth bound are host
+            // obligations (listed in the record of a crate verified in place;
+            // the lock holds them, and only the laws file may state them on a
+            // locked item: `surface::attached_proof_file_errors`)
+            IrrBinder::Requires | IrrBinder::DepthBound if lifted => continue,
             IrrBinder::Requires => Diagnostic::error(DiagKind::Boundary, f.sig_span, format!("public function `{}` with `requires` is reachable from the DSL root", it.name))
                 .note(format!("the verified boundary must be total: a boundary function's kernel type has no `Irr` binders; {hint}, or make the function total (DESIGN.md §3.1, §15.5)")),
             IrrBinder::DepthBound => {

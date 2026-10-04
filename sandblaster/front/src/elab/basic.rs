@@ -1673,7 +1673,35 @@ pub fn abstract_all(env: &Env, ctx: &Ctx, goal: &V, t: &V, b: &mut Budget) -> Re
     let m1 = crate::auto::util::kernel_friendly(env, &m1);
     let tt = env.quote_typed(ctx, t, None, false);
     let target = shift(&tt, 1);
-    Ok(replace_occ(env, &m1, &target))
+    Ok(idiom_refl_args(&replace_occ(env, &m1, &target)))
+}
+
+/// The path-equation argument of the dependent-match idiom `match s as z
+/// return Π(e : Eq(D, s, z)). T with .. end p` whose scrutinee `s` and
+/// equation side became the motive variable `y`: `p` must now prove
+/// `Eq(D, y, y)`, which `refl(D, y)` does — the `refl(D, s)` the abstraction
+/// left in that irrelevant position (it does not abstract proofs) proves
+/// `Eq(D, s, s)`, and the kernel rejected the rewritten proof (finish-B: a
+/// script `rewrite(r.3 == Ok(d))` of a goal that matches on `r.3`). Other
+/// idiom arguments are left as they are.
+fn idiom_refl_args(m: &Tm) -> Tm {
+    super::tm::map_post(m, 0, &mut |node, depth| {
+        let Term::App { rel: Rel::Irr, fun, arg } = &*node else { return Some(node) };
+        let Term::Match { scrut, motive, .. } = &**fun else { return Some(node) };
+        let y = |t: &Tm, k: u32| matches!(&**t, Term::Var(i) if i.0 == depth + k);
+        if !y(scrut, 0) || matches!(&**arg, Term::Refl { val, .. } if y(val, 0)) {
+            return Some(node);
+        }
+        let Term::Pi { dom, .. } = &**motive else { return Some(node) };
+        let Term::Eq { ty, lhs, rhs } = &**dom else { return Some(node) };
+        // (inside the motive, under its binder `z`: `y` is one further out)
+        if !matches!(&**rhs, Term::Var(i) if i.0 == 0) || !y(lhs, 1) || occurs(ty, 0) {
+            return Some(node);
+        }
+        let refl = mk::refl(shift(ty, -1), mk::var(depth));
+        Some(Rc::new(Term::App { rel: Rel::Irr, fun: fun.clone(), arg: refl }))
+    })
+    .unwrap_or_else(|| m.clone())
 }
 
 /// Puts back the unit constructors that an abstraction replaced by the

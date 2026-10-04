@@ -6,7 +6,9 @@ commonware-storage's MMR position and peak arithmetic (in place) with its
 laws unchanged and one proof lemma
 restated in the MIR's shape, and the first set of storage's Merkle proof
 verifier (`hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree
-reconstruction, in place) with its laws and proofs unchanged. The source
+reconstruction, in place) with its laws and proofs unchanged by the move
+(since then its laws grew from 5 to 8 and its lock was accepted: §4). All
+three are verified with accepted locks. The source
 lift's reading of bodies is deleted (§6 step 3): bodies are read only from
 MIR, and a lifted exec module without `mir = ".."` is refused. The appendix
 (§20) is the normative reading; it joins SEMANTICS.md at the next acceptance
@@ -205,10 +207,18 @@ and lifted names, exactly as before.
   `hasher.rs` (`Standard`'s methods and the `Hasher` trait's provided ones at
   `Standard<Sha256>`), of `proof.rs` (`Subtree::{leaf_end, is_before,
   is_outside, is_inside, children, reconstruct_digest}`) and of the position
-  arithmetic it uses, read from `verifier.sbmir`: 1,647 obligations and the
-  5 laws proven (the source lift: 1,643), **LAWS.rs and PROOF.rs unchanged**,
-  the §15 gates with the same findings as the source lift's reading (the
-  module's lock is not accepted yet). The extraction names its instances by
+  arithmetic it uses, read from `verifier.sbmir`: at the move, 1,647
+  obligations and the 5 laws proven (the source lift: 1,643), **LAWS.rs and
+  PROOF.rs unchanged**, the §15 gates with the same findings as the source
+  lift's reading (the module's lock was not accepted then). **Now verified**:
+  the laws grew to 8 (`location_to_position_counts_nodes`,
+  `honest_proofs_rebuild_the_subtree` and `rebuilding_binds_the_elements`
+  added), with known answers from an independent Python model
+  (`known_answers.py`); its lock is accepted (272 items, root
+  `3e969a79…`) and `storage/build.rs` builds it with `compile_lifted`: 2,642
+  obligations, 596 definitions, every §15 gate passed (spec mutants: 1,153
+  of 1,422 killed by the specification, 228 by safety, 40 possibly
+  equivalent), 69 of 69 MIR theorems, lift conformance 0 mismatches. The extraction names its instances by
   type aliases (`instances.rs`: `Standard<Sha256>`, SHA-256's `Digest`, and
   `Copied<slice::Iter<&[u8]>>` for the element iterator `E`) and keeps only
   the lifted items. Moving it needed, generally: an open trait's provided
@@ -251,17 +261,18 @@ and lifted names, exactly as before.
 
 | | source lift | MIR path |
 | --- | --- | --- |
-| trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884** | after §6 step 5 (checked structuring): L's generator `mir/literal.rs` 1,217 + `literal.core` 139 + `mir/stmt.rs` 210 + `mir/mod.rs` 491 + the parse `ir.rs` 482 + `sexp.rs` 131 = **2,670**, printer `mirx` 1,131 → **3,801**, plus the gate's trusted check `gate.rs` 164 (≈ 189 with its call sites), the elaborator's precondition check 39 and the lift glue ≈ 260 (`read.rs` untrusted) → **≈ 4,289** (after the reader widening: 1,287 + 170 + 210 + 531 + 482 + 131 = 2,811, with `mirx` **3,942**, in all **≈ 4,430**; after the panic statement, DESIGN.md §8.2 item 12: `stmt.rs` 234 and `gate.rs` 232, so 2,835, with `mirx` **3,966**, the gate ≈ 261 with its call sites, in all **≈ 4,526**) (≈ 4,972 at the first stage that made `read.rs` untrusted); before it: `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
+| trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884**; on the merged tree of stage finish-A: `lift.rs` 4,174 less its MIR glue (≈ 260, counted on the right) + `lift_open.rs` 1,165 + prelude 108 + model 71 = **≈ 5,258** | after §6 step 5 (checked structuring): L's generator `mir/literal.rs` 1,217 + `literal.core` 139 + `mir/stmt.rs` 210 + `mir/mod.rs` 491 + the parse `ir.rs` 482 + `sexp.rs` 131 = **2,670**, printer `mirx` 1,131 → **3,801**, plus the gate's trusted check `gate.rs` 164 (≈ 189 with its call sites), the elaborator's precondition check 39 and the lift glue ≈ 260 (`read.rs` untrusted) → **≈ 4,289** (after the reader widening: 1,287 + 170 + 210 + 531 + 482 + 131 = 2,811, with `mirx` **3,942**, in all **≈ 4,430**; after the panic statement, DESIGN.md §8.2 item 12: `stmt.rs` 234 and `gate.rs` 232, so 2,835, with `mirx` **3,966**, the gate ≈ 261 with its call sites, in all **≈ 4,526**; after stage finish-A's slice leaves, now: `literal.rs` 1,297 and `literal.core` 186, so 2,861, with `mirx` **3,992**, in all **≈ 4,552**) (≈ 4,972 at the first stage that made `read.rs` untrusted); before it: `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
 | grows with | every surface feature (each port added ~2k) | new MIR constructs only (the MMR survey added intrinsics, `Cmp`, unsizing, reference constants, iterator models: ≈ 0.2k; moving the MMR ≈ 0.5k; moving the verifier ≈ 0.3k: host models, open-trait instances and items in the printer, `Option<&mut T>` states, field write-back) |
-| untrusted support | — | after §6 step 5: the structurer `read.rs` 2,433, `cfg.rs` 298 (with L's ranks, loop headers and panicking blocks), the walker `simproof.rs` 4,565 and `checked.rs` (all of it untrusted since the trusted check moved to `gate.rs`); before: `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
+| untrusted support | — | after §6 step 5: the structurer `read.rs` 2,433, `cfg.rs` 298 (with L's ranks, loop headers and panicking blocks), the walker `simproof.rs` 4,565 and `checked.rs` (all of it untrusted since the trusted check moved to `gate.rs`); now (stage finish-A): `read.rs` 2,975, `cfg.rs` 298, `simproof.rs` 5,014, `checked.rs` 1,889; before: `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
 | MMR laws / proof lines adapted | 10 laws, PROOF.rs 4,074 lines | LAWS.rs unchanged; PROOF.rs: one lemma's `ensures` (`ptl_pick`, the candidate tests of `position_to_location`) restated in the MIR's shape, 9 lines replaced by 16 (+2 comment lines) |
 | MMR obligations / definitions / laws | 5,589 / 724 / 10 | 5,602 / 724 / 10 (every obligation and law proven) |
 | MMR `sandblaster check` (proofs, gates up to the missing lock) | 226 s | 231 s |
 | verifier (set 1) laws / proof lines adapted | 5 laws, PROOF.rs 442 lines | **0** lines changed (LAWS.rs, PROOF.rs unchanged); `merkle.rs`: `mir = "verifier.sbmir"` on the five in-place declarations; new `instances.rs` (the extraction's instances) |
 | verifier obligations / definitions / laws | 1,643 / 409 / 5 | 1,647 / 409 / 5 (every obligation and law proven) |
+| verifier now (laws extended, lock accepted, `compile_lifted`) | — | 2,642 / 596 / 8, every §15 gate passed, 69 of 69 MIR theorems, `SPEC.lock` 272 items, root `3e969a79…` (the rows above and below measure the move, before these changes) |
 | verifier `sandblaster check` (proofs, gates up to the missing lock) | 6.0 s; examples 14, sections 56, lock 1 finding | 7.3 s; the same findings (examples 14, sections 56, lock 1) |
 | verifier extraction | — | 87 roots, 121 functions, 3,453 lines; byte-identical when re-extracted |
-| verifier lift conformance, in place (`sandblaster conform`, kernel vs rustc 1.98.1) | the harness did not build (host models spelled as DSL paths) | 25,623 inputs on 70 functions (2 skipped: the constants `MAX_NODES`, `MAX_LEAVES`), **0 value mismatches**; `reconstruct_digest`: 400 inputs, 161 with `collected = Some(..)`, 4 compared ones pushing into it; **16 inputs fail by running out of the kernel's step budget** (500M) on deep subtrees (heights 19–47): the reference evaluation of this state-passing non-tail recursion grows exponentially with depth (31M steps at height 4, 2.6G at height 8, measured), so the check fails on them — open (an evaluation that shares the recursive call's result, or bounded heights in the generated inputs) |
+| verifier lift conformance, in place (`sandblaster conform`, kernel vs rustc 1.98.1) | the harness did not build (host models spelled as DSL paths) | 25,623 inputs on 70 functions (2 skipped: the constants `MAX_NODES`, `MAX_LEAVES`), **0 value mismatches**; `reconstruct_digest`: 400 inputs, 161 with `collected = Some(..)`, 4 compared ones pushing into it; every input evaluates: the elaborator binds a recursive self-call whose tuple result is destructured once (`elab::pat`, `compile_ctor`) instead of projecting a copy per field, so the reference evaluation of this state-passing non-tail recursion is linear in the depth (kernel steps, one-leaf range: 1.8M at height 4, 3.5M at height 8, 6.8M at height 16; before, 87M at height 4, ×4 per level); the precondition checks of `leaf_end`/`is_before` stay bounded by `height <= 62` first in `well_shaped` (before: 178 mismatches, `pow2` of huge heights and the budget) |
 | varint laws / proof lines adapted | 48 laws, 3,865 proof lines | **0** lines changed (LAWS.rs, PROOF.rs, SPEC.lock byte-identical) |
 | varint obligations / definitions | 21,079 / 611 | 21,241 / 611 (21,247 before the MMR moved) |
 | varint proof checking (`proofs_only`, dev build, one thread) | 369 s | 451 s (+22%: explicit assertion obligations of shifts through signed constants, `if` nesting where the source had `&&`) |
@@ -897,8 +908,8 @@ from MIR, its theorem `L::thm::<f>` of §20.5 is kernel-checked, or the
 build reports `error[mir-theorem]` naming the function and why (a walk that
 failed, a theorem it needs that failed, the literal reading not accepted,
 a recursion L does not read), and the module is not verified. The
-pending-gates development build (`compile_lifted_pending_gates`) reports
-the same findings without enforcing them.
+pending-gates development build (`compile_lifted_pending_gates`, which no
+root uses now) reports the same findings without enforcing them.
 
 * L is generated and checked once per extraction, for the instances the
   module's lifted functions run.

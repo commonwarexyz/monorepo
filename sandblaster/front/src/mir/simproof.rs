@@ -1909,7 +1909,11 @@ impl<'e> Walker<'e> {
             if count_var(&ty, j - 1 - lvl) == 0 && !out.iter().any(|(h, _)| count_var(&ty, j - 1 - h) > 0) {
                 continue;
             }
-            if e.rel == Rel::Rel || e.def.is_some() {
+            // a relevant entry blocks the split; an irrelevant one (a proof,
+            // also a `let`-bound one: a lemma applied at the start of the
+            // function whose statement mentions a parameter) is transported
+            // along the path equation like any proof about the variable
+            if e.rel == Rel::Rel {
                 return None;
             }
             out.push((j, shift(&ty, (n - j) as i64)));
@@ -2527,14 +2531,34 @@ impl<'e> Walker<'e> {
                         fs.push(c);
                     }
                     let goal = self.le_int(rf.need(&cargs), self.len_n(d));
-                    let Ok(fuel_pf) = self.linarith_fuel(ctx, &fs, &goal) else { continue };
-                    let Ok(dec) = self.rec_decrease(ctx, facts, &cargs, dp) else { continue };
+                    let fuel_pf = match self.linarith_fuel(ctx, &fs, &goal) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            if self.trace {
+                                eprintln!("  IH: no fuel: {}", trunc(&e, 1500));
+                            }
+                            continue;
+                        }
+                    };
+                    let dec = match self.rec_decrease(ctx, facts, &cargs, dp) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            if self.trace {
+                                eprintln!("  IH: no decrease: {}", trunc(&e, 1500));
+                            }
+                            continue;
+                        }
+                    };
                     let mut rargs = cargs.clone();
                     rargs.push(mk::var(ni));
                     rargs.push(fuel_pf);
                     let ih = Rc::new(Term::Rec { args: rargs, proof: Some(dec) });
                     let (eq_pf, pres_pf) = if self.pres.is_some() { (Rc::new(Term::Fst(ih.clone())), Some(Rc::new(Term::Snd(ih)))) } else { (ih, None) };
-                    if let Some((g2, w)) = self.transport_call(ctx, &g, &lcall, &sval, &self.out_ty.clone(), eq_pf, with_prem)? {
+                    let tc = self.transport_call(ctx, &g, &lcall, &sval, &self.out_ty.clone(), eq_pf, with_prem)?;
+                    if tc.is_none() && self.trace {
+                        eprintln!("  IH: the literal side does not reach the call");
+                    }
+                    if let Some((g2, w)) = tc {
                         self.stats.inductions += 1;
                         if self.trace {
                             eprintln!("  induction hypothesis applied (a self-call)");

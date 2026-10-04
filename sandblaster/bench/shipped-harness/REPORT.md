@@ -20,7 +20,8 @@ ships today: codec's varint module is emitted `VERIFIED + LIFTED AS-IS` (a heade
 the original file byte for byte, then rustc-checked host facts that compile to no code), and
 storage's MMR iterator is compiled through a lowered copy that is the source byte for byte after
 its header (the optimizer found nothing cheaper in either module; the verifier's files, a
-development build, are compiled as written). So every timing difference below is code placement
+development build when this ran and verified in place with an accepted lock since, are compiled as
+written either way: the host declares no lowered copy for them). So every timing difference below is code placement
 and machine noise, and the A/A row shows its size.
 
 | binary | geomean shipped / original, all functions | geomean A/A / original | A/A spread (per function) | identical code, shipped = original (A/A) | identical except data addresses (A/A) | load before → after |

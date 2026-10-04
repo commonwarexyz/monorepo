@@ -582,11 +582,17 @@ impl<'a> Engine<'a> {
         if others.is_empty() {
             return Ok(None);
         }
-        let at = self.quote(st, a);
-        let (kt, vt) = (st.quote_at(self.env, key, a), st.quote_at(self.env, val, a));
-        // `val = key`
-        let p_val_key = if key_first { self.sym(&at, &kt, &vt, &st.var(f.lvl)) } else { st.var(f.lvl) };
         for (lvl, other, other_key_first) in others {
+            // every term at the state's current depth: each round pushes the
+            // joined equation (and what its saturation derives), so terms
+            // quoted before the loop would point `k` binders too far out in
+            // the next round (finish-B: a proof the kernel rejected, its
+            // variables shifted onto the next parameters, `elems` read as
+            // `sibs`)
+            let at = self.quote(st, a);
+            let (kt, vt) = (st.quote_at(self.env, key, a), st.quote_at(self.env, val, a));
+            // `val = key`
+            let p_val_key = if key_first { self.sym(&at, &kt, &vt, &st.var(f.lvl)) } else { st.var(f.lvl) };
             let ot = st.quote_at(self.env, &other, a);
             // `key = other`
             let p_key_other = if other_key_first { st.var(lvl) } else { self.sym(&at, &ot, &kt, &st.var(lvl)) };
@@ -809,8 +815,11 @@ impl<'a> Engine<'a> {
             && let Term::Sigma { snd, .. } = &*a_tm
             && !occurs(snd, 0)
         {
-            let sb = shift(snd, -1);
+            // re-quoted at the current depth: the `fst` component above may
+            // have pushed a fact (one more binder)
             let a_tm = self.quote(st, a);
+            let Term::Sigma { snd, .. } = &*a_tm else { return Ok(()) };
+            let sb = shift(snd, -1);
             let (l_tm, r_tm) = (st.quote_at(self.env, lhs, a), st.quote_at(self.env, rhs, a));
             let fun = mk::lam("z", Rel::Rel, a_tm.clone(), mk::snd(mk::var(0)));
             let p = apps(

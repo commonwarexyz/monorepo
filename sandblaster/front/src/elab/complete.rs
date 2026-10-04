@@ -385,14 +385,32 @@ impl<'a> Elab<'a> {
         // `exported_functions`): a `pub` method of a type that an exported
         // function returns is callable whether or not the type is exported
         let exported: BTreeSet<ItemId> = crate::validate::boundary_functions(krate).into_iter().filter(|id| krate.fn_def(*id).is_some_and(|f| f.kind == FnKind::Exec)).collect();
-        // checked laws
+        // checked laws. An established function (§15.1: determined at once
+        // by its `#[refines]` or by a laws-file equation `ret == E`) that a
+        // law reaches only through the definition of a spec function it
+        // names (`left_half` builds positions with `Position::new`) is a
+        // fixed function there, as a spec function is: the law is not one of
+        // its section's hypotheses (fewer hypotheses: its completeness
+        // obligation is only harder). A law that names it in its own
+        // statement is.
+        let established: std::collections::HashSet<GlobalId> = self.s1.established.iter().copied().collect();
+        let law_mentions = |t: &Tm| -> BTreeSet<ItemId> {
+            let mut direct = std::collections::HashSet::new();
+            super::tm::any_node(t, &mut |n| {
+                if let Term::Global(g) = n {
+                    direct.insert(*g);
+                }
+                false
+            });
+            env.refs_closure(t, &stop_all).into_iter().filter(|g| !established.contains(g) || direct.contains(g)).filter_map(owner_of).collect()
+        };
         let mut laws = Vec::new();
         for d in &self.defs {
             if d.kind == DefKind::Law && d.status == DefStatus::Checked
                 && let (Some(item), Some(g)) = (d.item, d.global)
                 && let Some(ty) = env.global_type(g)
             {
-                laws.push((item, g, mentions(&ty)));
+                laws.push((item, g, law_mentions(&ty)));
             }
         }
         let definitional: BTreeSet<ItemId> = laws.iter().map(|(i, _, _)| *i).filter(|i| krate.fn_def(*i).is_some_and(|f| f.spec.definitional.is_some())).collect();

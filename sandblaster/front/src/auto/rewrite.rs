@@ -202,6 +202,17 @@ impl<'a> Engine<'a> {
         }
         let f_tm = st.quote_at(self.env, from, a);
         let a_tm = self.quote(st, a);
+        // a read-back the goal could not afford is a placeholder (the goal is
+        // exhausted, `meter::charge_quote`): there is nothing to abstract, and
+        // saying the term "does not occur" would misreport why (finish-B: a
+        // scrutinee written in the goal was reported absent from a goal too
+        // large to read back)
+        if [&g_tm, &f_tm, &a_tm].iter().any(|x| matches!(&***x, Term::Erased)) || super::meter::exhausted().is_some() {
+            if self.trace {
+                eprintln!("[auto] no motive for `{}`: the proposition was not read back ({})", self.show(st, from), super::meter::exhausted().map(super::meter::describe).unwrap_or_else(|| "placeholder".into()));
+            }
+            return Ok(None);
+        }
         let facts = self.reachable_fact_types(st, &g_tm);
         let ab = super::abstraction::abstract_prop(self.env, d, &g_tm, &f_tm, &a_tm, facts, &st.venv, from);
         self.b.steps = self.b.steps.saturating_sub(ab.steps);

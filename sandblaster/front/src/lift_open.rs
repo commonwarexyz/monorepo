@@ -256,6 +256,8 @@ pub struct OpenCtx {
     pub const_fns: HashSet<String>,
     /// Lifted functions with a `requires` attachment (for the record).
     pub host_obligations: Vec<(String, String)>,
+    /// Lifted functions with a recursion depth bound (for the record).
+    pub host_depth_bounds: Vec<(String, String)>,
     /// The module being emitted is lifted in place.
     pub cur_in_place: bool,
     /// Provided methods of the open traits declared in a lifted file, by

@@ -194,7 +194,7 @@ pub fn pos_ge_false(a: Position, b: Position) {
 /// equation opens it the same way in goals and facts).
 #[lemma]
 pub fn well_shaped_is(s: crate::merkle::proof::Subtree) {
-    ensures(crate::laws::well_shaped(s) == ((s.leaf_start.0 as Int) + pow2(s.height as Int) <= pow2(62) && (s.pos.0 as Int) + 2 >= pow2((s.height as Int) + 1)));
+    ensures(crate::laws::well_shaped(s) == (s.height <= 62u32 && (s.leaf_start.0 as Int) + pow2(s.height as Int) <= pow2(62) && (s.pos.0 as Int) + 2 >= pow2((s.height as Int) + 1)));
     by_unfolding(crate::laws::well_shaped, crate::laws::max_leaves);
 }
 

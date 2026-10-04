@@ -577,6 +577,25 @@ impl<'a> Engine<'a> {
                 return Ok(Some(st.var(f.lvl)));
             }
         }
+        // a hypothesis `c == K(..)` (a constructor: `true`, `Some(x)`,
+        // `Err(e)`) where a fact says `c == K'(..)` for another constructor
+        // `K'` of the same type (a path fact of another branch: the rule is
+        // for another case) is not proven here: only a contradiction of the
+        // facts could, and the search finds that itself. Without this check
+        // every rule of a case-split family re-runs linarith or a search on
+        // its refuted case test.
+        if let Some((_, c, k)) = as_eq(h)
+            && let Value::Ctor { ind, ctor, .. } = &**k
+        {
+            for f in st.facts.iter().rev() {
+                if let Some((_, c2, k2)) = as_eq(&f.ty)
+                    && matches!(&**k2, Value::Ctor { ind: i2, ctor: c2k, .. } if i2 == ind && c2k != ctor)
+                    && self.conv(st.depth(), c2, c)?
+                {
+                    return Ok(None);
+                }
+            }
+        }
         if let Some(hs) = lin {
             if self.lin_goal_form(h) {
                 return self.lin_with(st, hs, h);
