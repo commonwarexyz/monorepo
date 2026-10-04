@@ -3,6 +3,7 @@ use crate::{
     Viewable,
     simplex::{
         Floor, Lookahead, Viewport,
+        actors::span::MISSING_SPAN,
         elector::Elector,
         metrics::{Leader, Timeout, TimeoutReason},
         scheme::Scheme,
@@ -395,13 +396,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .or_insert_with(|| Round::new(self.scheme.clone(), Rnd::new(self.epoch, view)))
     }
 
-    /// Returns the root span for `view`, or a disabled span if the view is not
+    /// Returns the root span for `view`, or `MISSING_SPAN` if the view is not
     /// tracked or already decided.
-    pub fn view_span(&self, view: View) -> Span {
+    pub fn view_span(&self, view: View) -> &Span {
         self.views
             .get(&view)
-            .map(|round| round.span())
-            .unwrap_or_else(Span::none)
+            .map_or(&MISSING_SPAN, |round| round.span())
     }
 
     /// Closes the root span of every decided view (at or below the finalized
@@ -416,7 +416,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns the root span for `view` and the finalized view, the two state
     /// values a batcher update carries.
     pub fn batcher_context(&self, view: View) -> (Span, View) {
-        (self.view_span(view), self.last_finalized)
+        (self.view_span(view).clone(), self.last_finalized)
     }
 
     /// Returns the next timeout deadline and its reason.

@@ -3,7 +3,7 @@ use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
         Lookahead, Plan, Viewport,
-        actors::voter,
+        actors::{span::MISSING_SPAN, voter},
         config::{ForwardPolicy, SkipPolicy},
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
@@ -525,7 +525,7 @@ where
                         // votes, we can safely add the message even if the view is
                         // arbitrarily far in the future.
                         let round = self.round_for_view(&current, &mut work, view);
-                        let process = process_span(&round.span());
+                        let process = process_span(round.span());
                         let _guard = process.entered();
                         round.accept_vote(message, true);
                         self.added.inc();
@@ -574,9 +574,9 @@ where
 
                 // Parent under the view's span if we already track the view (we avoid
                 // creating per-view state for certificates that fail verification)
-                let parent = round.map(|round| round.span()).unwrap_or_else(Span::none);
+                let parent = round.map_or(&MISSING_SPAN, |round| round.span());
                 let span = info_span!(
-                    parent: &parent,
+                    parent: parent,
                     "simplex.batcher.verify_certificate",
                     %kind,
                     epoch = self.epoch.traced(),
@@ -651,9 +651,8 @@ where
                         let round = Rnd::new(self.epoch, current.view);
                         let _guard = work
                             .get(&current.view)
-                            .map(|round| round.span())
-                            .unwrap_or_else(Span::none)
-                            .entered();
+                            .map_or(&MISSING_SPAN, |round| round.span())
+                            .enter();
                         voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
                     dirty_views.push(view);
@@ -696,7 +695,7 @@ where
                         continue;
                     }
 
-                    let span = round.span();
+                    let span = round.span().clone();
                     self.process_view(&mut voter, view, round)
                         .instrument(span)
                         .await;

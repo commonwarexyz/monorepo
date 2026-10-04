@@ -83,7 +83,7 @@ impl<
     }
 
     /// Returns the root span of the view.
-    pub fn span(&self) -> Span {
+    pub fn span(&self) -> &Span {
         self.span.get()
     }
 
