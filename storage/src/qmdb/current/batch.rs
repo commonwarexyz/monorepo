@@ -24,6 +24,7 @@ use crate::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
         },
+        floor::{Limits, Policy},
         operation::Key,
     },
 };
@@ -503,7 +504,8 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with [`Policy`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
@@ -526,17 +528,19 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -544,6 +548,7 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
+        let Limits::Proportional = policy.limits();
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
@@ -575,7 +580,8 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with [`Policy`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
@@ -598,17 +604,19 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -618,6 +626,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
+        let Limits::Proportional = policy.limits();
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&bitmap_parent, floor, tip, limit, out)
@@ -638,7 +647,8 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -649,15 +659,17 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -667,6 +679,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let prepared = inner.prepare(&db.any)?;
+        let Limits::Proportional = policy.limits();
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
                 metadata,
@@ -690,7 +703,8 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -701,15 +715,17 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -719,6 +735,7 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let prepared = inner.prepare(&db.any)?;
+        let Limits::Proportional = policy.limits();
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
                 metadata,
@@ -1284,9 +1301,12 @@ mod trait_impls {
     use super::*;
     use crate::{
         journal::contiguous::Mutable,
-        qmdb::any::traits::{
-            ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-            UnmerkleizedBatch as UnmerkleizedBatchTrait,
+        qmdb::{
+            any::traits::{
+                ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+                UnmerkleizedBatch as UnmerkleizedBatchTrait,
+            },
+            floor::Policy,
         },
     };
     use std::future::Future;
@@ -1318,12 +1338,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 
@@ -1351,12 +1372,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 

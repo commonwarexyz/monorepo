@@ -28,6 +28,7 @@ use commonware_storage::{
             ordered::{fixed::Db as OCFixed, variable::Db as OCVariable},
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
         },
+        floor::Proportional,
         immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
     },
@@ -653,7 +654,7 @@ where
             batch = batch.write(key, Some(make_value(&mut rng)));
             pending += 1;
             if seed_batch.is_some_and(|n| pending >= n) {
-                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
                 commits += 1;
@@ -666,7 +667,7 @@ where
             }
         }
         if pending > 0 {
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();
             db = db.commit().await.unwrap();
         }
@@ -695,7 +696,7 @@ where
             if let Some(freq) = commit_frequency
                 && rng.next_u32().is_multiple_of(freq)
             {
-                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 (db, _) = db.apply_batch(merkleized).await.unwrap();
                 db = db.commit().await.unwrap();
                 commits += 1;
@@ -706,7 +707,7 @@ where
                 batch = db.new_batch();
             }
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         (db, _) = db.apply_batch(merkleized).await.unwrap();
         db = db.commit().await.unwrap();
     }
@@ -730,7 +731,7 @@ pub async fn seed_db<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest
         let k = Sha256::hash(&[&i.to_be_bytes()]);
         batch = batch.write(k, Some(make_fixed_value(&mut rng)));
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
     let (db, _) = db.apply_batch(merkleized).await.unwrap();
     db.commit().await.unwrap()
 }
