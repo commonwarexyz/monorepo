@@ -451,7 +451,7 @@ where
                         // Track the new current view, adopting the voter's view
                         // span so all of its work shares one trace
                         let round = self.round_for_view(&current, &mut work, current.view);
-                        round.set_span(span);
+                        round.adopt_span(span);
                         dirty_views.push(current.view);
 
                         // Revisit rounds in the admission window now that the
