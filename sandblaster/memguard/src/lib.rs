@@ -443,6 +443,17 @@ pub fn peak() -> usize {
     SHARED.peak.load(Ordering::Relaxed)
 }
 
+/// Restart [`peak`] at the current reservation: from this call on it
+/// reports the highest reservation since, a measurement window that an
+/// earlier, larger peak (an elaboration before the measured calls) does
+/// not hide. Process-wide, like [`peak`]: measurements on several threads
+/// at once share the window.
+pub fn reset_peak() {
+    SHARED
+        .peak
+        .store(SHARED.reserved.load(Ordering::Relaxed), Ordering::Relaxed);
+}
+
 /// How many times the process-wide counter has been updated (a diagnostic:
 /// the allocator touches it once per [`THREAD_STOCK`] bytes of net growth
 /// or shrinkage of a thread's heap, and for every request of at least

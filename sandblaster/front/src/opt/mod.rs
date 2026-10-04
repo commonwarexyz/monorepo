@@ -892,7 +892,9 @@ pub fn optimize(out: &mut Output, krate: &Crate, opts: &OptOptions) -> Optimized
     let _registries = ResetRegistries;
     let mut ext = krate.clone();
     let mut chain = ProverChain::standard();
-    let eopts = elab::Options::default();
+    // clones and candidates are elaborated as the input was: a test-only
+    // exec-only elaboration has no ghost items for them to name
+    let eopts = elab::Options { exec_only: cx.out.exec_only, ..elab::Options::default() };
     let arch = krate.target.arch.clone();
 
     // ------------------------------------------------------------------

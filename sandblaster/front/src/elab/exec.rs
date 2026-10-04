@@ -1508,10 +1508,68 @@ impl<'a> Elab<'a> {
                     me.copy_from_slice(*dst, lo, hi, src_t, span, &mut |me| me.stmts(b, i + 1, k))
                 })
             }
+            // test-only exec-only elaboration: a block about ghost items it
+            // does not elaborate is left out (`names_skipped_ghost_item`)
+            StmtKind::Proof(steps) if self.opts.exec_only && self.names_skipped_ghost_item(steps) => self.stmts(b, i + 1, k),
             // the invariant facts of values projected in the steps'
             // propositions (§15.3) are bound first
             StmtKind::Proof(steps) => self.prebind_inv_facts(&[], steps, span, &mut |me| me.exec_proof(steps, span, &mut |me| me.stmts(b, i + 1, k))),
         }
+    }
+
+    /// Whether a `proof!` block names an item the test-only exec-only mode
+    /// ([`super::Options::exec_only`]) does not elaborate: a spec function,
+    /// lemma, law or proof, or a ghost constant. Such a block is reasoning
+    /// for the ghost layer (in practice a step of a refinement or law
+    /// proof, whose lemma's preconditions are the callees' refinements,
+    /// which exec-only does not establish either), and it is erased from
+    /// the program anyway (`lower`), so exec-only leaves it out, as it
+    /// leaves out the items it names. This only drops facts:
+    /// an exec obligation that needed one is reported unproven, and
+    /// exec-only output is never a verification (`Verification::exec_only`).
+    /// A block naming only exec items and prelude lemmas is elaborated as
+    /// usual.
+    fn names_skipped_ghost_item(&self, steps: &[ScriptStmt]) -> bool {
+        struct Refs<'k> {
+            krate: &'k Crate,
+            hit: bool,
+        }
+        impl Refs<'_> {
+            fn note(&mut self, id: ItemId) {
+                self.hit |= match &self.krate.item(id).kind {
+                    // (a prelude lemma is a synthetic ghost lemma item that
+                    // exec-only elaboration still has: its kernel global)
+                    ItemKind::Fn(f) => f.kind != FnKind::Exec && crate::resolve::prelude_lemma_kernel_name(&self.krate.item(id).path).is_none(),
+                    ItemKind::Const(_) => self.krate.item(id).ghost,
+                    _ => false,
+                };
+            }
+        }
+        impl Visitor for Refs<'_> {
+            fn expr(&mut self, e: &Expr) {
+                match &e.kind {
+                    ExprKind::Call { callee: Callee::Item(id, _), .. } | ExprKind::Const(id) => self.note(*id),
+                    _ => {}
+                }
+                visit::walk_expr(self, e);
+            }
+            fn script(&mut self, s: &ScriptStmt) {
+                match &s.kind {
+                    ScriptKind::Unfold(UnfoldTarget::Item(id)) => self.note(*id),
+                    ScriptKind::Using(ids) => ids.iter().for_each(|id| self.note(*id)),
+                    ScriptKind::Unfolding(ts) => ts.iter().for_each(|t| {
+                        if let UnfoldTarget::Item(id) = t {
+                            self.note(*id)
+                        }
+                    }),
+                    _ => {}
+                }
+                visit::walk_script(self, s);
+            }
+        }
+        let mut r = Refs { krate: self.krate, hit: false };
+        steps.iter().for_each(|s| r.script(s));
+        r.hit
     }
 
     /// An expression statement: its value is bound to `_` (so every proof

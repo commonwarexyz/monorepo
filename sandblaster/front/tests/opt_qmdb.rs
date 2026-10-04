@@ -14,6 +14,7 @@
 mod common;
 
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use common::*;
@@ -24,6 +25,11 @@ use sandblaster_front::loader::RealFs;
 use sandblaster_front::opt::{OptOptions, Outcome};
 use sandblaster_front::target::TargetInfo;
 
+/// One instance at a time: optimizing QMDB takes several GiB of
+/// heap, and the memory soft limit is process-wide (6 GiB by default), so
+/// both instances at once fail for memory.
+static HEAVY: Mutex<()> = Mutex::new(());
+
 /// The N = 1 instance (the Bend configuration): the fixed-shape hashes of
 /// its graft (`hash_33`) and partial chunk (`hash_1`) are specialized, and
 /// the pinned fixtures and the Bend corpus agree.
@@ -31,7 +37,7 @@ use sandblaster_front::target::TargetInfo;
 fn qmdb_optimizer_report() {
     optimize_instance("n1.rs", "opt-qmdb", &["crate::sha256::hash_33__sha2", "crate::sha256::hash_1__sha2"], |code| {
         // N = 1: the graft takes a one-byte chunk
-        assert!(code.contains("pub const CHUNK_BYTES: usize = 1usize;") && code.contains("l1_chunk: &[u8; 1usize]"), "N = 1 chunks");
+        assert!(code.contains("pub(crate) const CHUNK_BYTES: usize = 1usize;") && code.contains("l1_chunk: &[u8; 1usize]"), "N = 1 chunks");
     }, |dir| run_fixtures(dir, "sandblaster/fixtures/qmdb/fixtures", Some("sandblaster/fixtures/qmdb/baseline/tests/data/bend_verify.json"), Some("fixtures 32 accepted 29")));
 }
 
@@ -44,7 +50,7 @@ fn qmdb_optimizer_report() {
 fn qmdb_n32_production_optimizer() {
     optimize_instance("mod.rs", "opt-qmdb-n32", &["crate::sha256::hash_32__sha2", "crate::sha256::hash_32"], |code| {
         // N = 32: monomorphic code, the graft takes a 32-byte chunk
-        assert!(code.contains("pub const CHUNK_BYTES: usize = 32usize;") && code.contains("l1_chunk: &[u8; 32usize]"), "N = 32 chunks");
+        assert!(code.contains("pub(crate) const CHUNK_BYTES: usize = 32usize;") && code.contains("l1_chunk: &[u8; 32usize]"), "N = 32 chunks");
     }, |dir| run_fixtures(dir, "sandblaster/fixtures/qmdb/fixtures-n32", None, None));
 }
 
@@ -55,6 +61,7 @@ fn qmdb_n32_production_optimizer() {
 /// static dispatch, unchecked indexing, round trip), then `code` on the
 /// emitted text and `run` on the output directory.
 fn optimize_instance(root: &str, tmp_name: &str, extra: &[&str], code: impl Fn(&str) + Send + Sync, run: impl Fn(&Path) + Send + Sync) {
+    let _g = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
     let rel = format!("sandblaster/fixtures/qmdb/sandblaster/{root}");
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(&rel);
     let c = driver::check(&path, &RealFs, &TargetInfo::aarch64_apple_darwin());
@@ -114,21 +121,25 @@ fn optimize_instance(root: &str, tmp_name: &str, extra: &[&str], code: impl Fn(&
         for f in shared.iter().chain(extra) {
             assert!(o.fns.iter().any(|r| r.name == *f && matches!(r.outcome, Outcome::Specialized { .. })), "{f} not specialized");
         }
-        // hopeless driven attempts end early (gate G9: optimizer time): a
-        // leaf the proof builder cannot close is refused within its own
-        // budget (`verify`: the leaf compares `a && (b && …)` with
-        // `(a && b) && …` under a kept call of the driven `verify_inputs`;
-        // 181 ms of reading back the unfolded verifier before), and a
-        // function whose residual would keep `as_chunks` is refused before
-        // driving (`graft__sha2` inlines `compress_sha2`: 1.2M steps of
-        // symbolic SHA-2 rounds before)
+        // (`config` is a private module since §15 S5: its items are printed
+        // crate-visible, `pub(crate) const CHUNK_BYTES`)
+        // driven attempts (gate G9: optimizer time): `verify` is driven and
+        // its equality lemma kernel-checked (§15 S5 rewrote it: the length
+        // checks, then `verify_fixed`; the legacy `verify`, whose leaf
+        // compared `a && (b && …)` with `(a && b) && …` under a kept call of
+        // the driven `verify_inputs`, was refused within the proof
+        // builder's leaf budget instead), and a function whose residual
+        // would keep `as_chunks` is refused before driving (`graft__sha2`
+        // inlines `compress_sha2`: 1.2M steps of symbolic SHA-2 rounds
+        // before; the variable-length `sha256::hash`, refused the same way,
+        // left the port with §15 S5, which hashes fixed lengths only)
         let driven_reason = |name: &str| -> String {
             let f = o.fns.iter().find(|r| r.name == name).unwrap_or_else(|| panic!("{name}: no report"));
             f.candidates.iter().find(|c| c.rung == sandblaster_front::opt::Rung::Driven).map(|c| c.reason.clone()).unwrap_or_else(|| panic!("{name}: no driven candidate"))
         };
         let why = driven_reason("crate::verifier::verify");
-        assert!(why.contains("a leaf of the process tree is not closed within its budget"), "verify: {why}");
-        for (name, needle) in [("crate::merkle::graft__sha2", "`crate::sha256::compress_sha2`, which it inlines, applies `slice::as_chunks`"), ("crate::sha256::hash", "its body applies `slice::as_chunks`")] {
+        assert!(why.contains("kernel-checked equality lemma"), "verify: {why}");
+        for (name, needle) in [("crate::merkle::graft__sha2", "`crate::sha256::compress_sha2`, which it inlines, applies `slice::as_chunks`")] {
             let why = driven_reason(name);
             assert!(why.contains(needle) && why.contains("which a residual cannot print"), "{name}: {why}");
         }
@@ -160,7 +171,10 @@ fn optimize_instance(root: &str, tmp_name: &str, extra: &[&str], code: impl Fn(&
             let end = em.code[start..].find("\n        }\n").map(|e| start + e).unwrap_or(em.code.len());
             em.code[start..end].to_string()
         };
-        for f in ["reconstruct__portable", "reconstruct__sha2"] {
+        // (the portable code of an internal function keeps its name: only
+        // the root's exports are dispatched, with `__portable` variants,
+        // since §15 S5 made the modules private)
+        for f in ["reconstruct", "reconstruct__sha2"] {
             let body = body_of(f, "l0_index: u64");
             // (the tail call of `reconstruct_finish` stays a call: its
             // instantiation there decides nothing, drive/process.rs
@@ -168,16 +182,24 @@ fn optimize_instance(root: &str, tmp_name: &str, extra: &[&str], code: impl Fn(&
             assert!(body.contains("merkle::shape(") && (body.contains("merkle::path") || body.contains("merkle::reconstruct_finish__")), "merkle::{f} is driven through the chain:\n{body}");
             assert!(!body.contains("> 64u32") && !body.contains("reconstruct_checked"), "merkle::{f}: the height check is decided by the facts:\n{body}");
         }
-        // plan O7: `reconstruct_finish` bags through the segment helper of
-        // `root` (no peak buffer), per variant
-        for (f, seg) in [("reconstruct_finish__portable", "merkle::root__seg0("), ("reconstruct_finish__sha2", "merkle::root__sha2__seg0(")] {
+        // plan O7: `reconstruct_finish` bags without a peak buffer, per
+        // variant (§15 S5 rewrote `root` to bag `before ‖ [peak] ‖ after` in
+        // place, `fold_back3`/`bag_prefix3`, so the call is kept: the
+        // segment helper O7 built for the legacy `root`, which copied the
+        // peaks into a 62-digest buffer, has nothing to remove)
+        for (f, call) in [("reconstruct_finish", "merkle::root("), ("reconstruct_finish__sha2", "merkle::root__sha2(")] {
             let body = body_of(f, "l0_leaves: u64");
-            assert!(body.contains(seg) && !body.contains("[[0u8; 32usize]; 62usize]"), "merkle::{f} calls its segment helper `{seg}`:\n{body}");
+            assert!(body.contains(call) && !body.contains("[[0u8; 32usize]; 62usize]"), "merkle::{f} calls `{call}` without a peak buffer:\n{body}");
         }
-        for f in ["crate::merkle::reconstruct_finish", "crate::merkle::reconstruct_finish__sha2"] {
-            let r = o.fns.iter().find(|r| r.name == f).unwrap_or_else(|| panic!("{f}: no report"));
-            assert!(matches!(r.outcome, Outcome::Specialized { .. }) && matches!(r.link, Some(sandblaster_front::opt::Link::Lemma(_))), "{f} is driven: {:?}", r.candidates);
-        }
+        // the portable `reconstruct_finish` is driven (its lemma links it);
+        // its SHA2 clone is not driven again: with the in-place `root` the
+        // original's process tree only re-splits the source (the legacy
+        // tree called the segment helper, and the clone was driven too)
+        let report = |f: &str| o.fns.iter().find(|r| r.name == f).unwrap_or_else(|| panic!("{f}: no report"));
+        let r = report("crate::merkle::reconstruct_finish");
+        assert!(matches!(r.outcome, Outcome::Specialized { .. }) && matches!(r.link, Some(sandblaster_front::opt::Link::Lemma(_))), "reconstruct_finish is driven: {:?}", r.candidates);
+        let r = report("crate::merkle::reconstruct_finish__sha2");
+        assert!(r.candidates.iter().any(|c| c.rung == sandblaster_front::opt::Rung::Driven && c.reason.contains("only re-splits the source (a trivial process tree)")), "reconstruct_finish__sha2: {:?}", r.candidates);
         code(&em.code);
         run(&dir);
     });

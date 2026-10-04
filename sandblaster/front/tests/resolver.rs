@@ -99,7 +99,9 @@ fn arch_helpers_and_intrinsics_resolve_against_target_table() {
     let k = c.krate.unwrap();
     let f = k.fn_def(k.find("crate::f").unwrap()).unwrap();
     assert_eq!(f.feature_set, vec!["neon".to_string()]);
-    let c = rejects("use core::arch::aarch64::vsha512hq_u64;", K::Resolve, "unresolved import");
+    // an aarch64 intrinsic outside the library (SM4; the SHA-512 ones such
+    // as `vsha512hq_u64` joined it with the SHA3/SHA512 models)
+    let c = rejects("use core::arch::aarch64::vsm4eq_u32;", K::Resolve, "unresolved import");
     assert!(c.render().contains("only intrinsics of sandblaster's target library"));
     rejects("use sandblaster::arch::aarch64::load_u8x32;", K::Resolve, "unresolved import");
 }

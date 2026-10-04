@@ -93,19 +93,85 @@ pub fn farkas_staged_point(p: &[Constraint], natoms: usize) -> Result<Vec<Q>, Op
             }
         }
         // one more hop
-        let mut grew = false;
-        for c in p {
-            if c.coeffs.iter().any(|(a, _)| *a < natoms && inset[*a]) {
-                for (a, _) in &c.coeffs {
-                    if *a < natoms && !inset[*a] {
-                        inset[*a] = true;
-                        grew = true;
-                    }
+        if !grow(p, natoms, &mut inset) {
+            return Err(point);
+        }
+    }
+}
+
+/// Adds the atoms of every constraint that mentions an atom of `inset`
+/// (one hop); whether it grew.
+fn grow(p: &[Constraint], natoms: usize, inset: &mut [bool]) -> bool {
+    let mut grew = false;
+    for c in p {
+        if c.coeffs.iter().any(|(a, _)| *a < natoms && inset[*a]) {
+            for (a, _) in &c.coeffs {
+                if *a < natoms && !inset[*a] {
+                    inset[*a] = true;
+                    grew = true;
                 }
             }
         }
-        if !grew {
-            return Err(point);
+    }
+    grew
+}
+
+/// A certificate for every problem of `sys`, searched from the negated
+/// goal outwards: the first neighbourhood is the goal's atoms alone (not
+/// every hypothesis's, as in [`farkas_staged_point`]), then one more hop
+/// of atoms per round over every constraint. For a side condition that a
+/// few of many hypotheses imply, the first neighbourhoods are small. When
+/// the hypotheses are consistent this finds a certificate exactly when
+/// [`certificate`] does: a minimal infeasible subsystem then contains the
+/// negated goal and is connected through shared atoms, so it lies within
+/// the goal's last neighbourhood. (Hypotheses contradictory among
+/// themselves and unrelated to the goal refute nothing here.)
+pub fn certificate_directed(sys: &LinSystem) -> Option<Vec<Rat>> {
+    let mut out = Vec::new();
+    for p in &sys.problems {
+        let c = farkas_directed(p, sys.atoms.len())?;
+        out.extend(c.iter().map(Q::to_rat));
+    }
+    Some(out)
+}
+
+/// [`farkas`] on the neighbourhoods of the negated goal (see
+/// [`certificate_directed`]); `None` when the last one is feasible (or
+/// the search gives up).
+fn farkas_directed(p: &[Constraint], natoms: usize) -> Option<Vec<Q>> {
+    use sandblaster_kernel::linarith::ConstraintOrigin;
+    let goal = |c: &Constraint| matches!(c.origin, ConstraintOrigin::NegatedGoal);
+    let mut inset = vec![false; natoms];
+    for c in p.iter().filter(|c| goal(c)) {
+        for (a, _) in &c.coeffs {
+            if *a < natoms {
+                inset[*a] = true;
+            }
+        }
+    }
+    let mut last = 0usize;
+    loop {
+        let sel: Vec<usize> = (0..p.len()).filter(|&i| goal(&p[i]) || p[i].coeffs.iter().all(|(a, _)| *a < natoms && inset[*a])).collect();
+        if sel.len() == p.len() {
+            return farkas_or_point(p, natoms).ok();
+        }
+        if sel.len() > last {
+            last = sel.len();
+            let sub: Vec<Constraint> = sel.iter().map(|&i| p[i].clone()).collect();
+            match farkas_or_point(&sub, natoms) {
+                Ok(c) => {
+                    let mut full = vec![Q::zero(); p.len()];
+                    for (k, &i) in sel.iter().enumerate() {
+                        full[i] = c[k].clone();
+                    }
+                    return Some(full);
+                }
+                Err(None) => return None,
+                Err(Some(_)) => {}
+            }
+        }
+        if !grow(p, natoms, &mut inset) {
+            return None;
         }
     }
 }

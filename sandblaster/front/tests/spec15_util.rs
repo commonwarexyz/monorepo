@@ -167,7 +167,12 @@ pub fn run_files_raw(files: &[(&str, &str)], eopts: sandblaster_front::elab::Opt
         let out = sandblaster_front::elab::elaborate(kr, &mut chain, eo);
         summarize(&out)
     });
-    Run { checked: c, front_ok, verified, rendered, errors, warnings, refs, examples, coverage, closure, established, failed_defs, unproven, checked_defs }
+    // the front end's warnings (an accepted crate has no front-end error)
+    // come first, as a build reports them
+    let mut all_warnings: Vec<(DiagKind, String)> = c.diags.list.iter().filter(|d| d.severity == Severity::Warning).map(|d| (d.kind, d.msg.clone())).collect();
+    all_warnings.extend(warnings);
+    let rendered = format!("{}{rendered}", c.diags.render(&c.sm));
+    Run { checked: c, front_ok, verified, rendered, errors, warnings: all_warnings, refs, examples, coverage, closure, established, failed_defs, unproven, checked_defs }
 }
 
 /// Runs the pipeline on a crate directory on disk (`root` is its

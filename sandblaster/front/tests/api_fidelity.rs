@@ -217,32 +217,39 @@ fn qmdb_apis(root: &str, target: &TargetInfo) -> (BTreeSet<api::Entry>, String, 
     (src, em.code, em.opt.not_emitted.clone())
 }
 
-fn assert_same_api(root: &str, chunk: &str, graft: &str) {
+/// The fully specified QMDB's public API is its root's `pub use` list
+/// (§15.8: the modules are private), the same for both instances:
+/// `Digest`, `verify` and `verify_fixed`. (Until §15 S5 the modules were
+/// `pub`, and the instance's `config::hash_chunk` / `config::hash_graft`
+/// re-exports were public paths too.)
+fn assert_same_api(root: &str) {
     let target = TargetInfo::aarch64_apple_darwin();
     let (src, code, not_emitted) = qmdb_apis(root, &target);
     assert!(not_emitted.is_empty(), "{not_emitted:?}");
     let out = api::generated_api(&code, &target);
     assert_eq!(src, out, "{root}: the generated public API differs from the source's:\n{}", api::diff(&src, &out));
-    for (name, def) in [("config::hash_chunk", chunk), ("config::hash_graft", graft)] {
-        assert!(out.iter().any(|e| e.path == name && e.def == def && e.kind == "fn/1"), "{root}: `{name}` = `{def}` missing from the generated API");
-    }
-    assert!(out.iter().any(|e| e.path == "verify" && e.def == "verifier::verify" && e.kind == "fn/4"));
+    assert!(out.iter().any(|e| e.path == "verify" && e.def == "verifier::verify" && e.kind == "fn/4"), "{root}: {out:?}");
+    assert!(out.iter().any(|e| e.path == "verify_fixed" && e.def == "verifier::verify_fixed" && e.kind == "fn/4"), "{root}: {out:?}");
+    assert!(out.iter().any(|e| e.path == "Digest" && e.def == "sha256::Digest"), "{root}: {out:?}");
+    // nothing of the private modules is public
+    assert!(!out.iter().any(|e| e.path.contains("::")), "{root}: a module path is public: {out:?}");
     // the comparison catches the regression: without its `pub use` line,
-    // `config::hash_chunk` is missing from the generated API
-    let dropped: String = code.lines().filter(|l| !l.ends_with(" as hash_chunk;")).map(|l| format!("{l}\n")).collect();
+    // `verify_fixed` is missing from the generated API
+    let dropped: String = code.lines().filter(|l| !l.ends_with(" as verify_fixed;")).map(|l| format!("{l}\n")).collect();
     assert_ne!(dropped, code);
     let d = api::generated_api(&dropped, &target);
     let missing: Vec<&str> = src.difference(&d).map(|e| e.path.as_str()).collect();
-    assert!(missing.contains(&"config::hash_chunk") && missing.iter().all(|p| p.ends_with("::hash_chunk")), "{missing:?}");
+    assert_eq!(missing, vec!["verify_fixed"], "{root}");
 }
 
 #[test]
 fn qmdb_n32_public_api_is_the_sources() {
-    assert_same_api("mod.rs", "sha256::hash_32", "sha256::hash_64");
+    assert_same_api("mod.rs");
 }
 
 #[test]
 fn qmdb_n1_public_api_is_the_sources() {
-    // `config` is `config_n1` re-exported at the root: both paths are public
-    assert_same_api("n1.rs", "sha256::hash_1", "sha256::hash_33");
+    // `config` is `config_n1` imported at the root (`use self::config_n1
+    // as config;`, not `pub`): the API is the N = 32 instance's
+    assert_same_api("n1.rs");
 }

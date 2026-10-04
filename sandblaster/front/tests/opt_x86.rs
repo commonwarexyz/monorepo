@@ -15,6 +15,9 @@
 //! (`evidence::withhold`) is still left out of the emitted code (fail closed).
 
 mod common;
+
+#[path = "common/qmdb.rs"]
+mod qmdb;
 #[path = "common/api.rs"]
 mod api;
 
@@ -57,7 +60,7 @@ const FEATURE_ONLY: [&str; 3] = ["v4", "sha_sse2_ssse3_sse4_1_v3", "v3_scalar"];
 fn qmdb_x86_64_sha_ni_is_proven_and_dispatched() {
     // the N = 1 instance: the pinned N = 1 fixtures
     x86_instance("n1.rs", "opt-qmdb-x86_64", "sandblaster/fixtures/qmdb/fixtures", "fixtures 32 accepted 29", true, |code| {
-        assert!(code.contains("pub const CHUNK_BYTES: usize = 1usize;"), "N = 1 chunks");
+        assert!(code.contains("pub(crate) const CHUNK_BYTES: usize = 1usize;"), "N = 1 chunks");
     });
 }
 
@@ -68,8 +71,10 @@ fn qmdb_x86_64_sha_ni_is_proven_and_dispatched() {
 #[test]
 fn qmdb_n32_x86_64_production_instance() {
     x86_instance("mod.rs", "opt-qmdb-n32-x86_64", "sandblaster/fixtures/qmdb/fixtures-n32", "fixtures 490 accepted 245", false, |code| {
-        assert!(code.contains("pub const CHUNK_BYTES: usize = 32usize;") && code.contains("l1_chunk: &[u8; 32usize]"), "N = 32 chunks");
-        assert!(code.contains("pub use crate::__sandblaster::sha256::hash_32 as hash_chunk;") && code.contains("pub use crate::__sandblaster::sha256::hash_64 as hash_graft;"), "config re-exports");
+        assert!(code.contains("pub(crate) const CHUNK_BYTES: usize = 32usize;") && code.contains("l1_chunk: &[u8; 32usize]"), "N = 32 chunks");
+        // (the modules are private since §15 S5: the re-exports of `config`
+        // are printed crate-visible, like the module itself)
+        assert!(code.contains("pub(crate) use crate::__sandblaster::sha256::hash_32 as hash_chunk;") && code.contains("pub(crate) use crate::__sandblaster::sha256::hash_64 as hash_graft;"), "config re-exports");
     });
 }
 
@@ -83,27 +88,26 @@ fn qmdb_n32_x86_64_production_instance() {
 fn a_reexport_of_a_not_emitted_variant_is_an_api_difference() {
     let _g = HEAVY.lock().unwrap_or_else(|e| e.into_inner());
     let _withheld = evidence::withhold(evidence_arch::X86_64, SHA_NI_MODELS);
-    // the production sources, with `verifier` re-exporting the SHA-NI variant
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster");
-    let mut fs = MemFs::new();
-    for e in std::fs::read_dir(&dir).unwrap() {
-        let p = e.unwrap().path();
-        if p.extension().is_some_and(|x| x == "rs") {
-            let mut text = std::fs::read_to_string(&p).unwrap();
-            if p.file_name().is_some_and(|f| f == "verifier.rs") {
-                text.push_str("\n#[cfg(all(target_arch = \"x86_64\", target_endian = \"little\"))]\npub use super::sha256::compress_shani as compress_fast;\n");
-            }
-            fs.insert(Path::new("q").join(p.file_name().unwrap()), text);
-        }
-    }
-    let c = driver::check(Path::new("q/mod.rs"), &fs, &TargetInfo::x86_64_apple_darwin());
+    // the production sources (every file the root mounts: `qmdb::crate_files`)
+    // with `verifier` public again (its layout before §15 S5 made the
+    // modules private; the §15.8 boundary gate, not run here, refuses it)
+    // and re-exporting the SHA-NI variant: a public re-export outside the
+    // root's `pub use` list
+    let mut files = qmdb::crate_files("mod.rs");
+    let root_text = qmdb::entry(&mut files, "mod.rs");
+    assert!(root_text.contains("\nmod verifier;\n"));
+    *root_text = root_text.replacen("\nmod verifier;\n", "\npub mod verifier;\n", 1);
+    qmdb::entry(&mut files, "verifier.rs").push_str("\n#[cfg(all(target_arch = \"x86_64\", target_endian = \"little\"))]\npub use super::sha256::compress_shani as compress_fast;\n");
+    let fs = MemFs::from_files(files.iter().map(|(p, t)| (p.as_str(), t.as_str())));
+    let root = files[0].0.clone();
+    let c = driver::check(Path::new(&root), &fs, &TargetInfo::x86_64_apple_darwin());
     assert!(c.ok(), "{}", c.render());
     assert!(c.reexports.iter().any(|r| r.name == "compress_fast"), "{:?}", c.reexports);
     let k = c.krate.as_ref().unwrap();
     let em = elab::with_big_stack(|| {
         let mut chain = ProverChain::standard();
         let mut out = elab::elaborate(k, &mut chain, &elab::Options { exec_only: true, ..Default::default() });
-        driver::stage::optimize_emit_mode(&c, &mut out, "q/mod.rs", "", &OptOptions { strict: true, ..Default::default() }, true).unwrap()
+        driver::stage::optimize_emit_mode(&c, &mut out, &root, "", &OptOptions { strict: true, ..Default::default() }, true).unwrap()
     });
     assert!(em.opt.errors.is_empty(), "{:?}", em.opt.errors);
     assert!(em.opt.not_emitted.iter().any(|(f, _)| f.ends_with("compress_shani")), "{:?}", em.opt.not_emitted);
@@ -229,7 +233,12 @@ fn x86_instance(root: &str, tmp_name: &str, fixtures: &str, expect: &str, grante
     let src = api::source_api(&root_path, &api::disk, &target);
     let out = api::generated_api(&em.code, &target);
     assert_eq!(src, out, "{root}: the generated public API differs from the source's:\n{}", api::diff(&src, &out));
-    assert!(out.iter().any(|e| e.path == "sha256::compress_shani"), "compress_shani missing from the generated API");
+    // the public API is the root's `pub use` list (§15.8: the modules are
+    // private, so the SHA-NI variant is emitted but not public)
+    for f in ["verify", "verify_fixed", "Digest"] {
+        assert!(out.iter().any(|e| e.path == f), "{f} missing from the generated API: {out:?}");
+    }
+    assert!(!out.iter().any(|e| e.path.contains("::")), "a module path is public: {out:?}");
     code(&em.code);
     // compile for x86_64; run the fixtures if the host can execute it
     let dir = tmp(tmp_name);

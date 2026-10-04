@@ -290,12 +290,16 @@ pub struct Output {
     /// literal reading's state and the callee lemmas), for the lifted
     /// round trip's theorems (`mir::checked::prove_roundtrip`).
     pub mir_gate: crate::mir::checked::GateMemory,
+    /// Whether this is a test-only exec-only elaboration
+    /// ([`Options::exec_only`]): what elaborates more items against it (the
+    /// optimizer's clones and candidates) skips the ghost items the same way.
+    pub exec_only: bool,
 }
 
 impl Output {
     /// An output with no records (elaboration could not start).
     pub fn empty(env: Env, diags: Diagnostics) -> Output {
-        Output { env, defs: vec![], obligations: vec![], laws: vec![], diags, fn_globals: HashMap::new(), adts: HashMap::new(), deferred: vec![], refinements: vec![], examples: vec![], sections: vec![], coverage: vec![], spec_closure: vec![], established: vec![], law_rules: vec![], pre_commit: HashMap::new(), mir_gate: Default::default() }
+        Output { env, defs: vec![], obligations: vec![], laws: vec![], diags, fn_globals: HashMap::new(), adts: HashMap::new(), deferred: vec![], refinements: vec![], examples: vec![], sections: vec![], coverage: vec![], spec_closure: vec![], established: vec![], law_rules: vec![], pre_commit: HashMap::new(), mir_gate: Default::default(), exec_only: false }
     }
 
     /// Whether every definition was checked, every obligation proven and
@@ -700,6 +704,7 @@ pub fn elaborate(krate: &Crate, prover: &mut ProverChain, opts: &Options) -> Out
         law_rules,
         pre_commit: el.pre_commit,
         mir_gate: Default::default(),
+        exec_only: opts.exec_only,
     }
 }
 

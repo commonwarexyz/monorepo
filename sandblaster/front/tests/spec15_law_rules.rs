@@ -1,11 +1,10 @@
 //! §15.1 law rules (DESIGN.md §15.1 "Laws state guarantees, not code",
 //! LR1–LR10 but LR8): every rule on crates built for it, the law table
 //! (LR9), the gate that turns the recorded findings into diagnostics
-//! (`law_rules::spec15_gate_laws`, a gate of the crate path), QMDB's legacy
-//! `LAWS.rs` (recorded and reported by the gate; its proofs still check),
-//! and the draft `LAWS.rs` of
-//! docs/qmdb-spec-design.md §2.2 over stub spec items, which passes every
-//! rule.
+//! (`law_rules::spec15_gate_laws`, a gate of the crate path), the draft
+//! `LAWS.rs` of docs/qmdb-spec-design.md §2.2 over stub spec items, which
+//! passes every rule, and QMDB's own `LAWS.rs` (the draft over the real
+//! spec, proven), which does too.
 //!
 //! The rules are errors (or warnings) for every crate; the build records
 //! them (`Output::law_rules`) and the gate reports them; these tests run
@@ -1044,34 +1043,48 @@ fn draft_qmdb_laws_rules_bite_on_mutations() {
 }
 
 // ---------------------------------------------------------------------
-// QMDB's legacy LAWS.rs: recorded, reported by the gate, the build green
+// QMDB's LAWS.rs: the fully specified QMDB passes every rule, its proofs check
 // ---------------------------------------------------------------------
 
-/// The production root `mod.rs` (N = 32) and the files it mounts.
-const QMDB_FILES: &[&str] = &["mod.rs", "config.rs", "codec.rs", "merkle.rs", "sha256.rs", "verifier.rs", "LAWS.rs", "PROOF.rs"];
+#[path = "common/qmdb.rs"]
+mod qmdb;
 
+/// QMDB's own `LAWS.rs` (the production root `mod.rs`, N = 32, with every
+/// file it mounts: `qmdb::crate_files`). Until 2026-09 the fixture had the
+/// legacy laws (13 laws restating the code, docs/qmdb-spec-design.md §1),
+/// which this test showed failing the rules only through the gate; §15 S5
+/// replaced them with the five laws of the design's §2.2 (the draft above,
+/// over the real `spec/` and proven by `PROOF.rs`). The fixture's proofs
+/// check and the gate reports no error; what the rules record are LR6 (b)
+/// resemblance warnings only (a subterm of the real spec's statements of
+/// 15 or 17 kernel nodes also occurs in `merkle::path_node` and
+/// `sha256::equal`; the draft over stub spec items has none), and the
+/// table is the draft's with the two laws of `spec/tree.rs`. (Elaborates
+/// all of QMDB: about twelve minutes.)
 #[test]
-fn legacy_qmdb_laws_fail_only_through_the_gate() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster");
-    let files: Vec<(String, String)> = QMDB_FILES.iter().map(|f| (format!("q/{f}"), std::fs::read_to_string(dir.join(f)).unwrap())).collect();
-    let r = run_owned(files);
+fn qmdb_laws_pass_every_rule() {
+    let r = run_owned(qmdb::crate_files("mod.rs"));
     r.front();
-    // the build itself is untouched: no error at all (the laws verify)
+    // the build itself: no error at all (the laws and refinements verify)
     assert!(r.errors.is_empty(), "{}", r.explain());
-    // what the gate reports (docs/qmdb-spec-design.md §1, §8):
-    // internal functions named by the laws (LR1) …
-    r.has(LawRule::Lr1, "crate::laws::digest_equal_sound", "`crate::sha256::equal`");
-    r.has(LawRule::Lr1, "crate::laws::location_bounded", "the exec constant `crate::merkle::MAX_LEAVES`");
-    // … `Acceptance` calling the exec `active` and `reconstruct` (LR2) …
-    r.has(LawRule::Lr2, "crate::laws::verify_acceptance", "`crate::verifier::active` through the spec item `crate::laws::Acceptance`");
-    r.has(LawRule::Lr2, "crate::laws::verify_acceptance", "`crate::verifier::reconstruct` through the spec item `crate::laws::Acceptance`");
-    // … a law that is one unfolding of `verify_decoded` (LR6 (a)) …
-    r.has(LawRule::Lr6Echo, "crate::laws::inactive_decoded_rejected", "unfolded once: `verifier::active`, `verifier::verify_decoded`");
-    // … `required_digests`, a copy of `reconstruct_shape`'s count (LR6 (b)) …
-    r.has(LawRule::Lr6Resemblance, "crate::laws::merkle_digest_count", "`crate::merkle::reconstruct_shape`");
-    // … and every law in the soundness direction (LR10)
-    r.has(LawRule::Lr10, "crate::verifier::verify", "only in hypotheses: nothing states when it is true");
-    assert!(r.gate.iter().filter(|(e, _, _)| *e).count() >= 20, "{:?}", r.gate);
+    // no error-level finding of any rule: not on the laws, the spec items,
+    // or `verify`; the resemblance warnings name the two exec functions
+    assert!(!r.gate.iter().any(|(e, _, _)| *e), "{:?}", r.gate);
+    for f in &r.findings {
+        assert!(f.rule == LawRule::Lr6Resemblance && (f.msg.contains("`crate::merkle::path_node`") || f.msg.contains("`crate::sha256::equal`")), "QMDB's laws fail a rule:\n{}", r.explain());
+    }
+    // the table: the draft's five guarantees, two of them assuming collision
+    // resistance, and the two laws of `spec/tree.rs` (why one root binds,
+    // docs/qmdb-spec-design.md §2.4)
+    assert_eq!(r.table.len(), 7, "{}", r.explain());
+    for (path, guarantee, assumes, heading) in &r.table {
+        assert_eq!(*heading, LawHeading::Guarantee, "{path}");
+        let name = path.rsplit("::").next().unwrap();
+        assert!(DRAFT_LAWS.contains(&name) || ["agreeing_trees_have_one_root", "equal_roots_agree"].contains(&name), "{path}");
+        assert!(guarantee.as_deref().is_some_and(|g| law_rules::states_guarantee(g, name)), "{path}: {guarantee:?}");
+        let reduced = name == "verified_updates_are_current" || name == "one_proof_per_location";
+        assert_eq!(assumes.clone(), if reduced { vec!["crate::spec::sha256::collision_resistance".to_string()] } else { vec![] }, "{path}");
+    }
 }
 
 // ---------------------------------------------------------------------

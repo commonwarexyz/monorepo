@@ -15,6 +15,9 @@
 
 mod common;
 
+#[path = "common/qmdb.rs"]
+mod qmdb;
+
 use common::*;
 use sandblaster_front::diag::{DiagKind as K, Diagnostics, Severity};
 use sandblaster_front::driver::Checked;
@@ -228,10 +231,26 @@ fn gate_accepts_a_pub_use_boundary() {
 
 #[test]
 fn gate_on_todays_qmdb_root() {
-    // what the fully specified QMDB changes in sandblaster/fixtures/qmdb/sandblaster/mod.rs: the `pub mod`s
+    // the fully specified QMDB (sandblaster/fixtures/qmdb/sandblaster/mod.rs)
+    // made its modules private: its boundary is its `pub use` list, and the
+    // gate passes
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/mod.rs");
     let c = check_dir(&root);
     assert!(c.ok(), "{}", c.render());
+    assert_eq!(gate(&c), Vec::<String>::new());
+    // the same root with its modules `pub` again (its layout before the
+    // rewrite): each `pub mod` is refused by the gate (and the live rules
+    // refuse what it exposes: public functions with a `requires` or a
+    // recursion depth bound)
+    let mut files = qmdb::crate_files("mod.rs");
+    let text = qmdb::entry(&mut files, "mod.rs");
+    for m in ["codec", "merkle", "sha256", "verifier"] {
+        let decl = format!("\nmod {m};\n");
+        assert!(text.contains(&decl), "{decl:?}");
+        *text = text.replacen(&decl, &format!("\npub mod {m};\n"), 1);
+    }
+    let c = check_files(&files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect::<Vec<_>>());
+    assert!(c.krate.is_some() && errors(&c).iter().all(|(k, m)| *k == K::Boundary && m.starts_with("public function `") && m.contains("is reachable from the DSL root")), "{}", c.render());
     let g = gate(&c);
     for m in ["codec", "merkle", "sha256", "verifier"] {
         assert!(g.iter().any(|x| x.contains(&format!("`pub mod {m}` is not allowed"))), "{g:?}");

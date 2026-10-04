@@ -228,6 +228,30 @@ fn rel_args(args: &[Arg]) -> Vec<V> {
     args.iter().filter_map(|a| if let Arg::Rel(v) = a { Some(v.clone()) } else { None }).collect()
 }
 
+/// Whether a declared type has a reference below its top (`Option<&T>`,
+/// `(&T, u8)`): the residual prints values, and only a top-level `&T` is
+/// adapted (`&e`).
+fn nested_ref(t: &Ty) -> bool {
+    fn has_ref(t: &Ty) -> bool {
+        match t {
+            Ty::Ref(_) => true,
+            Ty::Option(x) | Ty::Array(x, _) | Ty::Slice(x) => has_ref(x),
+            Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().any(has_ref),
+            _ => false,
+        }
+    }
+    match t {
+        Ty::Ref(x) => match &**x {
+            // `&[T]` and `&[T; N]` are printed as such; their elements count
+            Ty::Slice(e) | Ty::Array(e, _) => has_ref(e),
+            other => nested_ref(other),
+        },
+        Ty::Option(x) | Ty::Array(x, _) | Ty::Slice(x) => has_ref(x),
+        Ty::Tuple(ts) | Ty::Adt(_, ts) => ts.iter().any(has_ref),
+        _ => false,
+    }
+}
+
 /// The value type of a declared type: references stripped, except slices.
 fn value_ty(t: &Ty) -> Ty {
     match t.peel_refs() {
@@ -1375,6 +1399,13 @@ impl Emit<'_, '_> {
         }
         let tail = self.expr(tail_root, &bound2)?;
         let tail = self.adapt(tail, expected);
+        // the kernel's values carry no references: a reference inside the
+        // declared result (`Option<&T>`: a slice's `first()`) would be
+        // printed as the value it points to, an ill-typed residual that the
+        // model (references erased) cannot tell apart
+        if tail.ty != *expected && nested_ref(expected) {
+            return Err(format!("a result of type `{expected:?}`: a reference inside the declared type, which the residual (by value: `{:?}`) cannot print", tail.ty));
+        }
         if stmts.is_empty() {
             return Ok(tail);
         }

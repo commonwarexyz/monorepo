@@ -58,6 +58,9 @@
 //! within 5·10^6 steps (obligations, skeleton and the kernel check), each
 //! loop within 5·10^8.
 
+#[path = "common/qmdb.rs"]
+mod qmdb;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -1266,7 +1269,9 @@ fn samples(bound: u64) -> Vec<(u64, u64)> {
 }
 
 fn shape_env() -> Env {
-    let merkle = repo("sandblaster/fixtures/qmdb/sandblaster/merkle.rs");
+    // the exec code only: the §15 annotations name the fixture's `model`
+    // module, which this one-module copy does not carry
+    let merkle = qmdb::exec_source("merkle.rs");
     let mut env = elaborate(&[
         item(&merkle, "pub const MAX_LEAVES"),
         item(&merkle, "pub struct Shape"),

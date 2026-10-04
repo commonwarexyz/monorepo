@@ -4,24 +4,24 @@ result = match #Gt(U64)(x0, 4611686018427387904U64) {..} .
 crate::merkle::shape_go: 77 steps; 1 nodes {}; stuck: Some("a stuck application of `crate::merkle::shape_go`")
 result = crate::merkle::shape_go(x0, x1, x2, x3, x4, x5, x6, x7, ., ., ., .)
 
-crate::codec::uint64: 45 steps; 1 nodes {}; stuck: Some("a stuck application of `crate::codec::uint64_go`")
-result = crate::codec::uint64_go(10U32, x0, 0U32, 0U64, .)
+crate::codec::uint64: 71 steps; 1 nodes {}; stuck: Some("a stuck application of `crate::codec::uint64_go`")
+result = crate::codec::uint64_go(10U32, x0, true(), ., .)
 
-crate::codec::uint64_go: 29 steps; 1 nodes {}; stuck: Some("a stuck application of `crate::codec::uint64_go`")
-result = crate::codec::uint64_go(x0, x1, x2, x3, .)
+crate::codec::uint64_go: 33 steps; 1 nodes {}; stuck: Some("a stuck application of `crate::codec::uint64_go`")
+result = crate::codec::uint64_go(x0, x1, x2, ., .)
 
-crate::codec::location: 68 steps; 1 nodes {}; stuck: Some("a `match` on a neutral scrutinee (`crate::codec::uint64_go`)")
-result = match crate::codec::uint64_go(10U32, x0, 0U32, 0U64, .) {..} .
+crate::codec::location: 94 steps; 1 nodes {}; stuck: Some("a `match` on a neutral scrutinee (`crate::codec::uint64_go`)")
+result = match crate::codec::uint64_go(10U32, x0, true(), ., .) {..} .
 
 crate::merkle::reconstruct_finish: 118 steps; 1 nodes {}; stuck: Some("a `match` on a neutral scrutinee (variable #5)")
 result = match x5 {..} .
 
-crate::merkle::root: 56 steps; 1 nodes {}; stuck: Some("a `match` on a neutral scrutinee (primitive Le(Usize))")
-result = match #Le(Usize)(x3.1, 0Usize) {..} .
+crate::merkle::root: 231 steps; 1 nodes {}; stuck: Some("a `match` on a neutral scrutinee (primitive Lt(Usize))")
+result = match match #Lt(Usize)(0Usize, x3.1) {..} . {..} .
 
-crate::merkle::bag_prefix: 35 steps; 1 nodes {}; stuck: Some("a stuck application of `crate::merkle::bag_prefix`")
+crate::merkle::bag_prefix: 43 steps; 1 nodes {}; stuck: Some("a stuck application of `crate::merkle::bag_prefix`")
 %0 = <Cons(seq::index(<ty>, x2.1, 0Int, ., .), Cons(seq::index(<ty>, x2.1, 1Int, ., .), Cons(seq::index(<ty>, x2.1, 2Int, ., .), Cons(seq::index(<ty>, x2.1, 3Int, ., .), Cons(seq::index(<ty>, x2.1, 4Int, ., .), Cons(seq::index(<ty>, x2.1, 5Int, ., .), Cons(seq::index(<ty>, x2.1, 6Int, ., .), Cons(seq::index(<ty>, x2.1, 7Int, ., .), Cons(seq::index(<ty>, x2.1, 8Int, ., .), Cons(seq::index(<ty>, x2.1, 9Int, ., .), Cons(seq::index(<ty>, x2.1, 10Int, ., .), Cons(seq::index(<ty>, x2.1, 11Int, ., .), Cons(seq::index(<ty>, x2.1, 12Int, ., .), Cons(seq::index(<ty>, x2.1, 13Int, ., .), Cons(seq::index(<ty>, x2.1, 14Int, ., .), Cons(seq::index(<ty>, x2.1, 15Int, ., .), Cons(seq::index(<ty>, x2.1, 16Int, ., .), Cons(seq::index(<ty>, x2.1, 17Int, ., .), Cons(seq::index(<ty>, x2.1, 18Int, ., .), Cons(seq::index(<ty>, x2.1, 19Int, ., .), Cons(seq::index(<ty>, x2.1, 20Int, ., .), Cons(seq::index(<ty>, x2.1, 21Int, ., .), Cons(seq::index(<ty>, x2.1, 22Int, ., .), Cons(seq::index(<ty>, x2.1, 23Int, ., .), Cons(seq::index(<ty>, x2.1, 24Int, ., .), Cons(seq::index(<ty>, x2.1, 25Int, ., .), Cons(seq::index(<ty>, x2.1, 26Int, ., .), Cons(seq::index(<ty>, x2.1, 27Int, ., .), Cons(seq::index(<ty>, x2.1, 28Int, ., .), Cons(seq::index(<ty>, x2.1, 29Int, ., .), Cons(seq::index(<ty>, x2.1, 30Int, ., .), Cons(seq::index(<ty>, x2.1, 31Int, ., .), Nil())))))))))))))))))))))))))))))))), .>
-result = crate::merkle::bag_prefix(x0, x1, %0)
+result = crate::merkle::bag_prefix(x0, x1, %0, .)
 
 crate::verifier::verify_fixed: 93 steps; 1 nodes {}; stuck: Some("a `match` on a neutral scrutinee (primitive Le(Usize))")
 result = match #Le(Usize)(x3.1, 4096Usize) {..} .

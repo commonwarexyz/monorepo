@@ -21,11 +21,17 @@ use sandblaster_front::opt::par::LaneReport;
 use sandblaster_front::opt::OptOptions;
 use sandblaster_front::target::TargetInfo;
 
+#[path = "common/qmdb.rs"]
+mod qmdb;
+
 /// One elaboration at a time (the heap is measured per process).
 static SERIAL: Mutex<()> = Mutex::new(());
 
+/// QMDB's `sha256.rs`, mounted alone: its exec code, without the §15
+/// ghost lines that name the fixture's `spec` and `proof` modules
+/// (`qmdb::exec_source`).
 fn sha256_src() -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/sha256.rs")).unwrap()
+    qmdb::exec_source("sha256.rs")
 }
 
 /// A lane site of `n` calls of `f` (`compress` or `hash_64`).

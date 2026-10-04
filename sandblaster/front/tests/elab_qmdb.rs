@@ -11,9 +11,12 @@
 //!   baseline crate's tests assert is what the natively compiled sources
 //!   return (`sandblaster/fixtures/qmdb/baseline/tests`).
 //!
-//! The ghost modules (`LAWS.rs`, `PROOF.rs`) are phase 3; their front-end
-//! diagnostics are tolerated here, and they are not elaborated (test-only
-//! `exec_only`).
+//! The ghost modules (`spec/`, `MODEL.rs`, `LAWS.rs`, `PROOF.rs`) are not
+//! elaborated here (test-only `exec_only`; `elab_laws` and `qmdb_gates`
+//! verify them), nor are the exec code's `proof!` steps that use them. The
+//! build's prover chain is used throughout: the port's head-first slice
+//! recursions (`xs.first()`, then `&xs[1..]`) need `auto` for their slice
+//! ranges.
 
 #[path = "elab_util.rs"]
 #[macro_use]
@@ -118,7 +121,9 @@ fn kernel_evaluation_of_verify_matches_the_fixtures() {
             (name.clone(), args, expected)
         })
         .collect();
-    let opts = VerifyOptions { provers: ProverSet::Basic, exec_only: true };
+    // the build's prover chain: the port's head-first slice recursions
+    // (`xs.first()` then `&xs[1..]`) need `auto` for their slice ranges
+    let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: true };
     let results: Vec<(String, Result<String, String>, bool)> = driver::stage::with_elaboration(k, &opts, |out| {
         assert!(out.verified(), "QMDB exec code not verified");
         cases
@@ -154,7 +159,8 @@ fn kernel_evaluation_of_verify_matches_the_fixtures() {
 fn obligation_records_carry_spans_kinds_and_provers() {
     let c = check_qmdb();
     let k = c.krate.as_ref().unwrap();
-    let opts = VerifyOptions { provers: ProverSet::Basic, exec_only: true };
+    // the build's prover chain (see `kernel_evaluation_of_verify_matches_the_fixtures`)
+    let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: true };
     let v = driver::stage::verify(k, &opts);
     for o in &v.obligations {
         assert!(!o.span.is_dummy(), "obligation {} of {} has no span", o.id, o.def);
@@ -181,7 +187,8 @@ fn qmdb_on_x86_64_elaborates_the_sha_ni_variant() {
             assert!(file.ends_with("PROOF.rs") || file.ends_with("LAWS.rs"), "{}", d.render(&c.sm));
         }
         let k = c.krate.as_ref().unwrap();
-        let v = driver::stage::verify(k, &VerifyOptions { provers: ProverSet::Basic, exec_only: true });
+        // the build's prover chain (see `kernel_evaluation_of_verify_matches_the_fixtures`)
+        let v = driver::stage::verify(k, &VerifyOptions { provers: ProverSet::Standard, exec_only: true });
         assert!(v.failed_defs().is_empty(), "{}: {}", root.display(), util::explain(&c, &v));
         assert_eq!(v.stats().failed, 0, "{}: {}", root.display(), util::explain(&c, &v));
         let shani = v.defs.iter().find(|d| d.name == "crate::sha256::compress_shani").map(|d| d.status.clone());

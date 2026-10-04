@@ -589,17 +589,9 @@ impl<'a> Engine<'a> {
     pub fn decide_bool(&mut self, st: &St, c: &V) -> R<Option<(bool, Tm)>> {
         let bt = Rc::new(Value::Ind { ind: self.n.bool_ind, params: vec![] });
         let probe = std::mem::replace(&mut self.lin_probe, true);
-        let mut out = Ok(None);
-        for b in [true, false] {
-            let g = Rc::new(Value::Eq { ty: bt.clone(), lhs: c.clone(), rhs: self.bool_v(b) });
-            match self.lin_prove(st, &g, true) {
-                Ok(None) => {}
-                r => {
-                    out = r.map(|p| p.map(|p| (b, p)));
-                    break;
-                }
-            }
-        }
+        // both values at once: one enrichment of the facts for both
+        let goals: Vec<V> = [true, false].iter().map(|&b| Rc::new(Value::Eq { ty: bt.clone(), lhs: c.clone(), rhs: self.bool_v(b) })).collect();
+        let out = self.lin_prove_any(st, &goals).map(|r| r.map(|(i, p)| (i == 0, p)));
         self.lin_probe = probe;
         out
     }
@@ -611,25 +603,12 @@ impl<'a> Engine<'a> {
         let bt = Rc::new(Value::Ind { ind: self.n.bool_ind, params: vec![] });
         let saved = std::mem::replace(&mut self.lin_no_cuts, true);
         let probe = std::mem::replace(&mut self.lin_probe, true);
-        let mut out = None;
-        for b in [true, false] {
-            let g = Rc::new(Value::Eq { ty: bt.clone(), lhs: c.clone(), rhs: self.bool_v(b) });
-            match self.lin_prove(st, &g, true) {
-                Ok(Some(p)) => {
-                    out = Some((b, p));
-                    break;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    self.lin_no_cuts = saved;
-                    self.lin_probe = probe;
-                    return Err(e);
-                }
-            }
-        }
+        // both values at once: one enrichment of the facts for both
+        let goals: Vec<V> = [true, false].iter().map(|&b| Rc::new(Value::Eq { ty: bt.clone(), lhs: c.clone(), rhs: self.bool_v(b) })).collect();
+        let out = self.lin_prove_any(st, &goals);
         self.lin_no_cuts = saved;
         self.lin_probe = probe;
-        Ok(out)
+        Ok(out?.map(|(i, p)| (i == 0, p)))
     }
 
     /// A proof of `Eq(Bool, #le_int(0, e), true)` from `e`'s own range, by

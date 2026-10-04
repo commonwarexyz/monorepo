@@ -159,9 +159,6 @@ struct Run {
     sections: Vec<Vec<String>>,
     /// Every surface item's source text (`src` is its hash).
     sources: Vec<(String, String)>,
-    /// Whether the surface pins the lift prelude (a lifted crate's `lift`
-    /// header line).
-    lift: Option<[u8; 32]>,
 }
 
 impl Run {
@@ -218,7 +215,6 @@ fn run_full(c: Checked) -> (Run, Hashes) {
             gate: g.list.iter().filter(|d| d.severity == Severity::Error).map(|d| d.msg.clone()).collect(),
             sections: out.sections.iter().map(|x| x.members.iter().map(|m| kr.item(*m).path.to_string()).collect()).collect(),
             sources: s.items.iter().map(|i| (i.key.clone(), i.source.clone())).collect(),
-            lift: s.lift,
         };
         (r, hashes)
     })

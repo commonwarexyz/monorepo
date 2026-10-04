@@ -270,6 +270,91 @@ impl<'a> Engine<'a> {
         out
     }
 
+    /// [`Self::lin_prove`] (enriched) of several goals over the same facts
+    /// and atoms — a probe deciding a comparison both ways,
+    /// `Eq(Bool, c, true)` and `Eq(Bool, c, false)`
+    /// ([`Engine::decide_bool`]): the enrichment rounds are shared (they
+    /// depend on the facts and the atoms only, the same for every goal) and
+    /// each round tries every goal's certificate, then the integer cuts try
+    /// the goals in order. `Some((i, proof))` for the first goal `i` found.
+    /// Goals that are not plain linarith forms (or sides of an
+    /// equivalence) are proved one by one by [`Self::lin_prove`].
+    pub fn lin_prove_any(&mut self, st: &St, goals: &[V]) -> R<Option<(usize, Tm)>> {
+        if goals.iter().any(|g| !self.lin_goal_form(g) || self.lin_equiv_sides(g).is_some()) {
+            for (i, g) in goals.iter().enumerate() {
+                if let Some(p) = self.lin_prove(st, g, true)? {
+                    return Ok(Some((i, p)));
+                }
+            }
+            return Ok(None);
+        }
+        let goal_tms: Vec<Tm> = goals.iter().map(|g| self.quote(st, g)).collect();
+        let mut live = vec![true; goals.len()];
+        let mut hyps = self.lin_hyps(st);
+        let rounds = self.cfg.lin_rounds;
+        let mut seen: Vec<Tm> = Vec::new();
+        let skip = std::mem::replace(&mut self.lin_skip_rounds, 0);
+        // the goals' atoms (one comparison's, whichever its value)
+        let mut goal_atoms: Vec<Tm> = Vec::new();
+        for t in &goal_tms {
+            for a in self.linearize(st, &[], t)?.map(|s| s.atoms).unwrap_or_default() {
+                if !goal_atoms.iter().any(|b| self.env.alpha_eq_relevant(&a, b, &|x, y| x == y)) {
+                    goal_atoms.push(a);
+                }
+            }
+        }
+        for round in 0..rounds {
+            // the first live goal's system and feasible points feed the
+            // enrichment (the atoms are the same for all)
+            let mut base: Option<(LinSystem, Option<Vec<Vec<Option<super::rat::Q>>>>)> = None;
+            for i in 0..goals.len() {
+                if !live[i] {
+                    continue;
+                }
+                let Some(sys) = self.linearize(st, &hyps, &goal_tms[i])? else {
+                    // (as in `lin_prove`: a goal that does not linearize fails)
+                    live[i] = false;
+                    continue;
+                };
+                let mut points: Option<Vec<Vec<Option<super::rat::Q>>>> = None;
+                let cert = if round < skip && round + 1 < rounds { None } else { certificate_or_point(&sys).map_err(|p| points = Some(p.into_iter().collect())).ok() };
+                if let Some(cert) = cert {
+                    self.lin_round = Some(round);
+                    let t = goal_tms[i].clone();
+                    return Ok(Some((i, self.lin_term(st, hyps, t, &sys, cert)?)));
+                }
+                if self.trace {
+                    eprintln!("[auto] linarith failed (round {round}, {} hyps, {} atoms): {}", hyps.len(), sys.atoms.len(), self.show(st, &goals[i]));
+                }
+                if base.is_none() {
+                    base = Some((sys, points));
+                }
+            }
+            let Some((sys, points)) = base else { return Ok(None) };
+            if round + 1 == rounds {
+                break;
+            }
+            let before = hyps.len();
+            let atoms = self.enrich_atoms(st, &sys, &mut hyps, &mut seen)?;
+            self.enrich_pairs(st, &sys, points.as_deref(), &goal_atoms, &atoms, &mut hyps, &mut seen, None)?;
+            if hyps.len() == before {
+                break;
+            }
+        }
+        if self.cfg.int_cuts > 0 && !self.lin_no_cuts {
+            for i in 0..goals.len() {
+                if !live[i] {
+                    continue;
+                }
+                if let Some(p) = self.lin_cut(st, &goals[i], &hyps, self.cfg.int_cuts)? {
+                    self.lin_round = Some(u32::MAX);
+                    return Ok(Some((i, p)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Prove an arithmetic goal (a §5.8 goal form) by linarith over the
     /// state's facts, with enrichment rounds if `enrich`.
     pub fn lin_prove(&mut self, st: &St, goal: &V, enrich: bool) -> R<Option<Tm>> {
@@ -300,12 +385,43 @@ impl<'a> Engine<'a> {
             true => self.linearize(st, &[], &goal_tm)?.map(|s| s.atoms).unwrap_or_default(),
             false => Vec::new(),
         };
+        // the last failed search over the current `hyps`: its system and the
+        // point the integer cuts start from (`certificate_or_point`'s
+        // failure is the first infeasible problem's point, as `lin_cut`
+        // computes it)
+        let mut last: Option<(usize, LinSystem, Option<Vec<Option<super::rat::Q>>>)> = None;
+        // a failed per-atom search whose hypotheses the pairwise enrichment
+        // left unchanged: the next round's system is that same system
+        let mut carried: Option<(LinSystem, Option<Vec<Option<super::rat::Q>>>)> = None;
         for round in 0..rounds {
-            let Some(sys) = self.linearize(st, &hyps, &goal_tm)? else { return Ok(None) };
-            // (a round the caller knows fails for this class: no search; a
-            // failed search leaves its feasible points to the enrichment)
             let mut points: Option<Vec<Vec<Option<super::rat::Q>>>> = None;
-            let cert = if round < skip && round + 1 < rounds { None } else { certificate_or_point(&sys).map_err(|p| points = Some(p.into_iter().collect())).ok() };
+            let (sys, cert) = match carried.take() {
+                // (the same system fails the same way: no second search)
+                Some((sys, pt)) => {
+                    points = Some(pt.clone().into_iter().collect());
+                    last = Some((hyps.len(), sys.clone(), pt));
+                    (sys, None)
+                }
+                None => {
+                    let Some(sys) = self.linearize(st, &hyps, &goal_tm)? else { return Ok(None) };
+                    // (a round the caller knows fails for this class: no
+                    // search; a failed search leaves its feasible points to
+                    // the enrichment)
+                    let cert = if round < skip && round + 1 < rounds {
+                        None
+                    } else {
+                        match certificate_or_point(&sys) {
+                            Ok(c) => Some(c),
+                            Err(p) => {
+                                last = Some((hyps.len(), sys.clone(), p.clone()));
+                                points = Some(p.into_iter().collect());
+                                None
+                            }
+                        }
+                    };
+                    (sys, cert)
+                }
+            };
             if let Some(cert) = cert {
                 self.lin_round = Some(round);
                 return Ok(Some(self.lin_term(st, hyps, goal_tm, &sys, cert)?));
@@ -322,13 +438,46 @@ impl<'a> Engine<'a> {
                 break;
             }
             let before = hyps.len();
-            self.enrich(st, &sys, points.as_deref(), &goal_atoms, &mut hyps, &mut seen)?;
+            let atoms = self.enrich_atoms(st, &sys, &mut hyps, &mut seen)?;
+            // The per-atom facts alone first: the pairwise enrichments prove
+            // side conditions by linarith over every hypothesis, per
+            // candidate, which costs far more than one more certificate
+            // search; they run only when the cheap facts do not close the
+            // goal. (As a round: skipped below `skip`, reported as the next
+            // round; its linear system is a subsystem of the next round's.)
+            // Not in a probe, whose usual outcome is failure
+            // ([`Engine::lin_probe`]): there the extra search is pure cost.
+            let mut atoms_failed: Option<(usize, LinSystem, Option<Vec<Option<super::rat::Q>>>)> = None;
+            if hyps.len() > before && round + 1 >= skip && !self.lin_probe {
+                if let Some(sys1) = self.linearize(st, &hyps, &goal_tm)? {
+                    match certificate_or_point(&sys1) {
+                        Ok(cert) => {
+                            self.lin_round = Some(round + 1);
+                            return Ok(Some(self.lin_term(st, hyps, goal_tm, &sys1, cert)?));
+                        }
+                        Err(p) => atoms_failed = Some((hyps.len(), sys1, p)),
+                    }
+                }
+            }
+            let model = atoms_failed.as_ref().and_then(|(n, s1, p)| p.as_ref().map(|p| (*n, s1, p.as_slice())));
+            self.enrich_pairs(st, &sys, points.as_deref(), &goal_atoms, &atoms, &mut hyps, &mut seen, model)?;
+            if let Some((n, sys1, p)) = atoms_failed
+                && n == hyps.len()
+            {
+                last = Some((n, sys1.clone(), p.clone()));
+                carried = Some((sys1, p));
+            }
             if hyps.len() == before {
                 break;
             }
         }
         if enrich && self.cfg.int_cuts > 0 && !self.lin_no_cuts {
-            let r = self.lin_cut(st, goal, &hyps, self.cfg.int_cuts);
+            let r = match last {
+                // the cuts start from the last failed search of these very
+                // hypotheses (its system and point), not from a new one
+                Some((n, sys, point)) if n == hyps.len() => self.lin_cut_from(st, goal, goal_tm, &hyps, self.cfg.int_cuts, sys, point),
+                _ => self.lin_cut(st, goal, &hyps, self.cfg.int_cuts),
+            };
             if matches!(r, Ok(Some(_))) {
                 self.lin_round = Some(u32::MAX);
             }
@@ -365,6 +514,26 @@ impl<'a> Engine<'a> {
             let Some(cert) = simplex::certificate(&sys) else { return Ok(None) };
             return Ok(Some(self.lin_term(st, hyps.to_vec(), goal_tm, &sys, cert)?));
         };
+        self.lin_cut_at(st, goal, &goal_tm, hyps, depth, &sys, point)
+    }
+
+    /// [`Self::lin_cut`] from a search of `hyps` that already failed:
+    /// `sys` is their system and `point` the first infeasible problem's
+    /// point (`None`: no point, as `lin_cut` gives up then), the same
+    /// [`simplex::farkas_staged_point`] search `lin_cut` would run again.
+    #[allow(clippy::too_many_arguments)]
+    fn lin_cut_from(&mut self, st: &St, goal: &V, goal_tm: Tm, hyps: &[Hyp], depth: u32, sys: LinSystem, point: Option<Vec<Option<super::rat::Q>>>) -> R<Option<Tm>> {
+        if depth == 0 || sys.atoms.len() > CUT_MAX_ATOMS {
+            return Ok(None);
+        }
+        let Some(point) = point else { return Ok(None) };
+        self.lin_cut_at(st, goal, &goal_tm, hyps, depth, &sys, point)
+    }
+
+    /// The cuts of [`Self::lin_cut`] at the infeasible `point` of `sys`.
+    #[allow(clippy::too_many_arguments)]
+    fn lin_cut_at(&mut self, st: &St, goal: &V, goal_tm: &Tm, hyps: &[Hyp], depth: u32, sys: &LinSystem, point: Vec<Option<super::rat::Q>>) -> R<Option<Tm>> {
+        let goal_tm = goal_tm.clone();
         // Disequality facts first: they are the usual reason (`h < 2 ∧ h ≠ 0 ⊢ h = 1`).
         if let Some(p) = self.lin_diseq_cut(st, goal, hyps, depth)? {
             return Ok(Some(p));
@@ -735,9 +904,10 @@ impl<'a> Engine<'a> {
         Some(out)
     }
 
-    /// One enrichment round: axiom instances, type bounds and lemma
-    /// instances for the atoms of `sys` (see the module docs).
-    fn enrich(&mut self, st: &St, sys: &LinSystem, points: Option<&[Vec<Option<super::rat::Q>>]>, goal_atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>) -> R<()> {
+    /// The per-atom part of an enrichment round: axiom instances, type
+    /// bounds and lemma instances for the atoms of `sys` (see the module
+    /// docs). Returns the atoms looked at, for [`Self::enrich_pairs`].
+    fn enrich_atoms(&mut self, st: &St, sys: &LinSystem, hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>) -> R<Vec<Tm>> {
         let mut atoms = sys.atoms.clone();
         // the atoms of disequality facts (`a ≠ b`, not linarith hypotheses,
         // split on demand by the cuts) are enriched too, so the cut arms have
@@ -777,6 +947,16 @@ impl<'a> Engine<'a> {
             self.enrich_bounds(st, a, &av, &atoms, hyps)?;
             self.enrich_rules(st, &av, hyps)?;
         }
+        Ok(atoms)
+    }
+
+    /// The pairwise part of an enrichment round, after [`Self::enrich_atoms`]
+    /// (`atoms`: the atoms it looked at). `model`: a failed search over the
+    /// first `n` of `hyps` — its system and the rational point it ends at, a
+    /// model of those hypotheses (and of the implicit bounds of the atoms it
+    /// assigns).
+    #[allow(clippy::too_many_arguments)]
+    fn enrich_pairs(&mut self, st: &St, sys: &LinSystem, points: Option<&[Vec<Option<super::rat::Q>>]>, goal_atoms: &[Tm], atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>, model: Option<(usize, &LinSystem, &[Option<super::rat::Q>])>) -> R<()> {
         // The pairwise enrichments (unique quotients, `pow2` pairs, quotient
         // congruence) prove side conditions by linarith over every
         // hypothesis, per candidate and on every enriched linarith call:
@@ -790,7 +970,7 @@ impl<'a> Engine<'a> {
             false => atoms.iter().filter(|a| goal_atoms.iter().any(|g| self.env.alpha_eq_relevant(g, a, &|x, y| x == y))).cloned().collect(),
         };
         let goal_divides = in_goal.iter().any(|a| matches!(&**a, Term::Prim { op: PrimOp::IDiv | PrimOp::IMod, args, .. } if matches!(&*args[1], Term::Lit { .. })));
-        self.enrich_quotients(st, &in_goal, hyps, seen)?;
+        self.enrich_quotients(st, &in_goal, hyps, seen, model)?;
         self.enrich_pow2_pairs(st, &in_goal, hyps, seen)?;
         if !self.in_atom_congr {
             self.enrich_pow2_exponents(st, sys, points, goal_atoms, hyps, seen)?;
@@ -966,7 +1146,7 @@ impl<'a> Engine<'a> {
     /// the equation `x / k = m` is proved by two splits (`q < m` and
     /// `m < q` are each refuted by linarith) and added; `x % k = c` then
     /// follows linearly. Each proof is checked by the kernel like any other.
-    fn enrich_quotients(&mut self, st: &St, atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>) -> R<()> {
+    fn enrich_quotients(&mut self, st: &St, atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>, model: Option<(usize, &LinSystem, &[Option<super::rat::Q>])>) -> R<()> {
         // (also for rule hypotheses: `bool::eq_sound` states a boolean
         // equation as one; the splits below instantiate no rules)
         if self.rule_depth >= 3 {
@@ -1023,6 +1203,14 @@ impl<'a> Engine<'a> {
                 let ltk = sandblaster_kernel::prim::prim0(PrimOp::Lt(int), vec![c.clone(), mk::lit(int, k.clone())]);
                 let hs = hyps.clone();
                 let (Some(g0), Some(g1)) = (self.cond(st, le0, true)?, self.cond(st, ltk, true)?) else { continue };
+                // a side condition false at a rational model of these very
+                // hypotheses has no linarith proof: no search for it
+                if let Some((n, s1, pt)) = model
+                    && n == hs.len()
+                    && (self.false_at(st, &g1, s1, pt)? || self.false_at(st, &g0, s1, pt)?)
+                {
+                    continue;
+                }
                 if self.lin_with(st, &hs, &g0)?.is_none() || self.lin_with(st, &hs, &g1)?.is_none() {
                     continue;
                 }
@@ -1072,10 +1260,22 @@ impl<'a> Engine<'a> {
                     continue;
                 }
                 // (marked done only once proved: a later round may have the
-                // dividends' equation)
+                // dividends' equation; a failure is marked with the number
+                // of hypotheses it saw — the list only grows — so the same
+                // search is not run again until they grow)
+                let tried = sandblaster_kernel::prim::prim0(PrimOp::IAdd, vec![key.clone(), mk::lit(int, hyps.len() as u64)]);
+                if seen.iter().any(|s| self.env.alpha_eq_relevant(s, &tried, &|p, q| p == q)) {
+                    continue;
+                }
                 let hs = hyps.clone();
-                let Some(e) = self.eval(st, &mk::eq(mk::int_ty(int), x1.clone(), x2.clone()))? else { continue };
-                let Some(pe) = self.lin_with(st, &hs, &e)? else { continue };
+                let Some(e) = self.eval(st, &mk::eq(mk::int_ty(int), x1.clone(), x2.clone()))? else {
+                    seen.push(tried);
+                    continue;
+                };
+                let Some(pe) = self.lin_with(st, &hs, &e)? else {
+                    seen.push(tried);
+                    continue;
+                };
                 // one transport along the dividends' equation (as in
                 // `enrich_div_congruence`), not the two splits of
                 // `quotient_eq`: those cost a linarith run per arm
@@ -1415,6 +1615,50 @@ impl<'a> Engine<'a> {
         Ok(Some((pf, stmt)))
     }
 
+    /// Whether the linarith goal `goal` is false at `pt`, the point of a
+    /// failed search `s1` over some hypotheses (a rational model of them
+    /// and of the implicit bounds of the atoms it assigns): some refutation
+    /// problem of `goal` — the negated goal and the implicit constraints of
+    /// its atoms — holds at `pt` with every atom of it assigned. Then
+    /// `lin_with` over those hypotheses finds no certificate (the
+    /// constraints of the unassigned atoms share none of them and are
+    /// satisfiable on their own). Conservative: `false` when unsure.
+    fn false_at(&mut self, st: &St, goal: &V, s1: &LinSystem, pt: &[Option<super::rat::Q>]) -> R<bool> {
+        use super::rat::Q;
+        use sandblaster_kernel::linarith::ConstraintKind;
+        if !self.lin_goal_form(goal) || self.lin_equiv_sides(goal).is_some() {
+            return Ok(false);
+        }
+        let goal_tm = self.quote(st, goal);
+        let Some(gs) = self.linearize(st, &[], &goal_tm)? else { return Ok(false) };
+        let mut map: Vec<usize> = Vec::with_capacity(gs.atoms.len());
+        for a in &gs.atoms {
+            match s1.atoms.iter().position(|b| self.env.alpha_eq_relevant(a, b, &|x, y| x == y)) {
+                Some(i) if pt.get(i).is_some_and(|v| v.is_some()) => map.push(i),
+                _ => return Ok(false),
+            }
+        }
+        'p: for p in &gs.problems {
+            for c in p {
+                let mut v = Q::int(c.constant.clone());
+                for (a, k) in &c.coeffs {
+                    let Some(&i) = map.get(*a) else { continue 'p };
+                    let Some(x) = &pt[i] else { continue 'p };
+                    v = v.add(&Q::int(k.clone()).mul(x));
+                }
+                let holds = match c.kind {
+                    ConstraintKind::Le0 => !v.is_pos(),
+                    ConstraintKind::Eq0 => v.is_zero(),
+                };
+                if !holds {
+                    continue 'p;
+                }
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// A proof of `q = m` (terms at `st`'s depth) from `hyps`: split on
     /// `q < m`, then on `m < q`; the two strict arms are refuted and the
     /// last one is linear.
@@ -1506,6 +1750,12 @@ impl<'a> Engine<'a> {
                 if seen.iter().any(|s| self.env.alpha_eq_relevant(s, &key, &|p, q| p == q)) {
                     continue;
                 }
+                // (a failure over these very hypotheses is not retried until
+                // they grow, as in `enrich_quotient_congruence`)
+                let tried = sandblaster_kernel::prim::prim0(PrimOp::IAdd, vec![key.clone(), mk::lit(int, hyps.len() as u64)]);
+                if seen.iter().any(|s| self.env.alpha_eq_relevant(s, &tried, &|p, q| p == q)) {
+                    continue;
+                }
                 let hs = hyps.clone();
                 // an equation of the operands, by linarith (`None`: equal already)
                 let operand_eq = |e: &mut Self, x: &Tm, y: &Tm| -> R<Option<Option<Tm>>> {
@@ -1537,7 +1787,10 @@ impl<'a> Engine<'a> {
                     }
                     Ok(None)
                 };
-                let (Some(ea), Some(ed)) = (operand_eq(self, &a1, &a2)?, operand_eq(self, &d1, &d2)?) else { continue };
+                let (Some(ea), Some(ed)) = (operand_eq(self, &a1, &a2)?, operand_eq(self, &d1, &d2)?) else {
+                    seen.push(tried);
+                    continue;
+                };
                 let prim = |x: Tm, y: Tm| sandblaster_kernel::prim::prim0(o1, vec![x, y]);
                 // refl(t1), then along the dividend, then along the divisor
                 let mut proof = mk::refl(it.clone(), t1.clone());
@@ -1609,7 +1862,26 @@ impl<'a> Engine<'a> {
         {
             return Ok((x == y).then(|| mk::refl(mk::bool_ty(self.n.bool_ind), mk::bool_lit(self.n.bool_ind, true))));
         }
-        self.lin_with(st, hyps, &g)
+        self.lin_with_directed(st, hyps, &g)
+    }
+
+    /// [`Self::lin_with`] for the side condition of an enrichment fact (a
+    /// no-wrap or decided comparison of one atom): the certificate is
+    /// searched from the condition outwards
+    /// ([`simplex::certificate_directed`]), as the condition usually needs
+    /// a few of the round's many hypotheses. It misses only a refutation by
+    /// hypotheses contradictory among themselves and unrelated to the
+    /// condition, which the round's own search finds.
+    fn lin_with_directed(&mut self, st: &St, hyps: &[Hyp], goal: &V) -> R<Option<Tm>> {
+        if !self.lin_goal_form(goal) || self.lin_equiv_sides(goal).is_some() {
+            return Ok(None);
+        }
+        let goal_tm = self.quote(st, goal);
+        let Some(sys) = self.linearize(st, hyps, &goal_tm)? else { return Ok(None) };
+        match simplex::certificate_directed(&sys) {
+            Some(cert) => Ok(Some(self.lin_term(st, hyps.to_vec(), goal_tm, &sys, cert)?)),
+            None => Ok(None),
+        }
     }
 
     /// `Eq(Bool, c, b)` for a comparison term `c`.
@@ -1632,7 +1904,7 @@ impl<'a> Engine<'a> {
                 }
                 continue;
             }
-            if let Some(p) = self.lin_with(st, hyps, &g)? {
+            if let Some(p) = self.lin_with_directed(st, hyps, &g)? {
                 return Ok(Some((b, p)));
             }
         }

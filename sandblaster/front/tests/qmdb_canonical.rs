@@ -5,11 +5,14 @@
 //! oracle corpus of mutated fixtures (`sandblaster/fixtures/qmdb/baseline/tests/data/
 //! bend_verify.json`); `verify` must return the expected result everywhere.
 //!
-//! The ghost modules (`LAWS.rs`, `PROOF.rs`) are left out of this build: they
-//! are never printed, and their phase-1 status is reported by `sandblaster
-//! check`. The test is skipped when the port is absent.
+//! The ghost modules (`spec/`, `MODEL.rs`, `LAWS.rs`, `PROOF.rs`) are left
+//! out of this build, with the exec files' §15 annotations that name them:
+//! they are never printed. The test is skipped when the port is absent.
 
 mod common;
+
+#[path = "common/qmdb.rs"]
+mod qmdb;
 
 use std::path::Path;
 
@@ -26,30 +29,37 @@ fn qmdb_canonical_output_verifies_fixtures_and_bend_corpus() {
         eprintln!("qmdb port not present; skipping");
         return;
     }
-    // copy the exec sources without the ghost module declarations
+    // copy the exec sources without the ghost module declarations, and the
+    // exec files without their §15 ghost lines (`#[refines]`, `#[view]`,
+    // `proof!`), which name those modules (`qmdb::exec_source`); the ghost
+    // files themselves (`LAWS.rs`, `PROOF.rs`, `MODEL.rs`, `spec/`) are
+    // not mounted
     let t = tmp("qmdb-canonical");
     let dsl = t.join("dsl");
     std::fs::create_dir_all(&dsl).unwrap();
     for e in std::fs::read_dir(&src).unwrap() {
         let p = e.unwrap().path();
-        if p.extension().is_some_and(|x| x == "rs") {
-            std::fs::copy(&p, dsl.join(p.file_name().unwrap())).unwrap();
+        let name = p.file_name().unwrap().to_string_lossy().into_owned();
+        if p.extension().is_some_and(|x| x == "rs") && !["LAWS.rs", "PROOF.rs", "MODEL.rs"].contains(&name.as_str()) {
+            std::fs::write(dsl.join(&name), qmdb::exec_source(&name)).unwrap();
         }
     }
     let root = std::fs::read_to_string(dsl.join("n1.rs")).unwrap();
     let mut out = String::new();
-    let mut skip_next = false;
+    // a ghost declaration: `#[cfg(sandblaster)]`, its other attributes
+    // (`#[spec]`, `#[model]`, `#[path = ..]`), then `mod name;`
+    let mut in_ghost = false;
     for line in root.lines() {
         let t = line.trim();
         if t == "#[cfg(sandblaster)]" {
-            skip_next = true;
+            in_ghost = true;
             continue;
         }
-        if skip_next && (t.starts_with("#[path") || t.starts_with("mod ")) {
-            skip_next = !t.starts_with("mod ");
+        if in_ghost {
+            assert!(t.starts_with("#[") || t.starts_with("mod "), "a ghost declaration of n1.rs: {line}");
+            in_ghost = !t.starts_with("mod ");
             continue;
         }
-        skip_next = false;
         out.push_str(line);
         out.push('\n');
     }

@@ -9,19 +9,33 @@
 //! transparent), which took 56 s (`auto`, lightest configuration, lemma
 //! `inputs_accepted`) and 41 s (development prover, 50,000 steps, law
 //! `verify_acceptance`), one run growing to 4.2 GB; before this fix, on this
-//! machine: 8.2 s / 3 GiB and 19.4 s.
+//! machine: 8.2 s / 3 GiB and 19.4 s. The fully specified QMDB (§15 S5)
+//! replaced both items; their successors here have the same kind of
+//! hypotheses: [`LEMMA`] the unfolded decoder of the exec verifier
+//! (`verifier::parse`, which `inputs_accepted`'s `verify_inputs` called),
+//! [`LAW`] the unfolded verifier (the spec's `verify`, which the exec
+//! `verify` refines; `verify_acceptance` assumed the exec one).
 //!
 //! The bounds asserted here are generous (the measured times are ~0.1 s and
 //! a few ms, the heap growth under 64 MiB) so that a loaded machine does not
-//! make the suite flaky. The tests share process-wide state (the memory
-//! limits), so they are serialized.
+//! make the suite flaky. Two calls are the exception: `auto` and the chain
+//! at the build's 20M steps on [`LAW`] use every budget they are given (the
+//! search case splits the unfolded spec verifier, every step charged), and
+//! `auto` is given two (`auto::search::prove_goal`: the retry in the other
+//! order of plain search and simplifier has a fresh budget, which QMDB's
+//! own proofs need; the pass without casts shares the one before it): those
+//! calls are bounded by [`MAX_TIME`] per budget ([`per_budget`]; 6.5 s per
+//! budget here, 13 s in all; 21 s when each of `auto`'s three passes had a
+//! fresh budget), and the same configurations on a tenth of the budget by
+//! [`MAX_TIME`] (1.4 s here: the time follows the charged steps). The tests
+//! share process-wide state (the memory limits), so they are serialized.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use sandblaster_front::auto::{meter, Auto, AutoConfig};
-use sandblaster_front::driver::{self, Checked, ProverSet, VerifyOptions};
+use sandblaster_front::driver::{self, Checked};
 use sandblaster_front::elab::{self, basic::BasicProver, ProverChain};
 use sandblaster_front::loader::RealFs;
 use sandblaster_front::memguard;
@@ -38,6 +52,20 @@ static SERIAL: Mutex<()> = Mutex::new(());
 const MAX_TIME: Duration = Duration::from_secs(10);
 /// Bound on the heap growth of one prover call in the assertions.
 const MAX_HEAP: usize = 512 << 20;
+
+/// Time bound of a call that uses every step budget it is given:
+/// [`MAX_TIME`] per budget, `n` budgets (`auto`: its first pass and the
+/// retry in the other order; the standard chain: `basic`'s and `auto`'s).
+fn per_budget(n: u32) -> Duration {
+    MAX_TIME * n
+}
+
+/// The lemma whose hypotheses are a refutation goal: the exec decoder's
+/// result, `crate::verifier::parse(proof) == r`.
+const LEMMA: &str = "crate::proof::parsed_split";
+/// The law whose hypothesis is a refutation goal: the verifier accepts,
+/// `verify(root, key, value, proof)`.
+const LAW: &str = "crate::laws::verified_proofs_are_small";
 
 fn qmdb_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/mod.rs")
@@ -95,49 +123,80 @@ fn run(env: &Env, p: &mut dyn Prover, g: &Goal, terms: &elab::basic::GoalTerms, 
 
 #[track_caller]
 fn assert_bounded(what: &str, r: &Run) {
+    assert_bounded_by(what, r, MAX_TIME);
+}
+
+#[track_caller]
+fn assert_bounded_by(what: &str, r: &Run, max_time: Duration) {
     eprintln!("{what}: ok={} in {:?}, heap growth ≤ {} MiB, last tried: {:?}", r.ok, r.elapsed, r.heap >> 20, r.tried.last());
-    assert!(r.elapsed < MAX_TIME, "{what}: took {:?}", r.elapsed);
+    assert!(r.elapsed < max_time, "{what}: took {:?} (bound {max_time:?})", r.elapsed);
     assert!(r.heap < MAX_HEAP, "{what}: heap grew by {} MiB", r.heap >> 20);
     // the hypotheses are satisfiable: refuting them would be a bug
     assert!(!r.ok, "{what}: refuted satisfiable hypotheses");
 }
 
 /// Both reproductions, and the build's prover configurations, on one
-/// elaboration of QMDB (elaborating it takes a few seconds).
+/// elaboration of what the two items need from QMDB: the items they reach
+/// (their statements, proofs and every lemma those use; the mutation
+/// gate's item filter, `elab::order::filter_closure`), which must all
+/// check. The whole of QMDB takes about ten minutes to elaborate, and its
+/// verification is `qmdb_gates`' subject, not this test's.
 #[test]
 fn unfolded_qmdb_refutations_are_bounded() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     memguard::init_from_env();
     let c = check_qmdb();
     let k = c.krate.as_ref().unwrap();
-    let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
+    let seeds = [LEMMA, LAW].map(|p| k.find(p).unwrap_or_else(|| panic!("no item {p}")));
+    let items = elab::order::filter_closure(k, seeds);
+    let opts = elab::Options { items: Some(std::sync::Arc::new(items)), ..elab::Options::default() };
     let c2 = &c;
-    driver::stage::with_elaboration(k, &opts, move |out| {
-        assert!(out.verified(), "QMDB must verify:\n{}", out.diags.render(&c2.sm));
-        let (ia, ia_terms) = transparent_goal(c2, out, "crate::proof::inputs_accepted");
-        let (va, va_terms) = transparent_goal(c2, out, "crate::laws::verify_acceptance");
-        // (1) `auto`, lightest configuration, on `inputs_accepted` (the
-        // audit's budget and the elaborator's)
+    elab::with_big_stack(move || {
+        let t = Instant::now();
+        let out = &elab::elaborate(k, &mut ProverChain::standard(), &opts);
+        eprintln!("elaborated {} definitions in {:?}", out.defs.len(), t.elapsed());
+        // everything elaborated checks; the one error is the filter's note
+        // that a partial elaboration is not a verification of the crate
+        let bad: Vec<&elab::DefRecord> = out.defs.iter().filter(|d| !matches!(d.status, elab::DefStatus::Checked | elab::DefStatus::Deferred(_))).collect();
+        assert!(bad.is_empty() && out.obligations.iter().all(|o| o.proven()), "the items must verify: {bad:?}\n{}", out.diags.render(&c2.sm));
+        let errors: Vec<&str> = out.diags.list.iter().filter(|d| d.severity == sandblaster_front::diag::Severity::Error).map(|d| d.msg.as_str()).collect();
+        assert!(errors.len() == 1 && errors[0].starts_with("partial elaboration"), "{}", out.diags.render(&c2.sm));
+        let (ia, ia_terms) = transparent_goal(c2, out, LEMMA);
+        let (va, va_terms) = transparent_goal(c2, out, LAW);
+        // the heap is measured from here: the elaboration's own peak (above
+        // a GiB, freed again) is not the prover calls', and would hide theirs
+        memguard::reset_peak();
+        // (1) `auto`, lightest configuration, on the lemma (the audit's
+        // budget and the elaborator's)
         for steps in [driver::VACUITY_BUDGET, 20_000_000] {
             let r = run(&out.env, &mut Auto::with_config(lightest()), &ia, &ia_terms, steps);
-            assert_bounded(&format!("auto (lightest, {steps} steps) on inputs_accepted"), &r);
+            assert_bounded(&format!("auto (lightest, {steps} steps) on {LEMMA}"), &r);
         }
-        // (2) the development prover, 50,000 steps, on `verify_acceptance`
+        // (2) the development prover, 50,000 steps, on the law
         let r = run(&out.env, &mut BasicProver::default(), &va, &va_terms, 50_000);
-        assert_bounded("basic (50k steps) on verify_acceptance", &r);
-        // (3) the build's configurations (20M steps per prover) on both
-        for (name, g, t) in [("inputs_accepted", &ia, &ia_terms), ("verify_acceptance", &va, &va_terms)] {
+        assert_bounded(&format!("basic (50k steps) on {LAW}"), &r);
+        // (3) the build's configurations (20M steps per prover) on both:
+        // within `MAX_TIME`, except `auto` and the chain on the law, whose
+        // search uses every budget it is given, within `MAX_TIME` per budget
+        for (name, g, t, law) in [(LEMMA, &ia, &ia_terms, false), (LAW, &va, &va_terms, true)] {
             let r = run(&out.env, &mut Auto::new(), g, t, 20_000_000);
-            assert_bounded(&format!("auto (default, 20M steps) on {name}"), &r);
+            assert_bounded_by(&format!("auto (default, 20M steps) on {name}"), &r, if law { per_budget(2) } else { MAX_TIME });
             let r = run(&out.env, &mut BasicProver::default(), g, t, 20_000_000);
             assert_bounded(&format!("basic (default, 20M steps) on {name}"), &r);
             let r = run(&out.env, &mut ProverChain::standard(), g, t, 20_000_000);
-            assert_bounded(&format!("standard chain (20M steps) on {name}"), &r);
+            assert_bounded_by(&format!("standard chain (20M steps) on {name}"), &r, if law { per_budget(3) } else { MAX_TIME });
         }
+        // … and on the law with a tenth of that budget, `auto` and the chain
+        // within `MAX_TIME`: their time follows the steps they are given
+        // (work the meter did not charge would not shrink with the budget)
+        let r = run(&out.env, &mut Auto::new(), &va, &va_terms, 2_000_000);
+        assert_bounded(&format!("auto (default, 2M steps) on {LAW}"), &r);
+        let r = run(&out.env, &mut ProverChain::standard(), &va, &va_terms, 2_000_000);
+        assert_bounded(&format!("standard chain (2M steps) on {LAW}"), &r);
         // (4) a tiny deadline stops `auto` even with an unbounded budget
         let cfg = AutoConfig { goal_timeout: Some(Duration::from_millis(1)), max_nodes: u64::MAX, ..AutoConfig::default() };
         let r = run(&out.env, &mut Auto::with_config(cfg), &va, &va_terms, u64::MAX / 4);
-        assert_bounded("auto (1 ms deadline, unbounded budget) on verify_acceptance", &r);
+        assert_bounded(&format!("auto (1 ms deadline, unbounded budget) on {LAW}"), &r);
         assert!(r.elapsed < Duration::from_secs(5), "{:?}", r.elapsed);
     });
 }

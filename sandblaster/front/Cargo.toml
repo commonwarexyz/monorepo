@@ -31,3 +31,9 @@ opt-test-hooks = []
 
 [dev-dependencies]
 sandblaster-front = { path = ".", features = ["opt-test-hooks"] }
+
+[lints.rust]
+# `cfg(sandblaster)` is the ghost marker of DSL sources (DESIGN.md §2; the
+# build declares it the same way); test programs that rustc also compiles
+# carry it (`tests/redteam_fidelity.rs`)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(sandblaster)"] }

@@ -623,13 +623,19 @@ fn the_build_fails_without_a_matching_lock() {
     assert!(!o.ok && !emitted(&o), "{}", o.stderr);
     assert!(o.stderr.contains("error[spec-lock]: no SPEC.lock at `/crate/sandblaster/SPEC.lock`"), "{}", o.stderr);
     assert!(report(&o).contains("\"status\": \"missing\""), "{}", report(&o));
-    assert!(o.cargo.iter().any(|l| l == "cargo::rerun-if-changed=/crate/sandblaster/SPEC.lock"), "the lock is a build input even before it exists: {:?}", o.cargo);
+    // the lock is a build input even before it exists: a missing lock is
+    // noticed through the watched DSL root directory, and is not watched
+    // itself (Cargo re-runs a build script on every build while a watched
+    // path is missing: `driver::watch_existing`)
+    assert!(o.cargo.iter().any(|l| l == "cargo::rerun-if-changed=/crate/sandblaster"), "the DSL root directory is watched: {:?}", o.cargo);
+    assert!(!o.cargo.iter().any(|l| l == "cargo::rerun-if-changed=/crate/sandblaster/SPEC.lock"), "a missing lock is not a watched path: {:?}", o.cargo);
     // an accepted lock: the lock gate passes (its root is what a verdict
-    // would export)
+    // would export), and the lock is watched
     let text = accepted(&fixture());
     let o = build(&with_lock(&fixture(), &text));
     assert!(!o.stderr.contains("error[spec-lock]"), "{}", o.stderr);
     assert!(report(&o).contains("\"status\": \"matches\""), "{}", report(&o));
+    assert!(o.cargo.iter().any(|l| l == "cargo::rerun-if-changed=/crate/sandblaster/SPEC.lock"), "an existing lock is a watched build input: {:?}", o.cargo);
     // a mismatch is an error naming the item
     let o = build(&edit(&with_lock(&fixture(), &text), "r/LAWS.rs", "requires(x < 1000);", "requires(x < 2000);"));
     assert!(!o.ok && !emitted(&o));

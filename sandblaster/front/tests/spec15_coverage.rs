@@ -155,10 +155,13 @@ fn memory_limit_stops_batches_as_incomplete() {
     assert!(!r.complete && r.incomplete_reasons.iter().any(|x| x.contains("memory")), "{:?}", r.incomplete_reasons);
 }
 
-/// Legacy QMDB (production N = 32, `sandblaster/fixtures/qmdb/sandblaster/mod.rs`), bounded: the kill rates are recorded, not asserted
-/// (the legacy laws are soundness-only and name internal functions:
-/// survivors are expected — that is the point of the QMDB rewrite). Run with
-/// `--test-threads=1`; `SANDBLASTER_QMDB_MUTANTS` sets the cap (default 24).
+/// QMDB (production N = 32, `sandblaster/fixtures/qmdb/sandblaster/mod.rs`), bounded: the kill rates are recorded, not asserted.
+/// (Until §15 S5 the fixture had the legacy laws, soundness-only and naming
+/// internal functions, so survivors were expected.) Run with
+/// `--test-threads=1`; `SANDBLASTER_QMDB_MUTANTS` sets the cap (default 24:
+/// three batches). Each batch is an elaboration of about 1,200–1,500 items
+/// of the S5 crate, 9 to 14 minutes after the 10-minute baseline (about 45
+/// minutes in all); a smaller cap (8: one batch) gives a shorter record.
 #[test]
 fn legacy_qmdb_bounded_run_is_recorded() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/mod.rs");
@@ -168,7 +171,7 @@ fn legacy_qmdb_bounded_run_is_recorded() {
     let cap = std::env::var("SANDBLASTER_QMDB_MUTANTS").ok().and_then(|v| v.parse().ok()).unwrap_or(24usize);
     let o = MutateOptions { max_mutants: cap, batch: 8, inputs: 64, max_closure: 120, ..MutateOptions::default() };
     let r = mutate::run(&k, &c.sm, &o);
-    let mut s = format!("legacy QMDB: baseline verified {}, {} mutants enumerated, {} run, complete {}, {:.1} s, {} batch(es)\n", r.baseline_verified, r.enumerated, r.mutants.iter().filter(|(_, o)| o.verdict != Verdict::NotRun).count(), r.complete, r.elapsed.as_secs_f64(), r.batches.len());
+    let mut s = format!("QMDB: baseline verified {}, {} mutants enumerated, {} run, complete {}, {:.1} s, {} batch(es)\n", r.baseline_verified, r.enumerated, r.mutants.iter().filter(|(_, o)| o.verdict != Verdict::NotRun).count(), r.complete, r.elapsed.as_secs_f64(), r.batches.len());
     for v in Verdict::ALL {
         s.push_str(&format!("  {}: {}\n", v.word(), r.count(v)));
     }

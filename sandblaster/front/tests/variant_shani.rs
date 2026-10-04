@@ -27,6 +27,9 @@ use sandblaster_kernel::api::Env;
 use sandblaster_kernel::term::Lvl;
 use sandblaster_kernel::value::{Budget, VEnv};
 
+#[path = "common/qmdb.rs"]
+mod qmdb;
+
 /// One elaboration at a time (heap measurements are per process).
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -34,8 +37,11 @@ static SERIAL: Mutex<()> = Mutex::new(());
 const ABC: [u32; 8] = [0xba78_16bf, 0x8f01_cfea, 0x4141_40de, 0x5dae_2223, 0xb003_61a3, 0x9617_7a9c, 0xb410_ff61, 0xf200_15ad];
 const INITIAL: [u32; 8] = [0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19];
 
+/// QMDB's `sha256.rs`, mounted alone: its exec code, without the §15
+/// ghost lines that name the fixture's `spec` and `proof` modules
+/// (`qmdb::exec_source`).
 fn sha256_src() -> String {
-    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/sha256.rs")).unwrap()
+    qmdb::exec_source("sha256.rs")
 }
 
 struct Attempt {

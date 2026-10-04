@@ -1577,6 +1577,15 @@ pub fn is_type_sort(v: &V) -> bool {
 /// goes the other way round. Either order retries with the other, so the
 /// simplifier never loses a goal the plain search proves
 /// (`SANDBLASTER_SIMP=first` tries it first always, `off` never).
+///
+/// A third pass, the simplifier without its cast normal form, runs on what
+/// the pass before it left of its budget, not on a fresh one: a call
+/// charges at most two budgets, so a goal that uses them up (a refutation
+/// of satisfiable hypotheses) costs two searches, not three, and the
+/// per-goal deadline stays well above the budgets (`meter`; DESIGN.md
+/// §15.8). The retry of the other order keeps its fresh budget: goals of
+/// the QMDB proofs are proven by the simplifier after the plain search used
+/// its whole budget, and the other way round, with up to 17M of 20M steps.
 pub fn prove_goal(env: &Env, g: &Goal, b: &mut Budget, cfg: &AutoConfig, db: &LemmaDb) -> Result<Tm, AutoFailure> {
     let mode = simp_mode();
     if mode == SimpMode::Off {
@@ -1597,6 +1606,9 @@ pub fn prove_goal(env: &Env, g: &Goal, b: &mut Budget, cfg: &AutoConfig, db: &Le
         Ok(t) => return Ok(t),
         Err(e) => e,
     };
+    // what the last pass left of its budget (its front-end charges taken
+    // out; nothing once a limit stopped it): the cast-free pass's budget
+    let mut left = if super::meter::settle(b) { b.steps } else { 0 };
     let mut label = if first_plain { "plain search" } else { "simplifier" };
     // the passes after the first: the other of plain and simplifier, then
     // the simplifier without its cast normal form when that form was used
@@ -1606,19 +1618,23 @@ pub fn prove_goal(env: &Env, g: &Goal, b: &mut Budget, cfg: &AutoConfig, db: &Le
     let mut prev = first;
     for &pass in rest {
         let worth = match (prev, pass) {
+            // the pass without casts only if they were rewritten, and steps
+            // are left
+            (_, Pass::SimpNoCast) => used.cast && left > 0,
             // after the plain search, the simplifier unless the deadline or
             // memory stopped it
             (Pass::Plain, _) => !matches!(super::meter::exhausted(), Some(x) if x != super::meter::Exhaustion::Steps),
-            // after the simplifier, the plain search only if it ran; the
-            // pass without casts only if they were rewritten
+            // after the simplifier, the plain search only if it ran
             (_, Pass::Plain) => used.simp,
-            (_, Pass::SimpNoCast) => used.cast && !matches!(super::meter::exhausted(), Some(x) if x != super::meter::Exhaustion::Steps),
             _ => false,
         };
         if !worth {
             continue;
         }
-        let mut b2 = Budget { steps: steps0.max(b.steps) };
+        // the other order on a fresh budget, the pass without casts on what
+        // the previous pass left
+        let steps = if pass == Pass::SimpNoCast { left } else { steps0.max(b.steps) };
+        let mut b2 = Budget { steps };
         // a nested scope: its own step count, the same deadline
         let _scope = super::meter::Scope::enter(None, &b2);
         let r = prove_goal_with(env, g, &mut b2, cfg, db, pass);
@@ -1626,6 +1642,7 @@ pub fn prove_goal(env: &Env, g: &Goal, b: &mut Budget, cfg: &AutoConfig, db: &Le
         match r {
             Ok(t) => return Ok(t),
             Err((mut f2, used2)) => {
+                left = if super::meter::settle(&mut b2) { b2.steps } else { 0 };
                 f2.tried.insert(0, format!("{label}: {}", f.tried.last().cloned().unwrap_or_default()));
                 label = match pass {
                     Pass::Plain => "plain search",

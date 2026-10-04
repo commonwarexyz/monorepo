@@ -58,6 +58,9 @@ use sandblaster_kernel::util::mk;
 #[path = "opt_corpus/manifest.rs"]
 mod manifest;
 
+#[path = "common/qmdb.rs"]
+mod qmdb;
+
 /// One test at a time: R26 withholds hardware evidence process-wide.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -1440,7 +1443,9 @@ use sandblaster_front::opt::loopsum::LoopFault;
 
 /// QMDB's `shape` and `shape_go`, read from `sandblaster/fixtures/qmdb/sandblaster/merkle.rs`.
 fn shape_program() -> String {
-    let merkle = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/merkle.rs")).unwrap();
+    // the exec code only: the §15 annotations name the fixture's `model`
+    // module, which this one-module copy does not carry
+    let merkle = qmdb::exec_source("merkle.rs");
     let item = |marker: &str| -> String {
         let lines: Vec<&str> = merkle.lines().collect();
         let i = lines.iter().position(|l| l.starts_with(marker)).unwrap_or_else(|| panic!("no item `{marker}`"));
@@ -1896,7 +1901,9 @@ fn r21_lzcnt_as_bsr_is_rejected_by_the_dispatch_self_test() {
 // ---------------------------------------------------------------------------
 
 fn lane_site(n: usize, target: &TargetInfo) -> Checked {
-    let sha = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/sha256.rs")).unwrap();
+    // mounted alone: the exec code, without the ghost lines naming the
+    // fixture's `spec` and `proof` modules
+    let sha = qmdb::exec_source("sha256.rs");
     let calls = (0..n).map(|i| format!("compress(states[{i}], &blocks[{i}])")).collect::<Vec<_>>().join(", ");
     let site = format!("use sandblaster::prelude::*;\nuse crate::sha256::compress;\n\npub fn compress_x{n}(states: &[[u32; 8]; {n}], blocks: &[[u8; 64]; {n}]) -> [[u32; 8]; {n}] {{\n    [{calls}]\n}}\n");
     let fs = MemFs::from_files([("q/mod.rs", "#![forbid(unsafe_code)]\npub mod sha256;\npub mod lanes;\n"), ("q/sha256.rs", sha.as_str()), ("q/lanes.rs", site.as_str())]);
