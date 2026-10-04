@@ -1,74 +1,74 @@
-error: owned `Span` passed as a tracing span parent or `follows_from` source
-  --> $DIR/main.rs:29:1
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:32:1
    |
 LL | #[tracing::instrument(skip_all, follows_from = causes)]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
+   = note: the conversion drops this handle before the ID is used
    = help: pass a reference to the span
    = note: `#[deny(owned_span_parent)]` on by default
 
-error: owned `Span` passed as a tracing span parent or `follows_from` source
-  --> $DIR/main.rs:41:19
-   |
-LL |     info!(parent: span.clone(), "component.processed");
-   |                   ^^^^^^^^^^^^
-   |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
-   = help: pass a reference to the span
-
-error: owned `Span` passed as a tracing span parent or `follows_from` source
-  --> $DIR/main.rs:42:23
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:41:23
    |
 LL |     span.follows_from(cause.clone());
    |                       ^^^^^^^^^^^^^
    |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
+   = note: the conversion drops this handle before the ID is used
    = help: pass a reference to the span
 
-error: owned `Span` passed as a tracing span parent or `follows_from` source
-  --> $DIR/main.rs:43:31
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:42:31
    |
 LL |     Span::follows_from(&span, cause.clone());
    |                               ^^^^^^^^^^^^^
    |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
+   = note: the conversion drops this handle before the ID is used
    = help: pass a reference to the span
 
-error: owned `Span` passed as a tracing span parent or `follows_from` source
-  --> $DIR/main.rs:44:38
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:44:25
    |
-LL |     let _child = Span::child_of_with(span.clone(), metadata, &values, &dispatch);
-   |                                      ^^^^^^^^^^^^
+LL |     follows_from(&span, cause.clone());
+   |                         ^^^^^^^^^^^^^
    |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
+   = note: the conversion drops this handle before the ID is used
    = help: pass a reference to the span
 
-error: owned `Span` passed as a tracing span parent or `follows_from` source
-  --> $DIR/main.rs:45:47
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:45:27
    |
-LL |     let _event = tracing::Event::new_child_of(span.clone(), metadata, &values);
-   |                                               ^^^^^^^^^^^^
+LL |     let _id: Option<Id> = cause.clone().into();
+   |                           ^^^^^^^^^^^^^
    |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
+   = note: the conversion drops this handle before the ID is used
    = help: pass a reference to the span
 
-error: owned `Span` passed as a tracing span parent or `follows_from` source
-  --> $DIR/main.rs:47:27
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:46:34
    |
-LL |     let _child = child_of(span.clone(), metadata, &values);
-   |                           ^^^^^^^^^^^^
+LL |     let _id = Option::<Id>::from(cause.clone());
+   |                                  ^^^^^^^^^^^^^
    |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
+   = note: the conversion drops this handle before the ID is used
    = help: pass a reference to the span
 
-error: owned `Span` passed as a tracing span parent or `follows_from` source
+error: owned `Span` converted into a span ID
+  --> $DIR/main.rs:47:22
+   |
+LL |     let _kept = keep(cause.clone(), cause.clone());
+   |                      ^^^^^^^^^^^^^
+   |
+   = note: the conversion drops this handle before the ID is used
+   = help: pass a reference to the span
+
+error: owned `Span` converted into a span ID
   --> $DIR/main.rs:57:39
    |
 LL |     let _process = info_span!(parent: span, "component.process");
    |                                       ^^^^
    |
-   = note: tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span
+   = note: the conversion drops this handle before the ID is used
    = help: pass a reference to the span
 
 error: aborting due to 8 previous errors

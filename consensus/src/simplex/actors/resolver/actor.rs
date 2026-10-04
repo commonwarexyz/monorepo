@@ -1527,8 +1527,8 @@ mod tests {
     }
 
     /// The resolver engine can release its handles to a fetch span after the
-    /// actor checks that the delivery is still wanted, leaving the delivery with
-    /// the only handle. Processing must still run under that span.
+    /// actor checks that the delivery is still wanted. The delivery then holds
+    /// the only handle, and processing must still run under that span.
     #[test_collect_traces]
     fn delivery_holding_only_span_handle_parents_processing(traces: TraceStorage) {
         let runtime = deterministic::Runner::default();

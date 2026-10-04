@@ -4,28 +4,30 @@
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_middle;
+extern crate rustc_span;
 
 use rustc_errors::DiagDecorator;
 use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{self, Ty};
+use rustc_span::sym;
 
 dylint_linting::declare_late_lint! {
     /// ### What it does
     ///
-    /// Detects an owned `tracing::Span` passed as a span parent or
-    /// `follows_from` source, such as `info_span!(parent: span, ...)` or
-    /// `span.follows_from(cause)`.
+    /// Detects an owned `tracing::Span` converted into a span ID. This covers span
+    /// and event parents such as `info_span!(parent: span, ...)`, `follows_from`
+    /// sources, explicit conversions, and helpers that take
+    /// `impl Into<Option<Id>>`.
     ///
     /// ### Why is this bad?
     ///
-    /// Tracing converts an owned span into its ID and drops the handle before the
-    /// ID is used. If no other handle is alive at that moment, for example because
-    /// another task released its handle concurrently, the span has already
-    /// closed. `tracing-subscriber`'s registry then panics while registering a
-    /// child span, and an event or `follows_from` link refers to a closed span.
-    /// Borrowing keeps the handle alive during the call, regardless of who else
-    /// owns the span.
+    /// Converting an owned span into its ID drops the handle before the ID is used.
+    /// If no other handle is alive at that moment, for example because another task
+    /// released its handle concurrently, the span has already closed.
+    /// `tracing-subscriber`'s registry then panics while registering a child span,
+    /// and an event or `follows_from` link refers to a closed span. Borrowing keeps
+    /// the handle alive during the call regardless of who else owns the span.
     ///
     /// ### Example
     ///
@@ -40,10 +42,10 @@ dylint_linting::declare_late_lint! {
     /// ```
     pub OWNED_SPAN_PARENT,
     Deny,
-    "owned tracing span passed as a span parent or follows_from source"
+    "owned tracing span converted into a span ID"
 }
 
-fn is_tracing_type(cx: &LateContext<'_>, ty: Ty<'_>, crate_name: &str, name: &str) -> bool {
+fn is_adt(cx: &LateContext<'_>, ty: Ty<'_>, crate_name: &str, name: &str) -> bool {
     let ty::Adt(adt, _) = ty.kind() else {
         return false;
     };
@@ -51,65 +53,85 @@ fn is_tracing_type(cx: &LateContext<'_>, ty: Ty<'_>, crate_name: &str, name: &st
         && cx.tcx.item_name(adt.did()).as_str() == name
 }
 
+fn is_option_id(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
+    let ty::Adt(adt, args) = ty.kind() else {
+        return false;
+    };
+    cx.tcx.is_diagnostic_item(sym::Option, adt.did())
+        && is_adt(cx, args.type_at(0), "tracing_core", "Id")
+}
+
 impl<'tcx> LateLintPass<'tcx> for OwnedSpanParent {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        let (def_id, args) = match expr.kind {
+        let typeck = cx.typeck_results();
+        let (def_id, generic_args, receiver, args) = match expr.kind {
             ExprKind::Call(callee, args) => {
-                let ty::FnDef(def_id, _) = *cx.typeck_results().expr_ty(callee).kind() else {
+                let ty::FnDef(def_id, generic_args) = *typeck.expr_ty(callee).kind() else {
                     return;
                 };
-                (def_id, args)
+                (def_id, generic_args, None, args)
             }
-            ExprKind::MethodCall(_, _, args, _) => {
-                let Some(def_id) = cx.typeck_results().type_dependent_def_id(expr.hir_id) else {
+            ExprKind::MethodCall(_, receiver, args, _) => {
+                let Some(def_id) = typeck.type_dependent_def_id(expr.hir_id) else {
                     return;
                 };
-                (def_id, args)
+                (def_id, typeck.node_args(expr.hir_id), Some(receiver), args)
             }
             _ => return,
         };
-
-        // Span and event macros with `parent:` and
-        // `#[instrument(parent = ..., follows_from = ...)]` expand to these
-        // functions, which take the parent or `follows_from` source as
-        // `impl Into<Option<Id>>`.
-        let Some(impl_id) = cx.tcx.impl_of_assoc(def_id) else {
-            return;
-        };
-        let owner = cx.tcx.type_of(impl_id).skip_binder();
-        let name = cx.tcx.item_name(def_id);
-        let converts = if is_tracing_type(cx, owner, "tracing", "Span") {
-            matches!(name.as_str(), "child_of" | "child_of_with" | "follows_from")
-        } else if is_tracing_type(cx, owner, "tracing_core", "Event") {
-            matches!(name.as_str(), "child_of" | "new_child_of")
-        } else {
-            false
-        };
-        if !converts {
+        let is_owned_span =
+            |input: &Expr<'_>| is_adt(cx, typeck.expr_ty_adjusted(input), "tracing", "Span");
+        if !receiver.into_iter().chain(args).any(is_owned_span) {
             return;
         }
 
-        // Only the parent or `follows_from` source parameter of these functions
-        // accepts a `Span`, so every owned `Span` argument is one tracing
-        // converts. Checking all arguments also covers the
-        // `Span::follows_from(&span, cause)` call form. A span produced inside a
-        // macro, such as the loop variable that
-        // `#[instrument(follows_from = ...)]` iterates with, is reported at the
-        // macro call.
-        for arg in args {
-            if !is_tracing_type(cx, cx.typeck_results().expr_ty(arg), "tracing", "Span") {
+        // A call converts an argument into an ID when the argument's parameter is the
+        // source of an `Into` or `From` bound that targets `Option<Id>`. Collect
+        // those parameters. The argument check below limits the report to owned
+        // `tracing::Span` values.
+        let predicates = cx.tcx.predicates_of(def_id);
+        let declared = predicates.instantiate_identity(cx.tcx).predicates;
+        let instantiated = predicates.instantiate(cx.tcx, generic_args).predicates;
+        let mut converted = Vec::new();
+        for (declared, instantiated) in declared.iter().zip(&instantiated) {
+            let (Some(declared), Some(instantiated)) =
+                (declared.as_trait_clause(), instantiated.as_trait_clause())
+            else {
+                continue;
+            };
+            let declared = declared.skip_binder().trait_ref;
+            let instantiated = instantiated.skip_binder().trait_ref;
+            let (target, parameter) = if cx.tcx.is_diagnostic_item(sym::Into, instantiated.def_id) {
+                (instantiated.args.type_at(1), declared.self_ty())
+            } else if cx.tcx.is_diagnostic_item(sym::From, instantiated.def_id) {
+                (instantiated.self_ty(), declared.args.type_at(1))
+            } else {
+                continue;
+            };
+            if is_option_id(cx, target) {
+                converted.push(parameter);
+            }
+        }
+
+        // Report each argument passed for one of those parameters at its source
+        // call site. The loop variable that `#[instrument(follows_from = ...)]`
+        // generates is reported at the attribute.
+        let inputs = cx
+            .tcx
+            .fn_sig(def_id)
+            .instantiate_identity()
+            .skip_binder()
+            .inputs();
+        for (input, declared) in receiver.into_iter().chain(args).zip(inputs) {
+            if !converted.contains(declared) || !is_owned_span(input) {
                 continue;
             }
             cx.emit_span_lint(
                 OWNED_SPAN_PARENT,
-                arg.span.source_callsite(),
+                input.span.source_callsite(),
                 DiagDecorator(|diag| {
-                    diag.primary_message(
-                        "owned `Span` passed as a tracing span parent or `follows_from` source",
-                    );
-                    diag.note(
-                        "tracing drops an owned span while converting it to an ID, which can leave the ID referring to a closed span",
-                    );
+                    diag.primary_message("owned `Span` converted into a span ID");
+                    diag.note("the conversion drops this handle before the ID is used");
                     diag.help("pass a reference to the span");
                 }),
             );

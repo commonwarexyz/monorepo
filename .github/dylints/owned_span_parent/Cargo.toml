@@ -1,7 +1,7 @@
 [package]
 name = "owned_span_parent"
 version = "0.0.1"
-description = "Require tracing span parents and follows_from sources to be borrowed."
+description = "Require tracing spans to be borrowed when converted into span IDs."
 edition = "2021"
 publish = false
 
