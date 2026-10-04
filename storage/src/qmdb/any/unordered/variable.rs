@@ -148,7 +148,12 @@ pub mod partitioned {
 #[cfg(test)]
 pub(crate) mod test {
     use super::*;
-    use crate::{index::Unordered as _, mmr, qmdb::floor::Proportional, translator::TwoCap};
+    use crate::{
+        index::Unordered as _,
+        mmr,
+        qmdb::floor::{Compact, Proportional},
+        translator::TwoCap,
+    };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
@@ -1200,6 +1205,17 @@ pub(crate) mod test {
     fn assert_non_trait_futures_are_send(db: &AnyTest, key: Digest, value: Vec<u8>) {
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None, &mut Proportional));
+        let mut policy = Compact {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(db.new_batch().merkleize(db, None, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged
+                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .await
+        });
         is_send(db.get_with_loc(&key));
     }
 

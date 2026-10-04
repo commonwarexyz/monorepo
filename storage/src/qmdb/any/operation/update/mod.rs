@@ -50,10 +50,18 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync + 'static {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 }
 
-/// States whether deleting a key involves its collision siblings.
+/// Splits an update into its owned key, value, and cached payload, rebuilds it from them, and
+/// states whether deleting a key involves its collision siblings.
 pub(crate) trait Parts: Update {
     /// Whether a collision sibling can hold the predecessor link that deleting a key rewrites.
     const SIBLINGS: bool;
+
+    /// Consumes the update and returns its owned key, value, and [`cached`](Update::cached)
+    /// payload.
+    fn into_parts(self) -> (Self::Key, Self::Value, Self::Cached);
+
+    /// Rebuilds the update that [`into_parts`](Self::into_parts) split.
+    fn from_parts(key: Self::Key, value: Self::Value, cached: Self::Cached) -> Self;
 }
 
 #[cfg(test)]

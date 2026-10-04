@@ -163,7 +163,7 @@ pub(crate) mod test {
                 },
                 test::variable_db_config,
             },
-            floor::Proportional,
+            floor::{Compact, Proportional},
         },
         translator::TwoCap,
     };
@@ -585,6 +585,17 @@ pub(crate) mod test {
         is_send(db.get_all(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
+        let mut policy = Compact {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(db.new_batch().merkleize(db, None, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged
+                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .await
+        });
     }
 
     /// Parent inserts a key, child inserts another; commit parent then

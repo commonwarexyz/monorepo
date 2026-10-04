@@ -157,7 +157,7 @@ pub(crate) mod test {
             },
             cache::Cache,
             delete_key,
-            floor::Proportional,
+            floor::{Compact, Proportional},
             update_key, verify_proof,
         },
         translator::{OneCap, TwoCap},
@@ -1976,6 +1976,17 @@ pub(crate) mod test {
         is_send(reader.get_many(&[&key], db));
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None, &mut Proportional));
+        let mut policy = Compact {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(db.new_batch().merkleize(db, None, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged
+                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .await
+        });
         is_send(db.get_with_loc(&key));
     }
 

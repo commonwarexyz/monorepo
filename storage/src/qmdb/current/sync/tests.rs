@@ -33,10 +33,7 @@ use rand::Rng as _;
 
 mod harnesses {
     use super::*;
-    use crate::{
-        merkle::{self, mmb, mmr},
-        qmdb::floor::Proportional,
-    };
+    use crate::merkle::{self, mmb, mmr};
     use commonware_math::algebra::Random;
     use commonware_utils::TestRng;
 

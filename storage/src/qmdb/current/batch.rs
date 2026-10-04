@@ -15,7 +15,7 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
         bitmap::{Shared, fill_from},
@@ -548,23 +548,29 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let Limits::Proportional = policy.limits();
-
-        // Overlap the update resolution with a committed-prefix candidate prefetch.
-        // Candidates come from the speculative `bitmap_parent` (the same source the floor
-        // raise scans below), clamped to the committed prefix inside the helper.
-        let (prepared, staged_updates, prefetched) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
-            .await?;
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
+        let (prepared, staged, prefetched) = match policy.limits() {
+            Limits::Proportional => {
+                // Overlap the update resolution with a candidate prefetch. The helper clamps the
+                // prefetch to the committed prefix.
+                let (prepared, staged, prefetched) = inner
+                    .resolve_updates_prefetched(updates, upserts, &db.any, fill)
+                    .await?;
+                (prepared, staged, Some(prefetched))
+            }
+            limits => {
+                let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
+                let (prepared, staged) = inner
+                    .prepare(&db.any)?
+                    .advance(staged, policy, limits, fill)
+                    .await?;
+                (prepared, staged, None)
+            }
+        };
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                staged_updates,
-                Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(metadata, staged, prefetched, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -624,13 +630,15 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
+        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
-        let Limits::Proportional = policy.limits();
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(staged, policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -677,16 +685,14 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
         let prepared = inner.prepare(&db.any)?;
-        let Limits::Proportional = policy.limits();
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Unordered<K, V>>::new(),
-                None,
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(metadata, staged, None, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -733,15 +739,14 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
+        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
+            fill_candidates(&bitmap_parent, floor, tip, limit, out)
+        };
         let prepared = inner.prepare(&db.any)?;
-        let Limits::Proportional = policy.limits();
+        let limits = policy.limits();
+        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Ordered<K, V>>::new(),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_scan(metadata, staged, fill)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -1301,12 +1306,9 @@ mod trait_impls {
     use super::*;
     use crate::{
         journal::contiguous::Mutable,
-        qmdb::{
-            any::traits::{
-                ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-                UnmerkleizedBatch as UnmerkleizedBatchTrait,
-            },
-            floor::Policy,
+        qmdb::any::traits::{
+            ApplyBatchResult, BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+            UnmerkleizedBatch as UnmerkleizedBatchTrait,
         },
     };
     use std::future::Future;

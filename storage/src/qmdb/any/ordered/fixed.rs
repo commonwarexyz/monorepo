@@ -165,7 +165,7 @@ pub(crate) mod test {
                 },
                 test::{fixed_db_config, fixed_db_config_partitioned},
             },
-            floor::{Policy, Proportional},
+            floor::{Compact, Policy, Proportional},
             verify_proof,
         },
         translator::{OneCap, TwoCap},
@@ -1999,6 +1999,23 @@ pub(crate) mod test {
         });
     }
 
+    /// [`test_ordered_child_delete_colliding_key_corrupts_next_key`] under a [`Compact`] policy,
+    /// whose pass gathers the existing-key locations that merkleize then reuses.
+    #[test_traced("INFO")]
+    fn test_ordered_child_delete_colliding_key_fixed_policy() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            child_delete_colliding_key(
+                context,
+                &mut Compact {
+                    entries: 1,
+                    skips: 0,
+                },
+            )
+            .await;
+        });
+    }
+
     /// In a child batch merkleized with `policy`, delete a key whose predecessor shares its
     /// translated-key bucket, then check the predecessor's next_key.
     async fn child_delete_colliding_key<P>(context: deterministic::Context, policy: &mut P)
@@ -2208,6 +2225,17 @@ pub(crate) mod test {
         is_send(db.get_all(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
+        let mut policy = Compact {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(db.new_batch().merkleize(db, None, &mut policy));
+        is_send(async move {
+            let (_, staged) = db.new_batch().stage(&[&key], db).await?;
+            staged
+                .merkleize(Vec::new(), Vec::new(), None, db, &mut policy)
+                .await
+        });
     }
 
     // FromSyncTestable implementation for from_sync_result tests

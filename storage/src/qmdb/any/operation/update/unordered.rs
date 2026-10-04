@@ -68,6 +68,14 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 impl<K: Key, V: ValueEncoding> Parts for Update<K, V> {
     /// An unordered operation references no other key.
     const SIBLINGS: bool = false;
+
+    fn into_parts(self) -> (K, V::Value, ()) {
+        (self.0, self.1, ())
+    }
+
+    fn from_parts(key: K, value: V::Value, (): ()) -> Self {
+        Self(key, value)
+    }
 }
 
 impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {

@@ -520,10 +520,17 @@ pub mod tests {
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
-                test::{Inspect, build, colliding_digest, test_any_proportional_bound},
+                test::{
+                    Choice, Inspect, Script, build, colliding_digest, counter, keep, live,
+                    test_any_policy_decisions_match_writes, test_any_policy_hold,
+                    test_any_policy_keep_evict_and_recover, test_any_policy_limits,
+                    test_any_policy_matches_raise, test_any_policy_stop,
+                    test_any_proportional_bound,
+                },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
-            floor::Proportional,
+            chain::Bounds,
+            floor::{Compact, Hold, Proportional},
             store::tests::{TestKey, TestValue},
             verify_proof,
         },
@@ -540,8 +547,10 @@ pub mod tests {
     use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
     use rand::Rng;
     use std::{
+        collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
         ops::Range,
+        pin::Pin,
         sync::Arc,
     };
     use tracing::warn;
@@ -559,12 +568,11 @@ pub mod tests {
     /// the kind's test DB constructor.
     ///
     /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an
-    /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates,
-    /// deletes (which fall back to normal mutations and, for the ordered kind, rewrite
-    /// predecessors via a snapshot-bucket scan), upserts, duplicate read slots, missing keys,
-    /// and prefix-then-suffix expansion, rooted at the DB (D=0) and through one or two pending
-    /// ancestors (D=1/D=2). This guards the current-layer threading of
-    /// `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
+    /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates, deletes
+    /// (which, for the ordered kind, rewrite predecessors via a snapshot-bucket scan), upserts,
+    /// duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the DB (D=0)
+    /// and through one or two pending ancestors (D=1/D=2). This guards the current-layer threading
+    /// of `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
     /// `compute_current_layer` for non-empty staged updates. Collision-prone translators in
     /// `$open_db` (e.g. `OneCap`) stress predecessor rewrites.
     macro_rules! staged_merkleize_parity_test {
@@ -604,7 +612,11 @@ pub mod tests {
                                 for i in 100..110u64 {
                                     p = p.write(key(i), None);
                                 }
-                                stack.push(p.merkleize(&db, None, &mut Proportional).await.unwrap());
+                                stack.push(
+                                    p.merkleize(&db, None, &mut Proportional)
+                                        .await
+                                        .unwrap(),
+                                );
                             }
                             2 => {
                                 let mut grandparent = db.new_batch();
@@ -614,7 +626,10 @@ pub mod tests {
                                 for i in 100..110u64 {
                                     grandparent = grandparent.write(key(i), None);
                                 }
-                                let grandparent = grandparent.merkleize(&db, None, &mut Proportional).await.unwrap();
+                                let grandparent = grandparent
+                                    .merkleize(&db, None, &mut Proportional)
+                                    .await
+                                    .unwrap();
 
                                 let mut p = grandparent.new_batch::<Sha256>();
                                 for i in 20..30u64 {
@@ -670,11 +685,21 @@ pub mod tests {
                         for (k, v) in &upserts {
                             explicit = explicit.write(*k, *v);
                         }
-                        let explicit_root = explicit.merkleize(&db, None, &mut Proportional).await.unwrap().root();
+                        let explicit_root = explicit
+                            .merkleize(&db, None, &mut Proportional)
+                            .await
+                            .unwrap()
+                            .root();
 
                         let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
                         let staged_root = staged
-                            .merkleize(indexed_updates.clone(), upserts.clone(), None, &db, &mut Proportional)
+                            .merkleize(
+                                indexed_updates.clone(),
+                                upserts.clone(),
+                                None,
+                                &db,
+                                &mut Proportional,
+                            )
                             .await
                             .unwrap()
                             .root();
@@ -693,7 +718,13 @@ pub mod tests {
                         assert_eq!(range, split..keys.len());
                         expanded_values.extend(suffix_values);
                         let expanded_root = staged
-                            .merkleize(indexed_updates.clone(), upserts.clone(), None, &db, &mut Proportional)
+                            .merkleize(
+                                indexed_updates.clone(),
+                                upserts.clone(),
+                                None,
+                                &db,
+                                &mut Proportional,
+                            )
                             .await
                             .unwrap()
                             .root();
@@ -732,7 +763,8 @@ pub mod tests {
                                 ],
                                 Vec::new(),
                                 None,
-                                &db, &mut Proportional,
+                                &db,
+                                &mut Proportional,
                             )
                             .await
                             .unwrap()
@@ -5047,6 +5079,206 @@ pub mod tests {
         });
     }
 
+    /// The speculative bitmap lets a child policy pass committed updates that an unapplied parent
+    /// superseded without reading them.
+    #[test_traced("INFO")]
+    fn test_current_policy_skips_updates_superseded_by_pending_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("current-policy-speculative-skip", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Commit ten keys in key order after the initial commit.
+            let mut keys: Vec<_> = (40..50).map(key).collect();
+            keys.sort();
+            let seed = keys
+                .iter()
+                .enumerate()
+                .fold(db.new_batch(), |batch, (i, key)| {
+                    batch.write(*key, Some(val(i as u64)))
+                })
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // An unapplied parent supersedes every committed key except the last.
+            let parent = keys[..9]
+                .iter()
+                .fold(db.new_batch(), |batch, key| {
+                    batch.write(*key, Some(val(100)))
+                })
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // The child's policy reads only the surviving committed update before deciding it.
+            let items_read = || counter(&context, "log_journal_items_read_total");
+            let before = items_read();
+            let mut reads = Vec::new();
+            let mut policy = Script::new(1, u64::MAX, |_: &Digest| {
+                reads.push(items_read());
+                Choice::Keep
+            });
+            let child = parent
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(policy.visited.len(), 1);
+            assert_eq!(policy.visited[0].1, keys[9]);
+            assert_eq!(reads, [before + 1]);
+
+            drop((child, parent));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Over the same history and a pending parent that supersedes committed updates, Any and
+    /// Current policies decide the same updates, reach the same floors, and merkleize the same
+    /// operations under unbounded limits and under entry, skip, combined, and zero-entry limits.
+    #[test_traced("INFO")]
+    fn test_current_policy_matches_any() {
+        type AnyDb = crate::qmdb::any::unordered::fixed::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            Digest,
+            Sha256,
+            OneCap,
+            Sequential,
+        >;
+
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("any");
+            let mut any: AnyDb = AnyDb::init(
+                ctx.child("storage"),
+                crate::qmdb::any::test::fixed_db_config::<OneCap>("policy-any", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+            let ctx = context.child("current");
+            let mut current: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("policy-current", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Apply the same held-floor history to both databases.
+            let seed: Vec<_> = (0..24).map(|i| (key(i), Some(val(i)))).collect();
+            let churn: Vec<_> = (0..24)
+                .step_by(4)
+                .map(|i| (key(i), Some(val(i + 100))))
+                .collect();
+            for writes in [&seed, &churn] {
+                let batch = writes
+                    .iter()
+                    .fold(any.new_batch(), |batch, &(k, v)| batch.write(k, v))
+                    .merkleize(&any, None, &mut Hold)
+                    .await
+                    .unwrap();
+                (any, _) = any.apply_batch(batch).await.unwrap();
+                let batch = writes
+                    .iter()
+                    .fold(current.new_batch(), |batch, &(k, v)| batch.write(k, v))
+                    .merkleize(&current, None, &mut Hold)
+                    .await
+                    .unwrap();
+                (current, _) = current.apply_batch(batch).await.unwrap();
+            }
+
+            // Each database's pending parent supersedes a third of its committed updates.
+            let parent: Vec<_> = (1..24)
+                .step_by(3)
+                .map(|i| (key(i), Some(val(i + 200))))
+                .collect();
+            let any_parent = parent
+                .iter()
+                .fold(any.new_batch(), |batch, &(k, v)| batch.write(k, v))
+                .merkleize(&any, None, &mut Hold)
+                .await
+                .unwrap();
+            let current_parent = parent
+                .iter()
+                .fold(current.new_batch(), |batch, &(k, v)| batch.write(k, v))
+                .merkleize(&current, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // Each limit pair yields the same decided updates, floors, and operations.
+            for (entries, skips) in [
+                (usize::MAX, u64::MAX),
+                (5, u64::MAX),
+                (usize::MAX, 6),
+                (3, 2),
+                (0, 4),
+            ] {
+                let mut any_policy = Script::new(entries, skips, keep);
+                let any_batch = any_parent
+                    .new_batch::<Sha256>()
+                    .merkleize(&any, None, &mut any_policy)
+                    .await
+                    .unwrap();
+                let mut current_policy = Script::new(entries, skips, keep);
+                let current_batch = current_parent
+                    .new_batch::<Sha256>()
+                    .merkleize(&current, None, &mut current_policy)
+                    .await
+                    .unwrap();
+                assert_eq!(any_policy.visited, current_policy.visited);
+                assert_eq!(
+                    any_batch.bounds().inactivity_floor,
+                    current_batch.bounds().inactivity_floor
+                );
+                assert_eq!(any_batch.operations(), current_batch.operations());
+            }
+            drop((any_parent, current_parent));
+            any.destroy().await.unwrap();
+            current.destroy().await.unwrap();
+        });
+    }
+
+    fn is_send<T: Send>(_: T) {}
+
+    #[allow(dead_code)]
+    fn assert_policy_futures_are_send(
+        unordered: &UnorderedFixedDb,
+        ordered: &OrderedFixedDb,
+        key: Digest,
+    ) {
+        let mut policy = Compact {
+            entries: 1,
+            skips: 1,
+        };
+        is_send(
+            unordered
+                .new_batch()
+                .merkleize(unordered, None, &mut policy),
+        );
+        is_send(ordered.new_batch().merkleize(ordered, None, &mut policy));
+        is_send(async move {
+            let (_, staged) = unordered.new_batch().stage(&[&key], unordered).await?;
+            staged
+                .merkleize(Vec::new(), Vec::new(), None, unordered, &mut policy)
+                .await
+        });
+        is_send(async move {
+            let (_, staged) = ordered.new_batch().stage(&[&key], ordered).await?;
+            staged
+                .merkleize(Vec::new(), Vec::new(), None, ordered, &mut policy)
+                .await
+        });
+    }
+
     impl<F, C, I, U, const N: usize, S> Inspect<F> for db::Db<F, Context, C, I, Sha256, U, N, S>
     where
         F: merkle::Graftable,
@@ -5065,6 +5297,18 @@ pub mod tests {
             >,
     {
         type Update = U;
+
+        async fn live(&self) -> BTreeMap<Digest, Location<F>> {
+            live(&self.any).await
+        }
+
+        fn child(batch: &Self::Merkleized) -> Self::Batch {
+            batch.new_batch::<Sha256>()
+        }
+
+        fn span(batch: &Self::Merkleized) -> &Bounds<F, Digest> {
+            batch.bounds()
+        }
 
         fn ops(batch: &Self::Merkleized) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
             batch.operations()
@@ -5096,4 +5340,35 @@ pub mod tests {
         test_any_proportional_bound,
         "bound"
     );
+    current_test!(
+        test_current_policy_matches_raise,
+        test_any_policy_matches_raise,
+        "raise"
+    );
+    current_test!(
+        test_current_policy_decisions_match_writes,
+        test_any_policy_decisions_match_writes,
+        "decisions"
+    );
+    current_test!(test_current_policy_limits, test_any_policy_limits, "limits");
+    current_test!(test_current_policy_hold, test_any_policy_hold, "hold");
+    current_test!(test_current_policy_stop, test_any_policy_stop, "stop");
+
+    /// [`test_any_policy_keep_evict_and_recover`] on a current database.
+    async fn test_current_policy_keep_evict_and_recover<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = C> + Send + 'static,
+    {
+        let db = open_db(context.child("db"), "recover".into()).await;
+        let reopen = move |ctx: Context| -> Pin<Box<dyn Future<Output = C> + Send>> {
+            Box::pin(open_db(ctx, "recover".into()))
+        };
+        test_any_policy_keep_evict_and_recover(context, db, reopen, val).await;
+    }
+
+    test_for_all_variants!(test_current_policy_keep_evict_and_recover, "WARN");
 }

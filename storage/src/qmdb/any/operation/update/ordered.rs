@@ -85,6 +85,18 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 impl<K: Key, V: ValueEncoding> Parts for Update<K, V> {
     /// A collision sibling may be the predecessor whose `next_key` a delete rewrites.
     const SIBLINGS: bool = true;
+
+    fn into_parts(self) -> (K, V::Value, K) {
+        (self.key, self.value, self.next_key)
+    }
+
+    fn from_parts(key: K, value: V::Value, next_key: K) -> Self {
+        Self {
+            key,
+            value,
+            next_key,
+        }
+    }
 }
 
 impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
