@@ -906,7 +906,7 @@ pub trait WithBackend {
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;
 
-// Backend bucket kernels for MSM. Signing owns digit recoding and scheduling.
+// Backend kernels for MSM. Signing owns digit recoding and scheduling.
 pub mod msm;
 
 // Now, a module for each backend.

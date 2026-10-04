@@ -557,6 +557,18 @@ fn unpack_pair(regs: Regs) -> [F; 2] {
 /// One extended point per lane of a register tile, as `[x, y, t, z]`.
 type Point = [Regs; 4];
 
+/// The identity point in both lanes of a register tile.
+#[inline(always)]
+fn identity_regs() -> Point {
+    // SAFETY: AArch64 targets provide NEON.
+    unsafe {
+        let zero = [vdupq_n_u64(0); 5];
+        let mut one = zero;
+        one[0] = vdupq_n_u64(1);
+        [zero, one, zero, one]
+    }
+}
+
 /// Applies the complete addition formula to two independent register lanes.
 #[inline(always)]
 fn add_regs([x1, y1, t1, z1]: Point, [x2, y2, t2, z2]: Point) -> Point {
@@ -860,6 +872,94 @@ impl msm::Backend for Backend {
             result = result.add(*window);
         }
         result
+    }
+
+    fn with_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
+        computation.call::<Self, WIDTH>(self)
+    }
+}
+
+impl msm::Lanes<WIDTH> for Backend {
+    type Point = Point;
+    type Affine = [Regs; 3];
+
+    const SKIP_ZERO_GROUPS: bool = true;
+
+    #[inline(always)]
+    fn identity(self) -> Point {
+        identity_regs()
+    }
+
+    #[inline(always)]
+    fn load(self, points: [&GAffine; WIDTH]) -> Self::Affine {
+        // Each limb row packs the two terms into independent NEON lanes. A missing term
+        // supplies the affine identity, so the tile always has two complete points.
+        [
+            pack_pair([points[0].x, points[1].x]),
+            pack_pair([points[0].y, points[1].y]),
+            pack_pair([points[0].t2d, points[1].t2d]),
+        ]
+    }
+
+    #[inline(always)]
+    fn add_mixed(self, point: Point, affine: Self::Affine) -> Point {
+        add_mixed_regs(point, affine)
+    }
+
+    #[inline(always)]
+    fn double(self, point: Point) -> Point {
+        double_regs(point)
+    }
+
+    #[inline(always)]
+    fn add_signed(self, point: Point, table: &[Point], digits: [i16; WIDTH]) -> Point {
+        let low = &table[usize::from(digits[0].unsigned_abs())];
+        let high = &table[usize::from(digits[1].unsigned_abs())];
+        let mut selected = *low;
+
+        // The two digit magnitudes may select different table entries. Keep lane zero from
+        // the low entry and copy lane one from the high entry into every coordinate's limb rows.
+        // SAFETY: AArch64 targets provide NEON, and both lane indices are within the register.
+        unsafe {
+            for (selected, high) in selected.iter_mut().zip(high) {
+                for (selected, high) in selected.iter_mut().zip(high) {
+                    *selected = vcopyq_laneq_u64::<1, 1>(*selected, *high);
+                }
+            }
+        }
+        let [x, y, t, z] = selected;
+        let masks = [
+            0u64.wrapping_sub(u64::from(digits[0] < 0)),
+            0u64.wrapping_sub(u64::from(digits[1] < 0)),
+        ];
+        // SAFETY: AArch64 targets provide NEON, and the mask array has two lanes.
+        let mask = unsafe { vld1q_u64(masks.as_ptr()) };
+        add_regs(point, [neg_lanes(x, mask), y, neg_lanes(t, mask), z])
+    }
+
+    #[inline(always)]
+    fn sum(self, [x, y, t, z]: Point) -> G {
+        // The shared doubling chain leaves one sum per physical lane. Unpack each point
+        // once and combine the two sums with scalar addition.
+        let [x, y, t, z] = [
+            unpack_pair(x),
+            unpack_pair(y),
+            unpack_pair(t),
+            unpack_pair(z),
+        ];
+        let first = G {
+            x: x[0],
+            y: y[0],
+            t: t[0],
+            z: z[0],
+        };
+        let second = G {
+            x: x[1],
+            y: y[1],
+            t: t[1],
+            z: z[1],
+        };
+        first.add(second)
     }
 }
 

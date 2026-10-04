@@ -1,6 +1,6 @@
 //! Plain-Rust lane adapter over scalar field and group arithmetic.
 
-use super::{F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES};
+use super::{F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES, msm};
 use core::array;
 
 /// The portable backend token.
@@ -100,4 +100,47 @@ impl GAffineVec {
 
 impl super::msm::Backend for Backend {
     const STRIPES: usize = LANES;
+
+    fn with_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
+        computation.call::<Self, 1>(self)
+    }
+}
+
+impl msm::Lanes<1> for Backend {
+    type Point = G;
+    type Affine = GAffine;
+
+    #[inline(always)]
+    fn identity(self) -> G {
+        G::IDENTITY
+    }
+
+    #[inline(always)]
+    fn load(self, [point]: [&GAffine; 1]) -> GAffine {
+        *point
+    }
+
+    #[inline(always)]
+    fn add_mixed(self, point: G, affine: GAffine) -> G {
+        point.add_mixed(affine)
+    }
+
+    #[inline(always)]
+    fn double(self, point: G) -> G {
+        point.double()
+    }
+
+    #[inline(always)]
+    fn add_signed(self, point: G, table: &[G], [digit]: [i16; 1]) -> G {
+        let mut multiple = table[usize::from(digit.unsigned_abs())];
+        if digit < 0 {
+            multiple = multiple.negate();
+        }
+        point.add(multiple)
+    }
+
+    #[inline(always)]
+    fn sum(self, point: G) -> G {
+        point
+    }
 }

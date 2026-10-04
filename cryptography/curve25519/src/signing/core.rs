@@ -265,7 +265,7 @@ where
 ///    contiguous term chunks. A signer's coalesced scalar (the sum of its signatures' `z*h` over
 ///    a contiguous [`ScalarBlock`] run) is computed lazily by whichever unit resolves its `A`
 ///    entry, so there is no separate group-sum pass.
-/// 4. One tile-parallel MSM over the term slices (with the coalesced basepoint term
+/// 4. One MSM over the term slices (with the coalesced basepoint term
 ///    `sum(z*s)·(-B)` riding along as one final term), then the cofactored identity check.
 fn verify_batch_inner<B: Backend>(
     backend: B,
@@ -442,49 +442,47 @@ mod tests {
 
     type BatchItem = (VerifyingKeyBytes, Signature, Vec<u8>);
 
-    /// A batch of both independent signers and a repeated signer, spanning multiple scalar-phase
-    /// chunks and decompression chunks, verified under `Manual` -- which disables the adaptive
-    /// serial/parallel policy so every `strategy` call in this test genuinely dispatches across
-    /// the thread pool, rather than the policy falling back to serial for a size it judges too
-    /// small. Every other test in this module uses `Sequential`, so these are the only ones
-    /// exercising real concurrent execution of the sort, the scalar phase, the fused
-    /// decompression pass, and the tile-parallel MSM end to end.
+    /// A batch of both independent signers and a repeated signer (every position divisible by 3),
+    /// spanning multiple scalar-phase chunks and decompression chunks. Keys and messages come
+    /// from one drawn seed, so they stay distinct however short the fuzzer's input is.
     fn mixed_batch_with_repeats(
         u: &mut Unstructured<'_>,
         n: usize,
     ) -> arbitrary::Result<Vec<BatchItem>> {
-        let seed: [u8; 32] = u.arbitrary()?;
-        let repeated_signer = RefSigningKey::from(seed);
-        let repeated_key = repeated_signer.verification_key().to_bytes();
-
-        (0..n)
+        let mut rng = commonware_utils::TestRng::new(u.arbitrary()?);
+        let mut draw = || {
+            let mut bytes = [0u8; 32];
+            rand_core::Rng::fill_bytes(&mut rng, &mut bytes);
+            bytes
+        };
+        let repeated_signer = RefSigningKey::from(draw());
+        let batch: Vec<BatchItem> = (0..n)
             .map(|i| {
-                let message = u.arbitrary::<[u8; 32]>()?.to_vec();
+                let message = draw().to_vec();
+
                 // Every third signature reuses `repeated_signer`, exercising `A`-term coalescing
                 // alongside the independent-signer common case.
-                let item = if i % 3 == 0 {
-                    let signature = repeated_signer.sign(&message);
-                    (
-                        VerifyingKeyBytes::new(repeated_key),
-                        Signature::from_bytes(signature.to_bytes()),
-                        message,
-                    )
+                let signer = if i % 3 == 0 {
+                    repeated_signer.clone()
                 } else {
-                    let seed: [u8; 32] = u.arbitrary()?;
-                    let signing_key = RefSigningKey::from(seed);
-                    let verifying_key = signing_key.verification_key().to_bytes();
-                    let signature = signing_key.sign(&message);
-                    (
-                        VerifyingKeyBytes::new(verifying_key),
-                        Signature::from_bytes(signature.to_bytes()),
-                        message,
-                    )
+                    RefSigningKey::from(draw())
                 };
-                Ok(item)
+                (
+                    VerifyingKeyBytes::new(signer.verification_key().to_bytes()),
+                    Signature::from_bytes(signer.sign(&message).to_bytes()),
+                    message,
+                )
             })
-            .collect()
+            .collect();
+        let mut keys: Vec<_> = batch.iter().map(|(key, _, _)| *key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), 1 + n - n.div_ceil(3));
+        Ok(batch)
     }
 
+    /// 700 signatures from 467 signers make 1168 terms, past both the serial and the parallel
+    /// Straus cutoffs, so the bucket method runs under the pool.
     #[test]
     fn verify_batch_bytes_accepts_valid_batch_under_real_parallelism() {
         let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
@@ -495,7 +493,7 @@ mod tests {
             .with_search_limit(4)
             .test(|u| {
                 let rng_seed: [u8; 32] = u.arbitrary()?;
-                let batch = mixed_batch_with_repeats(u, 600)?;
+                let batch = mixed_batch_with_repeats(u, 700)?;
                 let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
                 assert!(verify_batch_bytes(
                     &mut FuzzRng::new(rng_seed.to_vec()),

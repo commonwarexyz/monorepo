@@ -1,17 +1,18 @@
-//! Backend bucket arithmetic for variable-time multi-scalar multiplication.
+//! Backend kernels for variable-time multi-scalar multiplication.
 //!
-//! Backends own the bucket geometry and point arithmetic. Digit recoding, range partitioning,
-//! and scheduling remain independent of that choice.
+//! Backends own the bucket geometry and native lane arithmetic. Digit recoding, range
+//! partitioning, and scheduling remain independent of that choice.
 
 use super::{G, GAffine, GAffineVec, GBackend, GVec, LANES};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-#[cfg(all(test, not(feature = "std")))]
+#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-/// Bucket filling, weighted folding, and window recombination for public scalar digits.
+/// Bucket filling, weighted folding, window recombination, and native lane dispatch for public
+/// scalar digits.
 ///
-/// The defaults use one bucket stripe per logical lane and vector point arithmetic. Backends
+/// The bucket defaults use one stripe per logical lane and vector point arithmetic. Backends
 /// with narrower physical tiles can override these kernels without changing MSM scheduling.
 pub trait Backend: GBackend + Send + Sync {
     /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`.
@@ -76,6 +77,150 @@ pub trait Backend: GBackend + Send + Sync {
         }
         result.untranspose()[0]
     }
+
+    /// Runs a computation with the backend's native lane width and required CPU features.
+    fn with_lanes<C: WithLanes>(self, computation: C) -> C::Output;
+}
+
+/// Native lane operations for variable-time multiplication of public scalar digits.
+pub trait Lanes<const N: usize>: Copy {
+    /// Extended points, one per native lane.
+    type Point: Copy;
+
+    /// Affine points, one per native lane.
+    type Affine: Copy;
+
+    /// Whether table construction should skip groups whose digits are all zero.
+    const SKIP_ZERO_GROUPS: bool = false;
+
+    /// Returns the identity in every lane.
+    fn identity(self) -> Self::Point;
+
+    /// Loads one affine point per lane.
+    fn load(self, points: [&GAffine; N]) -> Self::Affine;
+
+    /// Adds an affine point to each extended lane.
+    fn add_mixed(self, point: Self::Point, affine: Self::Affine) -> Self::Point;
+
+    /// Doubles every extended lane.
+    fn double(self, point: Self::Point) -> Self::Point;
+
+    /// Adds each lane's signed table entry, indexed by its digit's magnitude.
+    ///
+    /// Every magnitude must be less than `table.len()`. Negation changes X and T only.
+    fn add_signed(self, point: Self::Point, table: &[Self::Point], digits: [i16; N])
+    -> Self::Point;
+
+    /// Returns the sum of the extended lanes.
+    fn sum(self, point: Self::Point) -> G;
+}
+
+/// A computation generic over native lane widths and representations.
+pub trait WithLanes {
+    /// The result of the computation.
+    type Output;
+
+    /// Runs with the selected native lane operations.
+    fn call<B: Lanes<N>, const N: usize>(self, backend: B) -> Self::Output;
+}
+
+/// Inputs to a Straus computation dispatched through [`Backend::with_lanes`].
+pub struct Straus<'a, T, F> {
+    terms: &'a [T],
+    windows: usize,
+    width: u32,
+    term: F,
+}
+
+impl<'a, T, F: Fn(&T) -> (&GAffine, &[i16])> Straus<'a, T, F> {
+    /// Describes the terms, digit geometry, and projection for [`straus`].
+    pub const fn new(terms: &'a [T], windows: usize, width: u32, term: F) -> Self {
+        Self {
+            terms,
+            windows,
+            width,
+            term,
+        }
+    }
+}
+
+impl<T, F: Fn(&T) -> (&GAffine, &[i16])> WithLanes for Straus<'_, T, F> {
+    type Output = G;
+
+    #[inline(always)]
+    fn call<B: Lanes<N>, const N: usize>(self, backend: B) -> G {
+        straus(backend, self.terms, self.windows, self.width, self.term)
+    }
+}
+
+/// Returns the sum of each term's point times its signed digits in base `2^width`.
+///
+/// `N` must be nonzero. Every term must have at least `windows` digits, each with magnitude
+/// at most `2^(width-1)`, and `width` must be in `1..usize::BITS`.
+#[inline(always)]
+pub fn straus<B: Lanes<N>, const N: usize, T>(
+    backend: B,
+    terms: &[T],
+    windows: usize,
+    width: u32,
+    term: impl Fn(&T) -> (&GAffine, &[i16]),
+) -> G {
+    // Signed radix-2^width digits include both endpoints, -2^(width-1) and 2^(width-1).
+    // Each group's table holds lane-wise multiples 0*P through 2^(width-1)*P, including
+    // the identity at index zero, so it needs 2^(width-1) + 1 entries.
+    let entries = (1usize << (width - 1)) + 1;
+    let mut tables = Vec::with_capacity(terms.len().div_ceil(N) * entries);
+    for group in terms.chunks(N) {
+        // All-zero groups contribute the identity in every window. Their table slots remain
+        // present so the table chunks retain the same order as the term groups.
+        if B::SKIP_ZERO_GROUPS
+            && group
+                .iter()
+                .all(|item| term(item).1[..windows].iter().all(|&digit| digit == 0))
+        {
+            tables.extend(core::iter::repeat_n(backend.identity(), entries));
+            continue;
+        }
+        let mut points = [&GAffine::IDENTITY; N];
+        for (point, item) in points.iter_mut().zip(group) {
+            *point = term(item).0;
+        }
+        let points = backend.load(points);
+        let mut multiple = backend.identity();
+        tables.push(multiple);
+        for _ in 1..entries {
+            multiple = backend.add_mixed(multiple, points);
+            tables.push(multiple);
+        }
+    }
+
+    let mut accumulator = backend.identity();
+    for window in (0..windows).rev() {
+        // Horner evaluation shares one doubling chain across all terms. Multiplying the
+        // accumulated higher windows by 2^width makes room for this window's digits.
+        for _ in 0..width {
+            accumulator = backend.double(accumulator);
+        }
+        for (group, table) in terms.chunks(N).zip(tables.chunks_exact(entries)) {
+            let mut digits = [0; N];
+            let mut any = false;
+            for (digit, item) in digits.iter_mut().zip(group) {
+                *digit = term(item).1[window];
+                any |= *digit != 0;
+            }
+
+            // Missing lanes use digit zero. A group with no nonzero digit contributes only
+            // identities, including the high windows of short coefficients.
+            if !any {
+                continue;
+            }
+
+            // A digit's magnitude selects its positive multiple. Edwards negation changes
+            // X and T while preserving Y and Z, giving the signed multiple in each lane.
+            accumulator = backend.add_signed(accumulator, table, digits);
+        }
+    }
+    backend.sum(accumulator)
 }
 
 /// Adds each run in waves of one term per bucket stripe.
