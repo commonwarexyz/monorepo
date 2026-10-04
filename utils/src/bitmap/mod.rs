@@ -988,9 +988,19 @@ pub trait Readable<const N: usize> {
     where
         Self: Sized,
     {
-        let len = self.len();
-        let pruned_start = self.pruned_bits();
-        let pos = pos.max(pruned_start);
+        self.ones_iter_range(pos..u64::MAX)
+    }
+
+    /// Returns an iterator over the indices of set bits in `range`.
+    ///
+    /// Iteration starts at the first unpruned bit at or after `range.start` and stops before the
+    /// smaller of `range.end` and the bitmap length. Empty or reversed ranges yield no bits.
+    fn ones_iter_range(&self, range: Range<u64>) -> OnesIter<'_, Self, N>
+    where
+        Self: Sized,
+    {
+        let len = range.end.min(self.len());
+        let pos = range.start.max(self.pruned_bits());
         let mut iter = OnesIter {
             bitmap: self,
             len,
@@ -1040,15 +1050,18 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 ///
 /// `len` and the current chunk are read from the bitmap once and reused (the chunk until
 /// iteration crosses into the next one), so the bitmap's contents must not change for the
-/// iterator's lifetime. Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the
-/// immutable borrow. A `Readable` whose reads go through interior mutability (e.g. a
-/// lock-guarded shared bitmap) instead requires the caller to prevent concurrent mutation
-/// across the whole iteration, for example by constructing the iterator from a held read
-/// guard rather than a bare shared reference.
+/// iterator's lifetime.
+///
+/// Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the immutable borrow.
+///
+/// A `Readable` whose reads go through interior mutability (e.g. a lock-guarded shared bitmap)
+/// instead requires the caller to prevent concurrent mutation across the whole iteration, for
+/// example by constructing the iterator from a held read guard rather than a bare shared
+/// reference.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
-    /// Cached `bitmap.len()` at iterator construction. For layered bitmaps, `len()`
-    /// walks the layer chain, so caching this avoids that walk on every `next`.
+    /// Exclusive iteration bound. Construction caps it at `bitmap.len()`. For layered bitmaps,
+    /// caching this avoids walking the layer chain on every `next`.
     len: u64,
     /// Bit index of bit 0 of `word`. Always a 64-bit word boundary relative to the start
     /// of its chunk, except when the iterator is constructed exhausted (then `len`).
@@ -1965,6 +1978,26 @@ mod tests {
         assert!(collected[32]);
         assert!(!collected[33]);
         assert!(collected[34]);
+    }
+
+    /// `ones_iter_range` yields exactly the set bits of every range, including empty, reversed, and
+    /// past-the-end ranges.
+    #[test]
+    fn test_ones_iter_range() {
+        let mut bitmap = BitMap::<9>::new();
+        for bit in 0..150 {
+            bitmap.push(bit % 3 == 0);
+        }
+        for start in 0..=151 {
+            for end in 0..=151 {
+                let expected: Vec<_> = (start..end.min(bitmap.len()))
+                    .filter(|&bit| bitmap.get(bit))
+                    .collect();
+                let mut ones = bitmap.ones_iter_range(start..end);
+                assert_eq!(ones.by_ref().collect::<Vec<_>>(), expected);
+                assert_eq!(ones.next(), None);
+            }
+        }
     }
 
     #[test]
