@@ -287,6 +287,11 @@ where
         self.active_keys == 0
     }
 
+    /// Return the number of active keys in the store.
+    pub const fn active_keys(&self) -> usize {
+        self.active_keys
+    }
+
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
@@ -1484,7 +1489,7 @@ mod test {
                 _ => {}
             }
         }
-        assert_eq!(live.len(), db.active_keys);
+        assert_eq!(live.len(), db.active_keys());
         let gap = *db.size() - *db.inactivity_floor_loc();
         let bound = 3 * (live.len() as u64 + 1);
         assert!(
@@ -2147,7 +2152,7 @@ mod test {
             }
             let kept = db.get(&colliding(0)).await.unwrap();
             assert_eq!(kept.map(|value| value.0), Some(20));
-            assert_eq!(db.active_keys, 1);
+            assert_eq!(db.active_keys(), 1);
             db.destroy().await.unwrap();
         });
     }

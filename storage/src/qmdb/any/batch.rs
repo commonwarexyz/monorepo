@@ -210,6 +210,28 @@ fn contains_staged<F: Family, U: update::Update>(
         .is_some_and(|(_, sloc, _, _)| sloc.loc() == *target)
 }
 
+/// Removes from ascending `locations` those holding one of the ascending `kept` updates, passing
+/// each removed location and its update to `feed`.
+fn take_kept<'a, F: Family, U>(
+    locations: &mut Vec<Location<F>>,
+    kept: &'a [(Location<F>, U)],
+    mut feed: impl FnMut(Location<F>, &'a U),
+) {
+    let mut at = 0;
+    locations.retain(|loc| {
+        while kept.get(at).is_some_and(|(kept_loc, _)| kept_loc < loc) {
+            at += 1;
+        }
+        match kept.get(at) {
+            Some((kept_loc, update)) if kept_loc == loc => {
+                feed(*loc, update);
+                false
+            }
+            _ => true,
+        }
+    });
+}
+
 /// Merge the `less`-sorted vectors `a` and `b` into one sorted vector. On ties, the element from
 /// `b` comes first.
 fn merge_by<T>(a: Vec<T>, b: Vec<T>, less: impl Fn(&T, &T) -> bool) -> Vec<T> {
@@ -1807,28 +1829,33 @@ where
         } = self;
         let mut prepared = batch.prepare(db)?;
 
-        // Bound the steps the floor raise can take: only emitted ops consume steps, and an op is
-        // emitted per location-resolved update plus per upsert or prior mutation on a key alive
-        // in the committed snapshot. Repeated writes to a staged slot resolve to one op, so the
-        // resolved writes are capped by the staged key count. Fresh-key creates never consume a
-        // step, so unresolved update slots and writes missing from the snapshot are excluded
-        // (one in-memory probe per key). The bound is approximate in both directions. Surplus
-        // candidates (a translated-key collision, or a key an ancestor already deleted) are
-        // dropped by the raise once it moves enough ops, and a shortfall (a delete's second
-        // step, or an upsert or prior mutation whose key is live only in an ancestor's diff)
+        // Bound the steps the floor raise can take: the previous commit takes one, and each emitted
+        // op takes one for an update or two for a delete. An op is emitted per location-resolved
+        // staged slot plus per upsert or prior mutation on a key alive in the committed snapshot. A
+        // slot written more than once counts only its final write. Fresh-key creates never consume
+        // a step, so unresolved slots and writes missing from the snapshot are excluded (one
+        // in-memory probe per key). The bound is approximate in both directions. Surplus candidates
+        // (a translated-key collision, a key an ancestor already deleted, or a key that another
+        // slot or an upsert also writes) are dropped by the raise once it moves enough ops, and a
+        // shortfall (an upsert or prior mutation whose key is live only in an ancestor's diff)
         // makes the raise fall back to the live scan when the prefetched prefix runs out.
-        let resolved_updates = updates
+        let steps = |value: &Option<V::Value>| if value.is_some() { 1 } else { 2 };
+        let mut counted = vec![false; resolutions.len()];
+        let mut staged_steps = 0;
+        for (slot, value) in updates.iter().rev() {
+            if resolutions.get(*slot).is_some_and(Option::is_some) && !counted[*slot] {
+                counted[*slot] = true;
+                staged_steps += steps(value);
+            }
+        }
+        let existing_steps: usize = upserts
             .iter()
-            .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
-            .count()
-            .min(keys.len());
-        let existing_writes = upserts
-            .iter()
-            .map(|(key, _)| key)
-            .chain(prepared.mutations.keys())
-            .filter(|key| db.snapshot.get(key).next().is_some())
-            .count();
-        let steps_bound = resolved_updates + existing_writes + 1;
+            .map(|(key, value)| (key, value))
+            .chain(&prepared.mutations)
+            .filter(|&(key, _)| db.snapshot.get(key).next().is_some())
+            .map(|(_, value)| steps(value))
+            .sum();
+        let steps_bound = staged_steps + existing_steps + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
         // committed-prefix candidate set depends only on the base floor, the candidate
@@ -2285,6 +2312,26 @@ where
             self.merkleizer
                 .gather_existing_locations(&self.mutations, self.db)
         });
+
+        // Locations the pass treats as inactive without reading them: where the staged writes
+        // resolved, the committed locations they supersede, and the committed locations that
+        // pending ancestors superseded for the batch's other written keys.
+        let mut inactive = Vec::new();
+        if entries > 0 {
+            let db_size = self.merkleizer.db_state.size;
+            for (_, sloc, _, _) in &staged {
+                inactive.push(sloc.loc());
+                inactive.extend(sloc.superseded(db_size));
+            }
+            let ancestors = self.merkleizer.ancestors.as_slice();
+            if !ancestors.is_empty() {
+                inactive.extend(self.mutations.keys().filter_map(|key| {
+                    resolve_in_ancestors(ancestors, key).and_then(DiffEntry::base_old_loc)
+                }));
+            }
+            inactive.sort_unstable();
+            inactive.dedup();
+        }
         let mut decoded = Vec::new();
         let mut cursor = Cursor {
             floor,
@@ -2303,7 +2350,7 @@ where
         while cursor.entries > 0 {
             if cursor.buffer.is_empty() && cursor.scan < cursor.end {
                 let existing = existing.as_deref().unwrap_or_default();
-                self.read(&mut cursor, existing, &staged, &mut decoded, &mut fill)
+                self.read(&mut cursor, existing, &inactive, &mut decoded, &mut fill)
                     .await?;
             }
             let Some((sloc, update)) = cursor.pop() else {
@@ -2342,17 +2389,17 @@ where
     /// Read rounds of candidates from the scan position into the read-ahead buffer until one
     /// holds an active update or the window ends.
     ///
-    /// A round fills candidates until `entries` of those outside the batch's write locations
-    /// (`existing` and `staged`) may be active. It stops early at the first candidate the floor
-    /// cannot reach even if every earlier candidate is active, and that candidate becomes the
-    /// window's end. Committed candidates are read in one batch, and ancestor candidates resolve
-    /// in memory. Committed operations read at `existing` locations that the read-ahead does not
-    /// keep go to `decoded`.
+    /// A round fills candidates until `entries` of those outside `existing` and `inactive` may be
+    /// active, and never reads an `inactive` location. It stops early at the first candidate the
+    /// floor cannot reach even if every earlier candidate outside `inactive` is active, and that
+    /// candidate becomes the window's end. Committed candidates are read in one batch, and
+    /// ancestor candidates resolve in memory. Committed operations read at `existing` locations
+    /// that the read-ahead does not keep go to `decoded`.
     async fn read(
         &self,
         cursor: &mut Cursor<F, U>,
         existing: &[Location<F>],
-        staged: &StagedUpdates<F, U>,
+        inactive: &[Location<F>],
         decoded: &mut Vec<(Location<F>, Operation<F, U>)>,
         mut fill: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<(), crate::qmdb::Error<F>> {
@@ -2366,8 +2413,8 @@ where
         let mut found = Vec::new();
         let mut existing_at = existing.partition_point(|loc| *loc < scan);
         let mut decoded_at = existing_at;
-        let mut staged_count_at = staged.partition_point(|(_, sloc, _, _)| sloc.loc() < scan);
-        let mut staged_at = staged_count_at;
+        let mut inactive_count_at = inactive.partition_point(|loc| *loc < scan);
+        let mut inactive_at = inactive_count_at;
         loop {
             // The batch's commit supersedes the last commit at `tip - 1`, so candidates
             // stop before it.
@@ -2378,10 +2425,11 @@ where
             }
 
             // Every location in `[floor, scan)` is inactive here, so only this round's candidates
-            // may hold active updates. A write location may hold an active collision sibling, so it
-            // counts as possibly active for reachability but not toward `need`.
+            // outside `inactive` may hold active updates. An `existing` location may hold an active
+            // collision sibling, so it counts as possibly active for the cut but not toward `need`.
             let mut candidates = Vec::new();
             let mut need = cursor.entries;
+            let mut possible = 0;
             while need > 0 && scan < last {
                 // Each request adds at most the larger of the round's candidate count and 64, so a
                 // round fills at most 64 more than twice the candidates it keeps before a cut.
@@ -2390,13 +2438,15 @@ where
                 let next = fill(scan, *last, limit, &mut candidates);
                 let mut cut = None;
                 for (at, loc) in candidates.iter().enumerate().skip(start) {
-                    if **loc - *cursor.floor - at as u64 > cursor.skips {
+                    if sorted_contains(inactive, &mut inactive_count_at, loc) {
+                        continue;
+                    }
+                    if **loc - *cursor.floor - possible > cursor.skips {
                         cut = Some(at);
                         break;
                     }
-                    if !sorted_contains(existing, &mut existing_at, loc)
-                        && !contains_staged::<F, U>(staged, &mut staged_count_at, loc)
-                    {
+                    possible += 1;
+                    if !sorted_contains(existing, &mut existing_at, loc) {
                         need -= 1;
                     }
                 }
@@ -2410,8 +2460,7 @@ where
                 scan = next;
             }
 
-            // Staged writes supersede their resolved locations, so those need no read.
-            candidates.retain(|loc| !contains_staged::<F, U>(staged, &mut staged_at, loc));
+            candidates.retain(|loc| !sorted_contains(inactive, &mut inactive_at, loc));
             let split = candidates.partition_point(|loc| *loc < db_size);
             let positions: Vec<u64> = candidates[..split].iter().map(|loc| **loc).collect();
             let shards = self.db.log.read_many_sharded(&positions).await?;
@@ -2591,13 +2640,17 @@ where
 
         // Resolve existing keys. Reuse their locations when a policy pass gathered them, and the
         // committed operations it already read there. Staged records already resolved their exact
-        // locations, so those need no read.
+        // locations, so those need no read. Neither do the updates the pass kept, since the batch
+        // writes none of their keys.
         let mut locations = existing.unwrap_or_else(|| m.gather_existing_locations(&mutations, db));
         if !staged_updates.is_empty() {
             let mut staged_at = 0;
             locations.retain(|loc| {
                 !contains_staged::<F, update::Unordered<K, V>>(&staged_updates, &mut staged_at, loc)
             });
+        }
+        if let Some(frozen) = &m.frozen {
+            take_kept(&mut locations, &frozen.kept, |_, _| {});
         }
         let results = m.read_ops_reusing(&locations, decoded, &db.log).await?;
 
@@ -2835,6 +2888,19 @@ where
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
+        // A kept update is the active operation the pass read at its location, and the batch writes
+        // none of the kept keys, so it feeds the candidate sets just as reading its location would.
+        let kept = m
+            .frozen
+            .as_ref()
+            .map_or(&[][..], |frozen| frozen.kept.as_slice());
+        take_kept(&mut locations, kept, |loc, update| {
+            next_candidates.push(update.next_key.clone());
+            prev_candidates.push((
+                update.key.clone(),
+                (Some(Cow::Borrowed(&update.value)), loc),
+            ));
+        });
         let ops = m.read_ops_reusing(&locations, decoded, &db.log).await?;
         for (op, &old_loc) in zip_eq(ops, &locations) {
             let update::Ordered {
@@ -2912,6 +2978,13 @@ where
                 !contains_staged::<F, update::Ordered<K, V>>(&staged_updates, &mut staged_at, loc)
             });
         }
+        take_kept(&mut prev_locations, kept, |loc, update| {
+            next_candidates.push(update.next_key.clone());
+            prev_candidates.push((
+                update.key.clone(),
+                (Some(Cow::Borrowed(&update.value)), loc),
+            ));
+        });
 
         let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
 
@@ -4252,7 +4325,7 @@ pub(crate) mod tests {
                 .read(
                     &mut cursor,
                     &existing,
-                    &Vec::new(),
+                    &[],
                     &mut Vec::new(),
                     |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
                 )
@@ -4324,7 +4397,7 @@ pub(crate) mod tests {
                 .read(
                     &mut cursor,
                     &[],
-                    &Vec::new(),
+                    &[],
                     &mut Vec::new(),
                     |floor, tip, limit, out| {
                         let start = out.len();
@@ -4472,26 +4545,35 @@ pub(crate) mod tests {
     }
 
     /// A fixed policy that keeps the updates the [`Proportional`] raise moves produces the same
-    /// batch with the same journal reads when the batch's writes supersede updates in its window,
-    /// whether the keys have their own translated-key buckets or all share one.
+    /// batch with no more journal reads when the batch's writes supersede updates in its window:
+    /// with keys in their own translated-key buckets, all in one bucket, or a few in the written
+    /// key's bucket, and when a pending parent rewrote the written keys.
     async fn policy_reads_writes_once<D, Fut>(
         context: deterministic::Context,
         open: impl Fn(deterministic::Context, &'static str) -> Fut,
+        child: fn(&D::Merkleized) -> D::Batch,
     ) where
         D: DbAny<mmr::Family, Key = sha256::Digest, Value = sha256::Digest>,
         Fut: core::future::Future<Output = D>,
     {
-        // Each scenario names its keys, the indices of the keys it writes, and the updates the
-        // raise moves for those writes and the previous commit.
+        // Each scenario names its keys, the indices of the keys a pending parent rewrites and of
+        // those the batch writes, and the updates the raise moves for the batch.
         let distinct: Vec<_> = (0..32u8).map(|i| sha256::Digest::from([i; 32])).collect();
         let colliding: Vec<_> = (0..64).map(|i| colliding_digest(0xAA, i)).collect();
+        let crowded: Vec<_> = (0..4)
+            .map(|i| colliding_digest(0xAA, i))
+            .chain([0xBB, 0xCC].map(|byte| sha256::Digest::from([byte; 32])))
+            .collect();
         let scenarios = [
-            ("distinct", distinct, vec![1, 3, 5, 7], 5),
-            ("colliding", colliding, vec![63], 2),
+            ("distinct", distinct.clone(), vec![], vec![1, 3, 5, 7], 5),
+            ("colliding", colliding, vec![], vec![63], 2),
+            ("crowded", crowded, vec![], vec![3], 2),
+            ("pending", distinct, vec![1, 3], vec![1, 3], 3),
         ];
         let items = || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+        let rewrite = sha256::Digest::from([0xDD; 32]);
         let value = sha256::Digest::from([0xEE; 32]);
-        for (partition, keys, written, entries) in scenarios {
+        for (partition, keys, rewritten, written, entries) in scenarios {
             // Seed the keys. The raise moves the first one, so the floor is 2.
             let db = open(context.child(partition), partition).await;
             let seed = keys
@@ -4503,11 +4585,27 @@ pub(crate) mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             assert_eq!(*db.inactivity_floor_loc(), 2);
 
+            // A pending parent, if any, rewrites keys with a held floor.
+            let parent = if rewritten.is_empty() {
+                None
+            } else {
+                let parent = rewritten
+                    .iter()
+                    .fold(db.new_batch(), |batch, &i| {
+                        batch.write(keys[i], Some(rewrite))
+                    })
+                    .merkleize(&db, None, &mut Hold)
+                    .await
+                    .unwrap();
+                Some(parent)
+            };
+
             // Keeping as many updates as the raise moves produces the same batch.
             let write = || {
-                written.iter().fold(db.new_batch(), |batch, &i| {
-                    batch.write(keys[i], Some(value))
-                })
+                let batch = parent.as_ref().map_or_else(|| db.new_batch(), child);
+                written
+                    .iter()
+                    .fold(batch, |batch, &i| batch.write(keys[i], Some(value)))
             };
             let before = items();
             let raised = write()
@@ -4522,8 +4620,9 @@ pub(crate) mod tests {
             };
             let kept = write().merkleize(&db, None, &mut policy).await.unwrap();
             assert_eq!(kept.root(), raised.root(), "{partition}");
-            assert_eq!(items() - before, raise_reads, "{partition}");
-            drop((raised, kept));
+            let reads = items() - before;
+            assert!(reads <= raise_reads, "{partition}: {reads} > {raise_reads}");
+            drop((raised, kept, parent));
             db.destroy().await.unwrap();
         }
     }
@@ -4541,11 +4640,11 @@ pub(crate) mod tests {
                 OneCap,
                 Sequential,
             >;
-            policy_reads_writes_once(context, |context, partition| async move {
+            let open = |context, partition| async move {
                 let config = fixed_db_config::<OneCap>(partition, &context);
                 TestDb::init(context, config, None).await.unwrap()
-            })
-            .await;
+            };
+            policy_reads_writes_once(context, open, |batch| batch.new_batch::<Sha256>()).await;
         });
     }
 
@@ -4562,11 +4661,286 @@ pub(crate) mod tests {
                 OneCap,
                 Sequential,
             >;
-            policy_reads_writes_once(context, |context, partition| async move {
+            let open = |context, partition| async move {
                 let config = fixed_db_config::<OneCap>(partition, &context);
                 TestDb::init(context, config, None).await.unwrap()
-            })
-            .await;
+            };
+            policy_reads_writes_once(context, open, |batch| batch.new_batch::<Sha256>()).await;
+        });
+    }
+
+    /// An ordered batch that rewrites the link of an update its fixed policy keeps reads that
+    /// update no more often than the [`Proportional`] raise, whether the update lies in the
+    /// predecessor bucket of the created key or shares its translated-key bucket.
+    #[test]
+    fn policy_reads_kept_predecessor_once() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+
+            // Keys in even translated-key buckets. The created key follows the third key, either
+            // in an empty bucket or in that key's bucket.
+            let keys: Vec<_> = (0..16u8)
+                .map(|i| sha256::Digest::from([2 * i; 32]))
+                .collect();
+            let mut shared = [4; 32];
+            shared[1] = 5;
+            let created = [
+                ("empty", sha256::Digest::from([5; 32])),
+                ("shared", sha256::Digest::from(shared)),
+            ];
+            for (partition, created) in created {
+                // Seed the keys. The raise moves the first one, so the floor is 2 and the third
+                // key, which precedes the created key, lies at 3.
+                let config = fixed_db_config::<OneCap>(partition, &context);
+                let db = TestDb::init(context.child(partition), config, None)
+                    .await
+                    .unwrap();
+                let seed = keys
+                    .iter()
+                    .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let (db, _) = db.apply_batch(seed).await.unwrap();
+                assert_eq!(*db.inactivity_floor_loc(), 2);
+
+                // Rewriting the third key's link and the previous commit each move one update. A
+                // policy keeping the first three, the third key among them, reaches the same batch.
+                let before = items();
+                let raised = db
+                    .new_batch()
+                    .write(created, Some(created))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let raise_reads = items() - before;
+                let before = items();
+                let mut policy = Compact {
+                    entries: 3,
+                    skips: u64::MAX,
+                };
+                let kept = db
+                    .new_batch()
+                    .write(created, Some(created))
+                    .merkleize(&db, None, &mut policy)
+                    .await
+                    .unwrap();
+                assert_eq!(kept.root(), raised.root(), "{partition}");
+                let reads = items() - before;
+                assert!(reads <= raise_reads, "{partition}: {reads} > {raise_reads}");
+                drop((raised, kept));
+                db.destroy().await.unwrap();
+            }
+        });
+    }
+
+    /// A pass whose remaining skips cannot reach the update behind a staged write reads nothing.
+    #[test]
+    fn policy_reads_nothing_past_staged_reach() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("staged-reach", &context);
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+
+            // Seed four keys at 1..5 with a held floor, and stage the first.
+            let keys: Vec<_> = (1..5u8).map(|i| sha256::Digest::from([i; 32])).collect();
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let (_, staged) = db.new_batch().stage(&[&keys[0]], &db).await.unwrap();
+
+            // The staged write supersedes the update at 1, and one skip cannot also pass the
+            // initial commit to reach the update at 2.
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+            let before = items();
+            let mut policy = Compact {
+                entries: 2,
+                skips: 1,
+            };
+            let merkleized = staged
+                .merkleize(vec![(0, Some(keys[1]))], Vec::new(), None, &db, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(items() - before, 0);
+            assert_eq!(merkleized.bounds().inactivity_floor, Location::new(1));
+            drop(merkleized);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A pass over staged writes to keys that a pending parent rewrote passes the committed
+    /// locations the parent superseded without reading them, and keeping as many updates as the
+    /// [`Proportional`] raise moves produces the same batch.
+    #[test]
+    fn policy_passes_parent_superseded_locations_unread() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("staged-parent", &context);
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+
+            // Seed eight keys at 1..9 with a held floor, and rewrite the first and third in a
+            // pending parent.
+            let keys: Vec<_> = (1..9u8).map(|i| sha256::Digest::from([i; 32])).collect();
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let rewrite = Some(sha256::Digest::from([0xDD; 32]));
+            let parent = db
+                .new_batch()
+                .write(keys[0], rewrite)
+                .write(keys[2], rewrite)
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // A child stages both keys and writes them again. The raise moves three updates, and a
+            // policy that keeps three passes locations 1 and 3 and reads only the updates it keeps
+            // at 2, 4, and 5.
+            let staged = [&keys[0], &keys[2]];
+            let value = Some(sha256::Digest::from([0xEE; 32]));
+            let updates = vec![(0, value), (1, value)];
+            let (_, batch) = parent
+                .new_batch::<Sha256>()
+                .stage(&staged, &db)
+                .await
+                .unwrap();
+            let raised = batch
+                .merkleize(updates.clone(), Vec::new(), None, &db, &mut Proportional)
+                .await
+                .unwrap();
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+            let (_, batch) = parent
+                .new_batch::<Sha256>()
+                .stage(&staged, &db)
+                .await
+                .unwrap();
+            let before = items();
+            let mut policy = Compact {
+                entries: 3,
+                skips: u64::MAX,
+            };
+            let kept = batch
+                .merkleize(updates, Vec::new(), None, &db, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(items() - before, 3);
+            assert_eq!(kept.root(), raised.root());
+            drop((raised, kept, parent));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// The staged prefetch covers every move the raise takes for the final write to each staged
+    /// slot and for each upsert or earlier write to a live key: one per update and two per
+    /// delete, plus one for the previous commit.
+    #[test]
+    fn staged_prefetch_counts_final_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("staged-prefetch", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+
+            // Seed 64 keys with a held floor, and stage the last eight.
+            let keys: Vec<_> = (0..64u8).map(|i| sha256::Digest::from([i; 32])).collect();
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let staged_keys: Vec<_> = keys[56..].iter().collect();
+            let fill = |floor, tip, limit, out: &mut Vec<Location<mmr::Family>>| {
+                fill_candidates(&db.bitmap, floor, tip, limit, out)
+            };
+
+            let update = Some(sha256::Digest::from([0xFF; 32]));
+            for (values, steps) in [
+                (vec![update], 1),
+                (vec![None], 2),
+                (vec![None, update], 1),
+                (vec![update, None], 2),
+            ] {
+                let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
+                let updates: Vec<_> = values
+                    .iter()
+                    .flat_map(|value| (0..staged_keys.len()).map(move |slot| (slot, *value)))
+                    .collect();
+                let (prepared, _, prefetched) = staged
+                    .resolve_updates_prefetched(updates, Vec::new(), &db, fill)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    prefetched.locs.len(),
+                    1 + steps * staged_keys.len(),
+                    "{values:?}"
+                );
+                drop(prepared);
+            }
+
+            // An earlier delete, an updating upsert, and a deleting upsert of live keys.
+            let (_, staged) = db
+                .new_batch()
+                .write(keys[0], None)
+                .stage(&staged_keys, &db)
+                .await
+                .unwrap();
+            let upserts = vec![(keys[1], update), (keys[2], None)];
+            let (prepared, _, prefetched) = staged
+                .resolve_updates_prefetched(Vec::new(), upserts, &db, fill)
+                .await
+                .unwrap();
+            assert_eq!(prefetched.locs.len(), 1 + 2 + 1 + 2);
+            drop(prepared);
+            db.destroy().await.unwrap();
         });
     }
 
