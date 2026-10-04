@@ -5,7 +5,10 @@
 //! ```rust
 //! use commonware_storage::{
 //!     journal::contiguous::variable::Config as JournalConfig,
-//!     qmdb::store::db::{Config, Db},
+//!     qmdb::{
+//!         floor::Proportional,
+//!         store::db::{Config, Db},
+//!     },
 //!     translator::TwoCap,
 //! };
 //! use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -45,7 +48,7 @@
 //!     let v = Digest::random(&mut ctx);
 //!     let metadata = Some(Digest::random(&mut ctx));
 //!     let batch = db.new_batch().update(k, v).finalize(metadata);
-//!     let (db, _) = db.apply_batch(batch).await.unwrap();
+//!     let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
 //!     let db = db.commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -54,7 +57,7 @@
 //!
 //!     // Delete the key's value
 //!     let batch = db.new_batch().delete(k).finalize(None);
-//!     let (db, _) = db.apply_batch(batch).await.unwrap();
+//!     let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
 //!     let db = db.commit().await.unwrap();
 //!
 //!     // Fetch the value
@@ -71,17 +74,17 @@
 //! // and apply it. Each mutation takes the database and returns it, so committing and
 //! // building run in sequence on the threaded handle.
 //! let batch = db.new_batch().update(key_a, value_a).finalize(None);
-//! let (db, _) = db.apply_batch(batch).await?;
+//! let (db, _) = db.apply_batch(batch, &mut Proportional).await?;
 //! let db = db.commit().await?;
 //!
 //! let child = db.new_batch().update(key_b, value_b).finalize(None);
-//! let (db, _) = db.apply_batch(child).await?;
+//! let (db, _) = db.apply_batch(child, &mut Proportional).await?;
 //! let db = db.commit().await?;
 //! ```
 
 use crate::{
     Context,
-    index::{Unordered as _, unordered::Index},
+    index::{Cursor as _, Unordered as _, unordered::Index},
     journal::{
         authenticated::{Backing as _, BackingRecovery as _},
         contiguous::{
@@ -91,12 +94,12 @@ use crate::{
     },
     merkle::mmr::Location,
     qmdb::{
-        FloorHelper,
         any::{
             VariableValue,
             unordered::{Update, variable::Operation},
         },
         build_snapshot_from_log, delete_key,
+        floor::{Action, Compact, Entry, Limits, Policy},
         operation::{Committable as _, Floored as _, Key},
         update_key,
     },
@@ -284,6 +287,11 @@ where
         self.active_keys == 0
     }
 
+    /// Return the number of active keys in the store.
+    pub const fn active_keys(&self) -> usize {
+        self.active_keys
+    }
+
     /// Gets a [Operation] from the log at the given location. Returns [Error::OperationPruned]
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
@@ -469,15 +477,23 @@ where
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
     /// make the applied state durable.
+    ///
+    /// Before its commit, the batch advances the inactivity floor with [`Policy`].
+    /// If the batch leaves the store empty, the floor moves to its commit.
     #[boxed]
-    pub async fn apply_batch(
+    pub async fn apply_batch<P>(
         mut self,
         batch: Changeset<K, V>,
-    ) -> Result<(Self, Range<Location>), Error> {
+        policy: &mut P,
+    ) -> Result<(Self, Range<Location>), Error>
+    where
+        P: Policy<crate::mmr::Family, K, V>,
+    {
+        let limits = policy.limits();
         let start_loc = self.size();
         let Changeset { diff, metadata } = batch;
 
-        let mut steps = 0u64;
+        let mut steps = 0usize;
         for (key, value) in diff {
             if let Some(value) = value {
                 let updated = {
@@ -510,29 +526,38 @@ where
                 .await?;
                 if deleted.is_some() {
                     (self.log, _) = self.log.append(&Operation::Delete(key)).await?;
-                    steps += 1;
+                    steps += 2;
                     self.active_keys -= 1;
                 }
             }
         }
 
-        // Raise the inactivity floor by `steps` steps, plus 1 to account for the previous
-        // commit becoming inactive.
+        // Advance the floor as the policy's limits direct. An empty store has no active update to
+        // move or decide.
+        if !self.is_empty() {
+            self = match limits {
+                // Keep up to one active update for each update the batch supersedes, each delete
+                // it appends, and its previous commit. Moves stop at the tip as it stood before
+                // them, so no update moves twice.
+                Limits::Proportional => {
+                    let tip = self.size();
+                    let entries = steps + 1;
+                    let mut keep = Compact {
+                        entries,
+                        skips: u64::MAX,
+                    };
+                    self.advance(tip, &mut keep, entries, u64::MAX).await?
+                }
+                Limits::Fixed { entries, skips } => {
+                    self.advance(start_loc, policy, entries, skips).await?
+                }
+            };
+        }
+
+        // The writes or the policy's evictions may leave the store empty.
         if self.is_empty() {
             self.inactivity_floor_loc = self.size();
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
-        } else {
-            let steps_to_take = steps + 1;
-            let mut helper = FloorHelper {
-                snapshot: &mut self.snapshot,
-                log: self.log,
-            };
-            let mut inactivity_floor_loc = self.inactivity_floor_loc;
-            for _ in 0..steps_to_take {
-                (helper, inactivity_floor_loc) = helper.raise_floor(inactivity_floor_loc).await?;
-            }
-            self.log = helper.log;
-            self.inactivity_floor_loc = inactivity_floor_loc;
         }
 
         // Append the commit operation with the new inactivity floor.
@@ -543,6 +568,69 @@ where
 
         let end_loc = self.size();
         Ok((self, start_loc..end_loc))
+    }
+
+    /// Run `policy` from the inactivity floor over the active updates below `end` and set the
+    /// floor where the pass ends. The pass decides at most `entries` updates and passes at most
+    /// `skips` inactive locations.
+    async fn advance<P>(
+        mut self,
+        end: Location,
+        policy: &mut P,
+        mut entries: usize,
+        mut skips: u64,
+    ) -> Result<Self, Error>
+    where
+        P: Policy<crate::mmr::Family, K, V>,
+    {
+        let mut floor = self.inactivity_floor_loc;
+        'pass: while entries > 0 {
+            // Each inactive location passed costs a skip, so an active update past the remaining
+            // skips is out of reach.
+            let reach = Location::new((*floor).saturating_add(skips).saturating_add(1)).min(end);
+            let mut loc = floor;
+            let op = loop {
+                // With no active update before `reach`, the floor passes the inactive locations
+                // up to it that the remaining skips cover, and the pass ends.
+                if loc == reach {
+                    floor += (*reach - *floor).min(skips);
+                    break 'pass;
+                }
+                if let Operation::Update(Update(key, value)) = self.log.read(*loc).await?
+                    && let Some(mut cursor) = self.snapshot.get_mut(&key)
+                    && cursor.find(|&active| active == loc)
+                {
+                    skips -= *loc - *floor;
+                    floor = loc;
+
+                    // Keeping or replacing writes the key's update at the tip, and evicting
+                    // deletes the key. Stopping leaves the update in place with the floor at its
+                    // location. The cursor stays on the update's snapshot slot across the
+                    // synchronous decision, so the action rewrites or removes that slot without a
+                    // second lookup.
+                    break match policy.decide(Entry::new(loc, &key, value)).into_action() {
+                        Action::Keep(value) | Action::Replace(value) => {
+                            cursor.update(Location::new(self.log.size()));
+                            Operation::Update(Update(key, value))
+                        }
+                        Action::Evict => {
+                            cursor.delete();
+                            Operation::Delete(key)
+                        }
+                        Action::Stop => break 'pass,
+                    };
+                }
+                loc += 1;
+            };
+            (self.log, _) = self.log.append(&op).await?;
+            if matches!(op, Operation::Delete(_)) {
+                self.active_keys -= 1;
+            }
+            entries -= 1;
+            floor = loc + 1;
+        }
+        self.inactivity_floor_loc = floor;
+        Ok(self)
     }
 
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
@@ -571,10 +659,20 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::translator::TwoCap;
+    use crate::{
+        qmdb::{
+            any::{
+                batch::tests::{CountedValue, Evict, Growing},
+                test::{Choice, Script, churn, colliding_digest, counter, keep, simulate},
+            },
+            floor::{Compact, Hold, Proportional},
+        },
+        translator::{OneCap, TwoCap},
+    };
     use commonware_cryptography::{
-        Hasher as _,
+        Hasher as _, Sha256,
         blake3::{Blake3, Digest},
+        sha256,
     };
     use commonware_macros::{test_collect_traces, test_traced};
     use commonware_math::algebra::Random;
@@ -587,9 +685,17 @@ mod test {
         telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
-    use core::future::Future;
+    use core::{future::Future, hash::BuildHasher};
     use futures::FutureExt as _;
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        cell::Cell,
+        collections::BTreeSet,
+        num::{NonZeroU16, NonZeroUsize},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
@@ -625,7 +731,9 @@ mod test {
         db: TestStore,
         iter: impl IntoIterator<Item = (Digest, Option<Vec<u8>>)> + Send,
     ) -> (TestStore, Range<Location>) {
-        db.apply_batch(iter.into_iter().collect()).await.unwrap()
+        db.apply_batch(iter.into_iter().collect(), &mut Proportional)
+            .await
+            .unwrap()
     }
 
     #[test_traced]
@@ -645,7 +753,7 @@ mod test {
                     .update(a, vec![1])
                     .update(b, vec![2])
                     .finalize(Some(vec![10]));
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let first_size = db.size();
                 let batch = db
                     .new_batch()
@@ -653,7 +761,7 @@ mod test {
                     .delete(b)
                     .update(c, vec![4])
                     .finalize(Some(vec![20]));
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let latest_size = db.size();
                 _ = db.sync().await.unwrap();
 
@@ -700,7 +808,7 @@ mod test {
                     .update(a, vec![5])
                     .update(c, vec![6])
                     .finalize(None);
-                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
                 let appended_size = db.size();
                 assert!(appended_size > expected_size);
                 drop(db.commit().await.unwrap());
@@ -818,7 +926,10 @@ mod test {
 
     /// Apply a single-key batch writing `key -> value`.
     async fn apply_write(db: DelayedStore, key: Digest, value: Vec<u8>) -> DelayedStore {
-        let (db, _) = db.apply_batch([(key, Some(value))].into()).await.unwrap();
+        let (db, _) = db
+            .apply_batch([(key, Some(value))].into(), &mut Proportional)
+            .await
+            .unwrap();
         db
     }
 
@@ -1035,7 +1146,7 @@ mod test {
             // Test calling commit on an empty db which should make it (durably) non-empty.
             let metadata = vec![1, 2, 3];
             let batch = db.new_batch().finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch).await.unwrap();
+            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 2);
             let db = db.commit().await.unwrap();
@@ -1055,7 +1166,7 @@ mod test {
             let mut db = db.commit().await.unwrap();
             for _ in 1..100 {
                 let merkleized = db.new_batch().finalize(None);
-                (db, _) = db.apply_batch(merkleized).await.unwrap();
+                (db, _) = db.apply_batch(merkleized, &mut Proportional).await.unwrap();
                 db = db.commit().await.unwrap();
                 // Distance should equal 3 after the second commit, with inactivity_floor
                 // referencing the previous commit operation.
@@ -1112,7 +1223,7 @@ mod test {
                 .new_batch()
                 .update(key, value.clone())
                 .finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch).await.unwrap();
+            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
             assert_eq!(*range.start, 1);
             assert_eq!(*range.end, 4);
             let db = db.commit().await.unwrap();
@@ -1204,11 +1315,13 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            // First apply_entries: Update + 1 move + CommitFloor = 3 ops. Subsequent 99: Update + 2
-            // moves + CommitFloor = 4 ops each. Total: 1 (init) + 3 + 99*4 = 400.
-            assert_eq!(*db.bounds().end, 400);
-            // Only the last Update and CommitFloor are active → floor = 398.
-            assert_eq!(*db.inactivity_floor_loc, 398);
+            // Each apply_entries appends the Update, one move of it, and a CommitFloor. The raise
+            // stops at the tip as it stood before its moves, so the moved Update is not moved
+            // again. Total: 1 (init) + 100 * 3 = 301.
+            assert_eq!(*db.bounds().end, 301);
+
+            // Only the last moved Update and CommitFloor are active, so the floor is 299.
+            assert_eq!(*db.inactivity_floor_loc, 299);
             let floor = db.inactivity_floor_loc;
 
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
@@ -1344,6 +1457,59 @@ mod test {
             assert_eq!(db.get(&k_a).await.unwrap().unwrap(), v_c);
             assert_eq!(db.get(&k_b).await.unwrap().unwrap(), v_a);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Apply `writes` as one batch, replay its operations into `live`, and assert that the batch
+    /// moves each update at most once and that the floor trails the tip by at most `3 * (n + 1)`
+    /// operations for `n` live keys. A key the batch writes may appear twice: its write and one
+    /// move of that write.
+    async fn bounded(
+        db: TestStore,
+        live: &mut BTreeMap<Digest, Location>,
+        writes: &[(Digest, Option<Vec<u8>>)],
+    ) -> TestStore {
+        let (db, range) = apply_entries(db, writes.iter().cloned()).await;
+        let written: BTreeSet<_> = writes.iter().map(|(key, _)| *key).collect();
+        let mut updated = BTreeMap::new();
+        for loc in *range.start..*range.end {
+            let loc = Location::new(loc);
+            match db.get_op(loc).await.unwrap() {
+                Operation::Update(Update(key, _)) => {
+                    let count = updated.entry(key).or_insert(0usize);
+                    *count += 1;
+                    let limit = 1 + usize::from(written.contains(&key));
+                    assert!(*count <= limit, "the batch moves an update of {key} twice");
+                    live.insert(key, loc);
+                }
+                Operation::Delete(key) => {
+                    live.remove(&key);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(live.len(), db.active_keys());
+        let gap = *db.size() - *db.inactivity_floor_loc();
+        let bound = 3 * (live.len() as u64 + 1);
+        assert!(
+            gap <= bound,
+            "the floor trails the tip by {gap} with {} live keys",
+            live.len(),
+        );
+        db
+    }
+
+    /// Every batch of [`churn`] keeps the floor at most `3 * (n + 1)` operations behind the tip
+    /// for `n` live keys.
+    #[test_traced("WARN")]
+    fn test_store_floor_bound() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
+            let value = |i: u64| i.to_be_bytes().to_vec();
+            let db = create_test_store(context.child("store")).await;
+            let db = churn(db, key, value, bounded).await;
             db.destroy().await.unwrap();
         });
     }
@@ -1521,7 +1687,7 @@ mod test {
             let fetched_value = batch.get(&key).await.unwrap();
             assert_eq!(fetched_value.unwrap(), value);
             let changeset = batch.finalize(None);
-            db.apply_batch(changeset).await.unwrap();
+            db.apply_batch(changeset, &mut Proportional).await.unwrap();
 
             // Re-open the store
             let db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
@@ -1537,7 +1703,7 @@ mod test {
                 .new_batch()
                 .update(key, value.clone())
                 .finalize(Some(metadata.clone()));
-            let (db, range) = db.apply_batch(batch).await.unwrap();
+            let (db, range) = db.apply_batch(batch, &mut Proportional).await.unwrap();
             assert_eq!(range.start, 1);
             assert_eq!(range.end, 4);
             let db = db.commit().await.unwrap();
@@ -1598,7 +1764,7 @@ mod test {
                 .update(short.clone(), vec![1])
                 .update(long.clone(), vec![2])
                 .finalize(None);
-            let (db, _) = db.apply_batch(batch).await.unwrap();
+            let (db, _) = db.apply_batch(batch, &mut Proportional).await.unwrap();
             let db = db.commit().await.unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
@@ -1611,6 +1777,529 @@ mod test {
                     .unwrap();
             assert_eq!(db.get(&short).await.unwrap(), Some(vec![1]));
             assert_eq!(db.get(&long).await.unwrap(), Some(vec![2]));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A store keyed by SHA-256 digests whose translator buckets keys by their first byte.
+    type PolicyStore<V> = Db<deterministic::Context, sha256::Digest, V, OneCap>;
+
+    async fn open<V: VariableValue + Read<Cfg = ()>>(
+        context: deterministic::Context,
+        partition: &str,
+    ) -> PolicyStore<V> {
+        let cfg = Config {
+            log: JournalConfig {
+                partition: partition.into(),
+                write_buffer: NZUsize!(64 * 1024),
+                replay_buffer: NZUsize!(64 * 1024),
+                compression: None,
+                codec_config: ((), ()),
+                items_per_section: NZU64!(7),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            },
+            translator: OneCap,
+            init_cache: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+        };
+        PolicyStore::init(context, cfg, None).await.unwrap()
+    }
+
+    fn digest(i: u64) -> sha256::Digest {
+        Sha256::hash(&[&i.to_be_bytes()])
+    }
+
+    /// Return writes of `n` keys in ascending order. The `i`th write has the value
+    /// `digest(100 + i)`.
+    fn seed(n: u64) -> Vec<(sha256::Digest, Option<sha256::Digest>)> {
+        let mut keys: Vec<_> = (0..n).map(digest).collect();
+        keys.sort();
+        (100..)
+            .zip(keys)
+            .map(|(i, key)| (key, Some(digest(i))))
+            .collect()
+    }
+
+    /// Apply `writes` with `policy` and without metadata.
+    async fn apply<V, P>(
+        db: PolicyStore<V>,
+        writes: impl IntoIterator<Item = (sha256::Digest, Option<V>)>,
+        policy: &mut P,
+    ) -> (PolicyStore<V>, Range<Location>)
+    where
+        V: VariableValue,
+        P: Policy<crate::mmr::Family, sha256::Digest, V>,
+    {
+        db.apply_batch(writes.into_iter().collect(), policy)
+            .await
+            .unwrap()
+    }
+
+    /// Under every pair of limits, a policy decides the updates and reaches the floor that
+    /// [`simulate`] predicts, and each decided update moves to the tip with its value.
+    #[test_traced("WARN")]
+    fn test_store_policy_limits() {
+        deterministic::Runner::default().start(|context| async move {
+            // Lay out the initial commit at 0, superseded updates at 1..4, active updates at
+            // 4..7, the seed commit at 7, active updates at 8..11, and the last commit at 11.
+            let seed = seed(6);
+            let updates: Vec<_> = (200..)
+                .zip(&seed[..3])
+                .map(|(i, (key, _))| (*key, Some(digest(i))))
+                .collect();
+            let live: BTreeMap<u64, _> = (4..7)
+                .chain(8..11)
+                .zip(seed[3..].iter().chain(&updates))
+                .map(|(loc, (key, value))| (loc, (*key, value.unwrap())))
+                .collect();
+            let active: Vec<u64> = live.keys().copied().collect();
+
+            let mut trial = 0;
+            for entries in 0..=7 {
+                for skips in 0..=8 {
+                    let child = context.child("store").with_attribute("index", trial);
+                    let db = open(child, &format!("limits-{trial}")).await;
+                    trial += 1;
+                    let (db, _) = apply(db, seed.clone(), &mut Hold).await;
+                    let (db, _) = apply(db, updates.clone(), &mut Hold).await;
+                    assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 12));
+
+                    // The floor and the decided updates match `simulate`.
+                    let (expected, decisions) = simulate(&active, 0, 12, entries, skips);
+                    let decided: Vec<_> = decisions
+                        .iter()
+                        .map(|loc| (Location::new(*loc), live[loc].0, live[loc].1))
+                        .collect();
+                    let mut policy = Script::new(entries, skips, keep);
+                    let (db, range) = apply(db, [], &mut policy).await;
+                    let reached = *db.inactivity_floor_loc();
+                    assert_eq!(policy.visited, decided, "entries={entries} skips={skips}");
+                    assert_eq!(reached, expected, "entries={entries} skips={skips}");
+
+                    // Each decided update moves to the tip with its value before the commit.
+                    assert_eq!(*range.start..*range.end, 12..13 + decided.len() as u64);
+                    for (loc, (_, key, value)) in (12..).zip(&decided) {
+                        let op = db.get_op(Location::new(loc)).await.unwrap();
+                        assert_eq!(op, Operation::Update(Update(*key, *value)));
+                    }
+                    for (key, value) in live.values() {
+                        assert_eq!(db.get(key).await.unwrap(), Some(*value));
+                    }
+                    db.destroy().await.unwrap();
+                }
+            }
+        });
+    }
+
+    /// [`Hold`] keeps the inherited floor while the batch's writes apply, and moves it to the new
+    /// commit location when the batch empties the store.
+    #[test_traced("WARN")]
+    fn test_store_policy_hold() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed four updates with a held floor.
+            let db = open(context.child("store"), "hold").await;
+            let seed = seed(4);
+            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
+            let floor = db.inactivity_floor_loc();
+
+            // Hold the floor for a batch that updates, deletes, and creates keys.
+            let created = digest(4);
+            let writes = [
+                (seed[0].0, Some(digest(200))),
+                (seed[1].0, None),
+                (created, Some(digest(104))),
+            ];
+            let (db, _) = apply(db, writes, &mut Hold).await;
+
+            // The writes apply and the untouched keys keep their values.
+            assert_eq!(db.inactivity_floor_loc(), floor);
+            let expected = [
+                (seed[0].0, Some(digest(200))),
+                (seed[1].0, None),
+                seed[2],
+                seed[3],
+                (created, Some(digest(104))),
+            ];
+            for (key, value) in expected {
+                assert_eq!(db.get(&key).await.unwrap(), value);
+            }
+
+            // Deleting every key moves the floor to the new commit location.
+            let deletes = [seed[0].0, seed[2].0, seed[3].0, created].map(|key| (key, None));
+            let (db, _) = apply(db, deletes, &mut Hold).await;
+            assert!(db.is_empty());
+            assert_eq!(db.inactivity_floor_loc(), db.size() - 1);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A policy that stops at the first active update leaves the floor at its location and the
+    /// update in place. The next batch's policy decides that update without spending a skip.
+    #[test_traced("WARN")]
+    fn test_store_policy_stop() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed four updates in key order at 1..5 with a held floor.
+            let db = open(context.child("store"), "stop").await;
+            let seed = seed(4);
+            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
+            let (key, value) = (seed[0].0, seed[0].1.unwrap());
+
+            // Pass the initial commit and stop at the first update.
+            let mut policy = Script::new(usize::MAX, u64::MAX, |_: &sha256::Digest| Choice::Stop);
+            let (db, range) = apply(db, [], &mut policy).await;
+            let first = Location::new(1);
+            assert_eq!(policy.visited, [(first, key, value)]);
+
+            // The batch appends only its commit and moves the floor to the stopped update's
+            // location.
+            assert_eq!(*range.start..*range.end, 6..7);
+            assert_eq!(db.inactivity_floor_loc(), first);
+
+            // A policy of the next batch decides the stopped update without spending a skip.
+            let mut policy = Script::new(1, 0, keep);
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert_eq!(policy.visited, [(first, key, value)]);
+            assert_eq!(*db.inactivity_floor_loc(), 2);
+            for (key, value) in seed {
+                assert_eq!(db.get(&key).await.unwrap(), value);
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A policy with proportional limits moves one update for each update the batch supersedes,
+    /// each delete it appends, and its previous commit, without deciding an update.
+    #[test_traced("WARN")]
+    fn test_store_policy_proportional() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed six updates at 1..7 with a held floor.
+            let seed = seed(6);
+            let db = open(context.child("store"), "proportional").await;
+            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
+
+            // Two updates and a delete make four operations inactive, so with the previous commit
+            // the raise moves five updates between the writes and the commit: the three remaining
+            // seed updates and the two written updates. The floor ends past the last written
+            // update, at 11.
+            let writes = [
+                (seed[0].0, Some(digest(200))),
+                (seed[1].0, None),
+                (seed[2].0, Some(digest(202))),
+            ];
+            let mut policy = Script::proportional(|_: &sha256::Digest| -> Choice {
+                unreachable!("decided under proportional limits")
+            });
+            let (db, range) = apply(db, writes, &mut policy).await;
+            assert_eq!(*range.end - *range.start, 9);
+            assert_eq!(*db.inactivity_floor_loc(), 11);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A proportional move probes the snapshot index once: classifying the update positions the
+    /// cursor that rewrites its slot.
+    #[test_traced("WARN")]
+    fn test_store_proportional_reuses_snapshot_cursor() {
+        // A translator that counts its key transforms, one per snapshot probe.
+        #[derive(Clone)]
+        struct CountingTranslator(Arc<AtomicUsize>);
+
+        impl Translator for CountingTranslator {
+            type Key = u8;
+
+            fn transform(&self, key: &[u8]) -> u8 {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                OneCap.transform(key)
+            }
+        }
+
+        impl BuildHasher for CountingTranslator {
+            type Hasher = <OneCap as BuildHasher>::Hasher;
+
+            fn build_hasher(&self) -> Self::Hasher {
+                OneCap.build_hasher()
+            }
+        }
+
+        deterministic::Runner::default().start(|context| async move {
+            type CountedStore = Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator>;
+            let lookups = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(&context);
+            let db = CountedStore::init(
+                context,
+                Config {
+                    log: cfg.log,
+                    translator: CountingTranslator(lookups.clone()),
+                    init_cache: cfg.init_cache,
+                    init_buffer: cfg.init_buffer,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Seed three keys in one translated-key bucket at 1..4 with a held floor.
+            let writes = (0..3).map(|i| {
+                let mut key = [0xAA; 32];
+                key[31] = i;
+                (Digest::from(key), Some(vec![i]))
+            });
+            let (db, _) = db.apply_batch(writes.collect(), &mut Hold).await.unwrap();
+
+            // An empty batch moves one update for its previous commit.
+            lookups.store(0, Ordering::Relaxed);
+            let (db, range) = db
+                .apply_batch(core::iter::empty().collect(), &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(*range.end - *range.start, 2);
+            assert_eq!(lookups.load(Ordering::Relaxed), 1);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A policy that replaces an update writes its value for the key at the tip.
+    #[test_traced("WARN")]
+    fn test_store_policy_replace() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed three updates in key order at 1..4 with a held floor.
+            let db = open(context.child("store"), "replace").await;
+            let seed = seed(3);
+            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
+            let tip = db.size();
+
+            // Keep the first and last updates and replace the second.
+            let (replaced, value) = (seed[1].0, digest(201));
+            let mut policy = Script::new(usize::MAX, u64::MAX, move |key: &sha256::Digest| {
+                if *key == replaced {
+                    Choice::Replace(value)
+                } else {
+                    Choice::Keep
+                }
+            });
+            let (db, range) = apply(db, [], &mut policy).await;
+            assert_eq!(policy.locations(), [1, 2, 3].map(Location::new));
+            assert_eq!(db.inactivity_floor_loc(), tip);
+
+            // The replacement takes the second update's place among the moves to the tip.
+            assert_eq!(*range.start..*range.end, 5..9);
+            let writes = [seed[0], (replaced, Some(value)), seed[2]];
+            for (loc, (key, value)) in (5..).zip(writes) {
+                let op = db.get_op(Location::new(loc)).await.unwrap();
+                assert_eq!(op, Operation::Update(Update(key, value.unwrap())));
+                assert_eq!(db.get(&key).await.unwrap(), value);
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A policy that evicts committed and colliding-key updates receives each evicted value in
+    /// location order and owns it with no clone. The evicted keys read `None` once the batch
+    /// applies.
+    #[test_traced("WARN")]
+    fn test_store_policy_evicts_owned() {
+        deterministic::Runner::default().start(|context| async move {
+            let colliding = |i| colliding_digest(0xAA, i);
+            let other = colliding_digest(0xBB, 0);
+
+            // Seed three keys in one translated-key bucket and one other key at 1..5 with a held
+            // floor.
+            let db = open(context.child("store"), "evict").await;
+            let seed = [colliding(0), colliding(1), colliding(2), other]
+                .into_iter()
+                .zip(0u8..)
+                .map(|(key, tag)| (key, Some(CountedValue::new(tag))));
+            let (db, _) = apply(db, seed, &mut Hold).await;
+
+            // The batch rewrites the first colliding key and evicts every other active update.
+            let mut policy = Evict::default();
+            let write = (colliding(0), Some(CountedValue::new(20)));
+            let (db, range) = apply(db, [write], &mut policy).await;
+
+            // Evictions arrive in location order, and evicting clones no value.
+            let evicted: Vec<_> = policy
+                .evicted
+                .iter()
+                .map(|(loc, key, value, before, after)| (**loc, *key, value.0, *before, *after))
+                .collect();
+            assert_eq!(
+                evicted,
+                [
+                    (2, colliding(1), 1, 0, 0),
+                    (3, colliding(2), 2, 0, 0),
+                    (4, other, 3, 0, 0),
+                ]
+            );
+
+            // The batch appends its write, a delete of each evicted key, and its commit. The
+            // commit's floor is the original tip.
+            assert_eq!(*range.start..*range.end, 6..11);
+            let Operation::Update(Update(key, value)) = db.get_op(Location::new(6)).await.unwrap()
+            else {
+                panic!("expected the rewrite at 6");
+            };
+            assert_eq!((key, value.0), (colliding(0), 20));
+            for (loc, evicted) in (7..).zip([colliding(1), colliding(2), other]) {
+                let op = db.get_op(Location::new(loc)).await.unwrap();
+                assert!(matches!(op, Operation::Delete(key) if key == evicted));
+            }
+            let op = db.get_op(Location::new(10)).await.unwrap();
+            assert!(matches!(op, Operation::CommitFloor(None, floor) if *floor == 6));
+
+            // The evicted keys read `None` and the rewritten key keeps its value.
+            for (_, key, ..) in &policy.evicted {
+                assert!(db.get(key).await.unwrap().is_none());
+            }
+            let kept = db.get(&colliding(0)).await.unwrap();
+            assert_eq!(kept.map(|value| value.0), Some(20));
+            assert_eq!(db.active_keys(), 1);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A policy in a batch with writes passes the locations the writes supersede as inactive and
+    /// keeps or evicts the active updates it reaches. The result survives commit, reopen, and
+    /// prune.
+    #[test_traced("WARN")]
+    fn test_store_policy_keep_evict_and_recover() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed four updates in key order at 1..5 with a held floor.
+            let child = |index| context.child("store").with_attribute("index", index);
+            let db = open(child(0), "recover").await;
+            let seed = seed(4);
+            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
+            let tip = db.size();
+
+            // The batch updates the second key, deletes the third, and creates a fifth.
+            let created = digest(4);
+            let writes = [
+                (seed[1].0, Some(digest(201))),
+                (seed[2].0, None),
+                (created, Some(digest(104))),
+            ];
+
+            // The policy passes the initial commit, keeps the first update, passes the two written
+            // locations, evicts the last update, and passes the seed commit.
+            let evicted = seed[3].0;
+            let mut policy = Script::new(usize::MAX, 4, move |key: &sha256::Digest| {
+                if *key == evicted {
+                    Choice::Evict
+                } else {
+                    Choice::Keep
+                }
+            });
+            let (db, _) = apply(db, writes, &mut policy).await;
+            assert_eq!(policy.locations(), [1, 4].map(Location::new));
+
+            // The batch commits the original tip as the floor.
+            assert_eq!(db.inactivity_floor_loc(), tip);
+            let expected = [
+                seed[0],
+                (seed[1].0, Some(digest(201))),
+                (seed[2].0, None),
+                (evicted, None),
+                (created, Some(digest(104))),
+            ];
+            for (key, value) in expected {
+                assert_eq!(db.get(&key).await.unwrap(), value);
+            }
+
+            // The state survives commit and reopen.
+            let db = db.commit().await.unwrap();
+            let (size, floor) = (db.size(), db.inactivity_floor_loc());
+            drop(db);
+            let db: PolicyStore<sha256::Digest> = open(child(1), "recover").await;
+            assert_eq!((db.size(), db.inactivity_floor_loc()), (size, floor));
+            for (key, value) in expected {
+                assert_eq!(db.get(&key).await.unwrap(), value);
+            }
+
+            // The state survives prune and reopen.
+            let db = db.prune(floor).await.unwrap();
+            drop(db);
+            let db: PolicyStore<sha256::Digest> = open(child(2), "recover").await;
+            assert_eq!((db.size(), db.inactivity_floor_loc()), (size, floor));
+            for (key, value) in expected {
+                assert_eq!(db.get(&key).await.unwrap(), value);
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A batch whose evictions empty the store moves the floor to its commit.
+    #[test_traced("WARN")]
+    fn test_store_policy_empty() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed one update at 1 with a held floor.
+            let db = open(context.child("store"), "empty").await;
+            let (db, _) = apply(db, seed(1), &mut Hold).await;
+
+            // The policy passes the initial commit and evicts the update. The empty store moves
+            // the floor to the commit that follows the delete.
+            let mut policy = Script::new(1, 1, |_: &sha256::Digest| Choice::Evict);
+            let (db, range) = apply(db, [], &mut policy).await;
+            assert_eq!(policy.locations(), [Location::new(1)]);
+            assert!(db.is_empty());
+            assert_eq!(*range.start..*range.end, 3..5);
+            assert_eq!(*db.inactivity_floor_loc(), 4);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A pass reads no location past its skips and entries.
+    #[test_traced("WARN")]
+    fn test_store_policy_reads_within_limits() {
+        deterministic::Runner::default().start(|context| async move {
+            // Rewrite one key with a held floor. The log holds the initial commit at 0, superseded
+            // updates and commits at 1..39, the only active update at 39, and a commit at 40.
+            let mut db = open(context.child("store"), "reads").await;
+            let key = digest(0);
+            for i in 0..20 {
+                (db, _) = apply(db, [(key, Some(digest(100 + i)))], &mut Hold).await;
+            }
+            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 41));
+
+            // A pass without skips reads only the floor.
+            let reads = || counter(&context, "log_items_read_total");
+            let before = reads();
+            let mut policy = Compact {
+                entries: 1,
+                skips: 0,
+            };
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert_eq!(*db.inactivity_floor_loc(), 0);
+            assert_eq!(reads() - before, 1);
+
+            // A pass whose skips end one short of the active update reads only the locations below
+            // it.
+            let before = reads();
+            let mut policy = Compact {
+                entries: 1,
+                skips: 38,
+            };
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert_eq!(*db.inactivity_floor_loc(), 38);
+            assert_eq!(reads() - before, 39);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// The pass reads its policy's limits once.
+    #[test_traced("WARN")]
+    fn test_store_policy_reads_limits_once() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed four updates with a held floor.
+            let db = open(context.child("store"), "limits").await;
+            let (db, _) = apply(db, seed(4), &mut Hold).await;
+
+            // A policy that lifts its limits after the first read decides one update.
+            let mut policy = Growing {
+                reads: Cell::new(0),
+                decided: 0,
+            };
+            let (db, _) = apply(db, [], &mut policy).await;
+            assert_eq!(policy.reads.get(), 1);
+            assert_eq!(policy.decided, 1);
             db.destroy().await.unwrap();
         });
     }
@@ -1638,7 +2327,7 @@ mod test {
         is_send(db.get(&key));
         let batch = db.new_batch();
         is_send(batch.get(&key));
-        is_send(db.apply_batch(Changeset::from([(key, Some(value))])));
+        is_send(db.apply_batch(Changeset::from([(key, Some(value))]), &mut Proportional));
     }
 
     #[allow(dead_code)]

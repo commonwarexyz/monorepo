@@ -7,7 +7,10 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
-    qmdb::store::db::{Config, Db},
+    qmdb::{
+        floor::Proportional,
+        store::db::{Config, Db},
+    },
     translator::TwoCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -146,7 +149,7 @@ fn fuzz(input: FuzzInput) {
                     }
                     let changeset = batch.finalize(metadata_bytes.clone());
                     let (db, _) = db
-                        .apply_batch(changeset)
+                        .apply_batch(changeset, &mut Proportional)
                         .await
                         .expect("Apply batch should not fail");
                     db.commit().await.expect("Commit should not fail")
