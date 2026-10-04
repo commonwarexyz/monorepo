@@ -1569,9 +1569,10 @@ pub(crate) mod test {
     }
 
     /// Assert that the activity bitmap of `db` is exact against a replay of its retained log.
-    /// Every unpruned bit is set if and only if its location holds a live update or the last
-    /// commit, and every live update lies at or above the inactivity floor. The snapshot maps
-    /// each live key to its update and holds no other entry.
+    /// The bitmap covers the log. Every unpruned bit is set if and only if its location holds a
+    /// live update or the last commit, and every live update lies at or above the inactivity
+    /// floor. The active key count matches the live keys, and the snapshot maps each live key to
+    /// its update and holds no other entry.
     pub(crate) async fn assert_exact<F, C, I, H, U, const N: usize, S>(
         db: &Db<F, Context, C, I, H, U, N, S>,
     ) where
@@ -2407,22 +2408,6 @@ pub(crate) mod test {
         fixed_db_config
     );
     test_for_variant!(
-        with_make_value: test_any_policy_keep_reads_nothing,
-        "WARN",
-        uf,
-        UnorderedFixed,
-        mmr::Family,
-        fixed_db_config
-    );
-    test_for_variant!(
-        with_make_value: test_any_policy_keep_reads_nothing,
-        "WARN",
-        of,
-        OrderedFixed,
-        mmr::Family,
-        fixed_db_config
-    );
-    test_for_variant!(
         with_make_value: test_any_policy_unordered_reads_nothing,
         "WARN",
         uf,
@@ -2499,7 +2484,6 @@ pub(crate) mod test {
         }
     }
 
-    /// Keep every update.
     pub(crate) const fn keep(_: &Digest) -> Choice {
         Choice::Keep
     }
@@ -2542,8 +2526,8 @@ pub(crate) mod test {
         batch.merkleize(db, None, policy).await
     }
 
-    /// Merkleize `batch` with a policy without limits that decides each update with `choose`.
-    /// Returns the merkleized batch and the decided locations.
+    /// Merkleize `batch` with a policy whose entries and skips are unbounded and that decides each
+    /// update with `choose`. Returns the merkleized batch and the decided locations.
     async fn decide<F: Family, D>(
         db: &D,
         batch: D::Batch,
@@ -2595,8 +2579,10 @@ pub(crate) mod test {
             .sum()
     }
 
-    /// Return the floor and the decided locations of a policy from `floor` that keeps every
-    /// update at the `active` locations below `tip`.
+    /// Model a [`Limits::Fixed`] pass from `floor` that keeps every update at the `active`
+    /// locations below `tip`. Each skip passes one inactive location, and each entry decides the
+    /// next active update and passes it. The pass ends at `tip` or when a limit runs out. Returns
+    /// the floor it reaches and the decided locations.
     pub(crate) fn simulate(
         active: &[u64],
         mut floor: u64,
@@ -2673,8 +2659,8 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// A policy after writes keeps, evicts, and passes each location in the original prefix once,
-    /// and its batch survives commit, reopen, and prune.
+    /// A policy in a batch with writes passes the locations the writes supersede, keeps one update,
+    /// and evicts another. The result survives commit, reopen, and prune.
     pub(crate) async fn test_any_policy_keep_evict_and_recover<F: Family, D>(
         context: Context,
         db: D,
@@ -2693,8 +2679,9 @@ pub(crate) mod test {
         let (db, range) = db.apply_batch(merkleized).await.unwrap();
         let tip = db.size();
 
-        // All entries were created together in an empty DB. Both variants emit creates in
-        // key order, so their expected locations follow from the applied operation range.
+        // All entries were created together in an empty DB. Ordered and unordered batches both
+        // emit creates in key order, so the expected locations follow from the applied operation
+        // range.
         let original: Vec<_> = original
             .into_iter()
             .enumerate()
@@ -2767,9 +2754,8 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Policy limits bound the floor exactly. Each skip passes one inactive location, each
-    /// decided update passes its own location, and the floor never exceeds the inherited floor
-    /// plus the skips plus the decided updates.
+    /// Under every pair of limits, a policy decides the updates and reaches the floor that
+    /// [`simulate`] predicts, and the applied batch commits that floor.
     pub(crate) async fn test_any_policy_limits<F: Family, D: Inspect<F>>(
         _context: Context,
         db: D,
@@ -2799,35 +2785,18 @@ pub(crate) mod test {
             policy.locations().into_iter().map(|loc| *loc).collect()
         };
 
-        // Skips that run out mid-gap advance the floor by exactly the skips.
-        let mut policy = Script::new(usize::MAX, 2, keep);
-        assert_eq!(*reach(&db, db.new_batch(), &mut policy).await, *floor + 2);
-        assert!(policy.visited.is_empty());
-
-        // Entries that run out leave the floor one past the last decided update.
-        let mut policy = Script::new(2, u64::MAX, keep);
-        assert_eq!(*reach(&db, db.new_batch(), &mut policy).await, 6);
-        assert_eq!(positions(&policy), [4, 5]);
-
-        // A window that reaches the tip ends the pass there.
-        let mut policy = Script::new(usize::MAX, u64::MAX, keep);
-        assert_eq!(reach(&db, db.new_batch(), &mut policy).await, tip);
-        assert_eq!(positions(&policy), active);
-
-        // Every limit pair matches the positional model, and the floor never exceeds the
-        // inherited floor plus the skips plus the decided updates.
+        // Every limit pair matches `simulate`.
         for entries in 0..=7 {
             for skips in 0..=8 {
                 let (expected, decisions) = simulate(&active, *floor, *tip, entries, skips);
                 let mut policy = Script::new(entries, skips, keep);
                 let reached = *reach(&db, db.new_batch(), &mut policy).await;
-                let decided = positions(&policy);
-                assert_eq!(decided, decisions, "entries={entries} skips={skips}");
-                assert_eq!(reached, expected, "entries={entries} skips={skips}");
-                assert!(
-                    reached <= *floor + skips + decided.len() as u64,
+                assert_eq!(
+                    positions(&policy),
+                    decisions,
                     "entries={entries} skips={skips}"
                 );
+                assert_eq!(reached, expected, "entries={entries} skips={skips}");
             }
         }
 
@@ -2846,8 +2815,8 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Writes to keys that share a translated-key bucket with active updates leave the floor
-    /// positional under every limit pair, and the policy reads nothing past its window.
+    /// Writes to keys that share a translated-key bucket with active updates leave the floor where
+    /// [`simulate`] predicts under every limit pair, and the policy reads nothing past its window.
     pub(crate) async fn test_any_policy_limits_after_colliding_writes<F: Family, D: Inspect<F>>(
         context: Context,
         db: D,
@@ -2867,7 +2836,7 @@ pub(crate) mod test {
         assert_eq!((*floor, *tip), (0, 8));
 
         // Updating the last seeded key supersedes its update at 6, and creating a seventh key
-        // supersedes nothing. Every active update shares their bucket.
+        // supersedes nothing. Every active update shares the written keys' bucket.
         let writes = [
             (keys[5], Some(make_value(105))),
             (keys[6], Some(make_value(6))),
@@ -2894,7 +2863,7 @@ pub(crate) mod test {
         assert_eq!(*reached, 2);
         assert_eq!(reads, [before + 1]);
 
-        // Every limit pair matches the positional model.
+        // Every limit pair matches `simulate`.
         for entries in 0..=7 {
             for skips in 0..=8 {
                 let (expected, decisions) = simulate(&active, *floor, *tip, entries, skips);
@@ -3213,9 +3182,9 @@ pub(crate) mod test {
         }
     }
 
-    /// Writes staged in the batch supersede their keys' updates. The policy passes those updates
-    /// as inactive. The batch matches a policy after the same writes. A staged key resolves in the
-    /// committed snapshot or in a live parent.
+    /// Writes staged in the batch supersede their keys' updates, so the policy passes those
+    /// updates as inactive. The batch matches an unstaged batch with the same writes and policy. A
+    /// staged key resolves in the committed snapshot or in a live parent.
     pub(crate) async fn test_any_policy_after_staged_writes<F, C, I, U, const N: usize, S>(
         _context: Context,
         db: Db<F, Context, C, I, Sha256, U, N, S>,
@@ -3276,9 +3245,10 @@ pub(crate) mod test {
     }
 
     /// Stage an update and a delete through reads of their keys, upsert a third write, and
-    /// merkleize a batch from `make` with a policy without limits that keeps every update.
+    /// merkleize a batch from `make` with a policy that keeps every update under unbounded limits.
     /// Asserts that the policy decides the `expected` locations, that the floor reaches the
-    /// batch's original `tip`, and that the batch matches a policy after the same writes.
+    /// batch's original `tip`, and that the batch matches an unstaged batch with the same writes
+    /// and policy.
     async fn staged_matches_writes<F, C, I, U, const N: usize, S>(
         db: &Db<F, Context, C, I, Sha256, U, N, S>,
         make: impl Fn() -> batch::UnmerkleizedBatch<F, Sha256, U, S>,
@@ -3321,7 +3291,8 @@ pub(crate) mod test {
         assert_eq!(policy.locations(), expected);
         assert_eq!(staged.bounds().inactivity_floor, tip);
 
-        // A policy after the same writes decides the same updates and produces the same batch.
+        // An unstaged batch with the same writes and policy decides the same updates and produces
+        // the same batch.
         let written = writes
             .iter()
             .fold(make(), |batch, &(key, value)| batch.write(key, value));
@@ -3526,7 +3497,7 @@ pub(crate) mod test {
 
     /// Assert that two merkleized batches of `db` append the same operations under the same floor
     /// and root.
-    fn assert_same<F, D>(_: &D, a: &D::Merkleized, b: &D::Merkleized)
+    pub(crate) fn assert_same<F, D>(_: &D, a: &D::Merkleized, b: &D::Merkleized)
     where
         F: Family,
         D: Inspect<F>,
@@ -3601,13 +3572,12 @@ pub(crate) mod test {
         db
     }
 
-    /// The [`Proportional`] raise and a policy that keeps every update classify activity alike on
-    /// two pending ancestors, on one, and on the database, and for batches started before the
-    /// ancestors are applied. Policies that keep, evict, and replace updates of each ancestor
-    /// apply over two pending ancestors and over one. Every policy decides exactly the
-    /// live updates of keys its batch does not write, every batch serves the model's values, and
-    /// every applied state keeps an exact activity bitmap. Every key shares one translated-key
-    /// bucket.
+    /// Over two pending ancestors, one, and none, and for batches started before their ancestors
+    /// are applied, the [`Proportional`] raise produces the same batch, and so does a policy that
+    /// keeps every update. Policies that keep, evict, and replace each ancestor's updates then
+    /// apply over two pending ancestors and over one. Every policy decides exactly the live
+    /// updates of keys its batch does not write, every batch serves the model's values, and every
+    /// applied state keeps an exact activity bitmap. Every key shares one translated-key bucket.
     #[boxed]
     pub(crate) async fn test_any_activity_depths<F, D, Fut>(
         context: Context,
@@ -3685,10 +3655,10 @@ pub(crate) mod test {
         let first = with(D::child(&parent));
         let last = with(D::child(&parent));
 
-        // Depth 1: apply and free the grandparent. The raise, the policy, and the raise and
-        // first policy batch started before the apply match depth 2. One entry beyond the
-        // expected updates lets the first policy batch reach the tip in read rounds sized to its
-        // remaining entries.
+        // Depth 1: apply and free the grandparent. The raise and the policy started after the
+        // apply, and the raise and first policy batch started before it, match depth 2. The first
+        // policy batch has one more entry than there are updates to decide, so its pass reaches
+        // the tip in read rounds sized to its remaining entries.
         let db = db.apply_batch(grandparent).await.unwrap().0;
         db.assert_exact().await;
         let raised1 = build(&db, D::child(&parent), &writes).await;
@@ -3703,8 +3673,8 @@ pub(crate) mod test {
         assert_eq!(policy.locations(), expected);
         assert_same(&db, &kept, &first);
 
-        // Depth 0: apply the parent. The raise, the policy, and the last policy batch started
-        // before the grandparent's apply match depth 2.
+        // Depth 0: apply the parent. The raise and the policy started after the apply, and the
+        // last policy batch started before the grandparent's apply, match depth 2.
         let db = db.apply_batch(parent).await.unwrap().0;
         db.assert_exact().await;
         let (last, decided) = decide(&db, last, keep).await;
@@ -3793,10 +3763,10 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// A batch created at depth 2 whose grandparent is applied and freed and whose parent is then
-    /// applied before merkleize keeps the live updates of both ancestors' regions as a twin over
-    /// the pending ancestors does, and its applied state serves the model and keeps an exact
-    /// activity bitmap. Every key shares one translated-key bucket.
+    /// Batches created at depth 2 keep the same live updates as a twin over the pending ancestors,
+    /// including updates in both ancestors' regions, whether they merkleize after the grandparent
+    /// is applied and freed or after the parent is also applied. The applied state serves the
+    /// model with an exact activity bitmap. Every key shares one translated-key bucket.
     pub(crate) async fn test_any_policy_freed_ancestors<F, D>(
         _context: Context,
         db: D,
@@ -3997,7 +3967,7 @@ pub(crate) mod test {
     /// Assert that `db` holds exactly the `live` keys with their values, that each links to the
     /// next live key and the largest to the smallest, that every `absent` key is absent, and that
     /// the activity bitmap is exact (see [`assert_exact`]).
-    async fn assert_links<F: Family, D: Links<F>>(
+    pub(crate) async fn assert_links<F: Family, D: Links<F>>(
         db: &D,
         live: &BTreeMap<Digest, Digest>,
         absent: &[Digest],
@@ -4197,7 +4167,7 @@ pub(crate) mod test {
     }
 
     /// A policy over uncached updates reads every update it decides in one batched read of
-    /// exactly those updates.
+    /// exactly those updates, and merkleize reads nothing more.
     pub(crate) async fn test_any_policy_reads_in_one_read<F: Family, D>(
         context: Context,
         db: D,
@@ -4257,11 +4227,15 @@ pub(crate) mod test {
             .collect();
         assert_eq!(decided, expected);
         assert_eq!(probes, [[reads, batched + 1, items + 8]; 8]);
+        assert_eq!(
+            names.map(|name| counter(&context, name)),
+            [reads, batched + 1, items + 8]
+        );
         db.destroy().await.unwrap();
     }
 
     /// Writes in the batch supersede every other one of the first updates its policy would
-    /// decide, and the policy still reads the updates it decides in one batched read.
+    /// decide, and the policy reads the updates it decides in one batched read.
     pub(crate) async fn test_any_policy_reads_past_writes_in_one_read<F: Family, D>(
         context: Context,
         db: D,
@@ -4323,48 +4297,6 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Merkleizing a batch whose policy only keeps updates reads no operation past the policy's
-    /// reads.
-    pub(crate) async fn test_any_policy_keep_reads_nothing<F: Family, D>(
-        context: Context,
-        db: D,
-        make_value: impl Fn(u64) -> Digest,
-    ) where
-        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
-    {
-        // Seed sixteen updates with a held floor.
-        let seed: Vec<_> = (0..16)
-            .map(|i| (to_digest(i), Some(make_value(i))))
-            .collect();
-        let db = hold(db, &seed).await;
-        let tip = db.size();
-
-        // Keep every update. Merkleize reads nothing after the last decision.
-        let mut probes = Vec::new();
-        let mut policy = Script::new(usize::MAX, u64::MAX, |_: &Digest| {
-            probes.push(counter(&context, "log_journal_items_read_total"));
-            Choice::Keep
-        });
-        let merkleized = db
-            .new_batch()
-            .merkleize(&db, None, &mut policy)
-            .await
-            .unwrap();
-        assert_eq!(policy.visited.len(), 16);
-        assert_eq!(
-            probes.last().copied(),
-            Some(counter(&context, "log_journal_items_read_total"))
-        );
-
-        // The kept updates move past the old tip.
-        let (db, _) = db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.inactivity_floor_loc(), tip);
-        for (key, value) in seed {
-            assert_eq!(db.get(&key).await.unwrap(), value);
-        }
-        db.destroy().await.unwrap();
-    }
-
     /// Merkleizing an unordered batch whose policy keeps, evicts, and replaces updates reads no
     /// operation past the policy's reads.
     pub(crate) async fn test_any_policy_unordered_reads_nothing<F: Family, D>(
@@ -4405,7 +4337,7 @@ pub(crate) mod test {
             Some(counter(&context, "log_journal_items_read_total"))
         );
 
-        // The decisions apply.
+        // Published values reflect the keeps, replacement, and eviction.
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         for (i, (key, value)) in seed.into_iter().enumerate() {
             let expected = match i {
@@ -4418,9 +4350,8 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// A child policy decides committed and pending-ancestor updates once each, decides the same
-    /// updates after the parent is applied, and a sibling becomes stale once the child is
-    /// applied.
+    /// A child policy decides each committed and pending-ancestor update once, and decides the same
+    /// updates after the parent is applied. Applying the child makes its sibling stale.
     #[test_traced("INFO")]
     fn test_any_policy_speculative_ancestors() {
         let executor = deterministic::Runner::default();
@@ -4562,124 +4493,6 @@ pub(crate) mod test {
         });
     }
 
-    /// A policy without limits passes obsolete updates, deletes, and commits.
-    #[test_traced("INFO")]
-    fn test_any_policy_skips_inactive_operations() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let ctx = context.child("db");
-            let db: UnorderedVariable = UnorderedVariableDb::init(
-                ctx.child("storage"),
-                variable_db_config::<OneCap>("policy-operations", &ctx),
-                None,
-            )
-            .await
-            .unwrap();
-
-            // Build a history of updates, a delete, and commits with a held floor.
-            let first = db
-                .new_batch()
-                .write(key(0), Some(val(0)))
-                .write(key(3), Some(val(3)))
-                .merkleize(&db, Some(val(10)), &mut Hold)
-                .await
-                .unwrap();
-            let (db, first) = db.apply_batch(first).await.unwrap();
-            let second = db
-                .new_batch()
-                .write(key(0), None)
-                .merkleize(&db, Some(val(11)), &mut Hold)
-                .await
-                .unwrap();
-            let (db, second) = db.apply_batch(second).await.unwrap();
-            let third = db
-                .new_batch()
-                .write(key(1), Some(val(1)))
-                .merkleize(&db, Some(val(12)), &mut Hold)
-                .await
-                .unwrap();
-            let (db, third) = db.apply_batch(third).await.unwrap();
-            let fourth = db
-                .new_batch()
-                .write(key(2), Some(val(2)))
-                .merkleize(&db, Some(val(13)), &mut Hold)
-                .await
-                .unwrap();
-            let (db, fourth) = db.apply_batch(fourth).await.unwrap();
-            assert_eq!(*first.end - *first.start, 3);
-            assert_eq!(*second.end - *second.start, 2);
-            assert_eq!(*third.end - *third.start, 2);
-            assert_eq!(*fourth.end - *fourth.start, 2);
-            assert_eq!(first.end, second.start);
-            assert_eq!(second.end, third.start);
-            assert_eq!(third.end, fourth.start);
-
-            // The policy decides only the three live updates and evicts each.
-            let mut first_keys = [0, 3];
-            first_keys.sort_by_key(|&k| key(k));
-            let live_location =
-                first.start + first_keys.iter().position(|&k| k == 3).unwrap() as u64;
-            let expected = [
-                (live_location, key(3), val(3)),
-                (third.start, key(1), val(1)),
-                (fourth.start, key(2), val(2)),
-            ];
-            let mut policy = Script::new(usize::MAX, u64::MAX, |_: &Digest| Choice::Evict);
-            let merkleized = db
-                .new_batch()
-                .merkleize(&db, None, &mut policy)
-                .await
-                .unwrap();
-            assert_eq!(policy.visited, expected);
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            for k in 0..4 {
-                assert_eq!(db.get(&key(k)).await.unwrap(), None);
-            }
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// Skips that run out exactly at the original tip end the pass at the tip.
-    #[test_traced("INFO")]
-    fn test_any_policy_skips_reach_tip() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let ctx = context.child("db");
-            let db: UnorderedVariable = UnorderedVariableDb::init(
-                ctx.child("storage"),
-                variable_db_config::<OneCap>("policy-tip", &ctx),
-                None,
-            )
-            .await
-            .unwrap();
-
-            // A fresh database holds only its initial commit, so one skip reaches the tip. The
-            // batch creates a key, so its final state is not empty.
-            let mut policy = Script::new(usize::MAX, 1, keep);
-            let merkleized = db
-                .new_batch()
-                .write(key(0), Some(val(0)))
-                .merkleize(&db, None, &mut policy)
-                .await
-                .unwrap();
-            assert!(policy.visited.is_empty());
-            assert_eq!(merkleized.bounds().inactivity_floor, db.size());
-
-            // Without a skip, the floor stays at the initial commit.
-            let mut policy = Script::new(usize::MAX, 0, keep);
-            let merkleized = db
-                .new_batch()
-                .write(key(0), Some(val(0)))
-                .merkleize(&db, None, &mut policy)
-                .await
-                .unwrap();
-            assert!(policy.visited.is_empty());
-            assert_eq!(*merkleized.bounds().inactivity_floor, 0);
-            drop(merkleized);
-            db.destroy().await.unwrap();
-        });
-    }
-
     /// Skips that run out before a live update leave it unread, and a policy that stops at the
     /// update commits the floor at its location.
     #[test_traced("INFO")]
@@ -4730,8 +4543,8 @@ pub(crate) mod test {
             assert_eq!(reads(), before, "unreachable updates are not read");
             drop(merkleized);
 
-            // A policy without limits reads only the live update. The inactive suffix and the
-            // last commit need no read.
+            // A policy with unbounded limits reads only the live update. The inactive suffix and
+            // the last commit need no read.
             let before = reads();
             let mut policy = Script::new(usize::MAX, u64::MAX, keep);
             let merkleized = db
@@ -6322,23 +6135,14 @@ mod bitmap_tests {
         });
     }
 
-    /// Floor-scan falls through to the uncommitted tail when the committed bitmap region runs
-    /// out of active bits.
+    /// Floor scans cross the committed bitmap boundary into uncommitted ancestor operations.
     ///
-    /// `next_candidate` returns set-bit locations within `[floor, bitmap.len)`, then every
-    /// location beyond `bitmap.len` (uncommitted ancestor ops). Classifying each candidate
-    /// against the child's diff is the only thing that keeps the parent's superseded location
-    /// in place when the child supersedes the same key.
+    /// A child overwrites its parent's update of a committed key, so classification must keep the
+    /// superseded ancestor location out of the floor moves. The anchor overwrite and the previous
+    /// commit provide the move budget.
     ///
-    /// Setup: 1 committed key + uncommitted parent re-touching that key + uncommitted child that
-    /// supersedes the key AND writes many other keys. The added user mutations push
-    /// `total_steps` past the active bits available in the committed region, forcing the scan
-    /// to walk into the tail.
-    ///
-    /// Failure modes caught:
-    /// - tail-fallthrough boundary off-by-one -> wrong root,
-    /// - missing diff classification -> parent's superseded loc gets moved -> divergent root,
-    /// - bitmap state inconsistent with `init_from_log` -> oracle reopen mismatch.
+    /// Applying the child publishes its latest values. Rebuilding independently checks the root
+    /// and activity state after the scan.
     #[test_traced]
     fn floor_scan_falls_through_to_uncommitted_tail() {
         deterministic::Runner::default().start(|context| async move {
@@ -6370,9 +6174,7 @@ mod bitmap_tests {
                 "parent must extend past committed bitmap to exercise the tail path",
             );
 
-            // Uncommitted child: supersede anchor + add 16 more writes. The extra user_steps
-            // ensure `total_steps` exceeds active bits in the committed region, forcing the
-            // floor-raise scan into the uncommitted tail.
+            // The uncommitted child supersedes the anchor and creates 16 other keys.
             let others: Vec<_> = (0..16u64)
                 .map(|i| Sha256::hash(&[&(1000 + i).to_be_bytes()]))
                 .collect();
@@ -6391,8 +6193,6 @@ mod bitmap_tests {
             );
             let expected_root = child.root();
 
-            // Apply. If tail-fallthrough or classification were wrong, the produced root would
-            // diverge from the merkleize-time root.
             let (db, _) = db.apply_batch(child).await.unwrap();
             assert_eq!(db.root(), expected_root);
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));

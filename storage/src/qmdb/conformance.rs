@@ -532,13 +532,9 @@ mod tests {
     /// The policy a batch of the floor workload advances its floor with.
     #[derive(Clone, Copy)]
     enum Rule {
-        /// [`Proportional`].
         Proportional,
-        /// [`Hold`].
         Hold,
-        /// [`Compact`] with these limits.
         Compact { entries: usize, skips: u64 },
-        /// [`Seeded`] with these limits.
         Seeded { entries: usize, skips: u64 },
     }
 
@@ -666,9 +662,10 @@ mod tests {
     /// Floor-sensitive keyed workload. Returns the writes of each batch and the policy it advances
     /// its floor with.
     ///
-    /// After the first, each batch writes a few of many live keys. Floor advances therefore move
-    /// updates of unwritten keys. The root shows how many each advance moves. Unless a step names
-    /// its policy, batches at indices 2, 4, and 6 modulo 8 use [`Hold`], [`Compact`] under small
+    /// Early batches write a few of many planned live keys, so floor advances move updates of
+    /// unwritten keys and the root commits to how many each advance moves. The plan does not track
+    /// policy evictions, so a planned update may recreate an evicted key. Unless a step names its
+    /// policy, batches at indices 2, 4, and 6 modulo 8 use [`Hold`], [`Compact`] under small
     /// limits, and [`Seeded`] respectively. The rest use [`Proportional`].
     ///
     /// 1. Create n keys and eight keys that share a translator bucket.

@@ -47,15 +47,9 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = K;
 
-    /// An ordered delete must rewrite the deleted key's predecessor via a snapshot-bucket scan
-    /// the resolved location cannot skip, so its deletes gain nothing from staging.
-    const STAGES_DELETES: bool = false;
-
-    /// An ancestor's diff entry does not store the `next_key` a record needs.
+    /// A staged read caches the resolved update's `next_key`, which an ancestor's diff entry does
+    /// not store.
     const STAGES_ANCESTORS: Option<K> = None;
-
-    /// A collision sibling may be the predecessor whose `next_key` a delete rewrites.
-    const SIBLINGS: bool = true;
 
     fn key(&self) -> &K {
         &self.key
@@ -89,6 +83,9 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 }
 
 impl<K: Key, V: ValueEncoding> Parts for Update<K, V> {
+    /// A collision sibling may be the predecessor whose `next_key` a delete rewrites.
+    const SIBLINGS: bool = true;
+
     fn into_parts(self) -> (K, V::Value, K) {
         (self.key, self.value, self.next_key)
     }

@@ -39,14 +39,8 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = ();
 
-    /// An unordered delete just emits a `Delete` at the resolved location.
-    const STAGES_DELETES: bool = true;
-
-    /// A record needs nothing beyond the resolved location.
+    /// A staged read caches nothing beyond the resolved location.
     const STAGES_ANCESTORS: Option<()> = Some(());
-
-    /// An unordered operation references no other key.
-    const SIBLINGS: bool = false;
 
     fn key(&self) -> &K {
         &self.0
@@ -72,6 +66,9 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
 }
 
 impl<K: Key, V: ValueEncoding> Parts for Update<K, V> {
+    /// An unordered operation references no other key.
+    const SIBLINGS: bool = false;
+
     fn into_parts(self) -> (K, V::Value, ()) {
         (self.0, self.1, ())
     }

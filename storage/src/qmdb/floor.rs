@@ -4,7 +4,8 @@
 //! where the batch inherits it until `entries` updates are decided:
 //!
 //! - Each inactive location the floor passes spends a skip. Updates to keys the batch writes are
-//!   inactive.
+//!   inactive. Rewriting an ordered key's predecessor link does not count as writing the
+//!   predecessor.
 //! - Each active update the floor reaches goes to [`Policy::decide`] as an [`Entry`]. Keeping,
 //!   evicting, or replacing it moves the floor one past it. Stopping ends the pass with the floor
 //!   at it.
@@ -13,8 +14,8 @@
 //!
 //! Kept updates move to the tip as under [`Limits::Proportional`]. Evictions and replacements
 //! resolve as writes to their keys. The batch commits the floor the pass reached, or its commit
-//! location if its final state is empty. The pass reads only below the tip before the batch's
-//! writes and below `entries + skips` locations past the inherited floor.
+//! location if its final state is empty. The pass reads only locations below both the tip before
+//! the batch's writes and the inherited floor plus `skips` plus `entries`.
 
 use crate::merkle::{Family, Location};
 use std::marker::PhantomData;
@@ -29,9 +30,11 @@ pub enum Limits {
     /// update it supersedes, each delete it appends, and its previous commit. Moved updates lie
     /// below the tip as it stood before the moves. [`Policy::decide`] is not called.
     Proportional,
-    /// Decide at most `entries` active updates and pass at most `skips` inactive locations.
+    /// Decide at most `entries` active updates and pass at most `skips` inactive locations. Skips
+    /// left once `entries` updates are decided go unspent, and zero `entries` passes no location.
     Fixed {
-        /// The most active updates to decide.
+        /// The most active updates to decide. A pass may read ahead as many active updates as it
+        /// has entries left, so a policy that often stops early should keep it small.
         entries: usize,
         /// The most inactive locations to pass.
         skips: u64,
@@ -40,14 +43,16 @@ pub enum Limits {
 
 /// Chooses how a batch advances its inactivity floor.
 ///
-/// [`Proportional`] is the default compaction.
+/// [`Proportional`] is the policy for batches that need no custom rule.
 pub trait Policy<F: Family, K, V> {
     /// How far the floor advances.
     fn limits(&self) -> Limits;
 
     /// Decide `entry`, the active update at the floor.
     ///
-    /// The decision must depend only on the entry and the policy's own state.
+    /// The decision must depend only on the entry and the policy's own state, so the same batch
+    /// and policy state always produce the same operations and root. A decision takes effect only
+    /// if its batch is applied, so state the policy records in `decide` is provisional until then.
     fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V>;
 }
 
@@ -106,7 +111,6 @@ pub struct Entry<'a, F: Family, K, V> {
 }
 
 impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
-    /// Return an entry for the update of `key` to `value` at `location`.
     pub(crate) const fn new(location: Location<F>, key: &'a K, value: V) -> Self {
         Self {
             location,
@@ -168,7 +172,6 @@ impl<V> Decision<'_, V> {
         }
     }
 
-    /// Return the action the decided update resolves to.
     pub(crate) fn into_action(self) -> Action<V> {
         self.action
     }

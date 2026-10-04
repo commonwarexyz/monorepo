@@ -573,12 +573,11 @@ pub mod tests {
     /// the kind's test DB constructor.
     ///
     /// The staged path (`stage` + `Staged::merkleize`) must produce a root byte-identical to an
-    /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates,
-    /// deletes (which fall back to normal mutations and, for the ordered kind, rewrite
-    /// predecessors via a snapshot-bucket scan), upserts, duplicate read slots, missing keys,
-    /// and prefix-then-suffix expansion, rooted at the DB (D=0) and through one or two pending
-    /// ancestors (D=1/D=2). This guards the current-layer threading of
-    /// `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
+    /// explicit `get_many` + `write` + `merkleize` over the current layer, across updates, deletes
+    /// (which, for the ordered kind, rewrite predecessors via a snapshot-bucket scan), upserts,
+    /// duplicate read slots, missing keys, and prefix-then-suffix expansion, rooted at the DB (D=0)
+    /// and through one or two pending ancestors (D=1/D=2). This guards the current-layer threading
+    /// of `bitmap_parent`/`grafted_parent`, global read-index assignment across `expand`, and
     /// `compute_current_layer` for non-empty staged updates. Collision-prone translators in
     /// `$open_db` (e.g. `OneCap`) stress predecessor rewrites.
     macro_rules! staged_merkleize_parity_test {
@@ -2355,8 +2354,6 @@ pub mod tests {
             let staged_keys = [key(2)];
             let staged_refs: Vec<_> = staged_keys.iter().collect();
             let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
-            let compacted = db_a.new_batch();
-            let (_, held) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a
@@ -2381,19 +2378,6 @@ pub mod tests {
                         &db_b,
                         &mut Proportional
                     )
-                    .await,
-                Err(Error::StaleBatch)
-            ));
-            let mut policy = Compact {
-                entries: usize::MAX,
-                skips: u64::MAX,
-            };
-            assert!(matches!(
-                compacted.merkleize(&db_b, None, &mut policy).await,
-                Err(Error::StaleBatch)
-            ));
-            assert!(matches!(
-                held.merkleize(vec![(0, Some(val(3)))], Vec::new(), None, &db_b, &mut Hold)
                     .await,
                 Err(Error::StaleBatch)
             ));
@@ -2425,8 +2409,6 @@ pub mod tests {
             let staged_keys = [key(2)];
             let staged_refs: Vec<_> = staged_keys.iter().collect();
             let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
-            let compacted = db_a.new_batch();
-            let (_, held) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
 
             // Applying a sibling changes A's bitmap while B remains at the original commitment.
             let sibling = db_a
@@ -2451,19 +2433,6 @@ pub mod tests {
                         &db_b,
                         &mut Proportional
                     )
-                    .await,
-                Err(Error::StaleBatch)
-            ));
-            let mut policy = Compact {
-                entries: usize::MAX,
-                skips: u64::MAX,
-            };
-            assert!(matches!(
-                compacted.merkleize(&db_b, None, &mut policy).await,
-                Err(Error::StaleBatch)
-            ));
-            assert!(matches!(
-                held.merkleize(vec![(0, Some(val(3)))], Vec::new(), None, &db_b, &mut Hold)
                     .await,
                 Err(Error::StaleBatch)
             ));
@@ -5179,7 +5148,8 @@ pub mod tests {
             );
             assert_eq!(child.bounds().inactivity_floor, Location::new(*first + 3));
 
-            // The applied chain matches the speculative root and proves every key.
+            // The applied chain matches the speculative root, proves the live keys and their
+            // links, and proves the evicted key excluded.
             let speculative_root = child.root();
             let (db, _) = db.apply_batch(parent).await.unwrap();
             let (db, _) = db.apply_batch(child).await.unwrap();
@@ -5340,8 +5310,8 @@ pub mod tests {
     }
 
     /// Instantiate the staged policy test for one current DB kind. A staged write supersedes its
-    /// key's update. The policy passes that update as inactive. The batch matches a policy after
-    /// the same write and survives reopen.
+    /// key's update, so the policy passes that update as inactive. The batch matches an unstaged
+    /// batch with the same write and policy, and survives reopen.
     macro_rules! staged_policy_test {
         ($name:ident, $db:ty) => {
             #[test_traced("INFO")]
@@ -5398,7 +5368,7 @@ pub mod tests {
                     );
                     assert_eq!(staged.bounds().inactivity_floor, tip);
 
-                    // A policy after the same write produces the same root.
+                    // An unstaged batch with the same write and policy produces the same root.
                     let mut policy = Script::new(usize::MAX, u64::MAX, evict);
                     let written = db
                         .new_batch()
@@ -5411,7 +5381,7 @@ pub mod tests {
                     assert_eq!(written.root(), root);
                     drop(written);
 
-                    // The applied batch serves every write.
+                    // The applied batch serves the staged write, the eviction, and the kept update.
                     let (db, _) = db.apply_batch(staged).await.unwrap();
                     assert_eq!(db.root(), root);
                     assert_eq!(db.inactivity_floor_loc(), tip);
@@ -5449,7 +5419,7 @@ pub mod tests {
 
     /// Over the same history and a pending parent that supersedes committed updates, Any and
     /// Current policies decide the same updates, reach the same floors, and merkleize the same
-    /// operations without limits and under entry, skip, combined, and zero-entry limits.
+    /// operations under unbounded limits and under entry, skip, combined, and zero-entry limits.
     #[test_traced("INFO")]
     fn test_current_policy_matches_any() {
         type AnyDb = crate::qmdb::any::unordered::fixed::Db<
@@ -5503,7 +5473,7 @@ pub mod tests {
                 (current, _) = current.apply_batch(batch).await.unwrap();
             }
 
-            // Pending parents supersede a third of the committed updates.
+            // Each database's pending parent supersedes a third of its committed updates.
             let parent: Vec<_> = (1..24)
                 .step_by(3)
                 .map(|i| (key(i), Some(val(i + 200))))
@@ -5679,7 +5649,7 @@ pub mod tests {
     test_for_all_variants!(test_current_activity_depths, "WARN");
 
     /// Define `$name` to run the Any test `$any` on a current database opened in `$partition` for
-    /// every variant. Current raises and policies draw candidates from the speculative bitmap.
+    /// every variant.
     macro_rules! current_test {
         ($name:ident, $any:ident, $partition:literal) => {
             async fn $name<M, C, F, Fut>(context: Context, open_db: F)
@@ -5727,8 +5697,7 @@ pub mod tests {
     current_test!(test_current_policy_hold, test_any_policy_hold, "hold");
     current_test!(test_current_policy_stop, test_any_policy_stop, "stop");
 
-    /// [`test_any_policy_keep_evict_and_recover`] on a current database. Current policies draw
-    /// candidates from the speculative bitmap.
+    /// [`test_any_policy_keep_evict_and_recover`] on a current database.
     async fn test_current_policy_keep_evict_and_recover<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable,

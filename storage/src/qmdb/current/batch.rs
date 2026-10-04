@@ -505,15 +505,14 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with `policy`, then merkleize.
+    /// with `policy` (see [`Policy`]), then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch. `policy` chooses how the floor advances (see
-    /// [`Policy`]).
+    /// is committed with the returned batch.
     ///
     /// # Errors
     ///
@@ -549,9 +548,6 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-
-        // The speculative bitmap clears committed updates that pending ancestors superseded, so
-        // the floor scan skips them without reading them.
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };
@@ -591,15 +587,14 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
-    /// with `policy`, then merkleize.
+    /// with `policy` (see [`Policy`]), then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
     ///
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
-    /// is committed with the returned batch. `policy` chooses how the floor advances (see
-    /// [`Policy`]).
+    /// is committed with the returned batch.
     ///
     /// # Errors
     ///
@@ -660,10 +655,8 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
-    ///
-    /// `policy` chooses how the floor advances (see [`Policy`]).
+    /// Resolve mutations into operations, advance the inactivity floor with `policy` (see
+    /// [`Policy`]), merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -692,9 +685,6 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-
-        // The speculative bitmap clears committed updates that pending ancestors superseded, so
-        // the floor scan skips them without reading them.
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };
@@ -719,10 +709,8 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, advance the inactivity floor with `policy`, merkleize,
-    /// and return an `Arc<MerkleizedBatch>`.
-    ///
-    /// `policy` chooses how the floor advances (see [`Policy`]).
+    /// Resolve mutations into operations, advance the inactivity floor with `policy` (see
+    /// [`Policy`]), merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -751,9 +739,6 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-
-        // The speculative bitmap clears committed updates that pending ancestors superseded, so
-        // the floor scan skips them without reading them.
         let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
             fill_candidates(&bitmap_parent, floor, tip, limit, out)
         };

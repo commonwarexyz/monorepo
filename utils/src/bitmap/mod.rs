@@ -993,9 +993,8 @@ pub trait Readable<const N: usize> {
 
     /// Returns an iterator over the indices of set bits in `range`.
     ///
-    /// Iteration starts at the first unpruned bit at or after `range.start` and stops
-    /// before the smaller of `range.end` and the bitmap length. Empty or reversed ranges
-    /// yield no bits. Chunks beyond the range are not scanned.
+    /// Iteration starts at the first unpruned bit at or after `range.start` and stops before the
+    /// smaller of `range.end` and the bitmap length. Empty or reversed ranges yield no bits.
     fn ones_iter_range(&self, range: Range<u64>) -> OnesIter<'_, Self, N>
     where
         Self: Sized,
@@ -1978,6 +1977,8 @@ mod tests {
         assert!(collected[34]);
     }
 
+    /// `ones_iter_range` yields exactly the set bits of every range, including empty, reversed, and
+    /// past-the-end ranges.
     #[test]
     fn test_ones_iter_range() {
         let mut bitmap = BitMap::<9>::new();

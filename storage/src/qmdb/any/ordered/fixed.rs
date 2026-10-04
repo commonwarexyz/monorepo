@@ -2000,7 +2000,8 @@ pub(crate) mod test {
         });
     }
 
-    /// The same deletion under a fixed policy whose pass gathers the locations merkleize reuses.
+    /// [`test_ordered_child_delete_colliding_key_corrupts_next_key`] under a [`Compact`] policy,
+    /// whose pass gathers the existing-key locations that merkleize then reuses.
     #[test_traced("INFO")]
     fn test_ordered_child_delete_colliding_key_fixed_policy() {
         let executor = deterministic::Runner::default();

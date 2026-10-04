@@ -1340,6 +1340,8 @@ mod tests {
         assert!(prunable.is_chunk_aligned()); // 0 bits
     }
 
+    /// Compare the first bit `ones_iter_range` yields with a bit-by-bit scan for ranges over a
+    /// bitmap of `N`-byte chunks, with and without a pruned chunk.
     fn check_ones_iter_ranges<const N: usize>() {
         let len = 3 * Prunable::<N>::CHUNK_SIZE_BITS + 3;
         for stride in [1, 7, 63, 65, len + 1] {
@@ -1352,6 +1354,8 @@ mod tests {
                 if pruned {
                     bitmap.prune_to_bit(Prunable::<N>::CHUNK_SIZE_BITS);
                 }
+
+                // Wide chunks sample range bounds beside byte boundaries to bound the runtime.
                 for from in (0..=len + 1).filter(|bit| N <= 9 || bit % 8 <= 1 || bit % 8 == 7) {
                     for end in (from..=len + 1).filter(|bit| N <= 9 || bit % 8 <= 1 || bit % 8 == 7)
                     {
@@ -1372,6 +1376,7 @@ mod tests {
         }
     }
 
+    /// [`check_ones_iter_ranges`] for chunks narrower than, equal to, and wider than eight bytes.
     #[test]
     fn test_ones_iter_range_matches_bit_scan() {
         check_ones_iter_ranges::<1>();
@@ -1382,6 +1387,7 @@ mod tests {
         check_ones_iter_ranges::<64>();
     }
 
+    /// Ranges ending at or just below `u64::MAX` stop at their end without overflowing.
     #[test]
     fn test_ones_iter_range_near_max() {
         let mut bitmap = Prunable::<8>::new_with_pruned_chunks((u64::MAX / 64) as usize).unwrap();

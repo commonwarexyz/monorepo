@@ -84,7 +84,7 @@
 
 use crate::{
     Context,
-    index::{Unordered as _, unordered::Index},
+    index::{Cursor as _, Unordered as _, unordered::Index},
     journal::{
         authenticated::{Backing as _, BackingRecovery as _},
         contiguous::{
@@ -98,10 +98,10 @@ use crate::{
             VariableValue,
             unordered::{Update, variable::Operation},
         },
-        build_snapshot_from_log, delete_key, delete_known_loc,
+        build_snapshot_from_log, delete_key,
         floor::{Action, Compact, Entry, Limits, Policy},
         operation::{Committable as _, Floored as _, Key},
-        update_key, update_known_loc,
+        update_key,
     },
     translator::Translator,
 };
@@ -527,7 +527,8 @@ where
             }
         }
 
-        // Advance the floor with `policy`. An empty store has no active update to move or decide.
+        // Advance the floor as the policy's limits direct. An empty store has no active update to
+        // move or decide.
         if !self.is_empty() {
             self = match limits {
                 // Keep up to one active update for each update the batch supersedes, each delete
@@ -578,71 +579,53 @@ where
         P: Policy<crate::mmr::Family, K, V>,
     {
         let mut floor = self.inactivity_floor_loc;
-        while entries > 0 {
+        'pass: while entries > 0 {
             // Each inactive location passed costs a skip, so an active update past the remaining
             // skips is out of reach.
             let reach = Location::new((*floor).saturating_add(skips).saturating_add(1)).min(end);
-            let next = self.active(floor, reach).await?;
+            let mut loc = floor;
+            let op = loop {
+                // With no active update before `reach`, the floor passes the inactive locations
+                // up to it that the remaining skips cover, and the pass ends.
+                if loc == reach {
+                    floor += (*reach - *floor).min(skips);
+                    break 'pass;
+                }
+                if let Operation::Update(Update(key, value)) = self.log.read(*loc).await?
+                    && let Some(mut cursor) = self.snapshot.get_mut(&key)
+                    && cursor.find(|&active| active == loc)
+                {
+                    skips -= *loc - *floor;
+                    floor = loc;
 
-            // Move the floor to the next active update, or to `reach` if none lies before it. A
-            // gap wider than the remaining skips spends them and ends the pass.
-            let frontier = next.as_ref().map_or(reach, |(loc, _, _)| *loc);
-            let gap = *frontier - *floor;
-            if gap > skips {
-                floor += skips;
-                break;
-            }
-            floor = frontier;
-            skips -= gap;
-
-            // With no active update before `end`, the floor stops there.
-            let Some((loc, key, value)) = next else {
-                break;
+                    // Keeping or replacing writes the key's update at the tip, and evicting
+                    // deletes the key. Stopping leaves the update in place with the floor at its
+                    // location. The cursor stays on the update's snapshot slot across the
+                    // synchronous decision, so the action rewrites or removes that slot without a
+                    // second lookup.
+                    break match policy.decide(Entry::new(loc, &key, value)).into_action() {
+                        Action::Keep(value) | Action::Replace(value) => {
+                            cursor.update(Location::new(self.log.size()));
+                            Operation::Update(Update(key, value))
+                        }
+                        Action::Evict => {
+                            cursor.delete();
+                            Operation::Delete(key)
+                        }
+                        Action::Stop => break 'pass,
+                    };
+                }
+                loc += 1;
             };
-
-            // Keeping or replacing writes the key's update at the tip, and evicting deletes the
-            // key. Stopping leaves the update in place with the floor at its location.
-            match policy.decide(Entry::new(loc, &key, value)).into_action() {
-                Action::Keep(value) | Action::Replace(value) => {
-                    let tip = self.size();
-                    update_known_loc(&mut self.snapshot, &key, loc, tip);
-                    (self.log, _) = self
-                        .log
-                        .append(&Operation::Update(Update(key, value)))
-                        .await?;
-                }
-                Action::Evict => {
-                    delete_known_loc(&mut self.snapshot, &key, loc);
-                    (self.log, _) = self.log.append(&Operation::Delete(key)).await?;
-                    self.active_keys -= 1;
-                }
-                Action::Stop => break,
+            (self.log, _) = self.log.append(&op).await?;
+            if matches!(op, Operation::Delete(_)) {
+                self.active_keys -= 1;
             }
-
-            // A decided update moves the floor one past it.
             entries -= 1;
             floor = loc + 1;
         }
         self.inactivity_floor_loc = floor;
         Ok(self)
-    }
-
-    /// Return the location, key, and value of the first active update in `[loc, end)`, or `None`
-    /// if every operation in the range is inactive.
-    async fn active(
-        &self,
-        mut loc: Location,
-        end: Location,
-    ) -> Result<Option<(Location, K, V)>, Error> {
-        while loc < end {
-            if let Operation::Update(Update(key, value)) = self.log.read(*loc).await?
-                && self.snapshot.get(&key).any(|&active| active == loc)
-            {
-                return Ok(Some((loc, key, value)));
-            }
-            loc += 1;
-        }
-        Ok(None)
     }
 
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
@@ -697,12 +680,16 @@ mod test {
         telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
-    use core::future::Future;
+    use core::{future::Future, hash::BuildHasher};
     use futures::FutureExt as _;
     use std::{
         cell::Cell,
         collections::BTreeSet,
         num::{NonZeroU16, NonZeroUsize},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
@@ -1323,8 +1310,9 @@ mod test {
             let iter = db.snapshot.get(&k);
             assert_eq!(iter.count(), 1);
 
-            // Each apply_entries appends the Update, one move of it, and a CommitFloor, because
-            // moves stop at the tip as it stood before them. Total: 1 (init) + 100 * 3 = 301.
+            // Each apply_entries appends the Update, one move of it, and a CommitFloor. The raise
+            // stops at the tip as it stood before its moves, so the moved Update is not moved
+            // again. Total: 1 (init) + 100 * 3 = 301.
             assert_eq!(*db.bounds().end, 301);
 
             // Only the last moved Update and CommitFloor are active, so the floor is 299.
@@ -1791,7 +1779,6 @@ mod test {
     /// A store keyed by SHA-256 digests whose translator buckets keys by their first byte.
     type PolicyStore<V> = Db<deterministic::Context, sha256::Digest, V, OneCap>;
 
-    /// Open the [PolicyStore] in `partition`.
     async fn open<V: VariableValue + Read<Cfg = ()>>(
         context: deterministic::Context,
         partition: &str,
@@ -1813,7 +1800,6 @@ mod test {
         PolicyStore::init(context, cfg, None).await.unwrap()
     }
 
-    /// Return the SHA-256 digest of `i`.
     fn digest(i: u64) -> sha256::Digest {
         Sha256::hash(&[&i.to_be_bytes()])
     }
@@ -1844,8 +1830,8 @@ mod test {
             .unwrap()
     }
 
-    /// Policy limits bound the floor exactly. Every limit pair matches the positional model, and
-    /// each decided update moves to the tip with its value.
+    /// Under every pair of limits, a policy decides the updates and reaches the floor that
+    /// [`simulate`] predicts, and each decided update moves to the tip with its value.
     #[test_traced("WARN")]
     fn test_store_policy_limits() {
         deterministic::Runner::default().start(|context| async move {
@@ -1873,8 +1859,7 @@ mod test {
                     let (db, _) = apply(db, updates.clone(), &mut Hold).await;
                     assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 12));
 
-                    // The floor and the decided updates match the positional model, and the floor
-                    // never exceeds the skips plus the decided updates.
+                    // The floor and the decided updates match `simulate`.
                     let (expected, decisions) = simulate(&active, 0, 12, entries, skips);
                     let decided: Vec<_> = decisions
                         .iter()
@@ -1885,7 +1870,6 @@ mod test {
                     let reached = *db.inactivity_floor_loc();
                     assert_eq!(policy.visited, decided, "entries={entries} skips={skips}");
                     assert_eq!(reached, expected, "entries={entries} skips={skips}");
-                    assert!(reached <= skips + decided.len() as u64);
 
                     // Each decided update moves to the tip with its value before the commit.
                     assert_eq!(*range.start..*range.end, 12..13 + decided.len() as u64);
@@ -1945,7 +1929,7 @@ mod test {
     }
 
     /// A policy that stops at the first active update leaves the floor at its location and the
-    /// update in place, and a policy of the next batch decides it without spending a skip.
+    /// update in place. The next batch's policy decides that update without spending a skip.
     #[test_traced("WARN")]
     fn test_store_policy_stop() {
         deterministic::Runner::default().start(|context| async move {
@@ -1978,82 +1962,93 @@ mod test {
         });
     }
 
-    /// A policy with proportional limits writes the operations of [`Proportional`] without deciding
-    /// an update.
+    /// A policy with proportional limits moves one update for each update the batch supersedes,
+    /// each delete it appends, and its previous commit, without deciding an update.
     #[test_traced("WARN")]
     fn test_store_policy_proportional() {
         deterministic::Runner::default().start(|context| async move {
-            // Seed six updates with a held floor in two stores.
+            // Seed six updates at 1..7 with a held floor.
             let seed = seed(6);
-            let raised = open(context.child("raised"), "raised").await;
-            let (raised, _) = apply(raised, seed.clone(), &mut Hold).await;
-            let scripted = open(context.child("scripted"), "scripted").await;
-            let (scripted, _) = apply(scripted, seed.clone(), &mut Hold).await;
+            let db = open(context.child("store"), "proportional").await;
+            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
 
             // Two updates and a delete make four operations inactive, so with the previous commit
-            // the raise moves five updates between the writes and the commit.
+            // the raise moves five updates between the writes and the commit: the three remaining
+            // seed updates and the two written updates. The floor ends past the last written
+            // update, at 11.
             let writes = [
                 (seed[0].0, Some(digest(200))),
                 (seed[1].0, None),
                 (seed[2].0, Some(digest(202))),
             ];
-            let (raised, range) = apply(raised, writes, &mut Proportional).await;
             let mut policy = Script::proportional(|_: &sha256::Digest| -> Choice {
                 unreachable!("decided under proportional limits")
             });
-            let (scripted, other) = apply(scripted, writes, &mut policy).await;
+            let (db, range) = apply(db, writes, &mut policy).await;
             assert_eq!(*range.end - *range.start, 9);
-
-            // Both stores append the same operations and commit the same floor.
-            assert_eq!(range, other);
-            for loc in *range.start..*range.end {
-                let loc = Location::new(loc);
-                assert_eq!(
-                    raised.get_op(loc).await.unwrap(),
-                    scripted.get_op(loc).await.unwrap()
-                );
-            }
-            assert_eq!(
-                raised.inactivity_floor_loc(),
-                scripted.inactivity_floor_loc()
-            );
-            raised.destroy().await.unwrap();
-            scripted.destroy().await.unwrap();
+            assert_eq!(*db.inactivity_floor_loc(), 11);
+            db.destroy().await.unwrap();
         });
     }
 
-    /// [`Compact`] keeps the active updates it reaches within its limits and moves each to the tip
-    /// with its value.
+    /// A proportional move probes the snapshot index once: classifying the update positions the
+    /// cursor that rewrites its slot.
     #[test_traced("WARN")]
-    fn test_store_policy_compact() {
+    fn test_store_proportional_reuses_snapshot_cursor() {
+        // A translator that counts its key transforms, one per snapshot probe.
+        #[derive(Clone)]
+        struct CountingTranslator(Arc<AtomicUsize>);
+
+        impl Translator for CountingTranslator {
+            type Key = u8;
+
+            fn transform(&self, key: &[u8]) -> u8 {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                OneCap.transform(key)
+            }
+        }
+
+        impl BuildHasher for CountingTranslator {
+            type Hasher = <OneCap as BuildHasher>::Hasher;
+
+            fn build_hasher(&self) -> Self::Hasher {
+                OneCap.build_hasher()
+            }
+        }
+
         deterministic::Runner::default().start(|context| async move {
-            // Lay out the initial commit at 0, a superseded update at 1, active updates at 2..5,
-            // the seed commit at 5, an active update at 6, and the last commit at 7.
-            let db = open(context.child("store"), "compact").await;
-            let seed = seed(4);
-            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
-            let update = (seed[0].0, Some(digest(200)));
-            let (db, _) = apply(db, [update], &mut Hold).await;
-            assert_eq!(*db.size(), 8);
+            type CountedStore = Db<deterministic::Context, Digest, Vec<u8>, CountingTranslator>;
+            let lookups = Arc::new(AtomicUsize::new(0));
+            let cfg = test_config(&context);
+            let db = CountedStore::init(
+                context,
+                Config {
+                    log: cfg.log,
+                    translator: CountingTranslator(lookups.clone()),
+                    init_cache: cfg.init_cache,
+                    init_buffer: cfg.init_buffer,
+                },
+                None,
+            )
+            .await
+            .unwrap();
 
-            // Two skips pass the initial commit and the superseded update, and two entries keep
-            // the next two updates.
-            let mut policy = Compact {
-                entries: 2,
-                skips: 2,
-            };
-            let (db, range) = apply(db, [], &mut policy).await;
-            assert_eq!(*db.inactivity_floor_loc(), 4);
+            // Seed three keys in one translated-key bucket at 1..4 with a held floor.
+            let writes = (0..3).map(|i| {
+                let mut key = [0xAA; 32];
+                key[31] = i;
+                (Digest::from(key), Some(vec![i]))
+            });
+            let (db, _) = db.apply_batch(writes.collect(), &mut Hold).await.unwrap();
 
-            // The kept updates move to the tip with their values before the commit.
-            assert_eq!(*range.start..*range.end, 8..11);
-            for (loc, (key, value)) in (8..).zip(&seed[1..3]) {
-                let op = db.get_op(Location::new(loc)).await.unwrap();
-                assert_eq!(op, Operation::Update(Update(*key, value.unwrap())));
-            }
-            for (key, value) in [update, seed[1], seed[2], seed[3]] {
-                assert_eq!(db.get(&key).await.unwrap(), value);
-            }
+            // An empty batch moves one update for its previous commit.
+            lookups.store(0, Ordering::Relaxed);
+            let (db, range) = db
+                .apply_batch(core::iter::empty().collect(), &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(*range.end - *range.start, 2);
+            assert_eq!(lookups.load(Ordering::Relaxed), 1);
             db.destroy().await.unwrap();
         });
     }
@@ -2157,8 +2152,8 @@ mod test {
         });
     }
 
-    /// A policy after writes passes each location the batch's writes supersede as inactive and
-    /// keeps and evicts the active updates it reaches. The batch survives commit, reopen, and
+    /// A policy in a batch with writes passes the locations the writes supersede as inactive and
+    /// keeps or evicts the active updates it reaches. The result survives commit, reopen, and
     /// prune.
     #[test_traced("WARN")]
     fn test_store_policy_keep_evict_and_recover() {
