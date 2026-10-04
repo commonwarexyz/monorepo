@@ -5,7 +5,7 @@ use crate::merkle::Family;
 /// How far a policy advances the floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limits {
-    /// Move up to one active update for each superseded update and the previous commit.
+    /// Move up to one active update for each operation the batch makes inactive.
     Proportional,
 }
 
@@ -17,7 +17,12 @@ pub trait Policy<F: Family, K, V> {
     fn limits(&self) -> Limits;
 }
 
-/// Advances the floor in proportion to the operations a batch supersedes.
+/// Advances the floor in proportion to the operations a batch makes inactive.
+///
+/// Each update a batch supersedes, each delete it appends, and its previous commit become
+/// inactive and cannot be pruned until the floor passes them. When every batch moves one active
+/// update to the tip for each of them, the floor stays at most `3 * (n + 1)` operations behind
+/// the tip for `n` active keys.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Proportional;
 

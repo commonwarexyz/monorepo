@@ -270,13 +270,14 @@ pub(crate) mod test {
         BufferPooler, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
     };
     use commonware_utils::{
-        NZU16, NZU64, NZUsize,
+        NZU16, NZU64, NZUsize, Widen,
         bitmap::{Prunable, Readable as _},
     };
     use core::{fmt::Debug, future::Future, pin::Pin};
     use std::{
         collections::{BTreeMap, BTreeSet, HashMap},
         num::{NonZeroU16, NonZeroUsize},
+        sync::Arc,
     };
 
     pub(crate) fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
@@ -1472,6 +1473,26 @@ pub(crate) mod test {
         db
     }
 
+    /// Record in `live` the location of each key's last update in `ops` and remove each key
+    /// `ops` last deletes. The first operation in `ops` lies at `start`.
+    fn replay<F: Family, U: Update>(
+        live: &mut BTreeMap<U::Key, GenericLocation<F>>,
+        start: GenericLocation<F>,
+        ops: &[Operation<F, U>],
+    ) {
+        for (i, op) in ops.iter().enumerate() {
+            match op {
+                Operation::Update(update) => {
+                    live.insert(update.key().clone(), start + Widen::widen(i));
+                }
+                Operation::Delete(key) => {
+                    live.remove(key);
+                }
+                Operation::CommitFloor(..) => {}
+            }
+        }
+    }
+
     /// Siblings seeded by each chained-rebuild shape.
     const SIBLINGS: u64 = 48;
 
@@ -2193,9 +2214,178 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_chained_rebuild, "WARN");
+    test_for_all_variants!(with_make_value: test_any_proportional_bound, "WARN");
     with_mmr_variants!(
         test_for_variant!(with_cap: test_any_db_bounded_initialization_recovery, "WARN")
     );
+
+    /// Database access the policy tests need beyond [`DbAny`].
+    pub(crate) trait Inspect<F: Family>:
+        DbAny<F, Key = Digest, Value = Digest, Digest = Digest>
+    {
+        /// The update kind.
+        type Update: Update<Key = Digest, Value = Digest>;
+
+        /// Return the operations `batch` appends and the location of the first.
+        #[allow(clippy::type_complexity)]
+        fn ops(
+            batch: &Self::Merkleized,
+        ) -> (GenericLocation<F>, Arc<Vec<Operation<F, Self::Update>>>);
+    }
+
+    impl<F, C, I, U, const N: usize, S> Inspect<F> for Db<F, Context, C, I, Sha256, U, N, S>
+    where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>> + 'static,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+        Self: DbAny<
+                F,
+                Key = Digest,
+                Value = Digest,
+                Digest = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
+                Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
+            >,
+    {
+        type Update = U;
+
+        fn ops(batch: &Self::Merkleized) -> (GenericLocation<F>, Arc<Vec<Operation<F, U>>>) {
+            batch.operations()
+        }
+    }
+
+    /// Merkleize `writes` as one [`Proportional`] batch, replay its operations into `live`, and
+    /// apply it. Asserts that the applied floor trails the tip by at most `3 * (n + 1)` operations,
+    /// where `n` is the number of live keys.
+    async fn bounded<F: Family, D: Inspect<F>>(
+        db: D,
+        live: &mut BTreeMap<Digest, GenericLocation<F>>,
+        writes: &[(Digest, Option<Digest>)],
+    ) -> D
+    where
+        Operation<F, D::Update>: Codec,
+    {
+        let merkleized = build(&db, db.new_batch(), writes).await;
+        let (start, ops) = D::ops(&merkleized);
+        replay(live, start, &ops);
+        let db = db.apply_batch(merkleized).await.unwrap().0;
+        let gap = *db.size() - *db.inactivity_floor_loc();
+        let bound = 3 * (live.len() as u64 + 1);
+        assert!(
+            gap <= bound,
+            "the floor trails the tip by {gap} with {} live keys",
+            live.len(),
+        );
+        db
+    }
+
+    /// Return deletes of the `n` live keys with the highest locations.
+    fn newest<K: Copy + Ord, L: Copy + Ord, V>(
+        live: &BTreeMap<K, L>,
+        n: usize,
+    ) -> Vec<(K, Option<V>)> {
+        let mut keys: Vec<_> = live.iter().map(|(key, loc)| (*loc, *key)).collect();
+        keys.sort_unstable_by(|a, b| b.cmp(a));
+        keys.into_iter()
+            .take(n)
+            .map(|(_, key)| (key, None))
+            .collect()
+    }
+
+    /// Apply a large batch of creates, hot-key updates, delete and recreate churn, shrinking by
+    /// deleting the newest keys, bursts of creates followed by deletes of the newest keys, and
+    /// large mixed batches to `db`. Keys come from `key` and values from `value`. `apply` applies
+    /// one batch and records the location of each live key in its map.
+    pub(crate) async fn churn<D, K, V, L>(
+        mut db: D,
+        key: impl Fn(u64) -> K,
+        value: impl Fn(u64) -> V,
+        mut apply: impl AsyncFnMut(D, &mut BTreeMap<K, L>, &[(K, Option<V>)]) -> D,
+    ) -> D
+    where
+        K: Copy + Ord,
+        L: Copy + Ord,
+    {
+        let mut live = BTreeMap::new();
+
+        // Create 256 keys in one batch.
+        let writes: Vec<_> = (0..256).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+
+        // Update four hot keys in each of 64 batches.
+        for round in 0..64 {
+            let writes: Vec<_> = (0..4)
+                .map(|i| (key(i), Some(value(1000 + round))))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Delete eight keys, then delete the next eight in each of 64 batches while recreating
+        // the eight the previous batch deleted.
+        let window = |round: u64| (8 * round..8 * round + 8).map(|i| key(i % 256));
+        let writes: Vec<_> = window(0).map(|key| (key, None)).collect();
+        db = apply(db, &mut live, &writes).await;
+        for round in 0..64 {
+            let writes: Vec<_> = window(round)
+                .map(|key| (key, Some(value(2000 + round))))
+                .chain(window(round + 1).map(|key| (key, None)))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Delete the eight newest keys in each batch until eight keys remain.
+        while live.len() > 8 {
+            let writes = newest(&live, 8);
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Four times, create a burst of 64 keys and then delete the eight newest keys in each of
+        // eight batches.
+        for burst in 0..4 {
+            let start = 1000 + 64 * burst;
+            let writes: Vec<_> = (start..start + 64)
+                .map(|i| (key(i), Some(value(i))))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+            for _ in 0..8 {
+                let writes = newest(&live, 8);
+                db = apply(db, &mut live, &writes).await;
+            }
+        }
+
+        // Create 512 keys in one batch, then delete 64 keys, update 128, and create 32 in each of
+        // four batches.
+        let writes: Vec<_> = (2000..2512).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+        for round in 0..4 {
+            let keys: Vec<_> = live.keys().copied().collect();
+            let start = 3000 + 32 * round;
+            let deletes = keys[..64].iter().map(|&key| (key, None));
+            let updates = keys[64..192].iter().map(|&key| (key, Some(value(round))));
+            let creates = (start..start + 32).map(|i| (key(i), Some(value(i))));
+            let writes: Vec<_> = deletes.chain(updates).chain(creates).collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+        db
+    }
+
+    /// Every [`Proportional`] batch of [`churn`] keeps the floor at most `3 * (n + 1)` operations
+    /// behind the tip, where `n` is the number of live keys.
+    pub(crate) async fn test_any_proportional_bound<F, D>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        F: Family,
+        D: Inspect<F>,
+        Operation<F, D::Update>: Codec,
+    {
+        let db = churn(db, to_digest, make_value, bounded::<F, D>).await;
+        db.destroy().await.unwrap();
+    }
 
     fn key(i: u64) -> Digest {
         Sha256::hash(&[&i.to_be_bytes()])

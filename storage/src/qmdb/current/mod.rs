@@ -512,13 +512,15 @@ pub mod tests {
     pub use super::BitmapPrunedBits;
     use super::{
         Codec, FConfig, FixedConfig, MerkleConfig, Operation, Strategy, Update, VConfig,
-        VariableConfig, batch, grafting, ordered, unordered,
+        VariableConfig, batch, db, grafting, ordered, unordered,
     };
     use crate::{
+        index::Unordered as UnorderedIndex,
+        journal::contiguous::Mutable,
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
-                test::{build, colliding_digest},
+                test::{Inspect, build, colliding_digest, test_any_proportional_bound},
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             floor::Proportional,
@@ -5044,4 +5046,54 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    impl<F, C, I, U, const N: usize, S> Inspect<F> for db::Db<F, Context, C, I, Sha256, U, N, S>
+    where
+        F: merkle::Graftable,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+        Self: DbAny<
+                F,
+                Key = Digest,
+                Value = Digest,
+                Digest = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, N, S>>,
+                Batch = batch::UnmerkleizedBatch<F, Sha256, U, N, S>,
+            >,
+    {
+        type Update = U;
+
+        fn ops(batch: &Self::Merkleized) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
+            batch.operations()
+        }
+    }
+
+    /// Define `$name` to run the Any test `$any` on a current database opened in `$partition` for
+    /// every variant.
+    macro_rules! current_test {
+        ($name:ident, $any:ident, $partition:literal) => {
+            async fn $name<M, C, F, Fut>(context: Context, open_db: F)
+            where
+                M: merkle::Graftable,
+                C: Inspect<M>,
+                Operation<M, C::Update>: Codec,
+                F: Fn(Context, String) -> Fut,
+                Fut: Future<Output = C>,
+            {
+                let db = open_db(context.child("db"), $partition.into()).await;
+                $any(context, db, val).await;
+            }
+
+            test_for_all_variants!($name, "WARN");
+        };
+    }
+
+    current_test!(
+        test_current_proportional_bound,
+        test_any_proportional_bound,
+        "bound"
+    );
 }
