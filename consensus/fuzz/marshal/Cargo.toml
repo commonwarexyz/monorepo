@@ -128,3 +128,10 @@ path = "fuzz_targets/marshal_e2e_coding_cert_mock_disrupter.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "marshal_e2e_coding_cert_mock_poison"
+path = "fuzz_targets/marshal_e2e_coding_cert_mock_poison.rs"
+test = false
+doc = false
+bench = false

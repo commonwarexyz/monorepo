@@ -46,8 +46,9 @@ pub use input::{
     FloorStart, MarshalDisrupterInput, MarshalTwinsInput, NotarizationBlockSplitScenarioInput,
 };
 pub use runner::{
-    fuzz_marshal_coding_disrupter, fuzz_marshal_standard_block_dissemination,
-    fuzz_marshal_standard_certificate_poison, fuzz_marshal_standard_disrupter,
+    fuzz_marshal_coding_block_poison, fuzz_marshal_coding_disrupter,
+    fuzz_marshal_standard_block_dissemination, fuzz_marshal_standard_certificate_poison,
+    fuzz_marshal_standard_disrupter,
 };
 pub use scenario::{
     DropRule, PreGstAction, Role, ScenarioTemplate, fuzz_marshal_standard_scenarios,

@@ -10,9 +10,10 @@ use super::{
             AlwaysAcceptBlockBuilderApp, ApplicationChoice, BlockContextRegistry, FaultyConfig,
             SelectedBlockBuilderApp,
         },
-        coding_disrupter,
+        coding_disrupter::{self, CodingFaults},
         coding_stack::{
-            CodingB, CodingCtx, CodingValidator, CommitmentOf, coding_genesis, coding_marshaled,
+            CodingB, CodingCtx, CodingValidator, CommitmentOf, DigestLookups, FaultyProposer,
+            ProposalFault, coding_genesis, coding_marshaled, sample_shards_mailbox_size,
             setup_validator_coding, start_engine_coding_with_networks,
         },
         input::MarshalTwinsInput,
@@ -44,11 +45,24 @@ use std::{collections::HashMap, marker::PhantomData, num::NonZeroUsize, sync::Ar
 type PrimaryApp<P> = AlwaysAcceptBlockBuilderApp<CodingCtx<P>, SchemeOf<P>, CodingB<P>>;
 type HonestApp<P> = SelectedBlockBuilderApp<CodingCtx<P>, SchemeOf<P>, CodingB<P>>;
 
+/// Stack axes decoded from the reserved selector byte of the coding Twins tape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CodingStackSelection {
+    application: ApplicationChoice,
+    max_pending_acks: NonZeroUsize,
+    /// Ancestors the honest applications walk past the parent.
+    ancestry_depth: u8,
+    /// Whether honest applications issue digest-keyed marshal lookups.
+    digest_lookups: bool,
+    /// Header fault of the compromised identity's proposals.
+    proposal_fault: Option<ProposalFault>,
+}
+
 struct CodingTwinsBackend<P: Simplex> {
     input: MarshalTwinsInput,
     app_config: FaultyConfig,
-    application_choice: ApplicationChoice,
-    max_pending_acks: NonZeroUsize,
+    selection: CodingStackSelection,
+    shards_mailbox_size: NonZeroUsize,
     probe_input: Arc<str>,
     stack_label: Arc<str>,
     _marker: PhantomData<fn() -> P>,
@@ -67,19 +81,19 @@ struct CodingTwinsState<P: Simplex> {
 impl<P: Simplex> CodingTwinsBackend<P> {
     fn new(
         input: MarshalTwinsInput,
-        application_choice: ApplicationChoice,
-        max_pending_acks: NonZeroUsize,
+        selection: CodingStackSelection,
         probe_input: Arc<str>,
         stack_label: Arc<str>,
         entropy: Vec<u8>,
     ) -> Self {
         let mut rng = FuzzRng::new(entropy);
         let app_config = FaultyConfig::new(&mut rng, View::new(input.rounds.into()));
+        let shards_mailbox_size = sample_shards_mailbox_size(&mut rng);
         Self {
             input,
             app_config,
-            application_choice,
-            max_pending_acks,
+            selection,
+            shards_mailbox_size,
             probe_input,
             stack_label,
             _marker: PhantomData,
@@ -128,11 +142,12 @@ where
                 validator.clone(),
                 ConstantProvider::new(schemes[idx].clone()),
                 genesis.clone(),
-                self.max_pending_acks,
-                (self.max_pending_acks.get() <= DEEP_PENDING_ACKS.get())
-                    .then_some(self.max_pending_acks),
+                self.selection.max_pending_acks,
+                (self.selection.max_pending_acks.get() <= DEEP_PENDING_ACKS.get())
+                    .then_some(self.selection.max_pending_acks),
                 idx,
                 self.stack_label.clone(),
+                self.shards_mailbox_size,
             )
             .await;
             let networks = register_engine_networks::<P>(&oracle, validator.clone()).await;
@@ -224,10 +239,17 @@ where
         ),
     ) {
         let node = &state.validators[idx];
+        // The compromised identity's proposals may carry a header fault; the
+        // honest applications never wrap.
+        let application = FaultyProposer::<P, _>::new(
+            PrimaryApp::<P>::default().with_block_contexts(state.block_contexts.clone()),
+            self.selection.proposal_fault,
+            state.block_contexts.clone(),
+        );
         let marshaled = coding_marshaled::<P, _>(
             &context,
             ConstantProvider::new(scheme.clone()),
-            PrimaryApp::<P>::default().with_block_contexts(state.block_contexts.clone()),
+            application,
             node.mailbox.clone(),
             node.shards.clone(),
         );
@@ -284,6 +306,7 @@ where
             vote,
             certificate,
             resolver,
+            CodingFaults::none(),
         );
     }
 
@@ -300,8 +323,12 @@ where
         channels: NetworkChannels<PublicKeyOf<P>>,
     ) {
         let node = &state.validators[idx];
-        let application = HonestApp::<P>::new(self.application_choice, self.app_config, None)
-            .with_block_contexts(state.block_contexts.clone());
+        let application = DigestLookups::<P, _>::new(
+            HonestApp::<P>::new(self.selection.application, self.app_config, None)
+                .with_ancestry_depth(self.selection.ancestry_depth)
+                .with_block_contexts(state.block_contexts.clone()),
+            self.selection.digest_lookups.then(|| node.mailbox.clone()),
+        );
         let marshaled = coding_marshaled::<P, _>(
             &context,
             ConstantProvider::new(scheme.clone()),
@@ -318,7 +345,7 @@ where
             inner: marshaled.clone(),
             certification_agreement: state.certification_agreement.clone(),
             header_mismatch: HeaderMismatchInvariant::<P, FaultyConfig, CommitmentOf<P>>::coding(
-                self.application_choice,
+                self.selection.application,
                 self.app_config,
                 HonestApp::<P>::rejects,
                 state.block_contexts.clone(),
@@ -383,9 +410,22 @@ where
     }
 }
 
-fn select_coding_stack(raw_bytes: &[u8]) -> (ApplicationChoice, NonZeroUsize, Vec<u8>) {
+/// Decodes the stack selector byte: bit 0 application, bits 1-2 acknowledgement
+/// depth, bits 3-4 ancestry depth, bit 5 digest lookups, bits 6-7 the
+/// compromised proposer's fault. The remaining bytes stay scenario/runtime
+/// entropy.
+fn select_coding_stack(raw_bytes: &[u8]) -> (CodingStackSelection, Vec<u8>) {
     let Some((&selector, entropy)) = raw_bytes.split_last() else {
-        return (ApplicationChoice::AlwaysAccept, NZUsize!(2), vec![0]);
+        return (
+            CodingStackSelection {
+                application: ApplicationChoice::AlwaysAccept,
+                max_pending_acks: NZUsize!(2),
+                ancestry_depth: 0,
+                digest_lookups: false,
+                proposal_fault: None,
+            },
+            vec![0],
+        );
     };
     let max_pending_acks = match (selector >> 1) & 0b11 {
         0 => NZUsize!(1),
@@ -399,8 +439,13 @@ fn select_coding_stack(raw_bytes: &[u8]) -> (ApplicationChoice, NonZeroUsize, Ve
         entropy.to_vec()
     };
     (
-        ApplicationChoice::from_selector(selector),
-        max_pending_acks,
+        CodingStackSelection {
+            application: ApplicationChoice::from_selector(selector),
+            max_pending_acks,
+            ancestry_depth: (selector >> 3) & 0b11,
+            digest_lookups: (selector >> 5) & 1 == 1,
+            proposal_fault: ProposalFault::from_selector(selector),
+        },
         entropy,
     )
 }
@@ -416,26 +461,25 @@ where
     P: Simplex,
     SchemeOf<P>: SimplexScheme<CommitmentOf<P>>,
 {
-    let (application_choice, max_pending_acks, entropy) = select_coding_stack(&input.raw_bytes);
+    let (selection, entropy) = select_coding_stack(&input.raw_bytes);
     let stack_label: Arc<str> = format!(
-        "application={application_choice} marshal=coding max_pending_acks={max_pending_acks}"
+        "application={} marshal=coding max_pending_acks={}",
+        selection.application, selection.max_pending_acks
     )
     .into();
-    let probe_input: Arc<str> = format!("{:?}", MarshalTwinsInputDebug(&input)).into();
+    let probe_input: Arc<str> = format!(
+        "{:?} selection={selection:?}",
+        MarshalTwinsInputDebug(&input)
+    )
+    .into();
     let rng = FuzzRng::new(entropy.clone());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
         let scenario_entropy = entropy.clone();
-        let mut backend = CodingTwinsBackend::<P>::new(
-            input,
-            application_choice,
-            max_pending_acks,
-            probe_input,
-            stack_label,
-            entropy,
-        );
+        let mut backend =
+            CodingTwinsBackend::<P>::new(input, selection, probe_input, stack_label, entropy);
         run_twins_with_backend::<P, _>(&mut context, &mut backend, scenario_entropy).await;
     });
 }
@@ -448,15 +492,23 @@ mod tests {
 
     #[test]
     fn coding_stack_selects_application_ack_depth_and_preserves_entropy() {
-        let (choice, max_pending_acks, entropy) = select_coding_stack(&[1, 2, 5]);
-        assert_eq!(choice, ApplicationChoice::Faulty);
-        assert_eq!(max_pending_acks, DEEP_PENDING_ACKS);
+        let (selection, entropy) = select_coding_stack(&[1, 2, 5]);
+        assert_eq!(selection.application, ApplicationChoice::Faulty);
+        assert_eq!(selection.max_pending_acks, DEEP_PENDING_ACKS);
+        assert_eq!(selection.ancestry_depth, 0);
+        assert!(!selection.digest_lookups);
+        assert_eq!(selection.proposal_fault, None);
         assert_eq!(entropy, vec![1, 2]);
 
-        let (choice, max_pending_acks, entropy) = select_coding_stack(&[]);
-        assert_eq!(choice, ApplicationChoice::AlwaysAccept);
-        assert_eq!(max_pending_acks, NZUsize!(2));
+        let (selection, entropy) = select_coding_stack(&[]);
+        assert_eq!(selection.application, ApplicationChoice::AlwaysAccept);
+        assert_eq!(selection.max_pending_acks, NZUsize!(2));
         assert_eq!(entropy, vec![0]);
+
+        let (selection, _) = select_coding_stack(&[0, 0b1011_1000]);
+        assert_eq!(selection.ancestry_depth, 3);
+        assert!(selection.digest_lookups);
+        assert_eq!(selection.proposal_fault, Some(ProposalFault::WrongParent));
     }
 
     #[test]
@@ -476,5 +528,25 @@ mod tests {
                 floor: None,
             },
         );
+    }
+
+    /// Deep ancestry walks, digest lookups, and each proposer fault of the
+    /// compromised identity keep the honest nodes live.
+    #[test]
+    fn coding_twins_runs_with_lookups_and_proposer_faults() {
+        for selector in [0b0111_1000, 0b1011_1000, 0b1111_1001] {
+            fuzz_marshal_coding_twins::<commonware_consensus_fuzz_core::SimplexCertificateMock>(
+                MarshalTwinsInput {
+                    raw_bytes: vec![3, 1, 4, selector],
+                    rounds: 3,
+                    case_selector: 1,
+                    sustained: false,
+                    strategy: StrategyChoice::AnyScope,
+                    trailing_blocks: 2,
+                    forwarding: ForwardPolicy::Disabled,
+                    floor: None,
+                },
+            );
+        }
     }
 }

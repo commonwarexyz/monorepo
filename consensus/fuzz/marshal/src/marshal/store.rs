@@ -1,8 +1,12 @@
 //! Fuzz driver for marshal with prunable finalized archives.
 
-use crate::marshal::end_to_end::twins::{PublicKeyOf, SchemeOf};
+use crate::{
+    marshal::end_to_end::twins::{PublicKeyOf, SchemeOf},
+    scenarios::recording_resolver::{RecordingResolver, init_injectable},
+};
 use arbitrary::Arbitrary;
 use commonware_broadcast::buffered;
+use commonware_codec::Encode as _;
 use commonware_consensus::{
     Heightable, Reporter as _,
     marshal::{
@@ -15,7 +19,7 @@ use commonware_consensus::{
                 QUORUM, StandardHarness, TEST_QUOTA, TestHarness, setup_network_with_participants,
             },
         },
-        resolver::p2p as resolver,
+        resolver::handler::{Annotation, Finalized, Key},
         standard::Standard,
         store::{Blocks as StoreBlocks, Certificates as StoreCertificates},
     },
@@ -45,9 +49,13 @@ use std::{num::NonZeroUsize, time::Duration};
 type CertScheme = SchemeOf<SimplexCertificateMock>;
 type K = PublicKeyOf<SimplexCertificateMock>;
 type StoreVariant = Standard<B>;
+/// The actor's resolver, held by the harness so scripted deliveries can answer
+/// the fetches it records.
+type StoreResolver = RecordingResolver<SimplexCertificateMock>;
 
 /// Certificate-mock port of the harness prunable-validator setup: identical
-/// wiring, with the BLS scheme replaced by the certificate mock.
+/// wiring, with the BLS scheme replaced by the certificate mock and the
+/// resolver built around a handler the harness keeps.
 #[allow(clippy::type_complexity)]
 async fn setup_prunable_validator_cert_mock(
     context: deterministic::Context,
@@ -62,6 +70,7 @@ async fn setup_prunable_validator_cert_mock(
     buffered::Mailbox<K, B>,
     Application<B>,
     Handle<()>,
+    StoreResolver,
 ) {
     let control = oracle.control(validator.clone());
     let provider = ConstantProvider::new(schemes[0].clone());
@@ -83,21 +92,10 @@ async fn setup_prunable_validator_cert_mock(
         strategy: Sequential,
     };
 
-    let backfill = control.register(0, TEST_QUOTA).await.unwrap();
-    let resolver = resolver::init(
-        context.child("resolver"),
-        resolver::Config {
-            public_key: validator.clone(),
-            peer_provider: oracle.manager(),
-            blocker: control.clone(),
-            mailbox_size: config.mailbox_size,
-            timeout: Duration::from_secs(2),
-            fetch_retry_timeout: Duration::from_millis(100),
-            priority_requests: false,
-            priority_responses: false,
-        },
-        backfill,
-    );
+    // Backfill channel 1 and broadcast channel 2, as marshal numbers them.
+    let ((receiver, resolver_mailbox), handler) =
+        init_injectable::<SimplexCertificateMock>(&context, oracle, validator.clone()).await;
+    let resolver = RecordingResolver::injectable(handler, resolver_mailbox);
 
     let (broadcast_engine, buffer) = buffered::Engine::new(
         context.child("broadcast"),
@@ -110,7 +108,7 @@ async fn setup_prunable_validator_cert_mock(
             peer_provider: oracle.manager(),
         },
     );
-    let network = control.register(1, TEST_QUOTA).await.unwrap();
+    let network = control.register(2, TEST_QUOTA).await.unwrap();
     broadcast_engine.start(network);
 
     let finalizations_by_height = prunable::Archive::init(
@@ -160,12 +158,16 @@ async fn setup_prunable_validator_cert_mock(
     .await;
     let application = Application::<B>::default();
     let handle = if unbuffered {
-        actor.start_unbuffered(application.clone(), resolver)
+        actor.start_unbuffered(application.clone(), (receiver, resolver.clone()))
     } else {
-        actor.start(application.clone(), buffer.clone(), resolver)
+        actor.start(
+            application.clone(),
+            buffer.clone(),
+            (receiver, resolver.clone()),
+        )
     };
 
-    (mailbox, buffer, application, handle)
+    (mailbox, buffer, application, handle, resolver)
 }
 
 const NUM_BLOCKS: u64 = 16;
@@ -267,6 +269,12 @@ pub enum StoreOp {
         block_idx: u8,
         by_digest: bool,
     },
+    /// Answers a block fetch the actor issued with the canonical block, as a
+    /// peer response would. No-op when the block was never requested.
+    DeliverBlock {
+        block_idx: u8,
+        annotation: DeliverAnnotation,
+    },
     Restart,
     ObserveApplication,
     DirectPutBlock {
@@ -302,9 +310,29 @@ pub enum StoreOp {
     DirectLastCertificate,
 }
 
+/// Local annotation of a scripted block delivery, mirroring the block-bearing
+/// variants of the resolver's [`Annotation`].
+#[derive(Arbitrary, Debug, Clone, Copy)]
+pub enum DeliverAnnotation {
+    Untrusted,
+    Certified,
+    Finalized,
+}
+
+impl DeliverAnnotation {
+    /// The annotation the actor itself attaches to a fetch of `height`.
+    fn annotation(self, height: Height) -> Annotation {
+        match self {
+            Self::Untrusted => Annotation::Untrusted { height },
+            Self::Certified => Annotation::Certified { height },
+            Self::Finalized => Annotation::Finalized(Finalized::ByHeight { height }),
+        }
+    }
+}
+
 impl Arbitrary<'_> for StoreOp {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(0..=189)? {
+        Ok(match u.int_in_range(0..=199)? {
             0..=24 => Self::SeedBlock {
                 block_idx: block_idx(u)?,
             },
@@ -373,6 +401,10 @@ impl Arbitrary<'_> for StoreOp {
             },
             180..=184 => Self::Forward {
                 block_idx: block_idx(u)?,
+            },
+            190..=199 => Self::DeliverBlock {
+                block_idx: block_idx(u)?,
+                annotation: u.arbitrary()?,
             },
             _ => Self::Subscribe {
                 block_idx: block_idx(u)?,
@@ -587,6 +619,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
         let mut application = setup.2;
         let mut mailbox = setup.0;
         let mut actor_handle = setup.3;
+        let mut resolver = setup.4;
 
         for op in input.ops {
             match op {
@@ -718,6 +751,61 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                         _ = context.sleep(EVENT_SETTLE) => {},
                     }
                 }
+                StoreOp::DeliverBlock {
+                    block_idx,
+                    annotation,
+                } => {
+                    let block = &canonical[block_index(block_idx)];
+                    let key = Key::Block(block.digest());
+                    let requested = resolver
+                        .fetches()
+                        .iter()
+                        .any(|(fetched, _)| *fetched == key);
+                    let processed_before = mailbox
+                        .get_processed()
+                        .await
+                        .map_or(Height::zero(), |processed| processed.height());
+                    let held_before = mailbox.get_block(&block.digest()).await.is_some();
+                    let verdict = if requested {
+                        let verdict = resolver.deliver(
+                            key,
+                            annotation.annotation(block.height()),
+                            block.encode(),
+                        );
+                        select! {
+                            verdict = verdict => verdict.ok(),
+                            _ = context.sleep(EVENT_SETTLE) => None,
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(verdict) = verdict {
+                        assert!(
+                            verdict,
+                            "canonical block delivery rejected at height {}",
+                            block.height().get(),
+                        );
+                        // An admitted block above the processed height is
+                        // served by digest; one at or below the floor is not
+                        // admitted.
+                        let returned = mailbox.get_block(&block.digest()).await;
+                        let processed = mailbox
+                            .get_processed()
+                            .await
+                            .map_or(Height::zero(), |processed| processed.height());
+                        if block.height() > processed {
+                            let returned =
+                                returned.expect("delivered block above the floor is held");
+                            assert_returned_block(block, &returned, "DeliverBlock");
+                        } else if !held_before && block.height() <= processed_before {
+                            assert!(
+                                returned.is_none(),
+                                "block at or below the processed floor admitted at height {}",
+                                block.height().get(),
+                            );
+                        }
+                    }
+                }
                 StoreOp::Restart => {
                     drop(mailbox);
                     drop(application);
@@ -740,6 +828,7 @@ pub fn fuzz_marshal_actor_store(input: MarshalActorStoreInput) {
                     application = setup.2;
                     mailbox = setup.0;
                     actor_handle = setup.3;
+                    resolver = setup.4;
                 }
                 StoreOp::ObserveApplication => {
                     let _ = application.tip();
@@ -952,6 +1041,68 @@ mod tests {
             StoreOp::SeedBlock { block_idx: 6 },
             StoreOp::ReportFinalization { block_idx: 6 },
             StoreOp::ObserveApplication,
+        ];
+        for unbuffered in [false, true] {
+            fuzz_marshal_actor_store(MarshalActorStoreInput {
+                raw_bytes: vec![0],
+                ops: ops.clone(),
+                unbuffered,
+            });
+        }
+    }
+
+    /// Scripted backfill answers: untrusted and certified deliveries above the
+    /// processed height land in the certified cache, finalized ones in the
+    /// archive, and a repeated delivery is a no-op.
+    #[test]
+    fn scripted_block_deliveries_are_admitted() {
+        let ops = vec![
+            StoreOp::SeedBlock { block_idx: 0 },
+            StoreOp::ReportFinalization { block_idx: 0 },
+            StoreOp::Subscribe {
+                block_idx: 2,
+                by_digest: false,
+            },
+            StoreOp::DeliverBlock {
+                block_idx: 2,
+                annotation: DeliverAnnotation::Untrusted,
+            },
+            StoreOp::GetBlock {
+                block_idx: 2,
+                by_digest: true,
+            },
+            StoreOp::Subscribe {
+                block_idx: 3,
+                by_digest: false,
+            },
+            StoreOp::DeliverBlock {
+                block_idx: 3,
+                annotation: DeliverAnnotation::Certified,
+            },
+            StoreOp::DeliverBlock {
+                block_idx: 2,
+                annotation: DeliverAnnotation::Certified,
+            },
+            StoreOp::Subscribe {
+                block_idx: 5,
+                by_digest: false,
+            },
+            StoreOp::DeliverBlock {
+                block_idx: 5,
+                annotation: DeliverAnnotation::Finalized,
+            },
+            // A finalization for a block the actor never saw fetches it by
+            // commitment; the delivery completes the finalized chain.
+            StoreOp::ReportFinalization { block_idx: 1 },
+            StoreOp::DeliverBlock {
+                block_idx: 1,
+                annotation: DeliverAnnotation::Finalized,
+            },
+            StoreOp::ObserveApplication,
+            StoreOp::GetInfo {
+                block_idx: 0,
+                latest: true,
+            },
         ];
         for unbuffered in [false, true] {
             fuzz_marshal_actor_store(MarshalActorStoreInput {

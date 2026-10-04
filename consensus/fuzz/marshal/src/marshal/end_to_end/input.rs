@@ -24,6 +24,8 @@ use commonware_utils::NZU32;
 const MIN_REQUIRED: u64 = 1;
 pub(super) const MAX_TWINS_ROUNDS: u8 = 6;
 const MAX_TWINS_TRAILING_BLOCKS: u8 = 3;
+/// Deepest ancestry walk an application performs past the parent.
+pub(super) const MAX_ANCESTRY_DEPTH: u8 = 3;
 /// Highest anchor height a floor-started honest node waits for before joining.
 const MAX_FLOOR_HEIGHT: u8 = 6;
 

@@ -13,10 +13,13 @@
 //!   The scenario target replays a templated pre-GST program the fuzzer
 //!   extends, heals the network at a rigid GST boundary, and requires every
 //!   correct node to finalize past the height it held there.
+//!   The coding poison target instead has the Byzantine node answer block
+//!   backfill requests with coded blocks that decode but mismatch.
 //!   Targets: `marshal_e2e_standard_deferred_cert_mock_disrupter`,
 //!   `marshal_e2e_standard_deferred_cert_mock_poison`,
 //!   `marshal_e2e_standard_deferred_cert_mock_scenarios`,
 //!   `marshal_e2e_coding_cert_mock_disrupter`,
+//!   `marshal_e2e_coding_cert_mock_poison`,
 //!   `marshal_e2e_standard_app_cert_mock_twins`,
 //!   `marshal_e2e_coding_app_cert_mock_twins`,
 //!   `marshal_e2e_standard_deferred_cert_mock_twins_split_header`,
@@ -38,7 +41,7 @@ pub mod store;
 pub use end_to_end::{
     DropRule, FloorStart, MarshalDisrupterInput, MarshalTwinsInput,
     NotarizationBlockSplitScenarioInput, PreGstAction, Role, ScenarioTemplate,
-    fuzz_marshal_coding_disrupter, fuzz_marshal_coding_twins,
+    fuzz_marshal_coding_block_poison, fuzz_marshal_coding_disrupter, fuzz_marshal_coding_twins,
     fuzz_marshal_standard_block_dissemination, fuzz_marshal_standard_certificate_poison,
     fuzz_marshal_standard_deferred_cert_mock_twins_split_header, fuzz_marshal_standard_disrupter,
     fuzz_marshal_standard_inline_cert_mock_twins_split_header, fuzz_marshal_standard_scenarios,

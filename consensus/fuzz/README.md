@@ -105,6 +105,7 @@ cargo +nightly fuzz run --fuzz-dir consensus/fuzz/simplex simplex_cert_mock \
 - `marshal_actor_standard_store_cert_mock`
 - `marshal_e2e_coding_app_cert_mock_twins`
 - `marshal_e2e_coding_cert_mock_disrupter`
+- `marshal_e2e_coding_cert_mock_poison`
 - `marshal_e2e_standard_app_cert_mock_twins`
 - `marshal_e2e_standard_deferred_cert_mock_block_dissemination`
 - `marshal_e2e_standard_deferred_cert_mock_disrupter`
