@@ -192,6 +192,24 @@ fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool 
     items.get(*cursor) == Some(target)
 }
 
+/// Returns whether `staged` holds an update resolved at `target`, advancing `cursor` past updates
+/// resolved below it. Successive calls must use non-decreasing `target`s.
+fn contains_staged<F: Family, U: update::Update>(
+    staged: &StagedUpdates<F, U>,
+    cursor: &mut usize,
+    target: &Location<F>,
+) -> bool {
+    while staged
+        .get(*cursor)
+        .is_some_and(|(_, sloc, _, _)| sloc.loc() < *target)
+    {
+        *cursor += 1;
+    }
+    staged
+        .get(*cursor)
+        .is_some_and(|(_, sloc, _, _)| sloc.loc() == *target)
+}
+
 /// Merge the `less`-sorted vectors `a` and `b` into one sorted vector. On ties, the element from
 /// `b` comes first.
 fn merge_by<T>(a: Vec<T>, b: Vec<T>, less: impl Fn(&T, &T) -> bool) -> Vec<T> {
@@ -294,10 +312,11 @@ where
     base: Base<F, H::Digest, U, S>,
 }
 
-/// Pending mutations whose old locations were already resolved by staged reads, sorted
-/// by location. Each value is `Some` for an update and `None` for a delete. Only the unordered
-/// path stages deletes (an ordered delete cannot skip the deleted key's predecessor-bucket scan,
-/// so its deletes fall back to normal mutations).
+/// Pending mutations whose old locations were already resolved by staged reads or policy decisions.
+/// Entries are sorted by location. Each value is `Some` for an update and `None` for a delete. When
+/// a collision sibling can hold a deleted key's predecessor link (see [`update::Parts::SIBLINGS`]),
+/// the deleted key is also a batch delete so that merkleize gathers its translated-key bucket. The
+/// entry's location and cached payload still spare merkleize a read of the deleted update.
 pub(crate) type StagedUpdates<F, U> = Vec<StagedUpdate<F, U>>;
 
 /// A staged read slot's resolution: the location and cached payload the read resolved to,
@@ -962,20 +981,20 @@ where
     /// location for Active entries, skipping Deleted entries). Keys not in the ancestor diffs
     /// fall back to the committed DB snapshot.
     ///
-    /// When `include_active_collision_siblings` is true, Active entries also scan the snapshot
-    /// bucket for collision siblings (other keys sharing the same translated-key bucket). The
-    /// ordered path needs these so their `next_key` pointers are rewritten when a sibling is
-    /// deleted; the unordered path can skip them.
+    /// When [`update::Parts::SIBLINGS`] is set, Active entries also scan the snapshot bucket for
+    /// collision siblings (other keys sharing the same translated-key bucket). The ordered path
+    /// needs these so their `next_key` pointers are rewritten when a sibling is deleted. The
+    /// unordered path skips them.
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
         mutations: &BTreeMap<U::Key, Option<U::Value>>,
         db: &Db<F, E, C, I, H, U, N, S>,
-        include_active_collision_siblings: bool,
     ) -> Vec<Location<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
+        U: update::Parts,
     {
         // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
         // location per key.
@@ -995,7 +1014,7 @@ where
                         loc, base_old_loc, ..
                     }) => {
                         locations.push(*loc);
-                        if include_active_collision_siblings {
+                        if U::SIBLINGS {
                             locations.extend(
                                 db.snapshot
                                     .get(key)
@@ -1449,12 +1468,11 @@ where
     /// Upserts are applied last. If a caller passes an overlapping key, the upsert follows normal
     /// `write` semantics and wins.
     ///
-    /// Location-resolved updates (committed, or ancestor-diff when the update kind stages
-    /// those -- see [`update::Update::STAGES_ANCESTORS`]) reuse the staged location. Resolved
-    /// deletes reuse it only when [`update::Update::STAGES_DELETES`] is set (the unordered
-    /// kind). Unresolved keys (missing from committed state, resolved through this batch's
-    /// own mutations, or ancestor-resolved for a kind that does not stage those) always fall
-    /// back to normal mutations.
+    /// Location-resolved updates and deletes (committed, or ancestor-diff when the update kind
+    /// stages those -- see [`update::Update::STAGES_ANCESTORS`]) reuse the staged location.
+    /// Unresolved keys (missing from committed state, resolved through this batch's own
+    /// mutations, or ancestor-resolved for a kind that does not stage those) always fall back to
+    /// normal mutations.
     ///
     /// # Panics
     ///
@@ -1464,7 +1482,10 @@ where
         updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
         strategy: &S,
-    ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>) {
+    ) -> (UnmerkleizedBatch<F, H, U, S>, StagedUpdates<F, U>)
+    where
+        U: update::Parts,
+    {
         let Self {
             mut batch,
             keys,
@@ -1487,7 +1508,10 @@ where
         updates: Vec<(usize, Option<U::Value>)>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
         strategy: &S,
-    ) -> (BTreeMap<U::Key, Option<U::Value>>, StagedUpdates<F, U>) {
+    ) -> (BTreeMap<U::Key, Option<U::Value>>, StagedUpdates<F, U>)
+    where
+        U: update::Parts,
+    {
         let mut staged_updates = StagedUpdates::<F, U>::new();
         if updates.is_empty() {
             return (Self::apply_upserts(mutations, upserts), staged_updates);
@@ -1523,11 +1547,15 @@ where
         }
         drop(winner_of);
 
-        // Split the winners: updates whose slot resolved to a location become staged
-        // updates, the rest fall back to batch mutations. A surviving staged write must not
-        // also emit an older batch mutation for the same key, so it is removed here. The
-        // probe is skipped when the batch had no mutations before this call: each distinct
-        // key is visited at most once (winners are per key), so a staged winner can never
+        // Split the winners: writes whose slot resolved to a location become staged updates, and
+        // the rest fall back to batch mutations.
+        //
+        // A staged write must not also emit an older batch mutation for its key, so that mutation
+        // is removed, except that a staged delete is also written as a batch delete when a
+        // collision sibling can hold its predecessor link (see [`StagedUpdates`]).
+        //
+        // The removal probe is skipped when the batch had no mutations before this call: each
+        // distinct key is visited at most once (winners are per key), so a staged winner can never
         // chase a fallback inserted by this same loop.
         let had_mutations = !mutations.is_empty();
         let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(winners.len());
@@ -1537,13 +1565,15 @@ where
             };
             let key = &keys[*slot];
             match &resolutions[*slot] {
-                Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
-                    if had_mutations {
+                Some((sloc, _)) => {
+                    if value.is_none() && U::SIBLINGS {
+                        mutations.insert(key.clone(), None);
+                    } else if had_mutations {
                         mutations.remove(key);
                     }
                     order.push((sloc.loc(), entry));
                 }
-                _ => {
+                None => {
                     let (_, value) = winner.take().expect("winner checked above");
                     mutations.insert(key.clone(), value);
                 }
@@ -2186,7 +2216,13 @@ where
         } = self;
 
         // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, false);
+        let mut locations = m.gather_existing_locations(&mutations, db);
+        if !staged_updates.is_empty() {
+            let mut staged_at = 0;
+            locations.retain(|loc| {
+                !contains_staged::<F, update::Unordered<K, V>>(&staged_updates, &mut staged_at, loc)
+            });
+        }
         let results = m.read_ops(&locations, &[], &db.log).await?;
 
         // Generate user mutation operations.
@@ -2380,9 +2416,10 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Complete a prepared merkleization, consuming staged updates recorded by
-    /// [`Staged::merkleize`] (loaded keys skip the index probe and journal re-read their
-    /// resolution would otherwise require: the caller's new value and the cached next key feed
-    /// op generation directly) and accepting the floor-raise candidate source.
+    /// [`Staged::merkleize`] or a policy pass (loaded keys skip the journal re-read their
+    /// resolution would otherwise require: the caller's new value and the cached next key feed op
+    /// generation directly, and updates also skip the index probe) and accepting the floor-raise
+    /// candidate source.
     ///
     /// The callback must yield candidates in ascending location order, both within one call
     /// and across successive calls (the floor raise asserts this). It must yield every location
@@ -2401,7 +2438,13 @@ where
         } = self;
 
         // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, true);
+        let mut locations = m.gather_existing_locations(&mutations, db);
+        if !staged_updates.is_empty() {
+            let mut staged_at = 0;
+            locations.retain(|loc| {
+                !contains_staged::<F, update::Ordered<K, V>>(&staged_updates, &mut staged_at, loc)
+            });
+        }
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
         // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
@@ -2452,25 +2495,6 @@ where
             }
         }
 
-        // Merge staged-resolved updates: they skip the index probe and journal re-read, and
-        // their old op's next_key and (key, loc) feed the candidate sets exactly as the skipped
-        // journal read would have. No prev-candidate value is stored: it is only consumed when
-        // the predecessor-rewrite loop emits an op for the key, and that loop skips every key
-        // present in `updated`. The ordered path never stages deletes (see
-        // `Staged::resolve_updates`), so every staged entry carries a value.
-        for (key, sloc, old_next, value) in staged_updates {
-            let value = value.expect("ordered path never stages deletes");
-            let StagedLoc::Committed(loc) = sloc else {
-                unreachable!("ordered path never stages ancestor resolutions")
-            };
-            next_candidates.push(old_next);
-            prev_candidates.push((key.clone(), (None, loc)));
-            updated.push((key, value, loc));
-        }
-
-        db.strategy().sort_by(&mut deleted, |a, b| a.0.cmp(&b.0));
-        db.strategy().sort_by(&mut updated, |a, b| a.0.cmp(&b.0));
-
         // Keep creates in key order for candidate lookups and operation emission,
         // including keys re-created after an ancestor deleted them.
         let mut created: Vec<(K, V::Value, Option<Location<F>>)> =
@@ -2480,12 +2504,18 @@ where
             created.push((key, value, base_old_loc));
         }
 
-        // Look up prev_translated_key for created/deleted keys.
+        // Look up prev_translated_key for created/deleted keys, including staged deletes.
         let mut prev_locations = Vec::new();
         for key in deleted
             .iter()
             .map(|(k, _)| k)
             .chain(created.iter().map(|(k, _, _)| k))
+            .chain(
+                staged_updates
+                    .iter()
+                    .filter(|(.., value)| value.is_none())
+                    .map(|(key, ..)| key),
+            )
         {
             let Some((iter, _)) = db.snapshot.prev_translated_key(key) else {
                 continue;
@@ -2494,7 +2524,12 @@ where
         }
         prev_locations.sort();
         prev_locations.dedup();
-
+        if !staged_updates.is_empty() {
+            let mut staged_at = 0;
+            prev_locations.retain(|loc| {
+                !contains_staged::<F, update::Ordered<K, V>>(&staged_updates, &mut staged_at, loc)
+            });
+        }
         let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
 
         for (op, &old_loc) in zip_eq(prev_results, &prev_locations) {
@@ -2515,6 +2550,26 @@ where
             next_candidates.push(data.next_key);
             prev_candidates.push((data.key, (Some(Cow::Owned(data.value)), old_loc)));
         }
+
+        // Merge staged-resolved records: they skip the journal re-read, and updates also skip the
+        // index probe. Each record's cached successor feeds the successor candidates as the skipped
+        // read would have. An update also feeds its (key, loc) to the predecessor candidates
+        // without a value: the value is only consumed when the predecessor-rewrite loop emits an op
+        // for the key, and that loop skips every key present in `updated`. A deleted key is never a
+        // predecessor. An ancestor-resolved record's superseded base is re-resolved through the
+        // live ancestor diffs when its operation is emitted below.
+        for (key, sloc, old_next, value) in staged_updates {
+            let loc = sloc.loc();
+            next_candidates.push(old_next);
+            if let Some(value) = value {
+                prev_candidates.push((key.clone(), (None, loc)));
+                updated.push((key, value, loc));
+            } else {
+                deleted.push((key, loc));
+            }
+        }
+        db.strategy().sort_by(&mut deleted, |a, b| a.0.cmp(&b.0));
+        db.strategy().sort_by(&mut updated, |a, b| a.0.cmp(&b.0));
 
         // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
         // but are invisible to the base-DB-only `prev_translated_key` lookup above.
@@ -4679,8 +4734,10 @@ mod tests {
         });
     }
 
+    /// An ordered staged delete is recorded at its resolved location and also stays a batch
+    /// delete, so merkleize gathers its translated-key bucket.
     #[test]
-    fn ordered_staged_resolve_updates_keeps_deletes_as_mutations() {
+    fn ordered_staged_resolve_updates_records_deletes() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             type TestDb = OrderedFixedDb<
@@ -4726,6 +4783,7 @@ mod tests {
                 staged_updates,
                 vec![
                     (update_b, committed(7), next_b, Some(value_b)),
+                    (delete_key, committed(11), next_delete, None),
                     (update_a, committed(30), next_a, Some(value_a)),
                 ]
             );

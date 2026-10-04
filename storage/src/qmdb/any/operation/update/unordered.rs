@@ -1,7 +1,10 @@
 use crate::qmdb::{
     any::{
         FixedValue, VariableValue,
-        operation::{Update as UpdateTrait, update::sealed::Sealed},
+        operation::{
+            Update as UpdateTrait,
+            update::{Parts, sealed::Sealed},
+        },
         value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
     operation::Key,
@@ -36,11 +39,7 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = ();
 
-    /// An unordered delete just emits a `Delete` at the resolved location.
-    const STAGES_DELETES: bool = true;
-
-    /// An unordered staged read carries no cached payload, so ancestor-diff resolutions can
-    /// be staged directly.
+    /// A staged read caches nothing beyond the resolved location.
     const STAGES_ANCESTORS: Option<()> = Some(());
 
     fn key(&self) -> &K {
@@ -64,6 +63,11 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[key:{} value:{}]", hex(&self.0), hex(&self.1.encode()))
     }
+}
+
+impl<K: Key, V: ValueEncoding> Parts for Update<K, V> {
+    /// An unordered operation references no other key.
+    const SIBLINGS: bool = false;
 }
 
 impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
