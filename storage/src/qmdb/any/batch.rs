@@ -3946,20 +3946,339 @@ pub(crate) mod tests {
             any::{
                 BITMAP_CHUNK_BYTES,
                 ordered::fixed::Db as OrderedFixedDb,
-                test::{colliding_digest, fixed_db_config},
+                test::{Choice, Script, colliding_digest, fixed_db_config},
+                traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
                 unordered::fixed::Db as UnorderedFixedDb,
                 value::FixedEncoding,
             },
+            current,
             floor::{Compact, Decision, Entry, Hold, Proportional},
         },
         translator::OneCap,
     };
+    use commonware_codec::{Buf, FixedSize, Read, Write};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
-    use std::cell::Cell;
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
+
+    /// A tagged value that counts the clones of its original. A decoded value starts a new
+    /// count.
+    pub(crate) struct CountedValue(pub(crate) u8, Arc<AtomicUsize>);
+
+    impl CountedValue {
+        pub(crate) fn new(tag: u8) -> Self {
+            Self(tag, Arc::new(AtomicUsize::new(0)))
+        }
+
+        pub(crate) fn clones(&self) -> usize {
+            self.1.load(AtomicOrdering::Relaxed)
+        }
+    }
+
+    impl Clone for CountedValue {
+        fn clone(&self) -> Self {
+            self.1.fetch_add(1, AtomicOrdering::Relaxed);
+            Self(self.0, self.1.clone())
+        }
+    }
+
+    impl FixedSize for CountedValue {
+        const SIZE: usize = 1;
+    }
+
+    impl Write for CountedValue {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for CountedValue {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+            Ok(Self::new(u8::read_cfg(buf, &())?))
+        }
+    }
+
+    /// Keeps every update and records each decided key with the clone count at its decision.
+    struct Probe {
+        clones: Arc<AtomicUsize>,
+        decided: Vec<(sha256::Digest, usize)>,
+    }
+
+    impl Policy<mmr::Family, sha256::Digest, CountedValue> for Probe {
+        fn limits(&self) -> Limits {
+            Limits::Fixed {
+                entries: usize::MAX,
+                skips: u64::MAX,
+            }
+        }
+
+        fn decide<'a>(
+            &mut self,
+            entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
+        ) -> Decision<'a, CountedValue> {
+            self.decided
+                .push((*entry.key(), self.clones.load(AtomicOrdering::Relaxed)));
+            entry.keep()
+        }
+    }
+
+    /// A policy pass over a pending ancestor's operations clones only the active update it
+    /// decides.
+    #[test]
+    fn policy_clones_only_decided_ancestor_update() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                CountedValue,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("policy-clones", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+            let clones = Arc::new(AtomicUsize::new(0));
+            let first = sha256::Digest::from([0; 32]);
+            let second = sha256::Digest::from([1; 32]);
+
+            // A pending parent writes both keys and holds the floor.
+            let parent = db
+                .new_batch()
+                .write(first, Some(CountedValue(0, clones.clone())))
+                .write(second, Some(CountedValue(1, clones.clone())))
+                .merkleize(&db, Some(CountedValue(2, clones.clone())), &mut Hold)
+                .await
+                .unwrap();
+
+            // The child deletes the first key, so only the second key's update is active. The
+            // pass has cloned only that update when the policy decides it.
+            let mut policy = Probe {
+                clones: clones.clone(),
+                decided: Vec::new(),
+            };
+            clones.store(0, AtomicOrdering::Relaxed);
+            let child = parent
+                .new_batch::<Sha256>()
+                .write(first, None)
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(policy.decided, [(second, 1)]);
+
+            // The pass reaches the parent's tip.
+            assert_eq!(child.bounds().inactivity_floor, parent.bounds().tip.size);
+            drop((child, parent));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Evicts every update it reaches. Records each eviction's location, key, and value with the
+    /// value's clone count before and after the eviction.
+    #[derive(Default)]
+    pub(crate) struct Evict {
+        #[allow(clippy::type_complexity)]
+        pub(crate) evicted: Vec<(
+            Location<mmr::Family>,
+            sha256::Digest,
+            CountedValue,
+            usize,
+            usize,
+        )>,
+    }
+
+    impl Policy<mmr::Family, sha256::Digest, CountedValue> for Evict {
+        fn limits(&self) -> Limits {
+            Limits::Fixed {
+                entries: usize::MAX,
+                skips: u64::MAX,
+            }
+        }
+
+        fn decide<'a>(
+            &mut self,
+            entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
+        ) -> Decision<'a, CountedValue> {
+            let location = entry.location();
+            let key = *entry.key();
+            let before = entry.value().clones();
+            let (decision, value) = entry.evict();
+            let after = value.clones();
+            self.evicted.push((location, key, value, before, after));
+            decision
+        }
+    }
+
+    /// A policy that evicts committed, pending-parent, and colliding-key updates owns each
+    /// evicted value and receives them in location order with no clone beyond the parent's read.
+    /// The evicted keys read `None` once the batch applies.
+    async fn policy_evicts_owned<D>(db: D, child: fn(&D::Merkleized) -> D::Batch)
+    where
+        D: DbAny<mmr::Family, Key = sha256::Digest, Value = CountedValue>,
+    {
+        let colliding = |i| colliding_digest(0xAA, i);
+        let other = colliding_digest(0xBB, 0);
+
+        // Commit three keys in one translated-key bucket and one other key with a held floor.
+        let seed = [colliding(0), colliding(1), colliding(2), other]
+            .into_iter()
+            .zip(0u8..)
+            .fold(db.new_batch(), |batch, (key, tag)| {
+                batch.write(key, Some(CountedValue::new(tag)))
+            })
+            .merkleize(&db, None, &mut Hold)
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.commit().await.unwrap();
+        let size = db.size();
+
+        // A pending parent rewrites a colliding key and the other key with a held floor.
+        let pending = [
+            (colliding(2), CountedValue::new(12)),
+            (other, CountedValue::new(13)),
+        ];
+        let counts: Vec<_> = pending.iter().map(|(_, value)| value.1.clone()).collect();
+        let parent = pending
+            .into_iter()
+            .fold(db.new_batch(), |batch, (key, value)| {
+                batch.write(key, Some(value))
+            })
+            .merkleize(&db, None, &mut Hold)
+            .await
+            .unwrap();
+
+        // The child rewrites the first colliding key and evicts every other active update.
+        for count in &counts {
+            count.store(0, AtomicOrdering::Relaxed);
+        }
+        let mut policy = Evict::default();
+        let merkleized = child(&parent)
+            .write(colliding(0), Some(CountedValue::new(20)))
+            .merkleize(&db, None, &mut policy)
+            .await
+            .unwrap();
+
+        // Merkleize clones each pending value only for the pass's read.
+        for count in &counts {
+            assert_eq!(count.load(AtomicOrdering::Relaxed), 1);
+        }
+
+        // Evictions arrive in location order with the committed update first. Evicting clones
+        // nothing, committed values arrive unshared, and parent values carry only the clone their
+        // read takes.
+        assert!(policy.evicted.is_sorted_by(|a, b| a.0 < b.0));
+        let mut evicted: Vec<_> = policy
+            .evicted
+            .iter()
+            .map(|(loc, key, value, before, after)| (*loc >= size, *key, value.0, *before, *after))
+            .collect();
+        evicted[1..].sort();
+        assert_eq!(
+            evicted,
+            [
+                (false, colliding(1), 1, 0, 0),
+                (true, colliding(2), 12, 1, 1),
+                (true, other, 13, 1, 1),
+            ]
+        );
+
+        // Applying the batch deletes every evicted key and keeps the rewritten one.
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        drop(parent);
+        for (_, key, ..) in &policy.evicted {
+            assert!(db.get(key).await.unwrap().is_none());
+        }
+        let kept = db.get(&colliding(0)).await.unwrap();
+        assert_eq!(kept.map(|value| value.0), Some(20));
+        db.destroy().await.unwrap();
+    }
+
+    /// [`policy_evicts_owned`] on an unordered Any database.
+    #[test]
+    fn policy_evicts_owned_any_unordered() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                CountedValue,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("evict-unordered", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+            policy_evicts_owned(db, |batch| batch.new_batch::<Sha256>()).await;
+        });
+    }
+
+    /// [`policy_evicts_owned`] on an ordered Any database.
+    #[test]
+    fn policy_evicts_owned_any_ordered() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                CountedValue,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("evict-ordered", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+            policy_evicts_owned(db, |batch| batch.new_batch::<Sha256>()).await;
+        });
+    }
+
+    /// [`policy_evicts_owned`] on an unordered current database.
+    #[test]
+    fn policy_evicts_owned_current_unordered() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = current::unordered::fixed::Db<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                CountedValue,
+                Sha256,
+                OneCap,
+                32,
+                Sequential,
+            >;
+            let config = current::tests::fixed_config::<OneCap>("evict-unordered", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+            policy_evicts_owned(db, |batch| batch.new_batch::<Sha256>()).await;
+        });
+    }
+
+    /// [`policy_evicts_owned`] on an ordered current database.
+    #[test]
+    fn policy_evicts_owned_current_ordered() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = current::ordered::fixed::Db<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                CountedValue,
+                Sha256,
+                OneCap,
+                32,
+                Sequential,
+            >;
+            let config = current::tests::fixed_config::<OneCap>("evict-ordered", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+            policy_evicts_owned(db, |batch| batch.new_batch::<Sha256>()).await;
+        });
+    }
 
     /// A policy pass buffers at most its remaining entries when a write shares a translated-key
     /// bucket with every active update.
@@ -4167,6 +4486,329 @@ pub(crate) mod tests {
         });
     }
 
+    /// Writing every staged slot twice reads the same operations during a proportional merkleize as
+    /// writing each slot once, whether the earlier and final writes are updates or deletes.
+    #[test]
+    fn staged_duplicate_writes_read_like_single_writes() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("staged-duplicate-writes", &context);
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+
+            // Seed 64 keys in key order at locations 1..65 with a held floor, and stage the last
+            // eight.
+            let keys: Vec<_> = (0..64u8).map(|i| sha256::Digest::from([i; 32])).collect();
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let staged: Vec<_> = keys[56..].iter().collect();
+
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+            let update = Some(sha256::Digest::from([0xFF; 32]));
+            for last in [update, None] {
+                let mut reads = Vec::new();
+                for values in [vec![last], vec![update, last], vec![None, last]] {
+                    let (_, batch) = db.new_batch().stage(&staged, &db).await.unwrap();
+                    let updates: Vec<_> = values
+                        .iter()
+                        .flat_map(|value| (0..staged.len()).map(move |slot| (slot, *value)))
+                        .collect();
+                    let before = items();
+                    let merkleized = batch
+                        .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
+                        .await
+                        .unwrap();
+                    reads.push(items() - before);
+                    drop(merkleized);
+                }
+                assert!(
+                    reads.iter().all(|r| *r == reads[0]),
+                    "last={last:?} reads={reads:?}"
+                );
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A fixed policy that keeps the updates the [`Proportional`] raise moves produces the same
+    /// batch with no more journal reads when the batch's writes supersede updates in its window:
+    /// with keys in their own translated-key buckets, all in one bucket, or a few in the written
+    /// key's bucket, and when a pending parent rewrote the written keys.
+    async fn policy_reads_writes_once<D, Fut>(
+        context: deterministic::Context,
+        open: impl Fn(deterministic::Context, &'static str) -> Fut,
+        child: fn(&D::Merkleized) -> D::Batch,
+    ) where
+        D: DbAny<mmr::Family, Key = sha256::Digest, Value = sha256::Digest>,
+        Fut: core::future::Future<Output = D>,
+    {
+        // Each scenario names its keys, the indices of the keys a pending parent rewrites and of
+        // those the batch writes, and the updates the raise moves for the batch.
+        let distinct: Vec<_> = (0..32u8).map(|i| sha256::Digest::from([i; 32])).collect();
+        let colliding: Vec<_> = (0..64).map(|i| colliding_digest(0xAA, i)).collect();
+        let crowded: Vec<_> = (0..4)
+            .map(|i| colliding_digest(0xAA, i))
+            .chain([0xBB, 0xCC].map(|byte| sha256::Digest::from([byte; 32])))
+            .collect();
+        let scenarios = [
+            ("distinct", distinct.clone(), vec![], vec![1, 3, 5, 7], 5),
+            ("colliding", colliding, vec![], vec![63], 2),
+            ("crowded", crowded, vec![], vec![3], 2),
+            ("pending", distinct, vec![1, 3], vec![1, 3], 3),
+        ];
+        let items = || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+        let rewrite = sha256::Digest::from([0xDD; 32]);
+        let value = sha256::Digest::from([0xEE; 32]);
+        for (partition, keys, rewritten, written, entries) in scenarios {
+            // Seed the keys. The raise moves the first one, so the floor is 2.
+            let db = open(context.child(partition), partition).await;
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            assert_eq!(*db.inactivity_floor_loc(), 2);
+
+            // A pending parent, if any, rewrites keys with a held floor.
+            let parent = if rewritten.is_empty() {
+                None
+            } else {
+                let parent = rewritten
+                    .iter()
+                    .fold(db.new_batch(), |batch, &i| {
+                        batch.write(keys[i], Some(rewrite))
+                    })
+                    .merkleize(&db, None, &mut Hold)
+                    .await
+                    .unwrap();
+                Some(parent)
+            };
+
+            // Keeping as many updates as the raise moves produces the same batch.
+            let write = || {
+                let batch = parent.as_ref().map_or_else(|| db.new_batch(), child);
+                written
+                    .iter()
+                    .fold(batch, |batch, &i| batch.write(keys[i], Some(value)))
+            };
+            let before = items();
+            let raised = write()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let raise_reads = items() - before;
+            let before = items();
+            let mut policy = Compact {
+                entries,
+                skips: u64::MAX,
+            };
+            let kept = write().merkleize(&db, None, &mut policy).await.unwrap();
+            assert_eq!(kept.root(), raised.root(), "{partition}");
+            let reads = items() - before;
+            assert!(reads <= raise_reads, "{partition}: {reads} > {raise_reads}");
+            drop((raised, kept, parent));
+            db.destroy().await.unwrap();
+        }
+    }
+
+    /// [`policy_reads_writes_once`] on an unordered Any database.
+    #[test]
+    fn policy_reads_writes_once_unordered() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let open = |context, partition| async move {
+                let config = fixed_db_config::<OneCap>(partition, &context);
+                TestDb::init(context, config, None).await.unwrap()
+            };
+            policy_reads_writes_once(context, open, |batch| batch.new_batch::<Sha256>()).await;
+        });
+    }
+
+    /// [`policy_reads_writes_once`] on an ordered Any database.
+    #[test]
+    fn policy_reads_writes_once_ordered() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let open = |context, partition| async move {
+                let config = fixed_db_config::<OneCap>(partition, &context);
+                TestDb::init(context, config, None).await.unwrap()
+            };
+            policy_reads_writes_once(context, open, |batch| batch.new_batch::<Sha256>()).await;
+        });
+    }
+
+    /// An ordered batch that rewrites the link of an update its fixed policy keeps reads that
+    /// update no more often than the [`Proportional`] raise, whether the update lies in the
+    /// predecessor bucket of the created key or shares its translated-key bucket.
+    #[test]
+    fn policy_reads_kept_predecessor_once() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+
+            // Keys in even translated-key buckets. The created key follows the third key, either
+            // in an empty bucket or in that key's bucket.
+            let keys: Vec<_> = (0..16u8)
+                .map(|i| sha256::Digest::from([2 * i; 32]))
+                .collect();
+            let mut shared = [4; 32];
+            shared[1] = 5;
+            let created = [
+                ("empty", sha256::Digest::from([5; 32])),
+                ("shared", sha256::Digest::from(shared)),
+            ];
+            for (partition, created) in created {
+                // Seed the keys. The raise moves the first one, so the floor is 2 and the third
+                // key, which precedes the created key, lies at 3.
+                let config = fixed_db_config::<OneCap>(partition, &context);
+                let db = TestDb::init(context.child(partition), config, None)
+                    .await
+                    .unwrap();
+                let seed = keys
+                    .iter()
+                    .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let (db, _) = db.apply_batch(seed).await.unwrap();
+                assert_eq!(*db.inactivity_floor_loc(), 2);
+
+                // Rewriting the third key's link and the previous commit each move one update. A
+                // policy keeping the first three, the third key among them, reaches the same batch.
+                let before = items();
+                let raised = db
+                    .new_batch()
+                    .write(created, Some(created))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                let raise_reads = items() - before;
+                let before = items();
+                let mut policy = Compact {
+                    entries: 3,
+                    skips: u64::MAX,
+                };
+                let kept = db
+                    .new_batch()
+                    .write(created, Some(created))
+                    .merkleize(&db, None, &mut policy)
+                    .await
+                    .unwrap();
+                assert_eq!(kept.root(), raised.root(), "{partition}");
+                let reads = items() - before;
+                assert!(reads <= raise_reads, "{partition}: {reads} > {raise_reads}");
+                drop((raised, kept));
+                db.destroy().await.unwrap();
+            }
+        });
+    }
+
+    /// An ordered batch that rewrites the link of a key a pending parent rewrote reads the key's
+    /// superseded committed update no more often under a fixed policy than under the
+    /// [`Proportional`] raise.
+    #[test]
+    fn policy_reads_parent_rewritten_predecessor_once() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("parent-predecessor", &context);
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+
+            // Seed three keys in their own translated-key buckets at 1..4 with a held floor, and
+            // rewrite the first in a pending parent.
+            let keys = [2u8, 4, 6].map(|byte| sha256::Digest::from([byte; 32]));
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let parent = db
+                .new_batch()
+                .write(keys[0], Some(sha256::Digest::from([0xDD; 32])))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // Creating a key after the first rewrites its link, so the raise passes the first
+            // key's committed update at 1 and moves the two at 2 and 3. A policy that keeps two
+            // reaches the same batch.
+            let created = sha256::Digest::from([3; 32]);
+            let write = || parent.new_batch::<Sha256>().write(created, Some(created));
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+            let before = items();
+            let raised = write()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let raise_reads = items() - before;
+            let before = items();
+            let mut policy = Compact {
+                entries: 2,
+                skips: u64::MAX,
+            };
+            let kept = write().merkleize(&db, None, &mut policy).await.unwrap();
+            assert_eq!(kept.root(), raised.root());
+            let reads = items() - before;
+            assert!(reads <= raise_reads, "{reads} > {raise_reads}");
+            drop((raised, kept, parent));
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// A pass whose remaining skips cannot reach the update behind a staged write reads nothing.
     #[test]
     fn policy_reads_nothing_past_staged_reach() {
@@ -4363,6 +5005,54 @@ pub(crate) mod tests {
                 .unwrap();
             assert_eq!(prefetched.locs.len(), 1 + 2 + 1 + 2);
             drop(prepared);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Evicting an update that shares a translated-key bucket with a written key reads each
+    /// committed operation once.
+    #[test]
+    fn policy_evicts_beside_write_reads_once() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = UnorderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("evicts-beside-write", &context);
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+
+            // Seed two keys in one translated-key bucket with a held floor.
+            let evicted = colliding_digest(0xAA, 0);
+            let written = colliding_digest(0xAA, 1);
+            let seed = [evicted, written]
+                .into_iter()
+                .fold(db.new_batch(), |batch, key| batch.write(key, Some(key)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            // The pass reads both updates and evicts the first. Merkleize resolves the write from
+            // the pass's read and needs no read for the eviction.
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+            let before = items();
+            let mut policy = Script::new(1, u64::MAX, |_: &sha256::Digest| Choice::Evict);
+            let merkleized = db
+                .new_batch()
+                .write(written, Some(evicted))
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(items() - before, 2);
+            drop(merkleized);
             db.destroy().await.unwrap();
         });
     }

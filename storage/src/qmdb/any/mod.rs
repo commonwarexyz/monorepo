@@ -2354,6 +2354,46 @@ pub(crate) mod test {
     test_for_all_variants!(with_make_value: test_any_policy_decisions_match_writes, "WARN");
     test_for_all_variants!(with_make_value: test_any_policy_after_staged_writes, "WARN");
     test_for_all_variants!(with_make_value: test_any_proportional_bound, "WARN");
+    test_for_variant!(
+        with_reopen: test_any_policy_reads_in_one_read,
+        "WARN",
+        uf,
+        UnorderedFixed,
+        mmr::Family,
+        fixed_db_config
+    );
+    test_for_variant!(
+        with_reopen: test_any_policy_reads_in_one_read,
+        "WARN",
+        of,
+        OrderedFixed,
+        mmr::Family,
+        fixed_db_config
+    );
+    test_for_variant!(
+        with_reopen: test_any_policy_reads_past_writes_in_one_read,
+        "WARN",
+        uf,
+        UnorderedFixed,
+        mmr::Family,
+        fixed_db_config
+    );
+    test_for_variant!(
+        with_reopen: test_any_policy_reads_past_writes_in_one_read,
+        "WARN",
+        of,
+        OrderedFixed,
+        mmr::Family,
+        fixed_db_config
+    );
+    test_for_variant!(
+        with_make_value: test_any_policy_unordered_reads_nothing,
+        "WARN",
+        uf,
+        UnorderedFixed,
+        mmr::Family,
+        fixed_db_config
+    );
     with_mmr_variants!(
         test_for_variant!(with_cap: test_any_db_bounded_initialization_recovery, "WARN")
     );
@@ -3382,6 +3422,190 @@ pub(crate) mod test {
         Operation<F, D::Update>: Codec,
     {
         let db = churn(db, to_digest, make_value, bounded::<F, D>).await;
+        db.destroy().await.unwrap();
+    }
+
+    /// A policy over uncached updates reads every update it decides in one batched read of
+    /// exactly those updates, and merkleize reads nothing more.
+    pub(crate) async fn test_any_policy_reads_in_one_read<F: Family, D>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        // Seed 64 updates in key order, then supersede all but every eighth one, with a held
+        // floor.
+        let mut keys: Vec<_> = (0..64).map(to_digest).collect();
+        keys.sort();
+        let seed: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (*key, Some(make_value(i as u64))))
+            .collect();
+        let db = hold(db, &seed).await;
+        let churn: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| i % 8 != 0)
+            .map(|(i, key)| (*key, Some(make_value(i as u64 + 100))))
+            .collect();
+        let db = hold(db, &churn).await;
+        let db = db.commit().await.unwrap();
+
+        // Reopen so no operation is cached.
+        drop(db);
+        let db = reopen_db(context.child("cold")).await;
+
+        // Decide the eight sparse updates. Every decision follows one batched read of exactly
+        // those updates.
+        let names = [
+            "log_journal_read_calls_total",
+            "log_journal_read_many_calls_total",
+            "log_journal_items_read_total",
+        ];
+        let [reads, batched, items] = names.map(|name| counter(&context, name));
+        let mut probes = Vec::new();
+        let mut policy = Script::new(8, u64::MAX, |_: &Digest| {
+            probes.push(names.map(|name| counter(&context, name)));
+            Choice::Keep
+        });
+        db.new_batch()
+            .merkleize(&db, None, &mut policy)
+            .await
+            .unwrap();
+        let expected: Vec<_> = (0..64)
+            .step_by(8)
+            .map(|i| (GenericLocation::<F>::new(1 + i as u64), keys[i]))
+            .collect();
+        let decided: Vec<_> = policy
+            .visited
+            .iter()
+            .map(|(loc, key, _)| (*loc, *key))
+            .collect();
+        assert_eq!(decided, expected);
+        assert_eq!(probes, [[reads, batched + 1, items + 8]; 8]);
+        assert_eq!(
+            names.map(|name| counter(&context, name)),
+            [reads, batched + 1, items + 8]
+        );
+        db.destroy().await.unwrap();
+    }
+
+    /// Writes in the batch supersede every other one of the first updates its policy would
+    /// decide, and the policy reads the updates it decides in one batched read.
+    pub(crate) async fn test_any_policy_reads_past_writes_in_one_read<F: Family, D>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        // Seed the 64 smallest of 128 keys in key order, then the 64 largest after them, with a
+        // held floor. Only the largest seeded key precedes a created key, so an ordered
+        // database rewrites no other seeded update.
+        let mut keys: Vec<_> = (0..128).map(to_digest).collect();
+        keys.sort();
+        let seed: Vec<_> = keys[..64]
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (*key, Some(make_value(i as u64))))
+            .collect();
+        let db = hold(db, &seed).await;
+        let filler: Vec<_> = keys[64..]
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (*key, Some(make_value(64 + i as u64))))
+            .collect();
+        let db = hold(db, &filler).await;
+        let db = db.commit().await.unwrap();
+
+        // Reopen so no operation is cached.
+        drop(db);
+        let db = reopen_db(context.child("cold")).await;
+
+        // Write every odd one of the first sixteen updates, then decide the eight even ones.
+        // Every decision follows one batched read.
+        let batch = (1..16).step_by(2).fold(db.new_batch(), |batch, i| {
+            batch.write(keys[i], Some(make_value(i as u64 + 100)))
+        });
+        let names = [
+            "log_journal_read_calls_total",
+            "log_journal_read_many_calls_total",
+        ];
+        let [reads, batched] = names.map(|name| counter(&context, name));
+        let mut probes = Vec::new();
+        let mut policy = Script::new(8, u64::MAX, |_: &Digest| {
+            probes.push(names.map(|name| counter(&context, name)));
+            Choice::Keep
+        });
+        batch.merkleize(&db, None, &mut policy).await.unwrap();
+        let expected: Vec<_> = (0..16)
+            .step_by(2)
+            .map(|i| (GenericLocation::<F>::new(1 + i as u64), keys[i]))
+            .collect();
+        let decided: Vec<_> = policy
+            .visited
+            .iter()
+            .map(|(loc, key, _)| (*loc, *key))
+            .collect();
+        assert_eq!(decided, expected);
+        assert_eq!(probes, [[reads, batched + 1]; 8]);
+        db.destroy().await.unwrap();
+    }
+
+    /// Merkleizing an unordered batch whose policy keeps, evicts, and replaces updates reads no
+    /// operation past the policy's reads.
+    pub(crate) async fn test_any_policy_unordered_reads_nothing<F: Family, D>(
+        context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        // Seed sixteen updates with a held floor.
+        let seed: Vec<_> = (0..16)
+            .map(|i| (to_digest(i), Some(make_value(i))))
+            .collect();
+        let db = hold(db, &seed).await;
+
+        // Evict one key, replace another, and keep the rest. Merkleize reads nothing after the
+        // last decision.
+        let replacement = make_value(200);
+        let mut probes = Vec::new();
+        let mut policy = Script::new(usize::MAX, u64::MAX, |key: &Digest| {
+            probes.push(counter(&context, "log_journal_items_read_total"));
+            if *key == to_digest(1) {
+                Choice::Evict
+            } else if *key == to_digest(2) {
+                Choice::Replace(replacement)
+            } else {
+                Choice::Keep
+            }
+        });
+        let merkleized = db
+            .new_batch()
+            .merkleize(&db, None, &mut policy)
+            .await
+            .unwrap();
+        assert_eq!(policy.visited.len(), 16);
+        assert_eq!(
+            probes.last().copied(),
+            Some(counter(&context, "log_journal_items_read_total"))
+        );
+
+        // Published values reflect the keeps, replacement, and eviction.
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        for (i, (key, value)) in seed.into_iter().enumerate() {
+            let expected = match i {
+                1 => None,
+                2 => Some(replacement),
+                _ => value,
+            };
+            assert_eq!(db.get(&key).await.unwrap(), expected);
+        }
         db.destroy().await.unwrap();
     }
 
