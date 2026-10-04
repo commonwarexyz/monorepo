@@ -72,9 +72,18 @@ fn toolchain(dir: &Path) {
     write(&dir.join("sandblaster/Cargo.toml"), "[package]\nname = \"sandblaster\"\nversion = \"1.0.0\"\n");
     write(&dir.join("sandblaster/src/lib.rs"), "pub fn f() {}\n");
     write(&dir.join("front/Cargo.toml"), "[package]\nname = \"sandblaster-front\"\nversion = \"1.0.0\"\n");
-    write(&dir.join("front/src/lib.rs"), "pub fn g() {}\n");
+    write(&dir.join("front/src/lib.rs"), "pub fn g() {}\npub const S: &str = include_str!(\"../../SEMANTICS.md\");\npub const N: &str = include_str!(\"notes/law.md\");\n");
+    write(&dir.join("front/src/notes/law.md"), "an included document\n");
+    write(&dir.join("front/src/notes/plain.md"), "a document nobody includes\n");
     write(&dir.join("front/lemmas/a.core"), "def a := 1\n");
+    write(&dir.join("front/stdlib/bits.rs"), "pub fn pow2() {}\n");
     write(&dir.join("front/tests/t.rs"), "#[test] fn t() {}\n");
+    write(&dir.join("front/tests/fixtures/f.rs"), "\n");
+    write(&dir.join("front/benches/b.rs"), "\n");
+    write(&dir.join("front/examples/e.rs"), "\n");
+    write(&dir.join("front/README.md"), "the front end\n");
+    write(&dir.join("SEMANTICS.md"), "the semantics\n");
+    write(&dir.join("DESIGN.md"), "the design\n");
     write(&dir.join("unrelated/Cargo.toml"), "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\n");
     write(&dir.join("unrelated/src/lib.rs"), "\n");
 }
@@ -110,9 +119,21 @@ fn the_identity_is_the_toolchains_content() {
     let b = scratch("b");
     toolchain(&b);
     assert_eq!(id(&b, LOCK, &build()).unwrap(), base);
-    // what cannot change the linked library does not change it: tests, dot
-    // files, a package outside the closure, a lock entry outside it
+    // what cannot change a verdict does not change it: tests, benchmarks,
+    // examples, fixtures, documents nothing includes, dot files, a package
+    // outside the closure, a lock entry outside it
     write(&b.join("front/tests/t2.rs"), "// more tests\n");
+    write(&b.join("front/tests/t.rs"), "#[test] fn t() { assert!(true) }\n");
+    write(&b.join("front/tests/fixtures/f.rs"), "fn changed() {}\n");
+    write(&b.join("front/benches/b.rs"), "fn changed() {}\n");
+    write(&b.join("front/examples/e.rs"), "fn changed() {}\n");
+    write(&b.join("front/README.md"), "the front end, revised\n");
+    write(&b.join("front/AUDIT.md"), "a new document\n");
+    write(&b.join("front/src/notes/plain.md"), "revised\n");
+    write(&b.join("front/docs/guide.rs"), "fn changed() {}\n");
+    write(&b.join("front/bench/run.py"), "print(1)\n");
+    write(&b.join("front/fixtures/x.sbmir"), "x\n");
+    write(&b.join("DESIGN.md"), "the design, revised\n");
     write(&b.join("front/.DS_Store"), "x");
     write(&b.join("unrelated/src/lib.rs"), "pub fn changed() {}\n");
     assert_eq!(id(&b, &LOCK.replace("checksum = \"1111\"", "checksum = \"9999\""), &build()).unwrap(), base);
@@ -123,6 +144,12 @@ fn the_identity_is_the_toolchains_content() {
     let edits: Vec<(&str, Edit)> = vec![
         ("source", Box::new(|d: &Path| write(&d.join("front/src/lib.rs"), "pub fn g() { }\n"))),
         ("data", Box::new(|d: &Path| write(&d.join("front/lemmas/a.core"), "def a := 2\n"))),
+        ("new data file", Box::new(|d: &Path| write(&d.join("front/lemmas/b.core"), "def b := 1\n"))),
+        ("new data directory", Box::new(|d: &Path| write(&d.join("front/rules/r.core"), "def r := 1\n"))),
+        ("proof library", Box::new(|d: &Path| write(&d.join("front/stdlib/bits.rs"), "pub fn pow2() { }\n"))),
+        ("included file outside the packages", Box::new(|d: &Path| write(&d.join("SEMANTICS.md"), "the semantics, revised\n"))),
+        ("included document", Box::new(|d: &Path| write(&d.join("front/src/notes/law.md"), "revised\n"))),
+        ("build script", Box::new(|d: &Path| write(&d.join("front/build.rs"), "fn main() {}\n"))),
         ("new file", Box::new(|d: &Path| write(&d.join("front/src/extra.rs"), "\n"))),
         ("facade", Box::new(|d: &Path| write(&d.join("sandblaster/src/lib.rs"), "pub fn f() { () }\n"))),
         ("manifest", Box::new(|d: &Path| write(&d.join("front/Cargo.toml"), "[package]\nname = \"sandblaster-front\"\nversion = \"1.0.0\"\n[features]\nx = []\n"))),
@@ -156,8 +183,16 @@ fn the_digest_watches_every_hashed_entry() {
     toolchain(&a);
     let (_, watch) = tree_digest(&a.join("front")).unwrap();
     let names: Vec<String> = watch.iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-    assert_eq!(names, ["Cargo.toml", "lemmas", "src"], "tests/ is neither hashed nor watched");
+    assert_eq!(names, ["Cargo.toml", "lemmas", "src", "stdlib", "SEMANTICS.md", "law.md"], "tests/, benches/, examples/ and README.md are neither hashed nor watched; the included SEMANTICS.md and src/notes/law.md are");
+    assert!(watch.iter().all(|p| !p.ends_with("README.md")));
     let _ = std::fs::remove_dir_all(&a);
+}
+
+#[test]
+fn literal_includes_are_found() {
+    let src = "const A: &str = include_str!(\"../a.core\");\nconst B: &[u8] = include_bytes!(\"b.bin\");\ninclude!(\"c.rs\");\n#[path = \"d.rs\"]\nmod d;\n// not literal: built by macros\ninclude!(concat!(env!(\"OUT_DIR\"), \"/x.rs\"));\n// inside a string: escaped quotes\nconst S: &str = \"include!(\\\"e.rs\\\")\";\n";
+    assert_eq!(toolchain_id::literal_includes(src), ["../a.core", "b.bin", "c.rs", "d.rs"]);
+    assert_eq!(toolchain_id::relative(&toolchain_id::normalize(Path::new("/w/sb/front/src/../../SEMANTICS.md")), Path::new("/w/sb/front")), "../SEMANTICS.md");
 }
 
 /// The real toolchain: its identity resolves (the facade's closure in the
@@ -175,9 +210,14 @@ fn the_workspace_toolchain_has_an_identity() {
     }
     assert!(recipe.contains("\ndep syn "), "{recipe}");
     let w: Vec<String> = watch.iter().map(|p| p.display().to_string()).collect();
-    for suffix in ["targets/core", "targets/evidence", "front/src", "kernel/src", "front/lemmas"] {
+    for suffix in ["targets/core", "targets/evidence", "front/src", "kernel/src", "kernel/prelude", "front/lemmas", "front/lift", "front/stdlib", "sandblaster/toolchain_id.rs", "sandblaster/SEMANTICS.md"] {
         assert!(w.iter().any(|p| p.ends_with(suffix)), "{suffix} is watched: {w:?}");
     }
-    assert!(!w.iter().any(|p| p.ends_with("/tests")), "{w:?}");
+    for suffix in ["/tests", "/benches", "/examples", "AUDIT.md", "CORE_SYNTAX.md", "INTERFACE_CHANGES.md", "MODELS.md", "DESIGN.md"] {
+        assert!(!w.iter().any(|p| p.ends_with(suffix)), "{suffix} is not watched: {w:?}");
+    }
+    // SEMANTICS.md (outside every package, hashed into every spec lock) is
+    // an input through the front end's `include_str!`
+    assert!(recipe.contains("\nlocal sandblaster-front "), "{recipe}");
     let _: BTreeMap<String, PathBuf> = local_packages(facade.parent().unwrap());
 }

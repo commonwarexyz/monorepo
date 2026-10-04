@@ -55,7 +55,7 @@ pub mod module;
 pub mod stage;
 
 pub use gates::{build_crate, build_crate_emitting, CrateBuild, CrateVerdict, Emission, LockUse};
-pub use in_place::{build_lifted, build_lifted_with, GateUse};
+pub use in_place::build_lifted;
 pub use module::{build_module, module_file_ok, module_include_line, module_out_name};
 
 /// Result of running the front end.

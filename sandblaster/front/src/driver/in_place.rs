@@ -43,10 +43,8 @@
 //! **Lowered copies.** Every build writes `OUT_DIR/<name>-lowered__<path>`
 //! for **every** in-place file, whether rustc compiles it or not, so a
 //! lowered declaration never dangles, plus the index `<name>-lowered.txt`.
-//! A passing build writes a header (the status — `NOT VERIFIED —
-//! DEVELOPMENT BUILD: …` for a pending-gates build, which also says that
-//! the rewrites rest on the kernel-checked links and the lifted round trip,
-//! which ran; whether rustc compiles the copy; the rewritten functions,
+//! A passing build writes a header (the status; whether rustc compiles the
+//! copy; the rewritten functions,
 //! optimizer residuals and user-supplied `#[rewrite]` alternatives counted
 //! and marked apart; the source's SHA-256) and then the lowering's text after the source's
 //! leading `//!` lines: exactly the text the lifted round trip checked
@@ -93,9 +91,7 @@
 //! (`mutate::cache`: an edit re-runs only the mutants it can affect), the
 //! theorem gate's verdicts (replayed through the kernel), and the lift
 //! conformance check's pass (`conform`: its key covers its inputs only, so
-//! an edit of a law or a proof, or of the lock, does not re-run it). A
-//! pending-gates build has no verdict key and stores no verdict, but reuses
-//! and stores those three.
+//! an edit of a law or a proof, or of the lock, does not re-run it).
 
 use std::path::{Path, PathBuf};
 
@@ -291,34 +287,10 @@ fn outputs_digest(record: &str, copies: &[(PathBuf, String)]) -> String {
     hex(&sha256(t.as_bytes()))
 }
 
-/// How a build treats the §15 gates (DESIGN.md §15).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GateUse {
-    /// Every gate must pass, then the lift conformance check: the record
-    /// carries the verdict (`compile_lifted`).
-    Enforce,
-    /// **A development aid, to be removed before any landing** (DESIGN.md
-    /// §2.1; §15.8 allows no opt-out): before the specification lock is
-    /// accepted, every proof and law must check (the build fails
-    /// otherwise), the gates run and their findings are reported but not
-    /// enforced. It never yields a verdict, an accept permit or a verdict
-    /// key: it writes `OUT_DIR/<name>-pending.txt` (first line
-    /// [`PENDING_STATUS`]), replaces `OUT_DIR/<name>-verified.txt` with a
-    /// `NOT VERIFIED` stub, marks the report's `status` and warns on every
-    /// build (`compile_lifted_pending_gates`).
-    Pending,
-}
-
-/// The status of a pending-gates build (record, report, warning).
-pub const PENDING_STATUS: &str = "NOT VERIFIED — DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES PENDING";
-
 /// The build logic of `sandblaster::build::compile_lifted` (module docs).
+/// Every proof, law and §15 gate must pass, then the lift conformance
+/// check: the record carries the verdict (there is no opt-out, §15.8).
 pub fn build_lifted(root: &str, name: &str, context: Option<&str>, env: &dyn Fn(&str) -> Option<String>, fs: &dyn FileProvider) -> BuildOutcome {
-    build_lifted_with(root, name, context, env, fs, GateUse::Enforce)
-}
-
-/// [`build_lifted`] with the gates used as `gates` says.
-pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dyn Fn(&str) -> Option<String>, fs: &dyn FileProvider, gates: GateUse) -> BuildOutcome {
     let mut o = BuildOutcome::default();
     let fail = |mut o: BuildOutcome, msg: String| {
         o.stderr.push_str(&format!("error[build]: {msg}\n"));
@@ -464,11 +436,10 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
     // the verdict key (module docs): module mode's — every file the front
     // end read, the lock, the profile, the target, the context — plus the
     // host inputs of the lift conformance check (everything its copy of the
-    // host crate compiles or is configured by); a pending-gates build never
-    // reuses or stores a verdict: it has none
+    // host crate compiles or is configured by)
     let conform = crate::conform::Config::for_build(env, fs, &manifest, &out_dir, name, context);
-    let key = match (gates, context) {
-        (GateUse::Enforce, Some(ctx)) => match crate::conform::host_inputs(&conform) {
+    let key = match context {
+        Some(ctx) => match crate::conform::host_inputs(&conform) {
             Ok(h) => {
                 for w in &h.watch {
                     o.cargo.push(format!("cargo::rerun-if-changed={}", w.display()));
@@ -480,7 +451,7 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
                 None
             }
         },
-        _ => None,
+        None => None,
     };
     if let Some(k) = &key
         && let (Ok(kt), Ok(code)) = (fs.read(&key_path), fs.read(&code_path))
@@ -492,7 +463,7 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
         return o;
     }
     // the shared verdict cache (module docs): the whole verdict, else (on a
-    // miss, and in a pending-gates build) the per-mutant verdicts, the
+    // miss) the per-mutant verdicts, the
     // theorem gate's replays and the conformance passes whose inputs did
     // not change
     let cache = super::module::open_cache(context, env, &mut o);
@@ -509,26 +480,6 @@ pub fn build_lifted_with(root: &str, name: &str, context: Option<&str>, env: &dy
     }
     let root_display = root_path.display().to_string();
     let b = build_crate_emitting(&checked, LockUse::Enforce, &root_display, &Emission::InPlace { out: out.clone(), conform });
-    if gates == GateUse::Pending {
-        let mut o = pending_outcome(o, &b, &checked, name, root, &root_display, &out_dir, &code_path, &key_path);
-        let mut closed = None;
-        if o.ok
-            && let Err(e) = fail_closed(&b, &copies)
-        {
-            o.stderr.push_str(&format!("error[build]: {e}\n"));
-            o.ok = false;
-            closed = Some(e);
-        }
-        let (files, index) = lowered_copies(&b, &copies, &out_dir, name, &root_display, PENDING_STATUS, o.ok);
-        if let Some((_, record)) = o.outputs.iter_mut().find(|(p, _)| p.ends_with(format!("{name}-pending.txt"))) {
-            if let Some(e) = &closed {
-                record.push_str(&format!("\nBUILD FAILED: {e}\n"));
-            }
-            record.push_str(&format!("\nlowered copies (OUT_DIR/{name}-lowered.txt):\n{index}"));
-        }
-        o.outputs.extend(files);
-        return o;
-    }
     let by = |o: super::lowered::LowerOrigin| b.lowered_in_place.iter().any(|l| l.lowered_by(o) > 0);
     let verdict_status = match &b.verdict {
         Some(_) => match (by(super::lowered::LowerOrigin::Optimizer), by(super::lowered::LowerOrigin::UserRewrite)) {
@@ -659,7 +610,6 @@ fn lowered_copies(b: &super::gates::CrateBuild, copies: &[LoweredCopy], out_dir:
         "{status}\nsandblaster lowered copies of `{name}` ({root_display}): the host's in-place files, each function rewritten where a cheaper replacement passed (kernel-checked links, lifted round trip); one per file, on every build\nrewritten functions: {}\n",
         if ok { super::lowered::origin_counts(&b.lowered_in_place) } else { "none (failed build)".to_string() }
     );
-    let pending = status == PENDING_STATUS;
     for c in copies {
         let shown_dst = c.dst.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
         let src_sha = hex(&sha256(c.text.as_bytes()));
@@ -684,9 +634,6 @@ fn lowered_copies(b: &super::gates::CrateBuild, copies: &[LoweredCopy], out_dir:
             _ => src_body,
         };
         let mut head = format!("// @generated by sandblaster from `{root_display}`. Do not edit: edit `{}`, the verified source (the build rewrites this file).\n// STATUS: {status}\n", c.shown);
-        if pending {
-            head.push_str("//   The §15 gates (the specification lock) are pending: this build issues no verdict that the laws pin the\n//   behaviour down. The rewrites below do not depend on them: each rests on a kernel-checked link to the source\n//   function and on the lifted round trip, which ran in this build (DESIGN.md §2.1).\n");
-        }
         head.push_str(&format!("// {compiled}\n"));
         if rewritten.is_empty() {
             head.push_str(&format!("// The code below is `{}` byte for byte after its leading `//!` lines (the declaration carries them): nothing was cheaper.\n", c.shown));
@@ -717,58 +664,6 @@ fn lowered_copies(b: &super::gates::CrateBuild, copies: &[LoweredCopy], out_dir:
         }
     }
     (files, index)
-}
-
-/// The outcome of a pending-gates build ([`GateUse::Pending`]): a failed
-/// proof or law (or a front-end/emission-chain error) fails the build;
-/// otherwise the record `OUT_DIR/<name>-pending.txt` lists what was checked
-/// and the gate findings. Never a verdict: even when every gate and the lift
-/// conformance check passed, the record is the pending one (switch to
-/// `compile_lifted` for the verdict), and `OUT_DIR/<name>-verified.txt` and
-/// the verdict key are overwritten so no earlier verdict survives.
-#[allow(clippy::too_many_arguments)]
-fn pending_outcome(mut o: BuildOutcome, b: &super::gates::CrateBuild, checked: &super::Checked, name: &str, root: &str, root_display: &str, out_dir: &Path, code_path: &Path, key_path: &Path) -> BuildOutcome {
-    let report = b.report.replacen(&format!("\"status\": \"{}\"", b.status()), &format!("\"status\": \"{PENDING_STATUS}\""), 1);
-    let report = super::gates::splice_json_field(&report, "development_build", "\"compile_lifted_pending_gates: the §15 gates are reported, not enforced; this build carries no verdict (DESIGN.md §2.1)\"");
-    o.outputs.push((out_dir.join(format!("{name}-report.json")), report));
-    o.outputs.push((out_dir.join(format!("{name}-timing.json")), b.timing.clone()));
-    // no verified record and no verdict key of an earlier build survives
-    o.outputs.push((code_path.to_path_buf(), format!("NOT VERIFIED: `{name}` was last built by `compile_lifted_pending_gates`, a development aid that issues no verdict (see `{name}-pending.txt` when that build passed its proofs); this file is not a verified record\n")));
-    o.outputs.push((key_path.to_path_buf(), String::new()));
-    let chain_failed = !b.gates.chain.is_empty() || b.emit_error.is_some();
-    if !b.v.proofs_ok || chain_failed {
-        o.stderr.push_str(&b.render_failure(checked, root_display));
-        o.stderr.push_str(&format!("\nerror: sandblaster: `{name}` (`{root}`): {}; a pending-gates build still requires every proof and law\n", if chain_failed { "the emission chain failed" } else { "a proof or law did not check" }));
-        o.ok = false;
-        return o;
-    }
-    let st = b.v.stats();
-    let findings: Vec<(&str, usize)> = b.gates.results.iter().filter(|r| r.errors > 0 && r.gate != "lift-conformance").map(|r| (r.gate, r.errors)).collect();
-    let total: usize = findings.iter().map(|(_, n)| n).sum();
-    let listed: Vec<String> = findings.iter().map(|(g, n)| format!("{g}: {n}")).collect();
-    let conformance = match &b.gates.conformance {
-        None => "not run (it runs after every §15 gate passed)".to_string(),
-        Some(r) if r.passed() => format!("passed: {}", r.summary()),
-        Some(r) => format!("FAILED: {}", r.failures().join("; ")),
-    };
-    let mut record = format!(
-        "{PENDING_STATUS}\nsandblaster in-place record `{name}` ({root}), written by `compile_lifted_pending_gates` (a development aid, removed before landing: DESIGN.md §2.1)\n{} of {} obligation(s) proven; every definition and law kernel-checked\n§15 gate findings (reported, not enforced): {total} ({})\nlift conformance: {conformance}\nno verdict: this record does not state that the module meets its specification lock or that the lift read the source correctly\n\n",
-        st.total - st.failed - st.todo,
-        st.total,
-        if listed.is_empty() { "none".to_string() } else { listed.join(", ") }
-    );
-    record.push_str(&b.gates.diags.render(&checked.sm));
-    o.stderr.push_str(&b.gates.diags.render(&checked.sm));
-    if let Some(r) = b.gates.conformance.as_ref().filter(|r| !r.passed()) {
-        for f in r.failures() {
-            o.stderr.push_str(&format!("warning[lift-conformance]: {f}\n"));
-        }
-    }
-    o.outputs.insert(0, (out_dir.join(format!("{name}-pending.txt")), record));
-    let switch = if total == 0 && b.gates.conformance.as_ref().is_some_and(|r| r.passed()) { "; every gate and the lift conformance check passed: switch to `compile_lifted` for the verdict" } else { "" };
-    o.cargo.push(format!("cargo::warning=sandblaster: `{name}` ({root}): {PENDING_STATUS} ({} obligations proven; {total} §15 gate finding(s), not enforced; lift conformance {}; rewritten functions: {}){switch}", st.total, if b.gates.conformance.is_none() { "not run" } else if b.gates.conformance.as_ref().is_some_and(|r| r.passed()) { "passed" } else { "FAILED" }, super::lowered::origin_counts(&b.lowered_in_place)));
-    o.ok = true;
-    o
 }
 
 #[cfg(test)]

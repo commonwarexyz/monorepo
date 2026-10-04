@@ -10,17 +10,33 @@
 //! * every **local** package of the facade's dependency closure in
 //!   `Cargo.lock` (the sandblaster crates: front end, kernel, targets,
 //!   memguard, macros, the facade itself): the content of every file of
-//!   the package directory except `tests/`, `benches/`, `examples/`,
-//!   `target/` and dot files (sources, `Cargo.toml`, `build.rs`, the data
-//!   the code `include_str!`s, and the data it reads at run time by path —
-//!   `targets/core/*.core`, `targets/evidence/*.json` — which the binary
-//!   hash never covered);
+//!   the package directory that can change a verdict — `src/`, `build.rs`,
+//!   `Cargo.toml`, the data the code `include_str!`s (`kernel/prelude`,
+//!   `front/lemmas`, `front/lift`, `targets/core`, ...), the data it reads
+//!   at run time by path (`targets/core/*.core`, `targets/evidence/*.json`),
+//!   the proof library a crate mounts (`front/stdlib`) — and nothing that
+//!   cannot: not the top-level [`EXCLUDED`] trees (`tests/`, `benches/`,
+//!   `examples/`, `docs/`, the bench and fixture trees, `target/`), not
+//!   documentation (`*.md`, [`is_doc`]) and not dot files. It is an
+//!   exclusion list, so a new data directory is hashed without anyone
+//!   remembering to add it: a missed input would be a soundness bug, an
+//!   extra one only costs a re-verification;
+//! * every file a hashed Rust file names by a literal path —
+//!   `include_str!("..")`, `include_bytes!("..")`, `include!("..")`,
+//!   `#[path = ".."]` ([`literal_includes`]) — that the walk did not hash
+//!   already: an included `*.md`, or a file outside every package such as
+//!   `SEMANTICS.md` (hashed into every spec lock by the front end), by its
+//!   path relative to the package that names it;
 //! * every **registry or git** package of that closure by name, version,
 //!   source and checksum (the lock pins their content);
 //! * the facade's `rustc -vV`, the host triple and the encoded
 //!   `RUSTFLAGS` of the build that compiles the toolchain (`--cfg` flags
 //!   could change the code); the overflow-check setting is probed at run
 //!   time by the verifier context (`sandblaster_front::driver::cache`).
+//!
+//! So editing a test, a benchmark, a fixture or a document keeps the
+//! identity (and every stored verdict); editing a source, a `.core` file,
+//! the proof library or the lock changes it.
 //!
 //! It fails closed: a closure it cannot resolve (no `Cargo.lock` above the
 //! facade, a local package whose directory it cannot find) gives no
@@ -32,11 +48,69 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The identity format (bumped when the recipe changes).
-pub const FORMAT: &str = "sandblaster-toolchain/1";
+pub const FORMAT: &str = "sandblaster-toolchain/2";
 
-/// Top-level entries of a package directory that cannot change the
-/// library a build script links.
-pub const EXCLUDED: &[&str] = &["tests", "benches", "examples", "target"];
+/// Top-level entries of a package directory that cannot change a verdict:
+/// tests, benchmarks, examples, documentation, the bench and fixture
+/// trees, build output.
+pub const EXCLUDED: &[&str] = &["tests", "benches", "examples", "docs", "bench", "fixtures", "target"];
+
+/// Documentation, at any depth: not hashed unless a hashed Rust file
+/// includes it by a literal path ([`literal_includes`]).
+pub fn is_doc(name: &str) -> bool {
+    name.ends_with(".md")
+}
+
+/// The literal paths a Rust source names as `include_str!("p")`,
+/// `include_bytes!("p")`, `include!("p")` or `#[path = "p"]` (each relative
+/// to the file's directory). A path built by a macro (`concat!`, `env!`)
+/// is not literal: those name build output (`OUT_DIR`) or data under the
+/// package directory, which the walk hashes. A match inside a comment or
+/// dead code only adds an input.
+pub fn literal_includes(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for pat in ["include_str!(\"", "include_bytes!(\"", "include!(\"", "#[path = \""] {
+        let mut rest = text;
+        while let Some(i) = rest.find(pat) {
+            rest = &rest[i + pat.len()..];
+            if let Some(j) = rest.find('"') {
+                let lit = &rest[..j];
+                if !lit.is_empty() && !lit.contains('\\') {
+                    out.push(lit.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `p` with `.` and `..` removed lexically.
+pub fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    out
+}
+
+/// `path` relative to `base` (both normalized), `/`-separated, with `..`
+/// for the components of `base` it is not under.
+pub fn relative(path: &Path, base: &Path) -> String {
+    let p: Vec<_> = path.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), b.len() - common).collect();
+    parts.extend(p[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    parts.join("/")
+}
 
 /// SHA-256 (FIPS 180-4).
 pub fn sha256(data: &[u8]) -> [u8; 32] {
@@ -228,8 +302,10 @@ pub fn local_packages(dir: &Path) -> BTreeMap<String, PathBuf> {
 }
 
 /// The digest of a package directory's files (module docs: every file but
-/// the [`EXCLUDED`] top-level entries and dot files, by relative path,
-/// length and SHA-256) and the top-level entries a build must watch.
+/// the [`EXCLUDED`] top-level entries, documentation and dot files, by
+/// relative path, length and SHA-256, then every file a hashed Rust file
+/// includes by a literal path that is not hashed already) and the paths a
+/// build must watch (the hashed top-level entries and the included files).
 pub fn tree_digest(dir: &Path) -> Result<(String, Vec<PathBuf>), String> {
     fn walk(base: &Path, dir: &Path, top: bool, files: &mut Vec<(String, PathBuf)>, watch: &mut Vec<PathBuf>) -> Result<(), String> {
         let rd = std::fs::read_dir(dir).map_err(|e| format!("cannot list `{}`: {e}", dir.display()))?;
@@ -240,10 +316,13 @@ pub fn tree_digest(dir: &Path) -> Result<(String, Vec<PathBuf>), String> {
             if name.starts_with('.') || (top && EXCLUDED.contains(&name.as_str())) {
                 continue;
             }
+            let md = std::fs::metadata(&p).map_err(|e| format!("cannot stat `{}`: {e}", p.display()))?;
+            if md.is_file() && is_doc(&name) {
+                continue;
+            }
             if top {
                 watch.push(p.clone());
             }
-            let md = std::fs::metadata(&p).map_err(|e| format!("cannot stat `{}`: {e}", p.display()))?;
             if md.is_dir() {
                 walk(base, &p, false, files, watch)?;
             } else if md.is_file() {
@@ -258,9 +337,39 @@ pub fn tree_digest(dir: &Path) -> Result<(String, Vec<PathBuf>), String> {
     walk(dir, dir, true, &mut files, &mut watch)?;
     files.sort();
     let mut t = String::new();
-    for (rel, p) in &files {
+    // the walked files, then (transitively) the files Rust sources among
+    // them include by a literal path that the walk did not hash
+    let base = normalize(dir);
+    let mut hashed: BTreeSet<PathBuf> = files.iter().map(|(_, p)| normalize(p)).collect();
+    let mut queue: Vec<PathBuf> = files.iter().map(|(_, p)| p.clone()).collect();
+    let mut extra: Vec<(String, PathBuf)> = Vec::new();
+    let mut i = 0;
+    while i < queue.len() {
+        let p = queue[i].clone();
+        i += 1;
+        let bytes = std::fs::read(&p).map_err(|e| format!("cannot read `{}`: {e}", p.display()))?;
+        if i <= files.len() {
+            t.push_str(&format!("file {} {} {}\n", files[i - 1].0, bytes.len(), hex(&sha256(&bytes))));
+        }
+        if p.extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        let parent = p.parent().unwrap_or(Path::new("."));
+        for lit in literal_includes(&String::from_utf8_lossy(&bytes)) {
+            let q = normalize(&parent.join(&lit));
+            // a missing target is a comment or a stale string: the compiler
+            // would refuse a real include of it
+            if q.is_file() && hashed.insert(q.clone()) {
+                extra.push((relative(&q, &base), q.clone()));
+                queue.push(q);
+            }
+        }
+    }
+    extra.sort();
+    for (rel, p) in &extra {
         let bytes = std::fs::read(p).map_err(|e| format!("cannot read `{}`: {e}", p.display()))?;
-        t.push_str(&format!("file {rel} {} {}\n", bytes.len(), hex(&sha256(&bytes))));
+        t.push_str(&format!("include {rel} {} {}\n", bytes.len(), hex(&sha256(&bytes))));
+        watch.push(p.clone());
     }
     Ok((hex(&sha256(t.as_bytes())), watch))
 }
@@ -291,6 +400,10 @@ pub fn identity(lock_text: &str, root: &str, locals: &BTreeMap<String, PathBuf>,
     for (k, v) in build {
         t.push_str(&format!("build {k} {}\n", hex(&sha256(v.as_bytes()))));
     }
+    // a file two packages include (the kernel sources the front end
+    // embeds) is watched once
+    watch.sort();
+    watch.dedup();
     Ok((hex(&sha256(t.as_bytes())), t, watch))
 }
 

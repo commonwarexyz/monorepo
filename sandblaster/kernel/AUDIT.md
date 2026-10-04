@@ -1396,9 +1396,10 @@ are about is checked against it by a kernel theorem per lifted function.
 | the lift glue | ≈ 260 | loading, signature checks, the declared contracts (the skeleton's attributes before the body is read and the attachments' after, carried as `#[mir_contract(..)]`; the body reader sees the signature only), the list of functions read from MIR (`lift::MirContract`) | the lift's skeleton (TCB item 8) |
 | **total** | **≈ 4,552** (≈ 3,939 without the parse; ≈ 4,289 before stage reader-widen, ≈ 4,430 before stage optimizer-generic, ≈ 4,526 before stage finish-A) | the literal reading, its statement, parse, names and printer (3,992), the gate's trusted check with its call sites (≈ 261), the precondition check (39), the lift glue (≈ 260); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
 
-**Untrusted**: `front/src/mir/read.rs` (2,433, the structurer), `cfg.rs`
-(298, with the literal reading's shape facts), the walker `simproof.rs` (4,565) and its driver `checked.rs`
-(planning, dependency order, loop and model lemmas, the verdict cache —
+**Untrusted** (code lines, counted as above): `front/src/mir/read.rs`
+(2,975, the structurer), `cfg.rs` (298, with the literal reading's shape
+facts), the walker `simproof.rs` (5,014) and its driver `checked.rs`
+(1,889: planning, dependency order, loop and model lemmas, the verdict cache —
 whose entries are declarations the kernel re-checks on replay — and the
 reports). A bug there makes a theorem missing or refused and the build
 fail.

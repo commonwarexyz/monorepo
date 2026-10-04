@@ -138,26 +138,6 @@ pub fn compile_lifted(root: &str, name: &str) {
     finish(driver::build_lifted(root, name, context.as_deref(), &env, &RealFs));
 }
 
-/// **Development aid — to be removed before any landing (DESIGN.md §2.1,
-/// §15.8: no opt-out).** [`compile_lifted`] with the §15 gates reported
-/// but not enforced, for a lifted crate whose specification lock is not
-/// accepted yet. Every proof and law must still check (a failure fails the
-/// build). It never produces a verdict, an accept permit or a reusable
-/// verdict key: it writes `OUT_DIR/<name>-pending.txt`, whose first line
-/// is `NOT VERIFIED — DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES
-/// PENDING`, overwrites `OUT_DIR/<name>-verified.txt` with a `NOT
-/// VERIFIED` stub (no verified record of an earlier build survives), marks
-/// `<name>-report.json` with the same status, and prints a `cargo::warning`
-/// on every build. The lift conformance check (it runs after the gates) is
-/// reported as not run unless every gate passed. Switch to
-/// [`compile_lifted`] once the lock is accepted.
-pub fn compile_lifted_pending_gates(root: &str, name: &str) {
-    sandblaster_front::memguard::init_from_env();
-    let env = |k: &str| std::env::var(k).ok();
-    let context = verifier_context();
-    finish(driver::build_lifted_with(root, name, context.as_deref(), &env, &RealFs, driver::GateUse::Pending));
-}
-
 /// The toolchain identity: a content hash of the toolchain this build
 /// script links (the facade's `build.rs`, `toolchain_id.rs`), empty when it
 /// could not be computed (then no verdict is reused).

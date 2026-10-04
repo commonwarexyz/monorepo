@@ -63,6 +63,14 @@ const LAWS: [&str; 5] = [
     "crate::laws::verified_proofs_are_small",
 ];
 
+/// Serializes the QMDB elaborations of this binary. Each holds the whole
+/// production QMDB crate and its kernel environment; run side by side under
+/// the default test threads they exceed the memory cap
+/// (`SANDBLASTER_MEM_LIMIT_GB`, 6 GB by default). The small programs below
+/// do not take it. A poisoned lock (a failed QMDB test) is taken anyway:
+/// one failure must not fail the others.
+static QMDB_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Checks and verifies (ghost items included, standard provers) an
 /// in-memory copy of the production root `mod.rs` (N = 32) and every file
 /// it mounts (`qmdb::crate_files`), with `edit` applied to `file`. With
@@ -70,6 +78,7 @@ const LAWS: [&str; 5] = [
 /// item filter, `elab::order::filter_closure`; never a verification of the
 /// crate, so `proofs_ok` is false); `None` verifies the whole crate.
 fn qmdb_with(file: &str, from: &str, to: &str, seeds: Option<&[&str]>) -> (Checked, Verification, Refinements) {
+    let _serial = QMDB_SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut files = qmdb::crate_files("mod.rs");
     if !file.is_empty() {
         let text = qmdb::entry(&mut files, file);

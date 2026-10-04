@@ -20,6 +20,14 @@
 //! build when the host compiles the copy (and only then); the copies are
 //! guarded against edits (watched, written read-only with an old time).
 //!
+//! Every build that must get past the declaration checks is the real one
+//! (`compile_lifted`'s `driver::build_lifted`): the crate is written to a
+//! scratch directory with the lock its own gates accepted (`gated_util`),
+//! every proof, law and §15 gate is enforced and the lift conformance check
+//! compiles a copy of it, so a passing build carries the verdict. A build
+//! refused by the declaration checks (which run before any gate) is the
+//! same call on an in-memory copy without a lock ([`declared`]).
+//!
 //! The lifted bodies are rustc's MIR (the fixtures `mir_fixtures/lu_*`); the
 //! lifted round trip reads the MIR of its copy (`rt*.sbmir`, extracted from
 //! the copy the build wrote, `rt*.rs`: `SANDBLASTER_DUMP_ROUNDTRIP_COPIES=1`
@@ -28,12 +36,17 @@
 //!
 //! `cargo test --release -p sandblaster-front --test lowered_use`
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use sandblaster_front::driver::lowered::{in_place_fault, LowerFault};
-use sandblaster_front::driver::{self, BuildOutcome, GateUse};
-use sandblaster_front::loader::MemFs;
+use sandblaster_front::driver::{self, BuildOutcome};
+use sandblaster_front::loader::{MemFs, RealFs};
+use sandblaster_front::target::TargetInfo;
+
+#[path = "gated_util.rs"]
+mod gated;
 
 /// The in-place fault hook is process-wide: every build of this file
 /// holds this lock.
@@ -48,6 +61,8 @@ const OPT: &str = include_str!("mir_fixtures/lu_nested/opt.rs");
 const PROOF: &str = r#"//! Optimization lemmas (proven, so they need no human review).
 use sandblaster::prelude::*;
 use crate::outer::bits::at_most_one_bit;
+#[allow(unused_imports)]
+use crate::outer::bits::{ones_plus_one, Byte};
 use crate::opt::at_most_one_bit_fast;
 
 /// The alternative is the source function (by the 256 cases).
@@ -57,6 +72,44 @@ fn at_most_one_bit_is_fast(x: u8) {
     ensures(at_most_one_bit(x) == at_most_one_bit_fast(x));
     by_cases(x, 0..=255);
 }
+
+/// By the 256 cases.
+#[proof]
+fn at_most_one_bit_counts(x: u8) {
+    by_cases(x, 0..=255);
+}
+
+/// By the 256 cases.
+#[proof]
+fn ones_plus_one_counts(x: u8) {
+    by_cases(x, 0..=255);
+}
+"#;
+
+/// The laws: each function of `bits.rs` pinned down (the crate is fully
+/// specified, so its gates accept a lock and a build carries a verdict).
+const LAWS: &str = r#"use sandblaster::prelude::*;
+use crate::outer::bits::{at_most_one_bit, ones_plus_one};
+#[allow(unused_imports)]
+use crate::outer::bits::Byte;
+
+/// `at_most_one_bit` holds exactly when at most one bit of `x` is set.
+#[law]
+fn at_most_one_bit_counts(x: u8) {
+    ensures(at_most_one_bit(x) == (popcount(x as Nat) <= 1));
+}
+
+/// `ones_plus_one` is one more than the number of set bits.
+#[law]
+fn ones_plus_one_counts(x: u8) {
+    ensures(ones_plus_one(x) as Nat == popcount(x as Nat) + 1);
+}
+
+/// `Byte::new` (internal) wraps its argument.
+#[lift_attach(crate::outer::bits::Byte::new)]
+fn new_wraps() {
+    ensures(|ret: Byte| ret.0 == x);
+}
 "#;
 
 const ROOT: &str = r#"//! Bit tests verified in place, with an optimization alternative.
@@ -64,10 +117,15 @@ const ROOT: &str = r#"//! Bit tests verified in place, with an optimization alte
 
 #[lift(in_place, children = "bits", mir = "bits.sbmir")]
 #[path = "../../src/outer/mod.rs"]
-pub mod outer;
+mod outer;
 
 #[lift(opt, mir = "bits.sbmir")]
 mod opt;
+
+#[cfg(sandblaster)]
+#[lift]
+#[path = "LAWS.rs"]
+mod laws;
 
 #[cfg(sandblaster)]
 #[lift]
@@ -127,7 +185,8 @@ fn dump_copy(o: &BuildOutcome, dir: &str, module: &str, rt: &str) {
     if std::env::var_os("SANDBLASTER_DUMP_ROUNDTRIP_COPIES").is_none() {
         return;
     }
-    if let Some((_, t)) = o.outputs.iter().find(|(p, _)| p == &PathBuf::from("/out").join(format!("bits-roundtrip__{module}.rs"))) {
+    let want = format!("bits-roundtrip__{module}.rs");
+    if let Some((_, t)) = o.outputs.iter().find(|(p, _)| p.file_name().is_some_and(|f| f == want.as_str())) {
         std::fs::write(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mir_fixtures").join(dir).join(format!("{rt}.rs")), t).unwrap();
     }
 }
@@ -146,28 +205,64 @@ fn files_rt(outer_text: &str, bits: &str, rt: &str) -> Vec<(String, String)> {
         ("/host/src/lib.rs".into(), "//! A host crate.\nmod outer;\npub fn f(x: u8) -> bool { outer::bits::at_most_one_bit(x) }\n".into()),
         ("/host/src/outer/mod.rs".into(), outer_text.into()),
         ("/host/src/outer/bits.rs".into(), bits.into()),
+        ("/host/sandblaster/bits/LAWS.rs".into(), LAWS.into()),
     ];
     with_mir(f, dir, "outer__bits", rt)
 }
 
-fn env(k: &str) -> Option<String> {
-    match k {
-        "CARGO_MANIFEST_DIR" => Some("/host".into()),
-        "OUT_DIR" => Some("/out".into()),
+/// The build environment of a host crate at `manifest` writing to `out`
+/// (`RUSTC` and `CARGO` passed through for the lift conformance check).
+fn env_of(manifest: &str, out: &str) -> impl Fn(&str) -> Option<String> + use<> {
+    let (manifest, out) = (manifest.to_string(), out.to_string());
+    move |k: &str| match k {
+        "CARGO_MANIFEST_DIR" => Some(manifest.clone()),
+        "OUT_DIR" => Some(out.clone()),
         "CARGO_CFG_TARGET_ARCH" => Some("aarch64".into()),
         "CARGO_CFG_TARGET_FEATURE" => Some("neon".into()),
         "CARGO_CFG_TARGET_ENDIAN" => Some("little".into()),
         "CARGO_CFG_TARGET_POINTER_WIDTH" => Some("64".into()),
+        "RUSTC" | "CARGO" => std::env::var(k).ok(),
         _ => None,
     }
 }
 
+/// The host crate's manifest (its own workspace, no dependencies).
+const MANIFEST: &str = "[package]\nname = \"lu-host\"\nversion = \"0.1.0\"\nedition = \"2024\"\npublish = false\n\n[lib]\npath = \"src/lib.rs\"\n\n[workspace]\n";
+
+static SCRATCH: AtomicUsize = AtomicUsize::new(0);
+
+/// The real in-place build (module docs) of `files` (paths under
+/// `/host/`), with the printer fault `fault` injected into its lowering:
+/// the crate is written to a fresh scratch directory with the lock its own
+/// gates accept and built from disk. When the gates do not accept a lock
+/// (a proof that fails), it is built without one, so it fails and writes
+/// its stubs; the reason is at the start of `stderr`.
 fn build_with(files: &[(String, String)], fault: Option<LowerFault>) -> BuildOutcome {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    let dir = std::env::temp_dir().join(format!("sandblaster-lowered-use-build-{}-{}", std::process::id(), SCRATCH.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    let host = dir.join("host");
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let mut abs: Vec<(String, String)> = files.iter().map(|(p, t)| (dir.join(p.trim_start_matches('/')).display().to_string(), t.clone())).collect();
+    abs.push((host.join("Cargo.toml").display().to_string(), MANIFEST.into()));
+    let env = env_of(&host.display().to_string(), &out.display().to_string());
+    let target = TargetInfo::from_cargo_env(&env).expect("target");
+    let root = host.join("sandblaster/bits/mod.rs").display().to_string();
+    let (abs, refused_lock) = match gated::with_accepted_lock(&abs, &root, &target) {
+        Ok(with_lock) => (with_lock, String::new()),
+        Err(e) => (abs, format!("the gates accept no lock:\n{e}\n")),
+    };
+    for (p, t) in &abs {
+        let f = Path::new(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, t).unwrap();
+    }
     in_place_fault::set(fault);
-    let o = driver::build_lifted_with("sandblaster/bits/mod.rs", "bits", None, &env, &fs, GateUse::Pending);
+    let mut o = driver::build_lifted("sandblaster/bits/mod.rs", "bits", None, &env, &RealFs);
     in_place_fault::set(None);
+    o.stderr.insert_str(0, &refused_lock);
+    let _ = std::fs::remove_dir_all(&dir);
     o
 }
 
@@ -175,8 +270,19 @@ fn build(files: &[(String, String)]) -> BuildOutcome {
     build_with(files, None)
 }
 
+/// The same build of an in-memory copy without a lock, for a crate the
+/// declaration checks refuse (they run before any gate).
+fn declared(files: &[(String, String)]) -> BuildOutcome {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    let o = driver::build_lifted("sandblaster/bits/mod.rs", "bits", None, &env_of("/host", "/out"), &fs);
+    assert!(!o.cargo.iter().any(|l| l.contains("verified in place")), "a declaration refusal never reaches a verdict");
+    o
+}
+
+/// The output file `name` of a build (`OUT_DIR/<name>`).
 fn output<'a>(o: &'a BuildOutcome, name: &str) -> &'a str {
-    o.outputs.iter().find(|(p, _)| p == &PathBuf::from("/out").join(name)).map(|(_, t)| t.as_str()).unwrap_or_else(|| panic!("no output `{name}`: {:?}", o.outputs.iter().map(|(p, _)| p).collect::<Vec<_>>()))
+    o.outputs.iter().find(|(p, _)| p.file_name().is_some_and(|f| f == name)).map(|(_, t)| t.as_str()).unwrap_or_else(|| panic!("no output `{name}`: {:?}", o.outputs.iter().map(|(p, _)| p).collect::<Vec<_>>()))
 }
 
 #[track_caller]
@@ -233,9 +339,8 @@ fn the_lowered_declaration_compiles_the_checked_copy() {
     assert!(o.ok, "{}", o.stderr);
     let copy = output(&o, COPY);
     println!("{copy}");
-    assert!(copy.starts_with("// @generated by sandblaster from `/host/sandblaster/bits/mod.rs`. Do not edit: edit `src/outer/bits.rs`"), "{copy}");
-    assert!(copy.contains("// STATUS: NOT VERIFIED — DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES PENDING\n"), "{copy}");
-    assert!(copy.contains("each rests on a kernel-checked link to the source\n//   function and on the lifted round trip, which ran in this build"), "{copy}");
+    assert!(copy.starts_with("// @generated by sandblaster from `") && copy.lines().next().unwrap().ends_with("/host/sandblaster/bits/mod.rs`. Do not edit: edit `src/outer/bits.rs`, the verified source (the build rewrites this file)."), "{copy}");
+    assert!(copy.contains("// STATUS: VERIFIED + LIFTED IN PLACE + USER REWRITES\n"), "{copy}");
     assert!(copy.contains("// COMPILED: rustc compiles this file as the module declared in `src/outer/mod.rs`, in place of `src/outer/bits.rs`."), "{copy}");
     assert!(copy.contains("//   rewritten by user code: `crate::outer::bits::at_most_one_bit` (not optimizer output;"), "{copy}");
     assert!(copy.contains("pub fn at_most_one_bit(x: u8) -> bool {\n    __sandblaster_opt_at_most_one_bit_fast(x)\n}"), "{copy}");
@@ -252,16 +357,16 @@ fn the_lowered_declaration_compiles_the_checked_copy() {
     // the lowered declaration of `bits` as written)
     let other = output(&o, "bits-lowered__outer__mod.rs");
     assert!(other.contains("// NOT COMPILED: the host compiles `src/outer/mod.rs` as written") && other.contains(&lowered_decl(BITS_DOCS, COPY)), "{other}");
-    // the index, the pending record, the guard
+    // the index, the verified record, the guard
     let index = output(&o, "bits-lowered.txt");
-    assert!(index.starts_with("NOT VERIFIED — DEVELOPMENT BUILD") && index.contains(&format!("{COPY} sha256 ")) && index.contains("compiled by rustc"), "{index}");
-    assert!(output(&o, "bits-pending.txt").contains("lowered copies (OUT_DIR/bits-lowered.txt):"));
+    assert!(index.starts_with("VERIFIED + LIFTED IN PLACE + USER REWRITES\n") && index.contains(&format!("{COPY} sha256 ")) && index.contains("compiled by rustc"), "{index}");
+    let record = output(&o, "bits-verified.txt");
+    assert!(record.contains("// Lowered copies (`OUT_DIR/bits-lowered.txt`):\n//   VERIFIED + LIFTED IN PLACE + USER REWRITES"), "{record}");
     for f in [COPY, "bits-lowered__outer__mod.rs"] {
-        let p = PathBuf::from("/out").join(f);
-        assert!(o.guarded.contains(&p), "{f} is guarded");
+        let p = o.guarded.iter().find(|p| p.ends_with(f)).unwrap_or_else(|| panic!("{f} is guarded"));
         assert!(o.cargo.contains(&format!("cargo::rerun-if-changed={}", p.display())), "{f} is watched: {:?}", o.cargo);
     }
-    assert!(!o.guarded.iter().any(|p| p.ends_with("bits-lowered.txt") || p.ends_with("bits-pending.txt")), "only the copies are guarded");
+    assert!(!o.guarded.iter().any(|p| p.ends_with("bits-lowered.txt") || p.ends_with("bits-verified.txt")), "only the copies are guarded");
     assert!(rustc_ab(copy).contains("agree"));
 }
 
@@ -279,7 +384,7 @@ fn user_alternatives_are_attributed_apart_from_the_optimizer() {
     assert!(o.ok, "{}", o.stderr);
     let counts = "rewritten functions: optimizer residuals: 0; user-supplied `#[rewrite]` alternatives (user code, not optimizer output): 1 (`crate::outer::bits::at_most_one_bit`)";
     // the build summary
-    assert!(o.cargo.iter().any(|l| l.starts_with("cargo::warning=sandblaster: `bits`") && l.contains(counts)), "{:?}", o.cargo);
+    assert!(o.cargo.iter().any(|l| l.starts_with("cargo::warning=sandblaster: `bits` verified in place") && l.contains(&counts.replace("rewritten functions:", "rewritten functions in the lowered copies:"))), "{:?}", o.cargo);
     // the lowered-copy index header, and the copy's own header
     let index = output(&o, "bits-lowered.txt");
     assert!(index.contains(&format!("\n{counts}\n")), "{index}");
@@ -304,9 +409,9 @@ fn the_ide_twin_is_the_same_declaration() {
     assert!(output(&o, COPY).contains("// COMPILED: rustc compiles this file"));
     assert!(o.cargo.contains(&"cargo::rustc-check-cfg=cfg(rust_analyzer)".to_string()), "{:?}", o.cargo);
     let no_cfg = format!("#[cfg(rust_analyzer)]\npub mod bits;\n{}", lowered_decl(BITS_DOCS, COPY));
-    refused(&build(&files(&outer(&no_cfg), BITS)), "only the IDE twin `#[cfg(rust_analyzer)] mod bits;` may accompany it");
+    refused(&declared(&files(&outer(&no_cfg), BITS)), "only the IDE twin `#[cfg(rust_analyzer)] mod bits;` may accompany it");
     let no_twin = format!("#[cfg(not(rust_analyzer))]\n{}", lowered_decl(BITS_DOCS, COPY));
-    refused(&build(&files(&outer(&no_twin), BITS)), "it needs its IDE twin");
+    refused(&declared(&files(&outer(&no_twin), BITS)), "it needs its IDE twin");
 }
 
 /// Negative twin of fail-closed: the same rewrite rejected by the lifted
@@ -323,7 +428,8 @@ fn a_rewrite_the_round_trip_rejects_fails_the_build_that_compiles_the_copy() {
         let t = output(&o, f);
         assert!(t.contains("::core::compile_error!(\"sandblaster: the build of `bits` failed") && !t.contains("pub fn"), "{t}");
     }
-    assert!(output(&o, "bits-pending.txt").contains("BUILD FAILED:"));
+    assert!(!o.outputs.iter().any(|(p, c)| p.ends_with("bits-verified.txt") && c.contains("VERIFIED +")), "no verified record");
+    assert!(o.outputs.iter().any(|(p, c)| p.ends_with("bits-verdict.key") && c.is_empty()), "the verdict key is cleared");
     let plain = build_with(&files_rt(&outer("pub mod bits;\n"), BITS, "rt_WrongAlternative"), Some(LowerFault::WrongAlternative));
     assert!(plain.ok, "{}", plain.stderr);
     let copy = output(&plain, COPY);
@@ -351,7 +457,8 @@ fn a_failed_proof_writes_compile_error_stubs() {
     let mut f = files(&outer(&lowered_decl(BITS_DOCS, COPY)), BITS);
     f[2].1 = PROOF.replace("ensures(at_most_one_bit(x) == at_most_one_bit_fast(x));", "ensures(at_most_one_bit(x) != at_most_one_bit_fast(x));");
     let o = build(&f);
-    assert!(!o.ok, "an unproven overflow fails the build");
+    assert!(!o.ok, "a failed proof fails the build");
+    assert!(o.stderr.starts_with("the gates accept no lock") && o.stderr.contains("at_most_one_bit_is_fast"), "{}", o.stderr);
     let t = output(&o, COPY);
     assert!(t.contains("::core::compile_error!("), "{t}");
     assert!(output(&o, "bits-lowered.txt").contains(&format!("{COPY}: FAILED BUILD")));
@@ -363,30 +470,30 @@ fn a_failed_proof_writes_compile_error_stubs() {
 #[test]
 fn an_include_of_anything_else_is_refused() {
     let arbitrary = "pub mod bits {\n    include!(\"fast_bits.rs\");\n}\n";
-    refused(&build(&files(&outer(arbitrary), BITS)), "declared inline with an `include!` that is not its lowered declaration");
+    refused(&declared(&files(&outer(arbitrary), BITS)), "declared inline with an `include!` that is not its lowered declaration");
     let from_src = "pub mod bits {\n    include!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/outer/fast.rs\"));\n}\n";
-    refused(&build(&files(&outer(from_src), BITS)), "not its lowered declaration");
-    refused(&build(&files(&outer(&lowered_decl(BITS_DOCS, "bits-lowered__outer__mod.rs")), BITS)), "which is not the lowered copy of");
+    refused(&declared(&files(&outer(from_src), BITS)), "not its lowered declaration");
+    refused(&declared(&files(&outer(&lowered_decl(BITS_DOCS, "bits-lowered__outer__mod.rs")), BITS)), "which is not the lowered copy of");
     let extra = format!("pub mod bits {{\n{BITS_DOCS}    include!(concat!(env!(\"OUT_DIR\"), \"/{COPY}\"));\n    pub fn evil() {{}}\n}}\n");
-    refused(&build(&files(&outer(&extra), BITS)), "only item is the `include!` of the copy");
+    refused(&declared(&files(&outer(&extra), BITS)), "only item is the `include!` of the copy");
     let attr = format!("#[cfg(any())]\n{}", lowered_decl(BITS_DOCS, COPY));
-    refused(&build(&files(&outer(&attr), BITS)), "carries only doc comments");
+    refused(&declared(&files(&outer(&attr), BITS)), "carries only doc comments");
     let inline_body = "pub mod bits {\n    pub fn at_most_one_bit(x: u8) -> bool { true }\n}\n";
-    refused(&build(&files(&outer(inline_body), BITS)), "is declared inline");
+    refused(&declared(&files(&outer(inline_body), BITS)), "is declared inline");
     let other_module = format!("{}\nmod extra {{\n    include!(concat!(env!(\"OUT_DIR\"), \"/evil.rs\"));\n}}\n", lowered_decl(BITS_DOCS, COPY));
-    refused(&build(&files(&outer(&other_module), BITS)), "macro `include!` is not defined");
+    refused(&declared(&files(&outer(&other_module), BITS)), "macro `include!` is not defined");
 }
 
 /// The copy's name is this build's (another record's copy with the right
 /// path is refused by the build), and the docs are the source's.
 #[test]
 fn the_name_and_the_docs_are_checked() {
-    refused(&build(&files(&outer(&lowered_decl(BITS_DOCS, "other-lowered__outer__bits.rs")), BITS)), "that this build (`bits`) writes is `OUT_DIR/bits-lowered__outer__bits.rs`");
+    refused(&declared(&files(&outer(&lowered_decl(BITS_DOCS, "other-lowered__outer__bits.rs")), BITS)), "that this build (`bits`) writes is `OUT_DIR/bits-lowered__outer__bits.rs`");
     let fewer = "    //! Bit tests of a byte, the obvious way.\n";
-    refused(&build(&files(&outer(&lowered_decl(fewer, COPY)), BITS)), "must carry exactly the leading `//!` lines of `src/outer/bits.rs`");
+    refused(&declared(&files(&outer(&lowered_decl(fewer, COPY)), BITS)), "must carry exactly the leading `//!` lines of `src/outer/bits.rs`");
     let changed = BITS_DOCS.replace("obvious", "fast");
-    refused(&build(&files(&outer(&lowered_decl(&changed, COPY)), BITS)), "the first difference is at line 1");
-    refused(&build(&files(&outer(&lowered_decl("", COPY)), BITS)), "expected 3 doc line(s), found 0");
+    refused(&declared(&files(&outer(&lowered_decl(&changed, COPY)), BITS)), "the first difference is at line 1");
+    refused(&declared(&files(&outer(&lowered_decl("", COPY)), BITS)), "expected 3 doc line(s), found 0");
 }
 
 /// A source whose meaning depends on the file it is in cannot be compiled
@@ -396,10 +503,10 @@ fn the_name_and_the_docs_are_checked() {
 fn a_source_that_cannot_be_included_is_refused() {
     let with_line = format!("{BITS}\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn l() {{\n        assert!(line!() > 0);\n    }}\n}}\n");
     assert_eq!(with_line, include_str!("mir_fixtures/lu_nested_line/src/outer/bits.rs"));
-    refused(&build(&files(&outer(&lowered_decl(BITS_DOCS, COPY)), &with_line)), "it uses `line!`");
+    refused(&declared(&files(&outer(&lowered_decl(BITS_DOCS, COPY)), &with_line)), "it uses `line!`");
     let with_mod = format!("{BITS}\n#[cfg(test)]\nmod tests;\n");
     assert_eq!(with_mod, include_str!("mir_fixtures/lu_nested_mod/src/outer/bits.rs"));
-    refused(&build(&files(&outer(&lowered_decl(BITS_DOCS, COPY)), &with_mod)), "out-of-line module `mod tests;`");
+    refused(&declared(&files(&outer(&lowered_decl(BITS_DOCS, COPY)), &with_mod)), "out-of-line module `mod tests;`");
     // the twin: the same sources declared plainly build
     assert!(build(&files(&outer("pub mod bits;\n"), &with_line)).ok);
 }
@@ -411,18 +518,19 @@ fn a_source_that_cannot_be_included_is_refused() {
 fn stale_and_extra_mentions_are_refused() {
     let mut f = files(&outer(&lowered_decl(BITS_DOCS, COPY)), BITS);
     f[3].1.push_str("mod gone {\n    include!(concat!(env!(\"OUT_DIR\"), \"/bits-lowered__gone.rs\"));\n}\n");
-    refused(&build(&f), "`src/lib.rs` mentions a lowered copy of `bits`");
+    refused(&declared(&f), "`src/lib.rs` mentions a lowered copy of `bits`");
     let mut f = files(&outer(&lowered_decl(BITS_DOCS, COPY)), BITS);
     f.push(("/host/src/again.rs".into(), format!("include!(concat!(env!(\"OUT_DIR\"), \"/{COPY}\"));\n")));
-    refused(&build(&f), "`src/again.rs` mentions a lowered copy of `bits`");
+    refused(&declared(&f), "`src/again.rs` mentions a lowered copy of `bits`");
 }
 
 /// A top-level in-place file (declared in host code the lift does not
 /// read) uses the same declaration, checked by the build.
 #[test]
 fn a_top_level_in_place_file_uses_the_same_declaration() {
-    let root = ROOT.replace("#[lift(in_place, children = \"bits\", mir = \"bits.sbmir\")]\n#[path = \"../../src/outer/mod.rs\"]\npub mod outer;", "#[lift(in_place, mir = \"bits.sbmir\")]\n#[path = \"../../src/bits.rs\"]\npub mod bits;").replace("pub use outer::bits::", "pub use bits::");
+    let root = ROOT.replace("#[lift(in_place, children = \"bits\", mir = \"bits.sbmir\")]\n#[path = \"../../src/outer/mod.rs\"]\nmod outer;", "#[lift(in_place, mir = \"bits.sbmir\")]\n#[path = \"../../src/bits.rs\"]\nmod bits;").replace("pub use outer::bits::", "pub use bits::");
     let proof = PROOF.replace("crate::outer::bits::", "crate::bits::");
+    let laws = LAWS.replace("crate::outer::bits::", "crate::bits::");
     let lib = |decl: &str| format!("//! A host crate.\n{decl}pub fn f(x: u8) -> bool {{ bits::at_most_one_bit(x) }}\n");
     let mk = |lib_text: String| -> Vec<(String, String)> {
         with_mir(
@@ -432,6 +540,7 @@ fn a_top_level_in_place_file_uses_the_same_declaration() {
                 ("/host/sandblaster/bits/PROOF.rs".into(), proof.clone()),
                 ("/host/src/lib.rs".into(), lib_text),
                 ("/host/src/bits.rs".into(), BITS.into()),
+                ("/host/sandblaster/bits/LAWS.rs".into(), laws.clone()),
             ],
             "lu_top",
             "bits",
@@ -443,8 +552,8 @@ fn a_top_level_in_place_file_uses_the_same_declaration() {
     assert!(o.ok, "{}", o.stderr);
     let copy = output(&o, "bits-lowered__bits.rs");
     assert!(copy.contains("// COMPILED: rustc compiles this file as the module declared in `src/lib.rs`") && copy.contains("__sandblaster_opt_at_most_one_bit_fast(x)"), "{copy}");
-    refused(&build(&mk(lib("pub mod bits {\n    include!(\"bits_fast.rs\");\n}\n"))), "includes something other than its lowered copy");
-    refused(&build(&mk(lib(&lowered_decl(BITS_DOCS, "bits-lowered__outer__bits.rs")))), "that this build (`bits`) writes is `OUT_DIR/bits-lowered__bits.rs`");
+    refused(&declared(&mk(lib("pub mod bits {\n    include!(\"bits_fast.rs\");\n}\n"))), "includes something other than its lowered copy");
+    refused(&declared(&mk(lib(&lowered_decl(BITS_DOCS, "bits-lowered__outer__bits.rs")))), "that this build (`bits`) writes is `OUT_DIR/bits-lowered__bits.rs`");
 }
 
 /// The lowered declaration outside a lifted child's parent: a host module
@@ -454,7 +563,7 @@ fn a_lowered_declaration_of_a_host_module_is_a_host_module() {
     let root = ROOT.replace(", children = \"bits\"", "").replace("pub use outer::bits::{at_most_one_bit, ones_plus_one};", "pub use outer::ONE;");
     let f: Vec<(String, String)> = with_mir(
         vec![
-            ("/host/sandblaster/bits/mod.rs".into(), root.replace("#[lift(opt, mir = \"bits.sbmir\")]\nmod opt;\n", "").replace("#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n", "")),
+            ("/host/sandblaster/bits/mod.rs".into(), root.replace("#[lift(opt, mir = \"bits.sbmir\")]\nmod opt;\n", "").replace("#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n", "").replace("#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n", "")),
             ("/host/src/lib.rs".into(), "mod outer;\n".into()),
             ("/host/src/outer/mod.rs".into(), outer(&lowered_decl(BITS_DOCS, "other-lowered__outer__bits.rs"))),
             ("/host/src/outer/bits.rs".into(), BITS.into()),

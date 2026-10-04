@@ -9,9 +9,9 @@
 //! * `#[lift(host)]` modules: host models whose enum variants the emitted
 //!   module checks against the host;
 //! * signed integers in lifted code (SEMANTICS.md §19.3): an `iN` is its
-//!   two's complement bits, every sign-dependent operation is translated,
-//!   the others are refused; the translation agrees with rustc on many
-//!   inputs (kernel evaluation against native code);
+//!   two's complement bits, every sign-dependent operation is translated
+//!   (the reader's own and core's, e.g. `i32::abs`); the translation agrees
+//!   with rustc on many inputs (kernel evaluation against native code);
 //! * LR5 compares code, not proofs.
 
 #[path = "elab_util.rs"]
@@ -295,19 +295,32 @@ fn signed_operations_agree_with_rustc() {
     assert!(bad.is_empty(), "kernel evaluation disagrees with rustc:\n{}", bad[..bad.len().min(20)].join("\n"));
 }
 
+/// The reader translates every sign-dependent operation of the `ai_ref_*`
+/// bodies (rustc's MIR of each, `mir_fixtures/ai_ref_*`, read by
+/// `mir::read`; `abs` is core's MIR): each passes the front end. `+` and
+/// `abs` can panic (overflow, `i32::MIN`), so their panics stay as unproven
+/// obligations of `f` (an `unreachable` panic block or a callee's
+/// `requires`), and nothing else is unproven; `<` and the sign extension
+/// cannot panic and verify outright.
 #[test]
-fn sign_dependent_operations_the_lift_does_not_translate_are_refused() {
+fn sign_dependent_operations_pass_the_front_end() {
     let r = root("#[lift(mir = \"s.sbmir\")]\nmod s;\npub use s::f;\n");
-    for (body, needle) in [
-        // (rustc's MIR of each, `mir_fixtures/ai_ref_*`, read by `mir::read`)
-        ("pub fn f(a: u32, b: u32) -> u32 { ((a as i32) + (b as i32)) as u32 }", "signed checked `add`"),
-        ("pub fn f(a: u32, b: u32) -> bool { (a as i32) < (b as i32) }", "the signed operation `lt`"),
-        ("pub fn f(a: u32) -> u64 { (a as i32) as u64 }", "sign extension is not read"),
-        // `abs` is core's MIR, refused at its first sign-dependent operation
-        ("pub fn f(a: u32) -> u32 { (a as i32).abs() as u32 }", "(in `core::num::<impl i32>::abs`): the signed operation `lt`"),
+    for (name, body, panics) in [
+        ("add", include_str!("mir_fixtures/ai_ref_add/s.rs"), true),
+        ("abs", include_str!("mir_fixtures/ai_ref_abs/s.rs"), true),
+        ("lt", include_str!("mir_fixtures/ai_ref_lt/s.rs"), false),
+        ("widen", include_str!("mir_fixtures/ai_ref_widen/s.rs"), false),
     ] {
         let c = check(&[("r/mod.rs", &r), ("r/s.rs", body)]);
-        rejects(&c, DiagKind::Unsupported, needle);
+        assert!(c.ok(), "{name}: the front end rejected it:\n{}", c.render());
+        let v = verify(&c);
+        if panics {
+            let bad = unproven(&v);
+            assert!(!bad.is_empty() && bad.iter().all(|(d, k)| d == "crate::s::f" && (k == "unreachable" || k == "callee-requires")), "{name}: expected only the panics of `f` unproven; got {bad:?}\n{}", explain(&c, &v));
+            assert!(v.failed_defs().iter().all(|d| d.name == "crate::s::f" && matches!(d.status, sandblaster_front::elab::DefStatus::Unproven)), "{name}: only `f` is unproven, nothing failed\n{}", explain(&c, &v));
+        } else {
+            util::assert_verified(&c, &v);
+        }
     }
 }
 

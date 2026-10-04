@@ -422,9 +422,9 @@ does not declare (the lift reads them).
    reading, and
    that the MIR and the subset declare every module type alike), the
    elaborator's check of preconditions against the declared contract (39)
-   and the lift glue (≈ 0.26k): ≈ 4.29k in all; the structurer `read.rs` (2,433), `cfg.rs`
-   (298), the walker `simproof.rs` (4,565) and its driver `checked.rs` left
-   the trusted base
+   and the lift glue (≈ 0.26k): ≈ 4.29k in all; the structurer `read.rs` (2,433 then,
+   2,975 now), `cfg.rs` (298), the walker `simproof.rs` (4,565 then, 5,014 now) and its
+   driver `checked.rs` (1,889 now) left the trusted base
    (DESIGN.md §1.1 item 8 has the accounting).
 
 ## Appendix: `docs/mir-lift.md` §20 (text pending the next lock acceptance)
@@ -907,9 +907,9 @@ of the module's structured reading: for every lifted exec function read
 from MIR, its theorem `L::thm::<f>` of §20.5 is kernel-checked, or the
 build reports `error[mir-theorem]` naming the function and why (a walk that
 failed, a theorem it needs that failed, the literal reading not accepted,
-a recursion L does not read), and the module is not verified. The
-pending-gates development build (`compile_lifted_pending_gates`, which no
-root uses now) reports the same findings without enforcing them.
+a recursion L does not read), and the module is not verified. There is
+no build that reports the findings without enforcing them (the former
+pending-gates development build is deleted).
 
 * L is generated and checked once per extraction, for the instances the
   module's lifted functions run.

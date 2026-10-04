@@ -406,11 +406,15 @@ fn the_host_inputs_read_the_tree_and_the_path_dependencies_and_the_item_key_read
     for (p, t) in [("host/src/lib.rs", "mod a;\n"), ("host/src/a.rs", "pub fn half(x: u64) -> u64 { x }\n"), ("dep/src/lib.rs", "pub fn seven() -> u8 { 8 }\n"), ("dep/Cargo.toml", "[package]\nname = \"ic-dep\"\nversion = \"0.1.1\"\nedition = \"2024\"\n")] {
         assert_ne!(digest(&with(&base, p, t)), d0, "{p} is an input");
     }
-    // not inputs: the dependency's tests, the DSL files (the item key and
-    // the front end's files cover those)
-    for (p, t) in [("dep/tests/t.rs", "\n"), ("host/sandblaster/m/LAWS.rs", "\n")] {
+    // not inputs: the dependency's tests and documents nothing includes,
+    // the DSL files (the item key and the front end's files cover those)
+    for (p, t) in [("dep/tests/t.rs", "\n"), ("dep/README.md", "A document.\n"), ("dep/src/notes.md", "Notes.\n"), ("host/sandblaster/m/LAWS.rs", "\n")] {
         assert_eq!(digest(&with(&base, p, t)), d0, "{p} is not a host input");
     }
+    // twin: a document the dependency's source includes is an input
+    let doc = with(&with(&base, "dep/src/lib.rs", &format!("#![doc = include_str!(\"../README.md\")]\n{DEP}")), "dep/README.md", "A document.\n");
+    let d1 = digest(&doc);
+    assert_ne!(digest(&with(&doc, "dep/README.md", "A revised document.\n")), d1, "an included document is an input");
     // the item key: a law's statement and a proof are not part of it, a
     // spec function is
     let key = |laws: &str, proof: &str| {

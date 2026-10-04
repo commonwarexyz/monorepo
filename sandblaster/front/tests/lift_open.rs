@@ -363,57 +363,43 @@ fn an_unreachable_tail_does_not_prove_a_false_ensures() {
 }
 
 // ---------------------------------------------------------------------
-// building in place before the specification lock: proofs enforced, §15
-// gates reported
+// building in place: no verdict without the accepted lock and every proof
 // ---------------------------------------------------------------------
 
-fn build_in_place(src: &str, gates: driver::GateUse) -> driver::BuildOutcome {
-    let fs = MemFs::from_files([("c/src/lib.rs", "mod a;\n"), ("c/src/a.rs", src), ("c/sandblaster/m/mod.rs", root("", false).as_str()), (M, mir_of(src))]);
-    let env = |k: &str| -> Option<String> {
-        match k {
-            "CARGO_MANIFEST_DIR" => Some("c".into()),
-            "OUT_DIR" => Some("out".into()),
-            "CARGO_CFG_TARGET_ARCH" => Some("aarch64".into()),
-            "CARGO_CFG_TARGET_FEATURE" => Some("neon".into()),
-            "CARGO_CFG_TARGET_ENDIAN" => Some("little".into()),
-            "CARGO_CFG_TARGET_POINTER_WIDTH" => Some("64".into()),
-            _ => None,
-        }
-    };
-    driver::build_lifted_with("sandblaster/m/mod.rs", "m", None, &env, &fs, gates)
+fn in_place_files(src: &str) -> Vec<(String, String)> {
+    vec![("c/src/lib.rs".into(), "mod a;\n".into()), (A.into(), src.into()), (R.into(), root("", false)), (M.into(), mir_of(src).into())]
+}
+
+fn build_in_place(files: &[(String, String)]) -> driver::BuildOutcome {
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    driver::build_lifted("sandblaster/m/mod.rs", "m", None, &cargo_env, &fs)
 }
 
 const SAFE: &str = include_str!("mir_fixtures/lo_safe/src/a.rs");
 
 #[test]
-fn a_pending_gates_build_passes_on_checked_proofs_and_says_so() {
-    let o = build_in_place(SAFE, driver::GateUse::Pending);
-    assert!(o.ok, "{}", o.stderr);
-    let record = &o.outputs.iter().find(|(p, _)| p.ends_with("m-pending.txt")).expect("the record").1;
-    assert!(record.starts_with("NOT VERIFIED — DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES PENDING") && record.contains("no verdict"), "{record}");
-    assert!(record.contains("lift conformance: not run"), "{record}");
-    // it cannot be mistaken for a verified build: no verified record, no
-    // verdict key, the report says so, a warning on every build
-    let stub = &o.outputs.iter().find(|(p, _)| p.ends_with("m-verified.txt")).expect("the stub").1;
-    assert!(stub.starts_with("NOT VERIFIED") && !stub.contains("VERIFIED +"), "{stub}");
+fn an_in_place_build_without_an_accepted_lock_issues_no_verdict() {
+    let o = build_in_place(&in_place_files(SAFE));
+    assert!(!o.ok, "no lock: the build must fail");
+    // no verified record survives and the verdict key is cleared
+    assert!(!o.outputs.iter().any(|(p, c)| p.ends_with("m-verified.txt") && c.contains("VERIFIED +")), "no verified record");
     assert!(o.outputs.iter().any(|(p, c)| p.ends_with("m-verdict.key") && c.is_empty()), "the verdict key is cleared");
-    let report = &o.outputs.iter().find(|(p, _)| p.ends_with("m-report.json")).expect("the report").1;
-    assert!(report.contains("\"status\": \"NOT VERIFIED — DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES PENDING\"") && report.contains("\"development_build\""), "{report}");
-    assert!(o.cargo.iter().any(|l| l.starts_with("cargo::warning=") && l.contains("§15 GATES PENDING")), "{:?}", o.cargo);
     // cargo watches the files read, and no missing path (a missing path
     // would re-run the build script on every build)
     assert!(o.cargo.iter().any(|l| l.starts_with("cargo::rerun-if-changed=") && l.ends_with("a.rs")), "{:?}", o.cargo);
     assert!(!o.cargo.iter().any(|l| l.starts_with("cargo::rerun-if-changed=") && (l.contains('<') || l.ends_with("SPEC.lock"))), "{:?}", o.cargo);
-    // the same crate without an accepted lock fails an enforcing build
-    let e = build_in_place(SAFE, driver::GateUse::Enforce);
-    assert!(!e.ok, "no lock: the enforcing build must fail");
 }
 
 #[test]
-fn a_pending_gates_build_fails_on_an_unproven_obligation() {
-    let o = build_in_place("pub fn inc(x: u64) -> u64 {\n    x + 1\n}\n", driver::GateUse::Pending);
-    assert!(!o.ok, "an overflow is unproven: the build must fail");
-    assert!(!o.outputs.iter().any(|(p, c)| (p.ends_with("m-verified.txt") || p.ends_with("m-pending.txt")) && c.contains("PROOFS CHECKED")));
+fn an_unproven_obligation_gets_no_lock_and_no_verdict() {
+    let files = in_place_files("pub fn inc(x: u64) -> u64 {\n    x + 1\n}\n");
+    let target = TargetInfo::from_cargo_env(&cargo_env).expect("target");
+    // an overflow is unproven: the gates accept no lock, and the build fails
+    let e = gated::accept_lock(&files, R, &target).expect_err("the gates must refuse");
+    assert!(e.contains("inc"), "{e}");
+    let o = build_in_place(&files);
+    assert!(!o.ok, "the build must fail");
+    assert!(!o.outputs.iter().any(|(p, c)| p.ends_with("m-verified.txt") && c.contains("VERIFIED +")));
 }
 
 #[path = "gated_util.rs"]
@@ -446,15 +432,8 @@ fn an_in_place_build_runs_the_conformance_check_after_the_gates() {
     let files: Vec<(String, String)> = vec![("c/src/lib.rs".into(), "mod a;\n".into()), (A.into(), SAFE.into()), (R.into(), dsl_root.into()), ("c/sandblaster/m/LAWS.rs".into(), laws.into()), ("c/sandblaster/m/PROOF.rs".into(), proof.into()), (M.into(), mir_of(SAFE).into())];
     let files = gated::with_accepted_lock(&files, R, &target).expect("every gate but the lock passes");
     let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
-    let o = driver::build_lifted_with("sandblaster/m/mod.rs", "m", None, &cargo_env, &fs, driver::GateUse::Enforce);
+    let o = driver::build_lifted("sandblaster/m/mod.rs", "m", None, &cargo_env, &fs);
     assert!(!o.ok, "no verdict without the lift conformance check");
     assert!(o.stderr.contains("lift conformance") && o.stderr.contains("cargo metadata"), "{}", o.stderr);
     assert!(!o.outputs.iter().any(|(p, c)| p.ends_with("m-verified.txt") && c.contains("VERIFIED +")), "no verified record");
-    // the pending build of the same crate: every gate passed, the check
-    // ran and failed; still no verdict, and the record says so
-    let p = driver::build_lifted_with("sandblaster/m/mod.rs", "m", None, &cargo_env, &fs, driver::GateUse::Pending);
-    assert!(p.ok, "{}", p.stderr);
-    let record = &p.outputs.iter().find(|(p, _)| p.ends_with("m-pending.txt")).expect("the record").1;
-    assert!(record.contains("§15 gate findings (reported, not enforced): 0 (none)") && record.contains("lift conformance: FAILED"), "{record}");
-    assert!(!p.outputs.iter().any(|(p, c)| p.ends_with("m-verified.txt") && c.contains("VERIFIED +")), "no verified record");
 }

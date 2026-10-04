@@ -24,10 +24,13 @@
 //! # The toolchain identity
 //!
 //! A content hash of the toolchain (the facade's `toolchain_id.rs`,
-//! computed by its `build.rs`): the files of every sandblaster crate the
-//! build script links (sources, embedded data and the data read at run
-//! time), the lock entries of every third-party crate, and the `rustc`,
-//! host and `RUSTFLAGS` that compiled them. It does **not** depend on the
+//! computed by its `build.rs`): the inputs of every sandblaster crate the
+//! build script links that can change a verdict (sources, manifests, build
+//! scripts, embedded data, the data read at run time, the proof library and
+//! every file a source includes by a literal path — not tests, benchmarks,
+//! examples, fixtures or documents nothing includes), the lock entries of
+//! every third-party crate, and the `rustc`, host and `RUSTFLAGS` that
+//! compiled them. It does **not** depend on the
 //! host crate, its features, the profile or the target directory, so
 //! `cargo build`, `cargo test`, a release build and a dependent crate's
 //! build of the same module share one verdict. (It replaced the hash of

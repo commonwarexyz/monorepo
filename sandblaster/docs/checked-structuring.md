@@ -49,7 +49,7 @@ comparison refused correct code) and added L's slice leaves; the trusted part is
 lines, with the stages since tcb-review counted (§7). After stage finish-A the verifier's set 1
 was finished as well: its laws grew to 8, its lock was accepted (272 items, root `3e969a79…`), and
 `storage/build.rs` now builds both in-place roots with `compile_lifted` (2,642 obligations, 69 of 69
-theorems for the verifier); no root uses the pending-gates build any more, so the stage logs' mentions
+theorems for the verifier); the pending-gates build is deleted (no root used it any more), so the stage logs' mentions
 of the verifier's "development build" describe the tree of their day. The implementation log is the next
 section; the design follows it, updated where the implementation differs. This note does not change
 `SEMANTICS.md`.
@@ -75,8 +75,8 @@ section; the design follows it, updated where the implementation differs. This n
   `cfg.rs`, `read.rs`, `simproof.rs`. Target for the generator: about 1.0k
   code lines, table-driven, each construct's reading local.
 * **(e)** The gate: every verified build checks every lifted function's L
-  theorem or fails; the pending-gates build and `sandblaster check` report
-  the missing ones.
+  theorem or fails; `sandblaster check` reports the missing ones (the
+  pending-gates build that also reported them is deleted).
 * **(f)** Conformance runs L against rustc; mutating one MIR construct must
   break a theorem; the two historical `read.rs` bugs, re-injected behind a
   test hook, must make theorems fail.
@@ -2559,7 +2559,8 @@ type and a crate's own `Index` as negative twins).
   trusted check like a fresh proof, so neither the entries nor the keys
   are trusted.
 * **The gate** (stage cs-integrate): `driver::gates::theorem_gate`, after
-  the §15 gates of every verified build and the pending-gates build;
+  the §15 gates of every verified build (and of the pending-gates build,
+  since deleted);
   `docs/mir-lift.md` §20.6. Its verdict is the trusted check `mir/gate.rs`
   (stage tcb-gate).
 * **Conformance** (`sandblaster conform`, kernel vs rustc). It stays. It
@@ -2594,9 +2595,9 @@ comments or tests. The script used reproduces `docs/mir-lift.md` §5 exactly:
 
 | | before | after (stage cs-assurance: measured, with the review's fixes) |
 | --- | --- | --- |
-| structurer `mir/read.rs` | 2,397 | 2,433, **untrusted** (checked by the theorems) |
+| structurer `mir/read.rs` | 2,397 | 2,433, **untrusted** (checked by the theorems); 2,975 measured now (stage cleanup, after reader-widen and finish-A) |
 | `mir/cfg.rs` | untrusted | 298, untrusted (stage tcb-literal: + the literal reading's ranks, loop headers, panicking blocks and type-occurrence pruning, 63 lines; 235 before) |
-| walker `mir/simproof.rs`, driver `mir/checked.rs` | — | 4,565 + 1,674, untrusted (stage tcb-gate: the gate's trusted part moved to `mir/gate.rs`) |
+| walker `mir/simproof.rs`, driver `mir/checked.rs` | — | 4,565 + 1,674, untrusted (stage tcb-gate: the gate's trusted part moved to `mir/gate.rs`); 5,014 + 1,889 measured now (stage cleanup) |
 | `mir/mod.rs`: `load` checks and names (subset type names, host models) | 430 | 491 (L's names: `kernel_adt`, `is_transparent`, `host_model_method`, host enum paths; stage tcb-review: + `instance_global`, 10; the read.rs names stay until `read.rs` leaves); stage reader-widen: 531 measured (498 before it: + the models' selection, `slice_iter_elem`, `Model`, `MODEL_FNS`, `model_of`, and the slice iterator's subset type, 33) |
 | L generator `mir/literal.rs` | — | 1,217 (stage tcb-literal, with byte-identical output; 1,474 before it; prototype 1,905; stage cs-storage: + data-free reads; cs-assurance: + the review's fixes); stage reader-widen: 1,287 (+70: the models' calls `model_call` and the shared `state_leaf`, signed `CheckedAdd/Sub`, the rotations, the bytes-to-word `transmute`, the one value of an enum whose other variants are empty); stage finish-A: 1,297 (+10: a slice's sub-slices by `Index`) |
 | L library `mir/literal.core` | — | 139 non-comment lines (stage cs-literal: 141; `mir::nth` removed, `array_get` and the inclusive-range leaf changed); stage reader-widen: 170 (+31: `mir::scheck_*`, `leaf::slice_iter_new`/`next`, `leaf::slice_get_range`); stage finish-A: 186 (+16: `leaf::slice_index_to`/`_from`/`_range`/`_to_inclusive`) |

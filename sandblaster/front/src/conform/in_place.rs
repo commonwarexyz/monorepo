@@ -626,8 +626,9 @@ pub struct HostInputs {
 /// closure of the host's normal and build dependencies (the copy compiles
 /// them from their current sources; every file of the package directory
 /// but the top-level `tests/`, `benches/`, `examples/` and `target/`,
-/// nested packages and dot files, as the toolchain identity reads the
-/// toolchain's own crates — registry dependencies are pinned by the lock),
+/// nested packages, dot files and documents nothing includes, as the
+/// toolchain identity reads the toolchain's own crates
+/// ([`package_digest`]) — registry dependencies are pinned by the lock),
 /// `cargo -V`, the cargo configuration files that apply to the copy's
 /// build, and the environment variables that change how cargo builds it
 /// (`RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `CARGO_PROFILE_*`,
@@ -699,12 +700,18 @@ fn cargo_configs(dir: &Path) -> Vec<PathBuf> {
 
 /// The digest of a path dependency's package directory ([`host_inputs`]):
 /// every file by relative path, length and SHA-256, but the top-level
-/// `tests/`, `benches/`, `examples/` and `target/`, dot files and nested
+/// `tests/`, `benches/`, `examples/` and `target/`, dot files, nested
 /// packages (a directory with its own `Cargo.toml`: a dependency on it is
-/// in the closure on its own). The top-level entries it reads are added to
-/// `watch`.
+/// in the closure on its own) and documents (`*.md`) — then every file a
+/// hashed Rust file names by a literal path (`include_str!("..")`,
+/// `include_bytes!("..")`, `include!("..")`, `#[path = ".."]`) that is not
+/// hashed already, such as a `README.md` a crate's docs include. That is
+/// the toolchain identity's recipe (the facade's `toolchain_id.rs`), so a
+/// document or test edit in a path dependency (the sandblaster crates are
+/// one, through the build dependency) keeps the verdict. The top-level
+/// entries it reads, and the included files, are added to `watch`.
 pub fn package_digest(dir: &Path, watch: &mut Vec<PathBuf>) -> Result<String, String> {
-    fn go(base: &Path, dir: &Path, top: bool, t: &mut String, watch: &mut Vec<PathBuf>) -> Result<(), String> {
+    fn go(base: &Path, dir: &Path, top: bool, files: &mut Vec<(String, PathBuf, Vec<u8>)>, watch: &mut Vec<PathBuf>) -> Result<(), String> {
         let mut ents: Vec<PathBuf> = std::fs::read_dir(dir).map_err(|e| format!("cannot list `{}`: {e}", dir.display()))?.flatten().map(|e| e.path()).collect();
         ents.sort();
         for p in ents {
@@ -718,22 +725,83 @@ pub fn package_digest(dir: &Path, watch: &mut Vec<PathBuf>) -> Result<String, St
                     if top {
                         watch.push(p.clone());
                     }
-                    go(base, &p, false, t, watch)?;
+                    go(base, &p, false, files, watch)?;
                 }
-            } else if md.is_file() {
+            } else if md.is_file() && !name.ends_with(".md") {
                 if top {
                     watch.push(p.clone());
                 }
                 let bytes = std::fs::read(&p).map_err(|e| format!("cannot read `{}`: {e}", p.display()))?;
                 let rel = p.strip_prefix(base).unwrap_or(&p).display().to_string();
-                t.push_str(&format!("file {rel} {} {}\n", bytes.len(), hex(&sha256(&bytes))));
+                files.push((rel, p, bytes));
             }
         }
         Ok(())
     }
+    let mut files = Vec::new();
+    go(dir, dir, true, &mut files, watch)?;
     let mut t = String::new();
-    go(dir, dir, true, &mut t, watch)?;
+    for (rel, _, bytes) in &files {
+        t.push_str(&format!("file {rel} {} {}\n", bytes.len(), hex(&sha256(bytes))));
+    }
+    // the files the Rust sources include by a literal path, transitively
+    let base = crate::loader::normalize(dir);
+    let mut hashed: std::collections::BTreeSet<PathBuf> = files.iter().map(|(_, p, _)| crate::loader::normalize(p)).collect();
+    let mut queue: Vec<(PathBuf, Vec<u8>)> = files.into_iter().map(|(_, p, b)| (p, b)).collect();
+    let mut extra: Vec<(String, PathBuf, Vec<u8>)> = Vec::new();
+    while let Some((p, bytes)) = queue.pop() {
+        if p.extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        let parent = p.parent().unwrap_or(Path::new("."));
+        for lit in literal_includes(&String::from_utf8_lossy(&bytes)) {
+            let q = crate::loader::normalize(&parent.join(&lit));
+            // a missing target is a comment or a string: the compiler would
+            // refuse a real include of it
+            if q.is_file() && hashed.insert(q.clone()) {
+                let b = std::fs::read(&q).map_err(|e| format!("cannot read `{}`: {e}", q.display()))?;
+                extra.push((relative_to(&q, &base), q.clone(), b.clone()));
+                watch.push(q.clone());
+                queue.push((q, b));
+            }
+        }
+    }
+    extra.sort();
+    for (rel, _, bytes) in &extra {
+        t.push_str(&format!("include {rel} {} {}\n", bytes.len(), hex(&sha256(bytes))));
+    }
     Ok(hex(&sha256(t.as_bytes())))
+}
+
+/// The literal paths a Rust source names as `include_str!("p")`,
+/// `include_bytes!("p")`, `include!("p")` or `#[path = "p"]`
+/// ([`package_digest`]; the toolchain identity's `literal_includes`).
+pub fn literal_includes(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for pat in ["include_str!(\"", "include_bytes!(\"", "include!(\"", "#[path = \""] {
+        let mut rest = text;
+        while let Some(i) = rest.find(pat) {
+            rest = &rest[i + pat.len()..];
+            if let Some(j) = rest.find('"') {
+                let lit = &rest[..j];
+                if !lit.is_empty() && !lit.contains('\\') {
+                    out.push(lit.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `path` relative to `base` (both normalized), `/`-separated, with `..`
+/// for the components of `base` it is not under.
+fn relative_to(path: &Path, base: &Path) -> String {
+    let p: Vec<_> = path.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), b.len() - common).collect();
+    parts.extend(p[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    parts.join("/")
 }
 
 /// The harness code of the library newtypes rustc's MIR has for host

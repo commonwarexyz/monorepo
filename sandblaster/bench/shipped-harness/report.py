@@ -77,8 +77,9 @@ def main():
         P("ships today: codec's varint module is emitted `VERIFIED + LIFTED AS-IS` (a header of comments, then")
         P("the original file byte for byte, then rustc-checked host facts that compile to no code), and")
         P("storage's MMR iterator is compiled through a lowered copy that is the source byte for byte after")
-        P("its header (the optimizer found nothing cheaper in either module; the verifier's files, a")
-        P("development build, are compiled as written). So every timing difference below is code placement")
+        P("its header (the optimizer found nothing cheaper in either module; the verifier's files, verified")
+        P("in place, are compiled as written: the host declares no lowered copy for them). So every timing")
+        P("difference below is code placement")
         P("and machine noise, and the A/A row shows its size.")
     else:
         P(f"The shipped code is not identical in every function: identical machine code in "

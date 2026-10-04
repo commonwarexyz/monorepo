@@ -600,10 +600,15 @@ host/
   dependents do not rebuild. A verdict is reused when the verdict key
   matches — the **verifier context** (`driver::cache::verifier_context`:
   the **toolchain identity**, a content hash computed by the facade's
-  `build.rs` over the files of every sandblaster crate the build script
-  links, including the data read at run time such as `targets/core` and
-  `targets/evidence`, the lock entries of every third-party crate, and the
-  `rustc`, host and `RUSTFLAGS` that compiled them; the toolchain's
+  `build.rs` over the inputs of every sandblaster crate the build script
+  links that can change a verdict — `src/`, `build.rs`, `Cargo.toml`, the
+  embedded data (`kernel/prelude`, `front/lemmas`, `front/lift`, ...), the
+  data read at run time (`targets/core`, `targets/evidence`), the proof
+  library `front/stdlib`, and every file a source includes by a literal
+  path, such as `SEMANTICS.md` — but not tests, benchmarks, examples,
+  fixtures or documents (`*.md`) nothing includes, so a doc or test edit
+  keeps every stored verdict; the lock entries of every third-party crate;
+  and the `rustc`, host and `RUSTFLAGS` that compiled them; the toolchain's
   overflow checks and test hooks; the build's `rustc -vV`; every
   `SANDBLASTER_*` variable but the resource and cache settings), the
   target, the root, the module file, the host edition and the content of
@@ -639,8 +644,9 @@ host/
   the features (so, unlike module mode, the host's features are part of
   the key), every file of each path dependency in the closure of the
   host's normal and build dependencies (but its `tests/`, `benches/`,
-  `examples/`, `target/` and nested packages, as the toolchain identity
-  reads the toolchain's crates), `cargo -V`, the cargo configuration files
+  `examples/`, `target/`, nested packages and the documents no source
+  includes, as the toolchain identity reads the toolchain's crates),
+  `cargo -V`, the cargo configuration files
   and the environment that changes how cargo builds the copy; the build
   script watches the dependencies' files too. The shared cache holds the
   whole verdict (every output the build writes to `OUT_DIR`: record,
@@ -652,8 +658,7 @@ host/
   a position-independent fingerprint of every item but laws, lemmas and
   proofs (the input pools draw on the crate's constants, the precondition
   checkers call its spec functions) — so editing a law, a proof or the lock
-  re-verifies without re-running it. A pending-gates build stores no
-  verdict but uses those three caches.
+  re-verifies without re-running it.
 * Several verified modules in one crate: one `compile_module` call per
   module file, each with its own output name (a repeated name fails).
 * The lock is the root's, as in crate mode (`sandblaster spec <root> --accept`).
@@ -907,10 +912,8 @@ host/
   trip, a failed lowering or an optimizer that did not run fails the build
   (a function whose replacement is not cheaper keeps its verified source
   text — not a fallback). Each copy's header says what it is: the status
-  (a pending-gates build says `NOT VERIFIED — DEVELOPMENT BUILD: PROOFS
-  CHECKED, §15 GATES PENDING` and that the rewrites rest on the
-  kernel-checked links and the lifted round trip, which ran), whether
-  rustc compiles it, the rewritten functions and the source's SHA-256.
+  (for example `VERIFIED + LIFTED IN PLACE + OPTIMIZED`), whether rustc
+  compiles it, the rewritten functions and the source's SHA-256.
   **Edits of a copy** (an IDE's go-to-definition lands in it): the build
   script watches each copy and the facade writes it read-only with a fixed
   old modification time (2000-01-01), so the watch alone never re-runs the
@@ -945,25 +948,12 @@ host/
   theorems, lock root `1d8d5969…` (208 items). The verifier's set 1: 8 laws,
   2,642 obligations, 69 of 69 MIR theorems, lock root `3e969a79…` (272
   items). (codec's varint, module mode: 63 of 63, lock root `f0021c19…`.)
-* **Development aid, unused, to be deleted:
-  `sandblaster::build::compile_lifted_pending_gates(root, name)`.** No root
-  calls it any more: both in-place crates switched to `compile_lifted` once
-  their locks were accepted. The entry point (and the driver's
-  `GateUse::Pending` path, which `tests/lift_open.rs` and
-  `tests/lowered_use.rs` still drive) is still
-  in the code. What it does: while an
-  in-place crate's specification lock is not accepted, it checks every
-  proof and law (a failure fails the build) and runs the §15.8 gates but
-  only reports their findings. It is an opt-out of §15.8 (which allows
-  none), so it is bounded to be unmistakable: it never yields a verdict,
-  an accept permit or a verdict key, even when everything passed; it
-  writes `OUT_DIR/<name>-pending.txt` whose first line is `NOT VERIFIED —
-  DEVELOPMENT BUILD: PROOFS CHECKED, §15 GATES PENDING`, replaces
-  `<name>-verified.txt` with a `NOT VERIFIED` stub, sets the report's
-  `status` to the same line and warns on every build. The lift conformance
-  check runs only after every gate passed and is reported as not run
-  otherwise. It existed only while the in-place crates' gates were not
-  all green; with both locks accepted it has no user left.
+* **No development build.** Every in-place build is `compile_lifted`:
+  there is no entry point that checks the proofs and only reports the
+  §15.8 gates (the former `compile_lifted_pending_gates`, used while the
+  MMR's and the verifier's locks were not accepted, is deleted; §15.8
+  allows no opt-out). A crate whose lock is not accepted does not build;
+  `sandblaster check` and `sandblaster spec` report what is missing.
 
 ---------------------------------------------------------------------------
 
