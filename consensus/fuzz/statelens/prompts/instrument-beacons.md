@@ -57,8 +57,12 @@ If the index is missing the campaign said so, and search and reading are the fal
     python3 $SL ast notes [PATH]    # comments about races and recovery
 
 The index says a line mentions a field; it does not say whether the line changes it. Before
-you probe a transition, ask `ast sites` for the write sites, because those are the
-transitions and the rest are decisions. A site it marks `macro` sits inside a macro body,
+you probe a transition, ask `ast sites` for the write sites and the `maybe` sites. A write is
+an assignment. A `maybe` is the field handed out, as the receiver of a method call or by a
+`&mut` borrow, printed with what was done (`.push(..)`, `&mut`): the tree carries no types,
+so it cannot tell `push` from `len`, and `push`, `insert`, `clear` and `take` are transitions
+as much as an assignment is. Read each `maybe` site before you call the transition inventory
+complete; the reads are the decisions. A site it marks `macro` sits inside a macro body,
 which the tree does not structure, so read that one yourself; much of this crate's
 concurrency is inside `select!`. `ast notes` is the fastest way to do step 1 below:
 it finds the comments about orderings, races, recovery and cases that cannot happen, and
@@ -114,10 +118,15 @@ A dimension often has more parts than a pair holds. In order of preference:
    `pack(flag(valid), flag(durable))` against `disc(&outcome)`.
 2. Build a mask when several flags belong together:
    `flag(a) | flag(b) << 1 | flag(c) << 2`, against the outcome.
-3. Split across the sites the code already has, sharing a label prefix, and let the view or
-   round relate them. Prefer this over one probe that has to reach for a value: never call
-   something with side effects, and never force a value the original code computes only
-   conditionally.
+3. Keep related values at one site. A probe records only the presence of its own `(a, b)`
+   pair: nothing joins sites, a shared label prefix means nothing to the fuzzer, and the
+   view or round is not recorded, so two probes at two sites keep the marginal values and
+   lose which value of one went with which of the other. To cover a relationship, emit the
+   related, discretized values together at one site, carrying an earlier value there in
+   bounded ghost state when it is read elsewhere (a field holding the last value; the round
+   may key it, but never enters a probe). Never call something with side effects, and never
+   force a value the original code computes only conditionally, to bring a value to a site:
+   then probe the parts separately and say in the plan that the relationship is unobserved.
 
 Full worked analyses, one per subsystem, are in `consensus/fuzz/statelens/examples/`. They are
 reference material, not a pattern to copy: they also derive invariants, which is Phase 1 work,

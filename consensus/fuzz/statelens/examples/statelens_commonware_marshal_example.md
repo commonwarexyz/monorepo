@@ -1721,10 +1721,16 @@ FALSE
 These executions can share substantial structural coverage while having very different protocol
 meaning, which is exactly what a beacon probe exists to separate.
 
-Six components do not fit in one pair. Split the dimension along the boundary the code already
-has: the verification outcome is observable in `deferred_verify`, the path choice in `certify`,
-and the settlement in `report`, so three probes sharing the `marshal.standard.` prefix record
-the same information and let the round relate them. The uppercase names above are this
+Six components do not fit in one pair, and three probes at three sites would not record them
+either: a probe keeps only the presence of its own pair, nothing joins sites, and the round is
+not recorded, so the verification outcome seen in `deferred_verify`, the path choice in
+`certify` and the settlement in `report` would survive only as marginals, no longer telling E3
+from an execution that mixed its parts with E4's. Carry the earlier parts to the last site in
+bounded ghost state -- the outcome and the path, keyed by the round the adapter already
+tracks -- and emit them packed on one side of a `marshal.standard.settlement` probe, against
+the settlement on the other. A part that cannot be carried without reaching for a value is
+probed alone, and the plan says that its relationship to the rest is unobserved. The uppercase
+names above are this
 document's vocabulary; in a probe each becomes a small integer, usually `disc` of the
 corresponding enum where one exists and a packed set of flags where it does not.
 

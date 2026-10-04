@@ -14,8 +14,10 @@ below:
    `SL=consensus/fuzz/statelens/scripts/statelens.py`, the command
    `python3 $SL code refs|callers|callees <NAME>` gives references and call hierarchy
    by symbol, which matters because names here collide: `proposal` is five different
-   methods. `python3 $SL ast sites <NAME>` says which of those sites write the state
-   and which only read it. Both hide test sites unless you pass `--tests`, and the
+   methods. `python3 $SL ast sites <NAME>` says which of those sites assign the state,
+   which hand it out to a method or a `&mut` borrow (`maybe`, with the method name: the
+   tree cannot tell `push` from `len`, so read those), and which only read it. Both hide
+   test sites unless you pass `--tests`, and the
    `callers` of a mailbox method name the actor that sends the message. The guide
    `consensus/fuzz/statelens/prompts/discover-flow.md` is the method for the cases
    where this is not enough.
@@ -69,7 +71,8 @@ below:
    nothing was added. A binding that watches the decision and not the commit is
    `partial`, however exact its condition.
 8. Add the invariant's section to the plan, with the `Sites` ledger: one line per commit
-   site of step 3, naming the action, then the file and the function in backticks
+   site of step 3, naming the action in plain words, then the file and the function in
+   backticks (everything backticked after the file is read as a function)
    (`` `actors/voter/actor.rs` `Actor::process_proposed` ``), then `checked` or
    `not checked` in those words, and for `not checked` the reason and the delivery order
    that escapes it. `lint-plan` reads this ledger: it finds the entry by the file, and a
@@ -116,6 +119,26 @@ campaign stays silent and the silence is read as evidence. The patterns to watch
   the Statement forbids, your `pre` is false there forever: the assertion runs on every pass,
   its probe records one pair, and nothing is ever checked. Find the site where the forbidden
   state survives, or record the gap and set `partial`.
+- **Absence of evidence read as evidence.** A check that passes when the ghost record it
+  needs is missing -- `is_none_or(..)`, `map_or(true, ..)` or `unwrap_or(true)` on the lookup
+  -- accepts every case it never observed: a block the replica restored, a write nobody
+  recorded and a different block at the same height all look alike. A missing record is
+  unknown, not satisfied. Require positive evidence keyed by the exact identity (height and
+  digest, view and signer), from what the replica holds or restored; where none can be had
+  without changing behaviour, make the evidence part of `pre`, so the case is not evaluated
+  rather than passed, say in the Notes which cases are unknown, and set `partial`.
+- **A binding the campaign never evaluates.** A `pre` that cannot hold in the fuzz targets
+  leaves the check silent there however many unit tests with real schemes exercise it. Read
+  what the targets do from their harness under `consensus/fuzz/simplex` or
+  `consensus/fuzz/marshal` rather than assuming it: every target uses the `cert_mock`
+  scheme, which hides the signer set, and a floor is reached only where the harness provides one: marshal's standard Twins
+  targets start a node from a finalized floor (`MarshalTwinsInput.floor`), its actor store
+  target installs floors at run time (`StoreOp::SetFloor`), and the other targets start at
+  genesis. When no target of the
+  profile reaches `pre`, write `Status: partial (inactive in the fuzz targets)` (or
+  `bound (inactive ...)` when the sites and condition are complete) and the reason in the
+  Notes, so the campaign reports it apart from the bindings its silence speaks for; when
+  some targets reach it and others do not, name them in the Notes.
 
 A check you cannot imagine failing is either a theorem about the line above it or a check in
 the wrong place. Say which, in the Notes.

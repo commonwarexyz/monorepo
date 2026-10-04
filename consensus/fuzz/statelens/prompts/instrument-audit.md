@@ -45,7 +45,15 @@ For each invariant below:
    feedback: an assertion whose recorded pair cannot vary on a passing execution -- a
    `post` of `false`, or a site on the branch taken only once the replica is about to
    violate the invariant -- gives the fuzzer nothing, so add the classification probe of
-   rule 6.
+   rule 6. Ask what the check does when its evidence is absent: a lookup that passes on
+   `None` evaluates nothing for the cases it never observed, and such a binding is
+   `partial` at best, with the unknown cases named in the Notes. And ask whether `pre` can
+   hold at all in the fuzz targets, reading their harness under `consensus/fuzz/simplex`
+   or `consensus/fuzz/marshal` rather than assuming (every target uses the `cert_mock`
+   scheme; a floor is reached only in marshal's standard Twins targets, from
+   `MarshalTwinsInput.floor`, and its actor store target, through `StoreOp::SetFloor`): a check that no
+   target reaches, only real-scheme unit tests, is `(inactive in the fuzz targets)`, and
+   the Status says so; a check some targets reach names them in the Notes.
 6. Update the invariant's section of the plan: the `Sites` ledger, the `Assertions` you
    added, a `Status` that matches the ledger under the rule of the binding task (`bound`
    only when every commit site is checked and the condition is the Statement itself), and
@@ -63,8 +71,15 @@ For each invariant below:
    implementation's own code, not about a previous pass's instrumentation.
 8. Change nothing else. Do not rewrite a faithful binding because you would have written it
    differently, do not strengthen a condition to make a status look better, and do not
-   touch the sites of an invariant that is not in this batch. Beacon probes come in a
-   later step; leave the beacon table of the plan alone.
+   touch the sites of an invariant that is not in this batch. The beacon step has run
+   before you; leave its probes and the beacon table of the plan alone. Add rather than
+   edit: a line you change or remove may be another batch's assertion, ghost update or
+   helper, and that batch's verdict was given on the line as it was. If a check of this
+   batch needs a helper or an index to behave differently, add a new one beside it. The
+   campaign compares the tree after each batch: a changed or removed line, a line other
+   than a StateLens check added inside an existing function body, or an attribute or
+   comment opener placed above an existing item marks every earlier batch's bindings
+   unreviewed in the result. New items and new checks beside existing code do not.
 
 Run the check command until it passes. Then run
 

@@ -1786,9 +1786,12 @@ crate::simplex::statelens::sl_probe!(
 );
 ```
 
-When the two rules can only be read at different call sites, probe each at its own site with a
-shared label prefix and let the view relate them, rather than calling one from the other's
-site.
+When the two rules can only be read at different call sites, do not call one from the other's
+site. Two probes at two sites would keep each rule's value but not which value of one went with
+which of the other: nothing joins sites, and the view is not recorded. Carry the first rule's
+value to the second site in bounded ghost state (a field holding the last value for the view)
+and emit both there. If it cannot be carried without reaching for it, probe each rule alone and
+record in the plan that their relationship is unobserved.
 
 ## Probe D -- `construct_notarize` gate state
 

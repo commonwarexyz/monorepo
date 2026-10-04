@@ -24,7 +24,7 @@ You run from the root of the repository, so bind the script once:
     python3 $SL code callees <NAME>   # what a definition calls
     python3 $SL code defs <NAME>      # definitions and their extents
 
-    python3 $SL ast sites <NAME>      # write / init / read, per site
+    python3 $SL ast sites <NAME>      # write / maybe / init / read, per site
     python3 $SL ast notes [PATH]      # comments on races and recovery
 
     python3 $SL kb find|cites|grep|show
@@ -35,7 +35,10 @@ because nearly three quarters of this crate is test code sharing files with the 
 The index knows identity, the tree knows shape, and they answer different halves of one
 question. `code refs broadcast_notarize` gives six sites and will not confuse the field with
 the method of that name; `ast sites broadcast_notarize` says which two of the six are writes.
-Neither knows types and shape at once, so use both.
+A site it calls `maybe` is the field handed to a method or borrowed `&mut`, with the method
+name printed: the tree has no types, so `push` and `len` look alike to it, and you read
+those sites to tell a transition from a read. Neither tool knows types and shape at once, so
+use both.
 
 ### Structural or semantic
 
@@ -62,7 +65,8 @@ code.
    the ones with no support. A name is a hint, not a definition: read the body.
 
 3. **Establish, mutate, invalidate, consume.** For the confirmed state, use `ast sites` for
-   the writes and the reads, and `code callers` on each writer to learn who drives it. The
+   the writes, the `maybe` sites and the reads, and `code callers` on each writer to learn
+   who drives it. The
    write you would miss by reading one function is the one worth having: `broadcast_notarize`
    is written at `round.rs:697` when a vote is constructed and at `round.rs:746` when the
    journal is replayed. Both are reached from `Actor::run`, but by different paths, and a

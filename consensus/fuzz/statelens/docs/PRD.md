@@ -168,10 +168,10 @@ PHASE 2: INSTRUMENT THE CODE AND GENERATE FUZZ TARGETS
     -> materialize runtime support, fuzz targets, runner hooks
     -> instrumenter agent (claude|codex):
          registry invariants -> assertions + invariant probes + ghost state
-                             -> audit: the sites that commit each action, the
-                                checks that were missing, an honest status
          current code, and the knowledge base it queries while reading it
                              -> beacon probes (Simplex actors; marshal components)
+                             -> audit: the sites that commit each action, the
+                                checks that were missing, an honest status
     -> build the StateLens fuzz targets (up to 3 agent repair attempts)
     -> run the engine-level tests         (panic => STOP, human investigates)
     -> print the commands that run the StateLens fuzz targets
@@ -364,8 +364,8 @@ R-P2-1. A campaign runs in place in the operator's checkout: the operator clones
 
 R-P2-2. Steps, in order; R-S-P2-1 and R-M-P2-1 say what each step does for their profile:
 1. **Materialize.** Copy `runtime/statelens.rs` into `consensus/src/simplex/` and register it as a module. Add `sancov` to the dependencies of `commonware-consensus`. Patch the twins runner in `consensus/fuzz/core` so that it publishes the compromised set to the StateLens runtime before starting nodes and checks the participant index mapping (section 8.4). Patch the deterministic runtime so that a fresh runtime clears StateLens ghost state (R-INS-5). Add the profile's fuzz targets. Every edit is anchored on an exact line of the current code, and the campaign stops if an anchor has moved.
-2. **Instrument invariants.** Run the instrumenter agent with `prompts/instrument-invariants.md` over every invariant of the profile's registries, in batches of 8 within one registry. For each invariant it adds assertions, invariant probes, and any ghost state needed. Then run it once more over the same batches with `prompts/instrument-audit.md`, which re-reads each Statement against the sites that commit the actions it names, adds the checks that are missing and can be added, and corrects a plan section whose status claims more coverage than it has (R-INS-8). `STATELENS_AUDIT=0` skips the audit.
-3. **Instrument beacons.** Run the instrumenter agent with `prompts/instrument-beacons.md` once for each component of the profile. It adds beacon probes, discovered from the component's current code and from the knowledge base it queries while reading it. Without a knowledge base the step proceeds from the code alone.
+2. **Instrument invariants.** Run the instrumenter agent with `prompts/instrument-invariants.md` over every invariant of the profile's registries, in batches of 8 within one registry. For each invariant it adds assertions, invariant probes, and any ghost state needed.
+3. **Instrument beacons.** Run the instrumenter agent with `prompts/instrument-beacons.md` once for each component of the profile. It adds beacon probes, discovered from the component's current code and from the knowledge base it queries while reading it. Without a knowledge base the step proceeds from the code alone. Then run the instrumenter once more over the batches of step 2 with `prompts/instrument-audit.md`, which re-reads each Statement against the sites that commit the actions it names, adds the checks that are missing and can be added, and corrects a plan section whose status claims more coverage than it has (R-INS-8). The audit is the last agent pass, so no agent edits the tree it reviewed before the plan is checked and the targets are built. `STATELENS_AUDIT=0` skips the audit.
 4. **Write the instrumentation plan.** The agents record, in `consensus/fuzz/statelens/campaign/plan.md`, each invariant -> the sites and ghost fields used, and each beacon probe -> its site, what it observes, and where the agent found it. The operator uses it when investigating. If the agent could not bind an invariant, the plan says so and gives the reason. The script adds an `unbound` entry for any invariant the agent skipped, a summary, and a check that instrumentation changed no file outside the profile's subsystems. It also lints the plan against its own claims (R-INS-8) and reports the problems as warnings, because the plan is the agent's own account of what it bound.
 5. **Build.** Run `cargo check` of `commonware-consensus` (library and tests, stable toolchain) and the sanitizer build of the profile's fuzz targets (pinned nightly). On errors, the agent repairs its own instrumentation (as in StateLens section 5), without weakening assertions, for at most 3 attempts.
 6. **Test.** Run the test gate: the engine-level tests of the profile's subsystems on the instrumented code, together with the tests of the StateLens runtime module. Any failure stops the campaign for human investigation.
@@ -557,8 +557,9 @@ serves marshal too (G8).
 R-S-P2-1. For the `simplex` profile, the steps of R-P2-2 do the following:
 1. **Materialize.** Add one StateLens variant per simplex target of R-S-P2-2 to
    the existing `consensus/fuzz/simplex` package.
-2. **Instrument invariants.** Bind the simplex registry, then audit the bindings.
-3. **Instrument beacons.** Once for each of the voter, batcher and resolver.
+2. **Instrument invariants.** Bind the simplex registry.
+3. **Instrument beacons.** Once for each of the voter, batcher and resolver; then audit
+   the bindings.
 4. **Write the plan and check scope,** with `consensus/src/simplex/` allowed (R-INS-7).
 5. **Build.** The sanitizer build of every variant.
 6. **Test.** The test gate is the engine-level Simplex tests of `commonware-consensus`
@@ -748,9 +749,10 @@ R-M-P2-1. For the `marshal` profile, the steps of R-P2-2 do the following:
    `consensus/fuzz/marshal`, and a hook to the marshal wedge scenario that publishes its
    Byzantine role (9.4). No simplex variant is added; the marshal profile derives only from
    the targets of `consensus/fuzz/marshal`.
-2. **Instrument invariants.** Bind the simplex registry, then the marshal registry, then audit the bindings of both.
+2. **Instrument invariants.** Bind the simplex registry, then the marshal registry.
 3. **Instrument beacons.** Once for each of the Simplex voter, batcher and resolver, then
-   for marshal's core, standard and coding components.
+   for marshal's core, standard and coding components; then audit the bindings of both
+   registries.
 4. **Write the plan and check scope,** with the code of both subsystems allowed
    (R-INS-7).
 5. **Build.** The sanitizer build of every StateLens variant.

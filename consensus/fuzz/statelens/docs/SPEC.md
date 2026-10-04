@@ -125,7 +125,7 @@ them; the last column names the PRD requirement.
 | D45 | Sites in test code are hidden unless asked for. Nearly three quarters of the crate is test code sharing files with the code it exercises, so the unfiltered answer is mostly noise. | R-AG-4 |
 | D46 | Read and write polarity comes from the syntax tree, not from a language server. The tree needs no project and costs a tenth of a second for a file, against a server's startup on every query, and it classifies a struct literal field as an initial value where the server calls it a read. | R-AG-5 |
 | D47 | A name inside a macro body is reported as `macro`, not silently dropped and not guessed. Parsing does not expand macros, so the body is an unstructured token tree; dropping such sites would hide much of this crate's concurrency, which lives inside `select!`. | R-AG-5 |
-| D48 | The invariant step ends with an audit pass over its own bindings, by the same agent and under the same rules, and the plan carries a `Sites` ledger the pass and `lint-plan` both read. A first pass writes a binding and its own status in one go, and nothing there compares the two, so a binding that watches where an action is decided rather than where it is committed passes as `bound`. | R-INS-8, R-P2-2 |
+| D48 | The instrument step ends with an audit pass over its own bindings, after the beacon probes so that no agent edits the audited tree, by the same agent and under the same rules, and the plan carries a `Sites` ledger the pass and `lint-plan` both read. A first pass writes a binding and its own status in one go, and nothing there compares the two, so a binding that watches where an action is decided rather than where it is committed passes as `bound`. | R-INS-8, R-P2-2 |
 
 D24 to D30 concern marshal only; they are in section 8.2.
 
@@ -141,7 +141,8 @@ consensus/fuzz/statelens/
   README.md                      operator guide (Appendix D)
   config.env                     defaults (section 5.1)
   justfile                       recipes (section 5.3)
-  .gitignore                     two lines: `campaign/` and `extract/`
+  .gitignore                     `campaign/`, `extract/`, `scripts/__pycache__/` and `config.local.env`
+  config.local.env               machine-specific and private overrides, ignored by git (section 5.1)
   invariants/                    the registries; every INV-*.md is active (section 4.1)
     simplex/
     marshal/                     the marshal invariants
@@ -331,22 +332,24 @@ and only when `STATELENS_FALSE_INVARIANTS=1`.
 ### 5.1 `config.env` (verbatim)
 
 ~~~
-# StateLens defaults. An environment variable with the same name overrides a value
-# here, and `--agent` overrides STATELENS_AGENT.
+# StateLens defaults. This file is tracked by git: keep machine-specific and private
+# values out of it and put them in config.local.env, which git ignores and which
+# overrides a value here. An environment variable with the same name overrides both,
+# and `--agent` overrides STATELENS_AGENT.
 
 # Agent CLI used by extract and campaign: claude or codex.
 STATELENS_AGENT=claude
 
 # Model passed to the agent CLI; empty means the CLI default.
-STATELENS_CLAUDE_MODEL=
-STATELENS_CODEX_MODEL=
+STATELENS_CLAUDE_MODEL=claude-opus-5-5
+STATELENS_CODEX_MODEL=gpt-5.6-sol
 
 # Reasoning effort passed to the agent CLI; empty means the CLI default. Claude
 # takes low, medium, high, xhigh or max; codex takes its own
 # `model_reasoning_effort` levels. Pin both this and the model for a campaign you
 # want to be able to compare with another.
-STATELENS_CLAUDE_EFFORT=
-STATELENS_CODEX_EFFORT=
+STATELENS_CLAUDE_EFFORT=high
+STATELENS_CODEX_EFFORT=high
 
 # Toolchain for the test gate and the check command.
 STATELENS_TEST_TOOLCHAIN=stable
@@ -356,16 +359,21 @@ STATELENS_TEST_TOOLCHAIN=stable
 STATELENS_FUZZ_TOOLCHAIN=
 
 # Knowledge base roots for beacon extraction, separated by `:`. Empty disables
-# beacon extraction; nothing else depends on it.
+# beacon extraction; nothing else depends on it. Leave it empty here: a corpus root
+# is a path on one machine and may name a private repository of findings, so it
+# belongs in config.local.env or in the environment, never in this tracked file.
 STATELENS_KB=
 
-# Audit pass over the bindings, after the invariant step: 0 skips it. It costs one
+# Audit pass over the bindings, after the beacon step: 0 skips it. It costs one
 # agent run per batch and is what keeps a plan's Status honest.
 STATELENS_AUDIT=1
 ~~~
 
 Parsing: `KEY=VALUE` lines; `#` starts a comment line; values are not shell-expanded.
-Precedence: command-line flag, then non-empty environment variable, then `config.env`.
+Precedence: command-line flag, then non-empty environment variable, then `config.local.env`,
+then `config.env`. The local file is ignored by git (section 3) and holds what is specific
+to one machine or private, above all `STATELENS_KB`, so that a corpus root is never
+committed by filling in the tracked file.
 
 Generated outputs stay inside the subproject and are ignored by git: `SL/campaign/` for
 campaigns, `SL/extract/` for Phase 1 logs, paper text, the knowledge-base index
@@ -608,7 +616,7 @@ prefixed with `statelens:`.
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
 | `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it. A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
 | `targets` | `targets [--profile P]`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary | 0 done |
-| `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 passed, 1 no profile, 4 failed |
+| `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands, then the component tests, which are reported and not gated. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 gate passed, 1 no profile, 4 gate failed |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]` (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD` | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default) or `marshal` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
@@ -689,7 +697,7 @@ repository root, and gets back only what they print (D33):
 |---|---|
 | `kb modules` | Every `module` value in the index that passes the registry's filter, with a count |
 | `kb find TERM...` | Up to 20 findings whose `summary` or `tags` match, ranked; per hit the identifier, state, `module`, severity, remediation status, `summary`, and the files and symbols it cites |
-| `kb grep TEXT` | Up to 40 snippets from the state-bearing sections and the documents, each with its identifier or path, the section name, and three lines of context |
+| `kb grep TEXT` | Up to 40 snippets from the state-bearing sections and the documents, each with its identifier or path, the section name, and three lines of context, kept inside the section the hit is in |
 | `kb cites PATH` | Up to 20 findings that cite a file under `PATH`, most citations first; per hit the identifier, state, how many citations, remediation status, `summary`, which of its files fall under `PATH`, and its symbols |
 | `kb show IDENTIFIER [SECTION]` | One finding's claim block, the files and symbols it cites and the names of its state-bearing sections, or one of those sections. For a document, whose identifier is its path and which has neither, the whole text; a section asked of a document is refused |
 
@@ -802,9 +810,17 @@ remedy in every case.
 package, so the subproject keeps its stdlib-only rule (D44). Five fields carry the answers;
 the ones rust-analyzer leaves empty set the limits. It writes no relationships, so the index
 has no trait-implementation edges, and it leaves the read and write role bits unset, so an
-occurrence does not say which it is. It does populate the enclosing range of a definition,
-and that is what makes callers and callees derivable: a reference belongs to whichever
-definition's range contains its line.
+occurrence does not say which it is. A `local N` symbol is unique within its document only:
+rust-analyzer numbers the locals of every file from zero, so `local 0` names an unrelated
+binding in 218 of this crate's files, and the loader keys each local by the file that defines
+it, where a global symbol is unique by construction. A local is visible only inside its
+function, and the crate has 646 locals named `view` against 50 fields and methods, so a query
+sets locals aside whenever a global carries the name and says how many it set aside; a name
+that only locals carry is answered from them. It does populate the enclosing range of a
+definition, and that is what makes callers and callees derivable: a reference belongs to
+whichever definition's range contains its line, among the definitions that can contain code;
+a local's range is its own binding, so a call on a `let` line belongs to the function, not to
+the variable.
 
 **Test sites.** Nearly three quarters of this crate is test code (82,401 lines of 114,177),
 and it sits in the same files as the code it exercises, so neither the path nor the index
@@ -833,10 +849,14 @@ questions section 5.7 cannot.
 **Polarity.** The index records that a line mentions an entity, not whether it reads or
 writes it, because the read and write role bits are unset. An assignment is a shape: the
 token after the field expression is `=` or an `op=`. `ast sites` reports each site as a
-write, an initial value in a struct literal, or a read, which is what decides whether a probe
-belongs there. A write through `&mut` reads as a read, and the tree carries no types, so a
-field and a method of one name are one spelling to it (D46). Identity comes from the index,
-which also says which two or three files to parse rather than all of them.
+write, an initial value in a struct literal, a `maybe`, or a read, which is what decides
+whether a probe belongs there. A `maybe` is the field handed out, as the receiver of a method
+call or by a `&mut` borrow, and is printed with what was done to it (`.push(..)`, `&mut`):
+the tree carries no types, so `push` and `len` are one shape to it, and the prompts tell the
+agent to read those sites rather than take them for reads, since `push`, `insert` and `take`
+are transitions as much as an assignment is. `--writes-only` keeps them. For the same
+reason a field and a method of one name are one spelling to the tree (D46). Identity comes
+from the index, which also says which two or three files to parse rather than all of them.
 
 **Macro bodies.** This command parses source, and parsing does not expand macros, so the body
 of a macro invocation is one unstructured token tree: it holds the tokens but no expressions.
@@ -1045,7 +1065,9 @@ allows `unexpected_cfgs` itself.
    `SL/campaign/prompts/invariants-<registry>-<n>.md` and the output to
    `SL/campaign/logs/invariants-<registry>-<n>.log`.
 5. A non-zero agent exit aborts the campaign with exit code 2.
-6. After the last batch, audit the bindings, unless `STATELENS_AUDIT` is `0`. For each
+6. After the beacon step of section 7.4, audit the bindings, unless `STATELENS_AUDIT`
+   is `0`. It is the last agent pass, so the tree it reviews is the tree the plan lint of
+   section 7.5 fingerprints and the build hands over (section 7.6). For each
    batch of step 2, render `prompts/instrument.md`, a blank line, then
    `prompts/instrument-audit.md`, with the placeholders of step 3, and run the agent as in
    step 4 with `audit-<registry>-<n>` as the file stem. The pass re-reads each Statement,
@@ -1054,6 +1076,17 @@ allows `unexpected_cfgs` itself.
    plan section. A first pass writes both the binding and its own status, and nothing
    there compares the two; this is where a binding that is silently incomplete, rather
    than wrong, is found.
+   The verdict is per batch, and a later batch edits the same files. After each batch the
+   campaign keeps the text of every subsystem source and compares it with the batch
+   before. A later batch that adds new items, or new StateLens checks beside existing
+   code, changes nothing an earlier batch reviewed. One that changes or removes a line,
+   adds other lines inside an existing function body (a `let` that shadows, an early
+   `return`, a call that prunes a ghost history, a `/*`), or puts an attribute or a
+   comment opener above an existing item, may have touched an earlier binding's
+   assertion, ghost update or helper, which nothing reviews again: the bindings of every
+   earlier batch are then reported unreviewed, with the batch and each edit, on the
+   `coverage` line of section 7.9 and in the plan summary. The audit prompt tells the
+   agent to add new items and checks rather than edit, for that reason.
 7. Record the statuses before and after the pass. The ones that changed go in the summary
    (section 7.9) as `<ID> <before> -> <after>`.
 
@@ -1064,7 +1097,8 @@ blank line, then `prompts/instrument-beacons.md`. Placeholders: `BASE`, `PLAN`, 
 `ACTOR` and `ACTOR_DIR` from the profile table, `SUBSYSTEM_RULES` of the component's
 subsystem, and `QUERY`, the knowledge-base commands of section 5.6 with the concrete command
 line for each, carrying the `module` filter of the component's subsystem. Run and log as in
-section 7.3, with `beacons-<ACTOR>` as the file stem.
+section 7.3, with `beacons-<ACTOR>` as the file stem. This step runs before the audit of
+section 7.3 step 6, so that no agent edits the tree after the audit.
 
 The agent discovers the beacons in this step. It reads the component's code, where a
 candidate announces itself as a state enum, a `debug_assert!`, a per-view flag or a comment
@@ -1098,7 +1132,8 @@ empty and the step proceeds from the code alone.
    `Sites` ledgers list and how many of them are not checked, the call-site counts, the
    assertion sites per instrumented source, the beacon-table row count and the deleted-line
    count. Deleted lines are expected to be 0; any other value must match the "Edited lines"
-   entries of the plan.
+   entries of the plan. When the summary is rewritten after a repair that made the audit
+   stale (section 7.6), an `Audit: stale` line names the files the repair changed.
 7. Write `SL/campaign/instrumentation.diff` with the output of `git diff`.
 
 ### 7.6 Step 5: build and repair
@@ -1117,7 +1152,23 @@ On a failure, run a repair attempt: render `prompts/instrument.md`, a blank line
 failing command), `ERRORS` (its last 150 output lines), `SUBSYSTEM_RULES` (the parts of
 all the profile's subsystems, in the order of section 5.5). Run the agent, repeat the
 section 7.5 scope check, then run both commands again. After 3 failed attempts, exit with
-code 3. After a successful repair, write `SL/campaign/instrumentation.diff` again.
+code 3. After a successful repair, run the plan lint of section 7.5 step 3 again and
+rewrite the summary and `SL/campaign/instrumentation.diff` (steps 5 to 7): a repair may
+remove or change an assertion, and the lint count the campaign reports must describe the
+tree it hands over, not the tree the audit saw.
+
+The semantic audit of section 7.3 is not repeated, and the lint cannot stand in for it: a
+repair that rewrites a condition under the same invariant id, site and function passes the
+lint. So the campaign records what the audit's verdict stands for -- a digest of every file
+under `consensus/src/simplex/` and `consensus/src/marshal/`, the sources the lint scans
+(helpers and ghost state included, not only the macro calls), and of the plan without the
+summary the script appends -- taken at the first plan lint, which follows the audit, the last agent pass. After a successful repaired build, every recorded
+path whose digest differs is a file the repairs changed after the audit; the audit is then
+stale, the plan summary says so, and the `coverage` line of section 7.9 reports the campaign
+`UNVALIDATED` with those files, whatever the lint found. Only a campaign with a new audit
+clears that. The repair prompt makes the agent downgrade the invariant and its ledger
+rather than weaken a check, which the campaign cannot verify; the stale mark is what makes
+that limit visible.
 
 ### 7.7 Step 6: test gate
 
@@ -1140,6 +1191,26 @@ built targets without a new campaign, which would refuse the instrumented checko
 After a fix to the instrumented checkout, `just test` runs this command alone, so the
 fix is checked before fuzzing it.
 
+**Component tests.** The gate is the engine-level tests: the ones that run whole replicas
+against each other, where every actor produces the evidence the others' checks read. The
+crate's other simplex tests drive one actor, type or scheme with states built by hand, where
+a check that reads evidence another actor would have produced finds none, and a test may
+deliberately construct the state an invariant forbids to see the component tolerate it.
+Those tests are not the gate, but they are not hidden either: after the gate passes, the
+campaign runs
+
+~~~
+cargo +<test toolchain> nextest run -p commonware-consensus --lib --no-fail-fast \
+  --ignore-default-filter \
+  -E 'test(/^simplex::/) & not test(/^simplex::tests::/) & not test(/^simplex::statelens::/)'
+~~~
+
+logging to `SL/campaign/logs/test-components.log`, and names every failed test on the
+`components` line of the summary (section 7.9). They are reported, not gated: a failure is
+a mismatch between a check and a test that runs below the check's scope, for the operator
+to judge, and it never changes the result. They are 516 tests and a few seconds once
+built. `just test` runs them after the gate in the same way.
+
 ### 7.8 Step 7: hand-over
 
 The campaign does not run the fuzzer (D23). After the test gate passes, it writes the
@@ -1158,10 +1229,12 @@ statelens: checkout   <repo>
 statelens: base       <base>
 statelens: agent      <agent>
 statelens: profile    <profile>
-statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
-statelens: audit      <ID> <before> -> <after>, ... | no status change
+statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)[; inactive in the fuzz targets: <ID>, ...]
+statelens: audit      <ID> <before> -> <after>, ... | no status change [stale: a repair changed the tree after it]
 statelens: plan       <n> commit site(s) listed, <u> not checked, <p> lint problem(s)
+statelens: coverage   UNVALIDATED: <p> plan lint problem(s), so the code does not support the counts above; a repair changed <f> validated file(s) after the audit (<path>, ...), so the audit and the statuses describe the tree before it; run a campaign with a new audit before relying on them; no audit pass ran (STATELENS_AUDIT=0), so the statuses are the binding agent's own claims; audit batch <name> changed existing lines of <path>, ... after the verdict on <ID>, ..., which were not reviewed against them
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
+statelens: components <f> failed, not gated: <test>, ...; see campaign/logs/test-components.log | all passed
 statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for any result other than READY>
 statelens: panic      <first [statelens][...] line, or the first panic message>
@@ -1173,6 +1246,21 @@ The `run` and `replay` lines appear only with `READY`, one pair per target: the 
 profile prints one pair per StateLens variant (section 8.3). The `replay` line is a
 template: the operator puts in the crash file that libFuzzer wrote, and adds the
 `STATELENS_BYZANTINE` value of the run that found it (section 7.11).
+
+The `invariants` line names after the counts the invariants whose `Status` carries
+`(inactive in the fuzz targets)` (section 11): bound or partial as the ledger says, but
+never evaluated by the targets, so a silent campaign says nothing about them. The
+`coverage` line appears when the plan lint reports problems, which it does after a
+successful repaired build as well as after the audit (sections 7.5 and 7.6), and when a repair changed a file
+the audit's verdict stands for (section 7.6), when no audit pass ran (`STATELENS_AUDIT=0`), and when a later audit batch changed or
+removed lines after an earlier batch's verdict (section 7.3 step 6), each reason in its own
+clause: `READY`
+then means the targets are built and the gate passed, and nothing more, because the plan's
+claims are not supported by the code, the audit describes a tree that is gone, nothing but
+the binding agent vouched for the statuses, or some bindings were reviewed before a later
+batch edited what they rest on. A clean
+lint does not clear the second reason. The `components` line reports the component tests
+of section 7.7, which run after a passed gate and never change the result.
 
 ### 7.10 Phase 3: running a target
 
@@ -1557,11 +1645,13 @@ Agents add sections under `## Invariants`:
 
 ~~~markdown
 ### INV-0007: <title>
-- Status: bound | partial | unbound
+- Status: bound | partial | unbound, followed by `(inactive in the fuzz targets)` when the
+  targets never evaluate the check
 - Reading: <pre and post, or the checked condition, in code terms>
-- Sites: <one line per site that commits an action the Statement names: the action, the
-  file and the function in backticks, then `checked` or `not checked`, and for
-  `not checked` the reason>
+- Sites: <one line per site that commits an action the Statement names: the action in
+  plain words, then the file and the function in backticks (everything backticked after
+  the file is read as a function), then `checked` or `not checked`, and for `not checked`
+  the reason>
 - Assertions: <file, function, macro and condition; one line each>
 - Probes: <extra probes such as margins, or "none">
 - Ghost state: <fields and where they are updated, or "none">
@@ -1575,12 +1665,37 @@ check and the condition checked is the Statement itself. `partial` means anythin
 weaker condition, a site left out, a path left out, with the reason in `Notes`. `unbound`
 means nothing was added, and such a section needs only `Status` and `Notes`. A binding
 that watches the decision and not the commit is `partial`, however exact its condition.
+A qualifier may follow the status, `partial (inactive in the fuzz targets)` or
+`bound (inactive in the fuzz targets)`, for a binding whose `pre` no target of the
+profile reaches, which the harness under `consensus/fuzz/<package>` decides (every target
+uses the `cert_mock` scheme, which hides the signer set; a floor is reached only in marshal's
+standard Twins targets, from `MarshalTwinsInput.floor`, and its actor store target, through
+`StoreOp::SetFloor`), however many unit tests with real schemes reach it; the summary names such
+invariants apart from the status counts, because activation is a different claim from
+binding and a silent campaign says nothing about an inactive check.
 `statelens.py lint-plan` (section 5.4) checks a section against its own ledger and against
 the instrumented code, and that the plan is plain ASCII like the registry and the prompts.
 The ledger is not taken on trust either: each entry names its source and its function in
 backticks, which is how the lint reads it, and says `checked` or `not checked`; an entry
 that says `checked` must have an assertion naming the invariant in the function it names,
-so one assertion cannot certify every site of its file. What no lint can see is a commit site the ledger never
+so one assertion cannot certify every site of its file. The assertions are read out of the
+code with a textual scan, after the comments and the `#[cfg(test)]` items of each file are
+blanked (the test items come from the syntax tree of section 5.8, or from the `#[cfg(test)]
+mod` fallback without it), so an assertion quoted in a comment or placed in a test module
+certifies nothing. Items are located on the text with every literal blanked as well, so a
+string spelling `fn` opens nothing: a site is attributed to the function whose body holds
+it, qualified by the type of the `impl` block around it, and to nothing when no body does.
+A ledger entry `Type::f` names that method alone, so neither `Other::f` nor a free function
+`f` certifies it; a bare ledger name `f` is a less precise claim, satisfied by any function
+or method of that name. `impl` blocks are the only containers modelled: a method of a trait
+definition is attributed bare, and a function nested in a method carries the impl's type.
+The type is kept as the `impl` header spells it, so a claim may give `prunable::Archive::sync`
+or its tail `Archive::sync`, and a tail that fits two types in one file is reported as
+ambiguous. A string literal that quotes
+an assertion macro is blanked with the comments. Without
+rust-analyzer the fallback knows only a `#[cfg(test)] mod`, so a gated function or impl
+outside one counts as production there. The lint establishes that the plan and the code
+agree, not that an assertion executes: that is the test gate's and the targets' part. What no lint can see is a commit site the ledger never
 names; that is what the audit pass of section 7.3 is for, and why the summary also reports
 the distribution of assertion sites over files, where a layer nobody checked shows up as a
 file with none.
@@ -1998,10 +2113,12 @@ other parts.
 For each invariant, add under `## Invariants`:
 
     ### INV-NNNN: <title>
-    - Status: bound | partial | unbound
+    - Status: bound | partial | unbound, followed by `(inactive in the fuzz targets)`
+      when the targets never evaluate the check
     - Reading: <pre and post, or the checked condition, in code terms>
-    - Sites: <one line per site that commits an action the Statement names: the action,
-      the file and the function in backticks, then `checked` or `not checked`, and for
+    - Sites: <one line per site that commits an action the Statement names: the action
+      in plain words, then the file and the function in backticks (everything backticked
+      after the file is read as a function), then `checked` or `not checked`, and for
       `not checked` the reason>
     - Assertions: <file, function, macro and condition; one line each>
     - Probes: <extra probes such as margins, or "none">
@@ -2041,8 +2158,10 @@ below:
    `SL=consensus/fuzz/statelens/scripts/statelens.py`, the command
    `python3 $SL code refs|callers|callees <NAME>` gives references and call hierarchy
    by symbol, which matters because names here collide: `proposal` is five different
-   methods. `python3 $SL ast sites <NAME>` says which of those sites write the state
-   and which only read it. Both hide test sites unless you pass `--tests`, and the
+   methods. `python3 $SL ast sites <NAME>` says which of those sites assign the state,
+   which hand it out to a method or a `&mut` borrow (`maybe`, with the method name: the
+   tree cannot tell `push` from `len`, so read those), and which only read it. Both hide
+   test sites unless you pass `--tests`, and the
    `callers` of a mailbox method name the actor that sends the message. The guide
    `consensus/fuzz/statelens/prompts/discover-flow.md` is the method for the cases
    where this is not enough.
@@ -2096,7 +2215,8 @@ below:
    nothing was added. A binding that watches the decision and not the commit is
    `partial`, however exact its condition.
 8. Add the invariant's section to the plan, with the `Sites` ledger: one line per commit
-   site of step 3, naming the action, then the file and the function in backticks
+   site of step 3, naming the action in plain words, then the file and the function in
+   backticks (everything backticked after the file is read as a function)
    (`` `actors/voter/actor.rs` `Actor::process_proposed` ``), then `checked` or
    `not checked` in those words, and for `not checked` the reason and the delivery order
    that escapes it. `lint-plan` reads this ledger: it finds the entry by the file, and a
@@ -2143,6 +2263,26 @@ campaign stays silent and the silence is read as evidence. The patterns to watch
   the Statement forbids, your `pre` is false there forever: the assertion runs on every pass,
   its probe records one pair, and nothing is ever checked. Find the site where the forbidden
   state survives, or record the gap and set `partial`.
+- **Absence of evidence read as evidence.** A check that passes when the ghost record it
+  needs is missing -- `is_none_or(..)`, `map_or(true, ..)` or `unwrap_or(true)` on the lookup
+  -- accepts every case it never observed: a block the replica restored, a write nobody
+  recorded and a different block at the same height all look alike. A missing record is
+  unknown, not satisfied. Require positive evidence keyed by the exact identity (height and
+  digest, view and signer), from what the replica holds or restored; where none can be had
+  without changing behaviour, make the evidence part of `pre`, so the case is not evaluated
+  rather than passed, say in the Notes which cases are unknown, and set `partial`.
+- **A binding the campaign never evaluates.** A `pre` that cannot hold in the fuzz targets
+  leaves the check silent there however many unit tests with real schemes exercise it. Read
+  what the targets do from their harness under `consensus/fuzz/simplex` or
+  `consensus/fuzz/marshal` rather than assuming it: every target uses the `cert_mock`
+  scheme, which hides the signer set, and a floor is reached only where the harness provides one: marshal's standard Twins
+  targets start a node from a finalized floor (`MarshalTwinsInput.floor`), its actor store
+  target installs floors at run time (`StoreOp::SetFloor`), and the other targets start at
+  genesis. When no target of the
+  profile reaches `pre`, write `Status: partial (inactive in the fuzz targets)` (or
+  `bound (inactive ...)` when the sites and condition are complete) and the reason in the
+  Notes, so the campaign reports it apart from the bindings its silence speaks for; when
+  some targets reach it and others do not, name them in the Notes.
 
 A check you cannot imagine failing is either a theorem about the line above it or a check in
 the wrong place. Say which, in the Notes.
@@ -2218,8 +2358,12 @@ If the index is missing the campaign said so, and search and reading are the fal
     python3 $SL ast notes [PATH]    # comments about races and recovery
 
 The index says a line mentions a field; it does not say whether the line changes it. Before
-you probe a transition, ask `ast sites` for the write sites, because those are the
-transitions and the rest are decisions. A site it marks `macro` sits inside a macro body,
+you probe a transition, ask `ast sites` for the write sites and the `maybe` sites. A write is
+an assignment. A `maybe` is the field handed out, as the receiver of a method call or by a
+`&mut` borrow, printed with what was done (`.push(..)`, `&mut`): the tree carries no types,
+so it cannot tell `push` from `len`, and `push`, `insert`, `clear` and `take` are transitions
+as much as an assignment is. Read each `maybe` site before you call the transition inventory
+complete; the reads are the decisions. A site it marks `macro` sits inside a macro body,
 which the tree does not structure, so read that one yourself; much of this crate's
 concurrency is inside `select!`. `ast notes` is the fastest way to do step 1 below:
 it finds the comments about orderings, races, recovery and cases that cannot happen, and
@@ -2275,10 +2419,15 @@ A dimension often has more parts than a pair holds. In order of preference:
    `pack(flag(valid), flag(durable))` against `disc(&outcome)`.
 2. Build a mask when several flags belong together:
    `flag(a) | flag(b) << 1 | flag(c) << 2`, against the outcome.
-3. Split across the sites the code already has, sharing a label prefix, and let the view or
-   round relate them. Prefer this over one probe that has to reach for a value: never call
-   something with side effects, and never force a value the original code computes only
-   conditionally.
+3. Keep related values at one site. A probe records only the presence of its own `(a, b)`
+   pair: nothing joins sites, a shared label prefix means nothing to the fuzzer, and the
+   view or round is not recorded, so two probes at two sites keep the marginal values and
+   lose which value of one went with which of the other. To cover a relationship, emit the
+   related, discretized values together at one site, carrying an earlier value there in
+   bounded ghost state when it is read elsewhere (a field holding the last value; the round
+   may key it, but never enters a probe). Never call something with side effects, and never
+   force a value the original code computes only conditionally, to bring a value to a site:
+   then probe the parts separately and say in the plan that the relationship is unobserved.
 
 Full worked analyses, one per subsystem, are in `consensus/fuzz/statelens/examples/`. They are
 reference material, not a pattern to copy: they also derive invariants, which is Phase 1 work,
@@ -2294,7 +2443,9 @@ workflow. Do not let their shape decide what this component's states are -- the 
 The instrumented tree does not build. Fix the instrumentation only: code marked
 `// [statelens]`, and `consensus/src/simplex/statelens.rs`. Do not change existing code.
 Do not weaken an assertion to make it compile: if an assertion cannot be written
-faithfully, remove it and set its invariant to `unbound` in the plan with the reason.
+faithfully, remove it, set its invariant to `unbound` in the plan with the reason, and mark
+the sites it checked `not checked` in the `Sites` ledger. The plan lint runs again after
+the repair, against the tree as you leave it.
 Never fix a type error at a macro's `me` with `.flatten()`, `.unwrap_or(None)` or
 `.and_then(|me| me)`: each turns an unknown index into "not a participant", which turns the
 Byzantine guard off. The error means a guard is missing: `if let Some(me) = ...` around the
@@ -2480,6 +2631,11 @@ Last lines of its output:
   enqueue resolver deliveries whose local annotations no request of the actor created.
   Treat what the actor restores at startup as its own history, and an annotation on a
   delivery, such as `Annotation::Finalized`, as the actor's own request.
+- Durability evidence is positive: a block is durable when the actor restored it (the
+  archive read returned it, with its digest) or when a sync that started after its write
+  completed. The absence of a write record says nothing -- the write may have gone
+  unrecorded, or another block may hold the height -- so a check that passes on a missing
+  record is `partial`, with the unknown case in the Notes, never `bound`.
 ~~~
 
 ### 13.15 `prompts/instrument-audit.md`
@@ -2532,7 +2688,15 @@ For each invariant below:
    feedback: an assertion whose recorded pair cannot vary on a passing execution -- a
    `post` of `false`, or a site on the branch taken only once the replica is about to
    violate the invariant -- gives the fuzzer nothing, so add the classification probe of
-   rule 6.
+   rule 6. Ask what the check does when its evidence is absent: a lookup that passes on
+   `None` evaluates nothing for the cases it never observed, and such a binding is
+   `partial` at best, with the unknown cases named in the Notes. And ask whether `pre` can
+   hold at all in the fuzz targets, reading their harness under `consensus/fuzz/simplex`
+   or `consensus/fuzz/marshal` rather than assuming (every target uses the `cert_mock`
+   scheme; a floor is reached only in marshal's standard Twins targets, from
+   `MarshalTwinsInput.floor`, and its actor store target, through `StoreOp::SetFloor`): a check that no
+   target reaches, only real-scheme unit tests, is `(inactive in the fuzz targets)`, and
+   the Status says so; a check some targets reach names them in the Notes.
 6. Update the invariant's section of the plan: the `Sites` ledger, the `Assertions` you
    added, a `Status` that matches the ledger under the rule of the binding task (`bound`
    only when every commit site is checked and the condition is the Statement itself), and
@@ -2550,8 +2714,15 @@ For each invariant below:
    implementation's own code, not about a previous pass's instrumentation.
 8. Change nothing else. Do not rewrite a faithful binding because you would have written it
    differently, do not strengthen a condition to make a status look better, and do not
-   touch the sites of an invariant that is not in this batch. Beacon probes come in a
-   later step; leave the beacon table of the plan alone.
+   touch the sites of an invariant that is not in this batch. The beacon step has run
+   before you; leave its probes and the beacon table of the plan alone. Add rather than
+   edit: a line you change or remove may be another batch's assertion, ghost update or
+   helper, and that batch's verdict was given on the line as it was. If a check of this
+   batch needs a helper or an index to behave differently, add a new one beside it. The
+   campaign compares the tree after each batch: a changed or removed line, a line other
+   than a StateLens check added inside an existing function body, or an attribute or
+   comment opener placed above an existing item marks every earlier batch's bindings
+   unreviewed in the result. New items and new checks beside existing code do not.
 
 Run the check command until it passes. Then run
 
@@ -2599,7 +2770,7 @@ You run from the root of the repository, so bind the script once:
     python3 $SL code callees <NAME>   # what a definition calls
     python3 $SL code defs <NAME>      # definitions and their extents
 
-    python3 $SL ast sites <NAME>      # write / init / read, per site
+    python3 $SL ast sites <NAME>      # write / maybe / init / read, per site
     python3 $SL ast notes [PATH]      # comments on races and recovery
 
     python3 $SL kb find|cites|grep|show
@@ -2610,7 +2781,10 @@ because nearly three quarters of this crate is test code sharing files with the 
 The index knows identity, the tree knows shape, and they answer different halves of one
 question. `code refs broadcast_notarize` gives six sites and will not confuse the field with
 the method of that name; `ast sites broadcast_notarize` says which two of the six are writes.
-Neither knows types and shape at once, so use both.
+A site it calls `maybe` is the field handed to a method or borrowed `&mut`, with the method
+name printed: the tree has no types, so `push` and `len` look alike to it, and you read
+those sites to tell a transition from a read. Neither tool knows types and shape at once, so
+use both.
 
 ### Structural or semantic
 
@@ -2637,7 +2811,8 @@ code.
    the ones with no support. A name is a hint, not a definition: read the body.
 
 3. **Establish, mutate, invalidate, consume.** For the confirmed state, use `ast sites` for
-   the writes and the reads, and `code callers` on each writer to learn who drives it. The
+   the writes, the `maybe` sites and the reads, and `code callers` on each writer to learn
+   who drives it. The
    write you would miss by reading one function is the one worth having: `broadcast_notarize`
    is written at `round.rs:697` when a vote is constructed and at `round.rs:746` when the
    journal is replayed. Both are reached from `Actor::run`, but by different paths, and a

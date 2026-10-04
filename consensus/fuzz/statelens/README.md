@@ -37,7 +37,9 @@ with network access.
 - For issues: `gh` (logged in) or network access for `curl`. For PDF papers: `pdftotext`
   or the Python `pypdf` module; without either, the agent gets the PDF as is.
 
-Defaults live in [config.env](config.env): the agent (`claude`), the model and the
+Defaults live in [config.env](config.env), which git tracks; a `config.local.env` beside it,
+which git ignores, overrides them and is where a knowledge-base root or any other
+machine-specific or private value goes. In `config.env` live the agent (`claude`), the model and the
 reasoning effort of each agent CLI (empty means the CLI default), the test toolchain (`stable`) and the fuzz toolchain
 (empty means the pinned nightly). An environment variable with the same name overrides a
 value there, and `--agent` overrides `STATELENS_AGENT`. `CARGO_TARGET_DIR` is passed
@@ -85,7 +87,8 @@ first: edit them, delete the ones you do not want, and run `just check-invariant
 
 A campaign's beacon step can consult a knowledge base of developer artifacts while it
 instruments: the findings reported against this workspace, plus the curated documents beside
-them. Point `STATELENS_KB` at one or more corpus roots, separated by `:`.
+them. Point `STATELENS_KB` at one or more corpus roots, separated by `:`, in
+`config.local.env` or in the environment, never in the tracked `config.env`.
 
 ```
 export STATELENS_KB=/path/to/commonware-findings
@@ -133,14 +136,16 @@ clone on a dedicated machine or container, and throw the clone away afterwards.
 Two conveniences: `just fuzz <target>` runs a campaign and then fuzzes one of its targets,
 inferring the profile from the target name; and `just clean` undoes what a campaign wrote,
 so a checkout can be reused. After fixing an instrumented checkout by hand, `just test`
-runs only the campaign's test gate on it, for the profile in `campaign/meta.json`, before
+runs only the campaign's test gate on it, for the profile in `campaign/meta.json`, then
+the component tests the gate leaves out (reported, not gated), before
 you fuzz it with `just fuzz <profile> --skip-campaign`. Note that in `consensus/fuzz/` and at the
 repository root, `just fuzz` is a different, pre-existing recipe that runs a package's fuzz
 targets.
 
 A campaign adds the runtime module, the fuzz targets and the harness and runtime hooks to
-the tree, lets the agent bind every invariant of the profile's registries, audits those
-bindings and adds beacon probes, checks that only the profile's subsystems were edited,
+the tree, lets the agent bind every invariant of the profile's registries, adds beacon probes, then
+audits the bindings against the tree as it stands, checks that only the profile's
+subsystems were edited,
 builds (with up to 3 agent repair attempts), and runs the test gate. The audit pass re-reads
 each invariant against the sites that commit the actions it names, adds the checks that are
 missing, and corrects a plan section whose `Status` claims more coverage than it has;
@@ -157,7 +162,19 @@ development and ends the campaign with `STOPPED after <step>`.
 | Test gate | `simplex::tests` without Twins, `simplex::statelens` | the same, and `marshal::` |
 
 The simplex test gate is about 240 tests and 2 minutes on 16 cores; marshal adds 421
-tests and about 70 seconds.
+tests and about 70 seconds. After the gate passes, the campaign also runs every other
+simplex test the gate leaves out (the actor, type and scheme tests and the rest, about 516
+tests and a few seconds) and names any that fail on the `components` line of the summary.
+They drive one actor with states built by hand, so a failure there is for you to judge, and
+it never changes the result. A `coverage UNVALIDATED` line means the plan lint found
+problems after the audit or a repair, a repair changed instrumented files after the audit,
+no audit ran (`STATELENS_AUDIT=0`), or a later audit batch changed existing lines after an
+earlier batch's verdict:
+the targets are built and the gate passed, but the plan's coverage claims are not supported
+by the code, or the audit describes a tree the repair replaced. Run a campaign with a new
+audit before relying on the counts. The `invariants` line also names the bindings whose
+`Status` says `(inactive in the fuzz targets)`: bound or partial as written, but never
+evaluated by the targets, so a silent campaign says nothing about them.
 
 The campaign refuses to start when a required tool is missing, when tracked files outside
 `consensus/fuzz/statelens/` have uncommitted changes, or when an earlier campaign already
@@ -258,10 +275,12 @@ statelens: checkout   <repo>
 statelens: base       <base commit>
 statelens: agent      <agent>
 statelens: profile    simplex | marshal
-statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
-statelens: audit      <ID> <before> -> <after>, ... | no status change
+statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)[; inactive in the fuzz targets: <ID>, ...]
+statelens: audit      <ID> <before> -> <after>, ... | no status change [stale: a repair changed the tree after it]
 statelens: plan       <n> commit site(s) listed, <u> not checked, <p> lint problem(s)
+statelens: coverage   UNVALIDATED: <why the counts above are not supported>
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
+statelens: components <f> failed, not gated: <test>, ... | all passed
 statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for PANIC (tests), BUILD FAILED or SETUP FAILED>
 statelens: panic      <first [statelens][...] line, or the first panic message>
@@ -327,7 +346,7 @@ an instrumented layer with no assertions at all is the shape that gap takes.
 | `STATELENS_FALSE_INVARIANTS=1` | Set on `just campaign`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
 | `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: `simplex_cert_mock_twins_campaign_statelens`, `simplex_cert_mock_twins_mutator_statelens`, the four marshal Twins variants and the wedge-scenario variant must panic with `[statelens][BYZANTINE]`, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
 | `STATELENS_CLAUDE_EFFORT`, `STATELENS_CODEX_EFFORT` | Set in `config.env` or the environment. The reasoning effort the agent CLI runs with: `low`, `medium`, `high`, `xhigh` or `max` for claude, codex's own `model_reasoning_effort` levels for codex. Empty means the CLI's default, which is what a campaign uses unless you pin it. `STATELENS_CLAUDE_MODEL` and `STATELENS_CODEX_MODEL` work the same way for the model. Both land in `campaign/meta.json`, so pin them when you want two campaigns to be comparable. |
-| `STATELENS_AUDIT=0` | Set on `just campaign`. Skips the audit pass over the bindings, which costs one agent run per batch of 8 invariants. The campaign then prints no `audit` line, and a plan section keeps whatever `Status` the first pass gave it. |
+| `STATELENS_AUDIT=0` | Set on `just campaign`. Skips the audit pass over the bindings, which costs one agent run per batch of 8 invariants. The campaign then prints no `audit` line, a plan section keeps whatever `Status` the first pass gave it, and the summary's `coverage` line says `UNVALIDATED: no audit pass ran`. |
 | `STATELENS_FEEDBACK=0` | Set on a `run` command. Leaves the StateLens counters unregistered. Run a target for the same time on two empty corpora, with and without it: `ft:` on the `DONE` line should be higher with feedback. Compare `ft:`, not `cov:`, which libFuzzer stops printing once the counters are registered. |
 
 Each false-invariant campaign in a fresh clone of its own:

@@ -151,6 +151,12 @@ EDITED_PATHS = (
 SIMPLEX_TEST_FILTER = (
     "(test(/^simplex::tests::/) & not test(/::test_twins/)) | test(/^simplex::statelens::/)"
 )
+# Every other simplex test, which the gate leaves out: the actor, type and scheme
+# tests and the rest, which drive one component with states built by hand. They run
+# after the gate and are reported, not gated (SPEC section 7.7).
+COMPONENT_TEST_FILTER = (
+    "test(/^simplex::/) & not test(/^simplex::tests::/) & not test(/^simplex::statelens::/)"
+)
 
 # SPEC section 5.5. Beacon components are (ACTOR, ACTOR_DIR, subsystem). `target` is the
 # StateLens target made from SL/runtime/target.rs, or None when the campaign builds one
@@ -287,6 +293,8 @@ CAMPAIGN_TOOLS = ("cargo", "cargo-nextest", "cargo-fuzz", "just")
 PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 PLAN_HEADING = re.compile(r"^###\s+((?:INV|FALSE)-\d+)\b")
 PLAN_STATUS = re.compile(r"^-\s*\**Status\**\s*:\s*\**\s*`?(bound|partial|unbound)\b")
+# The one qualifier a status may carry (SPEC section 11).
+PLAN_INACTIVE = re.compile(r"\(inactive in the fuzz targets\)")
 # The fields of an invariant's plan section (SPEC section 11). A section that binds
 # nothing carries only `Status` and `Notes`.
 PLAN_FIELD = re.compile(r"^-\s*\**([A-Z][A-Za-z ]*?)\**\s*:\s*(.*)$")
@@ -311,8 +319,12 @@ PLAN_CHECKED = re.compile(r"(?<![A-Za-z0-9_])checked\b", re.IGNORECASE)
 # function it names is checked too, because a dispatch and the commit it leads to are
 # often in one file.
 PLAN_SITE_PATH = re.compile(r"`([A-Za-z0-9_./-]+\.rs)`")
-PLAN_SITE_FN = re.compile(r"`(?:[A-Za-z0-9_]+::)?([a-z_][A-Za-z0-9_]*)`")
-PLAN_FUNCTION = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-z_][A-Za-z0-9_]*)", re.M)
+PLAN_SITE_FN = re.compile(r"`((?:[A-Za-z0-9_]+::)*[a-z_][A-Za-z0-9_]*)`")
+PLAN_FUNCTION = re.compile(
+    r"^\s*(?:(?:pub(?:\([^)]*\))?|const|unsafe|async|extern(?:\s+\"[^\"]*\")?)\s+)*"
+    r"fn\s+([a-z_][A-Za-z0-9_]*)",
+    re.M,
+)
 # An assertion macro naming an invariant. The id is a separate line of the call, so the
 # search spans the arguments, and stops at the first `;` so it cannot run into the next
 # statement.
@@ -404,17 +416,30 @@ def porcelain_paths(output):
     return [path for _status, path in porcelain_entries(output)]
 
 
+CONFIG_LOCAL = "config.local.env"
+
+
 def load_config(sl_dir):
-    """Reads config.env; a non-empty environment variable overrides a value."""
+    """Reads config.env, then config.local.env, then the environment.
+
+    `config.env` is tracked and holds the defaults; `config.local.env` is ignored
+    by git and holds what is specific to one machine or private, above all a
+    knowledge-base root, which names a corpus of findings nobody should commit by
+    filling in a tracked file. A non-empty environment variable overrides both.
+    """
     values = {key: "" for key in CONFIG_KEYS}
-    for number, raw in enumerate((sl_dir / "config.env").read_text().splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
+    for name in ("config.env", CONFIG_LOCAL):
+        path = sl_dir / name
+        if not path.is_file():
             continue
-        key, sep, value = line.partition("=")
-        if not sep:
-            raise Abort(1, f"config.env:{number}: expected KEY=VALUE")
-        values[key.strip()] = value.strip()
+        for number, raw in enumerate(path.read_text().splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, sep, value = line.partition("=")
+            if not sep:
+                raise Abort(1, f"{name}:{number}: expected KEY=VALUE")
+            values[key.strip()] = value.strip()
     for key in list(values):
         if os.environ.get(key):
             values[key] = os.environ[key]
@@ -435,8 +460,7 @@ def cargo(toolchain):
     return ["cargo"] + ([f"+{toolchain}"] if toolchain else [])
 
 
-def gate_test_command(toolchain, profile):
-    """The test gate's command (SPEC section 7.7) for `profile`."""
+def nextest_command(toolchain, expression):
     return cargo(toolchain) + [
         "nextest",
         "run",
@@ -446,8 +470,29 @@ def gate_test_command(toolchain, profile):
         "--no-fail-fast",
         "--ignore-default-filter",
         "-E",
-        PROFILES[profile]["test_filter"],
+        expression,
     ]
+
+
+def gate_test_command(toolchain, profile):
+    """The test gate's command (SPEC section 7.7) for `profile`."""
+    return nextest_command(toolchain, PROFILES[profile]["test_filter"])
+
+
+def component_test_command(toolchain):
+    """The command for the component tests the gate leaves out (SPEC section 7.7)."""
+    return nextest_command(toolchain, COMPONENT_TEST_FILTER)
+
+
+def failed_tests(lines):
+    """The tests nextest reports as failed, timed out or killed, each once, in order."""
+    names = []
+    for line in lines:
+        if re.match(r"^\s+(?:FAIL|TIMEOUT|ABORT|SIG[A-Z]+) \[", line):
+            name = line.split()[-1]
+            if name not in names:
+                names.append(name)
+    return names
 
 
 def agent_name(config, flag):
@@ -1189,11 +1234,31 @@ def kb_grep(entries, registry, needle):
     return hits
 
 
+def kb_section_bounds(entry, line):
+    """The first and last line of the allowed section holding `line`, or None."""
+    text = kb_text(entry)
+    for start, end in (entry.get("sections") or {}).values():
+        first = text.count("\n", 0, start) + 1
+        last = text.count("\n", 0, max(start, end - 1)) + 1
+        if first <= line <= last:
+            return first, last
+    return None
+
+
 def kb_snippet(entry, line, context=None):
+    """The lines around `line`, kept inside the section the hit was found in.
+
+    A hit is confined to the sections the registry allows, and so is its context:
+    the lines shown next to a match at a section's edge would otherwise come from
+    the section the search excluded. A document has no sections and shows the
+    whole-file context.
+    """
     lines = kb_text(entry).split("\n")
     span = KB_GREP_CONTEXT if context is None else context
-    start = max(0, line - 1 - span // 2)
-    return "\n".join(f"    {text}" for text in lines[start : start + span])
+    first, last = kb_section_bounds(entry, line) or (1, len(lines))
+    start = max(first - 1, line - 1 - span // 2)
+    stop = min(last, start + span)
+    return "\n".join(f"    {text}" for text in lines[start:stop])
 
 
 def reference_lines(entry):
@@ -1399,13 +1464,32 @@ def campaign_artifacts(repo):
 # bits unset, so an occurrence does not say whether it reads or writes. It does
 # populate enclosing_range on definitions, which is what makes callers and
 # callees derivable: a reference belongs to whichever definition's range
-# contains its line.
+# contains its line. A `local N` symbol is scoped to its document, and the
+# numbering restarts in every file, so the loader keys locals by file.
 
 CODE_CRATE = "consensus"
 SCIP_INDEX = "extract/code-index.scip"
 SCIP_ROLE_DEFINITION = 0x1
 SCIP_CALLABLE = "()."
+SCIP_LOCAL = "local "
 CODE_HITS_LIMIT = 40
+
+
+def index_key(symbol, relative):
+    """The identity a symbol has across the whole index.
+
+    A global symbol is unique by construction. A `local N` symbol is unique
+    only within its document: the same text names an unrelated binding in
+    every other file (`local 0` occurs in 218 of this crate's files), so it is
+    qualified by the file that defines it.
+    """
+    if symbol.startswith(SCIP_LOCAL):
+        return f"{symbol} in {relative}"
+    return symbol
+
+
+def index_is_local(symbol):
+    return symbol.startswith(SCIP_LOCAL)
 
 
 def scip_varint(buf, i):
@@ -1458,6 +1542,8 @@ def index_load(path):
 
     Occurrences are (symbol, path, line, is definition). Definitions map a
     symbol to (path, first line, last line) covering the whole item, 1-based.
+    Symbols are the keys of `index_key`, so a file-local one never merges
+    with its namesake in another file.
     """
     raw = memoryview(path.read_bytes())
     occurrences = []
@@ -1486,7 +1572,7 @@ def index_load(path):
                 elif field == 6:
                     display = bytes(payload).decode("utf-8", "replace")
             if symbol and display:
-                names[symbol] = display
+                names[index_key(symbol, relative)] = display
         for entry in occs:
             span = symbol = enclosing = None
             roles = 0
@@ -1501,6 +1587,7 @@ def index_load(path):
                     enclosing = scip_packed(payload) if wire == 2 else None
             if not symbol or not span:
                 continue
+            symbol = index_key(symbol, relative)
             line = span[0] + 1
             is_def = bool(roles & SCIP_ROLE_DEFINITION)
             occurrences.append((symbol, relative, line, is_def))
@@ -1621,7 +1708,9 @@ def index_test_ranges(repo, relative):
     for number, line in enumerate(lines, 1):
         if not line.startswith("#[cfg(test)]"):
             continue
-        following = next(
+        # The item may follow on the same line (`#[cfg(test)] mod tests {`), and a
+        # comment there is not the item.
+        following = line[len("#[cfg(test)]"):].split("//", 1)[0].strip() or next(
             (one for one in lines[number:] if one.strip() and not one.startswith("#[")),
             "",
         )
@@ -1644,20 +1733,42 @@ def index_match(occurrences, definitions, names, needle):
 
     An exact display name wins, so `refs construct_notarize` reports the three
     symbols that carry that name rather than everything containing the text.
+    A local variable is visible only inside its function, and this crate has
+    646 of them named `view` against 50 fields and methods, so locals are set
+    aside whenever a global carries the name; `index_locals` counts them. The
+    text of a local symbol is `local N` plus its file, which names nothing, so
+    the substring fallbacks skip locals.
     """
     exact = {sym for sym, display in names.items() if display == needle}
+    if any(not index_is_local(sym) for sym in exact):
+        exact = {sym for sym in exact if not index_is_local(sym)}
     if not exact:
-        exact = {sym for sym in definitions if needle in sym}
+        exact = {sym for sym in definitions if needle in sym and not index_is_local(sym)}
     if not exact:
-        exact = {sym for sym, _p, _l, _d in occurrences if needle in sym}
+        exact = {
+            sym
+            for sym, _p, _l, _d in occurrences
+            if needle in sym and not index_is_local(sym)
+        }
     return sorted(exact)
 
 
+def index_locals(names, needle, symbols):
+    """How many locals named `needle` the match set aside."""
+    if any(index_is_local(sym) for sym in symbols):
+        return 0
+    return sum(1 for sym, display in names.items() if display == needle and index_is_local(sym))
+
+
 def index_enclosing(definitions, relative, line):
-    """The definition whose extent contains `line`, innermost first."""
+    """The definition whose extent contains `line`, innermost first.
+
+    A local's extent is its own binding, so a call on a `let` line would
+    otherwise be reported as inside the variable rather than the function.
+    """
     best = None
     for symbol, (path, start, end) in definitions.items():
-        if path != relative or not start <= line <= end:
+        if path != relative or not start <= line <= end or index_is_local(symbol):
             continue
         if best is None or (end - start) < (best[2] - best[1]):
             best = (symbol, start, end)
@@ -1798,6 +1909,12 @@ def cmd_code(args):
     dropped = max(0, len(symbols) - CODE_HITS_LIMIT)
     if dropped:
         print(f"{dropped} further symbol(s) not shown")
+    set_aside = index_locals(names, args.name, symbols)
+    if set_aside:
+        print(
+            f"{set_aside} local variable(s) named {args.name!r} not shown: "
+            "a local is visible only inside its function"
+        )
     # Said again, because placing the hits can discover a file with no snapshot.
     after = rebaser.report()
     if after and after != warning:
@@ -2183,17 +2300,49 @@ def ast_in_token_tree(ancestors):
     return any(node[1] == "TOKEN_TREE" for _index, node in ancestors)
 
 
-def ast_field_ops(path, name):
-    """Where `name` is written, read, given an initial value, or unknown.
+def ast_handed_out(nodes, ancestors, owner, source):
+    """How a field expression is handed out, or None.
 
-    Returns four sorted line lists. A write is an assignment to a field or
-    path expression; an init is a struct literal field; everything else that
-    names the entity is a read; and a site inside a macro body is unknown,
-    because the tree does not structure one. A write through `&mut` is reported
-    as a read, which is the known limit of reading shape alone.
+    `self.f.push(x)` makes `self.f` the receiver of a method call and `&mut self.f`
+    lends it; either can write the field, and the tree carries no types to tell
+    `push` from `len`. Returns `.push(..)` or `&mut` for those shapes, so the
+    site is reported with what was done to it.
+    """
+    # A node's depth is its indentation in the dump, two columns per level, so a
+    # direct child sits two deeper than its parent.
+    position = ancestors.index(owner)
+    if position == 0:
+        return None
+    parent_index, parent = ancestors[position - 1]
+    _depth, kind, start, end = parent
+    if kind == "METHOD_CALL_EXPR" and start == owner[1][2]:
+        for node in nodes[parent_index + 1 :]:
+            if node[2] >= end:
+                break
+            if node[0] == parent[0] + 2 and node[1] == "NAME_REF" and node[2] >= owner[1][3]:
+                return f".{source[node[2]:node[3]].decode('utf-8', 'replace')}(..)"
+        return ".(..)"
+    if kind == "REF_EXPR":
+        for node in nodes[parent_index + 1 :]:
+            if node[2] >= end:
+                break
+            if node[0] == parent[0] + 2 and node[1] == "MUT_KW":
+                return "&mut"
+    return None
+
+
+def ast_field_ops(path, name):
+    """Where `name` is written, read, given an initial value, handed out, or unknown.
+
+    Returns five sorted lists. A write is an assignment to a field or path
+    expression; an init is a struct literal field; a site inside a macro body is
+    unknown, because the tree does not structure one; a `maybe` is a field handed
+    out as the receiver of a method call or by a `&mut` borrow, as (line, what),
+    which the tree cannot classify because `push` and `len` have one shape; and
+    everything else that names the entity is a read.
     """
     nodes, line_of, source = ast_tree(path)
-    writes, reads, inits, opaque = set(), set(), set(), set()
+    writes, reads, inits, opaque, maybe = set(), set(), set(), set(), set()
     for index, node, ancestors in ast_walk(nodes):
         _depth, kind, start, end = node
         if kind != "IDENT" or source[start:end].decode("utf-8", "replace") != name:
@@ -2221,16 +2370,36 @@ def ast_field_ops(path, name):
         if owner is None:
             reads.add(line)
             continue
-        owner_kind, owner_end = owner[1][1], owner[1][3]
+        owner_kind = owner[1][1]
         if owner_kind in ("RECORD_EXPR_FIELD", "RECORD_FIELD"):
             inits.add(line)
             continue
-        following = ast_next_significant(nodes, index, owner_end)
+        # The use is decided after the whole place expression: `(self.f).clear()`
+        # hands the field out through parentheses, `self.f[i] = v` assigns through
+        # the index, `self.f.g = v` writes a projection of it, `*self.f = v` and
+        # `&mut *self.f` go through a deref, and `(self.f, self.g) = ..` assigns
+        # through a tuple. A tuple or a negation that is not assigned ends in a
+        # read, as before.
+        position = ancestors.index(owner)
+        while position > 0:
+            parent = ancestors[position - 1][1]
+            if parent[1] in ("PAREN_EXPR", "PREFIX_EXPR", "TUPLE_EXPR", "ARRAY_EXPR") or (
+                parent[1] in ("INDEX_EXPR", "FIELD_EXPR") and parent[2] == owner[1][2]
+            ):
+                position -= 1
+                owner = ancestors[position]
+            else:
+                break
+        following = ast_next_significant(nodes, index, owner[1][3])
         if following and following[1] in AST_ASSIGN:
             writes.add(line)
+            continue
+        handed = ast_handed_out(nodes, ancestors, owner, source)
+        if handed:
+            maybe.add((line, handed))
         else:
             reads.add(line)
-    return sorted(writes), sorted(reads), sorted(inits), sorted(opaque)
+    return sorted(writes), sorted(reads), sorted(inits), sorted(opaque), sorted(maybe)
 
 
 def ast_documented_item(nodes, index, ancestors, first, last, depth, line_of):
@@ -2369,19 +2538,20 @@ def cmd_ast(args):
     boundaries = {}
     shown = 0
     for relative in targets:
-        writes, reads, inits, opaque = ast_field_ops(repo / relative, args.name)
+        writes, reads, inits, opaque, maybe = ast_field_ops(repo / relative, args.name)
         rows = (
-            [("write", line) for line in writes]
-            + [("init", line) for line in inits]
-            + [("read", line) for line in reads]
-            + [("macro", line) for line in opaque]
+            [("write", line, "") for line in writes]
+            + [("maybe", line, what) for line, what in maybe]
+            + [("init", line, "") for line in inits]
+            + [("read", line, "") for line in reads]
+            + [("macro", line, "") for line in opaque]
         )
-        for kind, line in rows:
+        for kind, line, what in rows:
             if not args.tests and index_is_test(repo, boundaries, str(relative), line):
                 continue
-            if kind not in ("write", "macro") and args.writes_only:
+            if kind not in ("write", "maybe", "macro") and args.writes_only:
                 continue
-            print(f"{kind:6s} {relative}:{line}")
+            print(f"{kind:6s} {relative}:{line}" + (f"  {what}" if what else ""))
             shown += 1
     print(f"\n{shown} site(s) for {args.name!r} in {len(targets)} file(s)")
     return 0
@@ -2667,11 +2837,22 @@ def cmd_test_gate(args):
     profile = args.profile or campaign_profile(sl_dir)
     if profile not in PROFILES:
         raise Abort(1, "no campaign in this checkout names its profile; pass --profile")
-    command = gate_test_command(load_config(sl_dir)["STATELENS_TEST_TOOLCHAIN"], profile)
+    toolchain = load_config(sl_dir)["STATELENS_TEST_TOOLCHAIN"]
+    command = gate_test_command(toolchain, profile)
     say(f"test-gate: {shlex.join(command)}")
     code = subprocess.run(command, cwd=repo).returncode
     say(f"test-gate: the test gate {'passed' if code == 0 else 'failed'}")
-    return 0 if code == 0 else 4
+    if code != 0:
+        return 4
+    components = component_test_command(toolchain)
+    say(f"test-gate: {shlex.join(components)}")
+    failed = subprocess.run(components, cwd=repo).returncode
+    say(
+        "test-gate: the component tests passed"
+        if failed == 0
+        else "test-gate: component tests failed; they are reported, not gated"
+    )
+    return 0
 
 
 def cmd_clean(args):
@@ -2851,17 +3032,36 @@ def plan_site_entries(value):
             entries.append(line)
         elif entries:
             entries[-1] += " " + line.strip()
-    return [
-        (text, PLAN_SITE_PATH.findall(text), PLAN_SITE_FN.findall(text)) for text in entries
-    ]
+
+    def functions(text):
+        # The action comes before the file and is not a function claim, however it
+        # is written; everything backticked after the file is one.
+        path = PLAN_SITE_PATH.search(text)
+        return PLAN_SITE_FN.findall(text[path.end():] if path else text)
+
+    return [(text, PLAN_SITE_PATH.findall(text), functions(text)) for text in entries]
 
 
-def enclosing_function(text, position):
-    """The name of the `fn` a position sits in, or None."""
-    name = None
-    for match in PLAN_FUNCTION.finditer(text, 0, position):
-        name = match.group(1)
-    return name
+def enclosing_function(position, impls, fns):
+    """The function whose body holds `position`: `Type::name` inside an `impl`
+    block, `name` outside one, None when no body holds it.
+
+    `impls` and `fns` come from `impl_extents` and `fn_extents` over the same
+    literal-free text, so neither a comment nor a string spelling `fn` counts; the
+    innermost of each holding the position is taken.
+    """
+
+    def innermost(extents):
+        return min(
+            ((end - start, name) for start, end, name in extents if start <= position <= end),
+            default=None,
+        )
+
+    function = innermost(fns)
+    if function is None:
+        return None
+    holder = innermost(impls)
+    return f"{holder[1]}::{function[1]}" if holder else function[1]
 
 
 def subsystem_assertions(repo):
@@ -2872,6 +3072,12 @@ def subsystem_assertions(repo):
     check at one site cannot certify another site of the same file. A file with no
     assertion is kept, because the question "which layer holds none at all" is answered by
     the empty lists.
+
+    The scan is textual. Comments, string literals that quote an assertion macro, and
+    the `#[cfg(test)]` items of a file are blanked first, so an assertion quoted in a
+    comment or a string or placed in a test module certifies nothing; what remains is
+    production code, where a site is attributed to the function whose body holds it,
+    qualified by the `impl` block around it, and to nothing when no body does.
     """
     found = {}
     for name in SUBSYSTEMS:
@@ -2886,14 +3092,180 @@ def subsystem_assertions(repo):
             except OSError as error:
                 say(f"warning: cannot read {path}: {error.strerror or error}; skipped")
                 continue
-            code = "\n".join(
-                line for line in text.splitlines() if not line.lstrip().startswith("//")
-            )
+            code = production_code(repo, relative, text)
+            # Items are located on the text with every literal blanked, so a string
+            # spelling `fn` opens nothing; the ids are read from the text with them.
+            structure = blank_inert(code, strings=True)
+            impls, fns = impl_extents(structure), fn_extents(structure)
             found[relative] = [
-                (match.group(1), enclosing_function(code, match.start()))
+                (match.group(1), enclosing_function(match.start(), impls, fns))
                 for match in PLAN_ASSERTION.finditer(code)
             ]
     return found
+
+
+def production_code(repo, relative, text):
+    """`text` with comments and `#[cfg(test)]` items blanked, line for line.
+
+    A file that mentions no assertion macro is returned empty, so the syntax tree that
+    locates test items is only asked for the files that need it.
+    """
+    if "sl_assert!" not in text and "sl_implies!" not in text:
+        return ""
+    ranges = index_test_ranges(repo, relative)
+    lines = blank_inert(text).split("\n")
+    for number in range(1, len(lines) + 1):
+        if any(first <= number and (last is None or number <= last) for first, last in ranges):
+            lines[number - 1] = ""
+    return "\n".join(lines)
+
+
+# Rust source, one token at a time: a string (raw ones with their hashes) or char
+# literal is kept whole, so a comment marker inside it is text; `/*` opens a block
+# comment, which nests; `//` runs to the end of the line. Inside a block comment
+# only `/*`, `*/` and newlines matter.
+CODE_TOKEN = re.compile(
+    r'(?P<raw>r(?P<hashes>#*)"[\s\S]*?"(?P=hashes))'
+    # An escape may be a backslash-newline continuation, and a char literal may
+    # be `'\x41'` or `'\u{1F600}'`; a literal the scan cannot pair would desync
+    # every quote after it.
+    r'|(?P<string>"(?:\\[\s\S]|[^"\\])*"'
+    r"|'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^\\'])')"
+    r"|/\*|//[^\n]*|\n|(?:[^\"'/\nr]+|r(?!#*\"))+|."
+)
+COMMENT_TOKEN = re.compile(r"/\*|\*/|\n|[^/*\n]+|.")
+ASSERTION_MACROS = ("sl_assert!", "sl_implies!")
+
+
+def blank_inert(text, strings=False):
+    """`text` with what cannot be an assertion replaced by spaces, newlines kept.
+
+    Comments go: a `//` comment may follow code on its line and block comments
+    nest, so neither a line test nor a non-nesting pattern removes them all, and an
+    assertion quoted in one would certify the function it sits in. So does a
+    string literal that quotes an assertion macro, which is text, not a call. With
+    `strings`, every string and char literal goes, for counting the braces of the
+    code without the ones inside literals.
+    """
+    out, depth, position = [], 0, 0
+    while position < len(text):
+        match = (COMMENT_TOKEN if depth else CODE_TOKEN).match(text, position)
+        token = match.group()
+        position = match.end()
+        if depth:
+            if token == "/*":
+                depth += 1
+            elif token == "*/":
+                depth -= 1
+            blank = True
+        elif token == "/*":
+            depth = 1
+            blank = True
+        elif token.startswith("//"):
+            blank = True
+        elif match.lastgroup in ("raw", "string"):
+            blank = strings or any(macro in token for macro in ASSERTION_MACROS)
+        else:
+            blank = False
+        out.append(re.sub(r"[^\n]", " ", token) if blank else token)
+    return "".join(out)
+
+
+IMPL_HEADER = re.compile(
+    r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?impl\b([^{;]*)(?=\{)", re.M
+)
+
+
+def block_extents(structure, header, name_of):
+    """[(start, end, name)] of the block items `header` matches in a literal-free text.
+
+    The body starts at the first `{` after the header outside brackets; a `;` there
+    is a declaration without a body and is skipped, as is a header `name_of` gives
+    no name for. Braces are counted on text with the literals blanked, so a brace
+    inside one neither opens nor closes a block.
+    """
+    extents = []
+    for match in header.finditer(structure):
+        name = name_of(match)
+        if name is None:
+            continue
+        depth, position, body = 0, match.end(), None
+        while position < len(structure):
+            char = structure[position]
+            if char == "-" and structure[position + 1 : position + 2] == ">":
+                position += 2
+                continue
+            if char in "([<":
+                depth += 1
+            elif char in ")]>":
+                depth = max(0, depth - 1)
+            elif depth == 0 and char == ";":
+                break
+            elif depth == 0 and char == "{":
+                body = position
+                break
+            position += 1
+        if body is None:
+            continue
+        depth = 0
+        for end in range(body, len(structure)):
+            if structure[end] == "{":
+                depth += 1
+            elif structure[end] == "}":
+                depth -= 1
+                if depth == 0:
+                    extents.append((match.start(), end, name))
+                    break
+    return extents
+
+
+def impl_extents(structure):
+    """[(start, end, type)] of every `impl` block of a literal-free text."""
+
+    def name_of(match):
+        kind = impl_type(match.group(1))
+        # An `impl Trait` argument that rustfmt put at the start of a line is not a
+        # block: what it leaves after the generics is a `)` or a `,`, not a path.
+        return kind if re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*", kind) else None
+
+    return block_extents(structure, IMPL_HEADER, name_of)
+
+
+def fn_extents(structure):
+    """[(start, end, name)] of every function with a body in a literal-free text."""
+    return block_extents(structure, PLAN_FUNCTION, lambda match: match.group(1))
+
+
+def impl_type(header):
+    """The type an `impl` header is for, as spelled: `Round` from
+    `impl<S: Scheme> Round<S>`, `RoundRobin` from
+    `impl<S> Elector<S> for RoundRobin<S> where S: Scheme`, and `prunable::Archive`
+    from `impl Blocks for prunable::Archive<E>`, since two modules may each have
+    an `Archive`."""
+    while re.search(r"<[^<>]*>", header):
+        header = re.sub(r"<[^<>]*>", "", header)
+    if " for " in header:
+        header = header.split(" for ", 1)[1]
+    header = re.split(r"\bwhere\b", header)[0].strip()
+    return header.strip("& ")
+
+
+def function_matches(found, named):
+    """Whether the function the scanner found is the one a ledger entry names.
+
+    A ledger entry of the form `Type::function` names that method and nothing else:
+    a method of another type, or a free function of the same name, is a different
+    item. The scanner keeps the type as the `impl` header spells it, so a claim may
+    give the path (`prunable::Archive::sync`) or its tail (`Archive::sync`); the
+    ledger check reports a tail that fits more than one type. A bare ledger name
+    is a less precise claim, satisfied by any function or method of that name. A
+    site outside every function body matches nothing.
+    """
+    if found is None:
+        return False
+    if "::" in named:
+        return found == named or found.endswith("::" + named)
+    return found.rsplit("::", 1)[-1] == named
 
 
 def lint_plan_file(path, expected=(), assertions=None):
@@ -2922,13 +3294,23 @@ def lint_plan_file(path, expected=(), assertions=None):
     bound_ids = set()
     for name, fields in sections.items():
         # The status may be written back-quoted or bold; the campaign parser allows both.
-        status = fields.get("Status", "").strip("`* ").split(" ")[0]
+        # A qualifier may follow the status: `partial (inactive in the fuzz targets)`.
+        # It is the one phrase the summary looks for, so a paraphrase is a problem
+        # rather than a binding silently counted as active.
+        raw = fields.get("Status", "").strip("`* ")
+        status = raw.split(" ")[0].strip("`*")
+        qualifier = raw[len(raw.split(" ")[0]) :].strip()
         fields["Status"] = status
         if status not in ("bound", "partial", "unbound"):
             problems.append(
                 f"{name}: Status is `{status or 'missing'}`; it must be bound, partial or unbound"
             )
             continue
+        if qualifier and not PLAN_INACTIVE.fullmatch(qualifier):
+            problems.append(
+                f"{name}: Status qualifier `{qualifier}` is not recognised; after the status "
+                "write `(inactive in the fuzz targets)` or nothing"
+            )
         required = PLAN_FIELDS if status != "unbound" else ("Status", "Notes")
         for required_field in required:
             if not fields.get(required_field):
@@ -3010,10 +3392,24 @@ def plan_ledger_problems(name, entries, assertions):
                     "function; give it in backticks, as `Type::function` or `function`"
                 )
                 continue
-            if not any(found == name and at in functions for found, at in sites):
+            holders = sorted(
+                {
+                    at
+                    for found, at in sites
+                    if found == name and any(function_matches(at, named_fn) for named_fn in functions)
+                }
+            )
+            if not holders:
                 problems.append(
                     f"{name}: Sites calls `{named}` `{functions[0]}` checked, but the "
                     f"assertion naming {name} is elsewhere in that file"
+                )
+            elif len(holders) > 1:
+                # Two types of one name, from two modules, each with the method.
+                problems.append(
+                    f"{name}: Sites calls `{named}` `{functions[0]}` checked, which names "
+                    f"more than one method there ({', '.join(f'`{at}`' for at in holders)}); "
+                    "name the type's path"
                 )
     return problems
 
@@ -3390,6 +3786,15 @@ def materialize_edits(repo, sl_dir, profile):
 class Campaign:
     """Phase 2 (SPEC sections 7 and 8), run in place in the checkout."""
 
+    # What the plan's claims were validated against: a digest of every subsystem
+    # source and of the plan, taken at the first plan lint, after the audit (SPEC
+    # section 7.6). And the paths a repair changed after that, which make the audit
+    # stale. Class defaults, because `finish` reads them whichever step aborted.
+    audit_content = None
+    stale = None
+    # Bindings a later audit batch's edits escaped: id -> (batch, files).
+    unreviewed = None
+
     def __init__(self, args):
         self.repo = repo_root()
         self.sl_dir = self.repo / SL
@@ -3417,6 +3822,10 @@ class Campaign:
         # (commit sites listed, not checked) and the plan lint's problem count.
         self.coverage = None
         self.plan_problems = None
+        # Invariants whose Status says the fuzz targets never evaluate them.
+        self.inactive = None
+        # The component tests that failed after the gate passed; they are not gated.
+        self.components = None
         self.reason = None
         self.panic = None
 
@@ -3490,14 +3899,18 @@ class Campaign:
                 (
                     "invariants",
                     f"{len(self.statuses)} (bound {counts['bound']}, "
-                    f"partial {counts['partial']}, unbound {counts['unbound']})",
+                    f"partial {counts['partial']}, unbound {counts['unbound']})"
+                    + inactive_note(self.inactive),
                 )
             )
         if self.audited is not None:
-            rows.append(("audit", ", ".join(self.audited) if self.audited else "no status change"))
+            audit = ", ".join(self.audited) if self.audited else "no status change"
+            if self.stale:
+                audit += " [stale: a repair changed the tree after it]"
+            rows.append(("audit", audit))
+        problems = self.plan_problems or 0
         if self.coverage is not None:
             listed, unchecked = self.coverage
-            problems = self.plan_problems or 0
             rows.append(
                 (
                     "plan",
@@ -3505,12 +3918,47 @@ class Campaign:
                     f"{problems} lint problem(s)",
                 )
             )
+        # The counts above are the plan's claims. A lint problem means the code does
+        # not support them, and a repair after the audit means the audit speaks for a
+        # tree that is gone, so a reader must not take READY for the coverage they
+        # describe. A clean lint does not clear the second: it cannot see a condition
+        # rewritten under the same id, site and function.
+        unvalidated = []
+        if problems:
+            unvalidated.append(
+                f"{problems} plan lint problem(s), so the code does not support the counts above"
+            )
+        if self.stale:
+            unvalidated.append(
+                f"a repair changed {len(self.stale)} validated file(s) after the audit "
+                f"({', '.join(self.stale)}), so the audit and the statuses describe the "
+                "tree before it; run a campaign with a new audit before relying on them"
+            )
+        if self.statuses and self.audited is None:
+            unvalidated.append(
+                "no audit pass ran (STATELENS_AUDIT=0), so the statuses are the binding "
+                "agent's own claims"
+            )
+        if self.unreviewed:
+            unvalidated.append(unreviewed_note(self.unreviewed))
+        if unvalidated:
+            rows.append(("coverage", "UNVALIDATED: " + "; ".join(unvalidated)))
         if self.sites is not None:
             assertions, probes, deleted = self.sites
             rows.append(
                 (
                     "sites",
                     f"{assertions} assertion sites, {probes} probe sites, {deleted} deleted lines",
+                )
+            )
+        if self.components is not None:
+            rows.append(
+                (
+                    "components",
+                    f"{len(self.components)} failed, not gated: {', '.join(self.components)}"
+                    "; see campaign/logs/test-components.log"
+                    if self.components
+                    else "all passed",
                 )
             )
         rows.append(("result", result))
@@ -3744,20 +4192,24 @@ class Campaign:
             say("warning: no invariants to bind; adding beacon probes only")
         for name, prompt in self.invariant_prompts():
             self.agent_step(name, prompt)
-        self.audit()
         for name, prompt in self.beacon_prompts():
             self.agent_step(name, prompt)
+        # The audit is the last agent pass, so the tree it speaks for is the tree the
+        # plan lint fingerprints and the build hands over (SPEC section 7.3, step 6).
+        self.audit()
         self.complete_plan()
         self.check_plan()
         self.check_scope()
         self.record()
 
     def audit(self):
-        """Re-reviews the bindings before the beacon step (SPEC section 7.3, steps 6 and 7).
+        """Re-reviews the bindings after the beacon step (SPEC section 7.3, steps 6 and 7).
 
         The first pass writes a binding and its own status; nothing there compares the
         two. This pass does, against the Statement and the sites that commit the actions
-        it names, which is where a binding is silently incomplete rather than wrong.
+        it names, which is where a binding is silently incomplete rather than wrong. It
+        runs last, after the beacon agents, so no agent edits the tree between the audit
+        and the fingerprint the plan lint takes of it.
         """
         if not self.invariants:
             return
@@ -3766,8 +4218,18 @@ class Campaign:
             return
         plan = self.dir / "plan.md"
         before = self.parse_statuses(plan.read_text())
+        batches = []
         for name, prompt in self.audit_prompts():
             self.agent_step(name, prompt)
+            # The tree each batch's verdict stands for, to tell a later batch's
+            # additions from its edits to what an earlier batch reviewed.
+            batches.append((name, prompt_invariants(prompt), subsystem_texts(self.repo)))
+        self.unreviewed = audit_drift(batches)
+        if self.unreviewed:
+            say(
+                f"audit: {len(self.unreviewed)} binding(s) were reviewed before a later "
+                f"batch changed existing lines: {', '.join(sorted(self.unreviewed))}"
+            )
         after = self.parse_statuses(plan.read_text())
         self.audited = [
             f"{key} {before.get(key) or 'none'} -> {after.get(key) or 'none'}"
@@ -3789,6 +4251,56 @@ class Campaign:
         self.plan_problems = len(problems)
         # Set here, not only in `record`, so an abort in between still reports it.
         self.coverage = self.commit_sites(plan.read_text())
+        if self.audit_content is None:
+            self.audit_content = self.validated_content()
+
+    def validated_content(self):
+        """A digest of everything the audit and the plan lint speak for.
+
+        Every file of the subsystem sources the lint scans, helpers and ghost state
+        included and not only the macro calls, and the plan without the summary the
+        script appends. A repair that changes any of it leaves the audit describing
+        a tree that no longer exists, which the lint cannot see when the change
+        keeps the invariant's id, site and function and alters the condition.
+        """
+        content = {}
+        for name in SUBSYSTEMS:
+            for path in sorted((self.repo / "consensus/src" / name).rglob("*")):
+                if path.is_file():
+                    content[path.relative_to(self.repo).as_posix()] = sha256(path)
+        plan = self.dir / "plan.md"
+        if plan.is_file():
+            # Stripped the way `record` strips it before appending a new summary.
+            text = re.sub(r"\n## Summary\n.*\Z", "\n", plan.read_text(), flags=re.S)
+            content["plan.md"] = hashlib.sha256(text.rstrip("\n").encode()).hexdigest()
+        return content
+
+    def changed_since_validation(self):
+        """The paths of `validated_content` that differ from the validated digest."""
+        if self.audit_content is None:
+            return []
+        current = self.validated_content()
+        return sorted(
+            path
+            for path in set(self.audit_content) | set(current)
+            if self.audit_content.get(path) != current.get(path)
+        )
+
+    @staticmethod
+    def inactive_invariants(text):
+        """The invariants whose Status says the fuzz targets never evaluate the check.
+
+        A binding can be complete and still silent in the campaign, when its `pre` needs
+        what the `cert_mock` scheme or the targets never provide; the Status carries
+        `(inactive in the fuzz targets)` for that (SPEC section 11), and it is reported
+        apart from the statuses, which describe the binding and not its activation.
+        """
+        sections, _repeated = plan_sections(text)
+        return sorted(
+            name
+            for name, fields in sections.items()
+            if PLAN_INACTIVE.search(fields.get("Status", ""))
+        )
 
     @staticmethod
     def commit_sites(text):
@@ -3911,11 +4423,12 @@ class Campaign:
             rows = [line for line in section.splitlines() if line.startswith("|")]
             beacon_rows = max(len(rows) - 2, 0)
         listed, unchecked = self.commit_sites(text)
+        self.inactive = self.inactive_invariants(text)
         counts = collections.Counter(statuses.values())
         summary = (
             "## Summary\n\n"
             f"- Invariants: {len(statuses)} (bound {counts['bound']}, partial "
-            f"{counts['partial']}, unbound {counts['unbound']})\n"
+            f"{counts['partial']}, unbound {counts['unbound']}){inactive_note(self.inactive)}\n"
             f"- Commit sites: {listed} listed, {unchecked} not checked\n"
             f"- Assertion call sites: {assertions}\n"
             f"- Assertion sites by file: {self.assertion_files()}\n"
@@ -3924,6 +4437,13 @@ class Campaign:
             f"- Deleted lines under {', '.join(roots)}: {deleted}"
             + (" (must match the 'Edited lines' entries)" if deleted else "")
             + "\n"
+            + (
+                f"- Audit: stale; a repair changed {len(self.stale)} validated file(s) "
+                f"after it: {', '.join(self.stale)}\n"
+                if self.stale
+                else ""
+            )
+            + (f"- Audit: {unreviewed_note(self.unreviewed)}\n" if self.unreviewed else "")
         )
         self.coverage = (listed, unchecked)
         text = re.sub(r"\n## Summary\n.*\Z", "\n", text, flags=re.S).rstrip("\n")
@@ -3956,6 +4476,18 @@ class Campaign:
             failure = self.build_once(attempt)
             if failure is None:
                 if attempt:
+                    # A repair may have removed or changed an assertion. The plan is
+                    # linted again against the tree as repaired, and whatever the lint
+                    # finds, the audit now describes a tree that is gone: it is marked
+                    # stale for every file the repairs changed, because a condition
+                    # rewritten under the same id, site and function passes the lint.
+                    self.stale = self.changed_since_validation()
+                    if self.stale:
+                        say(
+                            f"build: the repairs changed {len(self.stale)} validated "
+                            f"file(s) ({', '.join(self.stale)}); the audit is stale"
+                        )
+                    self.check_plan()
                     self.record()
                 say("build: the instrumented tree builds")
                 return
@@ -3964,6 +4496,9 @@ class Campaign:
             command, tail = failure
             self.agent_step(f"repair-{attempt + 1}", self.repair_prompt(attempt + 1, command, tail))
             self.check_scope()
+            # Kept current after every repair, so a build that never succeeds still
+            # reports the audit stale in the summary it leaves behind.
+            self.stale = self.changed_since_validation()
 
     def build_once(self, attempt):
         """Runs CHECK, then FUZZBUILD target by target; returns the first failure."""
@@ -3990,6 +4525,7 @@ class Campaign:
         code, _ = run_logged(self.test_command(), log, self.repo)
         if code == 0:
             say("test: the test gate passed")
+            self.components = self.component_tests()
             return
         lines = log.read_text(errors="replace").splitlines()
         for line in lines:
@@ -3999,6 +4535,181 @@ class Campaign:
                 say(line.strip())
         self.panic = first_panic(lines)
         raise Abort(4, f"the test gate failed; see {log.relative_to(self.repo)}")
+
+    def component_tests(self):
+        """Runs the component tests the gate leaves out; returns the failed ones.
+
+        They drive one actor with states built by hand, where evidence another actor
+        produces is absent, so a failure is a mismatch to judge rather than a verdict,
+        and it never fails the campaign. Hiding them would hide more than that: an
+        instrumented tree that no longer passes the crate's own suite.
+        """
+        log = self.dir / "logs" / "test-components.log"
+        say("test: component tests of simplex, reported but not gated")
+        code, _ = run_logged(component_test_command(self.test_toolchain), log, self.repo)
+        if code == 0:
+            say("test: the component tests passed")
+            return []
+        failed = failed_tests(log.read_text(errors="replace").splitlines())
+        if not failed:
+            failed = [f"(no FAIL line; see {log.relative_to(self.repo)})"]
+        for name in failed:
+            say(f"test: component test failed, not gated: {name}")
+        return failed
+
+
+def inactive_note(inactive):
+    return f"; inactive in the fuzz targets: {', '.join(inactive)}" if inactive else ""
+
+
+def prompt_invariants(prompt):
+    """The invariant ids a binding or audit prompt is about, from its task line."""
+    match = re.search(r"^## Task: .*?invariants (.+)$", prompt, re.M)
+    text = match.group(1) if match else prompt
+    return sorted(set(re.findall(r"\b(?:INV|FALSE)-\d+\b", text)))
+
+
+def subsystem_texts(repo):
+    """The text of every subsystem source, by repo-relative path."""
+    texts = {}
+    for name in SUBSYSTEMS:
+        for path in sorted((repo / "consensus/src" / name).rglob("*")):
+            if path.is_file():
+                texts[path.relative_to(repo).as_posix()] = path.read_text(errors="replace")
+    return texts
+
+
+def insertions(old, new):
+    """The lines `new` adds to `old`, as (index in old, lines), or None when `new`
+    changes or removes a line of `old`.
+
+    A two-pointer walk rather than a diff: a diff can pair an old block with a
+    later copy of it and call the lines between removed, though every old line
+    survives in order.
+    """
+    old_lines, new_lines = old.split("\n"), new.split("\n")
+    added, block, index = [], [], 0
+    for line in new_lines:
+        if index < len(old_lines) and line == old_lines[index]:
+            if block:
+                added.append((index, block))
+                block = []
+            index += 1
+        else:
+            block.append(line)
+    if index < len(old_lines):
+        return None
+    if block:
+        added.append((index, block))
+    return added
+
+
+def modified_lines(old, new):
+    """Whether `new` changes or removes a line of `old`, rather than only adding lines."""
+    return bool(old) and insertions(old, new) is None
+
+
+QUIET_CALL = re.compile(r"\s*(?:crate::simplex::statelens::)?sl_(?:assert|implies|probe)!\s*\(")
+ITEM_LINE = re.compile(
+    r"^\s*(?:#\[|pub\b|fn\b|impl\b|struct\b|enum\b|trait\b|mod\b|type\b|const\b|static\b"
+    r"|async\b|unsafe\b|extern\b)"
+)
+
+
+def quiet_block(lines):
+    """Whether added lines are only blank lines, `//` comments and StateLens calls.
+
+    A block comment marker is never quiet: `/*` above an existing check and `*/`
+    below it comment the check out without touching its line.
+    """
+    if any("/*" in line or "*/" in line for line in lines):
+        return False
+    text = blank_inert("\n".join(lines), strings=True)
+    position = 0
+    while True:
+        match = QUIET_CALL.match(text, position)
+        if not match:
+            return text[position:].strip() == ""
+        depth, position = 1, match.end()
+        while position < len(text) and depth:
+            depth += {"(": 1, ")": -1}.get(text[position], 0)
+            position += 1
+        if depth:
+            return False
+        if text[position : position + 1] == ";":
+            position += 1
+
+
+def drift_reason(old, new):
+    """Why `new` may change what an earlier audit batch reviewed in `old`, or None.
+
+    A changed or removed line is drift. So are lines added inside an existing
+    function body unless every one is blank, a `//` comment or a StateLens macro
+    call: a `let` that shadows, an early `return`, a call that prunes a ghost
+    history or a `/*` all compile and change what an earlier binding rests on. So
+    is an attribute or a comment opener added right above an existing item, which
+    can compile it out. New items, and new checks beside existing code, are quiet.
+    """
+    added = insertions(old, new)
+    if added is None:
+        return "changed or removed lines"
+    old_lines = old.split("\n")
+    structure = blank_inert(old, strings=True)
+    bodies = [
+        (structure.count("\n", 0, start) + 1, structure.count("\n", 0, end) + 1, name)
+        for start, end, name in fn_extents(structure)
+    ]
+    for index, block in added:
+        # The block precedes old line `index + 1`; inside a body means after the
+        # body's first line and at or before its closing brace.
+        holder = next((name for first, last, name in bodies if first < index + 1 <= last), None)
+        if holder and not quiet_block(block):
+            return f"added lines inside `{holder}`"
+        following = next((line for line in old_lines[index:] if line.strip()), "")
+        if ITEM_LINE.match(following) and any(
+            line.lstrip().startswith(("#[", "/*")) for line in block
+        ):
+            return "added an attribute or a comment opener above an item"
+    return None
+
+
+def audit_drift(batches):
+    """The bindings whose audit verdict a later batch's edits escaped: id -> (batch, edits).
+
+    `batches` is (name, invariant ids, subsystem texts after the batch), in order.
+    Each batch's verdict stands for the tree it left. A later batch may add new
+    items and new checks, which change nothing an earlier batch reviewed; but an
+    edit `drift_reason` names may be to an earlier binding's assertion, ghost
+    update or helper, and nothing reviews that binding again, so it is reported
+    unreviewed with the batch and the edits, as `path (reason)`.
+    """
+    unreviewed = {}
+    for later in range(1, len(batches)):
+        name, _ids, texts = batches[later]
+        _earlier_name, _earlier_ids, previous = batches[later - 1]
+        edits = []
+        for path in sorted(set(previous) | set(texts)):
+            if path not in previous:
+                continue  # a new file, which no earlier batch reviewed
+            reason = drift_reason(previous[path], texts.get(path, ""))
+            if reason:
+                edits.append(f"{path} ({reason})")
+        if not edits:
+            continue
+        for earlier in range(later):
+            for invariant in batches[earlier][1]:
+                unreviewed.setdefault(invariant, (name, edits))
+    return unreviewed
+
+
+def unreviewed_note(unreviewed):
+    """One clause naming the bindings a later audit batch's edits escaped."""
+    batches = sorted({batch for batch, _edits in unreviewed.values()})
+    edits = sorted({edit for _batch, edits in unreviewed.values() for edit in edits})
+    return (
+        f"audit batch {', '.join(batches)} edited {', '.join(edits)} after the verdict on "
+        f"{', '.join(sorted(unreviewed))}, which were not reviewed against the edit"
+    )
 
 
 def first_panic(lines):
@@ -4217,13 +4928,19 @@ def main(argv):
     )
     ast_queries = ast.add_subparsers(dest="query", required=True, parser_class=Parser)
     ast_sites = ast_queries.add_parser(
-        "sites", help="where a field or binding is written, initialized and read"
+        "sites",
+        help=(
+            "where a field or binding is written, handed to a method or a &mut borrow "
+            "(maybe), initialized and read"
+        ),
     )
     ast_sites.add_argument("name", metavar="NAME", help="a field or variable name")
     ast_sites.add_argument("paths", nargs="*", metavar="PATH", help="files to parse")
     ast_sites.add_argument("--tests", action="store_true", help="include test code")
     ast_sites.add_argument(
-        "--writes-only", action="store_true", help="only the sites that assign it"
+        "--writes-only",
+        action="store_true",
+        help="only the sites that assign it or hand it out (write, maybe and macro)",
     )
     ast_notes_parser = ast_queries.add_parser(
         "notes", help="comment blocks matching a pattern, with the item each documents"

@@ -211,18 +211,28 @@ class SyntaxSites(unittest.TestCase):
         cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
         cls.path = cls.tmp / "t.rs"
         cls.path.write_text(
-            "struct S { armed: bool }\n"
-            "impl S {\n"
-            "    fn new() -> S { S { armed: false } }\n"
-            "    fn arm(&mut self) { self.armed = true; }\n"
-            "    fn ready(&self) -> bool { self.armed }\n"
-            "    fn armed(&self) -> bool { self.armed }\n"
-            "}\n"
+            "struct S { armed: bool, items: Vec<u8> }\n"                 # 1
+            "impl S {\n"                                                  # 2
+            "    fn new() -> S { S { armed: false, items: vec![] } }\n"   # 3
+            "    fn arm(&mut self) { self.armed = true; }\n"              # 4
+            "    fn ready(&self) -> bool { self.armed }\n"                # 5
+            "    fn armed(&self) -> bool { self.armed }\n"                # 6
+            "    fn add(&mut self) { self.items.push(1); }\n"             # 7
+            "    fn lend(&mut self) { fill(&mut self.items); }\n"         # 8
+            "    fn count(&self) -> usize { self.items.len() }\n"         # 9
+            "    fn peek(&self) -> &Vec<u8> { &self.items }\n"             # 10
+            "    fn set(&mut self) { self.items[0] = 2; }\n"               # 11
+            "    fn bump(&mut self) { self.items[0] += 1; }\n"             # 12
+            "    fn wrap(&mut self) { (self.items).push(3); }\n"           # 13
+            "    fn lend_paren(&mut self) { fill(&mut (self.items)); }\n"  # 14
+            "}\n"                                                         # 15
+            "fn fill(_items: &mut Vec<u8>) {}\n"                          # 16
         )
 
     def test_classifies_write_init_and_read(self):
-        writes, reads, inits, opaque = sl.ast_field_ops(self.path, "armed")
+        writes, reads, inits, opaque, maybe = sl.ast_field_ops(self.path, "armed")
         self.assertEqual(opaque, [], "no macro bodies in this fixture")
+        self.assertEqual(maybe, [], "a bool is never handed out here")
         # `self.armed = true` is a write, not a read of the `self` path.
         self.assertEqual(writes, [4])
         # a struct literal field is an initial value, not a write
@@ -230,6 +240,75 @@ class SyntaxSites(unittest.TestCase):
         # the two bodies that read it; the method declaration on line 6 is a
         # different entity of the same spelling and is not counted
         self.assertEqual(reads, [5, 6])
+
+    def test_a_field_handed_out_is_neither_a_read_nor_a_write(self):
+        # The gap: `self.items.push(1)` and `fill(&mut self.items)` were reads, so
+        # `--writes-only` left every mutation through a method out of the
+        # transition inventory.
+        writes, reads, inits, _opaque, maybe = sl.ast_field_ops(self.path, "items")
+        # An assignment through an index is a write of the field.
+        self.assertEqual(writes, [11, 12])
+        self.assertEqual(inits, [3])
+        # Parentheses around the receiver or the borrowed place change nothing.
+        self.assertEqual(
+            maybe,
+            [(7, ".push(..)"), (8, "&mut"), (9, ".len(..)"), (13, ".push(..)"), (14, "&mut")],
+        )
+        self.assertEqual(reads, [10], "a shared borrow cannot write, so it stays a read")
+
+    def test_a_write_through_a_projection_is_a_write_of_the_field(self):
+        path = self.tmp / "p.rs"
+        path.write_text(
+            "struct Inner { count: u8 }\n"                        # 1
+            "struct S { inner: Inner }\n"                         # 2
+            "impl S {\n"                                          # 3
+            "    fn set(&mut self) { self.inner.count = 1; }\n"   # 4
+            "    fn add(&mut self) { self.inner.count += 1; }\n"  # 5
+            "    fn get(&self) -> u8 { self.inner.count }\n"      # 6
+            "}\n"                                                 # 7
+        )
+        writes, reads, _inits, _opaque, maybe = sl.ast_field_ops(path, "inner")
+        self.assertEqual((writes, reads, maybe), ([4, 5], [6], []))
+        writes, reads, _inits, _opaque, maybe = sl.ast_field_ops(path, "count")
+        self.assertEqual((writes, reads, maybe), ([4, 5], [6], []))
+
+    def test_derefs_and_tuple_assignments_reach_the_field(self):
+        path = self.tmp / "d.rs"
+        path.write_text(
+            "struct S { boxed: Box<Vec<u8>>, items: Vec<u8>, n: u8 }\n"        # 1
+            "impl S {\n"                                                        # 2
+            "    fn clear_boxed(&mut self) { (*self.boxed).clear(); }\n"        # 3
+            "    fn lend_boxed(&mut self) { fill(&mut *self.boxed); }\n"        # 4
+            "    fn reset(&mut self) { *self.boxed = Box::new(vec![]); }\n"     # 5
+            "    fn pair(&mut self) { (self.items, self.n) = (vec![], 0); }\n"  # 6
+            "    fn neg(&self) -> i32 { -(self.n as i32) }\n"                   # 7
+            "    fn both(&self) -> (u8, u8) { (self.n, self.n) }\n"             # 8
+            "}\n"                                                               # 9
+            "fn fill(_v: &mut Vec<u8>) {}\n"                                    # 10
+        )
+        writes, reads, _inits, _opaque, maybe = sl.ast_field_ops(path, "boxed")
+        self.assertEqual((writes, reads, maybe), ([5], [], [(3, ".clear(..)"), (4, "&mut")]))
+        writes, reads, _inits, _opaque, maybe = sl.ast_field_ops(path, "items")
+        self.assertEqual((writes, reads, maybe), ([6], [], []))
+        writes, reads, _inits, _opaque, maybe = sl.ast_field_ops(path, "n")
+        self.assertEqual((writes, reads, maybe), ([6], [7, 8], []))
+
+    def test_writes_only_keeps_the_maybe_sites(self):
+        saved = sl.repo_root
+        sl.repo_root = lambda: self.tmp
+        self.addCleanup(setattr, sl, "repo_root", saved)
+        out = io.StringIO()
+        args = argparse.Namespace(
+            query="sites", name="items", paths=["t.rs"], tests=True, writes_only=True
+        )
+        with contextlib.redirect_stdout(out):
+            sl.cmd_ast(args)
+        text = out.getvalue()
+        self.assertIn("write  t.rs:11", text)
+        self.assertIn("maybe  t.rs:7  .push(..)", text)
+        self.assertIn("maybe  t.rs:8  &mut", text)
+        self.assertNotIn("read", text)
+        self.assertNotIn("init", text)
 
 
 class Rebasing(unittest.TestCase):
@@ -384,7 +463,7 @@ class MacroBodies(unittest.TestCase):
         cls.path.write_text(cls.SOURCE)
 
     def test_a_write_inside_a_macro_is_reported_as_unknown_not_dropped(self):
-        writes, reads, inits, opaque = sl.ast_field_ops(self.path, "armed")
+        writes, reads, inits, opaque, _maybe = sl.ast_field_ops(self.path, "armed")
         self.assertEqual(writes, [4], "the plain write")
         self.assertEqual(opaque, [5], "the write inside the macro body")
         self.assertNotIn(5, reads, "a macro-body site must not pass as a read")
@@ -780,10 +859,11 @@ class KbDocuments(unittest.TestCase):
         self.assertIn("is a document, which has no sections", str(caught.exception))
 
 
-def scip_document(relative, occurrences):
+def scip_document(relative, occurrences, names=None):
     """A SCIP index of one document holding several occurrences.
 
-    Each occurrence is (symbol, span, enclosing or None, roles).
+    Each occurrence is (symbol, span, enclosing or None, roles). `names` maps
+    a symbol to the display name its symbol information carries.
     """
     body = length_delimited(1, relative.encode())
     for symbol, span, enclosing, roles in occurrences:
@@ -792,7 +872,145 @@ def scip_document(relative, occurrences):
         if enclosing:
             one += length_delimited(7, packed(*enclosing))
         body += length_delimited(2, one)
+    for symbol, display in (names or {}).items():
+        info = length_delimited(1, symbol.encode()) + length_delimited(6, display.encode())
+        body += length_delimited(3, info)
     return length_delimited(2, body)
+
+
+class ScipLocals(unittest.TestCase):
+    """A `local N` symbol is unique within its document only. rust-analyzer
+    starts the numbering afresh in every file, so two files' `local 0` are two
+    unrelated bindings, and merging them attributes one file's name, definition
+    and references to the other."""
+
+    A = "consensus/src/a.rs"
+    B = "consensus/src/b.rs"
+    RUN = "rust-analyzer cargo c 1 a/run()."
+    QUORUM = "rust-analyzer cargo c 1 a/quorum()."
+    SOURCE_A = (
+        "fn run() {\n"                  # 1  run spans 1-4
+        "    let view = quorum();\n"    # 2  local 0 (view) defined, quorum called
+        "    view;\n"                   # 3  local 0 referenced
+        "}\n"                           # 4
+        "fn quorum() {}\n"              # 5
+    )
+    SOURCE_B = (
+        "fn other() {\n"                # 1
+        "    let round = 1;\n"          # 2  local 0 (round) defined
+        "    round;\n"                  # 3  local 0 referenced
+        "}\n"                           # 4
+    )
+
+    def setUp(self):
+        self.repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.sl_dir = self.repo / "consensus/fuzz/statelens"
+        (self.sl_dir / "extract").mkdir(parents=True)
+        (self.repo / "consensus/src").mkdir(parents=True)
+        (self.repo / self.A).write_text(self.SOURCE_A)
+        (self.repo / self.B).write_text(self.SOURCE_B)
+        self.index = sl.index_path(self.sl_dir)
+        self.write_index()
+        sl.snapshot_write(self.repo, self.sl_dir, [self.A, self.B])
+        self.saved = {n: getattr(sl, n) for n in ("repo_root", "say")}
+        sl.repo_root = lambda: self.repo
+        sl.say = lambda *_args, **_kw: None
+        self.addCleanup(lambda: [setattr(sl, k, v) for k, v in self.saved.items()])
+        self.loaded = sl.index_load(self.index)
+
+    def write_index(self, run="run"):
+        """Two documents that both define `local 0`; `run` names the function."""
+        self.index.write_bytes(
+            scip_document(
+                "src/a.rs",
+                [
+                    (self.RUN, [0, 3, 6], [0, 0, 3, 1], 1),
+                    ("local 0", [1, 8, 12], [1, 8, 12], 1),
+                    (self.QUORUM, [1, 15, 21], None, 0),
+                    ("local 0", [2, 4, 8], None, 0),
+                    (self.QUORUM, [4, 3, 9], [4, 0, 4, 15], 1),
+                ],
+                {"local 0": "view", self.RUN: run, self.QUORUM: "quorum"},
+            )
+            + scip_document(
+                "src/b.rs",
+                [
+                    ("local 0", [1, 8, 13], [1, 8, 13], 1),
+                    ("local 0", [2, 4, 9], None, 0),
+                ],
+                {"local 0": "round"},
+            )
+        )
+
+    def code(self, query, name):
+        out = io.StringIO()
+        args = argparse.Namespace(query=query, name=name, paths=[], tests=False, all=False)
+        with contextlib.redirect_stdout(out):
+            sl.cmd_code(args)
+        return out.getvalue()
+
+    def test_each_file_keeps_its_own_local(self):
+        _occurrences, definitions, names = self.loaded
+        locals_ = {sym: where for sym, where in definitions.items() if sl.index_is_local(sym)}
+        self.assertEqual(
+            locals_,
+            {
+                f"local 0 in {self.A}": (self.A, 2, 2),
+                f"local 0 in {self.B}": (self.B, 2, 2),
+            },
+        )
+        self.assertEqual(names[f"local 0 in {self.A}"], "view")
+        self.assertEqual(names[f"local 0 in {self.B}"], "round")
+
+    def test_a_locals_references_never_cross_into_another_file(self):
+        out = self.code("refs", "view")
+        self.assertIn("1 symbol(s) matching 'view'", out)
+        self.assertIn(f"def  {self.A}:2", out)
+        self.assertIn(f"ref  {self.A}:3", out)
+        self.assertNotIn(self.B, out)
+        other = self.code("refs", "round")
+        self.assertIn("1 symbol(s) matching 'round'", other)
+        self.assertNotIn(self.A, other)
+
+    def test_a_local_is_named_in_its_file(self):
+        out = self.code("defs", "round")
+        self.assertIn(f"local 0 in {self.B} (round)", out)
+        self.assertIn(f"{self.B}:2-2", out)
+
+    def test_a_call_on_a_let_line_belongs_to_the_function(self):
+        # The gap: the local's extent is its own binding on the `let` line, and
+        # as the innermost definition containing the call it was reported as
+        # the caller in place of the function.
+        out = self.code("callers", "quorum")
+        self.assertIn(f"{self.A}:2  in a/run()", out)
+        self.assertNotIn("local", out)
+
+    def test_a_local_is_not_matched_by_its_file_name(self):
+        occurrences, definitions, names = self.loaded
+        self.assertEqual(sl.index_match(occurrences, definitions, names, "src/b"), [])
+        self.assertEqual(sl.index_match(occurrences, definitions, names, "local"), [])
+
+    def test_locals_are_set_aside_when_a_global_carries_the_name(self):
+        occurrences, definitions, names = self.loaded
+        names = dict(names, **{self.RUN: "view"})
+        found = sl.index_match(occurrences, definitions, names, "view")
+        self.assertEqual(found, [self.RUN])
+        self.assertEqual(sl.index_locals(names, "view", found), 1)
+        self.assertEqual(sl.index_locals(names, "round", [f"local 0 in {self.B}"]), 0)
+
+    def test_set_aside_locals_are_counted_in_the_listing(self):
+        self.write_index(run="view")
+        out = self.code("refs", "view")
+        self.assertIn("1 symbol(s) matching 'view'", out)
+        self.assertIn("a/run()", out)
+        self.assertNotIn("local 0", out)
+        self.assertIn("1 local variable(s) named 'view' not shown", out)
+
+    def test_ast_scope_follows_the_files_that_mention_the_name(self):
+        self.assertEqual(
+            sl.ast_files(self.repo, self.sl_dir, "round", []), [pathlib.Path(self.B)]
+        )
 
 
 class IndexFreshness(unittest.TestCase):
@@ -1002,7 +1220,7 @@ class Ancestry(unittest.TestCase):
             "    }\n"
             "}\n"
         )
-        _writes, reads, _inits, opaque = sl.ast_field_ops(path, "armed")
+        _writes, reads, _inits, opaque, _maybe = sl.ast_field_ops(path, "armed")
         self.assertEqual(len(opaque), 1, "the write far into the body must be seen")
         self.assertNotIn(opaque[0], reads)
 
@@ -1103,6 +1321,65 @@ class TestGate(unittest.TestCase):
         campaign.test_toolchain, campaign.profile_name = "stable", "marshal"
         self.assertEqual(campaign.test_command(), sl.gate_test_command("stable", "marshal"))
 
+    def test_the_component_tests_are_the_simplex_tests_the_gate_leaves_out(self):
+        # The gap: the gate excluded every `simplex::actors::` test, and nothing ran
+        # them, so an instrumented tree that failed seven of them reported READY
+        # without a word about it.
+        command = sl.component_test_command("stable")
+        self.assertEqual(command[:3], ["cargo", "+stable", "nextest"])
+        expression = command[-1]
+        self.assertIn("test(/^simplex::/)", expression)
+        self.assertIn("not test(/^simplex::tests::/)", expression)
+        self.assertIn("not test(/^simplex::statelens::/)", expression)
+        self.assertNotIn("marshal", expression)
+
+    def test_failed_tests_are_named_once_each(self):
+        lines = [
+            "        PASS [   0.010s] commonware-consensus simplex::actors::voter::ok",
+            "        FAIL [   0.123s] commonware-consensus simplex::actors::voter::tests::a",
+            "thread 'x' panicked at [statelens][INV-0012] replica=1 timeout",
+            "        FAIL [   0.456s] commonware-consensus simplex::actors::batcher::b",
+            "     TIMEOUT [  60.000s] commonware-consensus simplex::actors::resolver::c",
+            "     SIGSEGV [   0.001s] commonware-consensus simplex::types::d",
+            "     Summary [   3.000s] 4 tests run: 0 passed, 4 failed",
+            "        FAIL [   0.123s] commonware-consensus simplex::actors::voter::tests::a",
+            "        FAIL [   0.456s] commonware-consensus simplex::actors::batcher::b",
+        ]
+        self.assertEqual(
+            sl.failed_tests(lines),
+            [
+                "simplex::actors::voter::tests::a",
+                "simplex::actors::batcher::b",
+                "simplex::actors::resolver::c",
+                "simplex::types::d",
+            ],
+        )
+
+    def test_failed_component_tests_are_reported_and_do_not_fail_the_campaign(self):
+        campaign = sl.Campaign.__new__(sl.Campaign)
+        with tempfile.TemporaryDirectory() as root:
+            campaign.repo = campaign.dir = pathlib.Path(root)
+            (campaign.dir / "logs").mkdir()
+            campaign.test_toolchain = ""
+            said = []
+            saved = {name: getattr(sl, name) for name in ("run_logged", "say")}
+            sl.say = lambda message, *a, **k: said.append(str(message))
+
+            def run(command, log, cwd, stdin_text=None, echo=True):
+                log.write_text(
+                    "        FAIL [   0.1s] commonware-consensus simplex::actors::voter::t\n"
+                )
+                return 100, []
+
+            sl.run_logged = run
+            try:
+                failed = campaign.component_tests()
+            finally:
+                for key, value in saved.items():
+                    setattr(sl, key, value)
+        self.assertEqual(failed, ["simplex::actors::voter::t"])
+        self.assertTrue(any("not gated" in line for line in said), said)
+
     def test_each_profile_runs_its_own_filter(self):
         for profile in ("simplex", "marshal"):
             command = sl.gate_test_command("stable", profile)
@@ -1197,8 +1474,8 @@ class PlanClaims(unittest.TestCase):
     # What `subsystem_assertions` returns: (invariant, enclosing function) per site.
     CODE = {
         "consensus/src/simplex/actors/voter/state.rs": [
-            ("INV-0016", "try_propose"),
-            ("INV-0016", "construct_notarize"),
+            ("INV-0016", "State::try_propose"),
+            ("INV-0016", "State::construct_notarize"),
         ],
         "consensus/src/simplex/actors/voter/actor.rs": [],
     }
@@ -1411,6 +1688,949 @@ class PlanClaims(unittest.TestCase):
             any("more than one section" in problem for problem in problems),
             f"a repeated section must be reported: {problems}",
         )
+
+
+class AssertionScanner(unittest.TestCase):
+    """The ledger check reads assertions out of the code with a textual scan, which
+    certified an assertion quoted in a block comment, and one in a `#[cfg(test)]`
+    module sharing the production function's name, as production coverage."""
+
+    PLAN = (
+        "# Plan\n\n## Invariants\n\n### INV-0016: example\n"
+        "- Status: bound\n- Reading: check dispatch\n"
+        "- Sites: `actors/voter/state.rs` `State::try_propose`, dispatch - checked\n"
+        "- Assertions: `actors/voter/state.rs` `State::try_propose`, `sl_assert!`\n"
+        "- Probes: none\n- Ghost state: none\n- Edited lines: none\n- Notes: none\n"
+    )
+    TEST_MODULE = (
+        "struct State;\n"
+        "impl State { fn try_propose() {} }\n"
+        "#[cfg(test)] mod tests {\n"
+        '  fn try_propose() { sl_assert!(None, "INV-0016", true, "test only"); }\n'
+        "}\n"
+    )
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.source = self.root / "consensus/src/simplex/actors/voter/state.rs"
+        self.source.parent.mkdir(parents=True)
+        self.plan = self.root / "plan.md"
+        self.plan.write_text(self.PLAN)
+
+    def problems(self, code):
+        self.source.write_text(code)
+        return sl.lint_plan_file(self.plan, ["INV-0016"], sl.subsystem_assertions(self.root))
+
+    def test_a_production_assertion_certifies_its_site(self):
+        code = (
+            "struct State;\nimpl State {\n"
+            '    fn try_propose() { sl_assert!(None, "INV-0016", true, "checked"); }\n'
+            "}\n"
+        )
+        self.assertEqual(self.problems(code), [])
+
+    def test_a_free_function_does_not_certify_a_method_claim(self):
+        # The gap: a free function has no type, and that was taken for a match
+        # with any type the ledger named; it is a different item.
+        code = (
+            "struct State;\nimpl State {\n    fn try_propose() {}\n}\n"
+            'fn try_propose() { sl_assert!(None, "INV-0016", true, "free"); }\n'
+        )
+        self.assertTrue(self.problems(code), "a free function certified State::try_propose")
+        # A bare ledger name is the less precise claim that a free function meets.
+        self.plan.write_text(self.PLAN.replace("`State::try_propose`", "`try_propose`"))
+        self.assertEqual(self.problems(code), [])
+
+    def test_a_function_spelled_in_a_string_opens_nothing(self):
+        # The gap: a string holding `fn try_propose() {}` was the last `fn` before
+        # the site, so an assertion in another method was attributed to it.
+        code = (
+            "struct State;\nimpl State {\n    fn try_propose() {}\n"
+            "    fn unrelated() {\n"
+            '        let _example = r#"\nfn try_propose() {}\n"#;\n'
+            '        sl_assert!(None, "INV-0016", true, "in unrelated");\n'
+            "    }\n}\n"
+        )
+        self.assertTrue(self.problems(code), "a string's `fn` claimed the assertion")
+        self.assertEqual(
+            sl.subsystem_assertions(self.root)["consensus/src/simplex/actors/voter/state.rs"],
+            [("INV-0016", "State::unrelated")],
+        )
+
+    def test_a_site_after_the_last_function_belongs_to_none(self):
+        code = (
+            "struct State;\nimpl State {\n    fn try_propose() {}\n}\n"
+            "macro_rules! trailing {\n"
+            '    () => { sl_assert!(None, "INV-0016", true, "after every body") };\n'
+            "}\n"
+        )
+        self.assertTrue(self.problems(code), "a site outside every body certified a method")
+        self.assertEqual(
+            sl.subsystem_assertions(self.root)["consensus/src/simplex/actors/voter/state.rs"],
+            [("INV-0016", None)],
+        )
+
+    def test_a_body_is_found_past_a_semicolon_in_the_signature(self):
+        code = (
+            "struct State;\nimpl State {\n"
+            "    fn try_propose() -> [u8; 4] {\n"
+            '        sl_assert!(None, "INV-0016", true, "checked");\n'
+            "        [0; 4]\n    }\n"
+            "    fn declared(&self) -> u8;\n"
+            "}\n"
+        )
+        self.assertEqual(self.problems(code), [])
+
+    def test_an_assertion_in_a_block_comment_certifies_nothing(self):
+        problems = self.problems(
+            "fn try_propose() {}\n"
+            "/* Example only:\n"
+            'sl_assert!(None, "INV-0016", true, "documentation");\n'
+            "*/\n"
+        )
+        self.assertTrue(problems, "a comment after the function certified it")
+
+    def test_an_assertion_in_a_line_comment_certifies_nothing(self):
+        problems = self.problems(
+            'fn try_propose() {\n    // sl_assert!(None, "INV-0016", true, "todo");\n}\n'
+        )
+        self.assertTrue(problems, "a commented-out assertion certified its function")
+
+    def test_an_assertion_in_a_test_module_certifies_nothing(self):
+        problems = self.problems(self.TEST_MODULE)
+        self.assertTrue(problems, "a test function of the production name certified it")
+
+    def test_a_test_module_on_one_line_is_found_without_the_tree(self):
+        saved = sl.ast_available
+        sl.ast_available = lambda: False
+        self.addCleanup(setattr, sl, "ast_available", saved)
+        problems = self.problems(self.TEST_MODULE)
+        self.assertTrue(problems, "the fallback must see `#[cfg(test)] mod` on one line")
+        commented = self.TEST_MODULE.replace("#[cfg(test)] mod tests {", "#[cfg(test)] // t\nmod tests {")
+        self.assertTrue(self.problems(commented), "a comment after the attribute is not the item")
+
+    def test_a_comment_after_code_certifies_nothing(self):
+        problems = self.problems(
+            "fn try_propose() {\n"
+            '    let x = 1; // sl_assert!(None, "INV-0016", true, "trailing");\n'
+            "}\n"
+        )
+        self.assertTrue(problems, "a trailing comment certified its function")
+
+    def test_a_nested_block_comment_certifies_nothing(self):
+        problems = self.problems(
+            "fn try_propose() {}\n"
+            "/* outer /* inner */\n"
+            'sl_assert!(None, "INV-0016", true, "still a comment");\n'
+            "*/\n"
+        )
+        self.assertTrue(problems, "a nested block comment certified its function")
+
+    def test_a_comment_marker_in_a_string_is_text(self):
+        code = (
+            "struct State;\nimpl State {\n"
+            "    fn try_propose() {\n"
+            '        let url = "https://example.invalid/*";\n'
+            '        sl_assert!(None, "INV-0016", true, "{url}");\n'
+            "    }\n}\n"
+        )
+        self.assertEqual(self.problems(code), [])
+
+    def test_blanking_keeps_every_line(self):
+        text = 'a /* b\nc */ d // e\n"f // g" h\n'
+        blanked = sl.blank_inert(text)
+        self.assertEqual(blanked.count("\n"), text.count("\n"))
+        self.assertEqual(blanked.splitlines()[2], '"f // g" h')
+        self.assertNotIn("b", blanked.splitlines()[0])
+        self.assertNotIn("e", blanked.splitlines()[1])
+        self.assertEqual(sl.blank_inert(text, strings=True).splitlines()[2], "         h")
+
+    def test_an_assertion_in_a_raw_string_certifies_nothing(self):
+        problems = self.problems(
+            "fn try_propose() {\n"
+            '    let _example = r#"sl_assert!(None, "INV-0016", true, "example");"#;\n'
+            "}\n"
+        )
+        self.assertTrue(problems, "a raw string certified its function")
+
+    def test_a_method_of_another_type_certifies_nothing(self):
+        # The gap: both `State::try_propose` and `Other::try_propose` reduced to the
+        # bare name, so the other type's method certified the ledger's site.
+        problems = self.problems(
+            "struct State;\nimpl State {\n    fn try_propose() {}\n}\n"
+            "struct Other;\nimpl Other {\n"
+            '    fn try_propose() { sl_assert!(None, "INV-0016", true, "other"); }\n'
+            "}\n"
+        )
+        self.assertTrue(problems, "Other::try_propose certified State::try_propose")
+
+    def test_a_method_of_the_named_type_certifies_its_site(self):
+        code = (
+            "struct State;\n"
+            "impl<S: Scheme> Elector<S> for State where S: Scheme {\n"
+            '    fn try_propose() { sl_assert!(None, "INV-0016", true, "checked"); }\n'
+            "}\n"
+        )
+        self.assertEqual(self.problems(code), [])
+        self.assertEqual(
+            sl.subsystem_assertions(self.root),
+            {"consensus/src/simplex/actors/voter/state.rs": [("INV-0016", "State::try_propose")]},
+        )
+
+    def test_a_const_method_certifies_its_site(self):
+        code = (
+            "struct State;\nimpl State {\n"
+            '    pub const fn try_propose() { sl_assert!(None, "INV-0016", true, "c"); }\n'
+            "}\n"
+        )
+        self.assertEqual(self.problems(code), [])
+
+    def test_an_assertion_before_any_function_is_reported_not_a_crash(self):
+        # The gap: a site with no `fn` before it had no function, and the ledger
+        # comparison raised on it instead of refusing to certify.
+        problems = self.problems(
+            "macro_rules! helper {\n"
+            '    () => { sl_assert!(None, "INV-0016", true, "in a macro body") };\n'
+            "}\n"
+            "struct State;\nimpl State { fn try_propose() { helper!(); } }\n"
+        )
+        self.assertTrue(problems, "a site in no function certified the ledger")
+
+    def test_an_impl_trait_argument_is_not_an_impl_block(self):
+        # rustfmt puts a tuple of `impl Trait` arguments one per line, so a line
+        # starts with `impl`, exactly as a block header does.
+        code = (
+            "struct State;\n"
+            "impl State {\n"
+            "    fn try_propose(\n"
+            "        net: (\n"
+            "            impl Sender,\n"
+            "            impl Receiver,\n"
+            "        ),\n"
+            '    ) { sl_assert!(None, "INV-0016", true, "checked"); }\n'
+            "}\n"
+        )
+        self.assertEqual(self.problems(code), [])
+        self.assertEqual(
+            sl.subsystem_assertions(self.root),
+            {"consensus/src/simplex/actors/voter/state.rs": [("INV-0016", "State::try_propose")]},
+        )
+
+    def test_a_string_continuation_keeps_the_scan_in_sync(self):
+        literals = (
+            '        let _a = "x \\\n y";\n'
+            '        let _b = "{";\n'
+            "        let _d = '\"';\n"
+            "        let _e = '\\u{1F600}';\n"
+        )
+        other = (
+            "struct State;\nimpl State { fn try_propose(&self) {} }\n"
+            "struct Other;\nimpl Other {\n    fn try_propose(&self) {\n"
+            + literals
+            + '        sl_assert!(None, "INV-0016", true, "other");\n    }\n}\n'
+        )
+        self.assertTrue(self.problems(other), "a desynced scan certified Other's method")
+        own = (
+            "struct State;\nimpl State {\n    fn try_propose(&self) {\n"
+            + literals
+            + '        sl_assert!(None, "INV-0016", true, "checked");\n    }\n}\n'
+        )
+        self.assertEqual(self.problems(own), [])
+
+    def test_two_types_of_one_name_need_the_path(self):
+        code = (
+            "mod immutable { pub struct Archive; }\nmod prunable { pub struct Archive; }\n"
+            "trait Blocks { fn try_propose(&self); }\n"
+            "impl Blocks for immutable::Archive {\n"
+            '    fn try_propose(&self) { sl_assert!(None, "INV-0016", true, "immutable"); }\n'
+            "}\n"
+            "impl Blocks for prunable::Archive {\n"
+            "    fn try_propose(&self) {}\n"
+            "}\n"
+        )
+        self.source.write_text(code)
+        found = sl.subsystem_assertions(self.root)["consensus/src/simplex/actors/voter/state.rs"]
+        self.assertEqual(found, [("INV-0016", "immutable::Archive::try_propose")])
+        tail = self.PLAN.replace("`State::try_propose`", "`Archive::try_propose`")
+        self.plan.write_text(tail)
+        self.assertEqual(sl.lint_plan_file(self.plan, ["INV-0016"], sl.subsystem_assertions(self.root)), [])
+        self.plan.write_text(tail.replace("`Archive::try_propose`", "`prunable::Archive::try_propose`"))
+        self.assertTrue(sl.lint_plan_file(self.plan, ["INV-0016"], sl.subsystem_assertions(self.root)))
+        # With the method asserted under both types, the tail is ambiguous.
+        self.source.write_text(code.replace("fn try_propose(&self) {}", 'fn try_propose(&self) { sl_assert!(None, "INV-0016", true, "prunable"); }'))
+        self.plan.write_text(tail)
+        problems = sl.lint_plan_file(self.plan, ["INV-0016"], sl.subsystem_assertions(self.root))
+        self.assertTrue(any("more than one method" in problem for problem in problems), problems)
+
+    def test_a_backticked_action_word_is_not_a_function_claim(self):
+        # The gap: every backticked word of a ledger entry was a function claim, so
+        # an action written as `notarize` matched a method of that name.
+        self.plan.write_text(
+            self.PLAN.replace(
+                "- Sites: `actors/voter/state.rs` `State::try_propose`, dispatch - checked",
+                "- Sites: `notarize` `actors/voter/state.rs` `State::try_propose` - checked",
+            )
+        )
+        code = (
+            "struct State;\nimpl State {\n    fn try_propose() {}\n"
+            '    fn notarize() { sl_assert!(None, "INV-0016", true, "action"); }\n'
+            "}\n"
+        )
+        self.assertTrue(self.problems(code), "an action word certified the method")
+
+    def test_an_extern_function_is_a_function(self):
+        code = (
+            "struct State;\nimpl State {\n"
+            '    extern "C" fn try_propose() { sl_assert!(None, "INV-0016", true, "c"); }\n'
+            "}\n"
+        )
+        self.assertEqual(self.problems(code), [])
+
+    def test_impl_types_and_function_matching(self):
+        self.assertFalse(sl.function_matches(None, "State::f"))
+        self.assertEqual(sl.impl_type("<S: Scheme> Round<S> "), "Round")
+        self.assertEqual(sl.impl_type("<S> Elector<S> for RoundRobin<S> where S: Scheme "), "RoundRobin")
+        self.assertEqual(sl.impl_type(" crate::marshal::Actor<E, S> "), "crate::marshal::Actor")
+        self.assertEqual(sl.impl_type(" Blocks for prunable::Archive<E> "), "prunable::Archive")
+        # A claim may give the type's path or its tail; the tail of another path is
+        # not it.
+        self.assertTrue(sl.function_matches("prunable::Archive::f", "Archive::f"))
+        self.assertTrue(sl.function_matches("prunable::Archive::f", "prunable::Archive::f"))
+        self.assertFalse(sl.function_matches("prunable::Archive::f", "immutable::Archive::f"))
+        self.assertFalse(sl.function_matches("State::f", "a::State::f"))
+        self.assertTrue(sl.function_matches("State::f", "State::f"))
+        self.assertFalse(sl.function_matches("Other::f", "State::f"))
+        # A qualified claim names a method; a free function is a different item. A
+        # bare claim is met by any function or method of the name.
+        self.assertFalse(sl.function_matches("f", "State::f"))
+        self.assertTrue(sl.function_matches("State::f", "f"))
+        self.assertTrue(sl.function_matches("f", "f"))
+        self.assertFalse(sl.function_matches("State::g", "f"))
+
+
+class RepairRevalidation(unittest.TestCase):
+    """A repair may remove the assertion a plan certifies, and the campaign kept the
+    plan verdict taken before the repair: a buildable, passing tree handed over with
+    a stale clean audit."""
+
+    ORIGINAL = (
+        "struct State;\nimpl State {\n"
+        "    fn try_propose(required: bool) {\n"
+        '        sl_assert!(None, "INV-0016", required, "checked");\n'
+        "    }\n}\n"
+    )
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.source = self.root / "consensus/src/simplex/actors/voter/state.rs"
+        self.source.parent.mkdir(parents=True)
+        self.source.write_text(self.ORIGINAL)
+        self.helper = self.root / "consensus/src/simplex/statelens.rs"
+        self.helper.write_text("pub fn evidence() -> bool { true }\n")
+        self.plan = self.root / "plan.md"
+        self.plan.write_text(AssertionScanner.PLAN)
+        self.campaign = sl.Campaign.__new__(sl.Campaign)
+        self.campaign.repo = self.campaign.dir = self.root
+        self.campaign.profile = sl.PROFILES["simplex"]
+        self.campaign.invariants = [("simplex", pathlib.Path("INV-0016.md"))]
+        self.campaign.repair_prompt = lambda *_args: "fixture repair"
+        self.campaign.check_scope = lambda: None
+        self.campaign.record = lambda: None
+        self.saved_say = sl.say
+        sl.say = lambda *_args, **_kw: None
+        self.addCleanup(setattr, sl, "say", self.saved_say)
+        # The audit's verdict stands for the tree at the first plan lint.
+        self.campaign.check_plan()
+        self.assertEqual(self.campaign.plan_problems, 0)
+        self.assertIsNotNone(self.campaign.audit_content)
+
+    def build(self, repair, failures=1):
+        outcomes = iter([("compiler", ["fixture diagnostic"])] * failures + [None])
+        self.campaign.build_once = lambda _attempt: next(outcomes)
+        self.campaign.agent_step = lambda *_args: repair()
+        self.campaign.build()
+
+    def test_a_repair_that_removes_the_assertion_is_linted(self):
+        self.build(
+            lambda: self.source.write_text(
+                "struct State;\nimpl State { fn try_propose(required: bool) {} }\n"
+            )
+        )
+        self.assertGreater(self.campaign.plan_problems, 0, "the old clean verdict survived")
+        self.assertEqual(self.campaign.stale, ["consensus/src/simplex/actors/voter/state.rs"])
+
+    def test_a_repair_that_keeps_the_assertion_stays_clean(self):
+        self.build(lambda: None)
+        self.assertEqual(self.campaign.plan_problems, 0)
+        self.assertEqual(self.campaign.stale, [])
+
+    def test_a_repair_that_rewrites_the_condition_makes_the_audit_stale(self):
+        # The gap: the lint sees the id, the site and the function, all unchanged,
+        # and passes; only the digest of the audited tree can say the audit is stale.
+        self.build(lambda: self.source.write_text(self.ORIGINAL.replace(", required,", ", true,")))
+        self.assertEqual(self.campaign.plan_problems, 0, "the lint cannot see this change")
+        self.assertEqual(self.campaign.stale, ["consensus/src/simplex/actors/voter/state.rs"])
+
+    def test_a_repair_to_a_helper_or_the_plan_makes_the_audit_stale(self):
+        def repair():
+            self.helper.write_text("pub fn evidence() -> bool { false }\n")
+            self.plan.write_text(self.plan.read_text().replace("Notes: none", "Notes: weakened"))
+
+        self.build(repair)
+        self.assertEqual(self.campaign.stale, ["consensus/src/simplex/statelens.rs", "plan.md"])
+
+    def test_the_summary_the_script_appends_does_not_count_as_a_change(self):
+        self.plan.write_text(self.plan.read_text() + "\n## Summary\n\n- Invariants: 1\n")
+        self.build(lambda: None)
+        self.assertEqual(self.campaign.stale, [])
+
+    def test_a_build_without_repair_leaves_the_audit_current(self):
+        self.build(lambda: self.fail("no repair is run"), failures=0)
+        self.assertIsNone(self.campaign.stale)
+
+    def test_a_build_that_never_succeeds_still_marks_the_audit_stale(self):
+        # The summary a failed build leaves behind is read before the checkout is
+        # fixed by hand and fuzzed with --skip-campaign, so it must not certify
+        # the tree the repairs replaced.
+        with self.assertRaises(sl.Abort):
+            self.build(
+                lambda: self.source.write_text(self.ORIGINAL.replace(", required,", ", true,")),
+                failures=sl.REPAIR_ATTEMPTS + 1,
+            )
+        self.assertEqual(self.campaign.stale, ["consensus/src/simplex/actors/voter/state.rs"])
+
+    def test_the_plan_summary_records_a_stale_audit(self):
+        run = lambda *args: subprocess.run(  # noqa: E731
+            ("git",) + args, cwd=self.root, capture_output=True, text=True, check=True
+        )
+        run("init", "-q", ".")
+        run("config", "user.email", "t@example.invalid")
+        run("config", "user.name", "t")
+        run("add", "-A")
+        run("commit", "-qm", "base")
+        del self.campaign.record  # the real method, over the stub of setUp
+        self.campaign.stale = ["consensus/src/simplex/actors/voter/state.rs"]
+        self.campaign.record()
+        summary = self.plan.read_text().split("## Summary", 1)[1]
+        self.assertIn(
+            "- Audit: stale; a repair changed 1 validated file(s) after it: "
+            "consensus/src/simplex/actors/voter/state.rs",
+            summary,
+        )
+        self.campaign.stale = []
+        self.campaign.record()
+        self.assertNotIn("Audit", self.plan.read_text().split("## Summary", 1)[1])
+
+    def test_a_later_lint_does_not_move_the_validated_content(self):
+        self.source.write_text(self.ORIGINAL.replace(", required,", ", true,"))
+        self.campaign.check_plan()
+        self.assertEqual(
+            self.campaign.changed_since_validation(),
+            ["consensus/src/simplex/actors/voter/state.rs"],
+            "a clean lint must not re-validate the tree",
+        )
+
+    def summary(self, **values):
+        campaign = sl.Campaign.__new__(sl.Campaign)
+        fields = dict(
+            repo=self.root, base=None, agent="claude", profile_name="simplex",
+            profile=sl.PROFILES["simplex"], targets=[], fuzz_toolchain="nightly",
+            statuses={"INV-0016": "bound"}, inactive=[], audited=[],
+            coverage=(3, 1), plan_problems=0, sites=None, components=None,
+            stale=None, reason=None, panic=None, initialized=False, dir=self.root,
+        )
+        fields.update(values)
+        for key, value in fields.items():
+            setattr(campaign, key, value)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            campaign.finish(0, "READY")
+        return out.getvalue()
+
+    def test_lint_problems_mark_the_coverage_unvalidated(self):
+        text = self.summary(plan_problems=2)
+        self.assertIn("coverage   UNVALIDATED: 2 plan lint problem(s)", text)
+        self.assertIn("result     READY", text)
+        self.assertNotIn("UNVALIDATED", self.summary())
+
+    def test_a_stale_audit_marks_the_coverage_unvalidated_despite_a_clean_lint(self):
+        text = self.summary(audited=[], stale=["consensus/src/simplex/actors/voter/state.rs"])
+        self.assertIn("audit      no status change [stale: a repair changed the tree after it]", text)
+        self.assertIn(
+            "coverage   UNVALIDATED: a repair changed 1 validated file(s) after the audit "
+            "(consensus/src/simplex/actors/voter/state.rs)",
+            text,
+        )
+        self.assertIn("result     READY", text)
+        both = self.summary(plan_problems=1, stale=["plan.md"])
+        self.assertIn("1 plan lint problem(s), so the code does not support", both)
+        self.assertIn("; a repair changed 1 validated file(s)", both)
+        self.assertNotIn("stale", self.summary(audited=[], stale=[]))
+
+    def test_failed_component_tests_are_named_beside_the_result(self):
+        text = self.summary(components=["simplex::actors::voter::t"])
+        self.assertIn("components 1 failed, not gated: simplex::actors::voter::t", text)
+        self.assertIn("components all passed", self.summary(components=[]))
+        self.assertNotIn("components", self.summary(components=None))
+
+    def test_inactive_bindings_are_named_beside_the_statuses(self):
+        text = self.summary(inactive=["INV-0007"])
+        self.assertIn("unbound 0); inactive in the fuzz targets: INV-0007", text)
+
+    def test_no_audit_marks_the_coverage_unvalidated(self):
+        text = self.summary(audited=None)
+        self.assertNotIn("statelens: audit", text)
+        self.assertIn("coverage   UNVALIDATED: no audit pass ran (STATELENS_AUDIT=0)", text)
+        self.assertNotIn("UNVALIDATED", self.summary(audited=None, statuses={}))
+
+
+class PhaseOrder(unittest.TestCase):
+    """The audit is the last agent pass, so its verdict stands for the tree the plan
+    lint fingerprints and the build hands over. Before, the beacon agents ran after
+    it and could rewrite an assertion the audit had endorsed, unseen by anything."""
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.source = self.root / "consensus/src/simplex/actors/voter/state.rs"
+        self.source.parent.mkdir(parents=True)
+        self.source.write_text(RepairRevalidation.ORIGINAL)
+        (self.root / "plan.md").write_text(AssertionScanner.PLAN)
+        self.campaign = sl.Campaign.__new__(sl.Campaign)
+        fields = dict(
+            repo=self.root, dir=self.root, base=None, agent="fixture",
+            profile_name="simplex", profile=sl.PROFILES["simplex"], targets=[],
+            fuzz_toolchain="nightly", invariants=[("simplex", pathlib.Path("INV-0016.md"))],
+            config={"STATELENS_AUDIT": "1"}, statuses={"INV-0016": "bound"}, inactive=[],
+            audited=None, coverage=None, plan_problems=None, sites=None, components=None,
+            reason=None, panic=None, initialized=False,
+        )
+        for key, value in fields.items():
+            setattr(self.campaign, key, value)
+        self.campaign.invariant_prompts = lambda: []
+        self.campaign.beacon_prompts = lambda: [("beacons", "fixture beacons")]
+        self.campaign.audit_prompts = lambda: [("audit", "fixture audit")]
+        self.campaign.check_scope = lambda: None
+        self.campaign.record = lambda: None
+        self.campaign.build_once = lambda _attempt: None
+        self.steps, self.audited = [], []
+        saved = sl.say
+        sl.say = lambda *_args, **_kw: None
+        self.addCleanup(setattr, sl, "say", saved)
+
+    def handover(self, beacon_edit=None, audit_edit=None):
+        def agent_step(name, _prompt):
+            self.steps.append(name)
+            if name == "beacons" and beacon_edit:
+                self.source.write_text(beacon_edit)
+            if name == "audit":
+                if audit_edit:
+                    self.source.write_text(audit_edit)
+                self.audited.append(sl.sha256(self.source))
+
+        self.campaign.agent_step = agent_step
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.campaign.instrument()
+            self.campaign.build()
+            self.campaign.finish(0, "READY")
+        return out.getvalue()
+
+    def test_the_audit_runs_after_the_beacon_step(self):
+        self.handover()
+        self.assertEqual(self.steps, ["beacons", "audit"])
+
+    def test_an_assertion_the_beacon_agent_rewrote_is_audited_as_handed_over(self):
+        weakened = RepairRevalidation.ORIGINAL.replace(", required,", ", true,")
+        out = self.handover(weakened)
+        self.assertEqual(self.audited, [sl.sha256(self.source)], "the audit must see the final tree")
+        self.assertEqual(self.campaign.plan_problems, 0)
+        self.assertIsNotNone(self.campaign.audit_content, "the fingerprint follows the audit")
+        self.assertNotIn("UNVALIDATED", out)
+        self.assertIn("result     READY", out)
+
+    def test_the_fingerprint_is_of_the_tree_the_audit_left(self):
+        # The audit's own edits are what the build validates, so the fingerprint
+        # must be taken after them, and a first-attempt build hands them over
+        # with nothing stale.
+        edited = RepairRevalidation.ORIGINAL.replace('"checked"', '"audited"')
+        out = self.handover(audit_edit=edited)
+        self.assertEqual(
+            self.campaign.audit_content["consensus/src/simplex/actors/voter/state.rs"],
+            sl.sha256(self.source),
+        )
+        self.assertIsNone(self.campaign.stale)
+        self.assertNotIn("UNVALIDATED", out)
+
+    def test_without_an_audit_the_statuses_are_reported_unvalidated(self):
+        self.campaign.config = {"STATELENS_AUDIT": "0"}
+        out = self.handover()
+        self.assertEqual(self.steps, ["beacons"])
+        self.assertIn("coverage   UNVALIDATED: no audit pass ran (STATELENS_AUDIT=0)", out)
+        self.assertIn("result     READY", out)
+
+
+class InactiveBindings(unittest.TestCase):
+    """A binding can be complete and still never evaluated by the fuzz targets,
+    whose `cert_mock` scheme hides what its `pre` needs; the Status qualifier says so
+    and the campaign reports it apart from the statuses."""
+
+    PLAN = (
+        "# Plan\n\n## Invariants\n\n### INV-0007: title\n"
+        "- Status: partial (inactive in the fuzz targets)\n- Reading: r\n"
+        "- Sites: `voter/state.rs` `State::construct_notarize`, signature - checked\n"
+        "- Assertions: `voter/state.rs` `State::construct_notarize`, `sl_implies!`\n"
+        "- Probes: none\n- Ghost state: none\n- Edited lines: none\n"
+        "- Notes: the mock certificate is an opaque handle\n"
+    )
+    CODE = {"consensus/src/simplex/actors/voter/state.rs": [("INV-0007", "State::construct_notarize")]}
+
+    def test_the_qualifier_lints_as_its_status(self):
+        with tempfile.TemporaryDirectory() as root:
+            plan = pathlib.Path(root) / "plan.md"
+            plan.write_text(self.PLAN)
+            self.assertEqual(sl.lint_plan_file(plan, ["INV-0007"], self.CODE), [])
+        self.assertEqual(sl.Campaign.parse_statuses(self.PLAN), {"INV-0007": "partial"})
+        self.assertEqual(sl.Campaign.inactive_invariants(self.PLAN), ["INV-0007"])
+
+    def test_a_plain_status_is_active(self):
+        plain = self.PLAN.replace(" (inactive in the fuzz targets)", "")
+        self.assertEqual(sl.Campaign.inactive_invariants(plain), [])
+        self.assertEqual(sl.inactive_note([]), "")
+        self.assertEqual(sl.inactive_note(["INV-0007"]), "; inactive in the fuzz targets: INV-0007")
+
+    def test_a_paraphrased_qualifier_is_reported_not_dropped(self):
+        # The gap: `partial (not active under cert_mock)` passed the lint and was
+        # counted as an active partial binding.
+        paraphrased = self.PLAN.replace(
+            "(inactive in the fuzz targets)", "(not active under cert_mock)"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            plan = pathlib.Path(root) / "plan.md"
+            plan.write_text(paraphrased)
+            problems = sl.lint_plan_file(plan, ["INV-0007"], self.CODE)
+        self.assertTrue(any("qualifier" in problem for problem in problems), problems)
+        self.assertEqual(sl.Campaign.inactive_invariants(paraphrased), [])
+
+
+class KbSnippets(unittest.TestCase):
+    """`kb grep` confines a match to the sections the registry allows, but the
+    snippet around it was cut from the whole file, so a match on a section's last
+    line showed the heading of the section the search excluded."""
+
+    BODY = (
+        "# Finding\n"             # 1
+        "\n"                      # 2
+        "## Root Cause\n"         # 3
+        "needle\n"                # 4
+        "## Excluded sentinel\n"  # 5
+        "excluded body\n"         # 6
+        "## Context\n"            # 7
+        "more\n"                  # 8
+    )
+
+    def setUp(self):
+        root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "f.md").write_text(self.BODY)
+        spans = sl.section_spans(self.BODY)
+        self.entry = {
+            "kind": "finding", "order": 0, "root": str(root), "path": "f.md",
+            "identifier": "f", "modules": ["consensus/simplex"],
+            "sections": {k: v for k, v in spans.items() if k in sl.KB_STATE_SECTIONS},
+            "refs": {"paths": [], "symbols": []},
+        }
+
+    def hit(self, needle):
+        hits = sl.kb_grep([self.entry], "simplex", needle)
+        self.assertEqual(len(hits), 1, hits)
+        _order, _path, _offset, entry, section, line = hits[0]
+        return section, line, sl.kb_snippet(entry, line)
+
+    def test_a_hit_on_a_sections_last_line_shows_no_excluded_heading(self):
+        section, line, snippet = self.hit("needle")
+        self.assertEqual((section, line), ("Root Cause", 4))
+        self.assertIn("needle", snippet)
+        self.assertNotIn("Excluded sentinel", snippet)
+
+    def test_a_hit_on_a_sections_first_line_shows_no_excluded_body(self):
+        section, line, snippet = self.hit("more")
+        self.assertEqual((section, line), ("Context", 8))
+        self.assertIn("more", snippet)
+        self.assertNotIn("excluded body", snippet)
+        # With more context the window reaches two lines back, into the excluded
+        # section, unless it is clamped.
+        wider = sl.kb_snippet(self.entry, line, context=5)
+        self.assertIn("more", wider)
+        self.assertNotIn("excluded body", wider)
+        self.assertNotIn("Excluded sentinel", wider)
+
+    def test_an_excluded_section_is_not_searched(self):
+        self.assertEqual(sl.kb_grep([self.entry], "simplex", "excluded"), [])
+
+    def test_a_document_keeps_the_whole_file_context(self):
+        document = dict(self.entry, kind="document", sections={}, modules=[])
+        snippet = sl.kb_snippet(document, 4)
+        self.assertIn("Root Cause", snippet)
+        self.assertIn("Excluded sentinel", snippet)
+
+
+class ConfigLayers(unittest.TestCase):
+    """`config.env` is tracked, so a knowledge-base root or any private value goes
+    in `config.local.env`, which git ignores and which overrides the tracked file;
+    the environment overrides both."""
+
+    def setUp(self):
+        self.sl_dir = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.sl_dir, True)
+        (self.sl_dir / "config.env").write_text(
+            "# defaults\nSTATELENS_AGENT=claude\nSTATELENS_KB=\nSTATELENS_AUDIT=1\n"
+        )
+        saved = os.environ.pop("STATELENS_KB", None)
+        self.addCleanup(lambda: os.environ.update({"STATELENS_KB": saved}) if saved else None)
+
+    def test_the_tracked_file_alone_gives_the_defaults(self):
+        values = sl.load_config(self.sl_dir)
+        self.assertEqual((values["STATELENS_AGENT"], values["STATELENS_KB"]), ("claude", ""))
+
+    def test_the_local_file_overrides_the_tracked_one(self):
+        (self.sl_dir / sl.CONFIG_LOCAL).write_text("STATELENS_KB=/private/findings\n")
+        values = sl.load_config(self.sl_dir)
+        self.assertEqual(values["STATELENS_KB"], "/private/findings")
+        self.assertEqual(values["STATELENS_AGENT"], "claude", "untouched keys keep the default")
+
+    def test_the_environment_overrides_both(self):
+        (self.sl_dir / sl.CONFIG_LOCAL).write_text("STATELENS_KB=/private/findings\n")
+        os.environ["STATELENS_KB"] = "/other"
+        try:
+            self.assertEqual(sl.load_config(self.sl_dir)["STATELENS_KB"], "/other")
+        finally:
+            del os.environ["STATELENS_KB"]
+
+    def test_a_malformed_local_line_names_its_file(self):
+        (self.sl_dir / sl.CONFIG_LOCAL).write_text("no equals sign\n")
+        with self.assertRaises(sl.Abort) as caught:
+            sl.load_config(self.sl_dir)
+        self.assertIn("config.local.env:1", str(caught.exception))
+
+    def test_the_local_file_is_ignored_by_git(self):
+        ignored = (HERE.parent / ".gitignore").read_text().splitlines()
+        self.assertIn(sl.CONFIG_LOCAL, ignored)
+        tracked = (HERE.parent / "config.env").read_text().splitlines()
+        self.assertIn("STATELENS_KB=", tracked, "the tracked file must leave the corpus root empty")
+
+
+class AuditBatches(unittest.TestCase):
+    """The audit runs one agent per batch, and each batch's verdict stands for the
+    tree it left. A later batch that changes or removes a line may have edited what
+    an earlier binding rests on, which nothing reviews again, so those bindings are
+    reported unreviewed; a batch that only adds lines changes nothing reviewed."""
+
+    SOURCE = (
+        "struct State;\nimpl State {\n"
+        "    fn try_propose(required: bool) {\n"
+        '        sl_assert!(None, "INV-0016", evidence(required), "a");\n'
+        "    }\n"
+        "    fn try_other(required: bool) {\n"
+        '        sl_assert!(None, "INV-0017", evidence(required), "b");\n'
+        "    }\n}\n"
+    )
+    HELPER = "pub fn evidence(required: bool) -> bool {\n    required\n}\n"
+    FIRST = "## Task: audit the bindings of invariants INV-0016 of the simplex registry\n"
+    SECOND = "## Task: audit the bindings of invariants INV-0017 of the simplex registry\n"
+
+    def setUp(self):
+        self.root = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.source = self.root / "consensus/src/simplex/actors/voter/state.rs"
+        self.source.parent.mkdir(parents=True)
+        self.source.write_text(self.SOURCE)
+        self.helper = self.root / "consensus/src/simplex/statelens.rs"
+        self.helper.write_text(self.HELPER)
+        second = AssertionScanner.PLAN.split("### ", 1)[1]
+        second = second.replace("INV-0016", "INV-0017").replace("try_propose", "try_other")
+        (self.root / "plan.md").write_text(AssertionScanner.PLAN + "\n### " + second)
+        self.campaign = sl.Campaign.__new__(sl.Campaign)
+        fields = dict(
+            repo=self.root, dir=self.root, base=None, agent="fixture",
+            profile_name="simplex", profile=sl.PROFILES["simplex"], targets=[],
+            fuzz_toolchain="nightly",
+            invariants=[("simplex", pathlib.Path("INV-0016.md")), ("simplex", pathlib.Path("INV-0017.md"))],
+            config={"STATELENS_AUDIT": "1"}, statuses={"INV-0016": "bound", "INV-0017": "bound"},
+            inactive=[], audited=None, coverage=None, plan_problems=None, sites=None,
+            components=None, reason=None, panic=None, initialized=False,
+        )
+        for key, value in fields.items():
+            setattr(self.campaign, key, value)
+        self.campaign.invariant_prompts = lambda: []
+        self.campaign.beacon_prompts = lambda: []
+        self.campaign.audit_prompts = lambda: [
+            ("audit-simplex-1", self.FIRST), ("audit-simplex-2", self.SECOND)
+        ]
+        self.campaign.check_scope = lambda: None
+        self.campaign.record = lambda: None
+        self.campaign.build_once = lambda _attempt: None
+        saved = sl.say
+        sl.say = lambda *_args, **_kw: None
+        self.addCleanup(setattr, sl, "say", saved)
+
+    def handover(self, second_batch=None, lint_clean=True):
+        def agent_step(name, _prompt):
+            if name == "audit-simplex-2" and second_batch:
+                second_batch()
+
+        self.campaign.agent_step = agent_step
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.campaign.instrument()
+            self.campaign.build()
+            self.campaign.finish(0, "READY")
+        if lint_clean:
+            self.assertEqual(self.campaign.plan_problems, 0, "the lint cannot see these edits")
+        return out.getvalue()
+
+    def test_a_later_batch_that_edits_a_helper_leaves_earlier_bindings_unreviewed(self):
+        out = self.handover(
+            lambda: self.helper.write_text(self.HELPER.replace("    required\n", "    true\n"))
+        )
+        self.assertEqual(
+            self.campaign.unreviewed,
+            {
+                "INV-0016": (
+                    "audit-simplex-2",
+                    ["consensus/src/simplex/statelens.rs (changed or removed lines)"],
+                )
+            },
+        )
+        self.assertIn(
+            "coverage   UNVALIDATED: audit batch audit-simplex-2 edited "
+            "consensus/src/simplex/statelens.rs (changed or removed lines) after the verdict "
+            "on INV-0016, which were not reviewed against the edit",
+            out,
+        )
+        self.assertIn("result     READY", out)
+
+    def test_lines_added_inside_an_existing_body_are_an_edit(self):
+        # The gap: a pure insertion was quiet wherever it landed, but a `let` that
+        # shadows the argument changes what the earlier assertion evaluates.
+        out = self.handover(
+            lambda: self.helper.write_text(
+                self.HELPER.replace("{\n", "{\n    let required = true;\n")
+            )
+        )
+        self.assertIn("UNVALIDATED", out)
+        self.assertEqual(
+            self.campaign.unreviewed["INV-0016"][1],
+            ["consensus/src/simplex/statelens.rs (added lines inside `evidence`)"],
+        )
+
+    def test_a_check_added_inside_a_body_is_quiet(self):
+        def add_check():
+            self.source.write_text(
+                self.SOURCE.replace(
+                    '        sl_assert!(None, "INV-0017", evidence(required), "b");\n',
+                    '        sl_assert!(None, "INV-0017", evidence(required), "b");\n'
+                    "        // [statelens] INV-0017\n"
+                    "        crate::simplex::statelens::sl_implies!(\n"
+                    "            None,\n"
+                    '            "INV-0017",\n'
+                    "            required,\n"
+                    "            evidence(required),\n"
+                    '            "b again: {}", required\n'
+                    "        );\n",
+                )
+            )
+
+        out = self.handover(add_check)
+        self.assertEqual(self.campaign.unreviewed, {})
+        self.assertNotIn("UNVALIDATED", out)
+
+    def test_an_attribute_or_comment_opener_above_an_item_is_an_edit(self):
+        for edit, expected in (
+            (
+                lambda: self.helper.write_text("#[cfg(any())]\n" + self.HELPER),
+                "added an attribute or a comment opener above an item",
+            ),
+            (
+                lambda: self.source.write_text(
+                    self.SOURCE.replace(
+                        '        sl_assert!(None, "INV-0016", evidence(required), "a");\n',
+                        "        /*\n"
+                        '        sl_assert!(None, "INV-0016", evidence(required), "a");\n'
+                        "        */\n",
+                    )
+                ),
+                "added lines inside `try_propose`",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                self.setUp()
+                # Commenting the check out is also a lint problem; the drift check
+                # must name the edit regardless.
+                out = self.handover(edit, lint_clean=False)
+                self.assertIn("UNVALIDATED", out)
+                self.assertIn(expected, self.campaign.unreviewed["INV-0016"][1][0])
+
+    def test_an_appended_copy_of_an_earlier_block_is_an_addition(self):
+        # A diff pairs the old block with its later copy and calls the lines between
+        # removed; the subsequence walk sees every old line survive.
+        twice = self.HELPER + "pub fn more() -> bool { true }\n" + self.HELPER.replace(
+            "evidence", "evidence_again"
+        )
+        out = self.handover(lambda: self.helper.write_text(twice))
+        self.assertEqual(self.campaign.unreviewed, {})
+        self.assertNotIn("UNVALIDATED", out)
+
+    def test_the_plan_summary_records_the_unreviewed_bindings(self):
+        run = lambda *args: subprocess.run(  # noqa: E731
+            ("git",) + args, cwd=self.root, capture_output=True, text=True, check=True
+        )
+        run("init", "-q", ".")
+        run("config", "user.email", "t@example.invalid")
+        run("config", "user.name", "t")
+        run("add", "-A")
+        run("commit", "-qm", "base")
+        del self.campaign.record
+        self.campaign.unreviewed = {
+            "INV-0016": ("audit-simplex-2", ["consensus/src/simplex/statelens.rs (changed or removed lines)"])
+        }
+        self.campaign.record()
+        summary = (self.root / "plan.md").read_text().split("## Summary", 1)[1]
+        self.assertIn(
+            "- Audit: audit batch audit-simplex-2 edited consensus/src/simplex/statelens.rs "
+            "(changed or removed lines) after the verdict on INV-0016",
+            summary,
+        )
+
+    def test_a_later_batch_that_only_adds_lines_leaves_nothing_unreviewed(self):
+        def add():
+            self.helper.write_text(self.HELPER + "pub fn more() -> bool { true }\n")
+            self.source.write_text(
+                self.SOURCE.replace("    fn try_other", '    // [statelens] INV-0017\n    fn try_other')
+            )
+
+        out = self.handover(add)
+        self.assertEqual(self.campaign.unreviewed, {})
+        self.assertNotIn("UNVALIDATED", out)
+
+    def test_a_removed_line_counts_as_an_edit(self):
+        out = self.handover(lambda: self.helper.write_text(""))
+        self.assertEqual(list(self.campaign.unreviewed), ["INV-0016"])
+        self.assertIn("UNVALIDATED", out)
+
+    def test_the_task_line_names_the_batch(self):
+        prompt = (
+            "# StateLens instrumenter\n\n## Task: audit the bindings of invariants INV-0001, "
+            "INV-0002 of the simplex registry\n\nINV-0003 and INV-0004 cover the rest.\n"
+        )
+        self.assertEqual(sl.prompt_invariants(prompt), ["INV-0001", "INV-0002"])
+        self.assertEqual(sl.prompt_invariants("INV-0016"), ["INV-0016"])
+        self.assertFalse(sl.modified_lines("", "new file\n"))
+        self.assertFalse(sl.modified_lines("a\nb\n", "a\nb\nc\n"))
+        self.assertTrue(sl.modified_lines("a\nb\n", "a\nB\n"))
+        self.assertTrue(sl.modified_lines("a\nb\n", "a\n"))
 
 
 class PromptCopies(unittest.TestCase):

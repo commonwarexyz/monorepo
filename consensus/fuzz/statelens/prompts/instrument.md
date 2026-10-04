@@ -156,10 +156,12 @@ other parts.
 For each invariant, add under `## Invariants`:
 
     ### INV-NNNN: <title>
-    - Status: bound | partial | unbound
+    - Status: bound | partial | unbound, followed by `(inactive in the fuzz targets)`
+      when the targets never evaluate the check
     - Reading: <pre and post, or the checked condition, in code terms>
-    - Sites: <one line per site that commits an action the Statement names: the action,
-      the file and the function in backticks, then `checked` or `not checked`, and for
+    - Sites: <one line per site that commits an action the Statement names: the action
+      in plain words, then the file and the function in backticks (everything backticked
+      after the file is read as a function), then `checked` or `not checked`, and for
       `not checked` the reason>
     - Assertions: <file, function, macro and condition; one line each>
     - Probes: <extra probes such as margins, or "none">

@@ -70,3 +70,8 @@
   enqueue resolver deliveries whose local annotations no request of the actor created.
   Treat what the actor restores at startup as its own history, and an annotation on a
   delivery, such as `Annotation::Finalized`, as the actor's own request.
+- Durability evidence is positive: a block is durable when the actor restored it (the
+  archive read returned it, with its digest) or when a sync that started after its write
+  completed. The absence of a write record says nothing -- the write may have gone
+  unrecorded, or another block may hold the height -- so a check that passes on a missing
+  record is `partial`, with the unknown case in the Notes, never `bound`.
