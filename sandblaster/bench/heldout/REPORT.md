@@ -1,64 +1,74 @@
-# Held-out evaluation report
+# Held-out v1 report (development set)
+
+**This is a development-set report.** Held-out v1 was retired to the development set on
+2026-10-02 (`sandblaster/bench/heldout/README.md`): its refusal reasons were read, and they have
+motivated reader and optimizer changes since. Its numbers are regression checks. They do not show
+that the optimizer is general, and a "faster than rustc" statement never cites them (DESIGN.md
+§8.2 item 11): the held-out evaluation is held-out v2 (`sandblaster/bench/heldout-v2/`).
 
 Written by `sandblaster/bench/heldout-harness/run.sh` (report.py); every number below comes from
-that run's result files (`sandblaster/bench/heldout-harness/results/latest/`). This is the fairness
-audit's evaluation protocol (plan step 8): the optimizer's own output on code it was never
-developed on, against rustc on the unmodified source, in one binary.
+that run's result files (`sandblaster/bench/heldout-harness/results/latest/`). The protocol is the
+fairness audit's held-out protocol (plan step 8), unchanged: the optimizer's own output against
+rustc on the unmodified source, in one binary.
 
 ## Headline
 
-**The optimizer changed none of the 31 held-out functions.** Every lowered copy it wrote is the
-source byte for byte (`gen/h1.rs` is H1's file; H2's text equals the source's), so the optimized subject is the rustc subject compiled again. The held-out
-optimizer-only geomean is **1.020** (optimized / rustc time, all 31 functions, no
-exclusions; default layout, overflow checks on). That is placement noise around 1.00: the A/A
-control (the same source compiled twice) spreads 0.704–1.791 in the same binary.
-With every function and block aligned to 64 bytes (less placement noise) it is 1.005, A/A spread
-0.969–1.122.
-The geomean over changed functions is undefined: no function changed.
+**The optimizer changed 3 of the 31 functions** (`next_power_of_two`, `read_u32_le`, `mix64`).
+Optimized / rustc time, geomean over all 31 functions, no exclusions: **1.002**; over the
+changed functions timed: **1.025** (default layout, overflow checks on). A/A control spread:
+0.820–1.291.
+Aligned layout: 1.004 over all timed, 1.039 over the changed ones (A/A 0.945–1.023).
 
-Most of the reason is upstream of the optimizer. Of 31 functions, 22 are refused by
-the lift's MIR reader, 6 by exec-only elaboration, and 3 reach the
-optimizer. Of those 3, 2 get a residual that is not lowered (not cheaper than the
-source, or not replaceable), and 1 is not specialized at all. No loop
-reaches the optimizer, so none of its loop machinery (closed forms, set-bit iteration, early exit,
-unrolling, the aegraph) is exercised on held-out code.
-
-These are held-out numbers. The QMDB, corpus, codec and storage numbers elsewhere are the
-development set; they do not show that the optimizer is general or faster than rustc.
+Of 31 functions, 7 are refused by the lift's MIR reader, 13 by exec-only
+elaboration, and 11 reach the optimizer (4 of them through their panic-explicit reading, DESIGN.md §8.2 item 12).
+Of those 11, 7 are specialized (3 lowered, 4 kept as written) and
+4 not specialized.
+No loop is summarized: the 2 functions whose loop reaches the optimizer (`gray_decode`, `parity`)
+keep it (each reason is in the table below), so none of the loop machinery (closed forms, set-bit
+iteration, early exit, unrolling, the aegraph) applies on this set.
 
 ## What was run
 
-- **Held-out set** (`sandblaster/bench/heldout/manifest.toml`, frozen by G6, dated 2026-10-02,
-  source commit `729ecd2a215b`): H1, 30 functions written blind from a committed idiom list;
-  H2, every monorepo function the sampling rule accepted (1 of the 40 asked for: the rule's probe
-  found only one, `commonware-utils::rng::mix64`; shortfall 39, h2/PROBE-LOG.md).
+- **Set**: held-out v1 (`sandblaster/bench/heldout/manifest.toml`, frozen by G6, dated 2026-10-02,
+  source commit `729ecd2a215b`), development data since 2026-10-02: H1, 30 functions written
+  blind from a committed idiom list; H2, every monorepo function the sampling rule accepted (1 of
+  the 40 asked for: the rule's probe found only one, `commonware-utils::rng::mix64`; shortfall 39,
+  h2/PROBE-LOG.md).
 - **Optimizer**: the exec-only path (`elab::Options { exec_only: true }`, no laws, as
   `tests/opt_qmdb.rs`), the production optimizer (`OptOptions::default()`) with only
   `exclude_user_rewrites` set (there are no user `#[rewrite]` alternatives here; the option makes
   sure none is counted), then the in-place lowering with its lifted round trip
-  (`driver::lowered::lower_in_place`), through `sandblaster/front/examples/heldout_eval.rs`. H1 is
-  lifted in place with `items = "<fn>"`, one root per function (so each refusal is that function's
-  own), then once more with every function that passed the reader, which gives the one lowered
-  copy the optimized subject compiles. H2 uses its frozen root. No profile exists for the held-out
-  set, so every result is without a profile, for both subjects.
+  (`driver::lowered::lower_in_place`), through `sandblaster/front/examples/heldout_eval.rs`. A
+  function that can panic on some inputs and states no contract is optimized through its
+  panic-explicit reading (`f__panics`, `None` the panic; DESIGN.md §8.2 item 12), and is replaced
+  only with the kernel's panic theorems of its own MIR and of the replacement's MIR. The round trip
+  reads rustc's MIR of each lowered copy (evaluate.py extracts it and runs the root again). H1 is
+  lifted in place with `items = "<fn>"` plus the file's types its signature names, one root per
+  function (so each refusal is that function's own), then once more with every function that passed
+  the reader, which gives the one lowered copy the optimized subject compiles. H2 uses a copy of its
+  frozen root. No profile exists for
+  this set, so every result is without a profile, for both subjects.
 - **Harness** (`sandblaster/bench/heldout-harness`, J11): three subjects of one crate source
   (`subject/lib.rs`; the package feature selects the module), linked into one binary: `rustc` (the
   frozen H1 file itself; H2's function text copied verbatim from its file), `A/A` (the same again)
   and `optimized` (the lowered copies). One workspace profile for all three: rustc -O
   (opt-level 3), 16 codegen units, no LTO, no target-cpu flag, no PGO; overflow checks on
   (Commonware's release profile) and, as a second binary, off. No hand-written variant exists in
-  the held-out set, so neither subject has one. Inputs: a fixed-seed type-driven generator (uniform
+  the set, so neither subject has one. Inputs: a fixed-seed type-driven generator (uniform
   bit length for integers, short byte strings) respecting each function's documented preconditions,
   plus edge cases; 512 inputs per function. The differential check runs first and must pass;
   then 31 interleaved rounds (the subject order rotates), 5 samples of about 200 µs per subject
   per round, the median of the per-round medians. `samecode.py` compares the subjects' machine code
-  (`--ignore-panic-locations`: each crate's own copy of a panic `Location` constant is not compared).
+  (`--ignore-panic-locations`: the addresses of each crate's own panic `Location` and message constants
+  are not compared), and again with `--data-blind` (no data address compared). Stage finish-A widened
+  the first check's panic rule to all of core's panic entry points and their whole argument setup, and
+  taught it the v0 back-references that the subject crates' different name lengths shift.
 - **Gates run first**: G6 and `fair-baseline.sh --heldout` (one profile, one binary, the identity
   check, an A/A subject, the rustc subject from the frozen source, >= 21 rounds after the check).
-- Machine: Apple M5 Pro; rustc 1.98.1 (48a229cea 2026-09-01); worktree HEAD `729ecd2a215b` plus the uncommitted fairness-audit work.
-- Load average [default-release]: before 4.23 5.13 4.11; after 4.13 5.10 4.10 (a shared, busy host).
-- Load average [align-release]: before 4.12 5.08 4.10; after 4.03 5.04 4.09 (a shared, busy host).
-- Load average [default-release-nooc]: before 3.95 5.01 4.09; after 3.87 4.98 4.08 (a shared, busy host).
+- Machine: Apple M5 Pro; rustc 1.98.1 (48a229cea 2026-09-01); worktree HEAD `2b3ec7cdc1f3` plus the branch's uncommitted work.
+- Load average [default-release]: before 7.28 8.50 9.11; after 7.10 8.44 9.08 (a shared, busy host).
+- Load average [align-release]: before 7.17 8.43 9.08; after 7.32 8.44 9.08 (a shared, busy host).
+- Load average [default-release-nooc]: before 7.37 8.44 9.07; after 7.34 8.41 9.06 (a shared, busy host).
 
 ## Results per binary
 
@@ -67,130 +77,177 @@ noise floor) is the control's range over all functions in that binary.
 
 | binary | geomean, all functions | geomean, changed only | median | best | worst | A/A spread (geomean) | identical code (optimized = rustc) | beyond the A/A spread: faster / slower |
 | --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |
-| default-release | 1.020 | none changed | 1.000 | 0.880 | 1.628 | 0.704–1.791 (1.015) | 30 of 31 | 0 / 0 |
-| align-release | 1.005 | none changed | 1.001 | 0.958 | 1.160 | 0.969–1.122 (1.002) | 30 of 31 | 1 / 1 |
-| default-release-nooc | 0.983 | none changed | 1.000 | 0.692 | 1.130 | 0.845–1.062 (0.989) | 30 of 31 | 2 / 4 |
+| default-release | 1.002 | 1.025 | 1.000 | 0.835 | 1.128 | 0.820–1.291 (1.016) | 28 of 31 | 0 / 0 |
+| align-release | 1.004 | 1.039 | 1.000 | 0.939 | 1.117 | 0.945–1.023 (0.996) | 28 of 31 | 1 / 6 |
+| default-release-nooc | 0.952 | 1.019 | 0.999 | 0.402 | 1.445 | 0.395–1.246 (0.957) | 29 of 31 | 0 / 1 |
 
-Rows outside the A/A spread in some binary (binomial_meld_carries, buddy_order, ceil_div, fenwick_prefix_sum, gray_decode, hamming_distance, isqrt, next_power_of_two) are not optimizer effects: their source
-text is identical in both subjects. They show how far placement and a busy host move identical code
-on this machine; a real gain has to clear that.
+Rows of unchanged functions outside the A/A spread in some binary (base64_encoded_len, buddy_order, ceil_div, fenwick_prefix_sum, first_newline, hamming_distance, remaining_budget) are not
+optimizer effects: their source text is identical in both subjects. They show how far placement and
+a busy host move identical code on this machine; a real gain has to clear that.
 
 ## Every function
 
-| set | function | stage reached | optimizer outcome | changed | opt / rustc [default-release] | opt / rustc [align-release] | opt / rustc [default-release-nooc] | A/A / rustc [default-release] | rounds p10–p90 [default-release] | why nothing changed |
-| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
-| H1 | `decimal_digits` | reader | — | no | = 1.000 | = 1.006 | = 1.025 | 1.143 | 0.985–1.027 | error[contract]: `while` loops need a measure |
-| H1 | `base32_encoded_len` | elaboration | — | no | = 0.997 | = 1.023 | = 1.000 | 0.933 | 0.986–1.112 | exec-only elaboration: Unproven (Overflow obligation Failed: Eq(Bool, #le_int(#imul(#cast_usize_int(n), #cast_usize_int(8usize)), 18446744073709551615int), true); Overflow obligation Failed: Eq(Bool, #le_int(#imul(#cast_usize_int(__t1), #cast_usize_int(8usize) |
-| H1 | `base64_encoded_len` | elaboration | — | no | = 1.000 | = 0.996 | = 0.995 | 0.923 | 0.914–1.087 | exec-only elaboration: Unproven (Overflow obligation Failed: Eq(Bool, #le_int(#imul(#cast_usize_int(__t3), #cast_usize_int(4usize)), 18446744073709551615int), true); Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cast_usize_int(__t4), #cast_usize_int(3usi |
-| H1 | `reverse_bits` | reader | — | no | = 0.999 | = 1.000 | = 1.000 | 1.001 | 0.994–1.007 | error[unsupported]: lift: MIR reading of `reverse_bits` (in `std::cmp::impls::<impl std::cmp::PartialOrd for i32>::lt`): the signed operation `lt` (SEMANTICS.md §19.3 reads bit operations, shifts, negation and truncating casts only) |
-| H1 | `gray_encode` | kept | Specialized (StraightLine) | no | = 1.000 | = 1.000 | = 1.000 | 1.000 | 0.993–1.008 | the residual is not 3% cheaper than the source (portable model: 1243 vs 1243 milli-cycles) |
-| H1 | `gray_decode` | reader | — | no | = 1.094 | = 1.035 | = 1.130 | 1.791 | 1.059–1.126 | error[contract]: `while` loops need a measure |
-| H1 | `next_power_of_two` | kept | Unspecialized | no | = 0.949 | = 0.999 | = 1.122 | 0.945 | 0.926–0.965 | optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Le(U32)) |
-| H1 | `isqrt` | reader | — | no | = 1.018 | = 0.998 | = 1.066 | 0.992 | 1.005–1.026 | error[contract]: `while` loops need a measure |
-| H1 | `fenwick_prefix_sum` | reader | — | no | = 1.084 | = 1.001 | = 0.841 | 1.062 | 1.058–1.091 | error[contract]: `while` loops need a measure |
-| H1 | `buddy_order` | reader | — | no | = 0.968 | = 0.978 | = 1.075 | 0.965 | 0.942–0.986 | error[contract]: `while` loops need a measure |
-| H1 | `binomial_meld_carries` | reader | — | no | = 1.187 | = 1.160 | = 0.980 | 1.095 | 1.172–1.220 | error[unsupported]: lift: MIR reading of `binomial_meld_carries` (in `heldout_h1_mir::h1::binomial_meld_carries`): a loop test with both targets in the loop |
-| H1 | `hamming_distance` | reader | — | no | = 0.880 | = 0.958 | = 1.005 | 0.897 | 0.863–0.883 | error[unsupported]: lift: MIR reading of `hamming_distance` (in `std::slice::Iter::<'_, u8>::new`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `run_count` | reader | — | no | = 0.990 | = 1.007 | = 1.003 | 1.007 | 0.979–1.016 | error[unsupported]: lift: MIR reading of `run_count` (in `core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `first_newline` | reader | — | no | = 0.935 | = 0.982 | = 0.957 | 1.038 | 0.917–0.956 | error[unsupported]: lift: MIR reading of `first_newline` (in `std::slice::Iter::<'_, u8>::new`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `first_printable` | reader | — | no | = 1.092 | = 0.991 | = 0.986 | 0.996 | 1.075–1.104 | error[unsupported]: lift: MIR reading of `first_printable` (in `std::slice::Iter::<'_, u8>::new`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `checked_sum` | reader | — | no | = 1.007 | = 1.001 | = 1.001 | 0.994 | 0.994–1.037 | error[unsupported]: lift: MIR reading of `checked_sum` (in `std::slice::Iter::<'_, u32>::new`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `ring_index` | elaboration | — | no | = 0.999 | = 1.000 | = 0.872 | 1.008 | 0.980–1.011 | exec-only elaboration: Unproven (DivZero obligation Failed: Eq(Bool, #ne_usize(capacity, 0usize), true); Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cast_usize_int(head), #cast_usize_int(__t1)), 18446744073709551615int), true)) |
-| H1 | `align_up` | elaboration | — | no | = 1.000 | = 1.002 | = 1.000 | 1.000 | 0.992–1.005 | exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cast_u64_int(x), #cast_u64_int(align)), 18446744073709551615int), true); Underflow obligation Failed: Eq(Bool, #le_u64(1u64, __t2), true) |
-| H1 | `ceil_div` | elaboration | — | no | = 1.628 | = 1.001 | = 0.692 | 1.114 | 1.618–1.661 | exec-only elaboration: Unproven (DivZero obligation Failed: Eq(Bool, #ne_u32(b, 0u32), true); DivZero obligation Failed: Eq(Bool, #ne_u32(b, 0u32), true); Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cast_u32_int(__t1), #cast_u32_int(1u32)), 4294967295i |
-| H1 | `crc8` | reader | — | no | 1.027 | 1.000 | 0.988 | 1.011 | 1.019–1.033 | error[unsupported]: lift: MIR reading of `crc8` (in `core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `parity` | reader | — | no | = 1.014 | = 1.001 | = 1.004 | 1.116 | 0.988–1.020 | error[contract]: `while` loops need a measure |
-| H1 | `trailing_ones` | reader | — | no | = 0.995 | = 1.015 | = 0.998 | 1.010 | 0.974–1.017 | error[contract]: `while` loops need a measure |
-| H1 | `byte_swap` | reader | — | no | = 1.002 | = 1.004 | = 1.000 | 1.000 | 0.991–1.009 | error[unsupported]: lift: MIR reading of `byte_swap` (in `std::cmp::impls::<impl std::cmp::PartialOrd for i32>::lt`): the signed operation `lt` (SEMANTICS.md §19.3 reads bit operations, shifts, negation and truncating casts only) |
-| H1 | `nibble_popcount` | elaboration | — | no | = 1.010 | = 1.000 | = 1.000 | 1.008 | 0.995–1.018 | exec-only elaboration: Blocked("depends on `crate::h1::nibble_popcount__loop0`, which could not be elaborated: cannot infer a termination measure; add `#[decreases(e)]` (§4.2)") |
-| H1 | `matrix_sum_4x8` | reader | — | no | = 1.001 | = 1.000 | = 1.000 | 0.999 | 0.989–1.016 | error[recursion]: mutual recursion is not supported: crate::h1::matrix_sum_4x8__loop0 → crate::h1::matrix_sum_4x8__loop1 |
-| H1 | `seed16_rounds20` | reader | — | no | = 0.998 | = 1.003 | = 1.000 | 0.999 | 0.986–1.006 | error[unsupported]: lift: MIR reading of `seed16_rounds20` (in `core::num::<impl u32>::rotate_left`): the intrinsic `rotate_left` |
-| H1 | `count_words` | reader | — | no | = 0.993 | = 0.973 | = 0.983 | 0.995 | 0.843–1.013 | error[unsupported]: lift: MIR reading of `count_words` (in `core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `scale_sample` | reader | — | no | = 0.996 | = 1.001 | = 1.000 | 0.998 | 0.985–1.108 | error[unsupported]: lift: MIR reading of `scale_sample` (in `heldout_h1_mir::h1::scale_sample`): the cast Int(true, 16) as Int(true, 32) (sign extension is not read) |
-| H1 | `remaining_budget` | reader | — | no | = 0.929 | = 1.041 | = 0.852 | 0.704 | 0.858–1.030 | error[unsupported]: lift: MIR reading of `remaining_budget` (in `core::slice::iter::<impl std::iter::IntoIterator for &[u32]>::into_iter`): rvalue (unsupported "rvalue AddressOf(Const, (*_1))") |
-| H1 | `read_u32_le` | reader | — | no | = 0.998 | = 1.002 | = 1.005 | 1.041 | 0.974–1.019 | error[unsupported]: lift: MIR reading of `read_u32_le` (in `<std::option::Option<u32> as std::ops::FromResidual<std::option::Option<std::convert::Infallible>>>::from_residual`): a zero-sized value of type std::option::Option<std::convert::Infallible> used as d |
-| H2 | `mix64` | kept | Specialized (StraightLine) | no | = 0.997 | = 1.004 | = 1.002 | 0.997 | 0.978–1.018 | a `const fn` (its lowered helpers would have to be `const fn` too; only a `const fn` alternative of a `#[rewrite]` lemma replaces one) |
+Optimizer time: the front end, exec-only elaboration, the optimizer, the lowering and its round
+trip for that function's root (wall clock, seconds, on the shared host; `+N rt`: the root ran again
+after N extractions of the round trip's MIR), and the optimizer's own milliseconds for that root.
+
+| set | function | stage reached | optimizer outcome | changed | opt / rustc [default-release] | opt / rustc [align-release] | opt / rustc [default-release-nooc] | A/A / rustc [default-release] | rounds p10–p90 [default-release] | optimizer time | reason |
+| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |
+| H1 | `decimal_digits` | elaboration | — | no | = 0.951 | = 0.992 | = 0.402 | 1.291 | 0.949–0.953 | 0.6 s; opt 14 ms | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| H1 | `base32_encoded_len` | kept | Unspecialized, through its panic-explicit reading | no | = 1.114 | = 0.975 | = 1.000 | 1.114 | 1.081–1.206 | 0.2 s; opt 19 ms | optimizer: not stuck-free: a `match` on a neutral scrutinee (variable #1); driven: the equality lemma was not proven: a leaf of the process tree is not closed within its budget (100000 steps: budget exhausted) |
+| H1 | `base64_encoded_len` | kept | Unspecialized, through its panic-explicit reading | no | = 0.930 | = 1.041 | = 0.998 | 1.028 | 0.903–0.926 | 0.3 s; opt 17 ms | optimizer: not stuck-free: a `match` on a neutral scrutinee (variable #1); driven: the equality lemma was not proven: the residual and the source split on different scrutinees |
+| H1 | `reverse_bits` | elaboration | — | no | = 1.000 | = 1.000 | = 1.006 | 1.000 | 0.971–1.000 | 0.2 s; opt 19 ms | exec-only elaboration: Blocked("depends on `crate::h1::reverse_bits__loop0`, which could not be elaborated: cannot infer a termination measure; add `#[decreases(e)]` (§4.2)"); no panic-explicit reading: it calls `crate::h1::reverse_bits__loop0`, which is neither kernel-checked nor read (it has no pa |
+| H1 | `gray_encode` | kept | Specialized (StraightLine) | no | = 1.000 | = 1.000 | = 0.998 | 1.000 | 0.999–1.003 | 0.2 s; opt 19 ms | the residual is not 3% cheaper than the source (portable model: 1243 vs 1243 milli-cycles); a tie keeps the source |
+| H1 | `gray_decode` | kept | Unspecialized | no | = 1.128 | = 0.997 | = 0.742 | 0.971 | 1.127–1.258 | 0.2 s; opt 17 ms | optimizer: not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gray_decode::loop#0`); driven: driven residual not printable: a stuck application of `crate::h1::gray_decode::loop#0` |
+| H1 | `next_power_of_two` | lowered | Specialized (Driven) | yes | 0.999 | 1.003 | = 0.980 | 0.992 | 0.995–1.008 | 2.7 s (+1 rt); opt 39 ms | lowered: rung Driven, portable cost 5119 -> 4619 milli-cycles |
+| H1 | `isqrt` | elaboration | — | no | = 1.003 | = 1.008 | = 1.005 | 1.032 | 0.998–1.048 | 0.2 s; opt 16 ms | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| H1 | `fenwick_prefix_sum` | elaboration | — | no | = 0.977 | = 1.025 | = 0.985 | 0.958 | 0.970–0.982 | 0.2 s; opt 16 ms | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| H1 | `buddy_order` | elaboration | — | no | = 1.056 | = 1.100 | = 1.053 | 0.984 | 1.035–1.087 | 0.2 s; opt 17 ms | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| H1 | `binomial_meld_carries` | elaboration | — | no | = 1.018 | = 0.947 | = 1.024 | 1.022 | 0.999–1.023 | 0.6 s; opt 18 ms | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| H1 | `hamming_distance` | reader | — | no | = 1.056 | = 1.024 | = 0.995 | 1.041 | 1.036–1.088 | 0.0 s | error[unsupported]: lift: MIR reading of `hamming_distance` (in `<std::slice::Iter<'_, u8> as std::iter::Iterator>::size_hint`): the cast `transmute` of Unsupported("type RawPtr(Ty { id: 33, kind: RigidTy(Uint(U8)) }, Not)") to Adt("std::ptr::NonNull<u8>") |
+| H1 | `run_count` | elaboration | — | no | = 1.024 | = 1.004 | = 1.000 | 1.055 | 1.023–1.024 | 3.6 s; opt 15 ms | exec-only elaboration: Blocked("depends on `crate::h1::run_count__loop0`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires`  |
+| H1 | `first_newline` | reader | — | no | = 0.939 | = 1.034 | = 0.999 | 0.949 | 0.938–0.940 | 0.0 s | error[unsupported]: lift: MIR reading of `first_newline` (in `heldout_h1_mir::h1::first_newline`): the library function `<std::slice::Iter<'_, u8> as std::iter::Iterator>::position::<{closure@lib.rs:166:26: 166:30}>` has a loop (library loops are not inlined) |
+| H1 | `first_printable` | reader | — | no | = 1.011 | = 0.995 | = 0.985 | 1.014 | 1.008–1.014 | 0.0 s | error[unsupported]: lift: a constructor of `std::iter::Enumerate` |
+| H1 | `checked_sum` | reader | — | no | = 0.998 | = 0.957 | = 0.921 | 1.011 | 0.985–1.017 | 0.0 s | error[unsupported]: lift: a constructor of `std::iter::Enumerate` |
+| H1 | `ring_index` | kept | Specialized (Driven), through its panic-explicit reading | no | = 1.007 | = 1.000 | = 1.065 | 0.993 | 0.959–1.056 | 0.2 s; opt 20 ms | the residual is not 3% cheaper than the source (portable model: 6545 vs 6545 milli-cycles); a tie keeps the source (its panic-explicit reading's residual, in its Rust form) |
+| H1 | `align_up` | elaboration | — | no | = 0.997 | = 1.000 | = 1.000 | 0.996 | 0.984–0.998 | 0.2 s; opt 19 ms | exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cast_u64_int(x), #cast_u64_int(align)), 18446744073709551615int), true); Underflow obligation Failed: Eq(Bool, #le_u64(1u64, __t2), true)); no panic-explicit reading: its elabor |
+| H1 | `ceil_div` | kept | Specialized (Driven), through its panic-explicit reading | no | = 0.980 | = 1.000 | = 1.445 | 1.271 | 0.952–0.981 | 0.2 s; opt 21 ms | the residual is not 3% cheaper than the source (portable model: 6927 vs 6927 milli-cycles); a tie keeps the source (its panic-explicit reading's residual, in its Rust form) |
+| H1 | `crc8` | elaboration | — | no | ≈ 1.002 | ≈ 1.000 | ≈ 1.001 | 0.998 | 0.973–1.027 | 0.2 s; opt 16 ms | exec-only elaboration: Blocked("depends on `crate::h1::crc8__loop0`, which was not elaborated: depends on `crate::h1::crc8__loop1`, which could not be elaborated: cannot infer a termination measure; add `#[decreases(e)]` (§4.2)"); no panic-explicit reading: it calls `crate::h1::crc8__loop0`, which i |
+| H1 | `parity` | kept | Unspecialized | no | = 0.998 | = 1.000 | = 1.018 | 1.024 | 0.996–1.006 | 0.2 s; opt 16 ms | optimizer: not stuck-free: a `match` on a neutral scrutinee (`crate::h1::parity::loop#0`); driven: driven residual not printable: a stuck application of `crate::h1::parity::loop#0` |
+| H1 | `trailing_ones` | elaboration | — | no | = 0.990 | = 0.996 | = 1.027 | 0.997 | 0.987–1.017 | 0.2 s; opt 14 ms | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| H1 | `byte_swap` | reader | — | no | = 1.001 | = 1.000 | = 0.513 | 1.000 | 0.978–1.006 | 0.0 s | error[unsupported]: lift: MIR reading of `byte_swap` (in `heldout_h1_mir::h1::byte_swap`): checked `mul` of a signed or non-integer type with a tested flag |
+| H1 | `nibble_popcount` | elaboration | — | no | = 1.000 | = 1.017 | = 0.984 | 1.000 | 0.961–1.015 | 0.2 s; opt 15 ms | exec-only elaboration: Blocked("depends on `crate::h1::nibble_popcount__loop0`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requ |
+| H1 | `matrix_sum_4x8` | elaboration | — | no | = 1.000 | = 1.000 | = 0.990 | 1.000 | 0.999–1.001 | 0.3 s; opt 15 ms | exec-only elaboration: Blocked("depends on `crate::h1::matrix_sum_4x8__loop1`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requi |
+| H1 | `seed16_rounds20` | elaboration | — | no | = 1.000 | = 1.000 | = 1.000 | 1.000 | 0.999–1.000 | 0.2 s; opt 14 ms | exec-only elaboration: Blocked("depends on `crate::h1::seed16_rounds20__loop0`, which was not elaborated: depends on `crate::h1::seed16_rounds20__loop1`, which could not be elaborated: cannot infer a termination measure; add `#[decreases(e)]` (§4.2)"); no panic-explicit reading: it calls `crate::h1: |
+| H1 | `count_words` | reader | — | no | = 1.006 | = 0.985 | = 0.982 | 0.996 | 1.000–1.007 | 0.0 s | error[resolve]: cannot find type `State` in this scope |
+| H1 | `scale_sample` | reader | — | no | = 1.000 | = 1.000 | = 0.999 | 1.000 | 0.973–1.044 | 0.0 s | error[unsupported]: lift: MIR reading of `scale_sample` (in `core::num::<impl i32>::saturating_mul`): checked `mul` of a signed or non-integer type with a tested flag |
+| H1 | `remaining_budget` | kept | Specialized (StraightLine) | no | = 0.835 | = 0.939 | = 0.900 | 0.820 | 0.829–0.837 | 0.2 s; opt 15 ms | the residual is not 3% cheaper than the source (portable model: 64928 vs 64928 milli-cycles); a tie keeps the source |
+| H1 | `read_u32_le` | lowered | Specialized (Driven) | yes | 1.079 | 1.117 | 1.071 | 1.040 | 1.072–1.081 | 3.7 s (+1 rt); opt 38 ms | lowered: rung Driven, portable cost 2970 -> 2071 milli-cycles |
+| H2 | `mix64` | lowered | Specialized (StraightLine) | yes | = 1.000 | = 1.000 | = 1.007 | 0.991 | 0.957–1.011 | 2.5 s (+1 rt); opt 16 ms | lowered: rung StraightLine, portable cost 7449 -> 7075 milli-cycles |
 
 `=`: the optimized and rustc subjects compiled to the same machine code (samecode.py). A row
 without `=` whose function did not change differs only in data addresses the conservative check
 compares (for example `crc8`, which rustc compiles to a 256-byte lookup table, one copy per crate:
 its A/A pair is not `=` either). A/A pairs identical by the check: 30 of 31 [default-release].
+`≈`: the same code except for the addresses of each crate's own constant data (`samecode.py --data-blind`;
+the constants' contents are not compared): 29 of 31 optimized = rustc, 31 A/A [default-release], `=` rows included.
+
+## Change since the previous run
+
+The previous run (its `eval.json`, `--previous`; run.sh passes the one its run replaces): 7 refused by the reader, 13 by exec-only
+elaboration, 11 reached the optimizer, 3 lowered. This run: 7, 13, 11, 3.
+
+No function's stage, outcome or lowering changed.
 
 ## Why: the funnel
 
 | stage | reason | functions |
 | --- | --- | --- |
-| reader | slice iteration: core's slice iterator (`Iter::new`, `into_iter`) takes a raw address (`AddressOf`), which the MIR reader does not read | 8: `hamming_distance`, `run_count`, `first_newline`, `first_printable`, `checked_sum`, `crc8`, `count_words`, `remaining_budget` |
-| reader | a `while` loop with no termination measure (in-place code carries none; the lift asks for `proof! { decreases(..) }`) | 7: `decimal_digits`, `gray_decode`, `isqrt`, `fenwick_prefix_sum`, `buddy_order`, `parity`, `trailing_ones` |
-| reader | `for _ in 0..N` over an `i32` range: `Range::next` compares signed integers, which SEMANTICS.md §19.3 does not read | 2: `reverse_bits`, `byte_swap` |
-| reader | a loop test whose two targets are both inside the loop (`while a != 0 || b != 0 || ..`) | 1: `binomial_meld_carries` |
-| reader | nested loops: the lift's two loop functions call each other (mutual recursion is not supported) | 1: `matrix_sum_4x8` |
-| reader | the `rotate_left` intrinsic is not read | 1: `seed16_rounds20` |
-| reader | a sign-extending cast (`i16 as i32`) is not read | 1: `scale_sample` |
-| reader | `?` on an `Option` (its residual `Option<Infallible>` is a zero-sized value used as data) | 1: `read_u32_le` |
-| elaboration | a panic obligation (overflow or division by zero) that no stated precondition rules out: the function can panic on some inputs, and H1 states no contract the verifier reads | 5: `base32_encoded_len`, `base64_encoded_len`, `ring_index`, `align_up`, `ceil_div` |
-| elaboration | no termination measure inferred for a `for` loop over a range (`#[decreases]` needed) | 1: `nibble_popcount` |
-| optimizer | reached the optimizer, not specialized: a branch on an argument (`if n <= 1`) is not stuck-free for the straight-line rung, and the driven residual cannot print `Le(Int)` | 1: `next_power_of_two` |
-| lowering | reached the optimizer, specialized; the residual is not 3% cheaper than the source (the selection gate) | 1: `gray_encode` |
-| lowering | reached the optimizer, specialized; the lowering does not replace a `const fn` (its helpers would have to be `const fn` too) | 1: `mix64` |
+| reader | `.iter().enumerate()`: core's `Enumerate` is not modeled | 2: `first_printable`, `checked_sum` |
+| reader | a signed checked multiplication (an overflow-checked `*` of a signed type, `saturating_mul`, `for _ in 0..N` over `i32`) is not read | 2: `byte_swap`, `scale_sample` |
+| reader | slice iteration: core's slice iterator's `size_hint` transmutes a raw pointer, which the MIR reader does not read | 1: `hamming_distance` |
+| reader | a library function with a loop (`Iterator::position`): library loops are not inlined | 1: `first_newline` |
+| reader | the lift does not resolve a type the file declares (`State`) | 1: `count_words` |
+| elaboration | unproven (a loop of it did not verify, or a panic no precondition rules out), and no panic-explicit reading: what can fail is where the reading does not read (inside a loop, an `unreachable!()`, a callee's `requires`, an indexed place; DESIGN.md §8.2 item 12) | 9: `decimal_digits`, `isqrt`, `fenwick_prefix_sum`, `buddy_order`, `binomial_meld_carries`, `run_count`, `trailing_ones`, `nibble_popcount`, `matrix_sum_4x8` |
+| elaboration | no termination measure inferred for a `for` loop over a range (`#[decreases]` needed) | 3: `reverse_bits`, `crc8`, `seed16_rounds20` |
+| elaboration | can panic on some inputs, no contract, and no panic-explicit reading: an `unreachable!()` the prover does not refute (an `assert!`; in MIR a `debug_assert!` is one) is not read (DESIGN.md §8.2 item 12) | 1: `align_up` |
+| optimizer | reached the optimizer with a loop: not specialized, the driven residual cannot print the call of the loop the elaborator made (`<f>::loop#k`) | 2: `gray_decode`, `parity` |
+| optimizer | reached the optimizer, not specialized: the driven candidate's equality proof has a leaf not closed within its budget | 1: `base32_encoded_len` |
+| optimizer | reached the optimizer, not specialized: the driven candidate's equality proof finds the residual and the source splitting on different scrutinees | 1: `base64_encoded_len` |
+| lowering | specialized; the residual costs what the source costs: a tie keeps the source (DESIGN.md §8.2 item 6) | 4: `gray_encode`, `ring_index`, `ceil_div`, `remaining_budget` |
+| lowered | lowered: the optimizer's residual replaces the source, accepted by the lifted round trip | 3: `next_power_of_two`, `read_u32_le`, `mix64` |
+
+## Functions the exec-only path leaves unproven (DESIGN.md §8.2 item 12)
+
+A function whose arithmetic, division or indexing no precondition makes safe is `Unproven` in the
+exec-only path (and its callers are blocked by it); so is one with a loop that does not verify.
+The optimizer works on the panic-explicit reading `f__panics : Option<R>` of each (`None` the
+panic), whose residual is linked to it by a kernel-checked equality over `Option<R>`, so no rewrite
+adds, removes or moves a panic; a replacement ships only with the panic theorems of the source's MIR
+and of the copy's MIR.
+
+| function | reading | optimizer outcome | lowered | reason |
+| --- | --- | --- | --- | --- |
+| `decimal_digits` | none | — | no | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| `base32_encoded_len` | `base32_encoded_len__panics` | Unspecialized | no | optimizer: not stuck-free: a `match` on a neutral scrutinee (variable #1); driven: the equality lemma was not proven: a leaf of the process tree is not closed within its budget (100000 steps: budget exhausted) |
+| `base64_encoded_len` | `base64_encoded_len__panics` | Unspecialized | no | optimizer: not stuck-free: a `match` on a neutral scrutinee (variable #1); driven: the equality lemma was not proven: the residual and the source split on different scrutinees |
+| `reverse_bits` | none | — | no | exec-only elaboration: Blocked("depends on `crate::h1::reverse_bits__loop0`, which could not be elaborated: cannot infer a termination measure; add `#[decreases(e)]` (§4.2)"); no panic-explicit reading: it calls `crate::h1::reverse_bits__loop0`, which is neither kernel-checked nor read (it has no pa |
+| `isqrt` | none | — | no | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| `fenwick_prefix_sum` | none | — | no | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| `buddy_order` | none | — | no | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| `binomial_meld_carries` | none | — | no | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| `run_count` | none | — | no | exec-only elaboration: Blocked("depends on `crate::h1::run_count__loop0`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires`  |
+| `ring_index` | `ring_index__panics` | Specialized (Driven) | no | the residual is not 3% cheaper than the source (portable model: 6545 vs 6545 milli-cycles); a tie keeps the source (its panic-explicit reading's residual, in its Rust form) |
+| `align_up` | none | — | no | exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Overflow obligation Failed: Eq(Bool, #le_int(#iadd(#cast_u64_int(x), #cast_u64_int(align)), 18446744073709551615int), true); Underflow obligation Failed: Eq(Bool, #le_u64(1u64, __t2), true)); no panic-explicit reading: its elabor |
+| `ceil_div` | `ceil_div__panics` | Specialized (Driven) | no | the residual is not 3% cheaper than the source (portable model: 6927 vs 6927 milli-cycles); a tie keeps the source (its panic-explicit reading's residual, in its Rust form) |
+| `crc8` | none | — | no | exec-only elaboration: Blocked("depends on `crate::h1::crc8__loop0`, which was not elaborated: depends on `crate::h1::crc8__loop1`, which could not be elaborated: cannot infer a termination measure; add `#[decreases(e)]` (§4.2)"); no panic-explicit reading: it calls `crate::h1::crc8__loop0`, which i |
+| `trailing_ones` | none | — | no | exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place) |
+| `nibble_popcount` | none | — | no | exec-only elaboration: Blocked("depends on `crate::h1::nibble_popcount__loop0`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requ |
+| `matrix_sum_4x8` | none | — | no | exec-only elaboration: Blocked("depends on `crate::h1::matrix_sum_4x8__loop1`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requi |
+| `seed16_rounds20` | none | — | no | exec-only elaboration: Blocked("depends on `crate::h1::seed16_rounds20__loop0`, which was not elaborated: depends on `crate::h1::seed16_rounds20__loop1`, which could not be elaborated: cannot infer a termination measure; add `#[decreases(e)]` (§4.2)"); no panic-explicit reading: it calls `crate::h1: |
 
 ## The four columns (protocol item 7)
 
 | column | functions | geomean |
 | --- | ---: | ---: |
-| optimizer-derived (driver, Σ1–Σ5, aegraph, residuals) | 0 | none |
+| optimizer-derived (driver, Σ1–Σ5, aegraph, residuals) | 3 | 1.025 |
 | user `#[rewrite]` alternatives | 0 (excluded by the evaluation option; none exist) | none |
-| hand-written hardware variants | 0 (the held-out set has none) | none |
+| hand-written hardware variants | 0 (the set has none) | none |
 | source restructuring | 0 (the subjects compile the frozen files) | none |
 
 ## Rung and lowering hits (protocol item 6)
 
-- Reached the optimizer: 3 of 31. Specialized: 2 (StraightLine 2). Unspecialized: 1.
-- ClosedForm 0, SetBits 0, EarlyExit 0, SkipIdle 0, Fused 0, Rewritten (aegraph) 0, Driven 0 (1 attempt refused: driven residual not printable: primitive Le(Int) cannot be printed).
-- Lowered into the source: 0 of 31.
+- Reached the optimizer: 11 of 31 (4 through a panic-explicit reading). Specialized: 7 (Driven 4, StraightLine 3). Unspecialized: 4.
+- Candidates per rung (functions with a candidate of that rung; specialized by it): ClosedForm 0/0, SetBits 0/0, EarlyExit 0/0, SkipIdle 0/0, Fused 0/0, Rewritten 0/0, Driven 8/4, StraightLine 11/3.
+- Lowered into the source: 3 of 31 in the optimized subject (optimizer 3).
 
-## Cost-model decision accuracy on held-out pairs (J12)
+## Cost-model decisions (J12)
 
-Candidate pairs with a measured winner: **0**. Accuracy is undefined (n = 0). The only held-out decision
-the cost model made is 1 source-vs-residual comparison (`gray_encode`: equal cost, so the source stays). A rejected residual
-is never printed, so there is no second subject to time against the source.
-`mix64`'s residual is refused before any cost comparison (a `const fn`), and `next_power_of_two` has
-no residual. The cost model is therefore unvalidated on held-out code; its three M5 decisions remain
-development-set regression checks only (front/tests/opt_cost.rs).
+The model predicted a gain (at least 3%) for the 3 lowered functions. Measured [default-release]:
+0 faster beyond the A/A spread (none), 0 slower beyond it (none),
+3 within it.
+
+Cost-model accuracy, per lowered function: the portable model's predicted ratio (residual / source
+cost) against the measured optimized / rustc time in each binary.
+
+| function | portable cost, source → residual (milli-cycles) | predicted | measured [default-release] | measured [align-release] | measured [default-release-nooc] |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `next_power_of_two` | 5119 → 4619 | 0.902 | 0.999 | 1.003 | 0.980 |
+| `read_u32_le` | 2970 → 2071 | 0.697 | 1.079 | 1.117 | 1.071 |
+| `mix64` | 7449 → 7075 | 0.950 | 1.000 | 1.000 | 1.007 |
+
+Geomean predicted 0.842, measured 1.025 [default-release]; the model's direction (a gain) held for 1 of 3 (any gain, inside the noise or not).
+Kept as written after the cost comparison (residual vs source, portable model): 4 equal in cost (`gray_encode`, `ring_index`, `ceil_div`, `remaining_budget`),
+0 dearer, 0 cheaper but not by 3%.
+A rejected residual is never printed, so there is no second subject to time against the source:
+these decisions are not measured here.
 
 ## Ablations (protocol item 8, J7)
 
-The guards stage removed the fixed unroll limit (J7: `drive::unroll_pays` decides by the cost model),
-so there is no `max_static_trips` value left to ablate. The remaining tuned constants (LOOP_TRIPS,
-the synthesis and guard pools, the 3% gate, TRY_FAIL, (CP+TP)/2, the popcount surcharge,
-DERIVE_MIN_PROOF_NODES) were not ablated on this set: no held-out loop reaches the optimizer, and
-the three functions that do reach it are decided before any of them applies (equal cost under any
-gate of 0–5%, a `const fn`, an unprintable branch). An ablation here would measure nothing; it
-becomes meaningful when held-out loops reach the optimizer.
+Not run on this set. The tuned constants (LOOP_TRIPS, the synthesis and guard pools, the 3% gate,
+TRY_FAIL, (CP+TP)/2, the popcount surcharge, DERIVE_MIN_PROOF_NODES) are ablated on held-out
+code; this set is development data now. No loop of this set is summarized either.
 
-## What would let the optimizer see held-out code (future items; not done here)
+## What keeps code unchanged (development notes)
 
-Recorded, not acted on: this stage does not change the optimizer or the reader in response to
-held-out results. Any item below that is implemented because of a held-out function moves that
-function to the development set; H1's replacement is a new function written blind from the same
-idiom, and H2's rule has no candidate left (a wider rule is a new, versioned rule).
+Counts from this run's reasons; this set may motivate changes (it is development data), and each
+change states its structural justification (DESIGN.md §8.2 item 11).
 
-1. **The MIR reader** refuses 22 of 31: slice iterators (`AddressOf` in core's `Iter`), signed
-   comparison (any `for _ in 0..N` whose range is `i32`), the `rotate_left` intrinsic, sign-extending
-   casts, `?` on `Option`, a loop test with both targets in the loop, and nested loops (mutual
-   recursion of the lift's loop functions). Ordinary Rust uses all of these.
-2. **Termination**: in-place code has no `decreases`; the lift asks for one on every `while` loop
-   (7 functions), and 1 `for` loop over a range gets no inferred measure. Without an attachment
-   per loop, no loop of unannotated code reaches the optimizer.
-3. **Contracts**: 5 functions can genuinely panic (overflow, division by zero) for some inputs; the
-   verifier is right to refuse them until a precondition is stated.
-4. **The optimizer itself**, on the 3 it saw: it cannot print a residual that branches on an
-   argument (`next_power_of_two`: the straight-line rung is not stuck-free on `if n <= 1`, and the
-   driven residual cannot print `Le(Int)`); the lowering never replaces a `const fn` (`mix64`);
-   and where it does produce a residual (`gray_encode`) the residual is the source.
+1. **The MIR reader** refuses 7 of 31.
+   - 2: `.iter().enumerate()`: core's `Enumerate` is not modeled.
+   - 2: a signed checked multiplication (an overflow-checked `*` of a signed type, `saturating_mul`, `for _ in 0..N` over `i32`) is not read.
+   - 1: slice iteration: core's slice iterator's `size_hint` transmutes a raw pointer, which the MIR reader does not read.
+   - 1: a library function with a loop (`Iterator::position`): library loops are not inlined.
+   - 1: the lift does not resolve a type the file declares (`State`).
+2. **Termination**: 3 functions with a loop over a range that gets no inferred measure.
+3. **Unproven in the exec-only path**: 17 functions (a panic no contract rules out, or a loop that does not
+   verify, or a callee of either); 4 reach the optimizer through their panic-explicit reading, 13 have none
+   (`decimal_digits`, `reverse_bits`, `isqrt`, `fenwick_prefix_sum`, `buddy_order`, `binomial_meld_carries`, `run_count`, `align_up`, `crc8`, `trailing_ones`, `nibble_popcount`, `matrix_sum_4x8`, `seed16_rounds20`; each reason is in the tables above).
+4. **The optimizer**, on the 11 it saw: 4 not specialized (`base32_encoded_len`, `base64_encoded_len`, `gray_decode`, `parity`); of the 7 specialized,
+   3 lowered and 4 kept (equal in cost: 4).
 
 ## Reproducing
 
 ```sh
-HEAVY=<admission wrapper> CARGO_TARGET_DIR=<dir> sandblaster/bench/heldout-harness/run.sh   # --rounds N (>= 21)
+HEAVY=<admission wrapper> CARGO_TARGET_DIR=<dir> sandblaster/bench/heldout-harness/run.sh --set v1   # --rounds N (>= 21)
 ```

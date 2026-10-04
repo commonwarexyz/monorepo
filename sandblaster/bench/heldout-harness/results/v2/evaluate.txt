@@ -1,0 +1,31 @@
+[H1] parse_u32: kept: the residual is not 3% cheaper than the source (portable model: 23336 vs 23586 milli-cycles)
+[H1] hex_encode_lower: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:25:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`
+[H1] hex_decode: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:47:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`
+[H1] adler32: elaboration: exec-only elaboration: Blocked("depends on `crate::h1::adler32__loop0`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading
+[H1] fletcher16: elaboration: exec-only elaboration: Blocked("depends on `crate::h1::fletcher16__loop0`, which did not verify (checked only against a stand-in body)"); no panic-explicit read
+[H1] luhn_valid: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:85:8: error[unsupported]: lift: a constructor of `std::iter::Rev`
+[H1] manhattan: kept: the residual cannot be printed as Rust: the lift prelude type `crate::__lift::I32` has no host spelling
+[H1] rect_intersection_area: elaboration: exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Unreachable obligation Failed: Empty; Overflow obligation Failed: Eq(Bool, #le_int(#imul(
+[H1] polygon_twice_area: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:145:8: error[unsupported]: lift: MIR reading of `polygon_twice_area` (in `heldout_h1v2_mir::h1::polygon_twice_area`):
+[H1] is_leap_year: kept: the residual is not 3% cheaper than the source (portable model: 7390 vs 7390 milli-cycles); a tie keeps the source
+[H1] days_in_month: elaboration: exec-only elaboration: Unproven (Unreachable obligation Failed: Empty); no panic-explicit reading: no operation it can panic at is read (its unproven obligation
+[H1] day_of_week: kept: optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))
+[H1] day_of_year: elaboration: exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unr
+[H1] seconds_to_hms: kept: the residual is not 3% cheaper than the source (portable model: 12050 vs 12050 milli-cycles); a tie keeps the source
+[H1] count_overlapping_pairs: elaboration: exec-only elaboration: Blocked("depends on `crate::h1::count_overlapping_pairs__loop1`, which did not verify (checked only against a stand-in body)"); no panic-
+[H1] high_nibble_histogram: elaboration: exec-only elaboration: Blocked("depends on `crate::h1::high_nibble_histogram__loop0`, which did not verify (checked only against a stand-in body)"); no panic-ex
+[H1] argmax: elaboration: exec-only elaboration: Blocked("depends on `crate::h1::argmax__loop0`, which did not verify (checked only against a stand-in body)"); no panic-explicit reading:
+[H1] min_max: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:250:8: error[unsupported]: lift: MIR reading of `min_max` (in `core::slice::<impl [u16]>::split_first`): projection (
+[H1] prefix_sums: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:267:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`
+[H1] range_sum: elaboration: exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Unreachable obligation Failed: Empty; IndexBounds obligation Failed: Eq(Bool, #lt_usize(h
+[H1] has_pair_with_sum: kept: optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))
+[H1] dedup_sorted: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:309:8: error[unsupported]: lift: `dedup_sorted`: rustc's MIR parameter `values` is `&mut` but the lift does not pass 
+[H1] lower_bound: elaboration: exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unr
+[H1] rgb565_pack: kept: the residual is not 3% cheaper than the source (portable model: 2936 vs 2936 milli-cycles); a tie keeps the source
+[H1] rgb565_unpack: kept: the residual is not 3% cheaper than the source (portable model: 3783 vs 3783 milli-cycles); a tie keeps the source
+[H1] gcd: kept: optimizer: not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)
+[H1] lcm: kept: the residual is not 3% cheaper than the source (portable model: 23692 vs 24067 milli-cycles) (its panic-explicit reading's residual, in its Rust form)
+[H1] max_subarray_sum: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:388:8: error[unsupported]: lift: MIR reading of `max_subarray_sum` (in `core::slice::<impl [i32]>::split_first`): pro
+[H1] brackets_balanced: reader: sandblaster/bench/heldout-v2/h1/src/lib.rs:404:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`
+[H1] count_inversions: elaboration: exec-only elaboration: Blocked("depends on `crate::h1::count_inversions__loop1`, which did not verify (checked only against a stand-in body)"); no panic-explici
+{"h1": 30, "h2": 0, "union": true}

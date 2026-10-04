@@ -251,7 +251,7 @@ and lifted names, exactly as before.
 
 | | source lift | MIR path |
 | --- | --- | --- |
-| trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884** | after §6 step 5 (checked structuring): L's generator `mir/literal.rs` 1,217 + `literal.core` 139 + `mir/stmt.rs` 210 + `mir/mod.rs` 491 + the parse `ir.rs` 482 + `sexp.rs` 131 = **2,670**, printer `mirx` 1,131 → **3,801**, plus the gate's trusted check `gate.rs` 164 (≈ 189 with its call sites), the elaborator's precondition check 39 and the lift glue ≈ 260 (`read.rs` untrusted) → **≈ 4,289** (≈ 4,972 at the first stage that made `read.rs` untrusted); before it: `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
+| trusted reading (code lines, no comments/tests) | before §6 step 3: `lift.rs` 4,443 + `lift_open.rs` 2,665 + templates 131 + prelude 145 + model 59 = **7,443** (bodies, skeleton and ghost language; covers varint, MMR, verifier); after it (no bodies): `lift.rs` 3,579 (its MIR glue of 202 not counted) + `lift_open.rs` 1,138 + prelude 108 + model 59 = **4,884** | after §6 step 5 (checked structuring): L's generator `mir/literal.rs` 1,217 + `literal.core` 139 + `mir/stmt.rs` 210 + `mir/mod.rs` 491 + the parse `ir.rs` 482 + `sexp.rs` 131 = **2,670**, printer `mirx` 1,131 → **3,801**, plus the gate's trusted check `gate.rs` 164 (≈ 189 with its call sites), the elaborator's precondition check 39 and the lift glue ≈ 260 (`read.rs` untrusted) → **≈ 4,289** (after the reader widening: 1,287 + 170 + 210 + 531 + 482 + 131 = 2,811, with `mirx` **3,942**, in all **≈ 4,430**; after the panic statement, DESIGN.md §8.2 item 12: `stmt.rs` 234 and `gate.rs` 232, so 2,835, with `mirx` **3,966**, the gate ≈ 261 with its call sites, in all **≈ 4,526**) (≈ 4,972 at the first stage that made `read.rs` untrusted); before it: `mir/read.rs` 2,417 + `mir/mod.rs` 434 = **2,851**, printer `mirx` 1,131 → **3,982**, glue in `lift.rs` 202 (covers varint, the MMR and the verifier's set 1; 3,958 before §6 step 3, whose fixtures added the slice length, the test hooks and two reader fixes: +24; 3,656 before the verifier moved; 3,109 before the MMR moved) |
 | grows with | every surface feature (each port added ~2k) | new MIR constructs only (the MMR survey added intrinsics, `Cmp`, unsizing, reference constants, iterator models: ≈ 0.2k; moving the MMR ≈ 0.5k; moving the verifier ≈ 0.3k: host models, open-trait instances and items in the printer, `Option<&mut T>` states, field write-back) |
 | untrusted support | — | after §6 step 5: the structurer `read.rs` 2,433, `cfg.rs` 298 (with L's ranks, loop headers and panicking blocks), the walker `simproof.rs` 4,565 and `checked.rs` (all of it untrusted since the trusted check moved to `gate.rs`); before: `cfg.rs` 235, `ir.rs` 467, `sexp.rs` 131 |
 | MMR laws / proof lines adapted | 10 laws, PROOF.rs 4,074 lines | LAWS.rs unchanged; PROOF.rs: one lemma's `ensures` (`ptl_pick`, the candidate tests of `position_to_location`) restated in the MIR's shape, 9 lines replaced by 16 (+2 comment lines) |
@@ -401,7 +401,10 @@ does not declare (the lift reads them).
    `read.rs` (§20.8). Trusted lines (code lines, no comments/tests): before,
    `read.rs` 2,417 + `mod.rs` 434 + `mirx` 1,131 = 3,982 (the parse
    untrusted); after, L's generator 1,217 + `literal.core` 139 + `stmt.rs`
-   210 + `mod.rs` 491 + `ir.rs` 482 + `sexp.rs` 131 + `mirx` 1,131 = 3,801,
+   210 + `mod.rs` 491 + `ir.rs` 482 + `sexp.rs` 131 + `mirx` 1,131 = 3,801
+   (after the reader widening: 1,287 + 170 + 210 + 531 + 482 + 131 + 1,131
+   = 3,942; after the panic statement, `stmt.rs` 234: 3,966, and `gate.rs`
+   232, ≈ 261 with its call sites),
    plus the gate's trusted check `gate.rs` (164, ≈ 189 with its call sites;
    it also checks that each listed function's MIR instance is that
    function, that its statement rests only on its own extraction's
@@ -536,7 +539,7 @@ shape of the output.
 | `Shl`/`Shr` (the amount masked) | `<<`/`>>`, whose obligation (amount below the width) is where the two agree |
 | `assert(c)` | `if !c { unreachable!() }` — except when the next operation's own obligation is `c` word for word: `i < N` before an index of an `[T; N]` by `i`, `s < w` before a shift of a `w`-bit value by `s`, `d == 0` false before a division or remainder by `d`, `x == MIN` false before a signed negation of `x` |
 | `assume(c)` | `if !c { unreachable!() }` |
-| `switchInt(discriminant(x))` | `match x { V(..) => .. }` over the variants, binding the fields a later `(x as V).i` reads; a constructor known on the path picks its arm |
+| `switchInt(discriminant(x))` | `match x { V(..) => .. }` over the variants, binding the fields a later `(x as V).i` reads; a constructor known on the path picks its arm; for `x = *r`, `r` a shared reference (`Option::eq(&self, &other)`), `r` refers to the arm's constructor in the arm (a shared reference is a snapshot of its referent) |
 | `switchInt(b)` on a `bool`/integer | `if`/`match` with literal patterns |
 | `&x`, `&raw`/fake borrows | the value of `x` (unchanged while the shared borrow lives: rustc's borrow checker) / nothing |
 | `&mut x`, `&mut *r` | `x` as a place: a write through the borrow assigns `x` |
@@ -557,6 +560,16 @@ shape of the output.
 | a constant `&v` | a shared reference to `v` |
 | a `&mut` state of a struct with an invariant (§15.3) | held field by field in variables `__s_f` from the entry of the function or loop helper; the struct is built only where the value leaves (the return, a call, a loop helper's call), so the invariant is an obligation there and not between field writes |
 | a loop whose header only computes a test and whose only exit is that test | `while test { .. }` with §19.9's attachment placement |
+| a loop whose header computes tests without effects, each leading to the body or to the loop's one exit (`while a > 0 \|\| b > 0`) | `while (a > 0) \| (b > 0) { .. }`: the tests joined by `\|`/`&` without short circuit (they have no obligations), each path to the body (or to the exit) starting from the same values |
+| a loop inside another loop's body that is not `while`-shaped, with one exit | a helper `f__loopK` from its header to the exit that returns the parameters the loop assigns (`let r = f__loopK(..); x = r.0; ..`, then the reading goes on from the exit); a tail-recursive helper there would call the outer loop's helper back (mutual recursion) |
+| a loop without an attachment | its measure guessed (untrusted: the elaborator proves every decrease and the kernel checks it, so a wrong guess only fails elaboration): the remaining length of an iterator the loop steps (core's `Range` of an unsigned type, `RangeInclusive<u32/u64>`, the slice iterator), else from a test that leaves the loop, over unsigned variables live at the header (through the block's copies of them) and constants (a counter up to a bound: `n - i`; a value down to a bound or to zero: `x`, also through a mask, a shift or a remainder of it); tests joined by `\|\|` sum their measures, a conjunction takes its first |
+| core's slice iterator `slice::Iter<'_, T>` (`<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`, `Iter::new`, `<Iter as Iterator>::next`) and `<Range<usize> as SliceIndex<[T]>>::get`, by the exact paths of their definitions (raw pointers inside) | models (`mir::Model`), each a small MIR body inlined like library code: the iterator is `(&[T], usize)`, the slice and the index of its next element; `next` yields `s[i]` and steps the index while `i < s.len()`, else `None` with the iterator unchanged; `get(i..j)` is `Some(&s[i..j])` when `i <= j <= s.len()`, else `None` |
+| `Transmute` between `[u8; n]` and `u16`/`u32`/`u64` of `n` bytes (inside core's `from_le_bytes`/`to_le_bytes`, so also the `be`/`ne` ones) | `uN::from_le_bytes(b)`, `x.to_le_bytes()` (the targets are little-endian) |
+| intrinsics `rotate_left`/`rotate_right`, `bswap` | `x.rotate_left(n)`, `x.rotate_right(n)`; the byte swap by shifts and masks, as L's `mir::bswap_*` |
+| signed `Add`/`Sub`/`Mul` (library code), `Lt`/`Le`/`Gt`/`Ge`, a sign-extending cast (`i16`/`i32` to a wider integer type; to `usize` through `u64`) | on the bits: `wrapping_*`; the comparison of the bits with the sign bit flipped, unsigned; the wider word with the high bits set when the sign bit is (L's `mir::slt_*`, `mir::sle_*`, `mir::sext`) |
+| signed `CheckedAdd`/`CheckedSub`, its flag asserted or tested | the pair (the wrapped bits, the overflow flag: the sign bit of `(a ^ r) & (b ^ r)`, of `(a ^ b) & (a ^ r)` for `sub`), as L's `mir::scheck_*`; an asserted flag is then the assert's own obligation |
+| a zero-sized value of an enum whose other variants hold an empty type (`Option<Infallible>`'s `None`: `?`'s residual, read unassigned) | that variant's constructor |
+| a call of a function of another file of the crate | as any function of the crate: by its lifted name when the lift lifts it, else its MIR inlined; the load check reads every source the extraction records (`(source ..)`) from the crate, relative to the lifted file's own |
 | any other loop | a tail-recursive helper `f__loopK` over the variables live at its header (in their order of first use, states last) plus those its attachment names, with the attachment's `invariant`/`decreases`/`ensures`/`at_start!`; when the receiver `self` is among them, a method helper `Self::m__loopK(self, ..)` of the impl |
 | a provided method of an open trait of the module at its instance; a method of the instance's impl | the instance's method `S::m`; an inherent method of `S` of the same name is the one function both stand for (the lift requires the trait's to delegate to it or to have its body, §19.10), and the reading takes the inherent one's MIR |
 | core's blanket `impl<T> From<T> for T` (any impl that is not the module's) at a module type | library code, inlined (`from(t)` is `t`); only the module's own impls are calls by name |
@@ -569,7 +582,7 @@ shape of the output.
 | `uN::to_be_bytes(x)`, `<[T]>::get(s, i)` by a `usize` | the builtins `x.to_be_bytes()`, `s.get(i)` |
 | `PtrMetadata(s)` of a slice reference (`s.len()`) | the builtin `s.len()` |
 | signed operations | §19.3's two's complement reading |
-| everything else (raw pointers, function pointers, `Len`, `Transmute`, runtime checks other than overflow checks, a call rustc did not let the extractor follow, loops in library code) | refused |
+| everything else (raw pointers, function pointers, `Len`, any other `Transmute`, signed `CheckedMul`, runtime checks other than overflow checks, a call rustc did not let the extractor follow, loops in library code) | refused |
 
 A named variable bound to a constructor keeps the constructor known; where
 paths join it is already in its own name (it is not assigned again). Under
@@ -707,6 +720,7 @@ check of `run` or consumes more fuel, never changes a value.
 | a module type, a host model enum, a host model unit struct that an open trait's declared instance is | the subset's declaration (`ModuleNames::kernel_adt`: the lifted name in its DSL module; a host enum where its model declares it), constructors matched by variant name (a struct's one constructor is its one variant); a variant the model does not declare is `None` when built |
 | a module type whose subset declaration carries invariant proofs | L's own **mirror** (an inductive of its MIR fields) |
 | `Vec<T, Global>`, `Copied<slice::Iter<&[u8]>>`, a library newtype of a host model alias (`Digest([u8; 32])`) | the models `List(T)`, `Slice (Slice U8)`, the field's type |
+| core's `slice::Iter<'_, T>` (by exact path) | `Tuple2(Slice T, Usize)`: the slice and the index of the element it yields next (its raw pointers are never read) |
 | any other library ADT | L's own inductive (constructors `v<i>_<Name>`, MIR field types) |
 | `u128`, `i128`, `char`, anything else (raw pointers, function pointers, trait objects) | not modeled: the local's slot is `mir::Unmodeled` and every use of it `None` (before stage cs-assurance, `u128`/`i128` were read as 64-bit words) |
 
@@ -714,7 +728,11 @@ check of `run` or consumes more fuel, never changes a value.
 the empty tuple, a closure without captures, a function item) is that
 type's one value, whatever the slot holds: rustc's `RemoveZsts` drops the
 assignments of such values, so MIR reads them unassigned (`let f = |n| ..;
-f(x)` borrows the closure's local `_29` without ever assigning it).
+f(x)` borrows the closure's local `_29` without ever assigning it). So is
+a type with one value: an enum all of whose variants but one hold a field
+of an empty type (`!`, an enum without variants), that one without fields
+(`Option<Infallible>`'s `None`, the residual of `?` on an `Option`); its
+zero-sized constant is that value too.
 
 **Places and references.** A place is its local with its projections
 (`Field`, `Downcast` then `Field`, `Index` by a local), read through the
@@ -742,16 +760,17 @@ extends the code `r` holds; `&place` is the value of the place.
 | `Add`/`Sub`/`Mul` | wrapping (`#wadd`..) on the bits |
 | `AddUnchecked`/`SubUnchecked`/`MulUnchecked`, `Div`, `Rem` (unsigned) | `None` on overflow / a zero divisor (`mir::*_unchecked_w`, `mir::div_w`, `mir::rem_w`) |
 | `CheckedAdd/Sub/Mul` (unsigned) | (the wrapped value, the overflow flag) (`mir::checked_*_w`) |
+| `CheckedAdd/Sub` (signed) | on the bits (`mir::scheck_add_w`, `mir::scheck_sub_w`): the wrapped bits, and the overflow flag, the sign bit of `(a ^ r) & (b ^ r)` (`(a ^ b) & (a ^ r)`): the exact sum leaves the range exactly when both operands have one sign and `r` the other |
 | `Shl`/`Shr` | the amount masked (`#wshl`, `#wshr`; `Shr` of a signed type is arithmetic, `mir::sar_w`) |
 | `ShlUnchecked`/`ShrUnchecked` | `None` at or above the width, the amount compared at its own type (a `u64` amount of `2^32` is undefined behaviour, not a shift by its low 32 bits) |
 | `BitAnd/Or/Xor`, `Eq/Ne` | the bits' primitive |
 | `Lt/Le/Gt/Ge` | unsigned, or signed on the bits of a signed type (`mir::slt_w`, `mir::sle_w`) |
 | `Cmp` (unsigned) | `mir::cmp_w`, an `Ordering` |
-| signed `Div`, `Rem`, unchecked or checked operations | not modeled |
+| signed `Div`, `Rem`, unchecked operations, `CheckedMul` | not modeled |
 | `Not`, `Neg` (signed) | `#not`, `#wneg` on the bits |
 | `PtrMetadata` of `&[T]` | its length |
 | `IntToInt` | the bits truncated, zero-extended from an unsigned type, sign-extended (`mir::sext`) from a signed one; a `bool` is 0 or 1 |
-| `Transmute` of `u16`/`u32`/`u64` to `[u8; n]` | its little-endian bytes (the targets) |
+| `Transmute` of `u16`/`u32`/`u64` to `[u8; n]`, and of `[u8; n]` to the word of `n` bytes | its little-endian bytes (the targets), the word whose little-endian bytes they are (`uN::to_le_bytes`, `uN::from_le_bytes`) |
 | `Unsize` of `&[T; N]` to `&[T]` | the slice (`None` past `isize::MAX`) |
 | `Discriminant(p)` | the variant's discriminant at the destination's type (`-1i8` is `255`) |
 | `Aggregate` | the constructor (tuple, struct, variant, closure); an array is its list with its length |
@@ -772,7 +791,8 @@ extends the code `r` holds; `&place` is the value of the place.
 | `Unreachable`, `UnwindResume`, `Abort`, a call that does not return | `None`; so is every block from which every path ends in one (a panic) |
 | `Call` of an instance with MIR | its `run` on the same fuel (a self-call: `rec` on one unit less, the continuation too) from its initial state: the parameters in their slots (a closure's spread from the tuple its callers pass), each callee cell holding the referent read through the caller's code for it (a nested cell: through the code its parent's referent holds; a held code in the callee's terms is the nested cell's own); after `Some(out)`, each cell's final value written back through that code, then the result to the destination. A code the callee returns, in a cell or its result (`&mut T`, `Option<&mut T>`), rooted at a callee cell, is the caller's code for that cell extended by its path; rooted at a callee local (dangling) it is `None` |
 | `Call` of a leaf | its model, below |
-| intrinsics `ctlz`, `cttz`, `ctpop`, `bswap`, `saturating_add/sub`, `*_with_overflow`, `cold_path` | their primitives (`bswap` by shifts and masks, so the word normalizer sees through it); `cold_path` is nothing |
+| intrinsics `ctlz`, `cttz`, `ctpop`, `bswap`, `saturating_add/sub`, `*_with_overflow`, `rotate_left/right`, `cold_path` | their primitives (`bswap` by shifts and masks, so the word normalizer sees through it; a rotation's amount, a `u32`, taken modulo the width); `cold_path` is nothing |
+| `Call` of a function read as a model (`mod.rs`'s `Model`, by the exact path of its definition: core's slice iterator's `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`, `Iter::new`, `<Iter as Iterator>::next`; `<Range<usize> as SliceIndex<[T]>>::get`) | its leaf below, not its MIR (raw pointers); `next` through the iterator's code like a `&mut` leaf |
 | `Deref::deref` of a library newtype of bytes without MIR | its bytes as a slice |
 | a call not extracted, mutual recursion | not modeled |
 
@@ -786,8 +806,11 @@ and writes the new referent back):
 | `BufMut::put_u8`, `put_slice` | `bufmut_put_u8`, `bufmut_put_slice` on the buffer |
 | `Vec::push` | `vec_push` on the list |
 | `Iterator::next` at `Copied<slice::Iter<&[u8]>>` | `crate::__lift::bytes_iter_next` |
-| `<[T; N] as Index<RangeToInclusive / RangeTo / RangeFrom / Range>>::index` (core's range types, by exact path) | the subslice, `None` past the end (`&a[..j + 1]` .. `&a[i..j]`) |
+| `<[T; N] as Index<RangeToInclusive / RangeTo / RangeFrom / Range>>::index` (core's range types, by exact path), and the same of a slice `[T]` (`leaf::slice_index_*`, stage finish-A) | the subslice, `None` past the end (`&a[..j + 1]` .. `&a[i..j]`; for a slice its length in place of `N`) |
 | a method of a host model's declared instance (`<Sha256 as Hasher>::hash`) | the host model's function (`crate::merkle::host::Sha256::hash`) |
+| `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`, `slice::Iter::new` | `leaf::slice_iter_new`: the slice at index 0 |
+| `<slice::Iter<'_, T> as Iterator>::next` | `leaf::slice_iter_next`: at index `i < len`, the element (a `&T`, read as its value) with the index one further; else `None`, the iterator unchanged |
+| `<Range<usize> as SliceIndex<[T]>>::get(i..j, s)` | `leaf::slice_get_range`: `Some(&s[i..j])` when `i <= j <= len`, else `None` (a value, not a panic) |
 
 These are the models S uses (SEMANTICS.md §19.10, A5 of
 `docs/checked-structuring.md`).
@@ -848,6 +871,23 @@ laws and proofs are about.
   S's result (its states in parameter order, then its return value) is
   erased component by component into `Out`.
 
+**The panic statement** (DESIGN.md §8.2 item 12; `stmt::statement_panic`;
+exec-only builds only, never a theorem of a verified build). A function of
+unverified code whose panics no precondition rules out has no `S_f`; the
+optimizer works on its panic-explicit reading `P = f__panics : Π x̄ (.h̄ :
+pre). Option(R)` (`opt::panics`, `None` the panic outcome), and the
+structured side is `P`:
+
+```text
+L::pthm::<f> : Π x̄ (.h̄ : pre). Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
+    Eq(Option(Out), L::<f>::run n b0 (Some(init(x̄))),
+       match P x̄ .h̄ with None => None | Some(y) => Some(erase(y)))
+```
+
+Where `P` returns a value, it says what the plain statement says. Where `P`
+is `None`, it says only that the literal reading returns no value; the gate
+accepts it only where that means a panic (§20.6).
+
 #### 20.6 The gate
 
 Every verified build (`compile_module`, `compile_lifted`, crate mode and
@@ -894,30 +934,43 @@ the same findings without enforcing them.
   refusal.
 * The report's `mir_theorems` section lists, per module, every theorem and
   loop lemma, proven or not and why.
+* **The panic statement** is accepted (`gate::Ledger::accept_shipped_panic`,
+  only for a function the lifted round trip replaces through its
+  panic-explicit reading, §20.7) under two more checks, which make "returns
+  no value" mean "panics": (5) `P` has exactly the source function's
+  parameters and preconditions (its kernel type is the source's with the
+  result wrapped in `Option`); (6) every instance either side's literal
+  reading runs is read with no fault (no construct read as `None` but a
+  panic: no undefined behaviour, nothing unmodeled), no loop header and no
+  self-call (no fuel is consumed, so no run is cut short), and each block L
+  reads as panicking panics: every path from it ends in a diverging call,
+  `unreachable`, an abort or an unwind, checked on the MIR (not taken from
+  `cfg.rs`).
 
 #### 20.7 The shipped code: the lifted round trip's theorems
 
 The lifted round trip (DESIGN.md §2.1) of a module read from MIR reads its
-copy's bodies from the copy's MIR (`<stem>.roundtrip__<module>.sbmir`);
-the emitted file is the copy's text, so that MIR is the code rustc builds.
-For every rewritten function `f` and each of its verified instances
-(replacement `g`, the optimizer's link: `<f>::rewrite_equiv : Π x̄ h̄. Eq(R,
-f x̄ h̄, g x̄ h̄)` of a `#[rewrite]`, a residual's `..::equiv : Π x̄. Eq(R, g x̄,
-f x̄)`, or conversion), after the round trip's comparisons pass:
+copy's bodies from the copy's MIR (`<stem>.roundtrip__<module>.sbmir`),
+which the load checks against the copy's text like any extraction (every
+source's SHA-256); the emitted file is the copy's text, so that MIR is the
+code rustc builds. Its theorems decide every rewrite of such a module (no
+structural comparison runs; below). For every rewritten function `f` and
+each of its verified instances (replacement `g`, the optimizer's link:
+`<f>::rewrite_equiv : Π x̄ h̄. Eq(R, f x̄ h̄, g x̄ h̄)` of a `#[rewrite]`, a
+residual's `..::equiv : Π x̄. Eq(R, g x̄, f x̄)`, or conversion):
 
 * L is read for the copy's new instances, continuing the gate's reading
   of the module (through the trusted loader); an instance both extractions
   hold must be the same MIR in both, else the trusted check refuses the
   shipped theorem.
 * Each helper `__sandblaster_opt_<h>` gets `L::thm::<id>` of §20.5
-  against the verified definition the round trip compared it with, under
-  that definition's declared contract; the check copy
-  `__sandblaster_check__<f>` (per instance type, and before it the
-  dispatch impl method it calls, for a function lowered through a per-type
-  dispatch) gets `L::thm::<id>` against `g`, its structured side the call
-  of `g` (the delegation the round trip checked). A replacement without a
-  declared contract (the optimizer's residual) is stated under the source
-  function's.
+  against the verified definition it replaces (the residual's helper, or
+  the verified alternative), under that definition's declared contract; the
+  check copy `__sandblaster_check__<f>` (per instance type, and before it
+  the dispatch impl method it calls, for a function lowered through a
+  per-type dispatch) gets `L::thm::<id>` against `g`, its structured side the
+  call of `g`. A replacement without a declared contract (the optimizer's
+  residual) is stated under the source function's.
 * From it, by a transport along `equiv`, the **shipped theorem**
   `L::shipped::<id>`: §20.5's statement of the copy's MIR instance against
   `f`, with `f`'s declared contract. The code rustc compiles returns, at
@@ -926,13 +979,57 @@ f x̄)`, or conversion), after the round trip's comparisons pass:
 A function is lowered only when the trusted check finds `L::shipped::<id>`
 in the kernel with that statement; else it keeps its source text (the
 round trip rejects it; a host compiling the lowered copy fails its
-build). The lowering record lists the theorems (`shipped_theorems`). Their
-declarations are replayed from the verdict cache under a key of the generator, the
-structured readings of `f`, `g`, the helpers' definitions and the link,
-the declared contracts, and the round trip's MIR of every instance the
-copy's, the dispatch method's and the helpers' readings run. A lowering
-run without a preceding gate (a stage tool) reads and proves the module's
-instances the copy needs first.
+build).
+
+**No structural comparison** (stage finish-A). Until then a rewrite of a
+module read from MIR also needed the copy's structured reading to equal its
+replacement in all relevant positions (`alpha_eq_relevant` modulo `let x =
+v; x` ≡ `v` and the reader normal form), every copy to be the delegation
+`λ x̄. g x̄`, and only then were the theorems proven. The comparison is
+dropped for these modules: the structured reading of the copy is an
+untrusted proposal (§20.2), and the theorems above are about the literal
+reading of the copy's MIR, the code rustc compiles, against the very
+definitions the comparison compared with (a helper against its residual,
+the copy against the call of `g`); with the optimizer's kernel-checked
+link they say what the laws need of the shipped code, so a syntactic
+equality between two readings adds nothing they do not decide. It refused
+correct code: rustc's MIR of a printed residual binds temporaries by `let`,
+tests a checked operation's `Option` with `is_none` and reaches sub-slices
+through core's `Index`, so the reading of the copy differed from the
+residual it computes (held-out v1, now development: `next_power_of_two`,
+`read_u32_le`, `mix64`, cheaper and refused with "relevant structure
+differs"; `tests/lift_opt.rs`, fixture `opt_shipped`, where a test hook runs
+the comparison beside the theorems and it refuses all three rewrites the
+theorems accept). The theorems fix the shipped code's meaning, not its cost:
+that the copy performs the residual's operations rests on the (untrusted)
+printer printing the residual the cost model priced, a performance claim
+that the held-out harness measures on the lowered copies, never a
+correctness one. The comparison remains only for a lifted module without
+MIR (`driver::lowered::compare_read_back`), which the lift no longer
+accepts. Stage finish-A also made the walker see through the sharing of an
+S-split's committed scrutinee (`simproof.rs`: refutation by evaluation
+evaluates a `let`-headed side and abstracts inside `let` bodies), and L read
+a slice's sub-slices (§20.4, `leaf::slice_index_*`), both of which these
+helpers' theorems needed.
+
+A function of unverified code that can panic (§20.5's panic statement) is
+replaced through its panic-explicit reading `P`: the residual `r` of `P`
+is printed in its Rust form (`Some(v)` is `v`, a kept checked operation
+whose `None` is the panic is Rust's operator, any other `None` an explicit
+`panic!`), and its theorems are two panic statements, both against `P`
+under the source function's declared contract: `L::pthm::<id>` of the
+source function's own MIR instance, and `L::pshipped::<id>` of the copy's
+(from the helpers' theorems against `r`, along the link `Π x̄. Eq(Option(R),
+r x̄, P x̄)`). The function is lowered only when the trusted check accepts
+both (§20.6, checks 5 and 6): on every input the shipped code and the
+source return the same value, or both panic. The panic message and location
+are not part of the meaning. The lowering record lists the theorems
+(`shipped_theorems`). Their declarations are replayed from the verdict
+cache under a key of the generator, the structured readings of `f`, `g`, the
+helpers' definitions and the link, the declared contracts, and the round
+trip's MIR of every instance the copy's, the dispatch method's and the
+helpers' readings run. A lowering run without a preceding gate (a stage
+tool) reads and proves the module's instances the copy needs first.
 
 
 #### 20.8 Checks of L itself: conformance and fault injection

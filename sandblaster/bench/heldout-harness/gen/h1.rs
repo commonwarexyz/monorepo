@@ -70,16 +70,7 @@ pub fn gray_decode(mut g: u32) -> u32 {
 /// Smallest power of two that is `>= n`, or `None` if it does not fit in a
 /// `u32`. `0` rounds up to `1`.
 pub fn next_power_of_two(n: u32) -> Option<u32> {
-    if n <= 1 {
-        return Some(1);
-    }
-    let mut v = n - 1;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v.checked_add(1)
+    __sandblaster_opt_next_power_of_two(n)
 }
 
 /// Integer square root (floor) of `n`, found by bisection.
@@ -349,9 +340,7 @@ pub fn remaining_budget(budget: u32, costs: &[u32], cap: u32) -> u32 {
 
 /// Reads a little-endian `u32` at `offset`, or `None` if out of bounds.
 pub fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
-    let end = offset.checked_add(4)?;
-    let bytes = data.get(offset..end)?;
-    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    __sandblaster_opt_read_u32_le(data, offset)
 }
 
 #[cfg(test)]
@@ -630,5 +619,60 @@ mod tests {
         assert_eq!(read_u32_le(&data, 2), None);
         assert_eq!(read_u32_le(&data, usize::MAX), None);
         assert_eq!(read_u32_le(&[], 0), None);
+    }
+}
+
+// sandblaster: the optimizer's replacements of the functions above whose bodies call them, lowered to
+// Rust and checked by the lifted round trip (DESIGN.md §2.1).
+
+#[inline(always)]
+#[allow(non_snake_case, unused_parens, unused_mut, unused_variables, unused_braces, clippy::all)]
+fn __sandblaster_opt_next_power_of_two(l0_n: u32) -> Option<u32> {
+    if l0_n <= 1u32 {
+        Some(1u32)
+    } else {
+        let l15_s15: u32 = l0_n - 1u32;
+        let l16_s16: u32 = l15_s15 >> 1u32;
+        let l17_s17: u32 = l15_s15 | l16_s16;
+        let l18_s18: u32 = l17_s17 >> 2u32;
+        let l19_s19: u32 = l17_s17 | l18_s18;
+        let l20_s20: u32 = l19_s19 >> 4u32;
+        let l21_s21: u32 = l19_s19 | l20_s20;
+        let l22_s22: u32 = l21_s21 >> 8u32;
+        let l23_s23: u32 = l21_s21 | l22_s22;
+        let l24_s24: u32 = l23_s23 >> 16u32;
+        let l25_s25: u32 = l23_s23 | l24_s24;
+        match l25_s25.checked_add(1u32) {
+            None => {
+                None
+            },
+            Some(l14_value_14) => {
+                Some(l25_s25 + 1u32)
+            },
+        }
+    }
+}
+
+#[inline(always)]
+#[allow(non_snake_case, unused_parens, unused_mut, unused_variables, unused_braces, clippy::all)]
+fn __sandblaster_opt_read_u32_le(l0_data: &[u8], l1_offset: usize) -> Option<u32> {
+    match l1_offset.checked_add(4usize) {
+        None => {
+            None
+        },
+        Some(l10_value_10) => {
+            let l11_s11: usize = l1_offset + 4usize;
+            if l1_offset <= l11_s11 {
+                if l11_s11 <= l0_data.len() {
+                    let l12_s12: &[u8] = &l0_data[l1_offset..];
+                    let l13_s13: &[u8] = &l12_s12[..(l11_s11 - l1_offset)];
+                    Some(u32::from_le_bytes([l13_s13[0usize], l13_s13[1usize], l13_s13[2usize], l13_s13[3usize]]))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        },
     }
 }

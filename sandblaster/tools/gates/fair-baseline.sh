@@ -28,9 +28,11 @@
 # 5. an A/A subject: a second package with the rustc subject's lib path and
 #    features (`<rustc subject>_aa`), linked into the same binary;
 # 6. the rustc subject built from the frozen source: under the `source`
-#    feature, H1 is `#[path]`-included from `heldout/h1/src/lib.rs`, a file
-#    G6 has recorded (frozen.sha256, unchanged); any hand-written variants a
-#    subject uses would be in the shared source, so both subjects get them;
+#    feature, H1 is `#[path]`-included from `heldout/h1/src/lib.rs`, and
+#    held-out v2's H1 (the `h1v2` module, when the subject has one) from
+#    `heldout-v2/h1/src/lib.rs`, files G6 has recorded (frozen.sha256,
+#    unchanged); any hand-written variants a subject uses would be in the
+#    shared source, so both subjects get them;
 # 7. the runner refuses fewer than 21 rounds and runs the differential check
 #    before it times anything (`rounds >= 21` outside a string, and
 #    `if !check(&cases)` within the 8 lines before each `bench(&cases`, in
@@ -116,6 +118,20 @@ heldout_check() {
             || [ "$(awk -v p="$frozen_h1" '$2 == p { print $1 }' "$gates/frozen.sha256")" != "$(shasum -a 256 "$repo/$frozen_h1" | cut -d' ' -f1)" ]; then
             say "FAIL: $frozen_h1 is not recorded by G6, or changed"; fail=1
         fi
+        # held-out v2 likewise: a source-feature `h1v2` module is the frozen
+        # heldout-v2/h1/src/lib.rs, recorded by G6 and unchanged
+        local frozen_h1v2=sandblaster/bench/heldout-v2/h1/src/lib.rs hp2
+        hp2=$(awk '/feature = "source", not\(feature = "optimized"\)/ { c = NR; next } /#\[path/ { p = $0; pl = NR; next } /^pub mod h1v2;/ { if (c && pl == NR - 1 && c == NR - 2) print p; exit }' "$src" | sed -n 's/.*#\[path *= *"\(.*\)"\].*/\1/p')
+        if grep -q '^pub mod h1v2;' "$src"; then
+            case $hp2 in
+            */heldout-v2/h1/src/lib.rs) ;;
+            *) say "FAIL: the rustc subject's held-out v2 H1 is \`${hp2:-nothing}\`, not the frozen heldout-v2/h1/src/lib.rs"; fail=1 ;;
+            esac
+            if ! awk -v p="$frozen_h1v2" '$2 == p { found = 1 } END { exit !found }' "$gates/frozen.sha256" \
+                || [ "$(awk -v p="$frozen_h1v2" '$2 == p { print $1 }' "$gates/frozen.sha256")" != "$(shasum -a 256 "$repo/$frozen_h1v2" | cut -d' ' -f1)" ]; then
+                say "FAIL: $frozen_h1v2 is not recorded by G6, or changed"; fail=1
+            fi
+        fi
     else
         say "FAIL: the subjects' crate source $lib is missing"; fail=1
     fi
@@ -172,6 +188,7 @@ if [ "${1:-}" = --selftest ]; then
     hfresh; sed -i.bak 's/^default = .*/default = ["optimized"]/' "$tmp/h/subj_rustc_aa/Cargo.toml"; rm "$tmp/h/subj_rustc_aa/Cargo.toml.bak"; hexpect fail "an A/A subject built from the optimized module"
     hfresh; sed -i.bak 's|^path = .*|path = "../orig/lib.rs"|' "$tmp/h/subj_rustc/Cargo.toml"; rm "$tmp/h/subj_rustc/Cargo.toml.bak"; hexpect fail "a rustc subject from another crate source"
     hfresh; sed -i.bak 's|../../heldout/h1/src/lib.rs|../trimmed/h1.rs|' "$tmp/h/subject/lib.rs"; rm "$tmp/h/subject/lib.rs.bak"; hexpect fail "a rustc subject from a hand-trimmed copy"
+    hfresh; sed -i.bak 's|../../heldout-v2/h1/src/lib.rs|../trimmed/h1v2.rs|' "$tmp/h/subject/lib.rs"; rm "$tmp/h/subject/lib.rs.bak"; hexpect fail "a rustc subject whose held-out v2 H1 is a hand-trimmed copy"
     hfresh; sed -i.bak 's/rounds >= 21/rounds >= 3/' "$tmp/h/src/main.rs"; rm "$tmp/h/src/main.rs.bak"; hexpect fail "a runner that accepts 3 rounds"
     hfresh; sed -i.bak 's/if !check(&cases)/if false/' "$tmp/h/src/main.rs"; rm "$tmp/h/src/main.rs.bak"; hexpect fail "a runner that times before the differential check"
     hfresh; sed -i.bak 's/samecode\.py/nothing.py/g' "$tmp/h/run.sh"; rm "$tmp/h/run.sh.bak"; hexpect fail "a held-out runner without the identity check"

@@ -70,16 +70,31 @@ sources compiled by rustc with the portable `compress`) a verify takes
 1,932 ns: that gap is the hand-written kernel's, not the optimizer's.
 "Faster than rustc" is a goal with development-set evidence only.
 
-**Held-out evaluation** (`bench/heldout/REPORT.md`; fairness audit plan
-step 8): on 31 functions the optimizer was never developed on (30 written
-blind from an idiom list, and the 1 monorepo function the sampling rule
-accepted), timed against rustc on the unmodified source in one binary with
-an A/A control, the optimizer-only geomean is **1.02** (default layout;
-**1.005** aligned), with **0 of 31 functions changed**: every lowered copy is
-the source. 22 functions are refused by the MIR reader, 6 by exec-only
-elaboration, and the 3 that reach the optimizer are kept as written. On
-code it was not built for, the optimizer does nothing yet; the numbers
-above are the development set (DESIGN.md, North star).
+**Held-out evaluation** (`bench/heldout-v2/REPORT.md`; held-out v2, frozen
+before the reader and optimizer work it judges): on 30 functions written
+blind from an idiom list, timed against rustc on the unmodified source in
+one binary with an A/A control, the optimizer-only geomean is **1.007**
+(default layout; **1.002** aligned; 0.999 without overflow checks), with
+**0 of 30 functions changed**: the optimized subject is the source compiled
+again, so the numbers are placement noise (the A/A control spreads
+0.87–1.19). 9 functions are refused by the MIR reader, 11 by exec-only
+elaboration, and of the 10 that reach the optimizer none yields a cheaper
+printable residual. The monorepo half, H2-v2, is empty: the frozen sampling
+rule probed all 869 candidates and accepted none (most are too small for
+its size criterion). On code it was not built for, the optimizer does
+nothing yet; the numbers above are the development set (DESIGN.md, North
+star). Held-out v1 (`bench/heldout/REPORT.md`) is development data now: the
+three rewrites stage finish-A lets through there are not faster: one
+compiles to rustc's own machine code, one measures 1.00, and `read_u32_le`,
+for which the cost model predicted 0.70, measures 1.07–1.12.
+
+**The shipped verified code** (`bench/shipped-harness/REPORT.md`): what
+commonware-codec and commonware-storage compile from sandblaster's emitted
+and lowered copies (codec's varint, storage's MMR and the verifier's first
+set), timed against the original Commonware functions in one binary, is the
+original code: 28 of 33 functions compile to identical machine code and the
+other 5 differ only in the addresses of each copy's constant data, exactly
+as the A/A pair does; geomean 1.003 (default) / 1.002 (aligned).
 
 ## What the code looks like
 

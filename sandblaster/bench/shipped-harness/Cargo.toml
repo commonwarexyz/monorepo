@@ -1,0 +1,90 @@
+# The shipped-code harness (finish-A, task 4): the code commonware-codec and
+# commonware-storage compile from sandblaster's emitted and lowered copies,
+# against the original Commonware functions, in one binary (README.md).
+#
+# Every subject is the SAME crate source (subject/lib.rs) over its own copies
+# of the two crates (gen/<subject>/, written by prepare.py, not committed):
+# `subj_orig` and `subj_aa` the original code (the merge base of the
+# sandblaster branch; `aa` is the A/A control), `subj_shipped` the shipped
+# code. One workspace profile compiles all of them alike. A standalone
+# workspace; run it with ./run.sh.
+[workspace]
+members = [
+    ".",
+    "subj_orig",
+    "subj_aa",
+    "subj_shipped",
+    "gen/orig/codec",
+    "gen/orig/storage",
+    "gen/aa/codec",
+    "gen/aa/storage",
+    "gen/shipped/codec",
+    "gen/shipped/storage",
+]
+resolver = "2"
+
+# the monorepo's (the copies inherit them)
+[workspace.package]
+version = "2026.9.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+homepage = "https://commonware.xyz"
+rust-version = "1.95.0"
+
+# the monorepo's entries the copies use, each path relative to here
+# (prepare.py checks them against the monorepo's root Cargo.toml)
+[workspace.dependencies]
+arbitrary = "1.4.2"
+bytes = { version = "1.12.1", default-features = false }
+cfg-if = "1.0.4"
+commonware-codec-macros = { version = "2026.9.0", path = "../../../codec/macros" }
+commonware-conformance = { version = "2026.9.0", path = "../../../conformance" }
+commonware-macros = { version = "2026.9.0", path = "../../../macros", default-features = false }
+paste = "1.0.15"
+rand_chacha = { version = "0.10.0", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
+thiserror = { version = "2.0.18", default-features = false }
+ahash = { version = "0.8.12", default-features = false }
+anyhow = { version = "1.0.103", default-features = false }
+commonware-codec = { version = "2026.9.0", path = "../../../codec", default-features = false }
+commonware-cryptography = { version = "2026.9.0", path = "../../../cryptography", default-features = false }
+commonware-formatting = { version = "2026.9.0", path = "../../../formatting", default-features = false }
+commonware-parallel = { version = "2026.9.0", path = "../../../parallel", default-features = false }
+commonware-runtime = { version = "2026.9.0", path = "../../../runtime" }
+commonware-utils = { version = "2026.9.0", path = "../../../utils", default-features = false }
+futures = "0.3.32"
+futures-util = { version = "0.3.32", default-features = false, features = ["std"] }
+hashbrown = { version = "0.17.1", default-features = false, features = ["default-hasher"] }
+tracing = "0.1.44"
+zstd = "0.13.3"
+
+[package]
+name = "shipped-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+subj_orig = { path = "subj_orig" }
+subj_aa = { path = "subj_aa" }
+subj_shipped = { path = "subj_shipped" }
+
+# Commonware's production profile: overflow checks on (the monorepo's
+# [profile.release]); everything else cargo's release default (opt-level 3,
+# 16 codegen units, no LTO), the same for every subject.
+[profile.release]
+overflow-checks = true
+debug = 1
+
+# The same without overflow checks (a second binary, reported separately).
+[profile.release-nooc]
+inherits = "release"
+overflow-checks = false
+
+# The monorepo's: build scripts run optimized. The one that runs here is the
+# monorepo's own commonware-codec's (the sandblaster verifier, module mode),
+# a dependency of every storage copy; it changes no subject's code.
+[profile.release.build-override]
+opt-level = 3
+[profile.release-nooc.build-override]
+opt-level = 3

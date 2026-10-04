@@ -1,0 +1,134 @@
+{
+ "hasher_leaf_digest": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "hasher_node_digest": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_children": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_is_valid_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_location_from_position": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_location_to_position": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_parent_heights": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_peak_iterator": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_peaks": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_position_from_location": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_position_to_location": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "mmr_to_nearest_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "proof_verify_element_inclusion": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i16_read": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i16_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i16_write": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i32_read": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i32_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i32_write": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i64_read": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i64_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_i64_write": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u16_read": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u16_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u16_write": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u32_decoder": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u32_read": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u32_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u32_write": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u64_decoder": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u64_read": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u64_size": {
+  "subj_aa": true,
+  "subj_shipped": true
+ },
+ "varint_u64_write": {
+  "subj_aa": true,
+  "subj_shipped": true
+ }
+}

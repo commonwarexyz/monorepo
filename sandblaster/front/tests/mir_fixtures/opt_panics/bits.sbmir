@@ -1,0 +1,126 @@
+;; rustc's MIR of `fx_opt_panics::bits`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_opt_panics")
+(module "fx_opt_panics::bits")
+(overflow-checks on)
+(exclude)
+(source "bits.rs" "98db52a57a9edb1c1e83da2530b2042be8c2c5aa42d439e796f7c7d115e7bf2e")
+(root "fx_opt_panics::bits::twice_quot")
+(root "fx_opt_panics::bits::ceil_div")
+(root "fx_opt_panics::bits::inc")
+(root "fx_opt_panics::bits::clamp7c")
+(fn "fx_opt_panics::bits::twice_quot"
+  (kind root) (def "fx_opt_panics::bits::twice_quot") (args ())
+  (item fn "twice_quot")
+  (span "bits.rs" 5 1)
+  (argc 2)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm)
+    (3 u32 mut)
+    (4 bool mut)
+    (5 u32 mut)
+    (6 bool mut)
+    (7 (tuple u32 bool) mut))
+  (debug "a" (p 1) (arg 1))
+  (debug "b" (p 2) (arg 2))
+  (bb 0
+    (assign (p 4) (bin eq (copy (p 2)) (int u32 0)) (at "bits.rs" 6 5))
+    (assert (move (p 4)) false div-zero 1 (at "bits.rs" 6 5)))
+  (bb 1
+    (assign (p 3) (bin div (copy (p 1)) (copy (p 2))) (at "bits.rs" 6 5))
+    (assign (p 6) (bin eq (copy (p 2)) (int u32 0)) (at "bits.rs" 6 15))
+    (assert (move (p 6)) false div-zero 2 (at "bits.rs" 6 15)))
+  (bb 2
+    (assign (p 5) (bin div (copy (p 1)) (copy (p 2))) (at "bits.rs" 6 15))
+    (assign (p 7) (checked add (copy (p 3)) (copy (p 5))) (at "bits.rs" 6 5))
+    (assert (move (p 7 (field 1 bool))) false overflow 3 (at "bits.rs" 6 5)))
+  (bb 3
+    (assign (p 0) (use (move (p 7 (field 0 u32)))) (at "bits.rs" 6 5))
+    (return (at "bits.rs" 7 2)))
+)
+(fn "fx_opt_panics::bits::ceil_div"
+  (kind root) (def "fx_opt_panics::bits::ceil_div") (args ())
+  (item fn "ceil_div")
+  (span "bits.rs" 10 1)
+  (argc 2)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm)
+    (3 u32 imm)
+    (4 bool mut)
+    (5 bool mut)
+    (6 u32 mut)
+    (7 bool mut)
+    (8 (tuple u32 bool) mut))
+  (debug "a" (p 1) (arg 1))
+  (debug "b" (p 2) (arg 2))
+  (debug "q" (p 3))
+  (bb 0
+    (assign (p 4) (bin eq (copy (p 2)) (int u32 0)) (at "bits.rs" 11 13))
+    (assert (move (p 4)) false div-zero 1 (at "bits.rs" 11 13)))
+  (bb 1
+    (assign (p 3) (bin div (copy (p 1)) (copy (p 2))) (at "bits.rs" 11 13))
+    (assign (p 7) (bin eq (copy (p 2)) (int u32 0)) (at "bits.rs" 12 8))
+    (assert (move (p 7)) false rem-zero 2 (at "bits.rs" 12 8)))
+  (bb 2
+    (assign (p 6) (bin rem (copy (p 1)) (copy (p 2))) (at "bits.rs" 12 8))
+    (assign (p 5) (bin ne (move (p 6)) (int u32 0)) (at "bits.rs" 12 8))
+    (switch (move (p 5)) (0 5) (otherwise 3) (at "bits.rs" 12 8)))
+  (bb 3
+    (assign (p 8) (checked add (copy (p 3)) (int u32 1)) (at "bits.rs" 12 21))
+    (assert (move (p 8 (field 1 bool))) false overflow 4 (at "bits.rs" 12 21)))
+  (bb 4
+    (assign (p 0) (use (move (p 8 (field 0 u32)))) (at "bits.rs" 12 21))
+    (goto 6 (at "bits.rs" 12 5)))
+  (bb 5
+    (assign (p 0) (use (copy (p 3))) (at "bits.rs" 12 36))
+    (goto 6 (at "bits.rs" 12 5)))
+  (bb 6
+    (return (at "bits.rs" 13 2)))
+)
+(fn "fx_opt_panics::bits::inc"
+  (kind root) (def "fx_opt_panics::bits::inc") (args ())
+  (item fn "inc")
+  (span "bits.rs" 16 1)
+  (argc 1)
+  (locals
+    (0 u8 mut)
+    (1 u8 imm)
+    (2 (tuple u8 bool) mut))
+  (debug "x" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (checked add (copy (p 1)) (int u8 1)) (at "bits.rs" 17 5))
+    (assert (move (p 2 (field 1 bool))) false overflow 1 (at "bits.rs" 17 5)))
+  (bb 1
+    (assign (p 0) (use (move (p 2 (field 0 u8)))) (at "bits.rs" 17 5))
+    (return (at "bits.rs" 18 2)))
+)
+(fn "fx_opt_panics::bits::clamp7c"
+  (kind root) (def "fx_opt_panics::bits::clamp7c") (args ())
+  (item fn "clamp7c")
+  (span "bits.rs" 22 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u32 imm)
+    (2 u32 imm)
+    (3 bool mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "y" (p 2))
+  (bb 0
+    (assign (p 2) (bin and (copy (p 1)) (int u32 7)) (at "bits.rs" 23 13))
+    (assign (p 3) (bin gt (copy (p 2)) (int u32 7)) (at "bits.rs" 24 8))
+    (switch (move (p 3)) (0 2) (otherwise 1) (at "bits.rs" 24 8)))
+  (bb 1
+    (assign (p 0) (use (int u32 7)) (at "bits.rs" 24 16))
+    (goto 3 (at "bits.rs" 24 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 2))) (at "bits.rs" 24 27))
+    (goto 3 (at "bits.rs" 24 5)))
+  (bb 3
+    (return (at "bits.rs" 25 2)))
+)

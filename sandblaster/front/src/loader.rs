@@ -748,8 +748,22 @@ impl Loader<'_> {
         });
         let path_display = self.sm.path(cfile).display().to_string();
         let text = self.sm.get(cfile).map(|f| f.text.clone()).unwrap_or_default();
-        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, path_display, text });
+        let mir_extra = mir.as_deref().map(|t| self.mir_extra_sources(t, &path_display)).unwrap_or_default();
+        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, path_display, text, mir_extra });
         c
+    }
+
+    /// The other files of the host crate that a lifted file's `.sbmir`
+    /// names (functions of modules not lifted, which the extraction followed
+    /// as callees: the reading takes them as library code), with their
+    /// texts: the files beside the lifted one, as its own `(source ..)` line
+    /// places the crate's root. The load checks each against its SHA-256
+    /// like a lifted file (`mir::load`); one not found stays unknown there.
+    fn mir_extra_sources(&mut self, mir: &str, me: &str) -> Vec<(String, Vec<u8>)> {
+        let srcs: Vec<&str> = mir.lines().filter_map(|l| l.strip_prefix("(source \"")).filter_map(|r| r.split('"').next()).collect();
+        let Some(own) = srcs.iter().find(|p| me.ends_with(&format!("/{p}")) || me == **p) else { return vec![] };
+        let base = &me[..me.len() - own.len()];
+        srcs.iter().filter(|p| **p != *own).filter_map(|p| self.fs.read(Path::new(&format!("{base}{p}"))).ok().map(|t| (format!("{base}{p}"), t.into_bytes()))).collect()
     }
 
     /// A ghost item that a target predicate configured out (`pred`; with

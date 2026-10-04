@@ -1,0 +1,6 @@
+[toolchain]
+# The nightly of the stable release the monorepo builds with (1.98): its
+# rustc-dev component carries rustc_public. Changing it changes every
+# .sbmir file's `rustc` line, so extraction is re-run.
+channel = "nightly-2026-06-21"
+components = ["rustc-dev", "rust-src"]

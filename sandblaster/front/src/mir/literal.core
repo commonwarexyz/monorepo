@@ -70,6 +70,28 @@ def[prelude] mir::sar_u8 : (a : U8) -> (s : U32) -> U8 :=
   fun (a : U8) (s : U32) => if #lt_u8(a, 128u8) return U8 then #wshr_u8(a, s) else #not_u8(#wshr_u8(#not_u8(a), s))
 def[prelude] mir::sar_u16 : (a : U16) -> (s : U32) -> U16 :=
   fun (a : U16) (s : U32) => if #lt_u16(a, 32768u16) return U16 then #wshr_u16(a, s) else #not_u16(#wshr_u16(#not_u16(a), s))
+-- `CheckedAdd`/`CheckedSub` of a signed type, on its two's complement bits:
+-- (the wrapped bits `r`, the overflow flag). The exact sum leaves the type's
+-- range exactly when both operands have the same sign and `r` the other
+-- one: the sign bit of `(a ^ r) & (b ^ r)`; the exact difference exactly
+-- when the operands' signs differ and `r`'s differs from `a`'s: the sign
+-- bit of `(a ^ b) & (a ^ r)`. (Signed `CheckedMul` is not modeled.)
+def[prelude] mir::scheck_add_u8 : (a : U8) -> (b : U8) -> Tuple2(U8, Bool) :=
+  fun (a : U8) (b : U8) => tuple2[U8, Bool](#wadd_u8(a, b), #ge_u8(#and_u8(#xor_u8(a, #wadd_u8(a, b)), #xor_u8(b, #wadd_u8(a, b))), 128u8))
+def[prelude] mir::scheck_sub_u8 : (a : U8) -> (b : U8) -> Tuple2(U8, Bool) :=
+  fun (a : U8) (b : U8) => tuple2[U8, Bool](#wsub_u8(a, b), #ge_u8(#and_u8(#xor_u8(a, b), #xor_u8(a, #wsub_u8(a, b))), 128u8))
+def[prelude] mir::scheck_add_u16 : (a : U16) -> (b : U16) -> Tuple2(U16, Bool) :=
+  fun (a : U16) (b : U16) => tuple2[U16, Bool](#wadd_u16(a, b), #ge_u16(#and_u16(#xor_u16(a, #wadd_u16(a, b)), #xor_u16(b, #wadd_u16(a, b))), 32768u16))
+def[prelude] mir::scheck_sub_u16 : (a : U16) -> (b : U16) -> Tuple2(U16, Bool) :=
+  fun (a : U16) (b : U16) => tuple2[U16, Bool](#wsub_u16(a, b), #ge_u16(#and_u16(#xor_u16(a, b), #xor_u16(a, #wsub_u16(a, b))), 32768u16))
+def[prelude] mir::scheck_add_u32 : (a : U32) -> (b : U32) -> Tuple2(U32, Bool) :=
+  fun (a : U32) (b : U32) => tuple2[U32, Bool](#wadd_u32(a, b), #ge_u32(#and_u32(#xor_u32(a, #wadd_u32(a, b)), #xor_u32(b, #wadd_u32(a, b))), 2147483648u32))
+def[prelude] mir::scheck_sub_u32 : (a : U32) -> (b : U32) -> Tuple2(U32, Bool) :=
+  fun (a : U32) (b : U32) => tuple2[U32, Bool](#wsub_u32(a, b), #ge_u32(#and_u32(#xor_u32(a, b), #xor_u32(a, #wsub_u32(a, b))), 2147483648u32))
+def[prelude] mir::scheck_add_u64 : (a : U64) -> (b : U64) -> Tuple2(U64, Bool) :=
+  fun (a : U64) (b : U64) => tuple2[U64, Bool](#wadd_u64(a, b), #ge_u64(#and_u64(#xor_u64(a, #wadd_u64(a, b)), #xor_u64(b, #wadd_u64(a, b))), 9223372036854775808u64))
+def[prelude] mir::scheck_sub_u64 : (a : U64) -> (b : U64) -> Tuple2(U64, Bool) :=
+  fun (a : U64) (b : U64) => tuple2[U64, Bool](#wsub_u64(a, b), #ge_u64(#and_u64(#xor_u64(a, b), #xor_u64(a, #wsub_u64(a, b))), 9223372036854775808u64))
 
 -- The option monad of the reading (a failing statement fails the rest).
 def[prelude] mir::bind : (A : Type) -> (B : Type) -> (o : Option(A)) -> (f : A -> Option(B)) -> Option(B) :=
@@ -201,6 +223,57 @@ def[prelude] leaf::array_index_range : (T : Type) -> (N : Usize) -> (a : Array T
       mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::bind (Slice T) (Slice T) (mir::prefix T s j) (fun (p : Slice T) => mir::suffix T p i))
     else None[Slice T]
 
+-- `<[T] as Index<RangeToInclusive<usize>>>::index(&s, ..=j)`: `&s[..j + 1]` (a panic unless `j < s.len()`;
+-- `j + 1` cannot overflow below the length: the checked sum, its test always true there)
+def[prelude] leaf::slice_index_to_inclusive : (T : Type) -> (s : Slice T) -> (j : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (j : Usize) =>
+    if #lt_usize(j, slice::len T s) return Option(Slice T) then
+      (if #le_int(#iadd(#cast_usize_int(j), #cast_usize_int(1usize)), 18446744073709551615int) as .h return Option(Slice T)
+       then mir::prefix T s (#add_usize(j, 1usize; h))
+       else None[Slice T])
+    else None[Slice T]
+
+-- `<[T] as Index<RangeTo<usize>>>::index(&s, ..j)`: `&s[..j]`
+def[prelude] leaf::slice_index_to : (T : Type) -> (s : Slice T) -> (j : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (j : Usize) => mir::prefix T s j
+
+-- `<[T] as Index<RangeFrom<usize>>>::index(&s, i..)`: `&s[i..]`
+def[prelude] leaf::slice_index_from : (T : Type) -> (s : Slice T) -> (i : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (i : Usize) => mir::suffix T s i
+
+-- `<[T] as Index<Range<usize>>>::index(&s, i..j)`: `&s[i..j]` (a panic unless `i <= j <= s.len()`)
+def[prelude] leaf::slice_index_range : (T : Type) -> (s : Slice T) -> (i : Usize) -> (j : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (i : Usize) (j : Usize) =>
+    if #le_usize(i, j) return Option(Slice T) then
+      mir::bind (Slice T) (Slice T) (mir::prefix T s j) (fun (p : Slice T) => mir::suffix T p i)
+    else None[Slice T]
+
 -- `Deref::deref(&d)` of a library newtype of bytes read as its field (SHA-256's `Digest`): `&d[..]`
 def[prelude] leaf::bytes_deref : (N : Usize) -> (a : Array U8 N) -> Option(Slice U8) :=
   fun (N : Usize) (a : Array U8 N) => mir::as_slice U8 N a
+
+-- core's `slice::Iter<'_, T>` (raw pointers inside) is the slice and the index
+-- of the element it yields next. `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`
+-- and `Iter::new` start it at index 0
+def[prelude] leaf::slice_iter_new : (T : Type) -> (s : Slice T) -> Tuple2(Slice T, Usize) :=
+  fun (T : Type) (s : Slice T) => tuple2[Slice T, Usize](s, 0usize)
+
+-- `Iterator::next(&mut it)` of a `slice::Iter<'_, T>`: the element at the index
+-- (a `&T`, read as its value) with the index one further, or `None` at the end
+-- with the iterator unchanged (`i + 1` cannot wrap below the slice's length)
+def[prelude] leaf::slice_iter_next : (T : Type) -> (it : Tuple2(Slice T, Usize)) -> Tuple2(Tuple2(Slice T, Usize), Option(T)) :=
+  fun (T : Type) (it : Tuple2(Slice T, Usize)) =>
+    match it : Tuple2(Slice T, Usize) as _ return Tuple2(Tuple2(Slice T, Usize), Option(T)) with
+    | tuple2(s, i) =>
+      if #lt_usize(i, slice::len T s) as .c return Tuple2(Tuple2(Slice T, Usize), Option(T))
+      then tuple2[Tuple2(Slice T, Usize), Option(T)](tuple2[Slice T, Usize](s, #wadd_usize(i, 1usize)), Some[T](slice::index T s i .c))
+      else tuple2[Tuple2(Slice T, Usize), Option(T)](it, None[T])
+    end
+
+-- `<Range<usize> as SliceIndex<[T]>>::get(i..j, s)` (`s.get(i..j)`, raw pointers
+-- inside): `Some(&s[i..j])` when `i <= j <= s.len()`, else `None` (a value, not a panic)
+def[prelude] leaf::slice_get_range : (T : Type) -> (s : Slice T) -> (i : Usize) -> (j : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (i : Usize) (j : Usize) =>
+    if #le_usize(i, j) as .h0 return Option(Slice T) then
+      (if #le_usize(j, slice::len T s) as .h1 return Option(Slice T) then Some[Slice T](slice::range T s i j .h0 .h1) else None[Slice T])
+    else None[Slice T]

@@ -356,6 +356,10 @@ impl<'a> Gen<'a> {
         if super::bytes_iter_model(self.m, &Ty::Adt(key.to_string())) {
             return Ok(AdtL { opaque: true, ..plain("(Slice (Slice U8))".into()) });
         }
+        // core's slice iterator: the slice and the index of its next element
+        if let Some(e) = super::slice_iter_elem(self.m, &Ty::Adt(key.to_string())) {
+            return Ok(AdtL { opaque: true, ..plain(format!("Tuple2((Slice {}), Usize)", self.ty(&e)?)) });
+        }
         if self.k.names.is_transparent(self.m, key) {
             return Ok(AdtL { newtype: true, ..plain(self.ty(&d.variants[0].fields[0].1)?) });
         }
@@ -400,6 +404,20 @@ impl<'a> Gen<'a> {
         let c = a.kctors.iter().find(|c| c.1 == v).map(|c| c.0.clone()).ok_or_else(|| format!("variant {v} of `{k}`, which its model does not name"))?;
         let head = if a.params.is_empty() { c } else { format!("{c}[{}]", a.params.join(", ")) };
         Ok(if args.is_empty() { head } else { format!("{head}({})", args.join(", ")) })
+    }
+
+    /// The one value of an enum all of whose variants but one have a field of
+    /// an empty type (`!`, an enum without variants), that one without fields:
+    /// `Option<Infallible>`'s `None` (`None`: another type).
+    fn single_value(&mut self, t: &Ty) -> Option<R<String>> {
+        let Ty::Adt(k) = t else { return None };
+        let d = self.m.adts.get(k)?;
+        let empty = |ft: &Ty| matches!(ft, Ty::Never) || matches!(ft, Ty::Adt(e) if self.m.adts.get(e).is_some_and(|de| de.is_enum && de.variants.is_empty()));
+        let live: Vec<usize> = d.variants.iter().filter(|v| !v.fields.iter().any(|f| empty(&f.1))).map(|v| v.idx).collect();
+        match live.as_slice() {
+            [v] if d.variants.len() > 1 && d.variants[*v].fields.is_empty() => Some(self.ctor(k, *v, &[])),
+            _ => None,
+        }
     }
 
     /// Field `i` of variant `v` of `x : t`: an `Option(F)` term (`None` on
@@ -567,7 +585,7 @@ impl<'a> Gen<'a> {
         for b in &f.blocks {
             if let Term::Call(Callee::Fn(k2), ..) = &b.term
                 && k2 != key
-                && self.m.fns.get(k2).is_some_and(|g| g.has_body)
+                && self.m.fns.get(k2).is_some_and(|g| g.has_body && super::model_of(g).is_none())
             {
                 let _ = self.function(k2);
             }
@@ -766,6 +784,8 @@ impl<'a> Gen<'a> {
             Const::Zst(Ty::Unit | Ty::Closure(..) | Ty::FnDef(..)) => "tt".into(),
             // a zero-sized ADT value: the one variant of a type with one variant
             Const::Zst(Ty::Adt(k)) if self.m.adts.get(k).is_some_and(|d| d.variants.len() == 1) => self.ctor(k, 0, &[])?,
+            // the one value of a type whose other variants are empty (`Option<Infallible>`'s `None`)
+            Const::Zst(t @ Ty::Adt(_)) if let Some(v) = self.single_value(t) => v?,
             Const::Agg(t, v, fs) => {
                 let args: Vec<String> = fs.iter().map(|x| self.konst(x.value())).collect::<R<_>>()?;
                 match t {
@@ -857,6 +877,12 @@ impl<'a> Gen<'a> {
         if is_unit(&pt) || matches!(&pt, Ty::FnDef(..)) || matches!(&pt, Ty::Closure(_, caps) if is_unit(caps)) {
             fx.live(pl.local)?;
             return Ok(some("Unit", "tt"));
+        }
+        // so is a type whose one variant without an empty field has no fields
+        // (`Option<Infallible>`: `?`'s residual, read unassigned)
+        if let Some(v) = self.single_value(&pt) {
+            fx.live(pl.local)?;
+            return Ok(some(&self.ty(&pt)?, &v?));
         }
         let pc = self.place(fx, pl)?;
         self.read_c(fx, &pc)
@@ -1076,6 +1102,9 @@ const INTRINSICS: &[(&str, char, &str)] = &[
     ("add_with_overflow", 'p', "mir::checked_add_{w} a0 a1"),
     ("sub_with_overflow", 'p', "mir::checked_sub_{w} a0 a1"),
     ("mul_with_overflow", 'p', "mir::checked_mul_{w} a0 a1"),
+    // (the amount, a `u32`, taken modulo the width)
+    ("rotate_left", 'w', "#rotl_{w}(a0, a1)"),
+    ("rotate_right", 'w', "#rotr_{w}(a0, a1)"),
 ];
 /// Leaves with a `&mut` argument (the first): MIR path → the `literal.core`
 /// leaf over its referent (the buffer model, or the pointee's value) and
@@ -1090,7 +1119,8 @@ const STATE_LEAVES: &[(&str, &str, bool)] = &[
     ("core::iter::Iterator::next", "leaf::bytes_iter_next", false),
 ];
 /// `<[T; N] as Index<range>>::index(&a, r)`: the range type → the leaf (its
-/// fields are the leaf's last arguments).
+/// fields are the leaf's last arguments); of a slice `[T]`, the same leaf
+/// named `leaf::slice_*`.
 const INDEX_LEAVES: &[(&str, &str)] = &[
     ("ops::RangeToInclusive", "leaf::array_index_to_inclusive"),
     ("ops::RangeTo", "leaf::array_index_to"),
@@ -1108,6 +1138,13 @@ impl<'a> Gen<'a> {
             // `CheckedAdd/Sub/Mul`: (the wrapped value, the overflow flag)
             Rvalue::Checked(op, a, b) => {
                 let ta = op_ty(&fx.f, a)?;
+                // a signed `add`/`sub` on its bits (`mir::scheck_*`), the result back in its type
+                if signed(&ta) && ["add", "sub"].contains(&op.as_str()) {
+                    let ((w, ab), (_, bb), tat) = (bits(&ta, "a").ok_or("bits")?, bits(&ta, "b").ok_or("bits")?, self.ty(&ta)?);
+                    let (pt, wt) = (format!("Tuple2({tat}, Bool)"), wty(w));
+                    let e = mat(&format!("mir::scheck_{op}_{w} {ab} {bb}"), &format!("Tuple2({wt}, Bool)"), &pt, &format!("| tuple2(r, o) => tuple2[{tat}, Bool]({}, o)", of_bits(&ta, "r")));
+                    return Ok(bind(&tat, &pt, &self.operand(fx, a)?, "a", &map(&tat, &pt, &self.operand(fx, b)?, "b", &e)));
+                }
                 let w = width(&ta).filter(|_| ["add", "sub", "mul"].contains(&op.as_str())).ok_or_else(|| format!("checked {op} on {ta:?}"))?;
                 let (av, bv, wt) = (self.operand(fx, a)?, self.operand(fx, b)?, wty(w));
                 let pt = format!("Tuple2({wt}, Bool)");
@@ -1269,6 +1306,9 @@ impl<'a> Gen<'a> {
             ("transmute", _, Ty::Array(e, n)) if **e == Ty::Int(false, 8) && width(&from).is_some_and(|w| ["u16", "u32", "u64"].contains(&w) && bits_of(w) == 8 * *n as u32) => {
                 format!("{}::to_le_bytes x", width(&from).unwrap())
             }
+            ("transmute", Ty::Array(e, n), _) if **e == Ty::Int(false, 8) && width(to).is_some_and(|w| ["u16", "u32", "u64"].contains(&w) && bits_of(w) == 8 * *n as u32) => {
+                format!("{}::from_le_bytes x", width(to).unwrap())
+            }
             ("unsize", Ty::Ref(false, fa), Ty::Ref(false, tb)) if matches!((&**fa, &**tb), (Ty::Array(..), Ty::Slice(_))) => {
                 let Ty::Array(e, n) = &**fa else { unreachable!() };
                 return Ok(bind(&ft, &tt, &av, "x", &format!("mir::as_slice {} {n}usize x", self.ty(e)?)));
@@ -1299,10 +1339,14 @@ impl<'a> Gen<'a> {
                     _ => wt.clone(),
                 };
                 let vals: Vec<String> = args.iter().map(|a| self.operand(fx, a)).collect::<R<_>>()?;
-                let e = binds(&vals, &vec![wt; vals.len()], &rt, "a", some(&rt, &tmpl.replace("{w}", w)));
+                // (each argument at its own type: a rotation's amount is a `u32`)
+                let tys: Vec<String> = args.iter().map(|a| self.ty(&op_ty(&fx.f, a)?)).collect::<R<_>>()?;
+                let e = binds(&vals, &tys, &rt, "a", some(&rt, &tmpl.replace("{w}", w)));
                 self.result(fx, dest, os, &rt, &e)?
             }
             Callee::Leaf(path, tys) => self.leaf(fx, path, tys, args, dest, os)?,
+            // core's slice iterator and range `get` (raw pointers): their models
+            Callee::Fn(k2) if let Some((model, elem)) = self.m.fns.get(k2).and_then(super::model_of) => self.model_call(fx, model, &elem, args, dest, os)?,
             // `Deref::deref` of a library newtype of bytes (its MIR is not exported)
             Callee::Fn(k2) if !self.m.fns.get(k2).is_some_and(|g| g.has_body) => {
                 let at = args.first().map(|a| op_ty(&fx.f, a)).transpose()?;
@@ -1450,7 +1494,6 @@ impl<'a> Gen<'a> {
     /// A leaf call (§20.4 "Leaves"): a library function without MIR whose
     /// meaning is a model of `literal.core` or of a host model.
     fn leaf(&mut self, fx: &mut FnCx, path: &str, tys: &[Ty], args: &[Operand], dest: &Place, os: &str) -> R<String> {
-        let (st, rc) = (fx.st(), fx.rc.clone());
         let dtt = self.ty(&place_ty(&fx.f, dest)?)?;
         // a leaf with a `&mut` first argument: its referent through the code
         let norm = path.replace("bytes::buf::buf_impl::Buf::", "bytes::Buf::").replace("bytes::buf::buf_mut::BufMut::", "bytes::BufMut::");
@@ -1462,33 +1505,34 @@ impl<'a> Gen<'a> {
             }
             let tparam = if leaf.ends_with("vec_push") { format!(" {}", sty.strip_prefix("List(").and_then(|x| x.strip_suffix(')')).ok_or("push on a non-`Vec`")?) } else { String::new() };
             self.leaf_def(leaf);
-            let n = fx.need(target);
-            let code = self.operand(fx, &args[0])?;
-            let mut call = format!("{leaf}{tparam} x0");
-            let mut binds = Vec::new();
-            for (i, a) in args.iter().enumerate().skip(1) {
-                binds.push((self.ty(&op_ty(&fx.f, a)?)?, self.operand(fx, a)?, format!("x{i}")));
-                let _ = write!(call, " x{i}");
-            }
-            let m = mat(&call, &format!("Tuple2({sty}, {dtt})"), &format!("Option({st})"), &format!("| tuple2(nx, r) => {}", bind(&st, &st, &format!("{} nx", fx.through("write", &n, "q")), "s", &self.write(fx, dest, "r")?)));
-            let inner = binds.iter().rev().fold(m, |e, (t, v, x)| bind(t, &st, v, x, &e));
-            return Ok(bind(&st, &st, os, "s", &bind(&rc, &st, &code, "q", &bind(&sty, &st, &fx.through("deref", &n, "q"), "x0", &inner))));
+            return self.state_leaf(fx, target, &sty, &format!("{leaf}{tparam}"), args, dest, os);
         }
         // a value leaf: a model at the arguments (a range's fields), `Option`-valued or total
         let method = path.rsplit("::").next().unwrap_or("");
         let (f, partial, vals) = match tys {
-            // `<[T; N] as Index<range>>::index(&a, r)` (core's `Index`, by its exact path)
-            [Ty::Array(e, n), Ty::Adt(rk)] if lib_path("ops::Index::index", path) => {
+            // `<[T; N] as Index<range>>::index(&a, r)`, `<[T] as Index<range>>::index(&s, r)`
+            // (core's `Index`, by its exact path): the array's leaf, or the slice's (`leaf::slice_*`)
+            [base @ (Ty::Array(..) | Ty::Slice(_)), Ty::Adt(rk)] if lib_path("ops::Index::index", path) => {
                 let rd = self.m.adts.get(rk).cloned().ok_or("no ADT")?;
                 let (_, leaf) = INDEX_LEAVES.iter().find(|(r, _)| lib_path(r, &rd.path)).ok_or_else(|| format!("an index by `{}`", rd.path))?;
-                self.leaf_def(leaf);
+                let (e, n) = match base {
+                    Ty::Array(e, n) => (e, Some(n)),
+                    Ty::Slice(e) => (e, None),
+                    _ => return Err("an index of neither an array nor a slice".into()),
+                };
+                let leaf = if n.is_some() { leaf.to_string() } else { leaf.replace("leaf::array_", "leaf::slice_") };
+                self.leaf_def(&leaf);
                 let (rty, et) = (Ty::Adt(rk.clone()), self.ty(e)?);
-                let mut vals = vec![(format!("(Array {et} {n}usize)"), self.operand(fx, &args[0])?)];
+                let (head, base_ty) = match n {
+                    Some(n) => (format!("{leaf} {et} {n}usize"), format!("(Array {et} {n}usize)")),
+                    None => (format!("{leaf} {et}"), format!("(Slice {et})")),
+                };
+                let mut vals = vec![(base_ty, self.operand(fx, &args[0])?)];
                 for (i, (_, ft)) in rd.variants[0].fields.iter().enumerate() {
                     let (rtt, ftt, rv) = (self.ty(&rty)?, self.ty(ft)?, self.operand(fx, &args[1])?);
                     vals.push((ftt.clone(), bind(&rtt, &ftt, &rv, "xr", &self.field(&rty, 0, i, "xr", None)?)));
                 }
-                (format!("{leaf} {et} {n}usize"), true, vals)
+                (head, true, vals)
             }
             // a host model's method
             [t, ..] if self.k.names.host_model_method(self.m, t, method).is_some() => {
@@ -1501,6 +1545,67 @@ impl<'a> Gen<'a> {
         let (tys, vals): (Vec<String>, Vec<String>) = vals.into_iter().unzip();
         let e = binds(&vals, &tys, &dtt, "a", if partial { call } else { some(&dtt, &call) });
         self.result(fx, dest, os, &dtt, &e)
+    }
+
+    /// A leaf whose first argument is a `&mut`: its referent (of L type
+    /// `sty`) read through the code, `call x0 x1 ..` (a `Tuple2(the new
+    /// referent, the result)`), the new referent written back through the
+    /// code and the result written to `dest`.
+    #[allow(clippy::too_many_arguments)]
+    fn state_leaf(&mut self, fx: &mut FnCx, target: Target, sty: &str, call0: &str, args: &[Operand], dest: &Place, os: &str) -> R<String> {
+        let (st, rc) = (fx.st(), fx.rc.clone());
+        let dtt = self.ty(&place_ty(&fx.f, dest)?)?;
+        let n = fx.need(target);
+        let code = self.operand(fx, &args[0])?;
+        let mut call = format!("{call0} x0");
+        let mut binds = Vec::new();
+        for (i, a) in args.iter().enumerate().skip(1) {
+            binds.push((self.ty(&op_ty(&fx.f, a)?)?, self.operand(fx, a)?, format!("x{i}")));
+            let _ = write!(call, " x{i}");
+        }
+        let m = mat(&call, &format!("Tuple2({sty}, {dtt})"), &format!("Option({st})"), &format!("| tuple2(nx, r) => {}", bind(&st, &st, &format!("{} nx", fx.through("write", &n, "q")), "s", &self.write(fx, dest, "r")?)));
+        let inner = binds.iter().rev().fold(m, |e, (t, v, x)| bind(t, &st, v, x, &e));
+        Ok(bind(&st, &st, os, "s", &bind(&rc, &st, &code, "q", &bind(sty, &st, &fx.through("deref", &n, "q"), "x0", &inner))))
+    }
+
+    /// A library function read as its model (`mod.rs`'s `Model`, with
+    /// `literal.core`'s `leaf::slice_*`) instead of its MIR, whose raw
+    /// pointers L does not model: core's slice iterator (the slice and the
+    /// index of its next element) and a slice's `get` by a `Range<usize>`.
+    fn model_call(&mut self, fx: &mut FnCx, model: super::Model, elem: &Ty, args: &[Operand], dest: &Place, os: &str) -> R<String> {
+        let et = self.ty(elem)?;
+        let (sl, it) = (format!("(Slice {et})"), format!("Tuple2((Slice {et}), Usize)"));
+        match (model, args) {
+            (super::Model::SliceIterNew, [s]) => {
+                self.leaf_def("leaf::slice_iter_new");
+                let e = map(&sl, &it, &self.operand(fx, s)?, "x", &format!("leaf::slice_iter_new {et} x"));
+                self.result(fx, dest, os, &it, &e)
+            }
+            (super::Model::SliceIterNext, [a]) => {
+                let Ty::Ref(true, pointee) = op_ty(&fx.f, a)? else { return Err("`Iterator::next` of a slice iterator without a `&mut` receiver".into()) };
+                if self.ty(&pointee)? != it {
+                    return Err(format!("`Iterator::next` of {pointee:?} as a slice iterator of {elem:?}"));
+                }
+                self.leaf_def("leaf::slice_iter_next");
+                self.state_leaf(fx, Target::Ty((*pointee).clone()), &it, &format!("leaf::slice_iter_next {et}"), args, dest, os)
+            }
+            (super::Model::SliceGetRange, [r, s]) => {
+                // the range's fields (core's `Range<usize>`, by its exact path)
+                let rt = op_ty(&fx.f, r)?;
+                let Ty::Adt(rk) = &rt else { return Err(format!("`SliceIndex::get` by {rt:?}")) };
+                if !self.m.adts.get(rk).is_some_and(|d| lib_path("ops::Range", &d.path) && d.args == [Ty::Int(false, 0)]) {
+                    return Err(format!("`SliceIndex::get` by `{rk}`"));
+                }
+                self.leaf_def("leaf::slice_get_range");
+                let (rtt, rv) = (self.ty(&rt)?, self.operand(fx, r)?);
+                let ends: Vec<String> = (0..2).map(|i| Ok(bind(&rtt, "Usize", &rv, "xr", &self.field(&rt, 0, i, "xr", None)?))).collect::<R<_>>()?;
+                let ot = format!("Option({sl})");
+                let vals = [self.operand(fx, s)?, ends[0].clone(), ends[1].clone()];
+                let e = binds(&vals, &[sl.clone(), "Usize".into(), "Usize".into()], &ot, "a", some(&ot, &format!("leaf::slice_get_range {et} a0 a1 a2")));
+                self.result(fx, dest, os, &ot, &e)
+            }
+            _ => Err(format!("the model {model:?} with {} arguments", args.len())),
+        }
     }
 
     /// The state `os`, then the result `r` (the `Option(rt)` term `e`) written to `dest`.

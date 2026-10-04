@@ -328,6 +328,38 @@ pub fn pair(a: u64, b: u64, t: bool) -> (Option<u64>, u64) {{
     assert!(b.contains("checked_add"), "{b}");
 }
 
+/// An undecided checked call at the head of a match, in a function that
+/// branches anyway (a test on whether an argument's arithmetic overflows):
+/// the driver keeps the call and splits on its result, so the residual
+/// prints `match a.checked_add(1u64) { .. }`. (Before, the split was on the
+/// call's unfolded overflow test over `Int`, which no exec expression
+/// prints, and the function was not specialized.) The same for the other
+/// checked operations (`checked_mul`, `checked_div`, ..).
+#[test]
+fn undecided_checked_call_at_a_match_prints() {
+    let src = format!(
+        "{HEADER}
+pub fn bump_if(a: u64, t: bool) -> Option<u64> {{
+    if t {{ match a.checked_add(1) {{ Some(x) => Some(x ^ 1u64), None => None }} }} else {{ None }}
+}}
+
+pub fn scale_if(a: u32, b: u32, t: bool) -> Option<u32> {{
+    if t {{ match a.checked_mul(b) {{ Some(x) => x.checked_div(b), None => None }} }} else {{ None }}
+}}
+"
+    );
+    let em = optimize(&src);
+    show(&em);
+    let b = body_of(&em.code, "bump_if");
+    println!("{b}");
+    assert!(driven(&em, "crate::bump_if"));
+    assert!(b.contains("checked_add"), "{b}");
+    let b = body_of(&em.code, "scale_if");
+    println!("{b}");
+    assert!(driven(&em, "crate::scale_if"));
+    assert!(b.contains("checked_mul"), "{b}");
+}
+
 /// A checked sum whose checks never fail (corpus P10): folded into a loop
 /// helper with the bound invariant `acc <= (65536 - xs.len()) * (2^32 - 1)`
 /// (plan O5, design §6.6); the helper's `checked_add` is decided by the

@@ -173,6 +173,14 @@ pub struct HelperInfo {
     pub params: Vec<usize>,
     pub while_loop: bool,
     pub local_names: Vec<String>,
+    /// A helper of a loop inside another loop's body: the positions (among
+    /// `params`) of the parameters it returns at the loop's exit; its lemma
+    /// is a `while` loop's (from the header to the exit), `local_names`
+    /// naming its parameters' locals.
+    pub returns: Option<Vec<usize>>,
+    /// The loop helper whose body holds this loop (`None`: the lifted
+    /// function's own body), and whether it is a method helper.
+    pub owner: Option<(String, bool)>,
 }
 
 /// The names and subset types of the root function's locals (the lift
@@ -312,8 +320,95 @@ enum Flow {
     Diverge,
     Fall(Env),
     /// The condition of a probed loop header: `(cond, target when true,
-    /// target when false, env)`.
-    Cond(syn::Expr, usize, usize, Env),
+    /// target when false, env, the frame and block of the test)`.
+    Cond(syn::Expr, usize, usize, Env, usize, usize),
+}
+
+/// The tests without effects that decide a `while` loop's condition
+/// (`a || b`): leaves are the body's entry (`true`) or the exit (`false`).
+#[derive(Clone)]
+enum CondTree {
+    Leaf(bool, usize, Env),
+    /// A test: its condition, its block, and the trees when true and false.
+    Test(syn::Expr, usize, Box<CondTree>, Box<CondTree>),
+}
+
+impl CondTree {
+    fn exits(&self) -> bool {
+        match self {
+            CondTree::Leaf(b, ..) => !b,
+            CondTree::Test(_, _, t, f) => t.exits() || f.exits(),
+        }
+    }
+
+    fn leaves(&self, out: &mut Vec<(bool, usize, Env)>) {
+        match self {
+            CondTree::Leaf(b, k, e) => out.push((*b, *k, e.clone())),
+            CondTree::Test(_, _, t, f) => {
+                t.leaves(out);
+                f.leaves(out);
+            }
+        }
+    }
+
+    /// The condition under which the body runs. The tests have no effects
+    /// and no obligations, so they are joined without short circuit (`|`,
+    /// `&`: one test of each in the structured reading, not a `match` on
+    /// the first).
+    fn expr(&self) -> syn::Expr {
+        use CondTree::{Leaf, Test};
+        match self {
+            Leaf(true, ..) => syn::parse_quote!(true),
+            Leaf(false, ..) => syn::parse_quote!(false),
+            Test(c, _, t, f) => match (&**t, &**f) {
+                (Leaf(true, ..), Leaf(false, ..)) => c.clone(),
+                (Leaf(false, ..), Leaf(true, ..)) => syn::parse_quote!(!(#c)),
+                (Leaf(true, ..), g) => {
+                    let g = g.expr();
+                    syn::parse_quote!((#c) | (#g))
+                }
+                (Leaf(false, ..), g) => {
+                    let g = g.expr();
+                    syn::parse_quote!(!(#c) & (#g))
+                }
+                (g, Leaf(true, ..)) => {
+                    let g = g.expr();
+                    syn::parse_quote!(!(#c) | (#g))
+                }
+                (g, Leaf(false, ..)) => {
+                    let g = g.expr();
+                    syn::parse_quote!((#c) & (#g))
+                }
+                (g, h) => {
+                    let (g, h) = (g.expr(), h.expr());
+                    syn::parse_quote!(((#c) & (#g)) | (!(#c) & (#h)))
+                }
+            },
+        }
+    }
+}
+
+/// The locals the blocks `body` assign (whole or in part), borrow mutably
+/// or receive a call's result in.
+fn loop_assigns(f: &Fn, body: &BTreeSet<usize>) -> BTreeSet<usize> {
+    let mut out = BTreeSet::new();
+    for b in body {
+        let bl = &f.blocks[*b];
+        for s in &bl.stmts {
+            if let Stmt::Assign(p, r, _) = s {
+                out.insert(p.local);
+                if let Rvalue::Ref(k, q) = r
+                    && k == "mut"
+                {
+                    out.insert(q.local);
+                }
+            }
+        }
+        if let Term::Call(_, _, d, _) = &bl.term {
+            out.insert(d.local);
+        }
+    }
+    out
 }
 
 #[derive(Clone)]
@@ -374,6 +469,8 @@ struct Frame<'m> {
 struct Reader<'m> {
     m: &'m Sbmir,
     nm: &'m dyn Names,
+    /// The bodies of the library functions read as models ([`model_body`]).
+    models: &'m std::collections::BTreeMap<String, Fn>,
     spec: &'m Spec<'m>,
     frames: Vec<Frame<'m>>,
     cfg: Cfg,
@@ -382,6 +479,10 @@ struct Reader<'m> {
     loop_forms: Vec<(usize, String)>,
     assigned_params: BTreeSet<usize>,
     helper_info: Vec<HelperInfo>,
+    /// The loop helper being written (`None`: the lifted function's body),
+    /// and the `while` loops written so far per function.
+    owner: Option<(String, bool)>,
+    whiles: std::collections::BTreeMap<String, usize>,
 }
 
 fn ident(s: &str) -> syn::Ident {
@@ -571,6 +672,9 @@ impl<'m> Reader<'m> {
             }
             // a width the subset lacks (`isize` discriminants): only folded
             Const::Int(Ty::Int(..), v) => Val::K(*v),
+            // the one value of an enum whose other variants are empty
+            // (`Option<Infallible>`'s `None`, `?`'s residual): its constructor
+            Const::Zst(Ty::Adt(k)) if let Some(v) = single_value(self.m, k) => Val::C(Ty::Adt(k.clone()), v, vec![]),
             Const::Zst(t) => Val::Z(t.clone()),
             Const::Agg(t, v, fs) => Val::C(t.clone(), *v, fs.iter().map(|f| self.konst(fr, f)).collect::<Result<_, _>>()?),
             // `&c`: a shared reference to the value of `c`
@@ -716,6 +820,12 @@ impl<'m> Reader<'m> {
         {
             // nor does a closure that captures nothing
             Val::Z(self.frames[fr].f.locals[p.local].0.clone())
+        } else if let Ty::Adt(k) = &self.frames[fr].f.locals[p.local].0
+            && let Some(v) = single_value(self.m, k)
+        {
+            // nor the one value of an enum whose other variants are empty
+            // (`Option<Infallible>`, `?`'s residual: rustc drops its assignment)
+            Val::C(Ty::Adt(k.clone()), v, vec![])
         } else if self.is_param(fr, p.local) || env.declared.contains(&self.frames[fr].names[p.local]) {
             Val::E(var(&self.frames[fr].names[p.local]))
         } else {
@@ -978,7 +1088,18 @@ impl<'m> Reader<'m> {
                 let sp = signed_path(*bits);
                 let shr = format_ident!("i{}_shr", bits);
                 let amount: syn::Expr = if tb.signed() { syn::parse_quote!(#eb.0) } else { eb.clone() };
+                // an order comparison: the bits with the sign bit flipped, compared
+                // unsigned (the literal reading's `mir::slt_*`/`mir::sle_*`)
+                let sb = lit_uint(1u128 << (bits - 1), uint_name(*bits));
                 let (e, pure): (syn::Expr, bool) = match op {
+                    // MIR's plain `Add`/`Sub`/`Mul` wrap: the same on the bits
+                    "add" => (syn::parse_quote!(#sp(#ea.0.wrapping_add(#eb.0))), true),
+                    "sub" => (syn::parse_quote!(#sp(#ea.0.wrapping_sub(#eb.0))), true),
+                    "mul" => (syn::parse_quote!(#sp(#ea.0.wrapping_mul(#eb.0))), true),
+                    "lt" => (syn::parse_quote!((#ea.0 ^ #sb) < (#eb.0 ^ #sb)), true),
+                    "le" => (syn::parse_quote!((#ea.0 ^ #sb) <= (#eb.0 ^ #sb)), true),
+                    "gt" => (syn::parse_quote!((#eb.0 ^ #sb) < (#ea.0 ^ #sb)), true),
+                    "ge" => (syn::parse_quote!((#eb.0 ^ #sb) <= (#ea.0 ^ #sb)), true),
                     "xor" => (syn::parse_quote!(#sp(#ea.0 ^ #eb.0)), true),
                     "and" => (syn::parse_quote!(#sp(#ea.0 & #eb.0)), true),
                     "or" => (syn::parse_quote!(#sp(#ea.0 | #eb.0)), true),
@@ -1005,6 +1126,30 @@ impl<'m> Reader<'m> {
             let (e, _) = self.operand_expr(fr, a, env, out)?;
             let e = paren(e);
             return Ok((syn::parse_quote!(&#e[..]), false));
+        }
+        // `transmute` between `[u8; n]` and an unsigned word of `n` bytes: its
+        // little-endian bytes (the targets are little-endian, SEMANTICS.md §19)
+        if kind == "transmute" {
+            let from = self.op_ty(fr, a)?;
+            let byte_array = |t: &Ty, w: u32| matches!(t, Ty::Array(e, n) if **e == Ty::Int(false, 8) && 8 * *n == w as u64);
+            let word = |t: &Ty| match t {
+                Ty::Int(false, b @ (16 | 32 | 64)) => Some(*b),
+                _ => None,
+            };
+            let (e, pu) = self.operand_expr(fr, a, env, out)?;
+            let e = paren(e);
+            if let Some(w) = word(to)
+                && byte_array(&from, w)
+            {
+                let tn = format_ident!("u{}", w);
+                return Ok((syn::parse_quote!(#tn::from_le_bytes(#e)), pu));
+            }
+            if let Some(w) = word(&from)
+                && byte_array(to, w)
+            {
+                return Ok((syn::parse_quote!(#e.to_le_bytes()), pu));
+            }
+            return self.err(fr, format!("the cast `transmute` of {from:?} to {to:?}"));
         }
         if kind != "int-to-int" {
             return self.err(fr, format!("the cast `{kind}`"));
@@ -1044,6 +1189,24 @@ impl<'m> Reader<'m> {
             (Ty::Int(true, _), true) if tb <= fb => {
                 let sp = signed_path(tb);
                 syn::parse_quote!(#sp(#e.0 as #tu))
+            }
+            // sign extension of the bits (the literal reading's `mir::sext_*`):
+            // the wider word with the high bits set when the sign bit is
+            // (to `usize` through `u64`, as the literal reading does)
+            (Ty::Int(true, f @ (16 | 32)), _) if tb > fb && (to.signed() || matches!(to, Ty::Int(false, _))) => {
+                let tw = if matches!(to, Ty::Int(false, 0)) { 64 } else { tb };
+                let wu = format_ident!("{}", uint_name(tw));
+                let sign = lit_uint(1u128 << (f - 1), uint_name(*f));
+                let high = lit_uint(((1u128 << tw) - 1) ^ ((1u128 << f) - 1), uint_name(tw));
+                let ext: syn::Expr = syn::parse_quote!(if #e.0 < #sign { #e.0 as #wu } else { (#e.0 as #wu) | #high });
+                match (to.signed(), to) {
+                    (true, _) => {
+                        let sp = signed_path(tb);
+                        syn::parse_quote!(#sp(#ext))
+                    }
+                    (false, Ty::Int(false, 0)) => syn::parse_quote!((#ext) as usize),
+                    _ => ext,
+                }
             }
             _ => return self.err(fr, format!("the cast {from:?} as {to:?} (sign extension is not read)")),
         };
@@ -1332,10 +1495,12 @@ impl<'m> Reader<'m> {
                 }
                 let dest_ty = self.place_ty(fr, p)?;
                 // checked arithmetic whose overflow flag is tested, not
-                // asserted (core's `checked_add`): the pair (wrapped result,
-                // overflowed), exactly
+                // asserted (core's `checked_add`), or of a signed type (the
+                // subset has no signed operator with an overflow obligation):
+                // the pair (wrapped result, overflowed), exactly; an assert
+                // of the flag is then its own obligation
                 if let Rvalue::Checked(op, a, b) = r
-                    && !self.flag_asserted(fr, s, p)
+                    && (!self.flag_asserted(fr, s, p) || self.op_ty(fr, a)?.signed())
                 {
                     let v = self.checked_pair(fr, op, a, b, &dest_ty, env, out)?;
                     return self.assign(fr, p, v, env, out);
@@ -1370,7 +1535,29 @@ impl<'m> Reader<'m> {
     /// `checked_op(..).is_none()` (both total).
     #[allow(clippy::too_many_arguments)]
     fn checked_pair(&mut self, fr: usize, op: &str, a: &Operand, b: &Operand, dest_ty: &Ty, env: &Env, out: &mut Vec<syn::Stmt>) -> Result<Val, String> {
-        if self.op_ty(fr, a)?.signed() || !self.op_ty(fr, a)?.is_int() {
+        let ta = self.op_ty(fr, a)?;
+        // signed `add`/`sub`: the wrapped bits, and the overflow flag as the
+        // sign bit of `(a ^ r) & (b ^ r)` (`(a ^ b) & (a ^ r)`), the literal
+        // reading's `mir::scheck_*` (both total)
+        if let Ty::Int(true, bits @ (16 | 32 | 64)) = ta
+            && matches!(op, "add" | "sub")
+        {
+            let (ea, pa) = self.operand_expr(fr, a, env, out)?;
+            let (eb, pb) = self.operand_expr(fr, b, env, out)?;
+            let (ea, eb) = (paren(ea), paren(eb));
+            let (sp, sb) = (signed_path(bits), lit_uint(1u128 << (bits - 1), uint_name(bits)));
+            let (r, flag): (syn::Expr, syn::Expr) = if op == "add" {
+                let r: syn::Expr = syn::parse_quote!(#ea.0.wrapping_add(#eb.0));
+                (r.clone(), syn::parse_quote!(((#ea.0 ^ #r) & (#eb.0 ^ #r)) >= #sb))
+            } else {
+                let r: syn::Expr = syn::parse_quote!(#ea.0.wrapping_sub(#eb.0));
+                (r.clone(), syn::parse_quote!(((#ea.0 ^ #eb.0) & (#ea.0 ^ #r)) >= #sb))
+            };
+            let wv = self.bind(syn::parse_quote!(#sp(#r)), pa && pb, None, out);
+            let cv = self.bind(flag, pa && pb, None, out);
+            return Ok(Val::C(dest_ty.clone(), 0, vec![wv, cv]));
+        }
+        if ta.signed() || !ta.is_int() {
             return self.err(fr, format!("checked `{op}` of a signed or non-integer type with a tested flag"));
         }
         let (ea, pa) = self.operand_expr(fr, a, env, out)?;
@@ -1846,12 +2033,41 @@ impl<'m> Reader<'m> {
                 self.assign(fr, dest, Val::Z(Ty::Unit), &mut env, out)?;
                 cont(self, env, out)
             }
-            Callee::Intrinsic(name, _) if matches!(name.as_str(), "ctpop" | "cttz" | "saturating_add" | "saturating_sub" | "add_with_overflow" | "sub_with_overflow" | "mul_with_overflow") => {
+            Callee::Intrinsic(name, _) if matches!(name.as_str(), "ctpop" | "cttz" | "saturating_add" | "saturating_sub" | "add_with_overflow" | "sub_with_overflow" | "mul_with_overflow" | "rotate_left" | "rotate_right" | "bswap") => {
                 let mut es = Vec::new();
                 for a in args {
                     es.push(paren(self.operand_expr(fr, a, &env, out)?.0));
                 }
+                // the byte swap by shifts and masks, as the literal reading's `mir::bswap_*`
+                let bswap = |x: &syn::Expr, bits: u32| -> Option<syn::Expr> {
+                    let l = |v: u128, t: &str| lit_uint(v, t);
+                    Some(match bits {
+                        16 => {
+                            let (a, b) = (l(8, "u32"), l(8, "u32"));
+                            syn::parse_quote!(#x.wrapping_shl(#a) | #x.wrapping_shr(#b))
+                        }
+                        32 => {
+                            let (m0, m1, s8, s24) = (l(255, "u32"), l(65280, "u32"), l(8, "u32"), l(24, "u32"));
+                            syn::parse_quote!(((#x & #m0).wrapping_shl(#s24) | (#x & #m1).wrapping_shl(#s8)) | ((#x.wrapping_shr(#s8) & #m1) | #x.wrapping_shr(#s24)))
+                        }
+                        64 => {
+                            let m = |v: u128| l(v, "u64");
+                            let s = |v: u128| l(v, "u32");
+                            let (m0, m1, m2, m3) = (m(255), m(65280), m(16711680), m(4278190080));
+                            let (s8, s24, s40, s56) = (s(8), s(24), s(40), s(56));
+                            syn::parse_quote!((((#x & #m0).wrapping_shl(#s56) | (#x & #m1).wrapping_shl(#s40)) | ((#x & #m2).wrapping_shl(#s24) | (#x & #m3).wrapping_shl(#s8)))
+                                | (((#x.wrapping_shr(#s8) & #m3) | (#x.wrapping_shr(#s24) & #m2)) | ((#x.wrapping_shr(#s40) & #m1) | #x.wrapping_shr(#s56))))
+                        }
+                        _ => return None,
+                    })
+                };
                 let v = match (name.as_str(), es.as_slice()) {
+                    ("rotate_left", [x, n]) => Val::E(syn::parse_quote!(#x.rotate_left(#n))),
+                    ("rotate_right", [x, n]) => Val::E(syn::parse_quote!(#x.rotate_right(#n))),
+                    ("bswap", [x]) => match self.op_ty(fr, &args[0])? {
+                        Ty::Int(false, b @ (16 | 32 | 64)) => Val::E(bswap(x, b).ok_or("bswap")?),
+                        other => return self.err(fr, format!("the intrinsic `bswap` on {other:?}")),
+                    },
                     ("ctpop", [x]) => Val::E(syn::parse_quote!(#x.count_ones())),
                     ("cttz", [x]) => Val::E(syn::parse_quote!(#x.trailing_zeros())),
                     ("saturating_add", [x, y]) => Val::E(syn::parse_quote!(#x.saturating_add(#y))),
@@ -1879,6 +2095,9 @@ impl<'m> Reader<'m> {
             Callee::Unextracted(k) | Callee::Unsupported(k) => self.err(fr, format!("a call of `{k}` (not extracted)")),
             Callee::Fn(key) => {
                 let f2 = self.m.fns.get(key).ok_or_else(|| format!("no MIR for the callee `{key}`"))?;
+                // a library function read as a model (core's slice iterator, a
+                // slice's `get` by a range): the model's body
+                let f2: &'m Fn = self.models.get(key).unwrap_or(f2);
                 // `o.as_deref_mut()` of an optional state `o: Option<&mut T>`
                 // (`&mut o`): the same optional place (§19.10's state table;
                 // rustc's borrow checker makes the reborrow exclusive)
@@ -2285,6 +2504,17 @@ impl<'m> Reader<'m> {
                     for x in &binders {
                         e2.declared.insert(x.clone());
                     }
+                } else if sp.proj == [Proj::Deref]
+                    && matches!(self.frames[sf].f.locals[sp.local].0, Ty::Ref(false, _))
+                    && !env.refs.contains_key(&(sf, sp.local))
+                {
+                    // `*r` of a shared reference (`PartialEq::eq(&self, &other)`
+                    // of an enum): `r` refers to the constructor in the arm (a
+                    // shared reference is a snapshot of its referent)
+                    e2.vals.insert((sf, sp.local), Val::R(Box::new(Val::C(t.clone(), var_def.idx, fvals))));
+                    for x in &binders {
+                        e2.declared.insert(x.clone());
+                    }
                 }
                 plan.push((Some(pat), target_of(var_def.discr), e2));
             }
@@ -2308,7 +2538,7 @@ impl<'m> Reader<'m> {
                     // a loop condition
                     let f_t = arms.iter().find(|(v, _)| *v == 0).map(|a| a.1).unwrap_or(otherwise);
                     let t_t = arms.iter().find(|(v, _)| *v == 1).map(|a| a.1).unwrap_or(otherwise);
-                    return Ok(Flow::Cond(scrut, t_t, f_t, env));
+                    return Ok(Flow::Cond(scrut, t_t, f_t, env, fr, b));
                 }
                 let f_t = arms.iter().find(|(v, _)| *v == 0).map(|a| a.1).unwrap_or(otherwise);
                 let t_t = arms.iter().find(|(v, _)| *v == 1).map(|a| a.1).unwrap_or(otherwise);
@@ -2454,35 +2684,21 @@ impl<'m> Reader<'m> {
         env.vals.retain(|k, _| k.0 == 0 && live.contains(&k.1));
         env.discr.clear();
         let body = self.cfg.body[h].clone();
-        // while-shaped: the header computes a condition, the loop's only exit is its test
-        let mut probe_out = Vec::new();
-        let probe_cx = Cx { k: K::Ret, stop: None, loops: vec![], probe: true };
-        let probe = self.go(0, h, env.clone(), &probe_cx, &mut probe_out);
-        let while_ok = at.ensures.is_empty()
-            && matches!(&probe, Ok(Flow::Cond(..)))
-            && probe_out.is_empty()
-            && {
-                let exits: Vec<(usize, usize)> = body.iter().flat_map(|b| self.cfg.succ[*b].iter().filter(|s| !body.contains(s)).map(move |s| (*b, *s))).collect();
-                exits.len() == 1
-            };
-        if while_ok {
-            let Ok(Flow::Cond(cond, t_t, f_t, env_c)) = probe else { unreachable!() };
-            let (cond, body_entry, exit): (syn::Expr, usize, usize) = if body.contains(&t_t) && !body.contains(&f_t) {
-                (cond, t_t, f_t)
-            } else if body.contains(&f_t) && !body.contains(&t_t) {
-                (syn::parse_quote!(!(#cond)), f_t, t_t)
-            } else {
-                return self.err(0, "a loop test with both targets in the loop");
-            };
-            let widx = self.loop_forms.iter().filter(|x| x.1 == "while").count();
+        // while-shaped: the header computes a condition without effects (one
+        // test, or tests joined by `&&`/`||`), the loop's only exits are its tests
+        let inferred = !self.spec.loops.contains_key(&k);
+        let wc = self.while_cond(h, &env, &body, at.ensures.is_empty())?;
+        if let Some((cond, body_entry, exit, env_c, env_x, tree)) = wc {
+            let widx = self.next_while();
             self.loop_forms.push((k, "while".into()));
-            self.helper_info.push(HelperInfo { name: format!("loop#{widx}"), method: false, header: h, params: vec![], while_loop: true, local_names: self.frames[0].names.clone() });
+            let info = HelperInfo { name: format!("loop#{widx}"), method: false, header: h, params: vec![], while_loop: true, local_names: self.frames[0].names.clone(), returns: None, owner: self.owner.clone() };
             let mut bo: Vec<syn::Stmt> = Vec::new();
             let mut head: Vec<syn::Stmt> = Vec::new();
             for i in &at.invariants {
                 head.push(syn::parse_quote!(invariant(#i);));
             }
-            if let Some(d) = &at.decreases {
+            // the attachment's measure, else (no attachment) an untrusted guess
+            if let Some(d) = at.decreases.clone().or_else(|| if inferred { self.guess_measure(h, &body, tree.as_ref()) } else { None }) {
                 head.push(syn::parse_quote!(decreases(#d);));
             }
             head.extend(at.steps.iter().cloned());
@@ -2496,7 +2712,7 @@ impl<'m> Reader<'m> {
             let mut loops = cx.loops.clone();
             loops.push((h, LoopForm::While));
             let cx_body = Cx { k: K::Ret, stop: Some(h), loops, probe: false };
-            let flow = self.go(0, body_entry, env_c.clone(), &cx_body, &mut bo)?;
+            let flow = self.go(0, body_entry, env_c, &cx_body, &mut bo)?;
             if let Flow::Fall(mut e) = flow {
                 self.normalize(&live, &mut e, &mut bo)?;
             }
@@ -2509,26 +2725,90 @@ impl<'m> Reader<'m> {
                 let s = &at.after;
                 out.push(syn::parse_quote!(proof! { #(#s)* }));
             }
+            // (innermost first: a `while` loop's lemma uses its inner loops')
+            self.helper_info.push(info);
             // after the loop: the header's values (of the loop variables,
             // in their own names) as its last test computed them
-            let mut e_after = env_c;
+            let mut e_after = env_x;
             e_after.vals.retain(|k, _| k.0 == 0);
             return self.go(0, exit, e_after, cx, out);
+        }
+        // a loop inside another loop's body, not while-shaped: a helper from
+        // the header to the loop's one exit, which returns the variables the
+        // loop assigns; its caller goes on after it (a tail-recursive helper
+        // would go on into the outer loop and call it: mutual recursion)
+        if !cx.loops.is_empty()
+            && at.ensures.is_empty()
+            && let Some(x) = self.loop_exit_block(&body)
+            && let Some(flow) = self.returning_helper(h, k, &at, x, &live, &body, &env, cx, out)?
+        {
+            return Ok(flow);
         }
         // a tail-recursive helper over the variables live at the header (and
         // those the attachment names)
         // a method's loop over its receiver (`&mut self`, `self`): a method
         // helper of the impl, `Self::m__loopK(self, ..)` (as the source lift's)
         let receiver = self.spec.params.first().is_some_and(|p| p == "self");
-        let mut params: Vec<usize> = live.iter().copied().filter(|l| *l != 0).collect();
-        let method = receiver && params.contains(&1);
+        let method = receiver && live.contains(&1);
+        let mut params = self.loop_params(&live, &at, &env);
         let name = if method {
             format_ident!("{}__loop{}", self.spec.lifted_name.rsplit("::").next().unwrap_or(""), k)
         } else {
             format_ident!("{}__loop{}", self.spec.lifted_name.replace("::", "__"), k)
         };
         let callee: syn::Expr = if method { syn::parse_quote!(Self::#name) } else { syn::parse_quote!(#name) };
-        let mentioned = |e: &TokenStream, n: &str| -> bool { ts_mentions(e.clone(), n) };
+        self.order_params(&mut params, &body, method);
+        self.loop_forms.push((k, "helper".into()));
+        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect::<Result<_, _>>()?;
+        out.push(syn::parse_quote!(return #callee(#(#args),*);));
+        // the helper
+        let (henv, inputs, mut hb) = self.helper_head(&params, &env, method)?;
+        if !at.at_start.is_empty() {
+            let s = &at.at_start;
+            hb.push(syn::parse_quote!(proof! { #(#s)* }));
+        }
+        let mut loops = cx.loops.clone();
+        loops.push((h, LoopForm::Helper(callee.clone(), params.clone())));
+        // the header's own statements run first in each call
+        let cx_h = Cx { k: K::Ret, stop: None, loops: loops.clone(), probe: false };
+        let saved = self.owner.replace((name.to_string(), method));
+        let flow = self.go_header(h, henv, &cx_h, &mut hb);
+        self.owner = saved;
+        if let Flow::Fall(_) = flow? {
+            return self.err(0, "a loop helper that falls through");
+        }
+        let mut attrs = self.helper_attrs(h, &body, &at, inferred);
+        for e in &at.ensures {
+            attrs.push(syn::parse_quote!(#[ensures(#e)]));
+        }
+        if method {
+            // the lift places it in the impl (`lift::Ctx`)
+            attrs.push(syn::parse_quote!(#[lift_method]));
+        }
+        let out_ty = &self.spec.out_ty;
+        let item: syn::ItemFn = syn::parse_quote!(
+            #(#attrs)*
+            fn #name(#(#inputs),*) -> #out_ty { #(#hb)* }
+        );
+        self.helpers.push(syn::Item::Fn(item));
+        self.helper_info.push(HelperInfo { name: name.to_string(), method, header: h, params: params.clone(), while_loop: false, local_names: vec![], returns: None, owner: self.owner.clone() });
+        Ok(Flow::Diverge)
+    }
+
+    /// The index of the next `while` loop of the function being written (the
+    /// lifted function, or the loop helper whose body holds it): the
+    /// elaborator numbers its helpers `loop#k` in that order.
+    fn next_while(&mut self) -> usize {
+        let key = self.owner.as_ref().map(|o| o.0.clone()).unwrap_or_default();
+        let n = self.whiles.entry(key).or_insert(0);
+        *n += 1;
+        *n - 1
+    }
+
+    /// A loop helper's parameters: the variables live at the header, and
+    /// those its attachment names.
+    fn loop_params(&self, live: &BTreeSet<usize>, at: &LoopAttach, env: &Env) -> Vec<usize> {
+        let mut params: Vec<usize> = live.iter().copied().filter(|l| *l != 0).collect();
         let mut attach_ts = TokenStream::new();
         for e in at.invariants.iter().chain(at.ensures.iter()).chain(at.decreases.iter()) {
             attach_ts.extend(e.to_token_stream());
@@ -2538,11 +2818,17 @@ impl<'m> Reader<'m> {
         }
         for l in 1..self.frames[0].f.locals.len() {
             let n = self.frames[0].names[l].clone();
-            if !params.contains(&l) && (self.is_param(0, l) || env.declared.contains(&n)) && mentioned(&attach_ts, &n) {
+            if !params.contains(&l) && (self.is_param(0, l) || env.declared.contains(&n)) && ts_mentions(attach_ts.clone(), &n) {
                 params.push(l);
             }
         }
-        // the order of first use in the loop (block order), states last
+        params
+    }
+
+    /// The order of a loop helper's parameters: the receiver of a method
+    /// helper first, states last, otherwise by first use in the loop (block
+    /// order; a `&mut` temporary counts as the place it borrows).
+    fn order_params(&self, params: &mut [usize], body: &BTreeSet<usize>, method: bool) {
         let mut order: Vec<usize> = Vec::new();
         {
             let f = self.frames[0].f;
@@ -2576,7 +2862,6 @@ impl<'m> Reader<'m> {
                 }
             }
         }
-        // a `&mut` temporary counts as the place it borrows
         let first_use = |l: usize| -> usize {
             let direct = order.iter().position(|x| *x == l);
             let via_ref = self.frames[0].f.blocks.iter().flat_map(|bl| bl.stmts.iter()).filter_map(|st| match st {
@@ -2587,12 +2872,14 @@ impl<'m> Reader<'m> {
         };
         let is_state = |l: usize| self.spec.states.iter().any(|s| *s + 1 == l);
         params.sort_by_key(|l| (!(method && *l == 1), is_state(*l), first_use(*l), *l));
-        self.loop_forms.push((k, "helper".into()));
-        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect::<Result<_, _>>()?;
-        out.push(syn::parse_quote!(return #callee(#(#args),*);));
-        // the helper
+    }
+
+    /// A loop helper's environment, inputs and first statements (an exploded
+    /// state is whole in the parameters: exploded again).
+    #[allow(clippy::type_complexity)]
+    fn helper_head(&mut self, params: &[usize], env: &Env, method: bool) -> Result<(Env, Vec<TokenStream>, Vec<syn::Stmt>), String> {
         let mut henv = Env::default();
-        for &l in &params {
+        for &l in params {
             let n = self.frames[0].names[l].clone();
             henv.declared.insert(n.clone());
             if let Some(r) = env.refs.get(&(0, l)) {
@@ -2600,7 +2887,7 @@ impl<'m> Reader<'m> {
             }
         }
         let mut inputs: Vec<TokenStream> = Vec::new();
-        for &l in &params {
+        for &l in params {
             let id = ident(&self.frames[0].names[l]);
             if method && l == 1 {
                 inputs.push(quote!(mut self));
@@ -2615,8 +2902,7 @@ impl<'m> Reader<'m> {
             inputs.push(quote!(mut #id: #t));
         }
         let mut hb: Vec<syn::Stmt> = Vec::new();
-        // an exploded state is whole in the helper's parameters: explode it again
-        for &l in &params {
+        for &l in params {
             if let Some(r) = env.refs.get(&(0, l))
                 && let Some((k, fs)) = &r.fields
             {
@@ -2629,40 +2915,364 @@ impl<'m> Reader<'m> {
                 }
             }
         }
+        Ok((henv, inputs, hb))
+    }
+
+    /// A loop helper's contract: the attachment's invariants as preconditions
+    /// and its measure, else (`inferred`: the loop has no attachment) an
+    /// untrusted guess of the measure.
+    fn helper_attrs(&self, h: usize, body: &BTreeSet<usize>, at: &LoopAttach, inferred: bool) -> Vec<syn::Attribute> {
+        let mut attrs: Vec<syn::Attribute> = Vec::new();
+        for i in &at.invariants {
+            attrs.push(syn::parse_quote!(#[requires(#i)]));
+        }
+        if let Some(d) = at.decreases.clone().or_else(|| if inferred { self.guess_measure(h, body, None) } else { None }) {
+            attrs.push(syn::parse_quote!(#[decreases(#d)]));
+        }
+        attrs
+    }
+
+    /// The condition of a while-shaped loop at header `h` (the condition,
+    /// the body's entry, the exit, and the environment each starts with):
+    /// the header computes it without effects, as one test or as tests
+    /// joined by `&&`/`||` whose leaves are the body's entry and the exit,
+    /// and the loop leaves only by those tests.
+    /// `allow`: the loop may be a `while` (no attachment summary). The
+    /// header is probed as before the widening (the probe names temporaries:
+    /// a failed probe of more tests restores the name counter, so a loop
+    /// read before reads the same).
+    #[allow(clippy::type_complexity)]
+    fn while_cond(&mut self, h: usize, env: &Env, body: &BTreeSet<usize>, allow: bool) -> Result<Option<(syn::Expr, usize, usize, Env, Env, Option<CondTree>)>, String> {
+        let probe_cx = Cx { k: K::Ret, stop: None, loops: vec![], probe: true };
+        let mut probe_out = Vec::new();
+        let probe = self.go(0, h, env.clone(), &probe_cx, &mut probe_out);
+        let Ok(Flow::Cond(cond, t_t, f_t, env_c, 0, cb)) = probe else { return Ok(None) };
+        if !allow || !probe_out.is_empty() {
+            return Ok(None);
+        }
+        let exits: Vec<(usize, usize)> = body.iter().flat_map(|b| self.cfg.succ[*b].iter().filter(|s| !body.contains(s)).map(move |s| (*b, *s))).collect();
+        // one test
+        if exits.len() == 1 {
+            if body.contains(&t_t) && !body.contains(&f_t) {
+                return Ok(Some((cond, t_t, f_t, env_c.clone(), env_c, None)));
+            }
+            if body.contains(&f_t) && !body.contains(&t_t) {
+                return Ok(Some((syn::parse_quote!(!(#cond)), f_t, t_t, env_c.clone(), env_c, None)));
+            }
+        }
+        // several tests (`a || b || c`, `a && b`): a tree of tests without effects
+        let saved = self.fresh;
+        let mut sw = vec![cb];
+        let tt = self.cond_tree(t_t, env_c.clone(), h, body, &mut sw, 1);
+        let ft = self.cond_tree(f_t, env_c, h, body, &mut sw, 1);
+        let tree = CondTree::Test(cond, cb, Box::new(tt), Box::new(ft));
+        let mut leaves = Vec::new();
+        tree.leaves(&mut leaves);
+        let (ins, outs): (Vec<_>, Vec<_>) = leaves.into_iter().partition(|l| l.0);
+        // the body and the exit start from the same values on every path
+        let same = |ls: &[(bool, usize, Env)]| -> bool {
+            let live = self.live_at(ls[0].1);
+            let key = |e: &Env| live.iter().map(|l| format!("{:?}", e.vals.get(&(0, *l)))).collect::<Vec<_>>();
+            ls.iter().all(|l| l.1 == ls[0].1 && key(&l.2) == key(&ls[0].2))
+        };
+        let ok = !ins.is_empty() && !outs.is_empty() && same(&ins) && same(&outs) && exits.iter().all(|(b, s)| sw.contains(b) && *s == outs[0].1);
+        if !ok {
+            self.fresh = saved;
+            return Ok(None);
+        }
+        let (bi, xo) = (ins[0].clone(), outs[0].clone());
+        Ok(Some((tree.expr(), bi.1, xo.1, bi.2, xo.2, Some(tree))))
+    }
+
+    /// The tests without effects from block `b` (inside the loop at header
+    /// `h`): a leaf at the exit or at a block that is not such a test; a test
+    /// none of whose paths leaves the loop belongs to the body (a leaf).
+    fn cond_tree(&mut self, b: usize, env: Env, h: usize, body: &BTreeSet<usize>, sw: &mut Vec<usize>, depth: usize) -> CondTree {
+        if !body.contains(&b) {
+            return CondTree::Leaf(false, b, env);
+        }
+        if b == h || depth > 8 || self.cfg.headers.contains(&b) {
+            return CondTree::Leaf(true, b, env);
+        }
+        let probe_cx = Cx { k: K::Ret, stop: None, loops: vec![], probe: true };
+        let mut o = Vec::new();
+        match self.go(0, b, env.clone(), &probe_cx, &mut o) {
+            Ok(Flow::Cond(c, t, f, e2, 0, cb)) if o.is_empty() => {
+                let n = sw.len();
+                sw.push(cb);
+                let tt = self.cond_tree(t, e2.clone(), h, body, sw, depth + 1);
+                let ft = self.cond_tree(f, e2, h, body, sw, depth + 1);
+                if !tt.exits() && !ft.exits() {
+                    sw.truncate(n);
+                    return CondTree::Leaf(true, b, env);
+                }
+                CondTree::Test(c, cb, Box::new(tt), Box::new(ft))
+            }
+            _ => CondTree::Leaf(true, b, env),
+        }
+    }
+
+    /// The one block the loop with body `body` leaves to (edges to blocks
+    /// every path from which panics aside), when no block of the loop returns.
+    fn loop_exit_block(&self, body: &BTreeSet<usize>) -> Option<usize> {
+        let f = self.frames[0].f;
+        let mut exits = BTreeSet::new();
+        for &b in body {
+            if matches!(f.blocks[b].term, Term::Return) {
+                return None;
+            }
+            for &s in &self.cfg.succ[b] {
+                if !body.contains(&s) && !must_diverge(f, s, &mut Vec::new()) {
+                    exits.insert(s);
+                }
+            }
+        }
+        (exits.len() == 1).then(|| *exits.iter().next().unwrap())
+    }
+
+    /// A loop inside another loop's body read as a helper from its header
+    /// `h` to its one exit `x`, which returns the parameters the loop
+    /// assigns (in parameter order, the value itself when there is one):
+    /// `let r = f__loopK(..); a = r.0; ..`, then the walk goes on from `x`.
+    /// `None` (nothing written) when it does not apply: a state or a `&mut`
+    /// among the parameters, the receiver of a method, a variable live at the
+    /// exit that is no parameter, or a loop that assigns none of them.
+    #[allow(clippy::too_many_arguments)]
+    fn returning_helper(&mut self, h: usize, k: usize, at: &LoopAttach, x: usize, live: &BTreeSet<usize>, body: &BTreeSet<usize>, env: &Env, cx: &Cx, out: &mut Vec<syn::Stmt>) -> Result<Option<Flow>, String> {
+        let f = self.frames[0].f;
+        let receiver = self.spec.params.first().is_some_and(|p| p == "self");
+        let mut params = self.loop_params(live, at, env);
+        let is_state = |l: usize| self.spec.states.iter().any(|s| *s + 1 == l);
+        if (receiver && params.contains(&1)) || params.iter().any(|l| env.refs.contains_key(&(0, *l)) || is_state(*l) || value_ty(&f.locals[*l].0).is_none()) {
+            return Ok(None);
+        }
+        let live_x = self.live_at(x);
+        if live_x.iter().any(|l| *l != 0 && !params.contains(l)) {
+            return Ok(None);
+        }
+        self.order_params(&mut params, body, false);
+        let assigned = loop_assigns(f, body);
+        let returned: Vec<usize> = params.iter().copied().filter(|l| assigned.contains(l)).collect();
+        if returned.is_empty() {
+            return Ok(None);
+        }
+        let tys: Vec<syn::Type> = returned.iter().map(|l| value_ty(&f.locals[*l].0).ok_or("a `&mut` result").and_then(|t| self.nm.ty(self.m, &t).map_err(|_| "a result type"))).collect::<Result<_, _>>()?;
+        let out_ty: syn::Type = if tys.len() == 1 { tys[0].clone() } else { syn::parse_quote!((#(#tys),*)) };
+        let name = format_ident!("{}__loop{}", self.spec.lifted_name.replace("::", "__"), k);
+        let callee: syn::Expr = syn::parse_quote!(#name);
+        // the call, and the results in their variables
+        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(env, *l)).collect::<Result<_, _>>()?;
+        let r = ident(&self.fresh("l"));
+        out.push(syn::parse_quote!(let #r = #callee(#(#args),*);));
+        let mut env2 = env.clone();
+        for (i, l) in returned.iter().enumerate() {
+            let n = self.frames[0].names[*l].clone();
+            let id = ident(&n);
+            let v: syn::Expr = if returned.len() == 1 {
+                syn::parse_quote!(#r)
+            } else {
+                let ix = syn::Index::from(i);
+                syn::parse_quote!(#r.#ix)
+            };
+            out.push(syn::parse_quote!(#id = #v;));
+            if self.is_param(0, *l) {
+                self.assigned_params.insert(*l - 1);
+            }
+            env2.vals.insert((0, *l), Val::E(var(&n)));
+        }
+        // the helper: the header's statements first, `return h(..)` at the
+        // back edge, the results where the loop leaves to `x`
+        let (henv, inputs, mut hb) = self.helper_head(&params, env, false)?;
         if !at.at_start.is_empty() {
             let s = &at.at_start;
             hb.push(syn::parse_quote!(proof! { #(#s)* }));
         }
         let mut loops = cx.loops.clone();
         loops.push((h, LoopForm::Helper(callee.clone(), params.clone())));
-        // the header's own statements run first in each call
-        let cx_h = Cx { k: K::Ret, stop: None, loops: loops.clone(), probe: false };
-        let flow = self.go_header(h, henv, &cx_h, &mut hb)?;
-        if let Flow::Fall(_) = flow {
-            return self.err(0, "a loop helper that falls through");
+        let cx_h = Cx { k: K::Ret, stop: Some(x), loops, probe: false };
+        let saved = self.owner.replace((name.to_string(), false));
+        let flow = self.go_header(h, henv, &cx_h, &mut hb);
+        self.owner = saved;
+        if let Flow::Fall(mut e) = flow? {
+            let rset: BTreeSet<usize> = returned.iter().copied().collect();
+            self.normalize(&rset, &mut e, &mut hb)?;
+            let rs: Vec<syn::Expr> = returned.iter().map(|l| var(&self.frames[0].names[*l])).collect();
+            hb.push(if rs.len() == 1 {
+                let r0 = &rs[0];
+                syn::parse_quote!(return #r0;)
+            } else {
+                syn::parse_quote!(return (#(#rs),*);)
+            });
         }
-        let mut attrs: Vec<syn::Attribute> = Vec::new();
-        for i in &at.invariants {
-            attrs.push(syn::parse_quote!(#[requires(#i)]));
-        }
-        if let Some(d) = &at.decreases {
-            attrs.push(syn::parse_quote!(#[decreases(#d)]));
-        }
-        for e in &at.ensures {
-            attrs.push(syn::parse_quote!(#[ensures(#e)]));
-        }
-        if method {
-            // the lift places it in the impl (`lift::Ctx`)
-            attrs.push(syn::parse_quote!(#[lift_method]));
-        }
-        let out_ty = &self.spec.out_ty;
+        let attrs = self.helper_attrs(h, body, at, !self.spec.loops.contains_key(&k));
         let item: syn::ItemFn = syn::parse_quote!(
             #(#attrs)*
             fn #name(#(#inputs),*) -> #out_ty { #(#hb)* }
         );
         self.helpers.push(syn::Item::Fn(item));
-        self.helper_info.push(HelperInfo { name: name.to_string(), method, header: h, params: params.clone(), while_loop: false, local_names: vec![] });
-        Ok(Flow::Diverge)
+        self.loop_forms.push((k, "returning".into()));
+        let positions: Vec<usize> = returned.iter().filter_map(|l| params.iter().position(|p| p == l)).collect();
+        self.helper_info.push(HelperInfo { name: name.to_string(), method: false, header: h, params: params.clone(), while_loop: false, local_names: self.frames[0].names.clone(), returns: Some(positions), owner: self.owner.clone() });
+        Ok(Some(self.go(0, x, env2, cx, out)?))
+    }
+
+    /// An untrusted guess of the measure of the loop at header `h` whose
+    /// attachment states none: the elaborator proves its decrease at every
+    /// step and the kernel checks those proofs, so a wrong guess only makes
+    /// the loop fail to elaborate. The remaining length of an iterator live
+    /// at the header (core's range over an unsigned type, `RangeInclusive<
+    /// u32/u64>`, the slice iterator), else from a test that leaves the
+    /// loop, over unsigned variables live at the header and constants: a
+    /// counter moving up to a bound (`i < n`: `n - i`), a value moving down
+    /// (`x > b`, `x != 0`, `x & m == c`: `x`).
+    fn guess_measure(&self, h: usize, body: &BTreeSet<usize>, tree: Option<&CondTree>) -> Option<syn::Expr> {
+        let f = self.frames[0].f;
+        let live = &self.cfg.live_in[h];
+        // (an iterator the loop steps: borrowed mutably in it, for its `next`;
+        // an outer loop's iterator passes through an inner loop unchanged)
+        let stepped = loop_assigns(f, body);
+        let mut ls: Vec<usize> = live.iter().copied().filter(|l| *l != 0 && stepped.contains(l)).collect();
+        ls.sort();
+        for &l in &ls {
+            let t = &f.locals[l].0;
+            let x = var(&self.frames[0].names[l]);
+            if super::slice_iter_elem(self.m, t).is_some() {
+                return Some(syn::parse_quote!((#x.0.len() as Int) - (#x.1 as Int)));
+            }
+            if let Ty::Adt(k) = t
+                && let Some(d) = self.m.adts.get(k)
+            {
+                match (d.path.as_str(), d.args.first()) {
+                    ("std::ops::Range" | "core::ops::Range", Some(Ty::Int(false, _))) => return Some(syn::parse_quote!((#x.end as Int) - (#x.start as Int))),
+                    ("std::ops::RangeInclusive" | "core::ops::RangeInclusive", Some(Ty::Int(false, 32 | 64))) => return Some(syn::parse_quote!((#x.end as Int) - (#x.start as Int) + ((!#x.exhausted) as u64 as Int))),
+                    _ => {}
+                }
+            }
+        }
+        // a condition of several tests: the measures of the tests that let the
+        // loop go on, summed (`a > 0 || b > 0`: `a + b`), the first of a conjunction
+        if let Some(t) = tree {
+            return self.tree_measure(t, h);
+        }
+        // a test that leaves the loop
+        for &b in body {
+            let Term::Switch(_, arms, otherwise) = &f.blocks[b].term else { continue };
+            let on = |v: u128| arms.iter().find(|a| a.0 == v).map(|a| a.1).unwrap_or(*otherwise);
+            let stay = match (body.contains(&on(1)), body.contains(&on(0))) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => continue,
+            };
+            if let Some(m) = self.test_measure(b, stay, h) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
+    /// The measure of a tree of tests ([`Self::guess_measure`]).
+    fn tree_measure(&self, t: &CondTree, h: usize) -> Option<syn::Expr> {
+        use CondTree::{Leaf, Test};
+        let sum = |a: syn::Expr, b: syn::Expr| -> syn::Expr { syn::parse_quote!(#a + #b) };
+        let Test(_, b, l, r) = t else { return None };
+        match (&**l, &**r) {
+            (Leaf(true, ..), Leaf(false, ..)) => self.test_measure(*b, true, h),
+            (Leaf(false, ..), Leaf(true, ..)) => self.test_measure(*b, false, h),
+            (Leaf(true, ..), rest) => Some(sum(self.test_measure(*b, true, h)?, self.tree_measure(rest, h)?)),
+            (rest, Leaf(true, ..)) => Some(sum(self.test_measure(*b, false, h)?, self.tree_measure(rest, h)?)),
+            (rest, Leaf(false, ..)) => self.test_measure(*b, true, h).or_else(|| self.tree_measure(rest, h)),
+            (Leaf(false, ..), rest) => self.test_measure(*b, false, h).or_else(|| self.tree_measure(rest, h)),
+            _ => None,
+        }
+    }
+
+    /// The measure a loop test in block `b` gives when the loop goes on
+    /// while its condition is `stay`: from a comparison of an unsigned
+    /// variable live at the header `h` (copied into a temporary in the
+    /// block, or a bit mask or shift of it) with another or a constant.
+    fn test_measure(&self, b: usize, stay: bool, h: usize) -> Option<syn::Expr> {
+        let f = self.frames[0].f;
+        let live = &self.cfg.live_in[h];
+        let bl = &f.blocks[b];
+        let Term::Switch(Operand::Copy(cp) | Operand::Move(cp), _, _) = &bl.term else { return None };
+        if !cp.proj.is_empty() || f.locals[cp.local].0 != Ty::Bool {
+            return None;
+        }
+        let def = |l: usize| {
+            bl.stmts.iter().rev().find_map(|s| match s {
+                Stmt::Assign(p, r, _) if p.local == l && p.proj.is_empty() => Some(r.clone()),
+                _ => None,
+            })
+        };
+        let Some(Rvalue::Bin(op, a, c)) = def(cp.local) else { return None };
+        let name = |l: usize| var(&self.frames[0].names[l]);
+        let unsigned = |l: usize| matches!(f.locals[l].0, Ty::Int(false, _));
+        // (the expression, the variable, whether it is a mask or shift of it)
+        // (a variable live at the header, through the block's copies of it:
+        // rustc copies a variable into a temporary before operating on it)
+        let live_var = |o: &Operand| -> Option<usize> {
+            let (Operand::Copy(q) | Operand::Move(q)) = o else { return None };
+            let mut l = q.local;
+            if !q.proj.is_empty() {
+                return None;
+            }
+            for _ in 0..4 {
+                if live.contains(&l) {
+                    return unsigned(l).then_some(l);
+                }
+                match def(l)? {
+                    Rvalue::Use(Operand::Copy(r) | Operand::Move(r)) if r.proj.is_empty() => l = r.local,
+                    _ => return None,
+                }
+            }
+            None
+        };
+        let operand = |o: &Operand| -> Option<(syn::Expr, Option<usize>, bool)> {
+            match o {
+                Operand::Const(k) => match k.value() {
+                    Const::Int(t @ Ty::Int(false, _), v) => Some((lit_uint(*v as u128, &int_ty_name(t)?), None, false)),
+                    _ => None,
+                },
+                Operand::Copy(p) | Operand::Move(p) if p.proj.is_empty() => {
+                    if let Some(l) = live_var(o) {
+                        return Some((name(l), Some(l), false));
+                    }
+                    match def(p.local)? {
+                        Rvalue::Bin(o2, q, _) if matches!(o2.as_str(), "and" | "shr" | "rem") => live_var(&q).map(|l| (name(l), Some(l), true)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        let ((xe, xl, xd), (ye, yl, yd)) = (operand(&a)?, operand(&c)?);
+        let op = match (op.as_str(), stay) {
+            (o, true) => o,
+            ("lt", false) => "ge",
+            ("le", false) => "gt",
+            ("gt", false) => "le",
+            ("ge", false) => "lt",
+            ("eq", false) => "ne",
+            ("ne", false) => "eq",
+            _ => return None,
+        };
+        let zero = |e: &syn::Expr| lit_value(e) == Some(0);
+        Some(match (op, xl, yl) {
+            // a mask or shift of a variable against a constant: the variable goes down
+            (_, Some(_), None) if xd => syn::parse_quote!((#xe as Int)),
+            (_, None, Some(_)) if yd => syn::parse_quote!((#ye as Int)),
+            // a counter moving up to a bound, or a bound moving down to it
+            ("lt", Some(_), _) => syn::parse_quote!((#ye as Int) - (#xe as Int)),
+            ("le", Some(_), _) => syn::parse_quote!((#ye as Int) - (#xe as Int) + 1),
+            ("lt" | "le", None, Some(_)) => syn::parse_quote!((#ye as Int)),
+            // a value moving down to a bound, or a counter moving up to it
+            ("gt" | "ge", Some(_), _) => syn::parse_quote!((#xe as Int)),
+            ("gt", None, Some(_)) => syn::parse_quote!((#xe as Int) - (#ye as Int)),
+            ("ge", None, Some(_)) => syn::parse_quote!((#xe as Int) - (#ye as Int) + 1),
+            ("ne", Some(_), None) if zero(&ye) => syn::parse_quote!((#xe as Int)),
+            ("ne", None, Some(_)) if zero(&xe) => syn::parse_quote!((#ye as Int)),
+            _ => return None,
+        })
     }
 
     /// The header block of a helper (not a back edge: its first run).
@@ -2699,6 +3309,78 @@ impl<'m> Reader<'m> {
     }
 }
 
+
+/// The structured reading of a library function read as a model
+/// ([`super::Model`]; the literal reading's `leaf::slice_*`): a small MIR
+/// body over the model's types, inlined like the function's own MIR would
+/// be (its tests become the reading's splits, its paths do not join). A
+/// slice iterator is the pair `(slice, index)`.
+pub fn model_body(m: &Sbmir, f: &Fn) -> Option<Fn> {
+    let (model, elem) = super::model_of(f)?;
+    let us = Ty::Int(false, 0);
+    let slice = Ty::Ref(false, Box::new(Ty::Slice(Box::new(elem.clone()))));
+    let iter = Ty::Tuple(vec![slice.clone(), us.clone()]);
+    let p = |l: usize, proj: Vec<Proj>| Place { local: l, proj };
+    let cp = |l: usize, proj: Vec<Proj>| Operand::Copy(p(l, proj));
+    let int = |v: i128| Operand::Const(Const::Int(Ty::Int(false, 0), v));
+    let asg = |l: usize, proj: Vec<Proj>, r: Rvalue| Stmt::Assign(p(l, proj), r, None);
+    let blk = |stmts: Vec<Stmt>, term: Term| Block { stmts, term, term_loc: None };
+    let ret = f.locals.first()?.0.clone();
+    // the result's `Option` variants, by name
+    let opt = |name: &str| -> Option<usize> {
+        let Ty::Adt(k) = &ret else { return None };
+        m.adts.get(k)?.variants.iter().find(|v| v.name == name).map(|v| v.idx)
+    };
+    let (locals, blocks): (Vec<Ty>, Vec<Block>) = match model {
+        // `(s, 0)`
+        super::Model::SliceIterNew => (vec![iter.clone(), slice.clone()], vec![blk(vec![asg(0, vec![], Rvalue::Agg(AggKind::Tuple, vec![cp(1, vec![]), int(0)]))], Term::Return)]),
+        // `let i = it.1; let s = it.0; if i < s.len() { let x = &s[i]; it.1 = i + 1; Some(x) } else { None }`
+        super::Model::SliceIterNext => {
+            let (some, none) = (opt("Some")?, opt("None")?);
+            let it = |i: usize, t: &Ty| vec![Proj::Deref, Proj::Field(i, t.clone())];
+            let locals = vec![ret.clone(), Ty::Ref(true, Box::new(iter.clone())), us.clone(), slice.clone(), us.clone(), Ty::Bool, Ty::Ref(false, Box::new(elem.clone())), Ty::Tuple(vec![us.clone(), Ty::Bool])];
+            let b0 = blk(
+                vec![asg(2, vec![], Rvalue::Use(cp(1, it(1, &us)))), asg(3, vec![], Rvalue::Use(cp(1, it(0, &slice)))), asg(4, vec![], Rvalue::Un("ptr-metadata".into(), cp(3, vec![]))), asg(5, vec![], Rvalue::Bin("lt".into(), cp(2, vec![]), cp(4, vec![])))],
+                Term::Switch(Operand::Move(p(5, vec![])), vec![(0, 2)], 1),
+            );
+            let b1 = blk(vec![asg(6, vec![], Rvalue::Ref("shared".into(), p(3, vec![Proj::Deref, Proj::Index(2)]))), asg(7, vec![], Rvalue::Checked("add".into(), cp(2, vec![]), int(1)))], Term::Assert(Operand::Move(p(7, vec![Proj::Field(1, Ty::Bool)])), false, "overflow".into(), 3));
+            let b2 = blk(vec![asg(0, vec![], Rvalue::Agg(AggKind::Adt(ret.clone(), none), vec![]))], Term::Return);
+            let b3 = blk(vec![asg(1, it(1, &us), Rvalue::Use(Operand::Move(p(7, vec![Proj::Field(0, us.clone())])))), asg(0, vec![], Rvalue::Agg(AggKind::Adt(ret.clone(), some), vec![cp(6, vec![])]))], Term::Return);
+            (locals, vec![b0, b1, b2, b3])
+        }
+        // `if r.start <= r.end { if r.end <= s.len() { Some(&s[r.start..r.end]) } else { None } } else { None }`
+        super::Model::SliceGetRange => {
+            let (some, none) = (opt("Some")?, opt("None")?);
+            let range = f.locals.get(1)?.0.clone();
+            let index = Callee::Leaf("core::ops::Index::index".into(), vec![Ty::Slice(Box::new(elem.clone())), range.clone()]);
+            let locals = vec![ret.clone(), range.clone(), slice.clone(), us.clone(), us.clone(), Ty::Bool, us.clone(), Ty::Bool, slice.clone(), range.clone()];
+            let b0 = blk(vec![asg(3, vec![], Rvalue::Use(cp(1, vec![Proj::Field(0, us.clone())]))), asg(4, vec![], Rvalue::Use(cp(1, vec![Proj::Field(1, us.clone())]))), asg(5, vec![], Rvalue::Bin("le".into(), cp(3, vec![]), cp(4, vec![])))], Term::Switch(Operand::Move(p(5, vec![])), vec![(0, 3)], 1));
+            let b1 = blk(vec![asg(6, vec![], Rvalue::Un("ptr-metadata".into(), cp(2, vec![]))), asg(7, vec![], Rvalue::Bin("le".into(), cp(4, vec![]), cp(6, vec![])))], Term::Switch(Operand::Move(p(7, vec![])), vec![(0, 3)], 2));
+            let b2 = blk(vec![asg(9, vec![], Rvalue::Agg(AggKind::Adt(range, 0), vec![cp(3, vec![]), cp(4, vec![])]))], Term::Call(index, vec![cp(2, vec![]), Operand::Move(p(9, vec![]))], p(8, vec![]), Some(4)));
+            let b3 = blk(vec![asg(0, vec![], Rvalue::Agg(AggKind::Adt(ret.clone(), none), vec![]))], Term::Return);
+            let b4 = blk(vec![asg(0, vec![], Rvalue::Agg(AggKind::Adt(ret.clone(), some), vec![cp(8, vec![])]))], Term::Return);
+            (locals, vec![b0, b1, b2, b3, b4])
+        }
+    };
+    let mut g = f.clone();
+    g.locals = locals.into_iter().map(|t| (t, true)).collect();
+    g.blocks = blocks;
+    g.debug = vec![];
+    Some(g)
+}
+
+/// The variant of the one value of an enum all of whose variants but one
+/// have a field of an empty type (`!`, an enum without variants), that one
+/// without fields (`Option<Infallible>`: `None`).
+fn single_value(m: &Sbmir, k: &str) -> Option<usize> {
+    let d = m.adts.get(k)?;
+    let empty = |t: &Ty| matches!(t, Ty::Never) || matches!(t, Ty::Adt(e) if m.adts.get(e).is_some_and(|de| de.is_enum && de.variants.is_empty()));
+    let live: Vec<&Variant> = d.variants.iter().filter(|v| !v.fields.iter().any(|f| empty(&f.1))).collect();
+    match live.as_slice() {
+        [v] if d.variants.len() > 1 && v.fields.is_empty() => Some(v.idx),
+        _ => None,
+    }
+}
 
 /// A discriminant as the value of its type: rustc prints the bits of a
 /// negative one (`Ordering::Less` is `-1i8`, printed `255`).
@@ -2796,7 +3478,8 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
         return Err(format!("`{}`: rustc's MIR has {} parameters, the lifted signature {}", spec.lifted_name, f.argc, spec.params.len()));
     }
     let cfg = Cfg::new(f);
-    let mut r = Reader { m, nm, spec, frames: Vec::new(), cfg, fresh: 0, helpers: Vec::new(), loop_forms: Vec::new(), assigned_params: BTreeSet::new(), helper_info: Vec::new() };
+    let models: std::collections::BTreeMap<String, Fn> = m.fns.iter().filter_map(|(k, g)| model_body(m, g).map(|b| (k.clone(), b))).collect();
+    let mut r = Reader { m, nm, spec, models: &models, frames: Vec::new(), cfg, fresh: 0, helpers: Vec::new(), loop_forms: Vec::new(), assigned_params: BTreeSet::new(), helper_info: Vec::new(), owner: None, whiles: Default::default() };
     let fr = r.new_frame(f, true);
     let mut env = Env::default();
     let mut out = Vec::new();

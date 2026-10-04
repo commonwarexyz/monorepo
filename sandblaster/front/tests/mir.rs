@@ -31,7 +31,9 @@ fn load(body: &str) -> Result<mir::Loaded, String> {
 /// Reads `k::m::f` with the given parameters (states by position).
 fn read_f(body: &str, params: &[&str], states: &[usize], has_ret: bool, out_ty: &str) -> Result<String, String> {
     let l = load(body)?;
-    let spec = Spec { key: "k::m::f", lifted_name: "f", params: params.iter().map(|s| s.to_string()).collect(), states: states.to_vec(), has_ret, out_ty: syn::parse_str(out_ty).unwrap(), loops: HashMap::new(), ref_params: vec![] };
+    // (a `&[T]` parameter stays a reference, as the lift keeps it)
+    let ref_params: Vec<usize> = l.m.fns.get("k::m::f").map(|f| (0..f.argc).filter(|i| matches!(&f.locals[i + 1].0, mir::ir::Ty::Ref(false, t) if matches!(**t, mir::ir::Ty::Slice(_)))).collect()).unwrap_or_default();
+    let spec = Spec { key: "k::m::f", lifted_name: "f", params: params.iter().map(|s| s.to_string()).collect(), states: states.to_vec(), has_ret, out_ty: syn::parse_str(out_ty).unwrap(), loops: HashMap::new(), ref_params };
     let o = read::read(&l.m, &l.names, &spec)?;
     let mut s = o.body.to_token_stream().to_string();
     for h in &o.helpers {
@@ -57,10 +59,17 @@ fn a_checked_add_is_the_subset_operator_and_its_assert_is_its_obligation() {
 }
 
 #[test]
-fn a_signed_checked_add_is_refused() {
+fn a_signed_checked_add_is_the_wrapped_bits_and_its_flag_an_obligation() {
+    // the subset has no signed `+` with an overflow obligation: the pair (the
+    // wrapped bits, the sign bit of `(a ^ r) & (b ^ r)`), its assert an obligation
     let body = CHECKED_ADD.replace("(0 u16 mut) (1 u16 imm) (2 u16 imm) (3 (tuple u16 bool) mut)", "(0 i16 mut) (1 i16 imm) (2 i16 imm) (3 (tuple i16 bool) mut)").replace("(field 0 u16)", "(field 0 i16)");
-    let e = read_f(&body, &["a", "b"], &[], true, "crate::__lift::I16").unwrap_err();
-    assert!(e.contains("signed checked"), "{e}");
+    let s = read_f(&body, &["a", "b"], &[], true, "crate::__lift::I16").unwrap();
+    assert!(s.contains("crate :: __lift :: I16 (a . 0 . wrapping_add (b . 0))"), "{s}");
+    assert!(s.contains(">= 32768u16") && s.contains("unreachable"), "{s}");
+    // negative twin: a signed checked multiplication is refused
+    let mul = body.replace("(checked add", "(checked mul");
+    let e = read_f(&mul, &["a", "b"], &[], true, "crate::__lift::I16").unwrap_err();
+    assert!(e.contains("checked `mul` of a signed"), "{e}");
 }
 
 const ASSERT_ONLY: &str = r#"(root "k::m::f")
@@ -322,9 +331,13 @@ fn a_checked_operation_whose_flag_is_tested_is_the_exact_pair() {
     // negative twin: the same operation with its flag asserted is `a + b`
     let s2 = read_f(CHECKED_ADD, &["a", "b"], &[], true, "u16").unwrap();
     assert!(s2.contains("a + b"), "{s2}");
-    // and a signed one with a tested flag is refused
+    // a signed one with a tested flag: the wrapped bits and the signed overflow flag
     let signed = CHECKED_TESTED.replace("(1 u16 imm) (2 u16 imm) (3 (tuple u16 bool) mut)", "(1 i16 imm) (2 i16 imm) (3 (tuple i16 bool) mut)");
-    assert!(read_with(&signed, "k::m::f", "f", &["a", "b"], &[], true, "Option<u16>", |_| {}).unwrap_err().contains("signed"));
+    let s3 = read_with(&signed, "k::m::f", "f", &["a", "b"], &[], true, "Option<u16>", |_| {}).unwrap();
+    assert!(s3.contains(">= 32768u16") && !s3.contains("checked_add"), "{s3}");
+    // and a signed multiplication with a tested flag is refused
+    let smul = signed.replace("(checked add", "(checked mul");
+    assert!(read_with(&smul, "k::m::f", "f", &["a", "b"], &[], true, "Option<u16>", |_| {}).unwrap_err().contains("signed"));
 }
 
 const DROP_KNOWN: &str = r#"(adt-def "k::m::E" (path "k::m::E") (kind enum) (args ())
@@ -835,4 +848,249 @@ fn the_storage_mmr_bodies_are_read_from_rustc_mir() {
     for f in ["Family::position_to_location", "PeakIterator::next", "Position::add__u64", "PeakIterator::to_nearest_size"] {
         assert!(read.iter().any(|(n, _, _)| n == f), "`{f}` is read from MIR: {:?}", read.iter().map(|r| &r.0).collect::<Vec<_>>());
     }
+}
+
+// ---------------------------------------------------------------------------
+// reader widening (each construct with a negative twin): signed comparisons,
+// sign extension, `?`'s residual, byte conversions, rotations and byte
+// swaps, loop tests of several conditions, nested loops, measures, core's
+// slice iterator and a slice's `get` by a range
+// ---------------------------------------------------------------------------
+
+const SIGNED_CMP: &str = r#"(root "k::m::f")
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 2)
+  (locals (0 bool mut) (1 i32 imm) (2 i32 imm))
+  (debug "a" (p 1) (arg 1)) (debug "b" (p 2) (arg 2))
+  (bb 0 (assign (p 0) (bin lt (copy (p 1)) (copy (p 2)))) (return)))
+"#;
+
+#[test]
+fn a_signed_comparison_compares_the_bits_with_the_sign_bit_flipped() {
+    let s = read_f(SIGNED_CMP, &["a", "b"], &[], true, "bool").unwrap();
+    assert!(s.contains("(a . 0 ^ 2147483648u32) < (b . 0 ^ 2147483648u32)"), "{s}");
+    // negative twin: `>` is `<` with the operands swapped (not the unsigned order of the bits)
+    let s = read_f(&SIGNED_CMP.replace("(bin lt", "(bin gt"), &["a", "b"], &[], true, "bool").unwrap();
+    assert!(s.contains("(b . 0 ^ 2147483648u32) < (a . 0 ^ 2147483648u32)"), "{s}");
+    let s = read_f(&SIGNED_CMP.replace("(bin lt", "(bin ge"), &["a", "b"], &[], true, "bool").unwrap();
+    assert!(s.contains("(b . 0 ^ 2147483648u32) <= (a . 0 ^ 2147483648u32)"), "{s}");
+}
+
+const SEXT: &str = r#"(root "k::m::f")
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 1)
+  (locals (0 i64 mut) (1 i16 imm))
+  (debug "a" (p 1) (arg 1))
+  (bb 0 (assign (p 0) (cast int-to-int (copy (p 1)) i64)) (return)))
+"#;
+
+#[test]
+fn a_widening_cast_from_a_signed_type_extends_the_sign() {
+    let s = read_f(SEXT, &["a"], &[], true, "crate::__lift::I64").unwrap();
+    assert!(s.contains("crate :: __lift :: I64 (if a . 0 < 32768u16 { a . 0 as u64 } else { (a . 0 as u64) | 18446744073709486080u64 })"), "{s}");
+    // to an unsigned type: the extended bits themselves
+    let s = read_f(&SEXT.replace("(0 i64 mut)", "(0 u32 mut)").replace("(copy (p 1)) i64", "(copy (p 1)) u32"), &["a"], &[], true, "u32").unwrap();
+    assert!(s.contains("if a . 0 < 32768u16 { a . 0 as u32 } else { (a . 0 as u32) | 4294901760u32 }") && !s.contains("I32"), "{s}");
+    // negative twin: a narrowing cast truncates (no sign test)
+    let s = read_f(&SEXT.replace("(0 i64 mut) (1 i16 imm)", "(0 i16 mut) (1 i64 imm)").replace("(copy (p 1)) i64", "(copy (p 1)) i16"), &["a"], &[], true, "crate::__lift::I16").unwrap();
+    assert!(s.contains("crate :: __lift :: I16 (a . 0 as u16)") && !s.contains(" if "), "{s}");
+}
+
+const RESIDUAL: &str = r#"(adt-def "std::convert::Infallible" (path "std::convert::Infallible") (kind enum) (args ()))
+(adt-def "std::option::Option<std::convert::Infallible>" (path "std::option::Option") (kind enum) (args ((adt "std::convert::Infallible")))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" (adt "std::convert::Infallible")) (no-glue)))
+(adt-def "std::option::Option<()>" (path "std::option::Option") (kind enum) (args (unit))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" unit) (no-glue)))
+(root "k::m::f")
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 0)
+  (locals (0 u16 mut) (1 (adt "std::option::Option<std::convert::Infallible>") mut) (2 isize mut))
+  (bb 0 (assign (p 1) (use (zst (adt "std::option::Option<std::convert::Infallible>")))) (assign (p 2) (discr (p 1))) (switch (move (p 2)) (0 1) (otherwise 2)))
+  (bb 1 (assign (p 0) (use (int u16 7))) (return))
+  (bb 2 (assign (p 0) (use (int u16 9))) (return)))
+"#;
+
+#[test]
+fn the_residual_of_question_mark_is_the_one_value_of_its_type() {
+    // `Option<Infallible>` (a zero-sized constant, or read unassigned) is `None`: its arm
+    assert_eq!(read_f(RESIDUAL, &[], &[], true, "u16").unwrap(), "{ return 7u16 ; }");
+    let unassigned = RESIDUAL.replace("(assign (p 1) (use (zst (adt \"std::option::Option<std::convert::Infallible>\")))) ", "");
+    assert_eq!(read_f(&unassigned, &[], &[], true, "u16").unwrap(), "{ return 7u16 ; }");
+    // negative twin: a type with two inhabited variants has no one value
+    let two = RESIDUAL.replace("(1 (adt \"std::option::Option<std::convert::Infallible>\") mut)", "(1 (adt \"std::option::Option<()>\") mut)").replace("(zst (adt \"std::option::Option<std::convert::Infallible>\"))", "(zst (adt \"std::option::Option<()>\"))");
+    assert!(read_f(&two, &[], &[], true, "u16").unwrap_err().contains("zero-sized value"));
+}
+
+const BYTES: &str = r#"(root "k::m::f")
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 1)
+  (locals (0 u32 mut) (1 (array u8 4) imm))
+  (debug "a" (p 1) (arg 1))
+  (bb 0 (assign (p 0) (cast transmute (copy (p 1)) u32)) (return)))
+"#;
+
+#[test]
+fn a_transmute_between_bytes_and_a_word_is_little_endian() {
+    let s = read_f(BYTES, &["a"], &[], true, "u32").unwrap();
+    assert!(s.contains("u32 :: from_le_bytes (a)"), "{s}");
+    let back = BYTES.replace("(0 u32 mut) (1 (array u8 4) imm)", "(0 (array u8 4) mut) (1 u32 imm)").replace("(copy (p 1)) u32", "(copy (p 1)) (array u8 4)");
+    let s = read_f(&back, &["a"], &[], true, "[u8; 4usize]").unwrap();
+    assert!(s.contains("a . to_le_bytes ()"), "{s}");
+    // negative twin: three bytes are no `u32`
+    let e = read_f(&BYTES.replace("(array u8 4)", "(array u8 3)"), &["a"], &[], true, "u32").unwrap_err();
+    assert!(e.contains("the cast `transmute`"), "{e}");
+}
+
+const ROT: &str = r#"(root "k::m::f")
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 2)
+  (locals (0 u32 mut) (1 u32 imm) (2 u32 imm))
+  (debug "a" (p 1) (arg 1)) (debug "n" (p 2) (arg 2))
+  (bb 0 (call (intrinsic "rotate_left" (u32)) (args (copy (p 1)) (copy (p 2))) (p 0) 1))
+  (bb 1 (return)))
+"#;
+
+#[test]
+fn rotations_and_byte_swaps_are_their_builtins_and_shifts() {
+    let s = read_f(ROT, &["a", "n"], &[], true, "u32").unwrap();
+    assert!(s.contains("a . rotate_left (n)"), "{s}");
+    let s = read_f(&ROT.replace("rotate_left", "rotate_right"), &["a", "n"], &[], true, "u32").unwrap();
+    assert!(s.contains("a . rotate_right (n)"), "{s}");
+    // a byte swap by shifts and masks, as the literal reading's `mir::bswap_u32`
+    let swap = ROT.replace("(intrinsic \"rotate_left\" (u32)) (args (copy (p 1)) (copy (p 2)))", "(intrinsic \"bswap\" (u32)) (args (copy (p 1)))");
+    let s = read_f(&swap, &["a", "n"], &[], true, "u32").unwrap();
+    assert!(s.contains("(a & 255u32) . wrapping_shl (24u32)") && s.contains("a . wrapping_shr (24u32)"), "{s}");
+    // negative twin: an intrinsic the reading has no builtin for
+    let e = read_f(&ROT.replace("rotate_left", "fshl"), &["a", "n"], &[], true, "u32").unwrap_err();
+    assert!(e.contains("the intrinsic `fshl`"), "{e}");
+}
+
+const OR_LOOP: &str = r#"(root "k::m::f")
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 2)
+  (locals (0 u32 mut) (1 u32 imm) (2 u32 imm) (3 u32 mut) (4 u32 mut) (5 bool mut) (6 bool mut) (7 u32 mut))
+  (debug "a0" (p 1) (arg 1)) (debug "b0" (p 2) (arg 2)) (debug "a" (p 3)) (debug "b" (p 4)) (debug "n" (p 7))
+  (bb 0 (assign (p 3) (use (copy (p 1)))) (assign (p 4) (use (copy (p 2)))) (assign (p 7) (use (int u32 0))) (goto 1))
+  (bb 1 (assign (p 5) (bin gt (copy (p 3)) (int u32 0))) (switch (move (p 5)) (0 2) (otherwise 3)))
+  (bb 2 (assign (p 6) (bin gt (copy (p 4)) (int u32 0))) (switch (move (p 6)) (0 4) (otherwise 3)))
+  (bb 3 (assign (p 7) (bin add (copy (p 7)) (int u32 1))) (assign (p 3) (bin shr (copy (p 3)) (int u32 1))) (assign (p 4) (bin shr (copy (p 4)) (int u32 1))) (goto 1))
+  (bb 4 (assign (p 0) (use (copy (p 7)))) (return)))
+"#;
+
+#[test]
+fn a_loop_test_of_two_conditions_is_one_while_condition() {
+    let s = read_f(OR_LOOP, &["a0", "b0"], &[], true, "u32").unwrap();
+    assert!(s.contains("while (a > 0u32) | (b > 0u32) {"), "{s}");
+    // the guessed measure counts both: each test's own
+    assert!(s.contains("decreases ((a as Int) + (b as Int))"), "{s}");
+    // negative twin: the second test after an effect is no condition (a helper)
+    let eff = OR_LOOP.replace("(bb 2 (assign (p 6)", "(bb 2 (assign (p 7) (bin add (copy (p 7)) (int u32 2))) (assign (p 6)");
+    let s = read_f(&eff, &["a0", "b0"], &[], true, "u32").unwrap();
+    assert!(!s.contains("while") && s.contains("fn f__loop0"), "{s}");
+}
+
+const NESTED: &str = r#"(root "k::m::f")
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 1)
+  (locals (0 u32 mut) (1 u32 imm) (2 u32 mut) (3 u32 mut) (4 u32 mut) (5 bool mut) (6 bool mut))
+  (debug "x" (p 1) (arg 1)) (debug "i" (p 2)) (debug "j" (p 3)) (debug "s" (p 4))
+  (bb 0 (assign (p 2) (use (int u32 0))) (assign (p 4) (use (copy (p 1)))) (goto 1))
+  (bb 1 (assign (p 5) (bin lt (copy (p 2)) (int u32 2))) (switch (move (p 5)) (0 5) (otherwise 2)))
+  (bb 2 (assign (p 3) (use (int u32 0))) (goto 3))
+  (bb 3 (assign (p 3) (bin add (copy (p 3)) (int u32 1))) (assign (p 4) (bin xor (copy (p 4)) (copy (p 3)))) (assign (p 6) (bin lt (copy (p 3)) (int u32 3))) (switch (move (p 6)) (0 4) (otherwise 3)))
+  (bb 4 (assign (p 2) (bin add (copy (p 2)) (int u32 1))) (goto 1))
+  (bb 5 (assign (p 0) (use (copy (p 4)))) (return)))
+"#;
+
+#[test]
+fn a_loop_inside_a_loop_is_a_helper_that_returns_to_it() {
+    let s = read_f(NESTED, &["x"], &[], true, "u32").unwrap();
+    // the outer loop is a `while`; the inner one a helper returning the
+    // variables it assigns, which the outer body takes back
+    assert!(s.contains("while i < 2u32 {"), "{s}");
+    assert!(s.contains("= f__loop1 (") && s.contains("j = __l") && s.contains("s = __l"), "{s}");
+    let helper = s.split(";;").nth(1).unwrap_or_default();
+    assert!(helper.contains("fn f__loop1 (") && helper.contains("-> (u32 , u32)"), "{helper}");
+    assert!(helper.contains("return f__loop1 (") && !helper.contains("f__loop0"), "{helper}");
+    // negative twin: an inner loop that also returns from the function is a
+    // tail-recursive helper, which goes on into the outer loop and calls it
+    // (mutual recursion, which the elaborator refuses)
+    let ret = NESTED.replace("(switch (move (p 6)) (0 4) (otherwise 3))", "(switch (move (p 6)) (0 4) (1 3) (otherwise 5))");
+    let s = read_f(&ret, &["x"], &[], true, "u32").unwrap();
+    let inner = s.split(";;").find(|h| h.contains("fn f__loop1")).unwrap_or_default();
+    assert!(inner.contains("return f__loop0 (") && !s.contains("let __l"), "{s}");
+}
+
+#[test]
+fn a_loop_without_an_attachment_gets_a_measure_from_its_shape() {
+    // a counter moving up to a bound
+    let s = read_f(NESTED, &["x"], &[], true, "u32").unwrap();
+    assert!(s.contains("decreases ((2u32 as Int) - (i as Int))"), "{s}");
+    // the inner loop leaves when `j < 3` fails: `3 - j`
+    assert!(s.contains("# [decreases ((3u32 as Int) - (j as Int))]"), "{s}");
+    // a value moving down (`while x > 0`)
+    let s = read_f(WHILE, &["a"], &[], true, "u16").unwrap();
+    assert!(s.contains("decreases ((x as Int))"), "{s}");
+    // negative twin: `x != 7` gives no direction (no measure guessed)
+    let s = read_f(LOOP_RETURN, &["a"], &[], true, "u16").unwrap();
+    assert!(!s.contains("decreases"), "{s}");
+}
+
+/// `for &b in data { s = s.wrapping_add(b as u64) }` over core's slice iterator.
+const SLICE_ITER: &str = r#"(adt-def "std::option::Option<&u8>" (path "std::option::Option") (kind enum) (args ((ref shared u8)))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" (ref shared u8)) (no-glue)))
+(adt-def "std::slice::Iter<'_, u8>" (path "std::slice::Iter") (kind struct) (args (u8))
+  (variant 0 "Iter" 0 (field "ptr" (unsupported "type RawPtr")) (field "end_or_len" (unsupported "type RawPtr")) (no-glue)))
+(root "k::m::f")
+(fn "core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter" (kind callee) (def "core::slice::iter::<impl std::iter::IntoIterator for &'a [T]>::into_iter") (args (u8)) (item impl (ref shared (slice u8)) "IntoIterator" () "into_iter") (argc 1)
+  (locals (0 (adt "std::slice::Iter<'_, u8>") mut) (1 (ref shared (slice u8)) imm))
+  (bb 0 (assign (p 0) (unsupported "rvalue AddressOf(Const, (*_1))")) (return)))
+(fn "<std::slice::Iter<'_, u8> as std::iter::Iterator>::next" (kind callee) (def "<std::slice::Iter<'a, T> as std::iter::Iterator>::next") (args (u8)) (item impl (adt "std::slice::Iter<'_, u8>") "Iterator" () "next") (argc 1)
+  (locals (0 (adt "std::option::Option<&u8>") mut) (1 (ref mut (adt "std::slice::Iter<'_, u8>")) imm))
+  (bb 0 (unreachable)))
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 1)
+  (locals (0 u64 mut) (1 (ref shared (slice u8)) imm) (2 (adt "std::slice::Iter<'_, u8>") mut) (3 (adt "std::option::Option<&u8>") mut) (4 (ref mut (adt "std::slice::Iter<'_, u8>")) mut) (5 isize mut) (6 u8 mut) (7 u64 mut) (8 u64 mut))
+  (debug "data" (p 1) (arg 1)) (debug "iter" (p 2)) (debug "b" (p 6)) (debug "s" (p 8))
+  (bb 0 (assign (p 8) (use (int u64 0))) (call (fn "core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter") (args (copy (p 1))) (p 2) 1))
+  (bb 1 (assign (p 4) (ref mut (p 2))) (call (fn "<std::slice::Iter<'_, u8> as std::iter::Iterator>::next") (args (copy (p 4))) (p 3) 2))
+  (bb 2 (assign (p 5) (discr (p 3))) (switch (move (p 5)) (0 4) (1 3) (otherwise 5)))
+  (bb 3 (assign (p 6) (use (copy (p 3 (downcast 1) (field 0 (ref shared u8)) deref)))) (assign (p 7) (cast int-to-int (copy (p 6)) u64)) (assign (p 8) (bin add (copy (p 8)) (copy (p 7)))) (goto 1))
+  (bb 4 (assign (p 0) (use (copy (p 8)))) (return))
+  (bb 5 (unreachable)))
+"#;
+
+#[test]
+fn core_slice_iterator_is_the_slice_and_the_index_of_its_next_element() {
+    let s = read_f(SLICE_ITER, &["data"], &[], true, "u64").unwrap();
+    // `into_iter`: `(data, 0)`; the loop helper holds it as `(&[u8], usize)`;
+    // `next`: a test of the index against the length, the element, the index one further
+    assert!(s.contains("(data , 0usize)") && s.contains("(& [u8] , usize)"), "{s}");
+    assert!(s.contains("iter . 1 < iter . 0 . len ()") && s.contains("iter . 1 + 1usize"), "{s}");
+    assert!(s.contains("decreases ((iter . 0 . len () as Int) - (iter . 1 as Int))"), "{s}");
+    // negative twin: a function only named like core's `next` is read from its own MIR
+    let mine = SLICE_ITER.replace("(def \"<std::slice::Iter<'a, T> as std::iter::Iterator>::next\")", "(def \"<k::m::Iter<'a, T> as std::iter::Iterator>::next\")");
+    let s = read_f(&mine, &["data"], &[], true, "u64").unwrap();
+    assert!(!s.contains("iter . 1 + 1usize") && s.contains("unreachable"), "{s}");
+}
+
+const GET_RANGE: &str = r#"(adt-def "std::option::Option<&[u8]>" (path "std::option::Option") (kind enum) (args ((ref shared (slice u8))))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" (ref shared (slice u8))) (no-glue)))
+(adt-def "std::ops::Range<usize>" (path "std::ops::Range") (kind struct) (args (usize))
+  (variant 0 "Range" 0 (field "start" usize) (field "end" usize) (no-glue)))
+(root "k::m::f")
+(fn "<std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::get" (kind callee) (def "<std::ops::Range<usize> as std::slice::SliceIndex<[T]>>::get") (args (u8)) (item impl (adt "std::ops::Range<usize>") "SliceIndex" ((slice u8)) "get") (argc 2)
+  (locals (0 (adt "std::option::Option<&[u8]>") mut) (1 (adt "std::ops::Range<usize>") imm) (2 (ref shared (slice u8)) imm))
+  (bb 0 (unreachable)))
+(fn "k::m::f" (kind root) (def "k::m::f") (args ()) (item fn "f") (argc 3)
+  (locals (0 (adt "std::option::Option<&[u8]>") mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 usize imm) (4 (adt "std::ops::Range<usize>") mut))
+  (debug "data" (p 1) (arg 1)) (debug "i" (p 2) (arg 2)) (debug "j" (p 3) (arg 3))
+  (bb 0 (assign (p 4) (agg (adt (adt "std::ops::Range<usize>") 0) (copy (p 2)) (copy (p 3)))) (call (fn "<std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::get") (args (move (p 4)) (copy (p 1))) (p 0) 1))
+  (bb 1 (return)))
+"#;
+
+#[test]
+fn a_slices_get_by_a_range_tests_both_ends_then_slices() {
+    let s = read_f(GET_RANGE, &["data", "i", "j"], &[], true, "Option<&[u8]>").unwrap();
+    assert!(s.contains("if i <= j {") && s.contains("if j <= data . len () {") && s.contains("& data [i .. j]"), "{s}");
+    // negative twin: `get` by another range type is not this model (read from its MIR)
+    let other = GET_RANGE.replace("(def \"<std::ops::Range<usize> as std::slice::SliceIndex<[T]>>::get\")", "(def \"<std::ops::RangeFrom<usize> as std::slice::SliceIndex<[T]>>::get\")");
+    let s = read_f(&other, &["data", "i", "j"], &[], true, "Option<&[u8]>").unwrap();
+    assert!(s.contains("unreachable") && !s.contains("data . len ()"), "{s}");
 }

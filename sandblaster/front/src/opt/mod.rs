@@ -56,6 +56,7 @@ pub mod proof;
 pub mod multiversion;
 pub mod refute;
 pub mod outline;
+pub mod panics;
 pub mod par;
 pub mod cache;
 pub mod residual;
@@ -476,6 +477,12 @@ pub struct Optimized {
     pub lanes: Vec<par::LaneReport>,
     /// The SIMD `seq::eq` candidates (plan O10), one per compared length.
     pub seq_eq: Vec<par::seqeq::SeqEqReport>,
+    /// The panic-explicit readings (DESIGN.md §8.2 item 12, `panics`): one
+    /// per function the exec-only elaboration left unproven (never in a
+    /// verified build), with its item or why it has none. A reading is an
+    /// exec item of the print view, ghost (never printed), with its
+    /// residual and target like any specialized function.
+    pub panics: Vec<panics::PanicReading>,
 }
 
 /// Development tracing (`SANDBLASTER_OPT_TRACE=1`).
@@ -770,6 +777,9 @@ struct Ctx<'o> {
     /// feature-only sets may price such a clone on its original's residual;
     /// a function in this set must be cloned to be priced.
     aegraph_matched: HashSet<ItemId>,
+    /// The panic-explicit readings (`panics`): source function → its
+    /// reading's item.
+    panic_readings: HashMap<ItemId, ItemId>,
 }
 
 impl Ctx<'_> {
@@ -867,7 +877,7 @@ impl Drop for ResetRegistries {
 /// clones, residuals).
 pub fn optimize(out: &mut Output, krate: &Crate, opts: &OptOptions) -> Optimized {
     let t0 = Instant::now();
-    let mut cx = Ctx { out, opts: opts.clone(), warnings: vec![], errors: vec![], helpers: BTreeMap::new(), helper_failed: BTreeMap::new(), driven: HashSet::new(), drive_failed: HashMap::new(), drive_trivial: HashSet::new(), tier0_nodes: HashMap::new(), tier0_recursive: HashSet::new(), tier0_residual: HashMap::new(), driven_info: HashMap::new(), clone_lemmas: HashMap::new(), clone_of: HashMap::new(), helper_pairs: HashMap::new(), late_obligations: Vec::new(), marks: HashMap::new(), summaries: summary::Summaries::default(), outlines: outline::Outlines::default(), cache: opts.cache_dir.as_deref().map(|d| cache::Cache::new(d).with_inputs(choice_inputs_hash(opts))), rules: None, aegraph_matched: HashSet::new() };
+    let mut cx = Ctx { out, opts: opts.clone(), warnings: vec![], errors: vec![], helpers: BTreeMap::new(), helper_failed: BTreeMap::new(), driven: HashSet::new(), drive_failed: HashMap::new(), drive_trivial: HashSet::new(), tier0_nodes: HashMap::new(), tier0_recursive: HashSet::new(), tier0_residual: HashMap::new(), driven_info: HashMap::new(), clone_lemmas: HashMap::new(), clone_of: HashMap::new(), helper_pairs: HashMap::new(), late_obligations: Vec::new(), marks: HashMap::new(), summaries: summary::Summaries::default(), outlines: outline::Outlines::default(), cache: opts.cache_dir.as_deref().map(|d| cache::Cache::new(d).with_inputs(choice_inputs_hash(opts))), rules: None, aegraph_matched: HashSet::new(), panic_readings: HashMap::new() };
     // Σ2 loop summaries (plan O6): one registry per crate; so are the
     // exported facts and the guard specializations
     loopsum::reset(opts.loops.clone());
@@ -1096,6 +1106,12 @@ pub fn optimize(out: &mut Output, krate: &Crate, opts: &OptOptions) -> Optimized
     // functor printed it through the residual printer — and is linked by
     // its `lane_equiv`: it is not specialized again)
     let lane_items: HashSet<String> = lanes.iter().map(|l| l.kernel.clone()).collect();
+    // the panic-explicit readings (DESIGN.md §8.2 item 12) of the functions
+    // whose elaboration left obligations unproven (exec-only code that can
+    // panic; a verified build has none), callees first: each is an exec item
+    // optimized below like any function, its residual linked to it by an
+    // equality over `Option<R>` that covers the panic outcome
+    let panics = panic_readings(&mut cx, &mut ext, &mut chain, &eopts, krate);
     let exec_order: Vec<ItemId> = elab::order::dependency_order(&ext)
         .into_iter()
         .filter(|i| !ext.item(*i).ghost && matches!(&ext.item(*i).kind, ItemKind::Fn(f) if f.kind == FnKind::Exec))
@@ -1264,6 +1280,11 @@ pub fn optimize(out: &mut Output, krate: &Crate, opts: &OptOptions) -> Optimized
             _ => {}
         }
     }
+    // the readings are never printed (their residuals and targets stay, for
+    // the lowering of lifted code)
+    for r in panics.iter().filter_map(|r| r.item) {
+        print.items[r.0 as usize].ghost = true;
+    }
     // dispatchers for exported functions of the trees (and exported
     // portable functions with variants)
     let exported = crate::canon::exported_items(krate);
@@ -1337,7 +1358,7 @@ pub fn optimize(out: &mut Output, krate: &Crate, opts: &OptOptions) -> Optimized
     }
     let warnings = std::mem::take(&mut cx.warnings);
     let errors = std::mem::take(&mut cx.errors);
-    Optimized { print, targets, fns, variants, clones, sets, dispatchers, not_cloned, not_emitted, warnings, errors, millis: t0.elapsed().as_millis(), lanes, seq_eq }
+    Optimized { print, targets, fns, variants, clones, sets, dispatchers, not_cloned, not_emitted, warnings, errors, millis: t0.elapsed().as_millis(), lanes, seq_eq, panics }
 }
 
 /// Phase 1b (plan O10): every lane site on every lane target of the
@@ -2205,7 +2226,13 @@ fn specialize_one(cx: &mut Ctx<'_>, ext: &mut Crate, chain: &mut ProverChain, eo
     if !f.generics.is_empty() {
         return out!("generic function".into(), false, false, None);
     }
-    let Some(g) = cx.checked(id) else { return out!("not kernel-checked".into(), true, false, None) };
+    let Some(g) = cx.checked(id) else {
+        // (exec-only code that can panic: its reading is optimized instead)
+        if let Some(r) = cx.panic_readings.get(&id) {
+            return out!(format!("not kernel-checked (it can panic): its panic-explicit reading `{}` is optimized in its place (DESIGN.md §8.2 item 12)", ext.item(*r).path), false, false, None);
+        }
+        return out!("not kernel-checked".into(), true, false, None);
+    };
     let mut recursive_calls = false;
     let mut static_recursion = false;
     let mut sym_keep: Option<symex::Symex> = None;
@@ -2443,6 +2470,79 @@ fn pop_item(ext: &mut Crate, rid: ItemId) {
         ext.items.pop();
         ext.modules[m.0 as usize].items.retain(|i| *i != rid);
     }
+}
+
+/// The panic-explicit readings of every source function (an item of
+/// `krate`) whose elaboration left obligations unproven or that is blocked
+/// by one that did (`panics`, DESIGN.md §8.2 item 12), callees first: each
+/// reading is added to `ext` as an exec item and elaborated (every
+/// obligation proven), or reported with why it is not built (and leaves no
+/// trace: its definitions, obligations and diagnostics are removed).
+fn panic_readings(cx: &mut Ctx<'_>, ext: &mut Crate, chain: &mut ProverChain, eopts: &elab::Options, krate: &Crate) -> Vec<panics::PanicReading> {
+    let failed: HashSet<ItemId> = cx.out.defs.iter().filter(|d| matches!(d.status, DefStatus::Unproven | DefStatus::Blocked(_))).filter_map(|d| d.item).collect();
+    if failed.is_empty() {
+        return Vec::new();
+    }
+    let order: Vec<ItemId> = elab::order::dependency_order(ext)
+        .into_iter()
+        .filter(|i| (i.0 as usize) < krate.items.len() && failed.contains(i) && !ext.item(*i).ghost && matches!(&ext.item(*i).kind, ItemKind::Fn(f) if f.kind == FnKind::Exec))
+        .collect();
+    let mut out = Vec::new();
+    for id in order {
+        // (a function blocked by a callee that is neither kernel-checked nor
+        // read would be blocked again: its reading is not attempted)
+        let blocked = panics::callees(ext, id).into_iter().find(|c| *c != id && !cx.out.fn_globals.contains_key(c) && !cx.panic_readings.contains_key(c) && matches!(&ext.item(*c).kind, ItemKind::Fn(f) if f.kind == FnKind::Exec));
+        let r = match blocked {
+            Some(c) => Err(format!("it calls `{}`, which is neither kernel-checked nor read (it has no panic-explicit reading)", ext.item(c).path)),
+            None => match panics::reading(ext, id, &cx.panic_readings) {
+                Ok(pf) => add_reading(cx, ext, chain, eopts, id, pf),
+                Err(e) => Err(e),
+            },
+        };
+        trace(|| format!("panic-explicit reading of {}: {:?}", ext.item(id).path, r.as_ref().map(|p| ext.item(*p).path.to_string())));
+        match r {
+            Ok(pid) => {
+                cx.panic_readings.insert(id, pid);
+                out.push(panics::PanicReading { source: id, item: Some(pid), note: String::new() });
+            }
+            Err(note) => out.push(panics::PanicReading { source: id, item: None, note }),
+        }
+    }
+    out
+}
+
+/// Adds the reading `pf` of `id` to `ext` (`<f>__panics`) and elaborates it.
+fn add_reading(cx: &mut Ctx<'_>, ext: &mut Crate, chain: &mut ProverChain, eopts: &elab::Options, id: ItemId, pf: FnDef) -> Result<ItemId, String> {
+    let orig = ext.item(id).clone();
+    let pid = ItemId(ext.items.len() as u32);
+    let name = format!("{}{}", orig.name, panics::SUFFIX);
+    let mut path = orig.path.clone();
+    if let Some(l) = path.0.last_mut() {
+        *l = name.clone();
+    }
+    ext.items.push(Item { id: pid, name, path, module: orig.module, vis: Vis::Crate, ghost: false, span: orig.span, docs: vec![], allow: orig.allow.clone(), cfg: orig.cfg.clone(), kind: ItemKind::Fn(pf) });
+    ext.modules[orig.module.0 as usize].items.push(pid);
+    let (nd, no, nf) = (cx.out.diags.list.len(), cx.out.obligations.len(), cx.out.defs.len());
+    let res = elab::generated::resume(cx.out, ext, &[pid], chain, eopts, None);
+    let ok = matches!(&res, Ok(f) if f.is_empty()) && cx.out.fn_globals.contains_key(&pid) && cx.out.defs[nf..].iter().all(|d| d.status == DefStatus::Checked);
+    if ok {
+        return Ok(pid);
+    }
+    let unproven: Vec<String> = cx.out.obligations[no.min(cx.out.obligations.len())..].iter().filter(|o| !o.proven()).take(3).map(|o| format!("{:?} obligation `{}`", o.kind, o.goal.chars().take(200).collect::<String>())).collect();
+    let diag = cx.out.diags.list.get(nd..).and_then(|d| d.iter().find(|x| x.severity == crate::diag::Severity::Error)).map(|d| d.msg.chars().take(300).collect::<String>());
+    let why = match (&res, unproven.is_empty(), diag) {
+        (Err(e), _, _) => format!("its elaboration failed: {e}"),
+        (_, false, _) => format!("its elaboration leaves obligations unproven: {}", unproven.join("; ")),
+        (_, true, Some(d)) => format!("its elaboration failed: {d}"),
+        _ => "its elaboration failed".to_string(),
+    };
+    // a reading that is not built leaves no trace in the report
+    cx.out.diags.list.truncate(nd);
+    cx.out.obligations.truncate(no);
+    cx.out.defs.truncate(nf);
+    cx.out.fn_globals.remove(&pid);
+    pop_item(ext, pid);
+    Err(why)
 }
 
 /// The `rejected_by` of a driven candidate whose proof builder built a term

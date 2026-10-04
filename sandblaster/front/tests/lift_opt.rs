@@ -46,7 +46,18 @@ const FIXTURES: &[(&str, &str)] = &[
     ("opt_gen2", include_str!("mir_fixtures/opt_gen2/bits.rs")),
     ("opt_gen2_more", include_str!("mir_fixtures/opt_gen2_more/bits.rs")),
     ("opt_rd", include_str!("mir_fixtures/opt_rd/bits.rs")),
+    ("opt_panics", include_str!("mir_fixtures/opt_panics/bits.rs")),
+    ("opt_shipped", include_str!("mir_fixtures/opt_shipped/bits.rs")),
 ];
+
+/// Arithmetic with nothing to rule out its panics (exec-only code: each
+/// function's elaboration leaves an obligation unproven), and a `const fn`.
+const PANICS: &str = include_str!("mir_fixtures/opt_panics/bits.rs");
+
+/// Functions whose cheaper residuals rustc compiles to MIR of another shape
+/// than the residuals' own: temporaries bound by `let`, a checked
+/// operation's `Option` tested with `is_none`, sub-slices of a slice.
+const SHIPPED: &str = include_str!("mir_fixtures/opt_shipped/bits.rs");
 
 /// A fixture file (`tests/mir_fixtures/<path>`), when it exists.
 fn fixture(path: &str) -> Option<String> {
@@ -280,6 +291,186 @@ fn main() {
     let out = run_ab(&dir, body, &low.body, main);
     assert!(out.contains("agree 200000"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A function that can panic (exec-only code: `b == 0`, an overflowing
+/// sum; nothing rules them out) is optimized through its panic-explicit
+/// reading (DESIGN.md §8.2 item 12) and lowered when the reading's residual
+/// is cheaper: `twice_quot`'s second division is the first one's value, so
+/// its residual divides once. It replaces the source only with the round
+/// trip's two panic theorems: the source's MIR and the copy's, each against
+/// the reading, accepted by the trusted gate. Functions whose readings'
+/// residuals are no cheaper keep their text, and a `const fn` whose residual
+/// is cheaper is lowered with `const fn` helpers.
+#[test]
+fn a_function_that_can_panic_is_lowered_through_its_panic_explicit_reading() {
+    let r = root("twice_quot, ceil_div, inc, clamp7c");
+    let low = lower(&[("r/mod.rs", &r), ("r/bits.rs", PANICS)]);
+    println!("{}\n{:?}\n{:?}", low.body, low.note, low.records);
+    match outcome(&low, "crate::bits::twice_quot") {
+        LowerOutcome::Lowered { via, origin, .. } => {
+            assert!(via.contains("panic-explicit reading") && via.contains("twice_quot__panics"), "{via}");
+            assert_eq!(*origin, LowerOrigin::Optimizer);
+        }
+        other => panic!("`twice_quot` was not lowered: {other:?}"),
+    }
+    // its helper divides once, by Rust's own operator (which panics on `b == 0`):
+    // the reading's guard `b == 0` is that division's own test, so it is not
+    // printed (`lower::guards_next`), and neither is any explicit panic
+    let helper = low.body.split("fn __sandblaster_opt_twice_quot").nth(1).expect("the helper");
+    let helper = &helper[..helper.find("\n}\n").unwrap_or(helper.len())];
+    assert_eq!(helper.matches(" / ").count(), 1, "{helper}");
+    assert!(!helper.contains("panic!"), "{helper}");
+    // the readings of the others are as costly as the source
+    kept(&low, "crate::bits::ceil_div", "not 3% cheaper");
+    kept(&low, "crate::bits::inc", "not 3% cheaper");
+    // a `const fn` keeps its constness: its helper is a `const fn`
+    assert!(matches!(outcome(&low, "crate::bits::clamp7c"), LowerOutcome::Lowered { .. }), "{:?}", low.records);
+    assert!(low.body.contains("const fn __sandblaster_opt_clamp7c("), "{}", low.body);
+    // the round trip proved the shipped code's panic theorems
+    assert!(low.shipped.iter().any(|n| n.contains("twice_quot")), "{:?}", low.shipped);
+}
+
+/// The lowered module panics exactly where the source panics: both
+/// compiled by rustc (overflow checks and debug assertions on) and run on
+/// every input class, panics caught and compared.
+#[test]
+fn the_lowered_code_panics_where_the_source_panics() {
+    let r = root("twice_quot, ceil_div, inc, clamp7c");
+    let low = lower(&[("r/mod.rs", &r), ("r/bits.rs", PANICS)]);
+    assert!(matches!(outcome(&low, "crate::bits::twice_quot"), LowerOutcome::Lowered { .. }), "{:?}", low.records);
+    let (_, body) = PANICS.split_at(PANICS.find("\n\n").unwrap());
+    let main = r#"
+fn outcome<T: std::fmt::Debug>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> String {
+    match std::panic::catch_unwind(f) {
+        Ok(v) => format!("{v:?}"),
+        Err(_) => "panic".to_string(),
+    }
+}
+fn main() {
+    std::panic::set_hook(Box::new(|_| {}));
+    let vals = [0u32, 1, 2, 3, 7, 1 << 31, (1 << 31) + 1, u32::MAX - 1, u32::MAX];
+    let mut n = 0u64;
+    let mut panics = 0u64;
+    for &a in &vals {
+        for &b in &vals {
+            let (x, y) = (outcome(move || orig::twice_quot(a, b)), outcome(move || opt::twice_quot(a, b)));
+            assert_eq!(x, y, "twice_quot({a}, {b})");
+            panics += (x == "panic") as u64;
+            assert_eq!(outcome(move || orig::ceil_div(a, b)), outcome(move || opt::ceil_div(a, b)), "ceil_div({a}, {b})");
+            n += 1;
+        }
+        assert_eq!(orig::clamp7c(a), opt::clamp7c(a));
+    }
+    for x in 0..=255u8 {
+        assert_eq!(outcome(move || orig::inc(x)), outcome(move || opt::inc(x)));
+    }
+    const C: u32 = opt::clamp7c(13);
+    assert_eq!(C, 5);
+    println!("agree {n} panics {panics}");
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("sandblaster-lift-opt-panics-{}", std::process::id()));
+    let out = run_ab(&dir, body, &low.body, main);
+    assert!(out.contains("agree 81") && !out.contains("panics 0"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Must-reject twin: the copy's MIR read with one constant off (the
+/// shipped code is not the code compared) fails the shipped code's panic
+/// theorem, so the function keeps its source text.
+#[test]
+fn a_shipped_mir_that_is_not_the_lowered_code_fails_the_panic_theorem() {
+    let r = root("twice_quot");
+    let low = lower_faulty(&[("r/mod.rs", &r), ("r/bits.rs", PANICS)], LowerFault::ShippedMir);
+    println!("{:?}\n{:?}", low.note, low.records);
+    match outcome(&low, "crate::bits::twice_quot") {
+        LowerOutcome::Kept(why) => assert!(why.contains("shipped code's theorem"), "{why}"),
+        other => panic!("`twice_quot` was lowered: {other:?}"),
+    }
+}
+
+/// A module read from MIR is decided by its shipped code's theorems, not by
+/// a syntactic comparison (DESIGN.md §2.1, docs/mir-lift.md §20.7). Each
+/// residual of `opt_shipped` is cheaper and reads back from rustc's MIR of
+/// the copy in another form than the residual's own (temporaries bound by
+/// `let`, `checked_add`'s `Option` tested with `is_none`, sub-slices of a
+/// slice): the syntactic comparison, run beside the theorems by the test
+/// hook `CompareStructurally` (it decides nothing there), refuses every one.
+/// The kernel holds `L::shipped::<id>` of each copy — its MIR returns
+/// exactly the source function's value — so each is lowered, nothing is
+/// compared structurally, and the lowered module agrees with the source
+/// under rustc on every input class.
+#[test]
+fn a_rewrite_whose_shipped_mir_differs_only_syntactically_is_accepted() {
+    let r = root("pow2_ceil, read_u16_be, mix32");
+    let files = [("r/mod.rs", r.as_str()), ("r/bits.rs", SHIPPED)];
+    let low = lower(&files);
+    println!("{}\n{:?}\n{:?}\n{:?}", low.body, low.note, low.records, low.shipped);
+    let fns = ["pow2_ceil", "read_u16_be", "mix32"];
+    for f in fns {
+        let path = format!("crate::bits::{f}");
+        assert!(matches!(outcome(&low, &path), LowerOutcome::Lowered { origin: LowerOrigin::Optimizer, .. }), "`{f}` was not lowered: {:?}", low.records);
+        assert!(low.shipped.iter().any(|n| n.contains(&format!("`{path}`")) && n.contains("1 against the source function")), "`{f}`: {:?}", low.shipped);
+    }
+    // the theorems decided: nothing was compared structurally
+    assert_eq!(low.compared, 0);
+    assert!(low.structural.is_empty());
+    // what the syntactic comparison would have said: each read back
+    // differently from its residual
+    let hooked = lower_faulty(&files, LowerFault::CompareStructurally);
+    println!("{:?}", hooked.structural);
+    for f in fns {
+        assert!(matches!(outcome(&hooked, &format!("crate::bits::{f}")), LowerOutcome::Lowered { .. }), "`{f}` (hooked): {:?}", hooked.records);
+        assert!(hooked.structural.iter().any(|s| s.starts_with(&format!("`{f}`:")) && s.contains(&format!("__sandblaster_opt_{f}` does not match its replacement"))), "`{f}`: {:?}", hooked.structural);
+    }
+    let (_, body) = driver::lifted::split_docs(SHIPPED);
+    let main = r#"
+fn main() {
+    let mut n = 0u64;
+    let edges = [0u64, 1, 2, 3, 4, 5, 1 << 62, (1 << 62) + 1, 1 << 63, (1 << 63) + 1, u64::MAX - 1, u64::MAX];
+    for &v in &edges {
+        assert_eq!(orig::pow2_ceil(v), opt::pow2_ceil(v), "pow2_ceil({v})");
+        n += 1;
+    }
+    let data: Vec<u8> = (0..16u8).map(|i| i.wrapping_mul(37).wrapping_add(11)).collect();
+    for len in 0..=data.len() {
+        for at in (0..=len + 2).chain([usize::MAX - 1, usize::MAX]) {
+            assert_eq!(orig::read_u16_be(&data[..len], at), opt::read_u16_be(&data[..len], at), "read_u16_be(len {len}, {at})");
+            n += 1;
+        }
+    }
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for _ in 0..100_000 {
+        x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+        assert_eq!(orig::pow2_ceil(x >> (x & 63)), opt::pow2_ceil(x >> (x & 63)));
+        assert_eq!(orig::mix32(x as u32), opt::mix32(x as u32));
+        n += 1;
+    }
+    const C: u32 = opt::mix32(7);
+    assert_eq!(C, orig::mix32(7));
+    println!("agree {n}");
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("sandblaster-lift-opt-shipped-{}", std::process::id()));
+    let out = run_ab(&dir, body, &low.body, main);
+    assert!(out.contains("agree"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Must-reject twin: the copy's MIR read with one constant off (the shipped
+/// code is not the code the residual is) fails the shipped code's theorem —
+/// which now decides alone — so the function keeps its source text.
+#[test]
+fn a_wrong_shipped_copy_is_refused_by_the_theorem() {
+    let r = root("pow2_ceil");
+    let low = lower_faulty(&[("r/mod.rs", &r), ("r/bits.rs", SHIPPED)], LowerFault::ShippedMir);
+    println!("{:?}\n{:?}", low.note, low.records);
+    match outcome(&low, "crate::bits::pow2_ceil") {
+        LowerOutcome::Kept(why) => assert!(why.starts_with("the lifted round trip") && why.contains("shipped code's theorem"), "{why}"),
+        other => panic!("`pow2_ceil` was lowered: {other:?}"),
+    }
+    assert!(low.body.contains("pub fn pow2_ceil(n: u64) -> Option<u64> {\n    if n <= 1 {"), "{}", low.body);
 }
 
 // ---------------------------------------------------------------------

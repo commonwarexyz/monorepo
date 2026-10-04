@@ -123,6 +123,10 @@ pub struct LiftSource {
     /// their SHA-256).
     pub path_display: String,
     pub text: String,
+    /// Other files of the host crate the `.sbmir` names (callees in modules
+    /// not lifted, read as library code): paths and texts, for its source
+    /// check.
+    pub mir_extra: Vec<(String, Vec<u8>)>,
 }
 
 /// What a lifted module is, for module-mode emission (`driver::gates`,
@@ -252,6 +256,10 @@ pub struct MirHelper {
     /// MIR local of the function as the reading did.
     pub while_loop: bool,
     pub local_names: Vec<String>,
+    /// A loop inside another loop's body, read as a helper that returns
+    /// (`crate::mir::read::HelperInfo::returns`): the positions of the
+    /// parameters it returns; its lemma is a `while` loop's.
+    pub returns: Option<Vec<usize>>,
 }
 
 /// One `#[lift(mir = ..)]` module's loaded MIR.
@@ -536,7 +544,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     // declaration) and the lifted source files the MIR must match
     let mut mir_texts: Vec<(String, String, String, Span)> = Vec::new();
     let dsl_modules: Vec<String> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| s.module_path.clone()).collect();
-    let mir_files: Vec<(String, Vec<u8>)> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| (s.path_display.clone(), s.text.clone().into_bytes())).collect();
+    let mir_files: Vec<(String, Vec<u8>)> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| (s.path_display.clone(), s.text.clone().into_bytes())).chain(sources.iter().flat_map(|s| s.mir_extra.clone())).collect();
     for s in &sources {
         if let Some(t) = &s.mir {
             mir_texts.push((s.name.clone(), s.module_path.trim_start_matches("crate::").to_string(), t.clone(), s.decl_span));
@@ -2455,12 +2463,18 @@ impl Ctx {
                 self.mir_read.push((lifted.clone(), key.clone(), o.loops.clone()));
                 let mp = self.conform_module_path();
                 for h in &o.helper_info {
-                    let global = match self_ty.and_then(type_name) {
-                        _ if h.while_loop => format!("{mp}::{lifted}::{}", h.name),
-                        Some(st) if h.method && !is_prim(&st) => format!("{mp}::{st}::{}", h.name),
-                        _ => format!("{mp}::{}", h.name),
+                    // a helper's global: in the impl (a method helper) or the module;
+                    // a `while` loop's: under the function whose body holds it
+                    let helper_global = |name: &str, method: bool| match self_ty.and_then(type_name) {
+                        Some(st) if method && !is_prim(&st) => format!("{mp}::{st}::{name}"),
+                        _ => format!("{mp}::{name}"),
                     };
-                    self.mir_helpers.push(MirHelper { global, key: key.clone(), header: h.header, params: h.params.clone(), while_loop: h.while_loop, local_names: h.local_names.clone() });
+                    let global = match &h.owner {
+                        Some((o, m)) if h.while_loop => format!("{}::{}", helper_global(o, *m), h.name),
+                        None if h.while_loop => format!("{mp}::{lifted}::{}", h.name),
+                        _ => helper_global(&h.name, h.method),
+                    };
+                    self.mir_helpers.push(MirHelper { global, key: key.clone(), header: h.header, params: h.params.clone(), while_loop: h.while_loop, local_names: h.local_names.clone(), returns: h.returns.clone() });
                 }
                 (o.body, o.helpers)
             }

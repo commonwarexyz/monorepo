@@ -1,0 +1,2 @@
+[fair-baseline] pass: sandblaster/bench/heldout-harness: one profile, one binary (3 subject crates), identity check run
+[fair-baseline] pass: sandblaster/bench/heldout-harness: one crate source (../subject/lib.rs), an A/A subject, the rustc subject from the frozen source, >= 21 rounds after the differential check

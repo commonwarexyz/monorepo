@@ -457,6 +457,11 @@ impl Names for ModuleNames {
                     // the byte strings not yet yielded (SEMANTICS.md §19.10)
                     return Ok(syn::parse_quote!(&[&[u8]]));
                 }
+                // core's slice iterator: the slice and the index of its next element
+                if let Some(e) = slice_iter_elem(m, t) {
+                    let e = self.ty(m, &e)?;
+                    return Ok(syn::parse_quote!((&[#e], usize)));
+                }
                 // `Option<&mut T>` (a state): the optional place's value
                 if d.path.ends_with("option::Option")
                     && let [Ty::Ref(true, inner)] = d.args.as_slice()
@@ -623,6 +628,50 @@ pub fn bytes_iter_model(m: &Sbmir, t: &Ty) -> bool {
             && d.args.len() == 1
             && adt(&d.args[0]).is_some_and(|i| matches!(i.path.as_str(), "std::slice::Iter" | "core::slice::Iter") && i.args == [byte_slice.clone()])
     })
+}
+
+/// core's `slice::Iter<'_, T>` (by its exact path): `T`. Both readings take it
+/// as the slice and the index of the next element (`literal.core`'s
+/// `leaf::slice_iter_*`); its own fields (raw pointers) are never read.
+pub fn slice_iter_elem(m: &Sbmir, t: &Ty) -> Option<Ty> {
+    let Ty::Adt(k) = t else { return None };
+    let d = m.adts.get(k)?;
+    match (d.path.as_str(), d.args.as_slice()) {
+        ("std::slice::Iter" | "core::slice::Iter", [e]) => Some(e.clone()),
+        _ => None,
+    }
+}
+
+/// A library function read as a model rather than through its MIR (whose
+/// raw pointers neither reading models), by the exact path of its
+/// definition; the element type is the instance's first type argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Model {
+    /// `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`, `slice::Iter::new`:
+    /// the iterator at index 0 of the slice.
+    SliceIterNew,
+    /// `<slice::Iter<'_, T> as Iterator>::next`.
+    SliceIterNext,
+    /// `<Range<usize> as SliceIndex<[T]>>::get`.
+    SliceGetRange,
+}
+
+const MODEL_FNS: &[(&str, Model)] = &[
+    ("core::slice::<impl [T]>::iter", Model::SliceIterNew),
+    ("core::slice::iter::<impl std::iter::IntoIterator for &'a [T]>::into_iter", Model::SliceIterNew),
+    ("core::slice::iter::<impl core::iter::IntoIterator for &'a [T]>::into_iter", Model::SliceIterNew),
+    ("std::slice::Iter::<'a, T>::new", Model::SliceIterNew),
+    ("core::slice::Iter::<'a, T>::new", Model::SliceIterNew),
+    ("<std::slice::Iter<'a, T> as std::iter::Iterator>::next", Model::SliceIterNext),
+    ("<core::slice::Iter<'a, T> as core::iter::Iterator>::next", Model::SliceIterNext),
+    ("<std::ops::Range<usize> as std::slice::SliceIndex<[T]>>::get", Model::SliceGetRange),
+    ("<core::ops::Range<usize> as core::slice::SliceIndex<[T]>>::get", Model::SliceGetRange),
+];
+
+/// The model a function is read as, and its element type `T`.
+pub fn model_of(f: &Fn) -> Option<(Model, Ty)> {
+    let (_, m) = MODEL_FNS.iter().find(|(p, _)| *p == f.def)?;
+    Some((*m, f.args.first()?.clone()))
 }
 
 fn prelude_iter_ty(d: &ir::AdtDef) -> Option<syn::Type> {

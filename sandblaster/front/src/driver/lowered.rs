@@ -67,18 +67,30 @@
 //!    function under the name `__sandblaster_check__<f>` (same signature
 //!    text, the new body) plus the helpers and dispatch impls is read back
 //!    by the same front end and **lift** that read the source (TCB,
-//!    SEMANTICS.md §19), and the new items are elaborated in generated mode
-//!    (every proof slot `Erased`, nothing added to the kernel) against the
-//!    verified environment. Then, in all relevant positions
-//!    (`Env::alpha_eq_relevant` after erasing irrelevant binders, the
-//!    codegen round trip's comparison, modulo only `let x = v; x` ≡ `v`,
-//!    the lift's reading of a last state update): every printed helper
-//!    equals its residual, every copied alternative equals its verified
-//!    definition; every dispatch impl method and every copy (per instance)
-//!    has the source function's type and is exactly the delegation `λ x̄.
-//!    r x̄` to its residual (or alternative). A function failing any of it
-//!    keeps its source text (and the check runs again on the rest; a second
-//!    failure lowers nothing).
+//!    SEMANTICS.md §19), with rustc's MIR of that copy
+//!    (`<stem>.roundtrip__<module>.sbmir`, checked against the copy's text
+//!    by its SHA-256 like any extraction). What decides each function is the
+//!    **shipped code's theorems** (`shipped_theorems`,
+//!    docs/checked-structuring.md §5.13): every helper's MIR against the
+//!    definition it replaces, the copy's (and a dispatch method's) MIR
+//!    against the call of the replacement, and from them, along the
+//!    optimizer's kernel-checked link, `L::shipped::<id>`: the literal
+//!    reading of the copy's MIR returns, at sufficient fuel, exactly the
+//!    source function's value (for a function that can panic, its two panic
+//!    theorems), accepted by the trusted check (`mir::gate`). The copy's
+//!    structured reading is not compared with the residual: it is
+//!    untrusted, and the theorems are about the MIR rustc compiles, so a
+//!    syntactic comparison (which refused code reading back as the same
+//!    operations in another form: temporaries bound by `let`, `?` read as a
+//!    test of `is_none`) adds nothing they do not decide. Only a module
+//!    without MIR — none since the lift refuses a lifted exec module
+//!    without `mir = ".."` — would be checked by the syntactic comparison
+//!    (`compare_read_back`: the new items elaborated in generated mode, every
+//!    printed helper equal to its residual in all relevant positions modulo
+//!    `let x = v; x` ≡ `v` and the reader normal form, every copy the
+//!    delegation `λ x̄. r x̄`). A function failing any of it keeps its source
+//!    text (and the check runs again on the rest; a second failure lowers
+//!    nothing).
 //! 4. **Emission.** The rewritten function in the emitted file is the copy's
 //!    text under the source name (the body never names the function: no
 //!    lowered function is recursive), in the same module scope, so it means
@@ -217,6 +229,10 @@ pub struct LoweredModule {
     /// copies' and helpers' MIR) the round trip proved, one note per
     /// rewritten function.
     pub shipped: Vec<String>,
+    /// Tests only ([`LowerFault::CompareStructurally`]): what the syntactic
+    /// comparison of a module without MIR would have refused in this module
+    /// read from MIR, where it decides nothing.
+    pub structural: Vec<String>,
 }
 
 impl LoweredModule {
@@ -351,6 +367,12 @@ struct SourceFn {
     ident_end: usize,
     body: (usize, usize),
     params: Vec<String>,
+    /// Byte ranges of the `mut` of by-value parameter bindings (`mut x:
+    /// u32`), with the whitespace after it: a rewritten body (a call of the
+    /// replacement) mutates no parameter, so the rewritten function and its
+    /// round-trip copy leave them out (rustc's `unused_mut` otherwise; a
+    /// binding mode, not part of the signature's type).
+    param_muts: Vec<(usize, usize)>,
     /// Parameter types (source text) and the return type (`None`: unit).
     param_tys: Vec<String>,
     ret: Option<String>,
@@ -475,6 +497,7 @@ fn source_fn(text: &str, ls: &[usize], sig: &syn::Signature, block: &syn::Block,
         return None;
     }
     let mut params = Vec::new();
+    let mut param_muts = Vec::new();
     let mut param_tys = Vec::new();
     let mut refused = None;
     let mut generic = None;
@@ -515,7 +538,16 @@ fn source_fn(text: &str, ls: &[usize], sig: &syn::Signature, block: &syn::Block,
                     g.recv = Some(k);
                 }
                 match &*pt.pat {
-                    syn::Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => params.push(pi.ident.to_string()),
+                    syn::Pat::Ident(pi) if pi.by_ref.is_none() && pi.subpat.is_none() => {
+                        params.push(pi.ident.to_string());
+                        if let Some(m) = &pi.mutability
+                            && let (Some(a), Some(b)) = pos(m.span)
+                            && text.get(a..b) == Some("mut")
+                        {
+                            let ws = text[b..].len() - text[b..].trim_start().len();
+                            param_muts.push((a, b + ws));
+                        }
+                    }
                     _ => refused = refused.or(Some("a parameter with a pattern".into())),
                 }
             }
@@ -538,7 +570,7 @@ fn source_fn(text: &str, ls: &[usize], sig: &syn::Signature, block: &syn::Block,
             refused = refused.or(Some(format!("a generic function without a by-value parameter of type `{}` (the dispatch needs one as its receiver; FRICTION)", g.param)));
         }
     }
-    Some(SourceFn { name: sig.ident.to_string(), owner, item_start, ident_end, body: (b0, b1), params, param_tys, ret, state, has_result, generic, is_const: sig.constness.is_some(), refused })
+    Some(SourceFn { name: sig.ident.to_string(), owner, item_start, ident_end, body: (b0, b1), params, param_muts, param_tys, ret, state, has_result, generic, is_const: sig.constness.is_some(), refused })
 }
 
 /// The module path (`crate::m`) of the lifted module read from `file`.
@@ -632,6 +664,10 @@ struct Inst {
     /// The optimizer's link between the source function and the
     /// replacement: a lemma's name (`None`: by conversion).
     link: Option<String>,
+    /// A source function that can panic, replaced through its
+    /// panic-explicit reading (DESIGN.md §8.2 item 12): the source
+    /// function's kernel name (`orig_global` is then the reading's).
+    panic: Option<String>,
 }
 
 /// A candidate after lowering (before the round trip).
@@ -749,6 +785,11 @@ pub enum LowerFault {
     /// The first `try_get_u8()` of a reader is done twice (one byte more
     /// is consumed).
     ReadTwice,
+    /// Not a fault: on a module read from MIR, the syntactic comparison of
+    /// a module without MIR (`compare_read_back`) runs too, and what it
+    /// would have refused is recorded in `LoweredModule::structural`; it
+    /// decides nothing (the shipped code's theorems do).
+    CompareStructurally,
 }
 
 /// [`lower_lifted`] with a simulated printer fault (tests only).
@@ -770,8 +811,9 @@ fn inject(fault: LowerFault, cands: &mut [Candidate]) {
         }
     }
     match fault {
-        // (the copies' text is right: the fault is in the MIR the round trip reads, `round_trip`)
-        LowerFault::ShippedMir => {}
+        // (the copies' text is right: the fault is in the MIR the round trip
+        // reads, or the hook is in the round trip itself, `round_trip`)
+        LowerFault::ShippedMir | LowerFault::CompareStructurally => {}
         LowerFault::FlipComparison => first_in_helpers(cands, " < ", " <= "),
         LowerFault::WrongConstant => first_in_helpers(cands, "1u32", "2u32"),
         LowerFault::WrongAlternative => first_in_helpers(cands, "wrapping_sub(1)", "wrapping_sub(2)"),
@@ -1118,8 +1160,16 @@ fn lower_lifted_body(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
     let docs_len = docs.len();
     let unused = std::cell::RefCell::new(Vec::<String>::new());
     let as_is = |note: Option<String>, records: Vec<LowerRecord>| LoweredModule { file: file.clone(), body: text[docs_len..].to_string(), docs: docs.clone(), records, compared: 0, note, unused_rewrites: unused.borrow().clone(), ..Default::default() };
-    let (Some(krate), pv) = (c.krate.as_ref(), &o.print) else {
+    let Some(krate) = c.krate.as_ref() else {
         return as_is(Some("no crate".into()), vec![]);
+    };
+    // the print view, with the panic-explicit readings in their Rust form
+    let pv_conv;
+    let pv: &Crate = if o.panics.iter().any(|r| r.item.is_some()) {
+        pv_conv = panic_view(&o.print, o);
+        &pv_conv
+    } else {
+        &o.print
     };
     let fns = match source_fns(&text) {
         Ok(f) => f,
@@ -1207,6 +1257,7 @@ fn lower_lifted_body(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
     let mut compared = 0;
     let mut note = None;
     let mut rt_copy: Option<(String, String)> = None;
+    let mut structural: Vec<String> = Vec::new();
     for round in 0..2 {
         if info.mir.is_some() {
             rt_copy = Some((mpath.trim_start_matches("crate::").replace("::", "__"), assemble(&text, &cands, true)));
@@ -1219,7 +1270,8 @@ fn lower_lifted_body(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
                 }
                 break;
             }
-            Ok((verdicts, n)) => {
+            Ok((verdicts, n, said)) => {
+                structural.extend(said);
                 let all_ok = verdicts.values().all(|v| v.is_ok());
                 if all_ok {
                     compared = n;
@@ -1247,7 +1299,7 @@ fn lower_lifted_body(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
         }
     }
     if cands.is_empty() {
-        return LoweredModule { compared: 0, roundtrip_copy: rt_copy, ..as_is(note, sorted(records)) };
+        return LoweredModule { compared: 0, roundtrip_copy: rt_copy, structural, ..as_is(note, sorted(records)) };
     }
     let body = assemble(&text, &cands, false);
     for cd in &cands {
@@ -1265,38 +1317,68 @@ fn lower_lifted_body(c: &Checked, root: &Path, out: &mut Output, o: &Optimized, 
         });
     }
     let shipped = std::mem::take(&mut out.mir_gate.shipped);
-    LoweredModule { file: file.clone(), body: body[docs_len..].to_string(), docs: docs.clone(), records: sorted(records), compared, note, unused_rewrites: unused.borrow().clone(), roundtrip_copy: rt_copy, shipped, ..Default::default() }
+    LoweredModule { file: file.clone(), body: body[docs_len..].to_string(), docs: docs.clone(), records: sorted(records), compared, note, unused_rewrites: unused.borrow().clone(), roundtrip_copy: rt_copy, shipped, structural, ..Default::default() }
 }
 
 /// The residual of lifted item `id` lowered: its entry helper `name` and
 /// every optimizer helper it calls, or why not.
 #[allow(clippy::too_many_arguments)]
-fn lower_residual(krate: &Crate, pv: &Crate, out: &Output, o: &Optimized, src_costs: &Costs<'_>, res_costs: &Costs<'_>, names_base: &Names, id: ItemId, name: &str, state: Option<State>, has_result: bool) -> Result<(Inst, Vec<Helper>), String> {
-    let rep = o.fns.iter().find(|f| f.item == id && f.set.is_none()).ok_or("the optimizer has no result for it")?;
+fn lower_residual(krate: &Crate, pv: &Crate, out: &Output, o: &Optimized, src_costs: &Costs<'_>, res_costs: &Costs<'_>, names_base: &Names, id: ItemId, name: &str, state: Option<State>, has_result: bool, konst: bool) -> Result<(Inst, Vec<Helper>), String> {
+    let mut rep = o.fns.iter().find(|f| f.item == id && f.set.is_none()).ok_or("the optimizer has no result for it")?;
+    // a source function that can panic (exec-only code): its panic-explicit
+    // reading's residual (DESIGN.md §8.2 item 12), printed in its Rust form
+    // (the print view holds it, `panic_view`), shipped only with the round
+    // trip's panic theorems
+    let mut subject = id;
+    let mut panic_source = None;
+    if matches!(rep.outcome, Outcome::Unspecialized { .. })
+        && let Some(pid) = o.panics.iter().find(|r| r.source == id).and_then(|r| r.item)
+    {
+        rep = o.fns.iter().find(|f| f.item == pid && f.set.is_none()).ok_or("the optimizer has no result for its panic-explicit reading")?;
+        subject = pid;
+        panic_source = Some(krate.item(id).path.to_string());
+        if state.is_some() {
+            return Err("a function with buffer state that can panic (its panic-explicit reading is not lowered with state yet)".into());
+        }
+    }
+    let panic = panic_source.is_some();
     let residual_global = match &rep.outcome {
-        Outcome::Specialized { .. } => match o.targets.get(&id) {
+        Outcome::Specialized { .. } => match o.targets.get(&subject) {
             Some((_, r)) => *r,
             None => return Err("specialized, but not printed".into()),
         },
+        Outcome::Unspecialized { reason, .. } if panic => return Err(format!("its panic-explicit reading is not specialized: {reason}")),
         Outcome::Unspecialized { reason, .. } => return Err(format!("not specialized: {reason}")),
     };
-    let orig_global = *out.fn_globals.get(&id).ok_or("not kernel-checked")?;
+    if panic
+        && let Some(Err(e)) = o.print.fn_def(subject).map(lower::panic_rust_form)
+    {
+        // (`panic_view` converted every reading it could)
+        return Err(format!("its panic-explicit reading's residual has no Rust form: {e}"));
+    }
+    let orig_global = *out.fn_globals.get(&subject).ok_or("not kernel-checked")?;
     if let Some(p) = std::env::var_os("SANDBLASTER_LOWER_DUMP")
         && let Some(f) = pv.fn_def(id)
     {
         let _ = std::fs::write(std::path::Path::new(&p).join(format!("{}.txt", pv.item(id).name)), format!("{:#?}", f.body));
     }
-    let (cs, cr) = (src_costs.of(id), res_costs.of(id));
+    let (cs, cr) = (src_costs.of(id), res_costs.of(subject));
     if !crate::opt::cost::model::beats(cr, cs) {
-        return Err(format!("the residual is not 3% cheaper than the source (portable model: {cr} vs {cs} milli-cycles)"));
+        let why = not_cheaper(out, residual_global, orig_global, cr, cs);
+        return Err(if panic { format!("{why} (its panic-explicit reading's residual, in its Rust form)") } else { why });
     }
     // the helper closure and the names the lowered code uses
-    let mut helpers: Vec<(ItemId, String)> = vec![(id, name.to_string())];
-    let mut queue = vec![id];
+    let mut helpers: Vec<(ItemId, String)> = vec![(subject, name.to_string())];
+    let mut queue = vec![subject];
     while let Some(h) = queue.pop() {
         for cid in lower::callees(pv, h) {
-            if names_base.fns.contains_key(&cid) && cid != id {
+            if names_base.fns.contains_key(&cid) && cid != subject {
                 continue;
+            }
+            // (a reading's residual calling an optimizer helper: the helper's
+            // panic outcome would need its own Rust form)
+            if panic {
+                return Err(format!("its panic-explicit reading's residual calls `{}` (a reading's helpers are not lowered yet)", pv.item(cid).path));
             }
             // the buffer model: printed as buffer calls in state mode
             if state.is_some() && crate::opt::drive::KEPT_LIFT_MODEL.contains(&pv.item(cid).path.to_string().as_str()) {
@@ -1314,34 +1396,77 @@ fn lower_residual(krate: &Crate, pv: &Crate, out: &Output, o: &Optimized, src_co
     }
     let mut names = names_base.clone();
     for (h, n) in &helpers {
-        if *h != id {
+        if *h != subject {
             names.fns.insert(*h, n.clone());
         }
     }
     let mut out_helpers = Vec::new();
     for (h, n) in &helpers {
-        let printed = match state {
-            Some(State::BufMut(k)) if *h == id => lower::lower_fn_state(pv, *h, n, &names, k),
-            Some(State::Buf(k)) if *h == id => lower::lower_fn_reader(pv, *h, n, &names, k, has_result),
+        let mut printed = match state {
+            Some(State::BufMut(k)) if *h == subject => lower::lower_fn_state(pv, *h, n, &names, k),
+            Some(State::Buf(k)) if *h == subject => lower::lower_fn_reader(pv, *h, n, &names, k, has_result),
+            _ if panic && *h == subject => lower::lower_fn_panic(pv, *h, n, &names),
             _ => lower::lower_fn(pv, *h, n, &names),
         }
         .map_err(|e| format!("the residual cannot be printed as Rust: {e}"))?;
-        let (refer, compare) = if *h == id { (residual_global, residual_global) } else { *o.targets.get(h).ok_or_else(|| format!("the helper `{}` has no optimized definition", pv.item(*h).path))? };
+        // the replacement of a `const fn` is called where the source is, in
+        // const contexts too: every helper is a `const fn`, and its printed
+        // body must be one
+        if konst {
+            lower::const_compatible(pv, *h).map_err(|e| format!("a `const fn` whose residual is {e}"))?;
+            printed = lower::as_const(printed);
+        }
+        let (refer, compare) = if *h == subject { (residual_global, residual_global) } else { *o.targets.get(h).ok_or_else(|| format!("the helper `{}` has no optimized definition", pv.item(*h).path))? };
         out_helpers.push(Helper { name: n.clone(), text: printed.text, refer, compare });
     }
     let link = match &rep.link {
         Some(crate::opt::Link::Lemma(l)) => Some(l.clone()),
         _ => None,
     };
-    let inst = Inst { ty: None, orig_global, target: residual_global, entry: name.to_string(), rung: rep.rung.map(|r| r.name().to_string()).unwrap_or_default(), cost_source: cs, cost_residual: cr, link };
+    let inst = Inst { ty: None, orig_global, target: residual_global, entry: name.to_string(), rung: rep.rung.map(|r| r.name().to_string()).unwrap_or_default(), cost_source: cs, cost_residual: cr, link, panic: panic_source };
     Ok((inst, out_helpers))
+}
+
+/// The print view with every panic-explicit reading in its Rust form
+/// (`lower::panic_rust_form`, DESIGN.md §8.2 item 12): what the lowering
+/// prices and prints for a source function that can panic. A reading whose
+/// residual has no Rust form keeps its `Option` result (and is refused,
+/// with the reason, when its source is considered).
+fn panic_view(pv: &Crate, o: &Optimized) -> Crate {
+    let mut v = pv.clone();
+    for r in o.panics.iter().filter_map(|r| r.item) {
+        if let Some(f) = pv.fn_def(r)
+            && let Ok(rf) = lower::panic_rust_form(f)
+            && let crate::hir::ItemKind::Fn(slot) = &mut v.items[r.0 as usize].kind
+        {
+            *slot = rf;
+        }
+    }
+    v
+}
+
+/// Why a residual costing `cr` keeps the source costing `cs` (the selection
+/// gate, `cost::model::beats`): not 3% cheaper, and, where it is so, that
+/// the residual is the source itself (its kernel body is the source's in
+/// every relevant position: the optimizer found nothing to change) or
+/// costs exactly the same (the tie rule: a tie keeps the source).
+fn not_cheaper(out: &Output, residual: GlobalId, source: GlobalId, cr: u64, cs: u64) -> String {
+    let same = match (out.env.global_body(residual), out.env.global_body(source)) {
+        (Some(a), Some(b)) => out.env.alpha_eq_relevant(&a, &b, &|x: GlobalId, y: GlobalId| x == y),
+        _ => false,
+    };
+    let why = if same {
+        "; the residual is the source itself: the optimizer found nothing cheaper"
+    } else if cr == cs {
+        "; a tie keeps the source"
+    } else {
+        ""
+    };
+    format!("the residual is not 3% cheaper than the source (portable model: {cr} vs {cs} milli-cycles){why}")
 }
 
 #[allow(clippy::too_many_arguments)]
 fn residual_candidate(krate: &Crate, pv: &Crate, out: &Output, o: &Optimized, src_costs: &Costs<'_>, res_costs: &Costs<'_>, names_base: &Names, mpath: &str, sf: &SourceFn, id: ItemId) -> Result<Candidate, String> {
-    if sf.is_const {
-        return Err("a `const fn` (its lowered helpers would have to be `const fn` too; only a `const fn` alternative of a `#[rewrite]` lemma replaces one)".into());
-    }
     let name = format!("{HELPER_PREFIX}{}", sf.key());
     if std::env::var_os("SANDBLASTER_OPT_TRACE").is_some() {
         let t = match sf.state {
@@ -1350,10 +1475,19 @@ fn residual_candidate(krate: &Crate, pv: &Crate, out: &Output, o: &Optimized, sr
             None => lower::lower_fn(pv, id, "trace", names_base),
         };
         eprintln!("lower: `{}` costs {} (source {}); residual as Rust: {}", sf.path(mpath), res_costs.of(id), src_costs.of(id), t.map(|l| l.text).unwrap_or_else(|e| format!("not printable: {e}")));
+        if sf.state.is_none() {
+            let st = lower::lower_fn(krate, id, "source", names_base);
+            eprintln!("lower: `{}`'s structured reading as Rust: {}", sf.path(mpath), st.map(|l| l.text).unwrap_or_else(|e| format!("not printable: {e}")));
+        }
+        if let Some(pid) = o.panics.iter().find(|r| r.source == id).and_then(|r| r.item) {
+            let pt = lower::lower_fn_panic(pv, pid, "panic_reading_residual", names_base);
+            eprintln!("lower: `{}`'s panic-explicit reading's residual costs {} in its Rust form: {}", sf.path(mpath), res_costs.of(pid), pt.map(|l| l.text).unwrap_or_else(|e| format!("not printable: {e}")));
+        }
     }
-    let (inst, helpers) = lower_residual(krate, pv, out, o, src_costs, res_costs, names_base, id, &name, sf.state, sf.has_result)?;
+    let (inst, helpers) = lower_residual(krate, pv, out, o, src_costs, res_costs, names_base, id, &name, sf.state, sf.has_result, sf.is_const)?;
     let entry = format!("{{\n    {name}({})\n}}", sf.params.join(", "));
-    Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via: String::new(), origin: LowerOrigin::Optimizer })
+    let via = if inst.panic.is_some() { format!("the residual of its panic-explicit reading `{}` (it can panic; its panics are preserved, by the lifted round trip's panic theorems)", out.env.global_name(inst.orig_global).unwrap_or_default()) } else { String::new() };
+    Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via, origin: LowerOrigin::Optimizer })
 }
 
 /// A `#[rewrite]` candidate (user code, [`LowerOrigin::UserRewrite`]): the
@@ -1413,7 +1547,7 @@ fn rewrite_candidate(c: &Checked, krate: &Crate, out: &mut Output, src_costs: &C
     let entry_name = rename[&krate.item(r.alt).name].clone();
     let entry = format!("{{\n    {entry_name}({})\n}}", sf.params.join(", "));
     let link_name = out.env.global_name(link).map(|s| s.to_string()).unwrap_or_default();
-    let inst = Inst { ty: None, orig_global: orig, target: g, entry: entry_name, rung: "Rewrite".into(), cost_source: cs, cost_residual: cg, link: Some(link_name.clone()) };
+    let inst = Inst { ty: None, orig_global: orig, target: g, entry: entry_name, rung: "Rewrite".into(), cost_source: cs, cost_residual: cg, link: Some(link_name.clone()), panic: None };
     Ok(Candidate { src: sf.clone(), insts: vec![inst], helpers, entry, dispatch: None, via: format!("user-supplied alternative `{alt_path}`, `#[rewrite]` lemma `{lemma_path}` (`{link_name}`)"), origin: LowerOrigin::UserRewrite })
 }
 
@@ -1450,7 +1584,7 @@ fn dispatch_candidate(c: &Checked, krate: &Crate, pv: &Crate, out: &Output, o: &
         let body = match lifted_ty {
             Some(id) => {
                 let name = format!("{HELPER_PREFIX}{key}_for_{ty}");
-                let (mut inst, hs) = lower_residual(krate, pv, out, o, src_costs, res_costs, names_base, id, &name, None, sf.has_result).map_err(|e| format!("instance `{ty}`: {e}"))?;
+                let (mut inst, hs) = lower_residual(krate, pv, out, o, src_costs, res_costs, names_base, id, &name, None, sf.has_result, false).map_err(|e| format!("instance `{ty}`: {e}"))?;
                 inst.ty = Some(ty.clone());
                 insts.push(inst);
                 for h in hs {
@@ -1598,6 +1732,10 @@ fn assemble(text: &str, cands: &[Candidate], check: bool) -> String {
             let indent: String = text[ls..].chars().take_while(|c| *c == ' ').collect();
             let entry = cd.entry.lines().enumerate().map(|(k, l)| if k == 0 { l.to_string() } else { format!("{indent}{l}") }).collect::<Vec<_>>().join("\n");
             edits.push((cd.src.body.0, cd.src.body.1, entry));
+            // (no parameter is mutated by the call of the replacement)
+            for &(a, b) in &cd.src.param_muts {
+                edits.push((a, b, String::new()));
+            }
         }
     }
     // the dispatch traits, one per sealed trait (methods in candidate order)
@@ -1695,22 +1833,145 @@ fn helpers_section(cands: &[Candidate]) -> String {
     s
 }
 
+/// The names of the top-level items `new` declares and `old` does not (the
+/// round trip's copies and helpers); empty when either does not parse.
+fn new_items(old: &str, new: &str) -> Vec<String> {
+    let names = |t: &str| -> Option<Vec<String>> {
+        let f = syn::parse_file(t).ok()?;
+        Some(
+            f.items
+                .iter()
+                .filter_map(|it| match it {
+                    syn::Item::Fn(x) => Some(x.sig.ident.to_string()),
+                    syn::Item::Struct(x) => Some(x.ident.to_string()),
+                    syn::Item::Enum(x) => Some(x.ident.to_string()),
+                    syn::Item::Trait(x) => Some(x.ident.to_string()),
+                    syn::Item::Const(x) => Some(x.ident.to_string()),
+                    syn::Item::Type(x) => Some(x.ident.to_string()),
+                    _ => None,
+                })
+                .collect(),
+        )
+    };
+    let (Some(o), Some(n)) = (names(old), names(new)) else { return vec![] };
+    n.into_iter().filter(|x| !o.contains(x)).collect()
+}
+
+/// `text` with the `items = ".."` of the `#[lift(..)]` attribute on the
+/// declaration `mod <name>` extended by `added`; `None` when `text` has no
+/// such declaration or its attribute names no `items`.
+fn with_items(text: &str, name: &str, added: &[String]) -> Option<String> {
+    let b = text.as_bytes();
+    // the index after the `]` closing the attribute that starts at `i` (`#[`)
+    let attr_end = |i: usize| -> Option<usize> {
+        let (mut depth, mut j, mut in_str) = (0i32, i + 1, false);
+        while j < b.len() {
+            match b[j] {
+                b'"' if j == 0 || b[j - 1] != b'\\' => in_str = !in_str,
+                b'[' | b'(' if !in_str => depth += 1,
+                b']' | b')' if !in_str => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(j + 1);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        None
+    };
+    let mut from = 0;
+    while let Some(i) = text[from..].find("#[lift(").map(|k| k + from) {
+        let end = attr_end(i)?;
+        // the item the attribute is on: past the other attributes and the visibility
+        let mut k = end;
+        loop {
+            while k < b.len() && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if text[k..].starts_with("#[") {
+                k = attr_end(k)?;
+            } else if text[k..].starts_with("pub(") {
+                k += text[k..].find(')')? + 1;
+            } else if text[k..].starts_with("pub ") {
+                k += 4;
+            } else {
+                break;
+            }
+        }
+        let decl = format!("mod {name}");
+        let on_it = text[k..].starts_with(&decl) && text[k + decl.len()..].starts_with(|c: char| !(c.is_alphanumeric() || c == '_'));
+        let attr = &text[i..end];
+        let key = attr.match_indices("items").map(|(p, _)| p).find(|p| {
+            let before = attr[..*p].chars().next_back();
+            matches!(before, Some('(' | ',' | ' ' | '\t' | '\n')) && attr[p + 5..].trim_start().starts_with('=')
+        });
+        if on_it && let Some(p) = key {
+            let q1 = i + p + attr[p..].find('"')? + 1;
+            let q2 = q1 + text[q1..].find('"')?;
+            let list = text[q1..q2].trim();
+            let ext = if list.is_empty() { added.join(", ") } else { format!("{list}, {}", added.join(", ")) };
+            return Some(format!("{}{ext}{}", &text[..q1], &text[q2..]));
+        }
+        from = end;
+    }
+    None
+}
+
 /// The check copy of a candidate: the source item from `fn` with the name
 /// `__sandblaster_check__<f>` and the rewritten body.
 fn check_copy(text: &str, cd: &Candidate) -> String {
-    format!("fn {CHECK_PREFIX}{}{} {}\n", cd.src.key(), &text[cd.src.ident_end..cd.src.body.0].trim_end(), cd.entry)
+    // the signature tail as the rewritten function has it (without the
+    // parameters' `mut`)
+    let mut tail = text[cd.src.ident_end..cd.src.body.0].to_string();
+    for &(a, b) in cd.src.param_muts.iter().rev() {
+        tail.replace_range(a - cd.src.ident_end..b - cd.src.ident_end, "");
+    }
+    format!("fn {CHECK_PREFIX}{}{} {}\n", cd.src.key(), tail.trim_end(), cd.entry)
+}
+
+/// Per source function key, `Ok` or the first failure; the number of
+/// definitions compared structurally (0 for a module read from MIR, whose
+/// shipped code is checked by its theorems instead); and, with the test hook
+/// [`LowerFault::CompareStructurally`] only, what the structural comparison
+/// would have refused.
+type Verdicts = (BTreeMap<String, Result<(), String>>, usize, Vec<String>);
+
+/// Records the first failure of source function `f`.
+fn fail(v: &mut BTreeMap<String, Result<(), String>>, f: &str, e: String) {
+    if let Some(x) = v.get_mut(f)
+        && x.is_ok()
+    {
+        *x = Err(e);
+    }
 }
 
 /// Runs the lifted round trip on `cands`; per source function key, `Ok`
 /// or the first failure. `Err` fails the whole step.
-/// Per source function key, `Ok` or the first failure; and the number of
-/// definitions compared.
-type Verdicts = (BTreeMap<String, Result<(), String>>, usize);
-
+///
+/// The copy is read back by the same front end in every case. What decides
+/// a function then depends on what checks its shipped code:
+/// * **a module read from rustc's MIR** (every lifted exec module since the
+///   source lift's reading of bodies was retired): the shipped code's
+///   theorems (`L::shipped::<id>`, and for a function that can panic
+///   `L::pthm::<id>` with `L::pshipped::<id>`), proven against the copy's
+///   own MIR and accepted by the trusted check (`mir::gate`). The copy's
+///   structured reading is not elaborated or compared: it is untrusted, and
+///   the theorems are about the literal reading of the MIR rustc compiles,
+///   so a syntactic comparison of the structured reading with the residual
+///   adds nothing they do not decide (DESIGN.md §2.1, docs/mir-lift.md
+///   §20.7);
+/// * **a module without MIR** (none since the lift refuses a lifted exec
+///   module without `mir = ".."`; kept for a reading of bodies without MIR):
+///   the syntactic comparison of [`compare_read_back`].
 #[allow(clippy::too_many_arguments)]
 fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &str, info: &LiftedInfo, cands: &[Candidate], fault: Option<LowerFault>) -> Result<Verdicts, String> {
     // 1. the source (with the dispatch declarations), the copies, the
-    // helpers and dispatch impls, read by the same front end
+    // helpers and dispatch impls, read by the same front end (for a module
+    // read from MIR, with the copy's MIR: the load checks that MIR against
+    // the copy's text, every source by its SHA-256, so the theorems below
+    // are about the copy the build emits)
     let check_text = assemble(text, cands, true);
     let lifted_path = c.sm.path(info.file).to_path_buf();
     let mut fs = MemFs::new();
@@ -1730,7 +1991,21 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
         };
         fs.insert(mir, rt);
     }
+    // a lifted file of which `items = ".."` selects some items: the read-back
+    // lifts the round trip's new items too (the copies and the helpers), so
+    // its declaration lists them there (the declaring file read back with
+    // the extended list; nothing else changes)
+    let added = new_items(text, &check_text);
     fs.insert(&lifted_path, check_text);
+    if !added.is_empty() {
+        for (_, f) in c.sm.files() {
+            if f.path != lifted_path
+                && let Some(t) = with_items(&f.text, &info.name, &added)
+            {
+                fs.insert(&f.path, t);
+            }
+        }
+    }
     let krate = c.krate.as_ref().ok_or("no crate")?;
     let c2 = super::check(root, &fs, &krate.target);
     if !c2.ok() {
@@ -1738,6 +2013,43 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
         return Err(format!("the front end rejects the lowered code: {}", first.lines().next().unwrap_or("")));
     }
     let k2 = c2.krate.as_ref().ok_or("no crate")?;
+    let mut verdicts: BTreeMap<String, Result<(), String>> = cands.iter().map(|cd| (cd.src.key(), Ok(()))).collect();
+    // 2.–4. a module without MIR: the structural comparison; a module read
+    // from MIR: its shipped code's theorems decide (5.)
+    let compared = if rt_text.is_some() { 0 } else { compare_read_back(out, krate, k2, mpath, cands, &mut verdicts)? };
+    // (tests only: what the syntactic comparison would have said here)
+    let mut structural = Vec::new();
+    if fault == Some(LowerFault::CompareStructurally) && rt_text.is_some() {
+        let mut v2 = verdicts.clone();
+        structural = match compare_read_back(out, krate, k2, mpath, cands, &mut v2) {
+            Ok(_) => v2.into_iter().filter_map(|(f, r)| r.err().map(|e| format!("`{f}`: {e}"))).collect(),
+            Err(e) => vec![format!("the whole step: {e}")],
+        };
+    }
+    // (a panic-explicit reading is shipped only with its panic theorems,
+    // which are about rustc's MIR of the printed code)
+    if rt_text.is_none() {
+        for cd in cands.iter().filter(|cd| cd.insts.iter().any(|i| i.panic.is_some())) {
+            fail(&mut verdicts, &cd.src.key(), "a source that can panic is replaced only with the panic theorems of rustc's MIR of its replacement (a lifted module read from MIR)".to_string());
+        }
+    }
+    // 5. a module read from MIR: the shipped code's theorems (the copies'
+    // and helpers' MIR, the code rustc compiles, against what the laws are
+    // about; docs/checked-structuring.md §5.13) decide — a function without
+    // them keeps its source text
+    if let Some(rt) = &rt_text {
+        shipped_theorems(c, out, krate, rt, mpath, cands, fault, &mut verdicts)?;
+    }
+    Ok((verdicts, compared, structural))
+}
+
+/// The syntactic round trip of a lifted module without MIR (steps 2–4 of
+/// the module docs' step 3): the read-back's new items elaborated in
+/// generated mode against the verified environment; every printed helper
+/// must equal its replacement in all relevant positions (modulo `let x = v;
+/// x` and the reader normal form) and every copy and dispatch method be the
+/// delegation to it. Returns the number of definitions compared.
+fn compare_read_back(out: &mut Output, krate: &Crate, k2: &Crate, mpath: &str, cands: &[Candidate], verdicts: &mut BTreeMap<String, Result<(), String>>) -> Result<usize, String> {
     // 2. the ids of the read-back crate, mapped to the verified environment
     // by path (the new items have no counterpart)
     let by_path: HashMap<String, ItemId> = krate.items.iter().map(|it| (it.path.to_string(), it.id)).collect();
@@ -1775,6 +2087,13 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
     };
     for cd in cands {
         let key = cd.src.key();
+        // a source that can panic, replaced through its panic-explicit
+        // reading: its printed code is checked by the panic theorems
+        // against rustc's MIR of it (below), not by a comparison with its
+        // structured reading (an `Option` against the code that panics)
+        if cd.insts.iter().any(|i| i.panic.is_some()) {
+            continue;
+        }
         for h in &cd.helpers {
             let kname = format!("{mpath}::{}", h.name);
             if add(kname.clone(), h.refer, h.compare, &key, &mut order)? {
@@ -1810,28 +2129,20 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
     out.fn_globals = saved_globals;
     out.adts = saved_adts;
     let (defs, errors) = r.map_err(|e| format!("generated-mode elaboration: {e}"))?;
-    let mut verdicts: BTreeMap<String, Result<(), String>> = cands.iter().map(|cd| (cd.src.key(), Ok(()))).collect();
-    let fail = |v: &mut BTreeMap<String, Result<(), String>>, f: &str, e: String| {
-        if let Some(x) = v.get_mut(f)
-            && x.is_ok()
-        {
-            *x = Err(e);
-        }
-    };
     for (id, e) in errors {
         if id.0 == u32::MAX {
             return Err(format!("generated-mode elaboration: {e}"));
         }
         let n = k2.item(id).path.to_string();
         match owner.get(&n) {
-            Some(f) => fail(&mut verdicts, f, format!("`{n}`: {e}")),
+            Some(f) => fail(verdicts, f, format!("`{n}`: {e}")),
             None => return Err(format!("generated-mode elaboration of `{n}`: {e}")),
         }
     }
     let got: HashMap<&str, &crate::elab::generated::GenDef> = defs.iter().map(|d| (d.name.as_str(), d)).collect();
     for (kname, compare, f) in &expect {
         match got.get(kname.as_str()) {
-            None => fail(&mut verdicts, f, format!("`{kname}` was not elaborated")),
+            None => fail(verdicts, f, format!("`{kname}` was not elaborated")),
             Some(d) => {
                 let try_get = out.env.lookup_global("crate::__lift_model::buf_try_get_u8");
                 let norm = |t: &sandblaster_kernel::term::Tm| read_norm(&let_var_elim(t), try_get);
@@ -1842,100 +2153,115 @@ fn round_trip(c: &Checked, root: &Path, out: &mut Output, text: &str, mpath: &st
                     let _ = std::fs::write(std::path::Path::new(&p).join(format!("{}.rt.txt", kname.rsplit("::").next().unwrap_or("x"))), format!("PRINTED\n{}\n\nOPTIMIZED\n{cb}\n", pr(&d.body)));
                 }
                 if let Err(e) = crate::roundtrip::compare_with(out, d, *compare, &norm) {
-                    fail(&mut verdicts, f, format!("`{kname}` does not match its replacement: {e}"));
+                    fail(verdicts, f, format!("`{kname}` does not match its replacement: {e}"));
                 }
             }
         }
     }
     for (kname, ty_of, target, f) in &delegations {
         match got.get(kname.as_str()) {
-            None => fail(&mut verdicts, f, format!("`{kname}` was not elaborated")),
+            None => fail(verdicts, f, format!("`{kname}` was not elaborated")),
             Some(d) => {
                 if let Err(e) = is_delegation(out, d, *ty_of, *target) {
-                    fail(&mut verdicts, f, format!("`{kname}`: {e}"));
+                    fail(verdicts, f, format!("`{kname}`: {e}"));
                 }
             }
         }
     }
-    // a module read from MIR: the shipped code's theorems (the copies'
-    // and helpers' MIR, the code rustc compiles, against what the laws are
-    // about; docs/checked-structuring.md step 8) — a function without them
-    // keeps its source text
-    if let Some(rt) = &rt_text {
-        let mut rt_m = crate::mir::ir::parse(rt).map_err(|e| format!("the round trip's MIR: {e}"))?;
-        let mir_mpath = format!("{}{}", rt_m.krate, mpath.strip_prefix("crate").unwrap_or(mpath));
-        if fault == Some(LowerFault::ShippedMir)
-            && let Some(h) = cands.first().and_then(|cd| cd.helpers.first())
-        {
-            shipped_mir_fault(&mut rt_m, &format!("{mir_mpath}::{}", h.name));
-        }
-        let name = |g: GlobalId| out.env.global_name(g).map(|n| n.to_string()).unwrap_or_default();
-        let mut rfs = Vec::new();
-        let mut keys = Vec::new();
-        let passing: Vec<&Candidate> = cands.iter().filter(|cd| verdicts.get(&cd.src.key()).is_some_and(|v| v.is_ok())).collect();
-        for cd in passing {
-            let key = cd.src.key();
-            let helpers: Vec<(String, String)> = cd.helpers.iter().map(|h| (format!("{mir_mpath}::{}", h.name), name(h.compare))).collect();
-            for inst in &cd.insts {
-                let (source, target) = (name(inst.orig_global), name(inst.target));
-                let equiv = inst.link.clone().filter(|l| out.env.lookup_global(l).is_some());
-                let (copy_key, dispatch_key) = match (&cd.dispatch, &inst.ty) {
-                    (None, _) => (format!("{mir_mpath}::{CHECK_PREFIX}{key}"), None),
-                    // the copy at the instance type calls the dispatch impl method of that type
-                    (Some(d), Some(ty)) => {
-                        let m = rt_m.fns.keys().find(|k| k.contains(&format!("{DISPATCH_PREFIX}{} for {ty}>::{HELPER_PREFIX}{key}", d.bound))).cloned();
-                        (format!("{mir_mpath}::{CHECK_PREFIX}{key}::<{ty}>"), m)
-                    }
-                    (Some(_), None) => {
-                        fail(&mut verdicts, &key, "a dispatch instance without its type".to_string());
-                        continue;
-                    }
-                };
-                if cd.dispatch.is_some() && dispatch_key.is_none() {
-                    fail(&mut verdicts, &key, format!("no MIR of the dispatch impl method of `{key}` in the round trip's extraction"));
+    Ok(expect.len() + delegations.len())
+}
+
+/// Step 5 of the lifted round trip of a module read from rustc's MIR
+/// (docs/checked-structuring.md §5.13, docs/mir-lift.md §20.7): per
+/// candidate still passing, the theorems of its shipped code — every
+/// helper's MIR against the definition it replaces, the copy's (and a
+/// dispatch method's) MIR against the replacement's call, and from them,
+/// along the optimizer's kernel-checked link, `L::shipped::<id>` of the
+/// copy's MIR against the source function (for a function that can panic,
+/// `L::pthm::<id>` and `L::pshipped::<id>` against its panic-explicit
+/// reading). A function is replaced only when the trusted check
+/// (`mir::gate`) accepts them; these theorems are what decides it (no
+/// structural comparison of the copy's structured reading runs).
+#[allow(clippy::too_many_arguments)]
+fn shipped_theorems(c: &Checked, out: &mut Output, krate: &Crate, rt: &str, mpath: &str, cands: &[Candidate], fault: Option<LowerFault>, verdicts: &mut BTreeMap<String, Result<(), String>>) -> Result<(), String> {
+    let mut rt_m = crate::mir::ir::parse(rt).map_err(|e| format!("the round trip's MIR: {e}"))?;
+    let mir_mpath = format!("{}{}", rt_m.krate, mpath.strip_prefix("crate").unwrap_or(mpath));
+    if fault == Some(LowerFault::ShippedMir)
+        && let Some(h) = cands.first().and_then(|cd| cd.helpers.first())
+    {
+        shipped_mir_fault(&mut rt_m, &format!("{mir_mpath}::{}", h.name));
+    }
+    let name = |g: GlobalId| out.env.global_name(g).map(|n| n.to_string()).unwrap_or_default();
+    let mut rfs = Vec::new();
+    let mut keys = Vec::new();
+    let passing: Vec<&Candidate> = cands.iter().filter(|cd| verdicts.get(&cd.src.key()).is_some_and(|v| v.is_ok())).collect();
+    for cd in passing {
+        let key = cd.src.key();
+        let helpers: Vec<(String, String)> = cd.helpers.iter().map(|h| (format!("{mir_mpath}::{}", h.name), name(h.compare))).collect();
+        for inst in &cd.insts {
+            let (source, target) = (name(inst.orig_global), name(inst.target));
+            let equiv = inst.link.clone().filter(|l| out.env.lookup_global(l).is_some());
+            let (copy_key, dispatch_key) = match (&cd.dispatch, &inst.ty) {
+                (None, _) => (format!("{mir_mpath}::{CHECK_PREFIX}{key}"), None),
+                // the copy at the instance type calls the dispatch impl method of that type
+                (Some(d), Some(ty)) => {
+                    let m = rt_m.fns.keys().find(|k| k.contains(&format!("{DISPATCH_PREFIX}{} for {ty}>::{HELPER_PREFIX}{key}", d.bound))).cloned();
+                    (format!("{mir_mpath}::{CHECK_PREFIX}{key}::<{ty}>"), m)
+                }
+                (Some(_), None) => {
+                    fail(verdicts, &key, "a dispatch instance without its type".to_string());
                     continue;
                 }
-                rfs.push(crate::mir::checked::RoundTripFn { source, target, copy_key, dispatch_key, helpers: helpers.clone(), equiv });
-                keys.push(key.clone());
+            };
+            if cd.dispatch.is_some() && dispatch_key.is_none() {
+                fail(verdicts, &key, format!("no MIR of the dispatch impl method of `{key}` in the round trip's extraction"));
+                continue;
+            }
+            rfs.push(crate::mir::checked::RoundTripFn { source, target, copy_key, dispatch_key, helpers: helpers.clone(), equiv, panic: inst.panic.clone() });
+            keys.push(key.clone());
+        }
+    }
+    if !rfs.is_empty() {
+        let opts = crate::mir::checked::GateOptions { cache: c.cache.as_deref(), ..Default::default() };
+        let outs = crate::mir::checked::prove_roundtrip(out, &c.lift_facts, &rt_m.module, &rt_m, &rfs, &opts);
+        // (per source function: every instance's theorems)
+        let mut per: BTreeMap<String, (usize, usize, usize, String)> = BTreeMap::new();
+        for (o, key) in outs.into_iter().zip(keys.iter().cloned()) {
+            match o.result {
+                Ok(ps) => {
+                    let e = per.entry(key).or_insert((0, 0, 0, o.source.clone()));
+                    let cached = ps.iter().any(|(_, p)| p.stats == "cached");
+                    if cached {
+                        e.2 += 1;
+                    } else {
+                        e.0 += ps.len();
+                        e.1 += ps.iter().filter(|(_, p)| p.kind == "shipped theorem").count();
+                    }
+                }
+                Err(e) => fail(verdicts, &key, format!("the shipped code's theorem: {e}")),
             }
         }
-        if !rfs.is_empty() {
-            let opts = crate::mir::checked::GateOptions { cache: c.cache.as_deref(), ..Default::default() };
-            let outs = crate::mir::checked::prove_roundtrip(out, &c.lift_facts, &rt_m.module, &rt_m, &rfs, &opts);
-            // (per source function: every instance's theorems)
-            let mut per: BTreeMap<String, (usize, usize, usize, String)> = BTreeMap::new();
-            for (o, key) in outs.into_iter().zip(keys.iter().cloned()) {
-                match o.result {
-                    Ok(ps) => {
-                        let e = per.entry(key).or_insert((0, 0, 0, o.source.clone()));
-                        let cached = ps.iter().any(|(_, p)| p.stats == "cached");
-                        if cached {
-                            e.2 += 1;
-                        } else {
-                            e.0 += ps.len();
-                            e.1 += ps.iter().filter(|(_, p)| p.kind == "shipped theorem").count();
-                        }
-                    }
-                    Err(e) => fail(&mut verdicts, &key, format!("the shipped code's theorem: {e}")),
-                }
+        // a function is replaced only when the trusted check finds the
+        // shipped code's theorem in the kernel (crate::mir::gate)
+        for (rf, key) in rfs.iter().zip(&keys) {
+            let accepted = match &rf.panic {
+                // the panic theorems of the source's MIR and of the copy's, each against the reading
+                Some(src) => out.mir_gate.ledger.accept_shipped_panic(&out.env, krate, &rt_m, &c.lift_facts, &rf.copy_key, src, &rf.source),
+                None => out.mir_gate.ledger.accept_shipped(&out.env, krate, &rt_m, &c.lift_facts, &rf.copy_key, &rf.source),
+            };
+            if let Err(e) = accepted {
+                fail(verdicts, key, format!("the shipped code's theorem: {e}"));
             }
-            // a function is replaced only when the trusted check finds the
-            // shipped code's theorem in the kernel (crate::mir::gate)
-            for (rf, key) in rfs.iter().zip(&keys) {
-                if let Err(e) = out.mir_gate.ledger.accept_shipped(&out.env, krate, &rt_m, &c.lift_facts, &rf.copy_key, &rf.source) {
-                    fail(&mut verdicts, key, format!("the shipped code's theorem: {e}"));
-                }
-            }
-            for (key, (n, shipped, cached, source)) in per {
-                if verdicts.get(&key).is_some_and(|v| v.is_ok()) {
-                    let src = cands.iter().find(|cd| cd.src.key() == key).map(|cd| cd.src.path(mpath)).unwrap_or(source);
-                    let from_cache = if cached > 0 { format!("; {cached} instance(s) from the verdict cache") } else { String::new() };
-                    out_notes_push(out, format!("`{src}`: {n} theorem(s) of the shipped MIR ({shipped} against the source function{from_cache})"));
-                }
+        }
+        for (key, (n, shipped, cached, source)) in per {
+            if verdicts.get(&key).is_some_and(|v| v.is_ok()) {
+                let src = cands.iter().find(|cd| cd.src.key() == key).map(|cd| cd.src.path(mpath)).unwrap_or(source);
+                let from_cache = if cached > 0 { format!("; {cached} instance(s) from the verdict cache") } else { String::new() };
+                out_notes_push(out, format!("`{src}`: {n} theorem(s) of the shipped MIR ({shipped} against the source function{from_cache})"));
             }
         }
     }
-    Ok((verdicts, expect.len() + delegations.len()))
+    Ok(())
 }
 
 /// [`LowerFault::ShippedMir`]: the first integer constant of `key`'s MIR
@@ -2209,6 +2535,24 @@ fn is_delegation(out: &Output, d: &crate::elab::generated::GenDef, ty_of: Global
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The read-back of a file lifted with `items = ".."` lists the round
+    /// trip's new items (`round_trip`).
+    #[test]
+    fn the_read_back_lists_the_new_items() {
+        let old = "pub fn f(x: u8) -> u8 { x }\npub fn g() {}\n";
+        let new = "pub fn f(x: u8) -> u8 { __sandblaster_opt_f(x) }\npub fn g() {}\nfn __sandblaster_check__f(x: u8) -> u8 { x }\nfn __sandblaster_opt_f(l0_x: u8) -> u8 { l0_x }\n";
+        let added = new_items(old, new);
+        assert_eq!(added, vec!["__sandblaster_check__f".to_string(), "__sandblaster_opt_f".to_string()]);
+        let root = "//! Root.\n#[lift(mir = \"h1.sbmir\", in_place, items = \"f\")]\n#[path = \"../h1/src/lib.rs\"]\npub mod h1;\n\npub use h1::f;\n";
+        let got = with_items(root, "h1", &added).expect("the declaration");
+        assert!(got.contains("items = \"f, __sandblaster_check__f, __sandblaster_opt_f\")"), "{got}");
+        assert_eq!(got.replace(", __sandblaster_check__f, __sandblaster_opt_f", ""), root);
+        // another module's declaration, or one without `items`, is left alone
+        assert!(with_items(root, "h2", &added).is_none());
+        assert!(with_items("#[lift(mir = \"a.sbmir\", in_place)]\nmod h1;\n", "h1", &added).is_none());
+        assert!(new_items("fn f( {", new).is_empty());
+    }
 
     fn one(text: &str, name: &str) -> SourceFn {
         source_fns(text).unwrap().into_iter().find(|f| f.name == name).unwrap_or_else(|| panic!("no `{name}`"))

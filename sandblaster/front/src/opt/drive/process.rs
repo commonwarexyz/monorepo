@@ -734,12 +734,12 @@ impl<'a> Driver<'a> {
     /// decide it when intervals do, with every fact when a fact relates
     /// several of its atoms, never otherwise.
     /// The lemma rewriting a decided checked arithmetic call of `def`
-    /// (`w::checked_add` / `w::checked_sub`): `w::checked_{op}_some`
+    /// (`w::checked_add`, .., [`super::CHECKED_OPS`]): `w::checked_{op}_some`
     /// (`some`) or `_none`, when `def` is one and the lemma is loaded.
     pub fn checked_lemma(&self, def: GlobalId, some: bool) -> Option<GlobalId> {
         let name = self.env.global_name(def)?;
         let (w, op) = name.split_once("::")?;
-        if !matches!(w, "u8" | "u16" | "u32" | "u64" | "usize") || !matches!(op, "checked_add" | "checked_sub") {
+        if !matches!(w, "u8" | "u16" | "u32" | "u64" | "usize") || !super::CHECKED_OPS.contains(&op) {
             return None;
         }
         self.env.lookup_global(&format!("{name}_{}", if some { "some" } else { "none" }))

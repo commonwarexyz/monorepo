@@ -724,6 +724,258 @@ fn a_core_type_the_structured_reading_models_is_erased_field_by_field() {
 }
 
 // ---------------------------------------------------------------------------
+// reader widening: rotations, signed checked arithmetic, `?`'s residual,
+// bytes to words, core's slice iterator and a slice's `get` by a range
+// ---------------------------------------------------------------------------
+
+const WIDEN: &str = r#"(adt-def "std::convert::Infallible" (path "std::convert::Infallible") (kind enum) (args ()))
+(adt-def "std::option::Option<std::convert::Infallible>" (path "std::option::Option") (kind enum) (args ((adt "std::convert::Infallible")))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" (adt "std::convert::Infallible")) (no-glue)))
+(adt-def "std::option::Option<u8>" (path "std::option::Option") (kind enum) (args (u8))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" u8) (no-glue)))
+(adt-def "std::option::Option<&u8>" (path "std::option::Option") (kind enum) (args ((ref shared u8)))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" (ref shared u8)) (no-glue)))
+(adt-def "std::option::Option<&[u8]>" (path "std::option::Option") (kind enum) (args ((ref shared (slice u8))))
+  (variant 0 "None" 0 (no-glue))
+  (variant 1 "Some" 1 (field "0" (ref shared (slice u8))) (no-glue)))
+(adt-def "std::slice::Iter<'_, u8>" (path "std::slice::Iter") (kind struct) (args (u8))
+  (variant 0 "Iter" 0 (field "ptr" (unsupported "type RawPtr")) (field "end_or_len" (unsupported "type RawPtr")) (no-glue)))
+(adt-def "std::ops::Range<usize>" (path "std::ops::Range") (kind struct) (args (usize))
+  (variant 0 "Range" 0 (field "start" usize) (field "end" usize) (no-glue)))
+(adt-def "std::ops::RangeTo<usize>" (path "std::ops::RangeTo") (kind struct) (args (usize))
+  (variant 0 "RangeTo" 0 (field "end" usize) (no-glue)))
+(adt-def "std::ops::RangeFrom<usize>" (path "std::ops::RangeFrom") (kind struct) (args (usize))
+  (variant 0 "RangeFrom" 0 (field "start" usize) (no-glue)))
+(adt-def "std::ops::RangeToInclusive<usize>" (path "std::ops::RangeToInclusive") (kind struct) (args (usize))
+  (variant 0 "RangeToInclusive" 0 (field "end" usize) (no-glue)))
+(adt-def "k::myops::Range<usize>" (path "k::myops::Range") (kind struct) (args (usize))
+  (variant 0 "Range" 0 (field "start" usize) (field "end" usize) (no-glue)))
+(fn "k::m::rotl" (kind root) (def "k::m::rotl") (args ()) (item fn "rotl") (argc 2)
+  (locals (0 u32 mut) (1 u32 imm) (2 u32 imm))
+  (bb 0 (call (intrinsic "rotate_left" (u32)) (args (copy (p 1)) (copy (p 2))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::rotr" (kind root) (def "k::m::rotr") (args ()) (item fn "rotr") (argc 2)
+  (locals (0 u8 mut) (1 u8 imm) (2 u32 imm))
+  (bb 0 (call (intrinsic "rotate_right" (u8)) (args (copy (p 1)) (copy (p 2))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::sadd" (kind root) (def "k::m::sadd") (args ()) (item fn "sadd") (argc 2)
+  (locals (0 (tuple i32 bool) mut) (1 i32 imm) (2 i32 imm))
+  (bb 0 (assign (p 0) (checked add (copy (p 1)) (copy (p 2)))) (return)))
+(fn "k::m::ssub" (kind root) (def "k::m::ssub") (args ()) (item fn "ssub") (argc 2)
+  (locals (0 (tuple i8 bool) mut) (1 i8 imm) (2 i8 imm))
+  (bb 0 (assign (p 0) (checked sub (copy (p 1)) (copy (p 2)))) (return)))
+(fn "k::m::smul" (kind root) (def "k::m::smul") (args ()) (item fn "smul") (argc 2)
+  (locals (0 (tuple i32 bool) mut) (1 i32 imm) (2 i32 imm))
+  (bb 0 (assign (p 0) (checked mul (copy (p 1)) (copy (p 2)))) (return)))
+(fn "k::m::resid" (kind root) (def "k::m::resid") (args ()) (item fn "resid") (argc 0)
+  (locals (0 bool mut) (1 (adt "std::option::Option<std::convert::Infallible>") imm) (2 isize mut))
+  (bb 0 (assign (p 2) (discr (p 1))) (assign (p 0) (bin eq (copy (p 2)) (int isize 0))) (return)))
+(fn "k::m::residc" (kind root) (def "k::m::residc") (args ()) (item fn "residc") (argc 0)
+  (locals (0 (adt "std::option::Option<std::convert::Infallible>") mut))
+  (bb 0 (assign (p 0) (use (zst (adt "std::option::Option<std::convert::Infallible>")))) (return)))
+(fn "k::m::unset8" (kind root) (def "k::m::unset8") (args ()) (item fn "unset8") (argc 0)
+  (locals (0 bool mut) (1 (adt "std::option::Option<u8>") imm) (2 isize mut))
+  (bb 0 (assign (p 2) (discr (p 1))) (assign (p 0) (bin eq (copy (p 2)) (int isize 0))) (return)))
+(fn "k::m::le4" (kind root) (def "k::m::le4") (args ()) (item fn "le4") (argc 1)
+  (locals (0 u32 mut) (1 (array u8 4) imm))
+  (bb 0 (assign (p 0) (cast transmute (copy (p 1)) u32)) (return)))
+(fn "k::m::le3" (kind root) (def "k::m::le3") (args ()) (item fn "le3") (argc 1)
+  (locals (0 u32 mut) (1 (array u8 3) imm))
+  (bb 0 (assign (p 0) (cast transmute (copy (p 1)) u32)) (return)))
+(fn "core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter" (kind callee) (def "core::slice::iter::<impl std::iter::IntoIterator for &'a [T]>::into_iter") (args (u8)) (item impl (ref shared (slice u8)) "IntoIterator" () "into_iter") (argc 1)
+  (locals (0 (adt "std::slice::Iter<'_, u8>") mut) (1 (ref shared (slice u8)) imm))
+  (bb 0 (unreachable)))
+(fn "<std::slice::Iter<'_, u8> as std::iter::Iterator>::next" (kind callee) (def "<std::slice::Iter<'a, T> as std::iter::Iterator>::next") (args (u8)) (item impl (adt "std::slice::Iter<'_, u8>") "Iterator" () "next") (argc 1)
+  (locals (0 (adt "std::option::Option<&u8>") mut) (1 (ref mut (adt "std::slice::Iter<'_, u8>")) imm))
+  (bb 0 (unreachable)))
+(fn "<k::m::Iter<'_, u8> as std::iter::Iterator>::next" (kind callee) (def "<k::m::Iter<'a, T> as std::iter::Iterator>::next") (args (u8)) (item impl (adt "std::slice::Iter<'_, u8>") "Iterator" () "next") (argc 1)
+  (locals (0 (adt "std::option::Option<&u8>") mut) (1 (ref mut (adt "std::slice::Iter<'_, u8>")) imm))
+  (bb 0 (unreachable)))
+(fn "k::m::sum" (kind root) (def "k::m::sum") (args ()) (item fn "sum") (argc 1)
+  (locals (0 u64 mut) (1 (ref shared (slice u8)) imm) (2 (adt "std::slice::Iter<'_, u8>") mut) (3 (adt "std::option::Option<&u8>") mut) (4 (ref mut (adt "std::slice::Iter<'_, u8>")) mut) (5 isize mut) (6 u8 mut) (7 u64 mut))
+  (bb 0 (assign (p 0) (use (int u64 0))) (call (fn "core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter") (args (copy (p 1))) (p 2) 1))
+  (bb 1 (assign (p 4) (ref mut (p 2))) (call (fn "<std::slice::Iter<'_, u8> as std::iter::Iterator>::next") (args (copy (p 4))) (p 3) 2))
+  (bb 2 (assign (p 5) (discr (p 3))) (switch (move (p 5)) (0 4) (1 3) (otherwise 5)))
+  (bb 3 (assign (p 6) (use (copy (p 3 (downcast 1) (field 0 (ref shared u8)) deref)))) (assign (p 7) (cast int-to-int (copy (p 6)) u64)) (assign (p 0) (bin add (copy (p 0)) (copy (p 7)))) (goto 1))
+  (bb 4 (return))
+  (bb 5 (unreachable)))
+(fn "k::m::mysum" (kind root) (def "k::m::mysum") (args ()) (item fn "mysum") (argc 1)
+  (locals (0 u64 mut) (1 (ref shared (slice u8)) imm) (2 (adt "std::slice::Iter<'_, u8>") mut) (3 (adt "std::option::Option<&u8>") mut) (4 (ref mut (adt "std::slice::Iter<'_, u8>")) mut) (5 isize mut) (6 u8 mut) (7 u64 mut))
+  (bb 0 (assign (p 0) (use (int u64 0))) (call (fn "core::slice::iter::<impl std::iter::IntoIterator for &[u8]>::into_iter") (args (copy (p 1))) (p 2) 1))
+  (bb 1 (assign (p 4) (ref mut (p 2))) (call (fn "<k::m::Iter<'_, u8> as std::iter::Iterator>::next") (args (copy (p 4))) (p 3) 2))
+  (bb 2 (assign (p 5) (discr (p 3))) (switch (move (p 5)) (0 4) (1 3) (otherwise 5)))
+  (bb 3 (assign (p 6) (use (copy (p 3 (downcast 1) (field 0 (ref shared u8)) deref)))) (assign (p 7) (cast int-to-int (copy (p 6)) u64)) (assign (p 0) (bin add (copy (p 0)) (copy (p 7)))) (goto 1))
+  (bb 4 (return))
+  (bb 5 (unreachable)))
+(fn "<std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::get" (kind callee) (def "<std::ops::Range<usize> as std::slice::SliceIndex<[T]>>::get") (args (u8)) (item impl (adt "std::ops::Range<usize>") "SliceIndex" ((slice u8)) "get") (argc 2)
+  (locals (0 (adt "std::option::Option<&[u8]>") mut) (1 (adt "std::ops::Range<usize>") imm) (2 (ref shared (slice u8)) imm))
+  (bb 0 (unreachable)))
+(fn "k::m::win" (kind root) (def "k::m::win") (args ()) (item fn "win") (argc 3)
+  (locals (0 (adt "std::option::Option<&[u8]>") mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 usize imm) (4 (adt "std::ops::Range<usize>") mut))
+  (bb 0 (assign (p 4) (agg (adt (adt "std::ops::Range<usize>") 0) (copy (p 2)) (copy (p 3)))) (call (fn "<std::ops::Range<usize> as std::slice::SliceIndex<[u8]>>::get") (args (move (p 4)) (copy (p 1))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::sto" (kind root) (def "k::m::sto") (args ()) (item fn "sto") (argc 2)
+  (locals (0 (ref shared (slice u8)) mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 (adt "std::ops::RangeTo<usize>") mut))
+  (bb 0 (assign (p 3) (agg (adt (adt "std::ops::RangeTo<usize>") 0) (copy (p 2)))) (call (leaf "std::ops::Index::index" ((slice u8) (adt "std::ops::RangeTo<usize>"))) (args (copy (p 1)) (move (p 3))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::sfrom" (kind root) (def "k::m::sfrom") (args ()) (item fn "sfrom") (argc 2)
+  (locals (0 (ref shared (slice u8)) mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 (adt "std::ops::RangeFrom<usize>") mut))
+  (bb 0 (assign (p 3) (agg (adt (adt "std::ops::RangeFrom<usize>") 0) (copy (p 2)))) (call (leaf "std::ops::Index::index" ((slice u8) (adt "std::ops::RangeFrom<usize>"))) (args (copy (p 1)) (move (p 3))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::srange" (kind root) (def "k::m::srange") (args ()) (item fn "srange") (argc 3)
+  (locals (0 (ref shared (slice u8)) mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 usize imm) (4 (adt "std::ops::Range<usize>") mut))
+  (bb 0 (assign (p 4) (agg (adt (adt "std::ops::Range<usize>") 0) (copy (p 2)) (copy (p 3)))) (call (leaf "std::ops::Index::index" ((slice u8) (adt "std::ops::Range<usize>"))) (args (copy (p 1)) (move (p 4))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::sincl" (kind root) (def "k::m::sincl") (args ()) (item fn "sincl") (argc 2)
+  (locals (0 (ref shared (slice u8)) mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 (adt "std::ops::RangeToInclusive<usize>") mut))
+  (bb 0 (assign (p 3) (agg (adt (adt "std::ops::RangeToInclusive<usize>") 0) (copy (p 2)))) (call (leaf "std::ops::Index::index" ((slice u8) (adt "std::ops::RangeToInclusive<usize>"))) (args (copy (p 1)) (move (p 3))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::smyrange" (kind root) (def "k::m::smyrange") (args ()) (item fn "smyrange") (argc 3)
+  (locals (0 (ref shared (slice u8)) mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 usize imm) (4 (adt "k::myops::Range<usize>") mut))
+  (bb 0 (assign (p 4) (agg (adt (adt "k::myops::Range<usize>") 0) (copy (p 2)) (copy (p 3)))) (call (leaf "std::ops::Index::index" ((slice u8) (adt "k::myops::Range<usize>"))) (args (copy (p 1)) (move (p 4))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::smyidx" (kind root) (def "k::m::smyidx") (args ()) (item fn "smyidx") (argc 3)
+  (locals (0 (ref shared (slice u8)) mut) (1 (ref shared (slice u8)) imm) (2 usize imm) (3 usize imm) (4 (adt "std::ops::Range<usize>") mut))
+  (bb 0 (assign (p 4) (agg (adt (adt "std::ops::Range<usize>") 0) (copy (p 2)) (copy (p 3)))) (call (leaf "k::myops::Index::index" ((slice u8) (adt "std::ops::Range<usize>"))) (args (copy (p 1)) (move (p 4))) (p 0) 1))
+  (bb 1 (return)))
+"#;
+
+/// A slice of bytes (core text).
+fn sl(bytes: &[u8]) -> String {
+    let n = bytes.len();
+    let l = bytes.iter().rev().fold("Nil[U8]".to_string(), |l, b| format!("Cons[U8]({b}u8, {l})"));
+    format!("slice::mk U8 {n}usize ({l}) .pair(SliceOk U8 {n}usize ({l}), refl(Int, {n}int), refl(Bool, true))")
+}
+
+#[test]
+fn rotations_take_their_amount_modulo_the_width() {
+    with_env(|env| {
+        let fx = load(env, WIDEN);
+        // 0x8000_0001 rotated left by 1 is 3; by 33 the same (Rust: the amount modulo 32)
+        same(env, &fx.run("rotl", 0, &["2147483649u32", "1u32"]), "Some[U32](3u32)");
+        same(env, &fx.run("rotl", 0, &["2147483649u32", "33u32"]), "Some[U32](3u32)");
+        // negative twin: a rotation is not a shift (the high bit comes back)
+        same(env, &fx.run("rotl", 0, &["2147483648u32", "1u32"]), "Some[U32](1u32)");
+        same(env, &fx.run("rotr", 0, &["1u8", "1u32"]), "Some[U8](128u8)");
+        assert!(fx.lf("rotl").faults.is_empty() && fx.lf("rotr").faults.is_empty());
+    });
+}
+
+#[test]
+fn signed_checked_arithmetic_flags_exactly_the_overflows_of_the_signed_range() {
+    with_env(|env| {
+        let fx = load(env, WIDEN);
+        let i32v = |v: i32| format!("crate::__lift::I32::I32({}u32)", v as u32);
+        let pair = |v: i32, o: bool| format!("Some[Tuple2(crate::__lift::I32, Bool)](tuple2[crate::__lift::I32, Bool]({}, {o}))", i32v(v));
+        same(env, &fx.run("sadd", 0, &[&i32v(i32::MAX), &i32v(1)]), &pair(i32::MIN, true));
+        same(env, &fx.run("sadd", 0, &[&i32v(-1), &i32v(i32::MIN)]), &pair(i32::MAX, true));
+        same(env, &fx.run("sadd", 0, &[&i32v(-5), &i32v(3)]), &pair(-2, false));
+        // negative twin: what is an overflow of the unsigned bits (-1 + 1) is none here
+        same(env, &fx.run("sadd", 0, &[&i32v(-1), &i32v(1)]), &pair(0, false));
+        let p8 = |v: i8, o: bool| format!("Some[Tuple2(U8, Bool)](tuple2[U8, Bool]({}u8, {o}))", v as u8);
+        same(env, &fx.run("ssub", 0, &[&format!("{}u8", i8::MIN as u8), "1u8"]), &p8(i8::MAX, true));
+        same(env, &fx.run("ssub", 0, &["0u8", &format!("{}u8", i8::MIN as u8)]), &p8(i8::MIN, true));
+        same(env, &fx.run("ssub", 0, &[&format!("{}u8", (-100i8) as u8), &format!("{}u8", 27u8)]), &p8(-127, false));
+        // a signed checked multiplication is not modeled
+        assert!(fx.lf("smul").faults.iter().any(|f| f.contains("checked mul")), "{:?}", fx.lf("smul").faults);
+    });
+}
+
+#[test]
+fn the_residual_of_question_mark_on_option_is_its_one_value_even_unassigned() {
+    with_env(|env| {
+        let fx = load(env, WIDEN);
+        // `Option<Infallible>` has one value, `None`: read unassigned (rustc drops
+        // the assignment of a zero-sized value) and as a zero-sized constant
+        same(env, &fx.run("resid", 0, &[]), "Some[Bool](true)");
+        same(env, &fx.run("residc", 0, &[]), "Some[Option(mir::Infallible)](None[mir::Infallible])");
+        // negative twin: an `Option<u8>` read unassigned is a failure
+        same(env, &fx.run("unset8", 0, &[]), "None[Bool]");
+    });
+}
+
+#[test]
+fn bytes_transmuted_to_a_word_are_its_little_endian_bytes() {
+    with_env(|env| {
+        let fx = load(env, WIDEN);
+        let a = "pair(Array U8 4usize, Cons[U8](1u8, Cons[U8](2u8, Cons[U8](3u8, Cons[U8](4u8, Nil[U8])))), refl(Int, 4int))";
+        same(env, &fx.run("le4", 0, &[a]), "Some[U32](67305985u32)");
+        // negative twin: three bytes are no `u32` (not modeled)
+        assert!(fx.lf("le3").faults.iter().any(|f| f.contains("transmute")), "{:?}", fx.lf("le3").faults);
+    });
+}
+
+#[test]
+fn core_slice_iterator_is_its_slice_and_index_and_yields_each_element_once() {
+    with_env(|env| {
+        let fx = load(env, WIDEN);
+        assert_eq!(fx.lit.state.adt_ty("std::slice::Iter<'_, u8>").as_deref(), Some("Tuple2((Slice U8), Usize)"));
+        // 1 + 2 + 250: the header is entered once per element and once more
+        same(env, &fx.run("sum", 4, &[&sl(&[1, 2, 250])]), "Some[U64](253u64)");
+        same(env, &fx.run("sum", 1, &[&sl(&[])]), "Some[U64](0u64)");
+        // negative twin: one unit of fuel less is out of fuel
+        same(env, &fx.run("sum", 3, &[&sl(&[1, 2, 250])]), "None[U64]");
+        // a function only named like core's `next` is read from its MIR (here
+        // `unreachable`): the model is core's, by its exact path
+        same(env, &fx.run("mysum", 4, &[&sl(&[1, 2, 250])]), "None[U64]");
+        assert!(fx.lf("sum").faults.is_empty(), "{:?}", fx.lf("sum").faults);
+    });
+}
+
+#[test]
+fn a_slices_get_by_a_range_is_the_subslice_or_none() {
+    with_env(|env| {
+        let fx = load(env, WIDEN);
+        let some = |b: &[u8]| format!("Some[Option(Slice U8)](Some[Slice U8]({}))", sl(b));
+        let none = "Some[Option(Slice U8)](None[Slice U8])";
+        same(env, &fx.run("win", 0, &[&sl(&[10, 20, 30]), "1usize", "3usize"]), &some(&[20, 30]));
+        same(env, &fx.run("win", 0, &[&sl(&[10, 20, 30]), "3usize", "3usize"]), &some(&[]));
+        // `None` is a value here, not a panic: start past end, end past the length
+        same(env, &fx.run("win", 0, &[&sl(&[10, 20, 30]), "2usize", "1usize"]), none);
+        same(env, &fx.run("win", 0, &[&sl(&[10, 20, 30]), "1usize", "4usize"]), none);
+    });
+}
+
+/// A slice's sub-slices by core's `Index` (stage finish-A: `&data[i..i + 4]`
+/// in the copy rustc compiles of a printed residual) are the array's leaves
+/// over the slice, `leaf::slice_*`: the sub-slice, or a panic (`None`) where
+/// Rust panics. Core's `Index` and range types by their exact paths only.
+#[test]
+fn a_slices_index_by_a_range_is_the_subslice_or_a_panic() {
+    with_env(|env| {
+        let fx = load(env, WIDEN);
+        let s = sl(&[10, 20, 30]);
+        let some = |b: &[u8]| format!("Some[Slice U8]({})", sl(b));
+        let panic = "None[Slice U8]";
+        for f in ["sto", "sfrom", "srange", "sincl"] {
+            assert!(fx.lf(f).faults.is_empty(), "{f}: {:?}", fx.lf(f).faults);
+        }
+        same(env, &fx.run("sto", 0, &[&s, "2usize"]), &some(&[10, 20]));
+        same(env, &fx.run("sto", 0, &[&s, "3usize"]), &some(&[10, 20, 30]));
+        same(env, &fx.run("sto", 0, &[&s, "4usize"]), panic);
+        same(env, &fx.run("sfrom", 0, &[&s, "1usize"]), &some(&[20, 30]));
+        same(env, &fx.run("sfrom", 0, &[&s, "3usize"]), &some(&[]));
+        same(env, &fx.run("sfrom", 0, &[&s, "4usize"]), panic);
+        same(env, &fx.run("srange", 0, &[&s, "1usize", "3usize"]), &some(&[20, 30]));
+        same(env, &fx.run("srange", 0, &[&s, "2usize", "2usize"]), &some(&[]));
+        // start past end, end past the length: Rust panics (unlike `get`'s `None` value)
+        same(env, &fx.run("srange", 0, &[&s, "2usize", "1usize"]), panic);
+        same(env, &fx.run("srange", 0, &[&s, "1usize", "4usize"]), panic);
+        same(env, &fx.run("sincl", 0, &[&s, "1usize"]), &some(&[10, 20]));
+        same(env, &fx.run("sincl", 0, &[&s, "2usize"]), &some(&[10, 20, 30]));
+        same(env, &fx.run("sincl", 0, &[&s, "3usize"]), panic);
+        // negative twins: a crate's own range type, a crate's own `Index`
+        assert!(fx.lf("smyrange").faults.iter().any(|f| f.contains("k::myops::Range")), "{:?}", fx.lf("smyrange").faults);
+        same(env, &fx.run("smyrange", 0, &[&s, "1usize", "3usize"]), panic);
+        assert!(fx.lf("smyidx").faults.iter().any(|f| f.contains("k::myops::Index::index")), "{:?}", fx.lf("smyidx").faults);
+        same(env, &fx.run("smyidx", 0, &[&s, "1usize", "3usize"]), panic);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // acceptance: every MIR instance of the three crates, and the first theorems
 // ---------------------------------------------------------------------------
 

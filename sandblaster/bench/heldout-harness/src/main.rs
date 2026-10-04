@@ -253,6 +253,90 @@ fn cases() -> Vec<Box<dyn Case>> {
     ]
 }
 
+/// A signed value of uniform bit length in 0..=bits, either sign.
+fn signed(r: &mut Rng, bits: u32) -> i64 {
+    let v = r.bits(bits) as i64;
+    if r.below(2) == 0 { v } else { -v }
+}
+
+/// Held-out v2's H1 (`probe::v2_<fn>`). Inputs respect each function's
+/// documented preconditions and keep its arithmetic from overflowing (an
+/// overflow panics with overflow checks on, in every subject alike, and the
+/// differential check compares values, not panics): coordinates and years
+/// small enough that sums and products fit.
+fn cases_v2() -> Vec<Box<dyn Case>> {
+    const DIGITS: &[u8] = b"0123456789";
+    const HEX: &[u8] = b"0123456789abcdefABCDEFg";
+    const BRACKETS: &[u8] = b"()[]{}a";
+    let sorted_i32 = |r: &mut Rng, n: u64| {
+        let mut v: Vec<i32> = (0..r.below(n + 1)).map(|_| signed(r, 20) as i32).collect();
+        v.sort();
+        v
+    };
+    vec![
+        row!("H1v2", v2_parse_u32, gen("parse_u32", vec![vec![], b"0".to_vec(), b"4294967295".to_vec(), b"4294967296".to_vec(), b"12a".to_vec()], |r| { let mut v = r.bytes(12, DIGITS); if r.below(8) == 0 && !v.is_empty() { let i = r.below(v.len() as u64) as usize; v[i] = b'x'; } v }), |v| (v)),
+        row!("H1v2", v2_hex_encode_lower, gen("hex_encode_lower", vec![vec![], vec![0, 255]], |r| r.bytes(32, &[])), |v| (v)),
+        row!("H1v2", v2_hex_decode, gen("hex_decode", vec![vec![], b"0".to_vec(), b"aF".to_vec(), b"zz".to_vec()], |r| r.bytes(32, HEX)), |v| (v)),
+        row!("H1v2", v2_adler32, gen("adler32", vec![vec![], b"Wikipedia".to_vec()], |r| r.bytes(64, &[])), |v| (v)),
+        row!("H1v2", v2_fletcher16, gen("fletcher16", vec![vec![], b"abcde".to_vec()], |r| r.bytes(64, &[])), |v| (v)),
+        row!("H1v2", v2_luhn_valid, gen("luhn_valid", vec![vec![], b"79927398713".to_vec(), b"7992739871x".to_vec()], |r| { let mut v = r.bytes(19, DIGITS); if r.below(8) == 0 && !v.is_empty() { let i = r.below(v.len() as u64) as usize; v[i] = b'/'; } v }), |v| (v)),
+        // coordinates below 2^29 in magnitude: the two distances add without overflow
+        row!("H1v2", v2_manhattan, gen("manhattan", vec![((0, 0), (0, 0)), ((-(1 << 28), 1 << 28), (1 << 28, -(1 << 28)))], |r| ((signed(r, 28) as i32, signed(r, 28) as i32), (signed(r, 28) as i32, signed(r, 28) as i32))), |&(a, b)| (a, b)),
+        // coordinates below 2^29: `right - left` and `top - bottom` fit an i32
+        row!("H1v2", v2_rect_intersection_area, gen("rect_intersection_area", vec![((0, 0, 2, 2), (1, 1, 3, 3)), ((0, 0, 1, 1), (1, 0, 2, 1))], |r| { let mut g = || signed(r, 28) as i32; ((g(), g(), g(), g()), (g(), g(), g(), g())) }), |&(a, b)| (a, b)),
+        // up to 32 vertices below 2^20: every cross product and their sum fit an i64
+        row!("H1v2", v2_polygon_twice_area, gen("polygon_twice_area", vec![vec![], vec![(0, 0), (4, 0), (0, 3)]], |r| (0..r.below(33)).map(|_| (signed(r, 20) as i32, signed(r, 20) as i32)).collect::<Vec<_>>()), |v| (v)),
+        row!("H1v2", v2_is_leap_year, gen("is_leap_year", vec![0, 1900, 2000, 2024, u32::MAX], |r| r.u32()), |&y| (y)),
+        // month in 1..=12 (it panics otherwise, as documented)
+        row!("H1v2", v2_days_in_month, gen("days_in_month", vec![(2023, 2), (2024, 2), (1900, 2), (2000, 2)], |r| (r.u32(), 1 + r.below(12) as u32)), |&(y, m)| (y, m)),
+        // year in 1..=2^28 (at least 1, as documented; small enough that `y + y / 4 + ..` fits), month 1..=12
+        row!("H1v2", v2_day_of_week, gen("day_of_week", vec![(2026, 10, 2), (1, 1, 1), (2000, 2, 29)], |r| (1 + r.bits(28) as u32, 1 + r.below(12) as u32, 1 + r.below(31) as u32)), |&(y, m, d)| (y, m, d)),
+        row!("H1v2", v2_day_of_year, gen("day_of_year", vec![(2026, 10, 2), (2024, 12, 31), (2023, 1, 1)], |r| (r.u32(), 1 + r.below(12) as u32, 1 + r.below(31) as u32)), |&(y, m, d)| (y, m, d)),
+        row!("H1v2", v2_seconds_to_hms, gen("seconds_to_hms", vec![0, 59, 3600, 86399, u64::MAX], |r| r.u64()), |&t| (t)),
+        row!("H1v2", v2_count_overlapping_pairs, gen("count_overlapping_pairs", vec![vec![], vec![(0, 2), (1, 3), (2, 4)]], |r| (0..r.below(25)).map(|_| { let a = r.bits(10) as u32; (a, a + r.bits(8) as u32) }).collect::<Vec<_>>()), |v| (v)),
+        row!("H1v2", v2_high_nibble_histogram, gen("high_nibble_histogram", vec![vec![], vec![0, 0x10, 0xff]], |r| r.bytes(64, &[])), |v| (v)),
+        row!("H1v2", v2_argmax, gen("argmax", vec![vec![], vec![3, 7, 7, 1]], |r| (0..r.below(33)).map(|_| signed(r, 31) as i32).collect::<Vec<_>>()), |v| (v)),
+        row!("H1v2", v2_min_max, gen("min_max", vec![vec![], vec![5], vec![3, 1, 4, 1, 5]], |r| (0..r.below(33)).map(|_| r.bits(16) as u16).collect::<Vec<_>>()), |v| (v)),
+        row!("H1v2", v2_prefix_sums, gen("prefix_sums", vec![vec![], vec![u32::MAX, u32::MAX]], |r| (0..r.below(33)).map(|_| r.u32()).collect::<Vec<_>>()), |v| (v)),
+        // a table built by `prefix_sums` (nondecreasing), lo <= hi < len (as documented)
+        row!("H1v2", v2_range_sum, gen("range_sum", vec![(vec![0], 0, 0), (vec![0, 5, 9], 0, 2)], |r| {
+                let n = r.below(33) as usize;
+                let mut t = vec![0u64];
+                for _ in 0..n {
+                    let last = *t.last().unwrap();
+                    t.push(last + r.u32() as u64);
+                }
+                let hi = r.below(t.len() as u64) as usize;
+                let lo = r.below(hi as u64 + 1) as usize;
+                (t, lo, hi)
+            }), |(t, lo, hi)| (t, *lo, *hi)),
+        // an ascending slice, a target near the sum of two of its values
+        row!("H1v2", v2_has_pair_with_sum, gen("has_pair_with_sum", vec![(vec![], 0), (vec![1, 2, 4], 6), (vec![1, 2, 4], 7)], |r| { let v = sorted_i32(r, 32); let t = if v.len() >= 2 && r.below(2) == 0 { v[r.below(v.len() as u64) as usize] as i64 + v[r.below(v.len() as u64) as usize] as i64 } else { signed(r, 21) }; (v, t) }), |(v, t)| (v, *t)),
+        // an ascending slice of at most 32 values with repeats (the probe sorts a copy in place)
+        row!("H1v2", v2_dedup_sorted, gen("dedup_sorted", vec![vec![], vec![1, 1, 2, 3, 3]], |r| { let mut v: Vec<u32> = (0..r.below(33)).map(|_| r.below(8) as u32).collect(); v.sort(); v }), |v| (v)),
+        row!("H1v2", v2_lower_bound, gen("lower_bound", vec![(vec![], 0), (vec![1, 3, 3, 5], 3), (vec![1, 3, 3, 5], 6)], |r| { let mut v: Vec<u32> = (0..r.below(33)).map(|_| r.bits(10) as u32).collect(); v.sort(); (v, r.bits(10) as u32) }), |(v, k)| (v, *k)),
+        row!("H1v2", v2_rgb565_pack, gen("rgb565_pack", vec![(0, 0, 0), (255, 255, 255)], |r| (r.next() as u8, r.next() as u8, r.next() as u8)), |&c| (c)),
+        row!("H1v2", v2_rgb565_unpack, gen("rgb565_unpack", vec![0, 0xffff, 0xf800], |r| r.next() as u16), |&v| (v)),
+        row!("H1v2", v2_gcd, gen("gcd", vec![(0, 0), (0, 7), (12, 18), (u64::MAX, u64::MAX - 1)], |r| (r.u64(), r.u64())), |&(a, b)| (a, b)),
+        // operands below 2^32: `a / gcd(a, b) * b` fits a u64
+        row!("H1v2", v2_lcm, gen("lcm", vec![(0, 5), (4, 6), (u32::MAX as u64, u32::MAX as u64 - 1)], |r| (r.bits(32), r.bits(32))), |&(a, b)| (a, b)),
+        row!("H1v2", v2_max_subarray_sum, gen("max_subarray_sum", vec![vec![], vec![-2, 1, -3, 4, -1, 2, 1, -5, 4], vec![i32::MIN]], |r| (0..r.below(33)).map(|_| signed(r, 31) as i32).collect::<Vec<_>>()), |v| (v)),
+        row!("H1v2", v2_brackets_balanced, gen("brackets_balanced", vec![vec![], b"([]{})".to_vec(), b"(]".to_vec()], |r| r.bytes(24, BRACKETS)), |v| (v)),
+        row!("H1v2", v2_count_inversions, gen("count_inversions", vec![vec![], vec![3, 1, 2]], |r| (0..r.below(33)).map(|_| signed(r, 31) as i32).collect::<Vec<_>>()), |v| (v)),
+    ]
+}
+
+/// The cases of one held-out set (`--set v1|v2|all`; v1 is the default,
+/// as before held-out v2 existed).
+fn cases_of(set: &str) -> Vec<Box<dyn Case>> {
+    match set {
+        "v1" => cases(),
+        "v2" => cases_v2(),
+        "all" => cases().into_iter().chain(cases_v2()).collect(),
+        other => panic!("unknown set {other} (v1, v2 or all)"),
+    }
+}
+
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = v.len();
@@ -344,8 +428,14 @@ fn bench(cases: &[Box<dyn Case>], rounds: usize, json: Option<&str>) {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let cases = cases();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--set v1|v2|all` anywhere on the line: which held-out set's cases run
+    let mut set = "v1".to_string();
+    if let Some(i) = args.iter().position(|a| a == "--set") {
+        set = args.get(i + 1).cloned().expect("--set v1|v2|all");
+        args.drain(i..i + 2);
+    }
+    let cases = cases_of(&set);
     match args.first().map(String::as_str) {
         Some("check") => {
             if !check(&cases) {
@@ -379,7 +469,7 @@ fn main() {
             bench(&cases, rounds, json.as_deref());
         }
         _ => {
-            eprintln!("usage: heldout-bench check | bench [--rounds N (>= 21)] [--json PATH]");
+            eprintln!("usage: heldout-bench check | bench [--rounds N (>= 21)] [--json PATH]  [--set v1|v2|all]");
             std::process::exit(2);
         }
     }

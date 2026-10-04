@@ -33,15 +33,21 @@ and Bend, with one pitch:
 >
 > | evidence | optimizer only, vs rustc on the same source | what it shows |
 > | --- | --- | --- |
-> | **held-out** (`bench/heldout/REPORT.md`, 2026-10-02: 30 blind H1 programs + the 1 function H2's rule accepted) | geomean **1.02** (default layout) / **1.005** (aligned layout) over all 31, no exclusions: **0 of 31 functions changed**; the A/A control spreads 0.70–1.79 / 0.97–1.12 | nothing yet: 22 are refused by the MIR reader, 6 by exec-only elaboration (no termination measure, or a panic no precondition rules out), and the 3 that reach the optimizer are kept as written |
+> | **held-out v2** (`bench/heldout-v2/REPORT.md`, stage finish-A, 2026-10-03; frozen 2026-10-02 before the reader and optimizer work it judges: 30 new blind H1 programs + the monorepo functions rule `h2-v2` samples after that work, from scope crates development does not look at) | geomean **1.007** (default layout) / **1.002** (aligned) / 0.999 (no overflow checks) over all 30 timed functions, no exclusions: **0 of 30 changed**, so the optimized subject is the rustc subject compiled again (29 of 30 functions identical machine code, 30 of 30 apart from data addresses); the A/A control spreads 0.87–1.19 / 0.84–1.11. H2-v2 is empty: the rule probed all 869 candidates and accepted none (651 too small, 104 refused by the reader, 78 not extracted, 35 with an unresolved or too large callee closure, 1 unproven), so the shortfall is the whole 40 | nothing on code it was not built for: of the 30, 9 are refused by the MIR reader, 11 by exec-only elaboration, 10 reach the optimizer (4 through their panic-explicit reading); 7 are specialized and none lowered (4 ties, 2 cheaper by less than 3%, 1 whose residual names a lift-prelude type with no Rust spelling), 3 are not specialized |
+> | held-out v1, **retired to the development set** (`bench/heldout/REPORT.md`, 2026-10-02: 30 blind H1 programs + the 1 function H2's rule accepted; its refusal reasons were read, so it may now motivate changes; re-run as development data after stages reader-widen, optimizer-generic and finish-A) | geomean 1.002 (default layout) / 1.004 (aligned layout) over all 31, no exclusions, with the A/A control at 1.016 / 0.996 and spreading 0.82–1.29 / 0.95–1.02: placement noise. 3 of 31 functions changed since stage finish-A (`next_power_of_two`, `read_u32_le`, `mix64`); over them 1.025 / 1.039, where the cost model predicted 0.90, 0.70 and 0.95: `mix64`'s rewrite compiles to rustc's own machine code, `next_power_of_two` measures 1.00, and `read_u32_le` is slower in all three binaries, 1.08 / 1.12 / 1.07 (identical code reaches 1.10 in the aligned binary, so the harness cannot call it a regression, but the predicted gain is not there) | nothing yet: 7 are refused by the MIR reader (22 at the first run), 13 by exec-only elaboration (6), and 11 reach the optimizer (3), 4 of them through their panic-explicit reading; 3 are lowered (their shipped MIR's theorems decide since stage finish-A; before it the round trip's structural comparison refused them), 4 kept by the tie rule, 4 not specialized |
 > | development set (QMDB port, N = 32 / N = 1) | 0.88–1.00× / 289 vs 318–325 ns | gains on the program the optimizer was developed on (timed before the profile split, J8: the profile was then recorded on the timed fixtures; not re-timed) |
 > | development set (optimizer corpus P1–P20) | per program, `optimizer-plan.md` | programs features were built for |
-> | augmented Commonware code (codec varint, storage MMR) | no change: nothing cheaper found, compiled as written (not timed) | — |
+> | augmented Commonware code: what codec and storage compile from sandblaster's emitted and lowered copies (codec's varint, storage's MMR and the verifier's first set; `bench/shipped-harness/REPORT.md`, stage finish-A) | geomean 1.003 (default layout) / 1.002 (aligned) / 1.008 (no overflow checks) over 33 functions against the original Commonware functions in one binary; A/A 1.000 / 1.001 / 0.998 | no change, and none expected: nothing cheaper was found, so the shipped code is the original code — 28 of 33 functions compile to identical machine code, the other 5 to identical code except for the addresses of each copy's own constant data, exactly like the A/A pair |
 >
-> Today the optimizer makes held-out code neither faster nor slower: the
-> code compiles as written. Any "faster than rustc" statement cites the
-> held-out report (§8.2 item 11); the evaluation is repeated at each optimizer
-> milestone and the held-out row updated from it.
+> On held-out v2, the held-out evaluation, the optimizer changed nothing:
+> every function compiled as written, and the timings are placement noise
+> around 1.00. Its monorepo half is empty, because the probe of the frozen
+> rule accepted no candidate, so held-out v2 measures the 30 blind programs
+> only. On held-out v1, now development data, the three rewrites stage
+> finish-A let through are not faster either. "Faster than rustc" is not
+> shown on any held-out code; any such statement cites the held-out v2
+> report (§8.2 item 11), and the evaluation is repeated at each optimizer
+> milestone, the held-out row updated from it.
 
 It augments existing Rust: the critical, pure parts of a crate become verified
 modules with the same API, and the rest of the crate stays as it is.
@@ -83,7 +89,7 @@ modules with the same API, and the rest of the crate stays as it is.
 | Augments existing Rust crates | — | yes, in place | no | no | yes: verified modules inside the crate |
 | What a human writes and reads | code only | code plus invariants, triggers, ghost code, lemma calls | proofs | laws | laws only |
 | Catches an agent's logic bugs | no (memory safety only) | yes | yes | yes | yes: every live function proven |
-| Makes the code faster | — | no (compiled as written) | no | own runtime | the goal: proven compositional symbolic execution, fueled by laws, plus proven SIMD (development set: 0.88–1.00× on QMDB; held-out: no function changed yet, measured geomean 1.02 / 1.005 is placement noise) |
+| Makes the code faster | — | no (compiled as written) | no | own runtime | the goal: proven compositional symbolic execution, fueled by laws, plus proven SIMD (development set: 0.88–1.00× on QMDB; held-out v2: no function changed, geomean 1.007 / 1.002, placement noise; held-out v1, now development: 3 of 31 changed since stage finish-A, none faster, geomean 1.002 / 1.004 with the A/A at 1.016 / 0.996) |
 | Protects against weak or gamed laws | — | no | no | no (laws may restate code or say little) | yes: §15 determinacy, mutation, unconstrained-behavior report, lock diffs |
 | Trusted base | rustc | Z3 plus Verus | small kernel | a TypeScript checker | small kernel; solvers and AI search, never trusted |
 
@@ -91,12 +97,12 @@ The moat is the combination: agents write the *obvious* code in the language
 they know best; the kernel proves it meets laws that §15 forces to pin the
 behaviour down; the proven optimizer (compositional symbolic execution) and
 hardware kernels are to make it faster than rustc alone (so far shown on the
-development set only; on held-out code it changes nothing yet, North star
-table); the human reviews a law diff.
+development set only; on held-out v2 it changed nothing, North star table);
+the human reviews a law diff.
 Against Verus specifically: humans read laws, not proof code; no trusted SMT;
 and verification is to make the code faster instead of merely costing nothing
-(the goal above; development-set evidence only so far; on held-out code no
-function changed yet, North star table).
+(the goal above; development-set evidence only so far; on held-out v2 no
+function changed, North star table).
 
 **Principles that follow.**
 
@@ -148,10 +154,10 @@ function changed yet, North star table).
 * agent time-to-green and tokens for a task;
 * incremental check time after an edit, and full-build time;
 * proof churn: proof lines that must change for a realistic code change;
-* runtime speed against rustc on the same source: the **held-out**
-  optimizer-only geomean (`sandblaster/bench/heldout-harness/run.sh`, report
-  `bench/heldout/REPORT.md`), the only speed number a "faster than rustc"
-  claim may cite; beside it, the development-set regression gates (QMDB,
+* runtime speed against rustc on the same source: the **held-out v2**
+  optimizer-only geomean (manifest `bench/heldout-v2/manifest.toml`; held-out
+  v1's report `bench/heldout/REPORT.md` is development data now), the only
+  speed number a "faster than rustc" claim may cite; beside it, the development-set regression gates (QMDB,
   corpus, §8.2), which catch regressions but justify no feature.
 
 **How we prove the claim.** An agentic benchmark: the same tasks given to
@@ -274,16 +280,16 @@ green, speed of the result and the human review load.
      bodies already lowered by the compiler) read **literally**, one kernel
      definition per MIR instance with one arm per basic block and no
      structuring, by a table-driven translation of a fixed set of MIR
-     constructs: the generator `mir/literal.rs` (1,217 code lines) and its
-     library `mir/literal.core` (139); the statement of each lifted
-     function's theorem `mir/stmt.rs` (210: the telescope, `init`,
-     `erase`);
+     constructs: the generator `mir/literal.rs` (1,297 code lines) and its
+     library `mir/literal.core` (186); the statement of each lifted
+     function's theorem `mir/stmt.rs` (234: the telescope, `init`,
+     `erase`, and the panic statement of §8.2 item 12);
      the parse L reads, `mir/ir.rs` (482) and `mir/sexp.rs` (131); the
-     names and load checks of `mir/mod.rs` (491); the printer
+     names and load checks of `mir/mod.rs` (531); the printer
      `sandblaster/mirx` (1,131: a rustc driver on the pinned nightly of the
      stable release, whose output is checked in with the sources'
-     SHA-256) — **3,801 code lines**; the gate's trusted check
-     `mir/gate.rs` (164: the literal reading enters the kernel only
+     SHA-256) — **3,992 code lines**; the gate's trusted check
+     `mir/gate.rs` (232: the literal reading enters the kernel only
      through it, and a listed function is accepted only when its MIR
      instance is that function — the lift finds instances by unqualified
      lifted names, `ModuleNames::instance_global` — and the kernel holds
@@ -293,8 +299,10 @@ green, speed of the result and the human review load.
      module type its MIR reaches is declared alike by
      the MIR and the subset — variants and fields by name and in order,
      discriminants `0, 1, ..` — since kernel field names are positional;
-     the same for the round trip's `L::shipped::<f>`)
-     and its call sites (≈ 25: the gate's errors in `driver::gates`, the
+     the same for the round trip's `L::shipped::<f>`, and for a function
+     replaced through its panic-explicit reading the panic statement's
+     `L::pthm::<f>` and `L::pshipped::<f>` under §8.2 item 12's conditions)
+     and its call sites (≈ 29: the gate's errors in `driver::gates`, the
      shipped copy's MIR instance and the requirement in `driver::lowered`);
      the elaborator's precondition check (≈ 39: `elab/items.rs`, `typeck`,
      `hir::FnDef::declared`: a function read from MIR is elaborated only
@@ -373,10 +381,16 @@ green, speed of the result and the human review load.
    `lift_open.rs` 1,138, prelude 108, model 59), down from 7,443 before
    the source's reading of bodies was deleted (`docs/mir-lift.md` §6 step
    3: `lift.rs` 4,443, `lift_open.rs` 2,665, the combinator templates 131,
-   prelude 145, model 59); the bodies' trusted reading is 3,801 (the
-   literal reading, its statement and parse, the names, the printer) plus
-   the gate's trusted check (≈ 189 with its call sites), the elaborator's
-   precondition check (39) and the glue (≈ 260): ≈ 4.29k in all, on the
+   prelude 145, model 59); the bodies' trusted reading is 3,992 (the
+   literal reading, its statement and parse, the names, the printer; 3,801
+   before the reader widening's models and constructs, 3,942 before the
+   panic statement, 3,966 before stage finish-A's slice leaves: `&s[i..]`,
+   `&s[..j]`, `&s[i..j]` and `&s[..=j]` of a slice, read like an array's) plus
+   the gate's trusted check (≈ 261 with its call sites; ≈ 189 before the
+   panic acceptance), the elaborator's
+   precondition check (39) and the glue (≈ 260): ≈ 4.55k in all (≈ 4.29k
+   before the reader widening, ≈ 4.43k before panic-preserving
+   optimization, §8.2 item 12, ≈ 4.53k before the slice leaves), on the
    same counting ≈ 4.78k with the structurer trusted and ≈ 4.97k when it
    was first replaced (`docs/checked-structuring.md`, stage tcb-review). The skeleton's next
    step is to come from the MIR too (`docs/mir-lift.md` §6 step 4); the
@@ -739,6 +753,18 @@ host/
     the next lock acceptance — the file is part of the lock's `semantics`
     hash.)
 
+  A **`const fn`** is rewritten like any other function when every helper of
+  its replacement can itself be a `const fn` (`lower::const_compatible`:
+  integer arithmetic, comparisons, casts, `if`/`match`/`let`/blocks,
+  constructors, fields, array and slice indexing by `usize`, `return`,
+  `unreachable!()`, the integer methods that are `const` since Rust 1.73, and
+  the replacement's own helpers; not `min`/`max`, sub-slices, slice `get`,
+  `?` or `==` on compound types): the helpers are printed `const fn`, so the
+  source stays callable in const contexts. (Before stage optimizer-generic a
+  `const fn` was never rewritten; development data: H2 v1's `mix64`.)
+  A function that can panic is rewritten through its panic-explicit reading
+  (§8.2 item 12), with the round trip's panic theorems.
+
   The cost model prices the source as rustc compiles it: the buffer model's
   operations as calls and the lift prelude's functions (`crate::__lift::*`:
   signed shifts and negation, core's methods) as one operation, never their
@@ -749,51 +775,88 @@ host/
   declarations) plus, per rewritten function, a copy
   `__sandblaster_check__f` with the same signature text and the new body
   plus the helpers and dispatch impls is read back by the same front end
-  and lift as the source, its new items are elaborated in generated mode
-  against the verified environment, every printed helper must equal its
-  residual and every copied alternative its verified definition in all
-  relevant positions (`alpha_eq_relevant`, as §8.3, modulo only `let x = v;
-  x` ≡ `v`, the lift's reading of a last state update, and for readers the
-  reader normal form: a pure read — the buffer model's `try_get_u8` of a
-  pure read, or a field of one — bound by `let` is substituted, a tuple of
-  one is projected, and a constructor over pure reads is pushed into the
-  tails of a `let`/`match`; β, η for the one-constructor tuple and a pure
-  total term read once or twice), and every copy and dispatch method must
-  have the source function's type and be exactly the delegation `λ x̄. r x̄`
-  to its replacement (per instance; for a reader, the lift's
-  `let (s, r) = f(..); buf = s; (buf, r)` is the call by η). The rewritten
-  function in the emitted file is the copy's text under the source name
-  (token-identical signature tail and body, no self-reference), so it means
-  its replacement, which the kernel-checked link (`Link::Conversion`,
-  `r_f::equiv` or `<f>::rewrite_equiv`) proves equal to `f`. A function
-  that fails keeps its source text (the rest is checked again; a second
-  failure lowers nothing), and with no cheaper printable replacement the
-  file is the source as-is, so the optimizer never makes a lifted module
-  slower. The build summary (header and warning line) counts the functions
-  that kept their source text by reason (not specialized, residual not 3%
-  cheaper, methods, other state passing, …); the report lists each
-  function's full reason. The lowered text gets its meaning exactly like
-  the source, by the lift (SEMANTICS.md §19); nothing new is trusted: the
-  printer writes only what the lift already reads (suffixed literals, locals `l<k>_<name>`,
-  plain operators — a checked operator of the residual prints as Rust's
-  operator, which agrees with it because the residual's proof slot shows it
-  does not overflow —, `as` casts, builtin methods as method calls, calls by
-  name, constructors, `if`, `match`, `let`, blocks, the buffer calls, a
-  sealed trait and its impls) plus the semantics-free attributes
-  `#[inline(always)]`, `#[doc(hidden)]` and `#[allow(..)]`, and a construct
-  it gets wrong is a round-trip failure, never a different program. Not
-  built yet: lowering of `&mut self` state passing and of residuals with
-  loops or recursion (an alternative may have loops: its text is copied,
-  not printed — but loop helpers are not yet matched by the round trip, so
-  write alternatives loop-free), and the lift conformance check of the
-  alternatives' texts. Open since bodies come from rustc's MIR only
-  (`docs/mir-lift.md` §6): a `for` over a range is a loop helper over
-  `core::ops::Range`, whose residual the printer does not print (a generic
-  struct), so no closed form of a loop is lowered; rustc's optimized MIR
-  already removes much of what the optimizer removed from the source's
-  reading (the buffer writers of the old tests are no longer 3% cheaper);
-  and the round trip compares the copy's MIR reading with the residual
-  structurally, which a lowered reader (`try_get_u8` calls) fails.
+  and lift as the source, with **rustc's MIR of that copy**
+  (`<stem>.roundtrip__<module>.sbmir`, which the load checks against the
+  copy's text by its SHA-256, so it is the MIR of exactly the text the build
+  emits). What decides each function is the **shipped code's theorems**
+  (`docs/mir-lift.md` §20.7, `docs/checked-structuring.md` §5.13): every
+  helper's MIR is proven to compute the definition it replaces (the
+  residual, or the verified alternative), the copy's (and a dispatch impl
+  method's) MIR to compute the call of the replacement, and from them, along
+  the optimizer's kernel-checked link (`Link::Conversion`, `r_f::equiv` or
+  `<f>::rewrite_equiv`), `L::shipped::<id>`: the literal reading of the
+  copy's MIR returns, at sufficient fuel and under `f`'s declared contract,
+  exactly `f`'s value — and the trusted check (`mir/gate.rs`) accepts the
+  function only when the kernel holds that statement, generated afresh (for
+  a function that can panic: `L::pthm::<id>` and `L::pshipped::<id>`, §8.2
+  item 12). **Why no structural comparison** (stage finish-A; before it,
+  every printed helper's structured reading also had to equal its residual
+  syntactically, `alpha_eq_relevant` modulo `let x = v; x` ≡ `v` and the
+  reader normal form, and every copy had to be the delegation `λ x̄. r x̄`):
+  the theorems are about the literal reading of the MIR rustc compiles,
+  which is what the laws must hold of; the copy's structured reading is an
+  untrusted proposal (`mir/read.rs`), and its syntactic equality with the
+  residual added nothing the theorems do not decide. It did refuse correct
+  code: rustc's MIR of a printed residual binds temporaries by `let`, tests
+  a checked operation's `Option` with `is_none` and reaches sub-slices
+  through core's `Index`, so the reading of the copy differs from the
+  residual it computes (development data: held-out v1's `next_power_of_two`,
+  `read_u32_le` and `mix64`, cheaper and refused with "relevant structure
+  differs"; all three ship since, each with its kernel-checked
+  `L::shipped::<id>`; `tests/lift_opt.rs`
+  `a_rewrite_whose_shipped_mir_differs_only_syntactically_is_accepted`, where
+  the comparison, run beside the theorems by a test hook, refuses all three
+  of its fixture's rewrites, and `a_wrong_shipped_copy_is_refused_by_the_theorem`).
+  The syntactic comparison remains (`driver::lowered::compare_read_back`)
+  only for a lifted module without MIR, which the lift no longer accepts.
+  **What the theorems do not say** is that the shipped code performs the
+  residual's operations: they fix its meaning, not its cost. The printer
+  (untrusted) prints the residual the cost model priced; a printer that
+  printed other code of the same meaning would ship correct code under the
+  residual's price — a performance claim, which the held-out harness
+  measures on the lowered copies themselves (timings and the machine-code
+  identity check), never a correctness one. The rewritten function in the
+  emitted file is the copy's text under the source name (token-identical
+  signature tail and body, no self-reference; a by-value parameter's `mut`,
+  which a call of the replacement never needs, is left out of both), so its
+  MIR is the copy's. A function that fails keeps its source text (the rest
+  is checked again; a second failure lowers nothing), and with no cheaper
+  printable replacement the file is the source as-is, so the optimizer never
+  makes a lifted module slower. The build summary (header and warning line)
+  counts the functions that kept their source text by reason (not
+  specialized, residual not 3% cheaper, methods, other state passing, …);
+  the report lists each function's full reason. The lowered text gets its
+  meaning exactly like the source, by the lift (SEMANTICS.md §19), and its
+  MIR's literal reading is what the shipped theorems are about; the printer
+  writes only what the lift already reads (suffixed literals, locals
+  `l<k>_<name>`, plain operators — a checked operator of the residual prints
+  as Rust's operator, which agrees with it because the residual's proof slot
+  shows it does not overflow —, `as` casts, builtin methods as method calls,
+  calls by name, constructors, `if`, `match`, `let`, blocks, sub-slices, the
+  buffer calls, a sealed trait and its impls) plus the semantics-free
+  attributes `#[inline(always)]`, `#[doc(hidden)]` and `#[allow(..)]`, and a
+  construct it gets wrong is a theorem failure, never a different program.
+  Not built yet: lowering of `&mut self` state passing and of residuals with
+  loops or recursion (an alternative may have loops: its text is copied, not
+  printed — but the round trip proves no loop lemma for a helper, so write
+  alternatives loop-free), and the lift conformance check of the
+  alternatives' texts. A residual that keeps a loop is not printable at
+  all yet, and this is not only a printing gap (stage finish-A, development
+  data: held-out v1's `gray_decode` and `parity`): an elaborator-made loop
+  helper (`<f>::loop#k`, §7.4) is a kernel definition with no HIR item, and
+  the residual printer, the specializer and the lowering name functions by
+  HIR item; giving it one (the source loop printed as a helper, linked to
+  `<f>::loop#k` by the induction lemma `opt::mirror` builds for clones) would
+  make the optimizer's residual printable, but the lowering prints no loops
+  or recursion (`lower.rs`: "lowered code has no loops yet"), and the round
+  trip would need a loop lemma (`Entry::Helper`/`Entry::While`, planned
+  against the helper's MIR loop with its slots named by the printed
+  locals) for the helper's MIR. A `for` over a range is a loop helper over
+  `core::ops::Range` too, whose residual the printer does not print (a
+  generic struct), so no closed form of a loop is lowered; and rustc's
+  optimized MIR already removes much of what the optimizer removed from the
+  source's reading (the buffer writers of the old tests are no longer 3%
+  cheaper).
 * **In place.** When the verified code is the crate's own files (not a
   copy), a DSL root inside the crate lifts them by path (`#[lift(in_place,
   ..)] #[path = "../../src/x.rs"] mod x;`, SEMANTICS.md §19.5) and the
@@ -1691,6 +1754,8 @@ an `AutoFailure`. Steps iterated to a fixpoint within the budget:
      - **split** into a residual match whose arms carry their path equation.
 
      `ne … true` and `eq … false` facts are split on demand and never given to linarith.
+
+     A call of the prelude's checked arithmetic (`a.checked_add(b)`, `checked_sub`, `checked_mul`, `checked_div`: `drive::CHECKED_OPS`) stays folded: decided by the facts, it is rewritten by its checked lemma (`w::checked_<op>_some`/`_none`, `lemmas/int.core`); undecided, it is **kept** and a match on it splits on its result, which prints as the call (inside a fold, §6.6, it is unfolded as before: the fold reads the accumulator's growth from its arithmetic, and the bound invariant decides its test). (Before stage optimizer-generic an undecided one was unfolded, and the split was on its overflow test over `Int`, `a as Int + b as Int <= MAX`, which no exec expression prints, so any residual that branches on an argument's overflow was refused: "driven residual not printable: `Le(Int)`".) Structural justification: the checked operations are exactly the operations whose test is a Rust operator's own panic test, so they are what both the source and a panic-explicit reading (item 12) test; development data: `next_power_of_two` and `read_u32_le` (held-out v1, now development) are driven and printed since (and lowered since stage finish-A, when the shipped code's theorems replaced the lifted round trip's structural comparison with the code read back from rustc's MIR, which writes the same operations otherwise: §2.1).
    * **Callee results.** A match on a summarized callee's result is pushed into the callee's leaves (case-of-case), and leaves that the continuation's facts contradict are pruned. A call with static arguments or branch-deciding facts gets a polyvariant specialization, at most 8 per callee.
    * **At stuck points** the driver consults three summarizers:
      - **Loops.** One-iteration symbolic execution gives recurrence classes, and closed forms are synthesized from traces. The rungs, strongest first, are: closed form, early exit, idle skip, set-bit iteration, residual loop.
@@ -1725,6 +1790,7 @@ an `AutoFailure`. Steps iterated to a fixpoint within the budget:
      - feature-gated lowerings.
    * A target cost model ranks them. Its inputs are latency/throughput tables, a critical-path weight, trip counts, branch probabilities from the checked-in `PROFILE.json`, and code size. x86 constants come from host-kit tuning evidence, which changes choices only.
    * A candidate replaces the next rung only if it is ≥ 3% cheaper. The top three are kept, and at most two retries follow a proof failure.
+   * **The tie rule** (checked in stage optimizer-generic). A tie never replaces the incumbent (the next rung, or the source as written): at equal cost, zero included, the incumbent stays (`cost::model::beats`; before, a zero-cost candidate beat a zero-cost incumbent). The gate is relative and the model's own error is larger than 3% (fairness audit J12), so "not cheaper" is "no measurable gain", and an equal replacement only adds code and a dependence on the optimizer. The lowering says which kind of non-gain it saw: a residual that is the source itself, a tie, or a residual that is not 3% cheaper. On development data the tie is right where it was seen: `gray_encode`'s residual (`n ^ (n >> 1)`) is its source, and both compile to one `eor` with a shifted operand; there is nothing cheaper to find. What the check found was not in the tie rule but in what the model compared: it priced the *same* code differently by its form, so ties of branchy code were not seen as ties. Two fixes, both structural and symmetric (source and replacement priced by the same rules): **an early `return` waits for the branch that leads to it** (before, a value returned in an arm counted as ready before the arm's condition; the source, read from MIR, returns early where a residual has tails, so `next_power_of_two`'s residual, the source's very code, priced 61% dearer than the source); and **a branch that only panics is never taken** (a panic path is cold: rustc and LLVM lay it out so, and a run that panics is over; before, it took half the probability and halved the weight of everything after it, so code after an `assert!` counted half and an explicit panic would have made a residual look cheaper than it is).
    * As built (plan O8): tables per level (x86 v1, v3-scalar, v4; aarch64) and microarchitecture, in milli-cycles, measured where a committed tuning file (`sandblaster/targets/evidence/tuning-*.json`: Zen 5, M5) supplies them and hypotheses otherwise; cost `(critical path + Σ throughput)/2`, the worst over a set's microarchitectures. The aegraph runs on straight-line tier-0 residuals, matches kernel-checked rules (`lemmas/rules/*.core`, written by the offline `sandblaster-rulegen`) modulo `bvnorm`, and admits a rewrite by a transport-chain lemma (rung `Rewritten`; corpus P3 becomes `count_ones`). The loop summarizer orders its rungs by cost. The tuning hash and `PROFILE.json` key the proof cache.
 7. **Multiversioning** (§9.3).
    * Whole call trees are cloned per hardware variant set, selected per set, and dispatched once at the boundary. A residual's clone is linked by `clone_equiv`.
@@ -1746,7 +1812,16 @@ an `AutoFailure`. Steps iterated to a fixpoint within the budget:
     * A content-addressed cache under `target/` holds hints only, and the kernel re-checks every hit.
 11. **Fairness: no optimization is built around a benchmark** (the user's rule; fairness audit of 2026-10-02). The hot paths show where to look; the optimizations must be generic.
     * **Review rule.** Every new rule, rung, template, constant or threshold states its structural justification (what shape of code it serves, in general) and its effect on the held-out set (plan step 8). A change justified only by QMDB, the corpus, codec or storage — the development set — is not merged; those numbers are regression checks that cannot on their own justify a feature. Any "faster than rustc" statement cites the held-out report, never a development-set number.
+    * **Held-out versions.** A held-out set whose results have been read is retired to the development set, and its files stay frozen (held-out v1, `bench/heldout/README.md`). Its successor is frozen before the work it will judge: held-out v2 (`bench/heldout-v2/`) has a new blind H1 set and a versioned H2 rule with a new committed seed (`h2/RULE.md`), written before any candidate was seen. Development does not look at the H2-v2 scope crates or at H1-v2's code (`h2/RULE.md` §0), and H2-v2 is sampled only after the reader work, with the rule unchanged.
     * **Mechanical guards** (`sandblaster/tools/gates/README.md`): optimizer code names no benchmark target (`tests/fairness_lint.rs`); Σ2 takes its constants from the loop (`tests/fairness_pool.rs`); no monorepo DSL root carries an unlisted user alternative and benchmark targets carry none (`tests/fairness_rewrites.rs`); user alternatives are reported apart (principle 3); the profile is recorded on inputs that are never timed (`tests/fairness_profile.rs`); a benchmark harness compiles every subject alike in one binary (`tools/gates/fair-baseline.sh`); and the corpus, its references, the QMDB fixture and the held-out manifest are frozen (G6, `tools/gates/g6.sh`).
+
+12. **Panic-preserving optimization of unverified code** (stage optimizer-generic; `opt::panics`, `lower::panic_rust_form`, `driver::lowered`, `mir::stmt::statement_panic`, `mir::gate::Ledger::accept_shipped_panic`). A verified build has no function that can panic: every partial operation carries its proof. The exec-only path (`elab::Options::exec_only`: unverified code, the held-out harness, the optimizer's tests) elaborates code whose arithmetic, divisions and indexing no precondition makes safe; such a function is `Unproven`, has no kernel definition, and the optimizer could not touch it. Unverified code is mostly such code, so the optimizer handles it, and preserves its panics exactly:
+    * **The panic-explicit reading.** For each such function `f` (and each one blocked only by such callees), callees first, the optimizer builds `f__panics : Π x̄ (h̄). Option(R)`, `None` the panic outcome, from `f`'s own HIR (untrusted): `a + b`, `a - b`, `a * b` on unsigned words become `a.checked_add(b)?` and the like (the prelude's checked operations, whose test is the operation's own overflow test, the very condition rustc's `CheckedAdd` asserts and the literal reading's `mir::checked_add_*` flags); `a / b`, `a % b`, `div_ceil` by a non-literal divisor get the guard `if b == 0 { return None; }` (rustc's own test, which MIR asserts before a division); a shift by a non-literal amount, an index, a sub-slice and `split_at` get the guard `if out of range { return None; }`; a call of a function that has a reading becomes the call of its reading under `?` (its panic propagates). Every guard and checked operation stands where the operation stood (only its operands are bound first, in their order), so the reading performs the same operations in the same order. `f`'s own exits keep their meaning: `return v` is `return Some(v)`, `f`'s own `?` returns `Some(None)`, the tail is `Some(tail)`. Not read (the function then has no reading, and the report says why): a panic inside a loop (a loop is read as written), recursion, an `unreachable!()` the prover does not refute (an `assert!`, `unwrap`, `expect` or `panic!`: in MIR a `debug_assert!` is an `assert!`, and a release build has none, so its panic is not the release program's), a callee's `requires`, a call of a function that is neither kernel-checked nor read (the reading would be blocked as the function is; it is not attempted), a place written through an index, `&mut` parameters.
+    * **Optimization.** The reading is elaborated and kernel-checked like any exec function (every obligation proven by its guards) and optimized like any function. Its residual `r` is admitted by the usual kernel-checked link, now `Π x̄. Eq(Option(R), r x̄, f__panics x̄)`: the equality covers the panic outcome, so no rewrite can add, remove or move a panic. The rules that serve it are structural and serve any code: undecided checked arithmetic stays folded (item 3), and the cost model never takes a branch that only panics (item 6).
+    * **Lowering** (lifted code). The residual is printed in its **Rust form**: `Some(v)` is `v`; a match on a kept checked operation whose `None` arm is the panic is Rust's own operator (`a + b`), which panics on exactly that test, with Rust's own message; a guard whose test is the panic test of the first operation after it (`d == 0` before `a / d`, a shift's amount, an array index) is dropped, since that operation panics by itself; a `None` the residual reached otherwise is an explicit `panic!`. The cost model prices that form, exactly as it prices the source. A replacement ships only with two kernel theorems of the **panic statement** (`stmt::statement_panic`: `run n b0 (Some init(x̄)) = match P x̄ with None => None | Some(y) => Some(erase(y))`), proven by the walker in its panic mode: `L::pthm::<f>`, the source function's own MIR against the reading, and `L::pshipped::<copy>`, the lowered copy's MIR against the reading (from the copy's theorem against `r`, along the link). The trusted gate accepts them only where the literal reading's `None` means a panic: the reading has the source's parameters and preconditions (its kernel type is the source's, the result wrapped in `Option`), and every instance either reading runs has no fault (no construct read as `None` but a panic), no loop and no self-call (no fuel is ever consumed, so no run is cut short), and each block read as panicking is checked, on the MIR, to panic. Together: on every input, the shipped code and the source both return the same value, or both panic. They are about the literal MIR, the stronger check; since stage finish-A every rewrite of a module read from MIR is decided by its shipped code's theorems alone (§2.1: `L::shipped::<id>` for a function that cannot panic), and no structural comparison runs for any of them.
+    * **What is preserved.** The panic outcome on every input, in the toolchain's semantics: rustc's MIR as extracted, with overflow checks and debug assertions on. A build without overflow checks is outside it on the inputs that overflow (there the source wraps and goes on, and the replacement need not compute what it computes after the wrap). The panic message and location are not part of the meaning (in the literal reading a panic is `None`): an operation the residual keeps panics with Rust's message, a panic the residual decided prints `the source panics here: …`.
+    * **Trusted lines.** The panic statement adds 24 code lines to `mir/stmt.rs` (210 → 234) and the panic acceptance 68 to `mir/gate.rs` (164 → 232); nothing else trusted changes (the kernel, L's generator and library, the elaborator's semantics). The reading, the walker's panic mode, the Rust form and the lowering are untrusted: a wrong one fails a theorem or the gate, and the function keeps its source text.
+    * **Development data** (held-out v1, now development: `bench/heldout/REPORT.md`): the five functions that panic for some inputs and state no contract (`base32_encoded_len`, `base64_encoded_len`, `ring_index`, `align_up`, `ceil_div`) were refused by exec-only elaboration; four now have readings (`align_up`'s `debug_assert!` is not read). `ring_index`'s and `ceil_div`'s are specialized (driven), and their residuals' Rust forms cost what the sources cost (no cheaper code: kept by the tie rule); `base32_encoded_len`'s and `base64_encoded_len`'s are not (the driven proof leaves a leaf open within its budget; the residual and the source split on different scrutinees). Test programs: `tests/opt_panics.rs`, `tests/lift_opt.rs` (`twice_quot`: a redundant division removed and shipped with both panic theorems; its panics checked natively against rustc; a shipped MIR that is not the compared code fails the panic theorem).
 
 Full design, research and judges' scores: `docs/optimizer-design.md`; milestones O1–O20: `docs/optimizer-plan.md`.
 

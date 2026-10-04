@@ -70,5 +70,8 @@ members = [
     "opt_ip_mod",
     "opt_mbits",
     "opt_mbits_cheap",
+    "opt_panics",
     "opt_rd",
+    "opt_shipped",
+    "rw_mix",
 ]

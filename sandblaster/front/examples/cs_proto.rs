@@ -246,7 +246,7 @@ fn parse_entries(spec: &str) -> Vec<Entry> {
             return Entry::Model { key: key.into(), s_global };
         }
         if kind == "while" {
-            return Entry::While { key: key.into(), s_global, header: 0, local_names: vec![] };
+            return Entry::While { key: key.into(), s_global, header: 0, local_names: vec![], returned: None };
         }
         let header = parts.next().expect("header").parse().unwrap();
         let slots = parts.next().unwrap_or("").split(',').filter(|x| !x.is_empty()).map(|kv| { let (a, b) = kv.split_once('=').unwrap(); (a.to_string(), b.to_string()) }).collect();

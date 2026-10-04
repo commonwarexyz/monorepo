@@ -1,0 +1,8 @@
+[shipped] out: sandblaster/bench/shipped-harness/results; load: 8.44 8.22 8.27; rounds: 31
+[shipped] [default-release] building
+[shipped] [default-release] load before: 9.69 9.49 8.84; after: 7.00 8.61 8.57
+[shipped] [align-release] building
+[shipped] [align-release] load before: 7.70 8.10 8.42; after: 13.22 9.77 9.02
+[shipped] [default-release-nooc] building
+[shipped] [default-release-nooc] load before: 7.82 11.24 11.48; after: 8.60 10.94 11.36
+[shipped] wrote sandblaster/bench/shipped-harness/REPORT.md; done in 1975 s

@@ -86,8 +86,9 @@ enum N {
     BoolAs(UintTy, NodeId),
     /// `!b` (the prelude's `bool::not`, kept folded by the driver).
     BoolNot(NodeId),
-    /// `a.checked_add(b)` / `a.checked_sub(b)` (the prelude's, kept folded
-    /// by the driver so a decided one is rewritten by its lemma).
+    /// `a.checked_add(b)` and the other checked operations of
+    /// `drive::CHECKED_OPS` (the prelude's, kept folded by the driver so a
+    /// decided one is rewritten by its lemma).
     IntCall(crate::builtins::IntMethod, UintTy, Vec<NodeId>),
     Call(ItemId, Vec<Ty>, Vec<NodeId>),
     /// A slice builtin call (receiver first).
@@ -219,7 +220,7 @@ struct SliceOps {
     /// `bool::as_uN`.
     bool_as: HashMap<GlobalId, UintTy>,
     bool_not: Option<GlobalId>,
-    /// `uN::checked_add` / `uN::checked_sub`.
+    /// `uN::checked_add` and the other checked operations (`drive::CHECKED_OPS`).
     checked: HashMap<GlobalId, (crate::builtins::IntMethod, UintTy)>,
 }
 
@@ -1076,7 +1077,10 @@ pub fn build_tree(env: &Env, maps: &Maps, krate: &Crate, f: &FnDef, tree: &TNode
         bool_not: env.lookup_global("bool::not"),
         checked: [UintTy::U8, UintTy::U16, UintTy::U32, UintTy::U64, UintTy::Usize]
             .into_iter()
-            .flat_map(|w| [(crate::builtins::IntMethod::CheckedAdd, "checked_add"), (crate::builtins::IntMethod::CheckedSub, "checked_sub")].map(move |(m, n)| (m, w, n)))
+            .flat_map(|w| {
+                use crate::builtins::IntMethod::*;
+                [(CheckedAdd, "checked_add"), (CheckedSub, "checked_sub"), (CheckedMul, "checked_mul"), (CheckedDiv, "checked_div")].map(move |(m, n)| (m, w, n))
+            })
             .filter_map(|(m, w, n)| env.lookup_global(&format!("{}::{n}", w.name())).map(|g| (g, (m, w))))
             .collect(),
     };

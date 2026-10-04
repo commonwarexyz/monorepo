@@ -20,7 +20,7 @@ use sandblaster_kernel::value::{Budget, Value};
 use super::gate::{Ledger, Verdict};
 use super::ir::{Sbmir, Ty};
 use super::literal::{Gen, GenState, KNames, LFn};
-use super::simproof::{Callee, ExitMode, Fact, Goal, Helper, Pres, RecCtx, RecFn, Walker, WhileHelper};
+use super::simproof::{Callee, ExitMode, Fact, Fuel, FuelMode, Goal, Helper, Pres, RecCtx, RecFn, Walker, WhileHelper};
 use super::stmt::{self, StmtSpec};
 use super::ModuleNames;
 use crate::lift::MirContract;
@@ -74,8 +74,11 @@ pub enum Entry {
     Helper { key: String, s_global: String, header: usize, slots: Vec<(String, String)> },
     /// The (untrusted) lemma of a `while` loop's helper (the elaborator's
     /// `<f>::loop#k`): the instance, the helper's global, the loop header,
-    /// and the reading's names of the instance's locals.
-    While { key: String, s_global: String, header: usize, local_names: Vec<String> },
+    /// and the reading's names of the instance's locals. Also of a loop
+    /// helper the structured reading built for a loop inside another loop's
+    /// body, which returns at the loop's exit the parameters at `returned`
+    /// (positions; `None`: the parameters a recursive call changes).
+    While { key: String, s_global: String, header: usize, local_names: Vec<String>, returned: Option<Vec<usize>> },
     /// The (untrusted) model lemma of a library function the lift prelude
     /// models (`core::num::<impl u64>::div_ceil` against `u64::div_ceil`):
     /// a callee lemma for the walks of the functions that call it, so that
@@ -131,11 +134,16 @@ pub struct Prover<'a> {
     whiles: Vec<WhileHelper>,
     /// Every declaration added since the last take (a verdict-cache entry).
     pub added: Vec<DefDecl>,
+    /// The panic statement (DESIGN.md §8.2 item 12, `stmt::statement_panic`):
+    /// every theorem proven is about a panic-explicit reading (result
+    /// `Option(R)`, `None` the panic outcome), named `L::pthm::<id>` (its
+    /// lemma `L::plem::<id>`), a composed one `L::pshipped::<id>`.
+    pub panic: bool,
 }
 
 impl<'a> Prover<'a> {
     pub fn new(env: &'a mut Env, m: &'a Sbmir, names: &'a ModuleNames, lit: &'a Literal, pre_commit: &'a std::collections::HashMap<GlobalId, crate::elab::PreCommit>, contracts: &'a [MirContract]) -> Self {
-        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), replace_callees: false, delegate: false, helpers: Vec::new(), whiles: Vec::new(), added: Vec::new() }
+        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), replace_callees: false, delegate: false, helpers: Vec::new(), whiles: Vec::new(), added: Vec::new(), panic: false }
     }
 
     /// Adds `d` to the environment (the kernel checks it) and to the log.
@@ -154,7 +162,7 @@ impl<'a> Prover<'a> {
         match e {
             Entry::Fn { key, s_global } => self.prove_fn(key, s_global),
             Entry::Helper { key, s_global, header, slots } => self.prove_helper(key, s_global, *header, slots),
-            Entry::While { key, s_global, header, local_names } => self.prove_while(key, s_global, *header, local_names),
+            Entry::While { key, s_global, header, local_names, returned } => self.prove_while(key, s_global, *header, local_names, returned.as_deref()),
             Entry::Model { key, s_global } => self.prove_fn_as(key, s_global, true),
         }
     }
@@ -199,6 +207,7 @@ impl<'a> Prover<'a> {
             steps: 0,
             whiles: self.whiles.clone(),
             exit: None,
+            panic: None,
         }
     }
 
@@ -247,7 +256,13 @@ impl<'a> Prover<'a> {
         let k = KNames { names: self.names, env: self.env };
         let mut g = Gen::resume(self.m, &k, self.lit.state.clone());
         let f = self.m.fns.get(key).ok_or("no MIR")?;
-        stmt::statement(self.env, &mut g, lf, f, s_global)
+        if self.panic { stmt::statement_panic(self.env, &mut g, lf, f, s_global) } else { stmt::statement(self.env, &mut g, lf, f, s_global) }
+    }
+
+    /// The names of a theorem and its lemma (`L::thm::`, `L::lem::`; for the
+    /// panic statement `L::pthm::`, `L::plem::`).
+    fn names_of(&self, id: &str) -> (String, String) {
+        if self.panic { (format!("L::pthm::{id}"), format!("L::plem::{id}")) } else { (format!("L::thm::{id}"), format!("L::lem::{id}")) }
     }
 
     /// The theorem of a lifted function, from its (untrusted) function
@@ -287,7 +302,19 @@ impl<'a> Prover<'a> {
         let mut rn: Vec<&str> = st.params.iter().filter(|p| p.1 == Rel::Rel).map(|p| p.0.as_str()).collect();
         rn.push("n");
         let l_rel = self.env.parse_term(&rn, &st.l_of()).map_err(|e| format!("l_of: {e}"))?;
-        let pres = self.pres_of(&lf, &tele, &r_ty0)?;
+        // (the panic statement: S's result `Option(R)`; no state passing)
+        let panic_r = if self.panic && !model {
+            if !lf.cells.is_empty() {
+                return Err(format!("`{s_global}`: a panic-explicit reading with `&mut` parameters (not read yet)"));
+            }
+            match &*r_ty0 {
+                Term::Ind { params, .. } if params.len() == 1 => Some(params[0].clone()),
+                _ => return Err(format!("`{s_global}` does not return an `Option`")),
+            }
+        } else {
+            None
+        };
+        let pres = if panic_r.is_some() { None } else { self.pres_of(&lf, &tele, &r_ty0)? };
         let rel_idx: Vec<u32> = (0..arity).filter(|i| tele[*i as usize].1 == Rel::Rel).collect();
         // a measure-recursive S: its pre-commit body (self-calls `Rec` with
         // their decrease proofs) and measure
@@ -325,10 +352,19 @@ impl<'a> Prover<'a> {
                 return Err(format!("a delegation to the recursive `{s_global}`"));
             }
             inner = mk::apps(mk::global(sg), (0..arity).map(|i| (tele[i as usize].1, mk::var(arity - 1 - i))).collect::<Vec<_>>());
+            // (the panic statement: the replacement's `Option` result matched
+            // on, `None` and `Some(y)` alike, so the walk splits on its
+            // outcome as on any callee's result; the literal side holds it in
+            // the callee lemma's `opt_erase`)
+            if let Some(r) = &panic_r {
+                inner = option_idiom(self.env, r, &inner)?;
+            }
         }
         // (the lift prelude's exec helpers, `i16_neg` and the like, unfolded
-        // in place: their tests are then S's own splits)
-        inner = inline_prelude(self.env, &inner, 4);
+        // in place: their tests are then S's own splits; for the panic
+        // statement the prelude's checked arithmetic too, whose test is the
+        // MIR's overflow or zero test)
+        inner = inline_prelude(self.env, &inner, 4, panic_r.is_some());
         // (S's body shared once: the walk shifts and commits it at every step)
         if std::env::var("CS_NO_HASHCONS").is_err() {
             inner = super::simproof::hashcons(&inner);
@@ -338,6 +374,7 @@ impl<'a> Prover<'a> {
         let mut w = self.walker(out_tm.clone(), erase_tm.clone(), (0..arity).collect(), arity, None, s_self, opaque);
         w.fname = s_global.to_string();
         w.pres = pres.clone();
+        w.panic = panic_r.clone();
         w.rec_fn = rec_fn.clone();
         w.prem_in_ctx = rec_fn.is_some();
         let params_at = |depth: u32| -> Vec<Tm> { (0..arity).map(|l| mk::var(depth - 1 - l)).collect() };
@@ -390,7 +427,12 @@ impl<'a> Prover<'a> {
             let s_app_n = mk::apps(mk::global(sg), args_x(1));
             let r_ty_n = shift(&r_ty0, 1);
             let delta = Rc::new(Term::Delta { def: sg, args: args_x(1).iter().map(|a| a.1.clone()).collect() });
-            let sym = if self.delegate { mk::refl(r_ty_n.clone(), s_app_n.clone()) } else { mk::apps(mk::global(self.env.lookup_global("eq::sym").ok_or("eq::sym")?), vec![(Rel::Rel, r_ty_n.clone()), (Rel::Rel, s_app_n.clone()), (Rel::Rel, inner_n.clone()), (Rel::Rel, delta)]) };
+            let sym = match (&panic_r, self.delegate) {
+                // the option idiom on the call is the call (by cases)
+                (Some(r), true) => option_idiom_eq(self.env, &shift(r, 1), &s_app_n)?,
+                (None, true) => mk::refl(r_ty_n.clone(), s_app_n.clone()),
+                _ => mk::apps(mk::global(self.env.lookup_global("eq::sym").ok_or("eq::sym")?), vec![(Rel::Rel, r_ty_n.clone()), (Rel::Rel, s_app_n.clone()), (Rel::Rel, inner_n.clone()), (Rel::Rel, delta)]),
+            };
             let ctx_y = w.push(&nctx, "y", Rel::Rel, &r_ty_n, None)?;
             let motive = w.goal_p(&ctx_y, &Goal { l: shift(&l_tm, 1), s: mk::var(0), ins: ins_at(arity + 2), rhs: None, acc: None });
             let prem_y = le_int(self.env, shift(&need_tm, 2), len_at(self.env, 1));
@@ -425,11 +467,12 @@ impl<'a> Prover<'a> {
         let stats = format!("{stats}; {raw_nodes} nodes before sharing");
         self.dump(&format!("lem_{}.core", lf.id), &self.env.print_term(&[], &lem_ty));
         let t4 = Instant::now();
-        let decl = DefDecl { name: Rc::from(format!("L::lem::{}", lf.id).as_str()), kind: DefKind::Lemma, ty: lem_ty, body: proof, recursion, arity: lem_arity, opaque: false };
+        let (thm_name, lem_name) = self.names_of(&lf.id);
+        let decl = DefDecl { name: Rc::from(lem_name.as_str()), kind: DefKind::Lemma, ty: lem_ty, body: proof, recursion, arity: lem_arity, opaque: false };
         let lem_g = self.add(decl, 40_000_000_000).map_err(|e| format!("the kernel rejected the lemma of `{s_global}`: {}", trunc(&e.to_string(), 3000)))?;
         if model {
             let check_secs = t4.elapsed().as_secs_f64();
-            self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres });
+            self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres, panic: None });
             return Ok(Proven { s_global: s_global.into(), kind: "model lemma", walk_secs, check_secs, nodes, stats });
         }
         // the trusted theorem from the lemma: pair(need, λ n .hle. lem x̄ n .hle)
@@ -451,14 +494,14 @@ impl<'a> Prover<'a> {
         for (nm, r, d) in tele.iter().rev() {
             tproof = mk::lam(nm, *r, d.clone(), tproof);
         }
-        let decl = DefDecl { name: Rc::from(format!("L::thm::{}", lf.id).as_str()), kind: DefKind::Lemma, ty: thm_ty, body: tproof, recursion: Recursion::None, arity, opaque: false };
+        let decl = DefDecl { name: Rc::from(thm_name.as_str()), kind: DefKind::Lemma, ty: thm_ty, body: tproof, recursion: Recursion::None, arity, opaque: false };
         self.add(decl, 4_000_000_000).map_err(|e| format!("the kernel rejected the theorem of `{s_global}`: {}", trunc(&e.to_string(), 2000)))?;
         let check_secs = t4.elapsed().as_secs_f64();
         // callers use the lemma: at any fuel, or at its need
         if self.replace_callees {
             self.callees.retain(|c| c.s_global != sg);
         }
-        self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres });
+        self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres, panic: panic_r });
         Ok(Proven { s_global: s_global.into(), kind: "theorem", walk_secs, check_secs, nodes, stats })
     }
 
@@ -478,17 +521,16 @@ impl<'a> Prover<'a> {
         if st_f.params.iter().map(|p| p.1).collect::<Vec<_>>() != st_g.params.iter().map(|p| p.1).collect::<Vec<_>>() {
             return Err(format!("`{source}` and `{target}` do not have the same parameters"));
         }
-        let thm_g = self.env.lookup_global(&format!("L::thm::{}", lf.id)).ok_or("the copy's theorem against the replacement is missing")?;
+        let thm_g = self.env.lookup_global(&self.names_of(&lf.id).0).ok_or("the copy's theorem against the replacement is missing")?;
         let names: Vec<&str> = st_f.params.iter().map(|p| p.0.as_str()).collect();
         let parse = |env: &Env, ns: &[&str], t: &str, what: &str| env.parse_term(ns, t).map_err(|e| format!("{what}: {e}"));
         let thm_ty = parse(self.env, &[], &st_f.theorem_ty(), "theorem type")?;
-        let r_ty = parse(self.env, &names, &st_f.s_ret, "result type")?;
+        let r_ty = parse(self.env, &names, &st_f.s_full_ret(), "result type")?;
         let f_app = parse(self.env, &names, &st_f.app(), "source call")?;
         let g_app = parse(self.env, &names, &st_g.app(), "replacement call")?;
         let mut ny = names.clone();
         ny.push("yy");
-        let er = st_f.erase_ret.replace("@Y@", "yy");
-        let motive_txt = format!("Sigma (k : Int), ((n : List(Unit)) -> (.hle : Eq(Bool, #le_int(k, seq::len Unit n), true)) -> Eq(Option({out}), {}, Some[{out}]({er})))", st_f.l_of(), out = st_f.l_out);
+        let motive_txt = format!("Sigma (k : Int), ((n : List(Unit)) -> (.hle : Eq(Bool, #le_int(k, seq::len Unit n), true)) -> Eq(Option({out}), {}, {}))", st_f.l_of(), st_f.rhs_of("yy"), out = st_f.l_out);
         let motive = parse(self.env, &ny, &motive_txt, "motive")?;
         let arity = st_f.params.len() as u32;
         let var_of = |i: usize| mk::var(arity - 1 - i as u32);
@@ -535,9 +577,10 @@ impl<'a> Prover<'a> {
             proof = mk::lam(nm, *r, d.clone(), proof);
         }
         let nodes = crate::elab::tm::size(&proof);
-        let decl = DefDecl { name: Rc::from(format!("L::shipped::{}", lf.id).as_str()), kind: DefKind::Lemma, ty: thm_ty, body: proof, recursion: Recursion::None, arity, opaque: false };
+        let shipped = if self.panic { format!("L::pshipped::{}", lf.id) } else { format!("L::shipped::{}", lf.id) };
+        let decl = DefDecl { name: Rc::from(shipped.as_str()), kind: DefKind::Lemma, ty: thm_ty, body: proof, recursion: Recursion::None, arity, opaque: false };
         self.add(decl, 4_000_000_000).map_err(|e| format!("the kernel rejected the shipped code's theorem of `{source}`: {}", trunc(&e.to_string(), 2000)))?;
-        Ok(Proven { s_global: source.into(), kind: "shipped theorem", walk_secs: 0.0, check_secs: t0.elapsed().as_secs_f64(), nodes, stats: format!("from `L::thm::{}` along {}", lf.id, equiv.unwrap_or("the same definition")) })
+        Ok(Proven { s_global: source.into(), kind: "shipped theorem", walk_secs: 0.0, check_secs: t0.elapsed().as_secs_f64(), nodes, stats: format!("from `{}` along {}", self.names_of(&lf.id).0, equiv.unwrap_or("the same definition")) })
     }
 
     fn prove_helper(&mut self, key: &str, s_global: &str, header: usize, slotmap: &[(String, String)]) -> Result<Proven, String> {
@@ -598,14 +641,26 @@ impl<'a> Prover<'a> {
                 _ => return Err("the measure's type".into()),
             }
         };
-        let mu_raw = self.env.print_term(&pnames, &measure);
-        let mu_txt = if width == Width::Int { mu_raw } else { format!("#cast_{}_int({mu_raw})", format!("{width:?}").to_lowercase()) };
+        let mut inner = pre_body.clone();
+        for _ in 0..arity {
+            let Term::Lam { body, .. } = &*inner else { return Err("pre-commit body".into()) };
+            inner = body.clone();
+        }
+        // (nested loops: the loop's fuel function is its premise)
+        let fuel = if nested_loops(&f, &lf.headers) { Some(self.fuel_fn(&lf, header, sg, &inner, 0)?) } else { None };
+        let mu_txt = match &fuel {
+            Some(fu) => params.iter().fold(self.env.global_name(fu.f).map(|n| n.to_string()).unwrap_or_default(), |a, (n, r, _)| format!("{a} {}{n}", if *r == Rel::Irr { "." } else { "" })),
+            None => {
+                let mu_raw = self.env.print_term(&pnames, &measure);
+                if width == Width::Int { mu_raw } else { format!("#cast_{}_int({mu_raw})", format!("{width:?}").to_lowercase()) }
+            }
+        };
         let lem_ty_text = format!("{tele_txt}(n : List(Unit)) -> (.hle : Eq(Bool, #le_int({mu_txt}, seq::len Unit n), true)) -> Eq(Option({out}), {run} n {blk}::b{header} ({st_text}), Some[{out}]({er}))", out = lf.out_ty, run = lf.run, blk = lf.blk);
         self.dump(&format!("hlem_{}.core", lf.id), &lem_ty_text);
         let lem_ty = self.env.parse_term(&[], &lem_ty_text).map_err(|e| format!("helper lemma type: {e}"))?;
         let nj = junk.len() as u32;
         let lem_arity = arity + nj + 2;
-        let hinfo = Helper { s_global: sg, lemma: GlobalId(u32::MAX), measure: measure.clone(), nparams: arity, rels: rels.clone(), junk: junk.clone(), nslots, header_ctor: (2 * header) as u32, width };
+        let hinfo = Helper { s_global: sg, lemma: GlobalId(u32::MAX), measure: measure.clone(), nparams: arity, rels: rels.clone(), junk: junk.clone(), nslots, header_ctor: (2 * header) as u32, width, fuel: fuel.clone() };
         let out_tm = self.env.parse_term(&[], &lf.out_ty).map_err(|e| e.to_string())?;
         let erase_tm = self.env.parse_term(&[], &format!("fun (yy : {s_ret}) => {}", erase_ret.replace("@Y@", "yy"))).map_err(|e| format!("erase: {e}"))?;
         let run_g = self.env.lookup_global(&lf.run).ok_or("no run")?;
@@ -625,11 +680,6 @@ impl<'a> Prover<'a> {
         for (nm, r, d) in ltele.iter().take(lem_arity as usize - 1) {
             ctx = w.push(&ctx, nm, *r, d, None)?;
         }
-        let mut inner = pre_body.clone();
-        for _ in 0..arity {
-            let Term::Lam { body, .. } = &*inner else { return Err("pre-commit body".into()) };
-            inner = body.clone();
-        }
         let inner_j = shift(&inner, nj as i64 + 1);
         let walked = w.walk(&ctx, &Goal { l: l_tm.clone(), s: inner_j.clone(), ins: vec![], rhs: None, acc: None }, &[]).map_err(|e| format!("walk of helper `{s_global}`: {e}"))?;
         let stats = format!("{:?}", w.stats);
@@ -641,11 +691,33 @@ impl<'a> Prover<'a> {
         let delta = Rc::new(Term::Delta { def: sg, args: pargs.iter().map(|a| a.1.clone()).collect() });
         let sym = mk::apps(mk::global(self.env.lookup_global("eq::sym").ok_or("eq::sym")?), vec![(Rel::Rel, r_ty.clone()), (Rel::Rel, h_app.clone()), (Rel::Rel, committed.clone()), (Rel::Rel, delta)]);
         let ctx_y = w.push(&ctx, "y", Rel::Rel, &r_ty, None)?;
-        let mot = w.goal_p(&ctx_y, &Goal { l: shift(&l_tm, 1), s: mk::var(0), ins: vec![], rhs: None, acc: None });
+        let g_y = Goal { l: shift(&l_tm, 1), s: mk::var(0), ins: vec![], rhs: None, acc: None };
+        // (with a fuel function the premise is the body's need, whatever `y`;
+        // the lemma's premise `F(p̄) ≤ len n` moved to it along `delta(F; p̄)`)
+        let (mot, need_root) = match &fuel {
+            Some(_) => {
+                let need = w.need_acc(&ctx, &inner_j, None);
+                let prem = w.le_int(shift(&need, 1), w.len_n(ctx_y.depth().0));
+                (mk::pi("hle", Rel::Irr, prem, shift(&w.goal_c(&g_y), 1)), Some(need))
+            }
+            None => (w.goal_p(&ctx_y, &g_y), None),
+        };
         let tr = Rc::new(Term::Transport { ty: r_ty, lhs: committed, rhs: h_app, eq: sym, motive: mot, val: walked });
+        let hle = match (&fuel, &need_root) {
+            (Some(fu), Some(need)) => {
+                // at depth + 1 (the premise bound): F(p̄) ≤ len n → need ≤ len n
+                let ps: Vec<Tm> = (0..arity).map(|i| mk::var(depth - i)).collect();
+                let f_app = mk::apps(mk::global(fu.f), rels.iter().copied().zip(ps.iter().cloned()));
+                let int = mk::int_ty(Width::Int);
+                let motive = w.le_int(mk::var(0), shift(&w.len_n(depth), 2));
+                let delta = Rc::new(Term::Delta { def: fu.f, args: ps });
+                Rc::new(Term::Transport { ty: int, lhs: f_app, rhs: shift(need, 1), eq: delta, motive, val: mk::var(0) })
+            }
+            _ => mk::var(0),
+        };
         drop(w);
         let (hn, hr, hd) = ltele[lem_arity as usize - 1].clone();
-        let mut proof = mk::lam(&hn, hr, hd, Rc::new(Term::App { rel: Rel::Irr, fun: shift(&tr, 1), arg: mk::var(0) }));
+        let mut proof = mk::lam(&hn, hr, hd, Rc::new(Term::App { rel: Rel::Irr, fun: shift(&tr, 1), arg: hle }));
         for (nm, r, d) in ltele.iter().take(lem_arity as usize - 1).rev() {
             proof = mk::lam(nm, *r, d.clone(), proof);
         }
@@ -683,7 +755,7 @@ impl Prover<'_> {
     /// with `eqS : h p̄ = S` in its goals: an exit hands the literal side,
     /// stepped to `X`, to `hC`; a recursive call is the induction hypothesis
     /// with `hC` moved along `eqS`.
-    fn prove_while(&mut self, key: &str, h_global: &str, header: usize, local_names: &[String]) -> Result<Proven, String> {
+    fn prove_while(&mut self, key: &str, h_global: &str, header: usize, local_names: &[String], returned: Option<&[usize]>) -> Result<Proven, String> {
         let t0 = Instant::now();
         let lf = self.lit.lfn(key).cloned().ok_or_else(|| format!("no literal reading of `{key}`"))?;
         let f = self.m.fns.get(key).cloned().ok_or("no MIR")?;
@@ -734,7 +806,10 @@ impl Prover<'_> {
             }
             None
         });
-        let carried: Vec<usize> = (0..arity as usize).filter(|k| rels[*k] == Rel::Rel && !unchanged[*k]).collect();
+        let carried: Vec<usize> = match returned {
+            Some(r) => r.to_vec(),
+            None => (0..arity as usize).filter(|k| rels[*k] == Rel::Rel && !unchanged[*k]).collect(),
+        };
         // the parameters' slots, by the reading's names of the locals
         let rc = format!("Tuple2(L::{}::Root, List(mir::Proj))", lf.id);
         let nl = lf.local_tys.len();
@@ -815,14 +890,25 @@ impl Prover<'_> {
         // the exit block: the header's successor outside the loop
         let x_blk = loop_exit(&f, header).ok_or_else(|| format!("`{h_global}`: the loop at block {header} has not exactly one exit"))?;
         let x_ctor = (2 * x_blk) as u32;
-        // the telescope p̄ j̄ n C hC (then hle)
+        // (nested loops: the loop's fuel function, its exit's unit when it
+        // jumps to an outer loop's header, and the continuation's reserve)
+        let fuel = if nested_loops(&f, &lf.headers) {
+            let e = if lf.headers.contains(&x_blk) { 1 } else { 0 };
+            Some(self.fuel_fn(&lf, header, sg, &inline_prelude(self.env, &inner0, 4, false), e)?)
+        } else {
+            None
+        };
+        let rsv: u32 = if fuel.is_some() { 1 } else { 0 };
+        let int = mk::int_ty(Width::Int);
+        // the telescope p̄ j̄ n C hC (then hle); with a fuel function p̄ j̄ n R
+        // C hC hR (then hle)
         let out_tm = self.env.parse_term(&[], &lf.out_ty).map_err(|e| format!("out type: {e}"))?;
         let opt = self.env.lookup_ind("Option").unwrap();
         let opt_out = mk::ind(opt, vec![out_tm.clone()]);
         let lu = mk::ind(self.env.lookup_ind("List").unwrap(), vec![mk::ind(self.env.lookup_ind("Unit").unwrap(), vec![])]);
         let seq_len = self.env.lookup_global("seq::len").ok_or("seq::len")?;
         let len_of = |t: Tm| mk::apps(mk::global(seq_len), vec![(Rel::Rel, mk::ind(self.env.lookup_ind("Unit").unwrap(), vec![])), (Rel::Rel, t)]);
-        let hinfo = Helper { s_global: sg, lemma: GlobalId(u32::MAX), measure: pc.measure.clone(), nparams: arity, rels: rels.clone(), junk: junk.clone(), nslots, header_ctor: (2 * header) as u32, width };
+        let hinfo = Helper { s_global: sg, lemma: GlobalId(u32::MAX), measure: pc.measure.clone(), nparams: arity, rels: rels.clone(), junk: junk.clone(), nslots, header_ctor: (2 * header) as u32, width, fuel: fuel.clone() };
         let run_g = self.env.lookup_global(&lf.run).ok_or("no run")?;
         let st_ind = self.env.lookup_ind(&lf.st).ok_or("no St")?;
         let blk_ind = self.env.lookup_ind(&lf.blk).ok_or("no Blk")?;
@@ -837,12 +923,20 @@ impl Prover<'_> {
             ltele.push((Rc::from(format!("j{i}").as_str()), Rel::Rel, t));
         }
         ltele.push((Rc::from("n"), Rel::Rel, lu.clone()));
+        if fuel.is_some() {
+            ltele.push((Rc::from("R"), Rel::Rel, int.clone()));
+        }
         ltele.push((Rc::from("C"), Rel::Rel, opt_out.clone()));
-        // hC's type at depth e0 + 2: Π m (.hm) k̄ c̄ (.ez : h p̄ = tuple(c̄)). Eq(run m X (sx c̄ w̄), C)
+        let c_lvl = e0 + 1 + rsv;
+        // hC's type at depth c_lvl + 1: Π m (.hm) k̄ c̄ (.ez : h p̄ = tuple(c̄)). Eq(run m X (sx c̄ w̄), C)
         let ncomp = comp_tys.len() as u32;
         let hc_ty = {
-            let d_m = e0 + 2; // m bound here
-            let hm_ty = le_int(self.env, mk::prim(PrimOp::ISub, vec![len_of(mk::var(d_m - e0)), hinfo.mu_int(&hinfo.params_at(d_m + 1))], vec![]), len_of(mk::var(0)));
+            let d_m = c_lvl + 1; // m bound here
+            let hm_ty = if fuel.is_some() {
+                le_int(self.env, mk::var(d_m - e0 - 1), len_of(mk::var(0)))
+            } else {
+                le_int(self.env, mk::prim(PrimOp::ISub, vec![len_of(mk::var(d_m - e0)), hinfo.mu_int(&hinfo.params_at(d_m + 1))], vec![]), len_of(mk::var(0)))
+            };
             let nk = k_tys.len() as u32;
             let d_c = d_m + 2 + nk; // the first component's level
             let d_ez = d_c + ncomp;
@@ -871,7 +965,7 @@ impl Prover<'_> {
                 });
             }
             let run_x = mk::apps(mk::global(run_g), vec![(Rel::Rel, mk::var(eb - 1 - d_m)), (Rel::Rel, blk(x_ctor)), (Rel::Rel, st)]);
-            let mut body = mk::eq(opt_out.clone(), run_x, mk::var(eb - 1 - (e0 + 1)));
+            let mut body = mk::eq(opt_out.clone(), run_x, mk::var(eb - 1 - c_lvl));
             body = mk::pi("ez", Rel::Irr, ez_ty, body);
             for (i, t) in comp_tys.iter().enumerate().rev() {
                 body = mk::pi(&format!("c{i}"), Rel::Rel, t.clone(), body);
@@ -883,8 +977,11 @@ impl Prover<'_> {
             mk::pi("m", Rel::Rel, lu.clone(), body)
         };
         ltele.push((Rc::from("hC"), Rel::Rel, hc_ty));
-        // the conclusion over (p̄, j̄, n, C, hC): depth e0 + 3
-        let e3 = e0 + 3;
+        if fuel.is_some() {
+            ltele.push((Rc::from("hR"), Rel::Irr, le_int(self.env, mk::lit(Width::Int, 0), mk::var(2))));
+        }
+        // the conclusion over (p̄, j̄, n, C, hC): depth e0 + 3 (e0 + 5 with R, hR)
+        let e3 = e0 + 3 + 2 * rsv;
         let mut slots_h: Vec<Tm> = Vec::new();
         for (i, pt) in param_slot_tm.iter().enumerate() {
             slots_h.push(match pt {
@@ -897,9 +994,12 @@ impl Prover<'_> {
         }
         let st_h = Rc::new(Term::Ctor { ind: st_ind, ctor: 0, params: vec![], args: slots_h });
         let os = Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![mk::ind(st_ind, vec![])], args: vec![st_h] });
-        let l_tm = mk::apps(mk::global(run_g), vec![(Rel::Rel, mk::var(2)), (Rel::Rel, blk((2 * header) as u32)), (Rel::Rel, os)]);
-        let prem = le_int(self.env, hinfo.mu_int(&hinfo.params_at(e3)), len_of(mk::var(2)));
-        let concl = mk::eq(opt_out.clone(), shift(&l_tm, 1), mk::var(1 + 1));
+        let l_tm = mk::apps(mk::global(run_g), vec![(Rel::Rel, mk::var(e3 - 1 - e0)), (Rel::Rel, blk((2 * header) as u32)), (Rel::Rel, os)]);
+        let prem = match fuel {
+            Some(_) => le_int(self.env, mk::prim(PrimOp::IAdd, vec![hinfo.need_int(&hinfo.params_at(e3)), mk::var(e3 - 1 - (e0 + 1))], vec![]), len_of(mk::var(e3 - 1 - e0))),
+            None => le_int(self.env, hinfo.mu_int(&hinfo.params_at(e3)), len_of(mk::var(e3 - 1 - e0))),
+        };
+        let concl = mk::eq(opt_out.clone(), shift(&l_tm, 1), mk::var(e3 - c_lvl));
         let mut lem_ty = mk::pi("hle", Rel::Irr, prem.clone(), concl);
         for (nm, r, d) in ltele.iter().rev() {
             lem_ty = mk::pi(nm, *r, d.clone(), lem_ty);
@@ -909,7 +1009,7 @@ impl Prover<'_> {
         let erase_id = self.env.parse_term(&[], &format!("fun (yy : {}) => yy", lf.out_ty)).map_err(|e| e.to_string())?;
         let opaque = self.opaque(run_g);
         let mut wk = self.walker(out_tm.clone(), erase_id, vec![], e0, Some(RecCtx { helper: hinfo.clone() }), Some((sg, rels.clone())), opaque);
-        wk.exit = Some(ExitMode { x_ctor, r_ty: r_h.clone(), sx: sx.clone(), comps: comp_tys.clone(), tuple: tuple.clone(), w: w.clone(), w_slots, e0, c_level: e0 + 1, hc_level: e0 + 2, k_tys: k_tys.clone(), eqs_level: None });
+        wk.exit = Some(ExitMode { x_ctor, r_ty: r_h.clone(), sx: sx.clone(), comps: comp_tys.clone(), tuple: tuple.clone(), w: w.clone(), w_slots, e0, c_level: c_lvl, hc_level: c_lvl + 1, r_level: fuel.as_ref().map(|_| e0 + 1), hr_level: fuel.as_ref().map(|_| e0 + 4), k_tys: k_tys.clone(), eqs_level: None });
         wk.fname = format!("{h_global} (the `while` loop's lemma)");
         let mut ctx = Ctx::default();
         for (nm, r, d) in ltele.iter() {
@@ -925,13 +1025,28 @@ impl Prover<'_> {
             let ty = shift(&self.env.quote_typed(&pre, &en.ty, None, true), (e3 - lv) as i64);
             sigma_facts(mk::var(e3 - 1 - lv), &ty, &mut facts);
         }
-        let inner = super::simproof::hashcons(&inline_prelude(self.env, &shift(&inner0, (e3 - arity) as i64), 4));
+        if fuel.is_some() {
+            facts.push(Fact::eq(mk::var(e3 - 1 - (e0 + 4)), le_int(self.env, mk::lit(Width::Int, 0), mk::var(e3 - 1 - (e0 + 1)))));
+        }
+        let inner = super::simproof::hashcons(&inline_prelude(self.env, &shift(&inner0, (e3 - arity) as i64), 4, false));
         let walked = wk.walk(&ctx, &Goal { l: l_tm.clone(), s: inner.clone(), ins: vec![], rhs: None, acc: None }, &facts).map_err(|e| format!("walk of `{h_global}` (the `while` loop's lemma): {e}"))?;
         let stats = format!("{:?}", wk.stats);
+        // (with a fuel function: the premise `F(p̄) + R ≤ len n` moved to the
+        // body's need along `delta(F; p̄)`)
+        let hle = match &fuel {
+            Some(fu) => {
+                let need = shift(&wk.shadow_f(&inner, None, &FuelMode { f: Some(fu.f), rels: rels.clone(), e: fu.e }), 1);
+                let ps = hinfo.params_at(e3 + 1);
+                let f_app = mk::apps(mk::global(fu.f), rels.iter().copied().zip(ps.iter().cloned()));
+                let motive = le_int(self.env, mk::prim(PrimOp::IAdd, vec![mk::var(0), mk::var(e3 - e0)], vec![]), len_of(mk::var(e3 - e0 + 1)));
+                Rc::new(Term::Transport { ty: int.clone(), lhs: f_app, rhs: need, eq: Rc::new(Term::Delta { def: fu.f, args: ps }), motive, val: mk::var(0) })
+            }
+            None => mk::var(0),
+        };
         drop(wk);
         // λ hle. walked hle (delta(h; p̄))
         let delta = Rc::new(Term::Delta { def: sg, args: hinfo.params_at(e3 + 1) });
-        let mut proof = mk::lam("hle", Rel::Irr, prem, Rc::new(Term::App { rel: Rel::Irr, fun: Rc::new(Term::App { rel: Rel::Irr, fun: shift(&walked, 1), arg: mk::var(0) }), arg: delta }));
+        let mut proof = mk::lam("hle", Rel::Irr, prem, Rc::new(Term::App { rel: Rel::Irr, fun: Rc::new(Term::App { rel: Rel::Irr, fun: shift(&walked, 1), arg: hle }), arg: delta }));
         for (nm, r, d) in ltele.iter().rev() {
             proof = mk::lam(nm, *r, d.clone(), proof);
         }
@@ -940,11 +1055,80 @@ impl Prover<'_> {
         let nodes = crate::elab::tm::size(&proof);
         let walk_secs = t0.elapsed().as_secs_f64();
         let t1 = Instant::now();
-        let decl = DefDecl { name: Rc::from(format!("L::wlem::{}_{header}", lf.id).as_str()), kind: DefKind::Lemma, ty: lem_ty, body: proof, recursion: Recursion::Measure { measure: shift(&pc.measure, (nj + 4) as i64) }, arity: e0 + 4, opaque: false };
-        let lem = self.add(decl, 40_000_000_000).map_err(|e| format!("the kernel rejected the `while` loop's lemma of `{h_global}`: {}", trunc(&e.to_string(), 3000)))?;
-        self.whiles.push(WhileHelper { s_global: sg, lemma: lem, measure: pc.measure.clone(), width, nparams: arity, rels, header_ctor: (2 * header) as u32, junk });
+        let decl = DefDecl { name: Rc::from(format!("L::wlem::{}_{header}", lf.id).as_str()), kind: DefKind::Lemma, ty: lem_ty, body: proof, recursion: Recursion::Measure { measure: shift(&pc.measure, (nj + 4 + 2 * rsv) as i64) }, arity: e0 + 4 + 2 * rsv, opaque: false };
+        let lem = self.add(decl, 40_000_000_000).map_err(|e| format!("the kernel rejected the `while` loop's lemma of `{h_global}`: {}", trunc(&e.to_string(), if std::env::var("CS_FULL").is_ok() { 1_000_000 } else { 3000 })))?;
+        self.whiles.push(WhileHelper { s_global: sg, lemma: lem, measure: pc.measure.clone(), width, nparams: arity, rels, header_ctor: (2 * header) as u32, junk, fuel });
         Ok(Proven { s_global: h_global.into(), kind: "loop lemma", walk_secs, check_secs: t1.elapsed().as_secs_f64(), nodes, stats: format!("{stats}; {raw} nodes before sharing") })
     }
+}
+
+impl Prover<'_> {
+    /// The fuel function of the loop helper `sg` at `header` in a function
+    /// with nested loops ([`Fuel`]): `L::fuel::<id>_<header>`, the fuel
+    /// shadow of its body `body` (over its parameters, `Walker::shadow_f`) by
+    /// its measure and decrease proofs, opaque; and `L::fuelnn::<id>_<header>`,
+    /// `Π p̄. 0 ≤ F(p̄)`, by the same recursion. `e`: the loop's exit needs
+    /// one unit (it jumps to an outer loop's header).
+    fn fuel_fn(&mut self, lf: &LFn, header: usize, sg: GlobalId, body: &Tm, e: i64) -> Result<Fuel, String> {
+        let (tele, _) = self.tele(sg)?;
+        let arity = tele.len() as u32;
+        let rels = self.env.global_param_rels(sg).ok_or("rels")?;
+        let measure = self.pre_commit.get(&sg).ok_or("no pre-commit body")?.measure.clone();
+        let out_tm = self.env.parse_term(&[], &lf.out_ty).map_err(|e| e.to_string())?;
+        let int = mk::int_ty(Width::Int);
+        let phi = {
+            let w = self.walker(out_tm.clone(), out_tm.clone(), vec![], 0, None, Some((sg, rels.clone())), vec![]);
+            w.shadow_f(body, None, &FuelMode { f: None, rels: rels.clone(), e })
+        };
+        let wrap = |mut t: Tm, pi: bool| {
+            for (nm, r, d) in tele.iter().rev() {
+                t = if pi { mk::pi(nm, *r, d.clone(), t) } else { mk::lam(nm, *r, d.clone(), t) };
+            }
+            t
+        };
+        let what = self.env.global_name(sg).map(|n| n.to_string()).unwrap_or_default();
+        self.dump(&format!("fuel_{}_{header}.core", lf.id), &self.env.print_term(&[], &wrap(phi.clone(), false)));
+        let decl = DefDecl { name: Rc::from(format!("L::fuel::{}_{header}", lf.id).as_str()), kind: DefKind::Spec, ty: wrap(int.clone(), true), body: wrap(phi.clone(), false), recursion: Recursion::Measure { measure: measure.clone() }, arity, opaque: true };
+        let f = self.add(decl, 4_000_000_000).map_err(|e| format!("the kernel rejected the fuel function of `{what}`: {}", trunc(&e.to_string(), 3000)))?;
+        // its nonnegativity: along `delta(F; p̄)`, by the body's matches
+        let (nn_ty, nn_body) = {
+            let w = self.walker(out_tm.clone(), out_tm, vec![], 0, None, None, vec![]);
+            let mut ctx = Ctx::default();
+            for (nm, r, d) in tele.iter() {
+                ctx = w.push(&ctx, nm, *r, d, None)?;
+            }
+            let p = w.fuel_nn(&ctx, &phi, f, &rels)?;
+            let params: Vec<Tm> = (0..arity).map(|l| mk::var(arity - 1 - l)).collect();
+            let f_app = mk::apps(mk::global(f), rels.iter().copied().zip(params.iter().cloned()));
+            let phic = crate::auto::util::map_term(&phi, 0, &mut |y, _| match &**y {
+                Term::Rec { args, .. } => Some(mk::apps(mk::global(f), rels.iter().copied().zip(args.iter().cloned()))),
+                _ => None,
+            });
+            let delta = Rc::new(Term::Delta { def: f, args: params });
+            let sym = mk::apps(mk::global(self.env.lookup_global("eq::sym").ok_or("eq::sym")?), vec![(Rel::Rel, int.clone()), (Rel::Rel, f_app.clone()), (Rel::Rel, phic.clone()), (Rel::Rel, delta)]);
+            let tr = Rc::new(Term::Transport { ty: int, lhs: phic, rhs: f_app.clone(), eq: sym, motive: w.le_int(w.int_lit(0), mk::var(0)), val: p });
+            (w.le_int(w.int_lit(0), f_app), tr)
+        };
+        let decl = DefDecl { name: Rc::from(format!("L::fuelnn::{}_{header}", lf.id).as_str()), kind: DefKind::Lemma, ty: wrap(nn_ty, true), body: wrap(nn_body, false), recursion: Recursion::Measure { measure }, arity, opaque: false };
+        let nn = self.add(decl, 4_000_000_000).map_err(|e| format!("the kernel rejected the fuel function's nonnegativity of `{what}`: {}", trunc(&e.to_string(), 3000)))?;
+        Ok(Fuel { f, nn, e })
+    }
+}
+
+/// The blocks of the natural loop of `header` (`cfg.rs`: the blocks that
+/// reach one of its back edges without passing the header).
+fn loop_body(f: &super::ir::Fn, header: usize) -> Vec<bool> {
+    let cfg = super::cfg::Cfg::new(f);
+    (0..f.blocks.len()).map(|b| cfg.body.get(header).is_some_and(|s| s.contains(&b))).collect()
+}
+
+/// Whether a loop of `f` (its headers `headers`) lies inside another: its
+/// loops' lemmas then need fuel functions ([`super::simproof::Fuel`]).
+fn nested_loops(f: &super::ir::Fn, headers: &[usize]) -> bool {
+    headers.iter().any(|h| {
+        let body = loop_body(f, *h);
+        headers.iter().any(|h2| h2 != h && body.get(*h2).copied().unwrap_or(false))
+    })
 }
 
 /// The block a loop leaves to: the one successor of the loop's blocks (the
@@ -952,28 +1136,7 @@ impl Prover<'_> {
 fn loop_exit(f: &super::ir::Fn, header: usize) -> Option<usize> {
     let n = f.blocks.len();
     let succ: Vec<Vec<usize>> = f.blocks.iter().map(|b| super::cfg::succs(&b.term)).collect();
-    let mut reach = vec![false; n];
-    let mut work = vec![header];
-    while let Some(b) = work.pop() {
-        if b < n && !reach[b] {
-            reach[b] = true;
-            work.extend(succ[b].iter().copied());
-        }
-    }
-    let mut body = vec![false; n];
-    body[header] = true;
-    let mut work: Vec<usize> = (0..n).filter(|b| reach[*b] && succ[*b].contains(&header)).collect();
-    while let Some(b) = work.pop() {
-        if body[b] {
-            continue;
-        }
-        body[b] = true;
-        for (p, s) in succ.iter().enumerate() {
-            if s.contains(&b) && !body[p] {
-                work.push(p);
-            }
-        }
-    }
+    let body = loop_body(f, header);
     let mut exits: Vec<usize> = (0..n).filter(|b| body[*b]).flat_map(|b| succ[b].iter().copied()).filter(|s| !body[*s]).collect();
     // (a panic path is not an exit: blocks every path from which panics)
     exits.retain(|s| !panics_only(f, *s));
@@ -1034,32 +1197,8 @@ fn count_free0(cod: &Tm) -> bool {
 /// parameter (conservatively: any cell).
 fn loop_assigned(f: &super::ir::Fn, header: usize, lf: &LFn) -> std::collections::BTreeSet<usize> {
     use super::ir::{Operand, Proj, Rvalue, Stmt, Term as T, Ty};
-    let n = f.blocks.len();
-    let succ: Vec<Vec<usize>> = f.blocks.iter().map(|b| super::cfg::succs(&b.term)).collect();
-    // reachable from the header
-    let mut reach = vec![false; n];
-    let mut work = vec![header];
-    while let Some(b) = work.pop() {
-        if b < n && !reach[b] {
-            reach[b] = true;
-            work.extend(succ[b].iter().copied());
-        }
-    }
     // the natural loop: the header and what reaches a back edge's source without it
-    let mut body = vec![false; n];
-    body[header] = true;
-    let mut work: Vec<usize> = (0..n).filter(|b| reach[*b] && succ[*b].contains(&header)).collect();
-    while let Some(b) = work.pop() {
-        if body[b] {
-            continue;
-        }
-        body[b] = true;
-        for (p, s) in succ.iter().enumerate() {
-            if s.contains(&b) && !body[p] {
-                work.push(p);
-            }
-        }
-    }
+    let body = loop_body(f, header);
     let nl = lf.local_tys.len();
     // the locals that may hold a code of a cell: the `&mut` parameters and
     // what is copied or reborrowed from them
@@ -1129,10 +1268,16 @@ fn loop_assigned(f: &super::ir::Fn, header: usize, lf: &LFn) -> std::collections
 /// replaced by its body (definitionally equal: a delta step and beta), so
 /// that the walker splits on the tests inside it like on S's own; `let j =
 /// v; j` is `v` (zeta). `depth` bounds nested unfolding.
-fn inline_prelude(env: &Env, t: &Tm, depth: u32) -> Tm {
+fn inline_prelude(env: &Env, t: &Tm, depth: u32, checked: bool) -> Tm {
     if depth == 0 {
         return t.clone();
     }
+    // (a match on a checked call, the elaboration of `c?`: the call bound by
+    // a `let` first, so its test, once inlined, is a `let`'s value the walk
+    // splits on, not a test inside another match's scrutinee)
+    let t = &if checked { hoist_checked_scrutinees(env, t) } else { t.clone() };
+    // (the prelude's checked arithmetic, `u32::checked_add` and the like)
+    let is_checked = |n: &str| checked && n.split_once("::").is_some_and(|(w, op)| matches!(w, "u8" | "u16" | "u32" | "u64" | "usize") && crate::opt::drive::CHECKED_OPS.contains(&op));
     let mut changed = false;
     let r = crate::auto::util::map_term(t, 0, &mut |x, _| {
         let mut args: Vec<Tm> = Vec::new();
@@ -1142,7 +1287,9 @@ fn inline_prelude(env: &Env, t: &Tm, depth: u32) -> Tm {
             cur = fun.clone();
         }
         let Term::Global(g) = &*cur else { return None };
-        if args.is_empty() || !env.global_name(*g).is_some_and(|n| n.starts_with("crate::__lift::")) || env.global_opaque(*g) != Some(false) || env.global_kind(*g) != Some(DefKind::Exec) || env.global_arity(*g) != Some(args.len() as u32) {
+        let lift = env.global_name(*g).is_some_and(|n| n.starts_with("crate::__lift::"));
+        let chk = env.global_name(*g).is_some_and(|n| is_checked(&n));
+        if args.is_empty() || !(lift || chk) || env.global_opaque(*g) != Some(false) || (lift && env.global_kind(*g) != Some(DefKind::Exec)) || env.global_arity(*g) != Some(args.len() as u32) {
             return None;
         }
         let body = env.global_body(*g)?;
@@ -1192,7 +1339,105 @@ fn inline_prelude(env: &Env, t: &Tm, depth: u32) -> Tm {
         changed = true;
         Some(b)
     });
-    if changed { inline_prelude(env, &r, depth - 1) } else { r }
+    if changed { inline_prelude(env, &r, depth - 1, checked) } else { r }
+}
+
+/// `(match s as z return Π(.e : Eq(Option(R), s, z)). Option(R) with
+/// | None => λ.e. None[R] | Some(y) => λ.e. Some[R](y) end) .refl(Option(R), s)`:
+/// the value `s : Option(R)` as the elaborator's match idiom on it (equal to
+/// `s` by cases, [`option_idiom_eq`]).
+fn option_idiom(env: &Env, r: &Tm, s: &Tm) -> Result<Tm, String> {
+    let opt = env.lookup_ind("Option").ok_or("no `Option`")?;
+    let oty = |k: i64| mk::ind(opt, vec![shift(r, k)]);
+    let none = |k: i64| Rc::new(Term::Ctor { ind: opt, ctor: 0, params: vec![shift(r, k)], args: vec![] });
+    let some = |k: i64, v: Tm| Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![shift(r, k)], args: vec![v] });
+    // (under z) Π(.e : Eq(Option(R), s, z)). Option(R)
+    let motive = mk::pi("e", Rel::Irr, mk::eq(oty(1), shift(s, 1), mk::var(0)), oty(2));
+    let arms = vec![
+        sandblaster_kernel::term::Arm { names: vec![], body: mk::lam("e", Rel::Irr, mk::eq(oty(0), s.clone(), none(0)), none(1)) },
+        sandblaster_kernel::term::Arm { names: vec![Rc::from("y")], body: mk::lam("e", Rel::Irr, mk::eq(oty(1), shift(s, 1), some(1, mk::var(0))), some(2, mk::var(1))) },
+    ];
+    let m = Rc::new(Term::Match { ind: opt, params: vec![r.clone()], scrut: s.clone(), motive, arms });
+    Ok(Rc::new(Term::App { rel: Rel::Irr, fun: m, arg: mk::refl(oty(0), s.clone()) }))
+}
+
+/// A proof of `Eq(Option(R), option_idiom(R, s), s)`: by cases on `s`,
+/// each arm `refl` (the idiom reduces to the constructor).
+fn option_idiom_eq(env: &Env, r: &Tm, s: &Tm) -> Result<Tm, String> {
+    let opt = env.lookup_ind("Option").ok_or("no `Option`")?;
+    let oty = |k: i64| mk::ind(opt, vec![shift(r, k)]);
+    // (under z) Eq(Option(R), option_idiom(R, z), z)
+    let motive = mk::eq(oty(1), option_idiom(env, &shift(r, 1), &mk::var(0))?, mk::var(0));
+    let arms = vec![
+        sandblaster_kernel::term::Arm { names: vec![], body: mk::refl(oty(0), Rc::new(Term::Ctor { ind: opt, ctor: 0, params: vec![r.clone()], args: vec![] })) },
+        sandblaster_kernel::term::Arm { names: vec![Rc::from("y")], body: mk::refl(oty(1), Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![shift(r, 1)], args: vec![mk::var(0)] })) },
+    ];
+    Ok(Rc::new(Term::Match { ind: opt, params: vec![r.clone()], scrut: s.clone(), motive, arms }))
+}
+
+/// `t` with every dependent-match idiom on a call of the prelude's checked
+/// arithmetic, `(match g ā as z return Π(.e : Eq(D, g ā, z)). A with ..)
+/// .refl(D, g ā)` (the elaboration of `g(ā)?` in a panic-explicit reading),
+/// rewritten as `let c = g ā; (match c as z return Π(.e : Eq(D, c, z)). A
+/// with ..) .refl(D, c)`: definitionally equal (zeta), and once the call is
+/// inlined its test is the `let`'s value, where the walk splits on it like
+/// on any test of S (in a scrutinee, its abstraction would also have to
+/// reach the idiom's equation and `refl`, which mention the call). Repeated
+/// until no idiom is left on a call (the arms' own ones too).
+fn hoist_checked_scrutinees(env: &Env, t: &Tm) -> Tm {
+    let is_checked = |g: GlobalId| env.global_name(g).is_some_and(|n| n.split_once("::").is_some_and(|(w, op)| matches!(w, "u8" | "u16" | "u32" | "u64" | "usize") && crate::opt::drive::CHECKED_OPS.contains(&op)));
+    let call_head = |x: &Tm| -> Option<GlobalId> {
+        let mut h = x.clone();
+        let mut n = 0;
+        while let Term::App { fun, .. } = &*h.clone() {
+            h = fun.clone();
+            n += 1;
+        }
+        match &*h {
+            Term::Global(g) if n == 2 && is_checked(*g) => Some(*g),
+            _ => None,
+        }
+    };
+    let mut cur = t.clone();
+    for _ in 0..256 {
+        let mut changed = false;
+        cur = crate::auto::util::map_term(&cur, 0, &mut |x, _| {
+            let Term::App { rel: Rel::Irr, fun, arg } = &**x else { return None };
+            let Term::Match { ind, params, scrut, motive, arms } = &**fun else { return None };
+            call_head(scrut)?;
+            let Term::Pi { name: en, rel: er, dom, cod } = &**motive else { return None };
+            let Term::Eq { ty: d, rhs, .. } = &**dom else { return None };
+            let Term::Refl { ty: rd, .. } = &**arg else { return None };
+            changed = true;
+            let sh = |t: &Tm| shift(t, 1);
+            // under the `let` (c = Var 0); in the motive also under its binder z (c = Var 1)
+            let motive2 = Rc::new(Term::Pi { name: en.clone(), rel: *er, dom: Rc::new(Term::Eq { ty: sandblaster_kernel::util::shift_from(d, 1, 1), lhs: mk::var(1), rhs: sandblaster_kernel::util::shift_from(rhs, 1, 1) }), cod: sandblaster_kernel::util::shift_from(cod, 1, 2) });
+            // (each arm's path-equation binder names `c` too: under its
+            // fields, `c` is `Var(fields)`)
+            let arms2: Vec<sandblaster_kernel::term::Arm> = arms
+                .iter()
+                .map(|a| {
+                    let k = a.names.len() as u32;
+                    let b = sandblaster_kernel::util::shift_from(&a.body, 1, k);
+                    let b = match &*b {
+                        Term::Lam { name, rel, dom, body } => match &**dom {
+                            Term::Eq { ty, rhs, .. } => Rc::new(Term::Lam { name: name.clone(), rel: *rel, dom: Rc::new(Term::Eq { ty: ty.clone(), lhs: mk::var(k), rhs: rhs.clone() }), body: body.clone() }),
+                            _ => b.clone(),
+                        },
+                        _ => b.clone(),
+                    };
+                    sandblaster_kernel::term::Arm { names: a.names.clone(), body: b }
+                })
+                .collect();
+            let m2 = Rc::new(Term::Match { ind: *ind, params: params.iter().map(sh).collect(), scrut: mk::var(0), motive: motive2, arms: arms2 });
+            let body = Rc::new(Term::App { rel: Rel::Irr, fun: m2, arg: Rc::new(Term::Refl { ty: sh(rd), val: mk::var(0) }) });
+            Some(Rc::new(Term::Let { name: Rc::from("chk"), rel: Rel::Rel, ty: Rc::new(Term::Ind { ind: *ind, params: params.clone() }), val: scrut.clone(), body }))
+        });
+        if !changed {
+            break;
+        }
+    }
+    cur
 }
 
 fn trunc(s: &str, n: usize) -> String {
@@ -1381,13 +1626,15 @@ pub fn plan(m: &Sbmir, lit: &Literal, contracts: &[MirContract], helpers: &[crat
         dep_idx.extend(mir_closure(m, k).iter().filter_map(|k2| model_idx.get(k2).copied()));
         let mut own: Vec<usize> = Vec::new();
         // (a `while` loop's lemma: its helper's, independent of the rest of the function)
-        for h in helpers.iter().filter(|h| &h.key == k && h.while_loop) {
+        // (and a returning helper's: a loop inside another loop's body, from
+        // its header to its exit; innermost first)
+        for h in helpers.iter().filter(|h| &h.key == k && (h.while_loop || h.returns.is_some())) {
             let mut needs = dep_idx.clone();
             needs.extend(own.iter().copied());
-            out.push(Planned { entry: Entry::While { key: k.clone(), s_global: h.global.clone(), header: h.header, local_names: h.local_names.clone() }, global: h.global.clone(), key: k.clone(), needs, is_fn: false });
+            out.push(Planned { entry: Entry::While { key: k.clone(), s_global: h.global.clone(), header: h.header, local_names: h.local_names.clone(), returned: h.returns.clone() }, global: h.global.clone(), key: k.clone(), needs, is_fn: false });
             own.push(out.len() - 1);
         }
-        for h in helpers.iter().filter(|h| &h.key == k && !h.while_loop) {
+        for h in helpers.iter().filter(|h| &h.key == k && !h.while_loop && h.returns.is_none()) {
             let slots = match lit.lfn(k) {
                 Some(lf) => helper_slots(lf, &h.params),
                 None => vec![],
@@ -1799,6 +2046,12 @@ pub struct RoundTripFn {
     /// The optimizer's link `Π x̄ h̄. Eq(R, source x̄ h̄, target x̄ h̄)`
     /// (`None`: the replacement is the source function's own definition).
     pub equiv: Option<String>,
+    /// A function replaced through its panic-explicit reading (DESIGN.md
+    /// §8.2 item 12): the source function's kernel name (`source` is then
+    /// the reading). Its theorems are panic statements, and the source
+    /// function's own MIR instance gets its panic theorem against the
+    /// reading too (`L::pthm::<id>`).
+    pub panic: Option<String>,
 }
 
 /// The theorems of one replaced function: its helpers', its copy's, and the
@@ -1838,14 +2091,52 @@ pub fn prove_roundtrip(out: &mut crate::elab::Output, facts: &crate::lift::LiftF
     let mut keys: Vec<String> = fns.iter().flat_map(|f| f.helpers.iter().map(|h| h.0.clone()).chain(f.dispatch_key.clone()).chain(std::iter::once(f.copy_key.clone()))).collect();
     keys.sort();
     keys.dedup();
+    // a function replaced through its panic-explicit reading: the panic
+    // theorem of the source function's own MIR instance against the
+    // reading, over the main extraction (its literal reading continued)
+    let mut source_err: BTreeMap<String, String> = BTreeMap::new();
+    let panic_fns: Vec<&RoundTripFn> = fns.iter().filter(|f| f.panic.is_some()).collect();
+    if !panic_fns.is_empty() {
+        let contract = |f: &RoundTripFn| facts.mir_contracts.iter().find(|c| Some(&c.global) == f.panic.as_ref()).cloned();
+        let main_keys: Vec<String> = panic_fns.iter().filter_map(|f| contract(f).map(|c| c.key)).collect();
+        match load_into(&mut out.mir_gate.ledger, &mut out.env, &mm.loaded.m, &mm.loaded.names, &main_keys, None) {
+            Err(e) => {
+                for f in &panic_fns {
+                    source_err.insert(f.source.clone(), format!("the literal reading of the source function: {e}"));
+                }
+            }
+            Ok(lit_main) => {
+                let mut contracts: Vec<MirContract> = facts.mir_contracts.clone();
+                contracts.extend(panic_fns.iter().filter_map(|f| contract(f).map(|c| MirContract { global: f.source.clone(), ..c })));
+                let mut pv = Prover::new(&mut out.env, &mm.loaded.m, &mm.loaded.names, &lit_main, &out.pre_commit, &contracts);
+                pv.budget_secs = opts.budget_secs;
+                pv.max_steps = opts.max_steps;
+                pv.trace = opts.trace;
+                pv.callees = callees.clone();
+                pv.panic = true;
+                for f in &panic_fns {
+                    let r = match contract(f) {
+                        Some(c) if lit_main.lfn(&c.key).is_some() => pv.prove(&Entry::Fn { key: c.key.clone(), s_global: f.source.clone() }).map(|_| ()),
+                        Some(c) => Err(format!("no literal reading of `{}`", c.key)),
+                        None => Err(format!("`{}` has no declared contract", f.panic.as_deref().unwrap_or(""))),
+                    };
+                    if let Err(e) = r {
+                        source_err.insert(f.source.clone(), format!("the source function's panic theorem: {e}"));
+                    }
+                }
+            }
+        }
+    }
     let lit = match load_into(&mut out.mir_gate.ledger, &mut out.env, rt, &mm.loaded.names, &keys, None) {
         Ok(l) => l,
         Err(e) => return fail_all(format!("the literal reading of the round trip's MIR: {e}")),
     };
+    // (a panic function's theorems are not cached: its source's theorem is
+    // proven on the main extraction, outside the entry)
     let keys_c: Vec<Option<String>> = match opts.cache {
         Some(vc) => {
             let mut h = Hasher { env: &out.env, memo: Default::default() };
-            fns.iter().map(|f| roundtrip_key(vc, &generator_hash(), &mut h, rt, f)).collect()
+            fns.iter().map(|f| if f.panic.is_some() { None } else { roundtrip_key(vc, &generator_hash(), &mut h, rt, f) }).collect()
         }
         None => vec![None; fns.len()],
     };
@@ -1864,7 +2155,10 @@ pub fn prove_roundtrip(out: &mut crate::elab::Output, facts: &crate::lift::LiftF
         if outs[i].is_some() {
             continue;
         }
-        let (o, decls) = proven.next().unwrap_or_else(|| (RoundTripOutcome { source: f.source.clone(), result: Err("not proven".into()) }, Vec::new()));
+        let (mut o, decls) = proven.next().unwrap_or_else(|| (RoundTripOutcome { source: f.source.clone(), result: Err("not proven".into()) }, Vec::new()));
+        if let Some(e) = source_err.get(&f.source) {
+            o.result = Err(e.clone());
+        }
         if let (Ok(_), Some(k)) = (&o.result, &keys_c[i]) {
             stores.push(cache_entry(&out.env, k, &decls));
         }
@@ -1914,7 +2208,11 @@ fn prove_roundtrip_now(out: &mut crate::elab::Output, facts: &crate::lift::LiftF
     let mut contracts: Vec<MirContract> = facts.mir_contracts.clone();
     let contract_of = |g: &str| facts.mir_contracts.iter().find(|c| c.global == g).cloned();
     for f in fns {
-        let src_c = contract_of(&f.source);
+        // (a panic-explicit reading has the source function's contract)
+        let src_c = match &f.panic {
+            Some(fname) => contract_of(fname).map(|c| MirContract { global: f.source.clone(), ..c }),
+            None => contract_of(&f.source),
+        };
         for (k, g) in &f.helpers {
             if let Some(c) = contract_of(g).or_else(|| src_c.clone().map(|c| MirContract { global: g.clone(), ..c })) {
                 contracts.push(MirContract { key: k.clone(), ..c });
@@ -1963,8 +2261,10 @@ fn prove_roundtrip_now(out: &mut crate::elab::Output, facts: &crate::lift::LiftF
         }
         order
     };
+    let panic_helpers: std::collections::BTreeSet<String> = fns.iter().filter(|f| f.panic.is_some()).flat_map(|f| f.helpers.iter().map(|h| h.0.clone())).collect();
     let mut done: BTreeMap<String, (Result<Proven, String>, Vec<DefDecl>)> = BTreeMap::new();
     for (k, g) in &helpers {
+        pv.panic = panic_helpers.contains(k);
         let r = if lit.lfn(k).is_none() { Err(format!("no literal reading of `{k}`")) } else { pv.prove(&Entry::Fn { key: k.clone(), s_global: g.clone() }) };
         done.insert(k.clone(), (r, std::mem::take(&mut pv.added)));
     }
@@ -1989,6 +2289,7 @@ fn prove_roundtrip_now(out: &mut crate::elab::Output, facts: &crate::lift::LiftF
                 }
             }
         }
+        pv.panic = f.panic.is_some();
         // (a dispatch impl method, then the copy, each against the
         // replacement's call: the delegation the round trip checked)
         for k in f.dispatch_key.iter().chain(std::iter::once(&f.copy_key)) {

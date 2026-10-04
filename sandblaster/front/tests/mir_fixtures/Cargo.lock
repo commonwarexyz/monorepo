@@ -290,11 +290,23 @@ name = "fx-opt-mbits-cheap"
 version = "0.0.0"
 
 [[package]]
+name = "fx-opt-panics"
+version = "0.0.0"
+
+[[package]]
 name = "fx-opt-rd"
 version = "0.0.0"
 dependencies = [
  "bytes",
 ]
+
+[[package]]
+name = "fx-opt-shipped"
+version = "0.0.0"
+
+[[package]]
+name = "fx-rw-mix"
+version = "0.0.0"
 
 [[package]]
 name = "proc-macro2"

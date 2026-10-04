@@ -205,6 +205,10 @@ pub struct Callee {
     pub need: Option<Tm>,
     /// The callee's presence conjunct (its optional cells).
     pub pres: Option<Pres>,
+    /// A panic-explicit reading's lemma (the panic statement, DESIGN.md
+    /// §8.2 item 12): the callee's result is `Option(R)` (this `R`), its
+    /// lemma's right side `match g x̄ with None => None | Some(y) => Some(erase_g y)`.
+    pub panic: Option<Tm>,
 }
 
 /// A loop helper of the structured reading with its lemma.
@@ -223,6 +227,32 @@ pub struct Helper {
     pub header_ctor: u32,
     /// The measure's type (`Int` or a machine width).
     pub width: Width,
+    /// Its fuel function (a function with nested loops), else its measure is
+    /// the fuel its loop needs.
+    pub fuel: Option<Fuel>,
+}
+
+/// The fuel function of a loop helper in a function with nested loops:
+/// `F(p̄)`, the literal side's fuel the loop needs from its header (one unit
+/// per recursive call, the fuel of the inner loops' runs, and `e` at the
+/// exit), defined by the helper's own recursion (its measure and decrease
+/// proofs, `Walker::shadow_f`), opaque; `nn : Π p̄. 0 ≤ F(p̄)`. `e` is 1 when
+/// the loop's exit jumps to an outer loop's header (which consumes fuel).
+#[derive(Clone)]
+pub struct Fuel {
+    pub f: GlobalId,
+    pub nn: GlobalId,
+    pub e: i64,
+}
+
+/// How [`Walker::shadow_f`] reads a helper's recursive calls and exits.
+pub struct FuelMode {
+    /// The fuel function a recursive call needs, `F(args)`; `None`: the
+    /// recursive call itself (the fuel function's own body).
+    pub f: Option<GlobalId>,
+    pub rels: Vec<Rel>,
+    /// The fuel the loop's exit needs.
+    pub e: i64,
 }
 
 /// A `while` loop's helper of the structured reading (the elaborator's
@@ -236,6 +266,14 @@ pub struct Helper {
 ///     Eq(run m X (Some σ_X(h p̄, w̄)), C)) (.hle : μ(p̄) ≤ len n).
 ///   Eq(run n H (Some σ(p̄, j̄)), C)
 /// ```
+///
+/// With a fuel function `F` (nested loops) the continuation's fuel is a
+/// reserve `R` the caller chooses (the fuel the rest of its body needs):
+///
+/// ```text
+/// Π p̄ j̄ (n) (R : Int) (C) (hC : Π m (.hm : R ≤ len m) k̄. ..) (.hR : 0 ≤ R)
+///     (.hle : F(p̄) + R ≤ len n). Eq(run n H (Some σ(p̄, j̄)), C)
+/// ```
 #[derive(Clone)]
 pub struct WhileHelper {
     pub s_global: GlobalId,
@@ -247,12 +285,21 @@ pub struct WhileHelper {
     pub header_ctor: u32,
     /// The state slots that are the lemma's junk binders (in order).
     pub junk: Vec<usize>,
+    pub fuel: Option<Fuel>,
 }
 
 impl WhileHelper {
     pub fn mu_int(&self, args: &[Tm]) -> Tm {
         let mu = crate::opt::proof::steps::subst_n(&self.measure, args);
         if self.width == Width::Int { mu } else { mk::prim(PrimOp::Cast { from: self.width, to: Width::Int }, vec![mu], vec![]) }
+    }
+
+    /// The fuel the loop needs at `args`: its fuel function's, else its measure.
+    pub fn need_int(&self, args: &[Tm]) -> Tm {
+        match &self.fuel {
+            Some(fu) => mk::apps(mk::global(fu.f), self.rels.iter().copied().zip(args.iter().cloned())),
+            None => self.mu_int(args),
+        }
     }
 }
 
@@ -285,6 +332,9 @@ pub struct ExitMode {
     /// The levels of `C` and `hC`.
     pub c_level: u32,
     pub hc_level: u32,
+    /// With a fuel function: the levels of the reserve `R` and of `hR`.
+    pub r_level: Option<u32>,
+    pub hr_level: Option<u32>,
     /// The types of the continuation's binders for the slots the loop
     /// assigns (closed `Option(T)`).
     pub k_tys: Vec<Tm>,
@@ -302,6 +352,14 @@ impl Helper {
     pub fn mu_int(&self, args: &[Tm]) -> Tm {
         let mu = crate::opt::proof::steps::subst_n(&self.measure, args);
         if self.width == Width::Int { mu } else { mk::prim(PrimOp::Cast { from: self.width, to: Width::Int }, vec![mu], vec![]) }
+    }
+
+    /// The fuel the loop needs at `args`: its fuel function's, else its measure.
+    pub fn need_int(&self, args: &[Tm]) -> Tm {
+        match &self.fuel {
+            Some(fu) => mk::apps(mk::global(fu.f), self.rels.iter().copied().zip(args.iter().cloned())),
+            None => self.mu_int(args),
+        }
     }
 }
 
@@ -373,6 +431,10 @@ pub struct Walker<'e> {
     pub whiles: Vec<WhileHelper>,
     /// A `while` lemma's walk.
     pub exit: Option<ExitMode>,
+    /// The panic statement (DESIGN.md §8.2 item 12): the structured term is
+    /// a panic-explicit reading's (`Option(R)`, this `R`), the equation's
+    /// right side `match s with None => None | Some(y) => Some(erase(y))`.
+    pub panic: Option<Tm>,
 }
 
 fn name(s: &str) -> Name {
@@ -435,14 +497,14 @@ impl<'e> Walker<'e> {
     fn some_out(&self, v: Tm) -> Tm {
         Rc::new(Term::Ctor { ind: self.ind("Option"), ctor: 1, params: vec![self.out_ty.clone()], args: vec![v] })
     }
-    fn len_n(&self, depth: u32) -> Tm {
+    pub(crate) fn len_n(&self, depth: u32) -> Tm {
         let ni = depth - 1 - self.n_level;
         mk::apps(mk::global(self.g("seq::len").unwrap()), vec![(Rel::Rel, self.unit_ty()), (Rel::Rel, mk::var(ni))])
     }
-    fn int_lit(&self, k: i64) -> Tm {
+    pub(crate) fn int_lit(&self, k: i64) -> Tm {
         mk::lit(Width::Int, k)
     }
-    fn le_int(&self, a: Tm, b: Tm) -> Tm {
+    pub(crate) fn le_int(&self, a: Tm, b: Tm) -> Tm {
         mk::eq_bool(self.env.bool_ind(), mk::prim(PrimOp::Le(Width::Int), vec![a, b], vec![]), true)
     }
 
@@ -458,8 +520,17 @@ impl<'e> Walker<'e> {
 
     /// The fuel the structured term needs (an `Int` term in the context).
     /// [`Self::need`] with the accumulated need of the `let`s walked.
-    fn need_acc(&self, ctx: &Ctx, s: &Tm, acc: Option<&Tm>) -> Tm {
+    pub(crate) fn need_acc(&self, ctx: &Ctx, s: &Tm, acc: Option<&Tm>) -> Tm {
         if let Some(r) = &self.rec {
+            // nested loops: the fuel the rest of the body needs from here
+            // (`F` at the recursive calls), and a `while` lemma's reserve
+            if let Some(fu) = &r.helper.fuel {
+                let w = self.shadow_f(s, acc, &FuelMode { f: Some(fu.f), rels: r.helper.rels.clone(), e: fu.e });
+                return match self.exit.as_ref().and_then(|x| x.r_level) {
+                    Some(rl) => mk::prim(PrimOp::IAdd, vec![w, mk::var(ctx.depth().0 - 1 - rl)], vec![]),
+                    None => w,
+                };
+            }
             // the helper's measure at its own parameters (the outermost binders)
             let args = r.helper.params_at(ctx.depth().0);
             return r.helper.mu_int(&args);
@@ -503,7 +574,7 @@ impl<'e> Walker<'e> {
             Term::Let { name: n, rel, ty, val, body } if self.while_of(val).is_some() => {
                 let (wh, args) = self.while_of(val).unwrap();
                 let all: Vec<Tm> = args.iter().map(|(_, a)| self.commit(a)).collect();
-                let w = mk::prim(PrimOp::IAdd, vec![wh.mu_int(&all), self.int_lit(1)], vec![]);
+                let w = mk::prim(PrimOp::IAdd, vec![wh.need_int(&all), self.int_lit(1)], vec![]);
                 let acc1 = plus(acc.map(|a| shift(a, 1)).as_ref(), Some(shift(&w, 1)));
                 Rc::new(Term::Let { name: n.clone(), rel: *rel, ty: self.commit(ty), val: self.commit(val), body: self.shadow_acc_all(body, acc1.as_ref()) })
             }
@@ -536,11 +607,210 @@ impl<'e> Walker<'e> {
                     && let Some(hi) = self.helpers.iter().find(|x| x.s_global == h)
                 {
                     let rel_args: Vec<Tm> = args.iter().map(|(_, a)| self.commit(a)).collect();
-                    let mu = hi.mu_int(&rel_args);
+                    let mu = hi.need_int(&rel_args);
                     return plus(acc, Some(mk::prim(PrimOp::IAdd, vec![mu, self.int_lit(1)], vec![]))).unwrap();
                 }
                 // a tail holding fuel-dependent calls: their needs
                 plus(acc, self.call_needs(t)).unwrap_or_else(|| self.int_lit(0))
+            }
+        }
+    }
+
+    /// The fuel shadow of a loop helper's body in a function with nested
+    /// loops ([`Self::shadow_acc`] for the helper's own recursion): a
+    /// recursive call needs one unit (the jump to the header) and the fuel
+    /// from there, `F(args)` (with `fm.f`; else the call itself: the fuel
+    /// function's own body); an inner loop's call its fuel and one unit; the
+    /// loop's exit `fm.e`; the fuel-dependent calls their needs, accumulated
+    /// down the `let`s. A tail without any of these needs the accumulated
+    /// fuel and the exit's.
+    pub fn shadow_f(&self, t: &Tm, acc: Option<&Tm>, fm: &FuelMode) -> Tm {
+        let plus = |a: Option<&Tm>, b: Tm| -> Tm {
+            match a {
+                Some(a) => mk::prim(PrimOp::IAdd, vec![a.clone(), b], vec![]),
+                None => b,
+            }
+        };
+        let exit = |a: Option<&Tm>| plus(a, self.int_lit(fm.e));
+        if !has_rec(t) && !self.calls_helper(t) && !self.calls_fuel_callee(t) {
+            return exit(acc);
+        }
+        match &**t {
+            Term::Let { name: n, rel, ty, val, body } => {
+                let w = match self.while_of(val) {
+                    Some((wh, args)) => {
+                        let all: Vec<Tm> = args.iter().map(|(_, a)| self.commit(a)).collect();
+                        Some(mk::prim(PrimOp::IAdd, vec![wh.need_int(&all), self.int_lit(1)], vec![]))
+                    }
+                    None => self.call_needs(val),
+                };
+                let acc_up = acc.map(|a| shift(a, 1));
+                let acc1 = match w {
+                    Some(w) => Some(plus(acc_up.as_ref(), shift(&w, 1))),
+                    None => acc_up,
+                };
+                Rc::new(Term::Let { name: n.clone(), rel: *rel, ty: self.commit(ty), val: self.commit(val), body: self.shadow_f(body, acc1.as_ref(), fm) })
+            }
+            Term::App { rel: Rel::Irr, fun, arg } if matches!(&**fun, Term::Match { .. }) => {
+                let Term::Match { ind, params, scrut, motive, arms } = &**fun else { unreachable!() };
+                let Term::Pi { name: en, rel: Rel::Irr, dom, .. } = &**motive else { return exit(acc) };
+                let m2 = Rc::new(Term::Pi { name: en.clone(), rel: Rel::Irr, dom: self.commit(dom), cod: mk::int_ty(Width::Int) });
+                let mut arms2: Vec<Arm> = Vec::new();
+                for a in arms {
+                    let nf = a.names.len() as i64;
+                    let body = match &*a.body {
+                        Term::Lam { name: ln, rel: Rel::Irr, dom: ld, body: lb } => {
+                            let acc_a = acc.map(|x| shift(x, nf + 1));
+                            Rc::new(Term::Lam { name: ln.clone(), rel: Rel::Irr, dom: self.commit(ld), body: self.shadow_f(lb, acc_a.as_ref(), fm) })
+                        }
+                        _ => exit(acc.map(|x| shift(x, nf)).as_ref()),
+                    };
+                    arms2.push(Arm { names: a.names.clone(), body });
+                }
+                Rc::new(Term::App { rel: Rel::Irr, fun: Rc::new(Term::Match { ind: *ind, params: params.clone(), scrut: self.commit(scrut), motive: m2, arms: arms2 }), arg: self.commit(arg) })
+            }
+            Term::Match { ind, params, scrut, arms, .. } => {
+                let arms2: Vec<Arm> = arms.iter().map(|a| Arm { names: a.names.clone(), body: self.shadow_f(&a.body, acc.map(|x| shift(x, a.names.len() as i64)).as_ref(), fm) }).collect();
+                Rc::new(Term::Match { ind: *ind, params: params.clone(), scrut: self.commit(scrut), motive: mk::int_ty(Width::Int), arms: arms2 })
+            }
+            Term::Rec { args, proof } => {
+                let call = match fm.f {
+                    Some(f) => mk::apps(mk::global(f), fm.rels.iter().copied().zip(args.iter().map(|a| self.commit(a)))),
+                    None => Rc::new(Term::Rec { args: args.clone(), proof: proof.clone() }),
+                };
+                plus(acc, mk::prim(PrimOp::IAdd, vec![self.int_lit(1), call], vec![]))
+            }
+            _ => {
+                // a loop helper's call (the loops after this one): its fuel and
+                // one unit (entering the loop)
+                if let Some((h, args)) = app_spine(t)
+                    && let Some(hi) = self.helpers.iter().find(|x| x.s_global == h)
+                {
+                    let all: Vec<Tm> = args.iter().map(|(_, a)| self.commit(a)).collect();
+                    return plus(acc, mk::prim(PrimOp::IAdd, vec![hi.need_int(&all), self.int_lit(1)], vec![]));
+                }
+                match self.call_needs(t) {
+                    Some(w) => plus(Some(&exit(acc)), w),
+                    None => exit(acc),
+                }
+            }
+        }
+    }
+
+    /// The fuel functions this walk knows: each with its arity, its
+    /// nonnegativity lemma and its parameters' relevances.
+    fn fuels(&self) -> Vec<(GlobalId, usize, GlobalId, Vec<Rel>)> {
+        let mut v = Vec::new();
+        for h in self.helpers.iter().chain(self.rec.as_ref().map(|r| &r.helper)) {
+            if let Some(fu) = &h.fuel {
+                v.push((fu.f, h.nparams as usize, fu.nn, h.rels.clone()));
+            }
+        }
+        for w in &self.whiles {
+            if let Some(fu) = &w.fuel {
+                v.push((fu.f, w.nparams as usize, fu.nn, w.rels.clone()));
+            }
+        }
+        v
+    }
+
+    /// `0 ≤ F(args)` for the fuel functions' calls in `ts` (by their
+    /// nonnegativity lemmas), as `linarith` hypotheses.
+    fn fuel_nn_hyps(&self, ts: &[&Tm]) -> Vec<(Tm, Tm)> {
+        let fuels = self.fuels();
+        if fuels.is_empty() {
+            return Vec::new();
+        }
+        let fs: Vec<(GlobalId, usize)> = fuels.iter().map(|x| (x.0, x.1)).collect();
+        let mut calls = Vec::new();
+        for t in ts {
+            fuel_calls(self.env, t, &fs, &mut calls);
+        }
+        calls
+            .into_iter()
+            .filter_map(|(g, args)| {
+                let x = fuels.iter().find(|x| x.0 == g)?;
+                Some((mk::apps(mk::global(x.2), args.clone()), self.le_int(self.int_lit(0), mk::apps(mk::global(g), args))))
+            })
+            .collect()
+    }
+
+    /// A proof of `0 ≤ t` at `ctx`, `t` a fuel function's body as
+    /// [`Self::shadow_f`] builds it (its recursive calls `Rec`): a `let` as
+    /// it is, a match by the same match (each arm's goal its own body), a
+    /// tail by `linarith` from the nonnegativity of its calls (a `Rec` is
+    /// the lemma's own recursion at the same decrease proof, another fuel
+    /// function's call its lemma). Its goals have the calls as `f`'s.
+    pub fn fuel_nn(&self, ctx: &Ctx, t: &Tm, f: GlobalId, rels: &[Rel]) -> Result<Tm, String> {
+        let commit_f = |x: &Tm| -> Tm {
+            crate::auto::util::map_term(x, 0, &mut |y, _| match &**y {
+                Term::Rec { args, .. } => Some(mk::apps(mk::global(f), rels.iter().copied().zip(args.iter().cloned()))),
+                _ => None,
+            })
+        };
+        let le0 = |x: Tm| self.le_int(self.int_lit(0), x);
+        match &**t {
+            Term::Let { name: n, rel, ty, val, body } => {
+                let c2 = self.push(ctx, n, *rel, ty, Some(val))?;
+                Ok(Rc::new(Term::Let { name: n.clone(), rel: *rel, ty: ty.clone(), val: val.clone(), body: self.fuel_nn(&c2, body, f, rels)? }))
+            }
+            Term::App { rel: Rel::Irr, fun, arg } if matches!(&**fun, Term::Match { .. }) => {
+                let Term::Match { ind, params, scrut, motive, arms } = &**fun else { unreachable!() };
+                let Term::Pi { name: en, rel: Rel::Irr, dom, .. } = &**motive else { return Err("a fuel function's match without its equation".into()) };
+                // Π(e : dom). 0 ≤ (match y with arms)(e)
+                let again = Rc::new(Term::App {
+                    rel: Rel::Irr,
+                    fun: Rc::new(Term::Match {
+                        ind: *ind,
+                        params: params.iter().map(|p| shift(p, 2)).collect(),
+                        scrut: mk::var(1),
+                        motive: shift_from(motive, 2, 1),
+                        arms: arms.iter().map(|a| Arm { names: a.names.clone(), body: shift_from(&commit_f(&a.body), 2, a.names.len() as u32) }).collect(),
+                    }),
+                    arg: mk::var(0),
+                });
+                let m2 = Rc::new(Term::Pi { name: en.clone(), rel: Rel::Irr, dom: dom.clone(), cod: le0(again) });
+                let decl = self.env.inductive_decl(*ind).ok_or("no inductive")?;
+                let mut arms2 = Vec::new();
+                for (k, a) in arms.iter().enumerate() {
+                    let Term::Lam { name: ln, rel: Rel::Irr, dom: ld, body: lb } = &*a.body else { return Err("a fuel function's arm without its equation".into()) };
+                    let (actx, _) = self.arm_ctx(ctx, *ind, params, &decl.ctors[k], &a.names)?;
+                    let ectx = self.push(&actx, ln, Rel::Irr, ld, None)?;
+                    arms2.push(Arm { names: a.names.clone(), body: mk::lam(ln, Rel::Irr, ld.clone(), self.fuel_nn(&ectx, lb, f, rels)?) });
+                }
+                Ok(Rc::new(Term::App { rel: Rel::Irr, fun: Rc::new(Term::Match { ind: *ind, params: params.clone(), scrut: scrut.clone(), motive: m2, arms: arms2 }), arg: arg.clone() }))
+            }
+            Term::Match { ind, params, scrut, motive, arms } => {
+                let again = Rc::new(Term::Match {
+                    ind: *ind,
+                    params: params.iter().map(|p| shift(p, 1)).collect(),
+                    scrut: mk::var(0),
+                    motive: shift_from(motive, 1, 1),
+                    arms: arms.iter().map(|a| Arm { names: a.names.clone(), body: shift_from(&commit_f(&a.body), 1, a.names.len() as u32) }).collect(),
+                });
+                let decl = self.env.inductive_decl(*ind).ok_or("no inductive")?;
+                let mut arms2 = Vec::new();
+                for (k, a) in arms.iter().enumerate() {
+                    let (actx, _) = self.arm_ctx(ctx, *ind, params, &decl.ctors[k], &a.names)?;
+                    arms2.push(Arm { names: a.names.clone(), body: self.fuel_nn(&actx, &a.body, f, rels)? });
+                }
+                Ok(Rc::new(Term::Match { ind: *ind, params: params.clone(), scrut: scrut.clone(), motive: le0(again), arms: arms2 }))
+            }
+            _ => {
+                let mut hyps: Vec<(Tm, Tm)> = Vec::new();
+                crate::auto::util::map_term(t, 0, &mut |y, d| {
+                    if let Term::Rec { args, proof } = &**y
+                        && d == 0
+                    {
+                        let fa = mk::apps(mk::global(f), rels.iter().copied().zip(args.iter().cloned()));
+                        hyps.push((Rc::new(Term::Rec { args: args.clone(), proof: proof.clone() }), le0(fa)));
+                        return Some(y.clone());
+                    }
+                    None
+                });
+                let tc = commit_f(t);
+                hyps.extend(self.fuel_nn_hyps(&[&tc]));
+                crate::elab::basic::linarith_term(self.env, ctx, hyps, le0(tc)).map_err(|e| format!("a fuel function's nonnegativity: {e}"))
             }
         }
     }
@@ -649,9 +919,24 @@ impl<'e> Walker<'e> {
         mk::eq(self.opt_out(), g.l.clone(), self.goal_rhs(g))
     }
 
-    /// The equation's right side: `Some(erase(s))`, or the abstracted one.
+    /// The equation's right side: `Some(erase(s))` (for the panic statement
+    /// `opt_erase(s)`, [`Self::opt_erase`]), or the abstracted one.
     fn goal_rhs(&self, g: &Goal) -> Tm {
-        g.rhs.clone().unwrap_or_else(|| self.some_out(mk::app(self.erase.clone(), self.commit(&g.s))))
+        g.rhs.clone().unwrap_or_else(|| match &self.panic {
+            Some(r) => self.opt_erase(r, &self.erase, &self.out_ty, &self.commit(&g.s)),
+            None => self.some_out(mk::app(self.erase.clone(), self.commit(&g.s))),
+        })
+    }
+
+    /// `match s : Option(r) with None => None[out] | Some(y) => Some[out](erase y)`:
+    /// the panic statement's right side of a structured value `s` (`None` is
+    /// the panic outcome, which the literal reading returns as `None`).
+    pub fn opt_erase(&self, r: &Tm, erase: &Tm, out: &Tm, s: &Tm) -> Tm {
+        let opt = self.ind("Option");
+        let out_opt = mk::ind(opt, vec![out.clone()]);
+        let none = Rc::new(Term::Ctor { ind: opt, ctor: 0, params: vec![out.clone()], args: vec![] });
+        let some = Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![shift(out, 1)], args: vec![mk::app(shift(erase, 1), mk::var(0))] });
+        Rc::new(Term::Match { ind: opt, params: vec![r.clone()], scrut: s.clone(), motive: out_opt, arms: vec![Arm { names: vec![], body: none }, Arm { names: vec![name("yy")], body: some }] })
     }
 
     /// The conclusion: [`Self::goal_e`], with the presence conjunct
@@ -1526,7 +1811,18 @@ impl<'e> Walker<'e> {
         let ind = *ind;
         let cscrut = self.commit(scrut);
         let sv = self.eval(ctx, &cscrut)?;
-        let l_abs = self.abstract_l(ctx, &g.l, &sv)?; // (ctx, y)
+        let mut l_abs = self.abstract_l(ctx, &g.l, &sv)?; // (ctx, y)
+        // (a dependent test of the literal side on the scrutinee whose proof
+        // is used at its old type — a leaf's `if c as .h` handing `h` to
+        // `slice::range` — cannot be abstracted: the literal side stays as it
+        // is, and the path equation decides its test in each arm)
+        if idiom_on(&l_abs, 0) {
+            let dty0 = mk::ind(ind, params.to_vec());
+            let cy = self.push(ctx, "y", Rel::Rel, &dty0, None)?;
+            if self.env.infer(&cy, &mk::eq(shift(&self.opt_out(), 1), l_abs.clone(), l_abs.clone()), &mut self.b()).is_err() {
+                l_abs = shift(&g.l, 1);
+            }
+        }
         let refined = count_var(&l_abs, 0) > 0;
         let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
         let scrut_txt = trunc(&self.env.print_term(&names, &self.quote(ctx, &sv)), 140);
@@ -2157,7 +2453,10 @@ impl<'e> Walker<'e> {
                 let mut sub = rel_args.clone();
                 sub.push(mk::var(ni));
                 let lcall = crate::opt::proof::steps::subst_n(&ci.l_of, &sub);
-                let sval = Rc::new(Term::Ctor { ind: self.ind("Option"), ctor: 1, params: vec![ci.out_ty.clone()], args: vec![mk::app(ci.erase.clone(), mk::apps(mk::global(*cg), args.clone()))] });
+                let sval = match &ci.panic {
+                    Some(r) => self.opt_erase(r, &ci.erase, &ci.out_ty, &mk::apps(mk::global(*cg), args.clone())),
+                    None => Rc::new(Term::Ctor { ind: self.ind("Option"), ctor: 1, params: vec![ci.out_ty.clone()], args: vec![mk::app(ci.erase.clone(), mk::apps(mk::global(*cg), args.clone()))] }),
+                };
                 // the lemma's fuel premise: at every fuel, or the callee's need
                 // from the premise (a hypothesis: inside a terminal, or before
                 // the walk); otherwise the call waits for the terminal
@@ -2577,15 +2876,16 @@ impl<'e> Walker<'e> {
     /// A split on the literal reading's own test `c` inside a terminal.
     #[allow(clippy::too_many_arguments)]
     fn l_split(&mut self, ctx: &Ctx, g: &Goal, ind: IndId, params: &[Tm], c: &Tm, facts: &[Fact], depth: u32) -> Result<Tm, String> {
-        self.split_test(ctx, g, ind, params, c, facts, depth, false)
+        self.split_test(ctx, g, ind, params, c, facts, depth, false, false)
     }
 
     /// A split on a test `c` inside a terminal: both sides abstracted over
     /// it where they hold it, each arm with its path equation. `force`: a
     /// test neither side holds (its path equation is the point: a fact the
-    /// arms' repairs use).
+    /// arms' repairs use). `exit`: at a `while` lemma's exit (each arm goes
+    /// on to the exit, [`Self::exit_close`]).
     #[allow(clippy::too_many_arguments)]
-    fn split_test(&mut self, ctx: &Ctx, g: &Goal, ind: IndId, params: &[Tm], c: &Tm, facts: &[Fact], depth: u32, force: bool) -> Result<Tm, String> {
+    fn split_test(&mut self, ctx: &Ctx, g: &Goal, ind: IndId, params: &[Tm], c: &Tm, facts: &[Fact], depth: u32, force: bool, exit: bool) -> Result<Tm, String> {
         let cv = self.eval(ctx, c)?;
         let l_abs = self.abstract_l(ctx, &g.l, &cv)?;
         // (the structured value waiting for the same test, a transparent
@@ -2621,7 +2921,7 @@ impl<'e> Walker<'e> {
             let mut fs: Vec<Fact> = facts.iter().map(|f| f.shifted(nf as i64 + 1)).collect();
             fs.push(Fact::eq(mk::var(0), shift(&eq_ty, 1)));
             self.rewrite_facts_by_last(&ectx, &mut fs)?;
-            let body = self.terminal(&ectx, &g_arm, &fs, depth + 1)?;
+            let body = if exit { self.exit_close_d(&ectx, &g_arm, &fs, depth + 1)? } else { self.terminal(&ectx, &g_arm, &fs, depth + 1)? };
             new_arms.push(Arm { names, body: mk::lam("e", Rel::Irr, eq_ty, body) });
         }
         let m = Rc::new(Term::Match { ind, params: params.to_vec(), scrut: c.clone(), motive, arms: new_arms });
@@ -2705,6 +3005,11 @@ impl<'e> Walker<'e> {
     fn terminal(&mut self, ctx: &Ctx, g: &Goal, facts: &[Fact], depth: u32) -> Result<Tm, String> {
         if depth > 48 {
             return Err("too many literal-reading steps at one tail".into());
+        }
+        // (a loop's call where the literal side is at the loop's header
+        // already: an inner loop's exit jumped there)
+        if depth == 0 && self.l_at_loop_header(g) {
+            return self.after_fuel(ctx, g, facts, depth);
         }
         let (g1, wraps, newf) = self.advance(ctx, g, facts, false)?;
         let mut fs = facts.to_vec();
@@ -2842,7 +3147,7 @@ impl<'e> Walker<'e> {
         let bt = self.quote(ctx, &block);
         let n_idx = ctx.depth().0 - 1 - self.n_level;
         if matches!(&*bt, Term::Var(Idx(i)) if *i == n_idx) {
-            return self.fuel_split(ctx, g, facts, depth);
+            return self.fuel_split(ctx, g, facts, depth, false);
         }
         // (refutation before splitting: a contradictory path is closed
         // without duplicating the literal side — a constructor clash,
@@ -3106,7 +3411,7 @@ impl<'e> Walker<'e> {
             return Ok(None);
         }
         self.stats.l_splits += 1;
-        self.split_test(ctx, g, bi, &[], &cond, facts, depth, true).map(Some)
+        self.split_test(ctx, g, bi, &[], &cond, facts, depth, true, false).map(Some)
     }
 
     /// Two values that agree once a machine word is replaced by the literal a
@@ -3185,7 +3490,9 @@ impl<'e> Walker<'e> {
     /// The literal side waits for fuel: split `n`. `Nil` contradicts the
     /// premise; `Cons(u, n1)`: a loop helper's call (its lemma), a recursive
     /// call (the induction hypothesis), or the walk goes on with `n1`.
-    fn fuel_split(&mut self, ctx: &Ctx, g: &Goal, facts: &[Fact], depth: u32) -> Result<Tm, String> {
+    /// `exit`: at a `while` lemma's exit that jumps to an outer loop's
+    /// header (the walk goes on to the exit under `Cons(u, n1)`).
+    fn fuel_split(&mut self, ctx: &Ctx, g: &Goal, facts: &[Fact], depth: u32, exit: bool) -> Result<Tm, String> {
         self.stats.fuel_splits += 1;
         let list = self.ind("List");
         let unit = self.unit_ty();
@@ -3213,7 +3520,7 @@ impl<'e> Walker<'e> {
         let g1 = g.with(inst0_under(&l_abs, 3, &shift(&ctor_tm, 1)), shift(&g.s, 3), 3);
         let saved = self.n_level;
         self.n_level = ctx.depth().0 + 1;
-        let cons_body = self.after_fuel(&ectx1, &g1, &fs1, depth);
+        let cons_body = if exit { self.exit_close_d(&ectx1, &g1, &fs1, depth + 1) } else { self.after_fuel(&ectx1, &g1, &fs1, depth) };
         self.n_level = saved;
         let cons_body = cons_body?;
         let arms = vec![Arm { names: vec![], body: mk::lam("e", Rel::Irr, nil_eq, nil_body) }, Arm { names: vec![name("u"), name("n1")], body: mk::lam("e", Rel::Irr, cons_eq, cons_body) }];
@@ -3259,6 +3566,39 @@ impl<'e> Walker<'e> {
             return Ok(wrap(wraps, inner));
         }
         self.terminal(ctx, g, facts, depth + 1)
+    }
+
+    /// Whether the structured side is a loop's call (a recursive call, a
+    /// loop helper's or a `while` loop's) and the literal side the function's
+    /// run at that loop's header.
+    fn l_at_loop_header(&self, g: &Goal) -> bool {
+        let want = if self.loop_rec(&g.s).is_some() {
+            self.rec.as_ref().map(|r| r.helper.header_ctor)
+        } else if let Term::Let { val, .. } = &*g.s
+            && let Some((wh, _)) = self.while_of(val)
+        {
+            Some(wh.header_ctor)
+        } else if let Some((h, _)) = app_spine(&g.s)
+            && let Some(hi) = self.helpers.iter().find(|x| x.s_global == h)
+        {
+            Some(hi.header_ctor)
+        } else {
+            None
+        };
+        let Some(want) = want else { return false };
+        let mut cur = g.l.clone();
+        loop {
+            match &*cur {
+                Term::Let { val, body, .. } => cur = crate::elab::tm::subst0(body, val),
+                Term::App { fun, arg, .. } if matches!(&**fun, Term::Lam { .. }) => {
+                    let Term::Lam { body, .. } = &**fun else { unreachable!() };
+                    cur = crate::elab::tm::subst0(body, arg);
+                }
+                _ => break,
+            }
+        }
+        let Some((head, args)) = app_spine(&cur) else { return false };
+        Some(head) == self.s_self_run && matches!(args.get(1).map(|a| &*a.1), Some(Term::Ctor { ctor, .. }) if *ctor == want)
     }
 
     /// One block of the literal side with its run kept folded: the folded
@@ -3343,7 +3683,7 @@ impl<'e> Walker<'e> {
         }
         largs.push((Rel::Rel, n1));
         let all_args: Vec<Tm> = args.iter().map(|(_, a)| self.commit(a)).collect();
-        let mu = hi.mu_int(&all_args);
+        let mu = hi.need_int(&all_args);
         let goal = self.le_int(mu, self.len_n(ctx.depth().0));
         let pf = self.linarith_fuel(ctx, facts, &goal)?;
         largs.push((Rel::Irr, pf));
@@ -3367,20 +3707,59 @@ impl<'e> Walker<'e> {
         }
         let n_cur = mk::var(d - 1 - self.n_level);
         largs.push((Rel::Rel, n_cur));
+        // (a loop with a fuel function: the reserve, the fuel the rest needs)
+        let reserve = match &wh.fuel {
+            Some(_) => Some(self.rest_need(ctx, g)?),
+            None => None,
+        };
+        if let Some(r) = &reserve {
+            largs.push((Rel::Rel, r.clone()));
+        }
         let c = self.goal_rhs(g);
         largs.push((Rel::Rel, c.clone()));
-        // the continuation's type, from the lemma's
-        let partial = mk::apps(mk::global(wh.lemma), largs.clone());
-        let pty = self.env.infer(ctx, &partial, &mut self.b()).map_err(|e| format!("the `while` lemma's application: {e}"))?;
-        let pty = self.quote(ctx, &pty);
+        // the continuation's type, from the lemma's (with a fuel function:
+        // instantiated as it is, its literal side at the exit block even when
+        // that is an outer loop's header, whose code evaluation would run)
+        let pty = match &wh.fuel {
+            Some(_) => {
+                let mut ty = self.env.global_type(wh.lemma).ok_or("the `while` lemma's type")?;
+                for (_, a) in largs.iter() {
+                    let Term::Pi { cod, .. } = &*ty else { return Err("the `while` lemma's telescope".into()) };
+                    ty = crate::elab::tm::subst0(cod, a);
+                }
+                ty
+            }
+            None => {
+                let partial = mk::apps(mk::global(wh.lemma), largs.clone());
+                let pty = self.env.infer(ctx, &partial, &mut self.b()).map_err(|e| format!("the `while` lemma's application: {e}"))?;
+                self.quote(ctx, &pty)
+            }
+        };
         let Term::Pi { dom: hc_ty, .. } = &*pty else { return Err("the `while` lemma's continuation".into()) };
         let hc = self.continuation(ctx, g, facts, hc_ty, wh)?;
         largs.push((Rel::Rel, hc));
         let all_args: Vec<Tm> = cargs.iter().map(|(_, a)| a.clone()).collect();
-        let goal = self.le_int(wh.mu_int(&all_args), self.len_n(d));
+        let mut need = wh.need_int(&all_args);
+        if let Some(r) = &reserve {
+            let hr = self.linarith_fuel(ctx, facts, &self.le_int(self.int_lit(0), r.clone())).map_err(|e| self.fail(ctx, g, &format!("the `while` loop's reserve: {e}")))?;
+            largs.push((Rel::Irr, hr));
+            need = mk::prim(PrimOp::IAdd, vec![need, r.clone()], vec![]);
+        }
+        let goal = self.le_int(need, self.len_n(d));
         let pf = self.linarith_fuel(ctx, facts, &goal).map_err(|e| self.fail(ctx, g, &format!("the `while` loop's fuel: {e}")))?;
         largs.push((Rel::Irr, pf));
         Ok(mk::apps(mk::global(wh.lemma), largs))
+    }
+
+    /// The fuel the rest of a `while` loop's call `let x = h(ā); rest`
+    /// needs after the loop (the reserve of a loop with a fuel function):
+    /// `let x = h(ā); need(rest)`, as the continuation's premise states it.
+    fn rest_need(&self, ctx: &Ctx, g: &Goal) -> Result<Tm, String> {
+        let Term::Let { name: n, rel, ty, val, body } = &*g.s else { return Err("a `while` call that is not a `let`".into()) };
+        let (cval, cty) = (self.commit(val), self.commit(ty));
+        let ctx2 = self.push(ctx, n, *rel, &cty, Some(&cval))?;
+        let need = self.need_acc(&ctx2, body, g.acc.as_ref().map(|a| shift(a, 1)).as_ref());
+        Ok(Rc::new(Term::Let { name: n.clone(), rel: *rel, ty: cty, val: cval, body: need }))
     }
 
     /// The continuation of a `while` loop's call `let loop = h(ā); rest`:
@@ -3416,7 +3795,9 @@ impl<'e> Walker<'e> {
         let cval = shift(&self.commit(val), nb as i64);
         let cty = shift(&self.commit(lty), nb as i64);
         let (_, cargs) = app_spine(&cval).ok_or("the `while` call")?;
-        let rest_c = shift_from(&self.commit(rest), nb as i64, 1);
+        // (the rest as it is: a recursive call in it, an outer loop's, keeps
+        // its decrease proof for the induction)
+        let rest_c = shift_from(rest, nb as i64, 1);
         let env = self.env;
         let sg = wh.s_global;
         let cval_v = self.eval(&c2, &cval)?;
@@ -3555,7 +3936,25 @@ impl<'e> Walker<'e> {
     /// at the current fuel, its slots the loop assigns from the state, the
     /// components `ā` and `eqS : h p̄ = tuple(ā)`.
     fn exit_close(&mut self, ctx: &Ctx, g: &Goal, facts: &[Fact]) -> Result<Tm, String> {
+        self.exit_close_d(ctx, g, facts, 0)
+    }
+
+    /// [`Self::exit_close`] after `depth` splits of the literal side's tests
+    /// on the way to the exit (a condition of several tests, `a | b`, whose
+    /// outcome the structured side's path already chose: the arm against the
+    /// path is refuted).
+    fn exit_close_d(&mut self, ctx: &Ctx, g: &Goal, facts: &[Fact], depth: u32) -> Result<Tm, String> {
         let x = self.exit.clone().ok_or("not a `while` lemma")?;
+        if depth > 0 {
+            let pf = match self.refute_last(ctx, facts)? {
+                Some(pf) => Some(pf),
+                None => self.refute_eval(ctx, facts)?,
+            };
+            if let Some(pf) = pf {
+                self.stats.refuted += 1;
+                return Ok(Rc::new(Term::Absurd { ty: self.goal_e(g), proof: pf }));
+            }
+        }
         self.at_header = true;
         let adv = self.advance(ctx, g, facts, false);
         self.at_header = false;
@@ -3568,16 +3967,41 @@ impl<'e> Walker<'e> {
         let isop = move |gl: GlobalId| opq.contains(&gl);
         let mut b = self.b();
         let lv = self.env.eval_opaque(&self.env.ctx_venv(ctx), ctx.depth(), &g1.l, &isop, &mut b).map_err(|e| format!("eval: {e:?}"))?;
-        let lx = self.step_to(ctx, &self.quote(ctx, &lv), x.x_ctor).map_err(|e| self.fail(ctx, &g1, &format!("the `while` loop's exit: {e}")))?;
+        let lx = match self.step_to(ctx, &self.quote(ctx, &lv), x.x_ctor) {
+            Ok(lx) => lx,
+            Err(e) => {
+                // (the literal side waits for a test before the exit: split on it)
+                if depth < 8
+                    && let Some((block, ind, params)) = self.blocker(ctx, &self.eval(ctx, &g1.l)?)
+                {
+                    let bt = self.quote(ctx, &block);
+                    let n_idx = ctx.depth().0 - 1 - self.n_level;
+                    if !matches!(&*bt, Term::Var(Idx(i)) if *i == n_idx) {
+                        let ps: Vec<Tm> = params.iter().map(|p| self.quote(ctx, p)).collect();
+                        let inner = self.split_test(ctx, &g1, ind, &ps, &bt, &fs, depth, true, true)?;
+                        return Ok(wrap(wraps, inner));
+                    }
+                    // (the exit jumps to an outer loop's header: one unit of fuel)
+                    if x.r_level.is_some() {
+                        let inner = self.fuel_split(ctx, &g1, &fs, depth, true)?;
+                        return Ok(wrap(wraps, inner));
+                    }
+                }
+                return Err(self.fail(ctx, &g1, &format!("the `while` loop's exit: {e}")));
+            }
+        };
         let slots = self.slots_of(ctx, &lx)?;
         let d = ctx.depth().0;
         let h = self.rec.as_ref().map(|r| r.helper.clone()).ok_or("no helper")?;
         let params = h.params_at(d);
         let n_cur = mk::var(d - 1 - self.n_level);
-        // hm : len n − μ(p̄) ≤ len n
+        // hm : len n − μ(p̄) ≤ len n (with a fuel function: R ≤ len n)
         let len_n = self.len_n(d);
-        let hm_ty = self.le_int(mk::prim(PrimOp::ISub, vec![len_n.clone(), h.mu_int(&params)], vec![]), len_n);
-        let hm = self.linarith_fuel(ctx, &fs, &hm_ty)?;
+        let hm_ty = match x.r_level {
+            Some(rl) => self.le_int(mk::var(d - 1 - rl), len_n),
+            None => self.le_int(mk::prim(PrimOp::ISub, vec![len_n.clone(), h.mu_int(&params)], vec![]), len_n),
+        };
+        let hm = self.linarith_fuel(ctx, &fs, &hm_ty).map_err(|e| self.fail(ctx, &g1, &format!("the `while` loop's exit: the continuation's fuel: {e}")))?;
         let mut hc_args: Vec<(Rel, Tm)> = vec![(Rel::Rel, n_cur), (Rel::Irr, hm)];
         for (i, w) in x.w.iter().enumerate() {
             if w.is_none() {
@@ -3591,12 +4015,35 @@ impl<'e> Walker<'e> {
             (Some((ind, _)), Term::Ctor { ind: i2, args, .. }) if ind == i2 => args.clone(),
             _ => return Err(self.fail(ctx, &g1, "the `while` loop's exit value is not its tuple")),
         };
-        for c in comps {
-            hc_args.push((Rel::Rel, c));
+        for c in comps.iter() {
+            hc_args.push((Rel::Rel, c.clone()));
         }
         hc_args.push((Rel::Irr, mk::var(d - 1 - x.eqs_level.ok_or("no eqS")?)));
         self.stats.leaves += 1;
-        Ok(wrap(wraps, mk::apps(mk::var(d - 1 - x.hc_level), hc_args)))
+        let hc = mk::apps(mk::var(d - 1 - x.hc_level), hc_args);
+        if x.r_level.is_none() {
+            return Ok(wrap(wraps, hc));
+        }
+        // (the continuation's state and the literal side's agree as states,
+        // not always once the run is unfolded — a slot the walk has split by
+        // eta: moved along `refl` of the states)
+        let (run_h, largs) = app_spine(&lx).ok_or("the exit's literal side")?;
+        let st_goal = largs.get(2).ok_or("the exit's state")?.1.clone();
+        let mut st_hc = x.sx.clone();
+        for c in comps {
+            st_hc = mk::app(st_hc, c);
+        }
+        for (i, w) in x.w.iter().enumerate() {
+            st_hc = mk::app(st_hc, match w {
+                Some(t) => shift(t, (d - x.e0) as i64),
+                None => slots[self.exit_slot_index(&x, i)].clone(),
+            });
+        }
+        let st_ty = self.quote(ctx, &self.env.infer(ctx, &st_goal, &mut self.b()).map_err(|e| format!("the exit's state: {e}"))?);
+        let rhs1 = shift(&self.goal_rhs(&g1), 1);
+        let motive = mk::eq(shift(&self.opt_out(), 1), mk::apps(mk::global(run_h), vec![(Rel::Rel, shift(&largs[0].1, 1)), (Rel::Rel, shift(&largs[1].1, 1)), (Rel::Rel, mk::var(0))]), rhs1);
+        let tr = Rc::new(Term::Transport { ty: st_ty.clone(), lhs: st_hc, rhs: st_goal.clone(), eq: mk::refl(st_ty, st_goal), motive, val: hc });
+        Ok(wrap(wraps, tr))
     }
 
     /// The slot index of the `i`-th entry of [`ExitMode::w`].
@@ -3617,7 +4064,11 @@ impl<'e> Walker<'e> {
         let n1 = mk::var(d - 1 - self.n_level);
         // hm' over (ctx, m)
         let cargs1: Vec<Tm> = cargs.iter().map(|a| shift(a, 1)).collect();
-        let hm_ty = self.le_int(mk::prim(PrimOp::ISub, vec![len_of(shift(&n1, 1)), hi.mu_int(&cargs1)], vec![]), len_of(mk::var(0)));
+        // (with a fuel function: the same reserve, `hm' : R ≤ len m`)
+        let hm_ty = match x.r_level {
+            Some(rl) => self.le_int(mk::var(d - rl), len_of(mk::var(0))),
+            None => self.le_int(mk::prim(PrimOp::ISub, vec![len_of(shift(&n1, 1)), hi.mu_int(&cargs1)], vec![]), len_of(mk::var(0))),
+        };
         let mut c = self.push(ctx, "m", Rel::Rel, &lu, None)?;
         c = self.push(&c, "hm", Rel::Irr, &hm_ty, None)?;
         let nk = x.k_tys.len() as u32;
@@ -3648,9 +4099,13 @@ impl<'e> Walker<'e> {
         fs.push(self.decrease_fact(hi, &cargs_d, &shift(dproof, up1), &c));
         let params = hi.params_at(dd);
         let m = mk::var(dd - 1 - d);
-        let n0 = mk::var(dd - 1 - (x.hc_level - 2));
-        let goal = self.le_int(mk::prim(PrimOp::ISub, vec![len_of(n0), hi.mu_int(&params)], vec![]), len_of(m.clone()));
-        let hm2 = self.linarith_fuel(&c, &fs, &goal).map_err(|e| format!("the continuation's fuel at a recursive call: {e}"))?;
+        let hm2 = if x.r_level.is_some() {
+            mk::var(dd - 1 - (d + 1))
+        } else {
+            let n0 = mk::var(dd - 1 - (x.hc_level - 2));
+            let goal = self.le_int(mk::prim(PrimOp::ISub, vec![len_of(n0), hi.mu_int(&params)], vec![]), len_of(m.clone()));
+            self.linarith_fuel(&c, &fs, &goal).map_err(|e| format!("the continuation's fuel at a recursive call: {e}"))?
+        };
         let mut hc_args: Vec<(Rel, Tm)> = vec![(Rel::Rel, m), (Rel::Irr, hm2)];
         for i in 0..nk {
             hc_args.push((Rel::Rel, mk::var(nk + ncomp - i)));
@@ -3705,13 +4160,21 @@ impl<'e> Walker<'e> {
             rargs.push(slots[*j].clone());
         }
         rargs.push(n1);
-        // a `while` lemma: the same `C`, and the continuation moved along `eqS`
+        // a `while` lemma: the same `C` (and reserve), and the continuation
+        // moved along `eqS`
+        let mut need = hi.need_int(&cargs);
         if let Some(x) = self.exit.clone() {
+            if let Some(rl) = x.r_level {
+                rargs.push(mk::var(d - 1 - rl));
+                need = mk::prim(PrimOp::IAdd, vec![need, mk::var(d - 1 - rl)], vec![]);
+            }
             rargs.push(mk::var(d - 1 - x.c_level));
             rargs.push(self.exit_continuation(ctx, facts, &x, &cargs, &dproof, hi)?);
+            if let Some(hl) = x.hr_level {
+                rargs.push(mk::var(d - 1 - hl));
+            }
         }
-        let mu_args = hi.mu_int(&cargs);
-        let goal = self.le_int(mu_args.clone(), self.len_n(ctx.depth().0));
+        let goal = self.le_int(need, self.len_n(ctx.depth().0));
         // the decrease proof: μ(args) < μ(params) (its second component for
         // an `Int` measure)
         let mut fs = facts.to_vec();
@@ -3941,6 +4404,19 @@ impl<'e> Walker<'e> {
                 hyps.push((cong, ty2));
             }
         }
+        // (nested loops: the fuel functions' calls are nonnegative)
+        let tys: Vec<&Tm> = std::iter::once(goal).chain(facts.iter().filter(|f| !f.is_marker()).map(|f| &f.ty)).collect();
+        hyps.extend(self.fuel_nn_hyps(&tys));
+        if std::env::var("CS_TRACE_FUEL").is_ok() {
+            let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
+            let r = crate::elab::basic::linarith_term(self.env, ctx, hyps.clone(), goal.clone());
+            if r.is_err() {
+                eprintln!("FUEL FAILED at {}: goal {}", self.path.join(" / "), trunc(&self.env.print_term(&names, goal), 3000));
+                for (_, t) in &hyps {
+                    eprintln!("    hyp {}", trunc(&self.env.print_term(&names, t), 3000));
+                }
+            }
+        }
         crate::elab::basic::linarith_term(self.env, ctx, hyps, goal.clone()).map_err(|e| format!("fuel arithmetic: {e}"))
     }
 
@@ -4049,7 +4525,9 @@ impl<'e> Walker<'e> {
             if focus.is_some_and(|k| k != *fi) {
                 continue;
             }
-            if matches!(&**flhs, Term::Var(_) | Term::App { .. } | Term::Global(_)) {
+            // (a `let`: an S-split's scrutinee committed with its `let`s, the
+            // quoter's sharing; its value holds the tests too)
+            if matches!(&**flhs, Term::Var(_) | Term::App { .. } | Term::Global(_) | Term::Let { .. }) {
                 let ev = self.quote(ctx, &self.eval(ctx, flhs)?);
                 if !self.env.alpha_eq_relevant(&ev, flhs, &|a, b| a == b) {
                     targets.push((*fi, fty.clone(), ev, frhs.clone()));
@@ -4211,8 +4689,19 @@ impl<'e> Walker<'e> {
             Term::Ctor { ind, ctor, params, args } => Rc::new(Term::Ctor { ind: *ind, ctor: *ctor, params: params.iter().map(|p| shift(p, 1)).collect(), args: args.iter().map(|a| self.abs_syn(ctx, a, c)).collect::<Result<_, _>>()? }),
             Term::Prim { op, args, proofs } => Rc::new(Term::Prim { op: *op, args: args.iter().map(|a| self.abs_syn(ctx, a, c)).collect::<Result<_, _>>()?, proofs: proofs.iter().map(|p| shift(p, 1)).collect() }),
             Term::Match { ind, params, scrut, motive, arms } => Rc::new(Term::Match { ind: *ind, params: params.iter().map(|p| shift(p, 1)).collect(), scrut: self.abs_syn(ctx, scrut, c)?, motive: shift_from(motive, 1, 1), arms: arms.iter().map(|a| Arm { names: a.names.clone(), body: shift_from(&a.body, 1, a.names.len() as u32) }).collect() }),
-            // (the quoter shares a repeated value by a `let`: its value)
-            Term::Let { name, rel: Rel::Rel, ty, val, body } => Rc::new(Term::Let { name: name.clone(), rel: Rel::Rel, ty: shift(ty, 1), val: self.abs_syn(ctx, val, c)?, body: shift_from(body, 1, 1) }),
+            // (the quoter shares a repeated value by a `let`: its value, and
+            // its body with the `let`'s variable a definition of the context
+            // — abstracted in `(ctx, x, y)`, then read in `(ctx, y, x)`)
+            Term::Let { name, rel: Rel::Rel, ty, val, body } => {
+                let body_a = match self.push(ctx, name, Rel::Rel, ty, Some(val)) {
+                    Ok(cx) => {
+                        let b = self.abs_syn(&cx, body, c)?;
+                        if count_var(&b, 0) > 0 { crate::elab::tm::subst0(&shift_from(&b, 1, 2), &mk::var(1)) } else { shift_from(body, 1, 1) }
+                    }
+                    Err(_) => shift_from(body, 1, 1),
+                };
+                Rc::new(Term::Let { name: name.clone(), rel: Rel::Rel, ty: shift(ty, 1), val: self.abs_syn(ctx, val, c)?, body: body_a })
+            }
             _ => shift(t, 1),
         })
     }
@@ -4536,6 +5025,24 @@ fn repair_idiom(t: &Tm, y: u32) -> Tm {
 
 fn repair_idiom_at(t: &Tm, y: u32) -> Tm {
     repair_idiom(t, y)
+}
+
+/// Whether `t` holds a dependent match (an idiom with its path equation)
+/// whose scrutinee is the variable `y` (index `y` in `t`).
+fn idiom_on(t: &Tm, y: u32) -> bool {
+    let mut found = false;
+    crate::auto::util::map_term(t, 0, &mut |x, d| {
+        if !found
+            && let Term::App { rel: Rel::Irr, fun, .. } = &**x
+            && let Term::Match { scrut, motive, .. } = &**fun
+            && matches!(&**scrut, Term::Var(Idx(i)) if *i == y + d)
+            && matches!(&**motive, Term::Pi { rel: Rel::Irr, .. })
+        {
+            found = true;
+        }
+        None
+    });
+    found
 }
 
 /// `t` with the `let`-bound variables `defs` (variable, value) replaced by
@@ -5145,6 +5652,41 @@ fn count_var(t: &Tm, k: u32) -> usize {
         None
     });
     n
+}
+
+/// Whether `t` holds a recursive call (`Rec`).
+fn has_rec(t: &Tm) -> bool {
+    let mut found = false;
+    crate::auto::util::map_term(t, 0, &mut |x, _| {
+        if matches!(&**x, Term::Rec { .. }) {
+            found = true;
+        }
+        if found { Some(x.clone()) } else { None }
+    });
+    found
+}
+
+/// The calls of the fuel functions `fs` (each with its arity) in `t` whose
+/// arguments mention no binder of `t` (as terms outside `t`), deduplicated.
+fn fuel_calls(env: &Env, t: &Tm, fs: &[(GlobalId, usize)], out: &mut Vec<(GlobalId, Vec<(Rel, Tm)>)>) {
+    // (`let`s inlined: a need's calls are about its `let`s' values)
+    fn zeta(t: &Tm) -> Tm {
+        crate::auto::util::map_term(t, 0, &mut |x, _| match &**x {
+            Term::Let { val, body, .. } => Some(zeta(&crate::elab::tm::subst0(body, val))),
+            _ => None,
+        })
+    }
+    crate::auto::util::map_term(&zeta(t), 0, &mut |x, d| {
+        let (g, args) = app_spine(x)?;
+        if !fs.iter().any(|(f, n)| *f == g && *n == args.len()) || (0..d).any(|k| count_var(x, k) > 0) {
+            return None;
+        }
+        let args: Vec<(Rel, Tm)> = args.iter().map(|(r, a)| (*r, shift(a, -(d as i64)))).collect();
+        if !out.iter().any(|(g2, a2)| *g2 == g && a2.len() == args.len() && a2.iter().zip(&args).all(|(p, q)| p.0 != Rel::Rel || env.alpha_eq_relevant(&p.1, &q.1, &|a, b| a == b))) {
+            out.push((g, args));
+        }
+        Some(x.clone())
+    });
 }
 
 /// The head global and arguments of an application spine.

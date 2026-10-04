@@ -932,7 +932,14 @@ pub fn lowering_note(low: &super::lowered::LoweredModule) -> String {
         } else {
             format!("; {} rewritten to user-supplied `#[rewrite]` alternatives (user code, not optimizer output: {})", user.len(), user.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", "))
         };
-        format!("optimized: {opt} of {n} source function(s) rewritten to optimizer residuals{user} (lifted round trip: {} definition(s) compared{})", low.compared, if low.shipped.is_empty() { String::new() } else { format!("; the shipped MIR's theorems: {}", low.shipped.join("; ")) })
+        // (a module read from MIR: its shipped code's theorems decide, and
+        // nothing is compared structurally)
+        let checked = match (low.compared, low.shipped.is_empty()) {
+            (0, false) => format!("the shipped MIR's theorems: {}", low.shipped.join("; ")),
+            (k, true) => format!("{k} definition(s) compared"),
+            (k, false) => format!("{k} definition(s) compared; the shipped MIR's theorems: {}", low.shipped.join("; ")),
+        };
+        format!("optimized: {opt} of {n} source function(s) rewritten to optimizer residuals{user} (lifted round trip: {checked})")
     };
     if low.user_rewrites_excluded {
         s.push_str("; user `#[rewrite]` alternatives excluded (evaluation-only build)");

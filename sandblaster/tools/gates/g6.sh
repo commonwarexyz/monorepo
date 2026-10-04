@@ -21,11 +21,12 @@
 #   fixture data (proof fixtures, test vectors, the baseline loader and the
 #   Bend corpus: one `#tree` entry per directory), the QMDB profile/timing
 #   split (fixtures/qmdb/splits, J8) and the held-out evaluation's files
-#   (sandblaster/bench/heldout/, once they exist: the held-out manifest is
-#   committed and recorded here before anything is measured on it), except
-#   the generated REPORT.md, which bench/heldout-harness/run.sh rewrites on
-#   every run, and Python caches (`__pycache__/`): freezing either would fail
-#   the next run's G6.
+#   (sandblaster/bench/heldout/, v1, now development but still frozen, and
+#   sandblaster/bench/heldout-v2/, frozen before any reader or optimizer
+#   work: each manifest is committed and recorded here before anything is
+#   measured on it), except a generated REPORT.md, which
+#   bench/heldout-harness/run.sh rewrites on every run, and Python caches
+#   (`__pycache__/`): freezing either would fail the next run's G6.
 #
 # Entry kinds in frozen.sha256: `<sum>  <file>`, `<sum>  <file>#frozen-prefix`
 # (the part of the corpus root above its `// ---- additions` line) and
@@ -40,6 +41,7 @@ cd "$repo"
 corpus=sandblaster/front/tests/opt_corpus
 qmdb=sandblaster/fixtures/qmdb
 heldout=sandblaster/bench/heldout
+heldout2=sandblaster/bench/heldout-v2
 frozen=$gates/frozen.sha256
 QMDB_SOURCES='857a529aca08725e547904d8a554af18d2cbbbddc8215117c7f3b650af6fc778  sandblaster/fixtures/qmdb/sandblaster/LAWS.rs
 63c1523e74ac4d052756fdb52a9f1ea7447588fa617ad570b32e08e6a8fc50ae  sandblaster/fixtures/qmdb/sandblaster/MODEL.rs
@@ -81,8 +83,10 @@ list() {
         [ -d "$qmdb/$d" ] && echo "$qmdb/$d#tree"
     done
     ls "$qmdb"/splits/* 2> /dev/null || true
-    # the held-out evaluation: manifest.toml, h1/ and h2/ (every file)
-    [ -d "$heldout" ] && find "$heldout" -type f ! -name .DS_Store ! -path "$heldout/REPORT.md" ! -path '*/__pycache__/*' | LC_ALL=C sort
+    # the held-out evaluations, v1 and v2: manifest.toml, h1/ and h2/ (every file)
+    for h in "$heldout" "$heldout2"; do
+        [ -d "$h" ] && find "$h" -type f ! -name .DS_Store ! -path "$h/REPORT.md" ! -path '*/__pycache__/*' | LC_ALL=C sort
+    done
     return 0
 }
 # whether frozen.sha256 has an entry for exactly this path

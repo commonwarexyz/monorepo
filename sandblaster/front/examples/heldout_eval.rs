@@ -121,6 +121,14 @@ fn main() -> ExitCode {
                 )
             })
             .collect();
+        // the panic-explicit readings (DESIGN.md §8.2 item 12) of the wanted
+        // functions: the reading's name, or why there is none
+        let panics: Vec<String> = o
+            .panics
+            .iter()
+            .filter(|r| wanted(&k.item(r.source).path.to_string()))
+            .map(|r| format!("{{\"source\":{},\"reading\":{},\"note\":{}}}", esc(&k.item(r.source).path.to_string()), opt_str(r.item.map(|i| o.print.item(i).path.to_string())), esc(&r.note)))
+            .collect();
         let warnings: Vec<String> = o.warnings.iter().map(|w| esc(w)).collect();
         let opt_errors: Vec<String> = o.errors.iter().map(|e| esc(e)).collect();
         let t = Instant::now();
@@ -133,6 +141,21 @@ fn main() -> ExitCode {
             if let Err(e) = std::fs::create_dir_all(out_dir).and_then(|_| std::fs::write(&dest, format!("{}{}", m.docs, m.body))) {
                 eprintln!("cannot write {}: {e}", dest.display());
             }
+            // the lifted round trip's copy (its MIR, extracted next to the
+            // module's `.sbmir`, is what the round trip reads back) and that
+            // MIR's path
+            let (rt_copy, rt_mir) = match &m.roundtrip_copy {
+                Some((flat, text)) => {
+                    let p = out_dir.join(format!("{stem}.roundtrip__{flat}.rs"));
+                    let _ = std::fs::write(&p, text);
+                    let mir = c.lifted.iter().filter_map(|l| l.mir.as_ref()).find(|mir| c.lifted.iter().any(|l| l.in_place && !l.ghost && l.mir.as_ref() == Some(*mir))).map(|mir| {
+                        let ms = mir.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                        mir.with_file_name(format!("{ms}.roundtrip__{flat}.sbmir")).display().to_string()
+                    });
+                    (Some(p.display().to_string()), mir)
+                }
+                None => (None, None),
+            };
             let recs: Vec<String> = m
                 .records
                 .iter()
@@ -149,22 +172,25 @@ fn main() -> ExitCode {
                 })
                 .collect();
             mods.push(format!(
-                "{{\"file\":{},\"written\":{},\"compared\":{},\"note\":{},\"user_rewrites_excluded\":{},\"records\":[{}]}}",
+                "{{\"file\":{},\"written\":{},\"compared\":{},\"note\":{},\"user_rewrites_excluded\":{},\"roundtrip_copy\":{},\"roundtrip_mir\":{},\"records\":[{}]}}",
                 esc(&m.file),
                 esc(&dest.display().to_string()),
                 m.compared,
                 opt_str(m.note.clone()),
                 m.user_rewrites_excluded,
+                opt_str(rt_copy),
+                opt_str(rt_mir),
                 recs.join(",")
             ));
         }
         format!(
-            "{{\"root\":{},\"front_end\":true,\"elab_errors\":{},\"defs\":[{}],\"unproven\":[{}],\"opt_ms\":{opt_ms},\"lowering_ms\":{low_ms},\"fns\":[{}],\"warnings\":[{}],\"opt_errors\":[{}],\"modules\":[{}]}}",
+            "{{\"root\":{},\"front_end\":true,\"elab_errors\":{},\"defs\":[{}],\"unproven\":[{}],\"opt_ms\":{opt_ms},\"lowering_ms\":{low_ms},\"fns\":[{}],\"panics\":[{}],\"warnings\":[{}],\"opt_errors\":[{}],\"modules\":[{}]}}",
             esc(&args[0]),
             esc(&errors.join("\n")),
             defs.join(","),
             unproven.join(","),
             fns.join(","),
+            panics.join(","),
             warnings.join(","),
             opt_errors.join(","),
             mods.join(",")

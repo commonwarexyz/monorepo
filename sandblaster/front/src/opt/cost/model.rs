@@ -53,9 +53,14 @@ pub const TOP: usize = 3;
 pub const RETRIES: usize = 2;
 
 /// `true` when `candidate` is at least 3% cheaper than `incumbent` (the
-/// selection gate).
+/// selection gate). A tie never replaces the incumbent (the next rung, or
+/// the source as written): at equal cost, zero included, the incumbent
+/// stays. The gate is relative, and the model's own error is larger than
+/// its 3% (fairness audit J12), so "no cheaper" is "no measurable gain",
+/// and a replacement that gains nothing only adds code and a dependence on
+/// the optimizer (DESIGN.md §8.2 item 6, the tie rule).
 pub fn beats(candidate: u64, incumbent: u64) -> bool {
-    candidate.saturating_mul(100) <= incumbent.saturating_mul(97)
+    candidate < incumbent && candidate.saturating_mul(100) <= incumbent.saturating_mul(97)
 }
 
 /// The (stable) cheapest [`TOP`] candidates, cheapest first.
@@ -189,6 +194,10 @@ struct Walker<'a> {
     /// Early exits: Σ weight × readiness, and Σ weight.
     ret_cp: u128,
     ret_w: u64,
+    /// The readiness of the branch conditions the code being walked is
+    /// under: a value it returns early is ready no sooner (the `return`
+    /// waits for the test that leads to it, as an arm's tail does).
+    ctrl: u64,
 }
 
 /// Probability 1 (fixed point).
@@ -198,7 +207,7 @@ const TRY_FAIL: u64 = ONE / 16;
 
 impl<'a> Walker<'a> {
     fn new(t: &'a Table, krate: &'a Crate, callee: &'a dyn Fn(ItemId) -> Option<u64>) -> Walker<'a> {
-        Walker { t, krate, callee, ready: HashMap::new(), tp: 0, vector: false, w: ONE, ret_cp: 0, ret_w: 0, carried: false }
+        Walker { t, krate, callee, ready: HashMap::new(), tp: 0, vector: false, w: ONE, ret_cp: 0, ret_w: 0, carried: false, ctrl: 0 }
     }
 
     /// The expected readiness of the result: the early exits and the
@@ -256,7 +265,7 @@ impl<'a> Walker<'a> {
 
     /// A sub-walker for an arm (its locals start as ours).
     fn arm(&self) -> Walker<'a> {
-        Walker { t: self.t, krate: self.krate, callee: self.callee, ready: self.ready.clone(), tp: 0, vector: self.vector, w: self.w, ret_cp: 0, ret_w: 0, carried: self.carried }
+        Walker { t: self.t, krate: self.krate, callee: self.callee, ready: self.ready.clone(), tp: 0, vector: self.vector, w: self.w, ret_cp: 0, ret_w: 0, carried: self.carried, ctrl: self.ctrl }
     }
 
     fn lit_u32(e: &Expr) -> bool {
@@ -332,21 +341,34 @@ impl<'a> Walker<'a> {
                 let rc = self.expr(cond);
                 let bt = self.t.op(Op::Branch).tp;
                 self.charge(bt);
-                let half = ONE / 2;
-                let ra = self.in_arm(half, &mut |a| a.expr(then));
+                // each arm half the time, except that an arm that only
+                // panics is never taken (a panic path is cold: rustc and
+                // LLVM lay it out so, and a run that panics is over)
+                let (pt, pe) = (panics_only(then), els.as_ref().is_some_and(|x| panics_only(x)));
+                let (wt, we) = match (pt, pe) {
+                    (true, false) => (0, ONE),
+                    (false, true) => (ONE, 0),
+                    _ => (ONE / 2, ONE / 2),
+                };
+                // (the arms are under the condition: an early exit in one
+                // waits for it)
+                let saved = self.ctrl;
+                self.ctrl = self.ctrl.max(rc);
+                let ra = self.in_arm(wt, &mut |a| a.expr(then));
                 let rb = match els {
-                    Some(x) => self.in_arm(half, &mut |a| a.expr(x)),
+                    Some(x) => self.in_arm(we, &mut |a| a.expr(x)),
                     None => rc,
                 };
+                self.ctrl = saved;
                 // an arm that returns early takes its share out of the rest
                 let (dt, de) = (then.ty.is_never(), els.as_ref().is_some_and(|x| x.ty.is_never()));
-                let live = u64::from(!dt) + u64::from(!de);
+                let live = if dt { 0 } else { wt } + if de { 0 } else { we };
                 let r = match (dt, de) {
                     (true, false) => rb,
                     (false, true) => ra,
                     _ => (ra + rb) / 2,
                 };
-                self.w = self.w * live / 2;
+                self.w = self.w * live / ONE;
                 r.max(rc)
             }
             Match { scrut, arms, .. } => {
@@ -356,10 +378,22 @@ impl<'a> Walker<'a> {
                     let bt = self.t.op(Op::Branch).tp * depth + self.t.op(Op::Cmp).tp * depth;
                     self.charge(bt);
                 }
+                // the arms alike, but an arm that only panics is never taken
+                let cold = arms.iter().filter(|a| panics_only(&a.body)).count() as u64;
                 let n = arms.len().max(1) as u64;
+                let warm = if cold == n { n } else { n - cold };
                 let (mut ready, mut live) = (0u64, 0u64);
+                let mut w_live = 0u64;
+                let saved = self.ctrl;
+                if arms.len() > 1 {
+                    self.ctrl = self.ctrl.max(rs);
+                }
                 for a in arms {
-                    let r = self.in_arm(ONE / n, &mut |w| {
+                    let p = if cold < n && panics_only(&a.body) { 0 } else { ONE / warm };
+                    if !a.body.ty.is_never() {
+                        w_live += p;
+                    }
+                    let r = self.in_arm(p, &mut |w| {
                         for l in a.pat.bindings() {
                             w.ready.insert(l, rs);
                         }
@@ -373,12 +407,13 @@ impl<'a> Walker<'a> {
                         live += 1;
                     }
                 }
-                self.w = self.w * live / n;
+                self.ctrl = saved;
+                self.w = self.w * w_live / ONE;
                 (ready / live.max(1)).max(rs)
             }
             Block(b) => self.block(b),
             Return(x) => {
-                let r = x.as_ref().map(|x| self.expr(x)).unwrap_or(0);
+                let r = x.as_ref().map(|x| self.expr(x)).unwrap_or(0).max(self.ctrl);
                 self.ret_cp += u128::from(r) * u128::from(self.w);
                 self.ret_w += self.w;
                 self.w = 0;
@@ -542,6 +577,29 @@ impl<'a> Walker<'a> {
             }
         }
     }
+}
+
+/// Whether `e` only panics: it never yields a value (`!`) and returns no
+/// value early either (`unreachable!()`, the panic of a panic-explicit
+/// reading's Rust form, a block ending in one): a cold path.
+fn panics_only(e: &Expr) -> bool {
+    struct R(bool);
+    impl crate::visit::Visitor for R {
+        fn expr(&mut self, e: &Expr) {
+            if matches!(e.kind, ExprKind::Return(_) | ExprKind::Try(_)) {
+                self.0 = true;
+            }
+            if !self.0 {
+                crate::visit::walk_expr(self, e);
+            }
+        }
+    }
+    if !e.ty.is_never() {
+        return false;
+    }
+    let mut r = R(false);
+    crate::visit::Visitor::expr(&mut r, e);
+    !r.0
 }
 
 fn peel(e: &Expr) -> &Expr {
@@ -749,8 +807,10 @@ mod tests {
     fn the_gate_is_three_percent() {
         assert!(beats(97, 100));
         assert!(!beats(98, 100));
-        assert!(beats(0, 0));
+        assert!(!beats(100, 100), "a tie keeps the incumbent");
+        assert!(!beats(0, 0), "a tie at zero cost keeps the incumbent too");
         assert!(!beats(1, 0));
+        assert!(beats(0, 1));
     }
 
     #[test]

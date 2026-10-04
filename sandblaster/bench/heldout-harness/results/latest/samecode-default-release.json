@@ -81,7 +81,7 @@
  },
  "next_power_of_two": {
   "subj_rustc_aa": true,
-  "subj_opt": true
+  "subj_opt": false
  },
  "nibble_popcount": {
   "subj_rustc_aa": true,
@@ -93,7 +93,7 @@
  },
  "read_u32_le": {
   "subj_rustc_aa": true,
-  "subj_opt": true
+  "subj_opt": false
  },
  "remaining_budget": {
   "subj_rustc_aa": true,
@@ -120,6 +120,126 @@
   "subj_opt": true
  },
  "trailing_ones": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_adler32": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_argmax": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_brackets_balanced": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_count_inversions": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_count_overlapping_pairs": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_day_of_week": {
+  "subj_rustc_aa": false,
+  "subj_opt": false
+ },
+ "v2_day_of_year": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_days_in_month": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_dedup_sorted": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_fletcher16": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_gcd": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_has_pair_with_sum": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_hex_decode": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_hex_encode_lower": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_high_nibble_histogram": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_is_leap_year": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_lcm": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_lower_bound": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_luhn_valid": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_manhattan": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_max_subarray_sum": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_min_max": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_parse_u32": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_polygon_twice_area": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_prefix_sums": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_range_sum": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_rect_intersection_area": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_rgb565_pack": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_rgb565_unpack": {
+  "subj_rustc_aa": true,
+  "subj_opt": true
+ },
+ "v2_seconds_to_hms": {
   "subj_rustc_aa": true,
   "subj_opt": true
  }

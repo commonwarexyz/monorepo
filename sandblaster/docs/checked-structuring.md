@@ -43,7 +43,10 @@ the gate checks that a listed function's MIR instance is that function
 statement rests only on its own extraction's literal reading (L's names
 restart with each extraction's reading); core's `Index::index` leaf is
 recognized by its exact path — and ran the final validation; the trusted
-part is ≈ 4.29k code lines (≈ 4.97k when this workflow began). The implementation log is the next
+part is ≈ 4.29k code lines (≈ 4.97k when this workflow began). Stage finish-A made the shipped
+code's theorems the only check of a rewrite of a module read from MIR (§5.13; the structural
+comparison refused correct code) and added L's slice leaves; the trusted part is ≈ 4.55k code
+lines, with the stages since tcb-review counted (§7). The implementation log is the next
 section; the design follows it, updated where the implementation differs. This note does not change
 `SEMANTICS.md`.
 
@@ -1565,6 +1568,97 @@ shared with other agents' builds):
 * A cached theorem costs its kernel re-check; not measured on a warm build.
   The shipped theorems' cache path still has no dedicated test.
 
+### Stage finish-A (the shipped theorems decide), 2026-10-03
+
+**Goal.** The lifted round trip refused correct rewrites. Besides the
+kernel theorems of the shipped code, every printed helper's structured
+reading had to equal its residual syntactically, and every copy had to be
+the delegation `λ x̄. r x̄`; rustc's MIR of a printed residual binds
+temporaries by `let`, tests a checked operation's `Option` with `is_none`
+and reaches sub-slices through core's `Index`, so its reading differs from
+the residual it computes. Make the theorems (`L::shipped::<id>`,
+`L::pshipped::<id>`) the deciding check for every module read from MIR,
+keep the syntactic comparison only where no MIR theorem can exist, and
+write the argument down (DESIGN.md §2.1, §5.13 here).
+
+**Changed.**
+
+| where | what |
+| --- | --- |
+| `driver/lowered.rs` (untrusted bookkeeping around the trusted call sites, whose requirement is unchanged) | the round trip is two functions: `shipped_theorems`, which decides a module read from MIR by the trusted check of each rewrite's shipped theorems alone (`mir::gate::accept_shipped`, `accept_shipped_panic`), and `compare_read_back`, the structural comparison, run only for a lifted module without MIR (which the lift no longer accepts). The test hook `LowerFault::CompareStructurally` runs the comparison beside the theorems and records what it would refuse (`LoweredModule::structural`). The emitted function and its round-trip copy leave out a by-value parameter's `mut` (`SourceFn::param_muts`): the rewritten body, a call of the replacement, mutates no parameter, and rustc warns `unused_mut` otherwise |
+| `driver/gates.rs` | the build note names what decided ("the shipped MIR's theorems") |
+| `mir/simproof.rs` (untrusted) | the two walker gaps of §5.13: a `let`-headed side of an S-split's path equation is evaluated, and `abs_syn` abstracts inside `let` bodies |
+| `mir/literal.rs` (+10), `mir/literal.core` (+16) (trusted) | a slice's sub-slices by core's `Index` (`&s[..j]`, `&s[i..]`, `&s[i..j]`, `&s[..=j]`), read as the array's are, by four leaves over the slice (`leaf::slice_index_*`, §2.5, §2.6) |
+
+**Tests.** `tests/lift_opt.rs`
+`a_rewrite_whose_shipped_mir_differs_only_syntactically_is_accepted`
+(fixture `opt_shipped`: three rewrites whose copies' MIR differs from the
+residual by `let`-bound temporaries, `is_none` and `Index` sub-slices;
+each ships with its kernel-checked `L::shipped::<id>` and agrees with the
+source under rustc, while the comparison, run beside the theorems by the
+hook, refuses all three) and `a_wrong_shipped_copy_is_refused_by_the_theorem`
+(the copy's MIR read with one constant off: the theorem fails and the
+source stays). `tests/literal.rs`
+`a_slices_index_by_a_range_is_the_subslice_or_a_panic`: the four slice
+leaves, their values and their panics, with negative twins (a crate's own
+range type, a crate's own `Index`, both `None` and named).
+
+**Development data.** Held-out v1's `next_power_of_two`, `read_u32_le` and
+`mix64`, whose cheaper residuals the comparison refused with "relevant
+structure differs", now lower, each with its kernel-checked shipped
+theorem.
+
+**Not changed: a residual with a loop.** Not printable, and not only a
+printing gap: the elaborator's loop helper `<f>::loop#k` has no HIR item
+while the printer, the specializer and the lowering name functions by HIR
+item; printing one as a helper would still meet a lowering that prints no
+loops and a round trip without a loop lemma for a helper's MIR (DESIGN.md
+§2.1, "Not built yet"; development data: held-out v1's `gray_decode`,
+`parity`).
+
+**Validation** (this stage's development changes complete, before the
+held-out v2 sample was drawn): the touched suites (`lift_opt`,
+`lowered_use`, `opt_panics`, `opt_summaries`, `literal`, `mir`, `walker`,
+`theorem_gate`, `fault_injection`, `reader_widen`, `build_loop`,
+`lift_conformance`, `in_place_cache`, `verdict_cache` and the four
+`fairness_*`: 18 suites, 187 tests) and the front end's unit tests of the
+lowering, the optimizer and the MIR modules (18) pass (`literal` again
+after the slice test was added: 31 tests); G6, its self-test
+and `fair-baseline.sh` (plain, `--heldout`, `--selftest`) pass.
+`cargo test -p commonware-codec`: varint verified, 21,253 obligations,
+603 definitions kernel-checked, `mir-theorems` 63 of 63, every §15 gate
+passed, `SPEC.lock: matches (116 item(s), root f0021c19…)`, none of the 6
+source functions rewritten (the source emitted as-is), 147 + 16 + 5 tests
+pass (343 s with the build). `cargo test -p commonware-storage --lib` (the
+MMR, position, location, proof and hasher tests): the MMR verified in
+place, 5,953 obligations, 740 definitions, `mir-theorems` 69 of 69, every
+§15 gate passed (220 of 297 spec mutants killed), `SPEC.lock: matches (208
+item(s), root 1d8d5969…)`, no function rewritten; the verifier's
+development build as before (1,929 obligations, `mir-theorems` 69 of 69,
+its 79 §15 findings pending); 129 tests pass (1,141 s with the build). The
+locks and theorem counts are those before the stage.
+
+**Counts.** L's generator 1,297 code lines (+10), `literal.core` 186 (+16);
+the trusted part ≈ 4,552 (+26, §7).
+
+**Then, with development frozen** (snapshot `finish-A dev accepted`,
+04:05 PDT): held-out v2 (`bench/heldout-v2/REPORT.md`). H2-v2 was sampled
+by its frozen rule, unchanged: all 869 candidates probed, none accepted
+(`h2/PROBE-LOG.md`), so H2-v2 is empty; the fair harness on H1-v2: 0 of 30
+functions changed, geomean 1.007 (default layout) / 1.002 (aligned) /
+0.999 (no overflow checks), A/A 0.87–1.19 / 0.84–1.11, 29 of 30 functions
+identical machine code (30 of 30 apart from data addresses). Held-out v1,
+development data, run again: 3 of 31 changed (the three this stage lets
+through), geomean 1.002 / 1.004 against an A/A of 1.016 / 0.996; the model
+predicted 0.90, 0.70 and 0.95 for them, and they measure 1.00 (`mix64`, the
+same machine code as rustc's), 1.00 (`next_power_of_two`) and 1.08 / 1.12 /
+1.07 (`read_u32_le`, slower in all three binaries). The
+shipped code (`bench/shipped-harness/REPORT.md`): codec's varint, storage's
+MMR and the verifier's first set as the two crates compile them, against the
+original Commonware functions: the same instructions in all 33 functions
+(28 identical outright, 5 apart from each copy's constant-data addresses,
+like the A/A pair), geomean 1.003 / 1.002 / 1.008.
+
 ## Summary
 
 Today `front/src/mir/read.rs` (2,397 code lines) turns rustc's MIR into the
@@ -1882,7 +1976,29 @@ function S uses, and writes back:
   (`crate::merkle::host::Sha256::hash`);
 * `Deref::deref` of the `Digest` newtype → `array::as_slice`.
 
-### 2.6 The library (`literal.core`, trusted, 141 code lines with the leaves)
+Stage reader-widen adds library functions read as **models** instead of
+through their MIR, whose raw pointers neither reading models (`mod.rs`'s
+`Model`, by the exact path of each definition; S inlines a small MIR body
+of the same meaning, `read::model_body`):
+
+* core's slice iterator: `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`
+  and `Iter::new` → `leaf::slice_iter_new` (the slice at index 0), and
+  `<Iter as Iterator>::next` → `leaf::slice_iter_next` through the
+  iterator's code (the element at the index, the index one further, or
+  `None` at the end); the iterator is `Tuple2(Slice T, Usize)`;
+* `<Range<usize> as SliceIndex<[T]>>::get` → `leaf::slice_get_range`.
+
+Stage finish-A reads a slice's sub-slices as the array's are read:
+`<[T] as Index<RangeTo / RangeFrom / Range / RangeToInclusive>>::index`
+(core's `Index`, by its exact path) → `leaf::slice_index_to`, `_from`,
+`_range`, `_to_inclusive`, the array leaves' definitions over the slice
+itself (its length in place of `N`): the sub-slice, or `None` — rustc's
+panic — unless the range lies in the slice. S read them already
+(`&s[i..]`); L read them as unmodeled, so a function that sub-slices a
+slice had no theorem (the printed residual of held-out v1's `read_u32_le`,
+development data: `&l0_data[l1_offset..]`).
+
+### 2.6 The library (`literal.core`, trusted, 186 code lines with the leaves; 170 before stage finish-A, 139 before stage reader-widen)
 
 | definitions | what they are |
 | --- | --- |
@@ -1894,6 +2010,9 @@ function S uses, and writes back:
 | per width: `mir::checked_*`, `*_unchecked`, `div`, `rem`, `shl` / `shr_unchecked`, `cmp` | arithmetic |
 | `mir::array_get`, `mir::array_set` | indexing: the prelude's `array::index` / `array::set` under the bound test, the test's equation their premise (stage cs-integrate: `array_get` no longer recurses through a proof-free `mir::nth`) |
 | `mir::bswap_u16` / `u32` / `u64` / `usize` | the byte swap by shifts and masks |
+| `mir::scheck_add_*`, `mir::scheck_sub_*` on `u8`..`u64` (stage reader-widen) | a signed type's `CheckedAdd`/`CheckedSub` on its bits: the wrapped bits and the overflow flag (the sign bit of `(a ^ r) & (b ^ r)`, `(a ^ b) & (a ^ r)`) |
+| `leaf::slice_iter_new`, `leaf::slice_iter_next`, `leaf::slice_get_range` (stage reader-widen) | the models of core's slice iterator and of a slice's `get` by a range (§2.5) |
+| `leaf::slice_index_to`, `_from`, `_range`, `_to_inclusive` (stage finish-A) | a slice's sub-slices by core's `Index` (§2.5): the array leaves over the slice |
 
 There are no lemmas. The library is total and proof-free except for
 `array_set`'s bound premise.
@@ -1960,7 +2079,7 @@ sufficient fuel. By A2, the MIR run terminates with that value.
 
 ### Assumptions (the trusted base after this change)
 
-* **A1. L's generator and library mean MIR.** 1,217 + 139 code lines (§7). Each
+* **A1. L's generator and library mean MIR.** 1,297 + 186 code lines (§7; 1,287 + 170 before stage finish-A, 1,217 + 139 before stage reader-widen). Each
   construct's reading is local and checkable against the MIR reference by
   a reader.
 * **A2. Fuel adequacy.**
@@ -1987,7 +2106,7 @@ sufficient fuel. By A2, the MIR run terminates with that value.
   unchanged, and they are the same model functions S uses.
 * **A6. The kernel**, unchanged. No new prelude definitions beyond L's
   library, which is counted in A1.
-* **A7. The statement generator** (`mir/stmt.rs`, 210 code lines). The theorem text, `init` and `erase`,
+* **A7. The statement generator** (`mir/stmt.rs`, 234 code lines; 210 before the panic statement of DESIGN.md §8.2 item 12). The theorem text, `init` and `erase`,
   about 0.2k lines, decide what the theorem says. They are small and
   regular, and a reader checks them against §3. Its preconditions are
   `S_f`'s; the elaborator makes them the declared contract's (checked,
@@ -2303,6 +2422,62 @@ outside it):
   `ez`; the rest's `h_loop`, its post-state proven at `ā`, a hypothesis of
   that motive).
 
+### 5.12a Loops of the reader widening (stage reader-widen)
+
+* **A `while` of several tests** (`while a > 0 || b > 0`): S joins the tests
+  without short circuit (`(a > 0) | (b > 0)`, one test of each); the
+  lemma's exit is reached by the literal side's own tests in turn, each
+  split (`split_test`, forced) with the arm against S's path refuted.
+* **A loop inside another loop** that is not `while`-shaped is a helper
+  that returns the parameters it assigns (`HelperInfo::returns`); its
+  lemma is §5.12's, with `returned` naming the result's components.
+* **Measures** of loops without an attachment are guessed by the reader
+  (untrusted); the elaborator proves their decreases.
+
+---------------------------------------------------------------------------
+
+### 5.12b Nested loops: fuel functions (stage reader-widen)
+
+In a function with a loop inside another, a loop's measure no longer
+bounds the fuel its lemma needs: the outer loop's body runs the inner loop,
+whose fuel varies with each iteration, and an inner loop's exit may jump to
+the outer header, which costs a unit of its own. Each loop helper of such a
+function gets a **fuel function** (`checked.rs`'s `fuel_fn`, untrusted):
+
+```text
+L::fuel::<id>_<h> : Π p̄. Int        (opaque; measure recursion with h's measure)
+  := the fuel shadow of h's body: a recursive call 1 + F(ā), an inner loop's
+     call its fuel + 1, the loop's exit e (1 when it jumps to an outer
+     loop's header), callees' needs accumulated down the lets
+L::fuelnn::<id>_<h> : Π p̄. 0 ≤ F(p̄)   (the same recursion: the body's
+     matches, leaves by linarith from the recursive calls' and inner loops'
+     nonnegativity)
+```
+
+`F`'s recursive calls carry S's own decrease proofs (its body keeps every
+binder of S's on the way to them). The lemmas then state `F(p̄) ≤ len n` (a
+tail helper) or, for §5.12's `while` lemma, a **reserve** `R` the caller
+chooses, the fuel the rest of its body needs after the loop:
+
+```text
+Π p̄ j̄ (n) (R : Int) (C) (hC : Π m (.hm : R ≤ len m) k̄ c̄ (.ez). Eq(run m X σ_X, C))
+    (.hR : 0 ≤ R) (.hle : F(p̄) + R ≤ len n). Eq(run n H σ, C)
+```
+
+The walk's premise is the shadow of the rest of the body (`delta(F; p̄)`
+at the start): a recursive call needs `F(ā) + R` after the back edge's
+unit, the exit `R` after its own (a fuel split when it jumps to a header),
+and the induction hypothesis passes `R`, `hR` and `hC` on unchanged, so no
+arithmetic relates the exit to the start. A caller's continuation walks the
+rest from `X`, which for an inner loop may be the outer header itself: a
+loop's call whose literal side is at its header already is its lemma (or
+the induction hypothesis) at once. The continuation keeps a recursive call
+of the rest as `Rec`, its type is the lemma's instantiated (not evaluated:
+the header's code would run), and at the exit the continuation's state
+meets the literal side's along `refl` of the two states (a slot the walk
+split by eta converts as a state, not once the run is unfolded). Functions
+without nested loops keep the measure (their lemmas and proofs unchanged).
+
 ---------------------------------------------------------------------------
 
 ### 5.13 The shipped code (stage cs-storage, plan step 8)
@@ -2327,6 +2502,39 @@ both extractions hold are reused, and must be the same MIR. The helpers are
 proven callee-first; each one's lemma replaces the gate's callee lemma of
 the same definition (`Prover::replace_callees`: the copy calls the helper,
 not the original alternative).
+
+**These theorems decide** (stage finish-A). Until then the round trip also
+compared the copy's structured reading (`read.rs` on the copy's MIR,
+elaborated in generated mode) with the replacement, syntactically, and
+proved the theorems only for what passed. Nothing in that comparison is
+needed: the structured reading of the copy is an untrusted proposal, while
+`L::thm::<helper>` and `L::thm::<copy>` relate the literal reading of the
+copy's MIR — what rustc compiles — directly to the definitions the
+comparison compared it with, and `L::shipped` composes them with the
+optimizer's kernel-checked link into the statement the laws need, which
+the trusted check accepts or refuses. So for a module read from MIR the
+round trip runs no comparison (`driver::lowered::round_trip`; the front end
+still reads the copy with its MIR, whose load checks the copy's text by its
+SHA-256). The comparison refused correct code: the reading of a printed
+residual binds rustc's temporaries by `let`, tests `checked_add`'s
+`Option` with `is_none` and reaches sub-slices through `Index`, so it
+differed from the residual it computes (held-out v1, development data:
+`next_power_of_two`, `read_u32_le`, `mix64`). Two walker gaps showed on the
+way, both fixed in `simproof.rs` (untrusted): an S-split's path equation
+states its scrutinee committed with `let`s (the quoter's sharing), so
+refutation by evaluation now evaluates a `let`-headed side too, and
+abstracts the tested term inside `let` bodies (`abs_syn`), which refuted
+`next_power_of_two`'s overflow arm against L's no-overflow path; and L read
+a slice's sub-slices as unmodeled (§2.5, now `leaf::slice_index_*`). Tests:
+`tests/lift_opt.rs` `a_rewrite_whose_shipped_mir_differs_only_syntactically_is_accepted`
+(fixture `opt_shipped`: three rewrites the comparison, run beside the
+theorems by the hook `LowerFault::CompareStructurally`, refuses, each
+shipped with its `L::shipped::<id>` and agreeing with the source under
+rustc) and `a_wrong_shipped_copy_is_refused_by_the_theorem` (the copy's MIR
+read with one constant off: the theorem fails, the source stays);
+`tests/literal.rs` `a_slices_index_by_a_range_is_the_subslice_or_a_panic`
+(the four slice leaves, their values and panics, with a crate's own range
+type and a crate's own `Index` as negative twins).
 
 ## 6. Fit with the rest of the toolchain
 
@@ -2385,16 +2593,16 @@ comments or tests. The script used reproduces `docs/mir-lift.md` §5 exactly:
 | structurer `mir/read.rs` | 2,397 | 2,433, **untrusted** (checked by the theorems) |
 | `mir/cfg.rs` | untrusted | 298, untrusted (stage tcb-literal: + the literal reading's ranks, loop headers, panicking blocks and type-occurrence pruning, 63 lines; 235 before) |
 | walker `mir/simproof.rs`, driver `mir/checked.rs` | — | 4,565 + 1,674, untrusted (stage tcb-gate: the gate's trusted part moved to `mir/gate.rs`) |
-| `mir/mod.rs`: `load` checks and names (subset type names, host models) | 430 | 491 (L's names: `kernel_adt`, `is_transparent`, `host_model_method`, host enum paths; stage tcb-review: + `instance_global`, 10; the read.rs names stay until `read.rs` leaves) |
-| L generator `mir/literal.rs` | — | 1,217 (stage tcb-literal, with byte-identical output; 1,474 before it; prototype 1,905; stage cs-storage: + data-free reads; cs-assurance: + the review's fixes) |
-| L library `mir/literal.core` | — | 139 non-comment lines (stage cs-literal: 141; `mir::nth` removed, `array_get` and the inclusive-range leaf changed) |
-| statement and `erase` `mir/stmt.rs` | — | 210 (stage cs-storage: + core types S models by prelude structs, the model lemmas' statement; stage tcb-checks: − the precondition name rule, 225 before) |
+| `mir/mod.rs`: `load` checks and names (subset type names, host models) | 430 | 491 (L's names: `kernel_adt`, `is_transparent`, `host_model_method`, host enum paths; stage tcb-review: + `instance_global`, 10; the read.rs names stay until `read.rs` leaves); stage reader-widen: 531 measured (498 before it: + the models' selection, `slice_iter_elem`, `Model`, `MODEL_FNS`, `model_of`, and the slice iterator's subset type, 33) |
+| L generator `mir/literal.rs` | — | 1,217 (stage tcb-literal, with byte-identical output; 1,474 before it; prototype 1,905; stage cs-storage: + data-free reads; cs-assurance: + the review's fixes); stage reader-widen: 1,287 (+70: the models' calls `model_call` and the shared `state_leaf`, signed `CheckedAdd/Sub`, the rotations, the bytes-to-word `transmute`, the one value of an enum whose other variants are empty); stage finish-A: 1,297 (+10: a slice's sub-slices by `Index`) |
+| L library `mir/literal.core` | — | 139 non-comment lines (stage cs-literal: 141; `mir::nth` removed, `array_get` and the inclusive-range leaf changed); stage reader-widen: 170 (+31: `mir::scheck_*`, `leaf::slice_iter_new`/`next`, `leaf::slice_get_range`); stage finish-A: 186 (+16: `leaf::slice_index_to`/`_from`/`_range`/`_to_inclusive`) |
+| statement and `erase` `mir/stmt.rs` | — | 210 (stage cs-storage: + core types S models by prelude structs, the model lemmas' statement; stage tcb-checks: − the precondition name rule, 225 before); stage optimizer-generic: 234 (+24: the panic statement of DESIGN.md §8.2 item 12) |
 | printer `mirx` | 1,131 | 1,131 (unchanged) |
 | lift glue (`lift.rs`'s `#[lift(mir)]` path) | about 0.2k | about 0.26k (+ the declared contracts, the loaded MIR and the helpers' record in the lift's facts) |
-| the gate's trusted check `mir/gate.rs` and its call sites in `gates.rs` and `lowered.rs` (stage tcb-gate; before it, ≈ 650 lines of bookkeeping: `theorem_gate` and its report ≈ 80, `checked.rs`'s planning, cache keys, acceptance and round-trip acceptance ≈ 500, `lowered.rs` ≈ 70) | — | 164 + ≈ 25 (stage tcb-review: + check 0, the instance is the function, and check 3 per extraction, 6; stage tcb-checks: + the module types' declarations, 33; 125 before) |
+| the gate's trusted check `mir/gate.rs` and its call sites in `gates.rs` and `lowered.rs` (stage tcb-gate; before it, ≈ 650 lines of bookkeeping: `theorem_gate` and its report ≈ 80, `checked.rs`'s planning, cache keys, acceptance and round-trip acceptance ≈ 500, `lowered.rs` ≈ 70) | — | 164 + ≈ 25 (stage tcb-review: + check 0, the instance is the function, and check 3 per extraction, 6; stage tcb-checks: + the module types' declarations, 33; 125 before); stage optimizer-generic: 232 (+68: the panic acceptance, checks 5 and 6); stage finish-A: the call sites in `lowered.rs` keep the requirement as it was (moved into `shipped_theorems`), and the structural comparison they no longer run for a module read from MIR was never part of this count |
 | the elaborator's precondition check (`elab/items.rs` 22, `typeck` 16, `hir.rs` 1; stage tcb-checks) | — | 39 |
 | `ir.rs` + `sexp.rs` (they feed L: trusted, amendment (d)) | untrusted | 482 + 131 = 613 (cs-assurance: no defaults, order checks) |
-| **total trusted** (`read.rs` before, L after the gate) | **about 4.2k** (`ir.rs`/`sexp.rs` not counted; ≈ 4.8k with them) | **about 4.3k** = 491 + 1,217 + 139 + 210 + 1,131 + ≈ 260 + ≈ 189 + 39 + 613 = 4,289 (stage tcb-review, two checks the review found missing: +16; stage tcb-checks, two assumptions made checks: +55; ≈ 4.2k after stage tcb-literal, ≈ 4.5k after stage tcb-gate, ≈ 5.0k before it); **≈ 3.7k** counted as before (without `ir.rs`/`sexp.rs`). What changes is also its kind: local, construct-by-construct translations and one check of what the kernel holds replace 2.4k lines of symbolic structuring |
+| **total trusted** (`read.rs` before, L after the gate) | **about 4.2k** (`ir.rs`/`sexp.rs` not counted; ≈ 4.8k with them) | stage finish-A: **about 4.6k** = 531 + 1,297 + 186 + 234 + 1,131 + ≈ 260 + ≈ 261 + 39 + 613 = 4,552 (+26: the slice leaves; stage optimizer-generic's panic statement and acceptance, +92, counted here for the first time); stage reader-widen: **about 4.4k** = 531 + 1,287 + 170 + 210 + 1,131 + ≈ 260 + ≈ 189 + 39 + 613 = 4,430 (+134 in this stage, `stmt.rs`, `ir.rs`, `sexp.rs` and `gate.rs` unchanged; + 7 lines of `mod.rs` since the last count); before it **about 4.3k** = 491 + 1,217 + 139 + 210 + 1,131 + ≈ 260 + ≈ 189 + 39 + 613 = 4,289 (stage tcb-review, two checks the review found missing: +16; stage tcb-checks, two assumptions made checks: +55; ≈ 4.2k after stage tcb-literal, ≈ 4.5k after stage tcb-gate, ≈ 5.0k before it); **≈ 3.7k** counted as before (without `ir.rs`/`sexp.rs`). What changes is also its kind: local, construct-by-construct translations and one check of what the kernel holds replace 2.4k lines of symbolic structuring |
 
 **Why the generator is 1.2k and not 1.0k.** Stage tcb-literal took it from
 1,474 to 1,217 with the same output (the log has the breakdown and the

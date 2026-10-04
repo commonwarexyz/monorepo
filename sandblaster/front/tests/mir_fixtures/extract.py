@@ -83,12 +83,16 @@ FIXTURES = [
     ("opt_gen2", "opt_gen2", "bits", "bits.sbmir", []),
     ("opt_gen2_more", "opt_gen2_more", "bits", "bits.sbmir", []),
     ("opt_rd", "opt_rd", "bits", "bits.sbmir", []),
+    ("opt_panics", "opt_panics", "bits", "bits.sbmir", []),
+    ("opt_shipped", "opt_shipped", "bits", "bits.sbmir", []),
     ("opt_ip_mod", "opt_ip_mod", "bits,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
     ("opt_ip_inplace", "opt_ip_inplace", "bits,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
     # tests/build_loop.rs
     ("bl_mbits_edited", "bl_mbits_edited", "bits", "bits.sbmir", []),
     # tests/in_place_cache.rs
     ("ic_two", "ic_two", "a", "a.sbmir", []),
+    # tests/reader_widen.rs
+    ("rw_mix", "rw_mix", "a", "a.sbmir", []),
     # tests/lowered_use.rs
     ("lu_nested", "lu_nested", "outer,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
     ("lu_nested_line", "lu_nested_line", "outer,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
@@ -110,6 +114,8 @@ RT_SOURCE = {
     "opt_gen2": "bits.rs",
     "opt_gen2_more": "bits.rs",
     "opt_rd": "bits.rs",
+    "opt_panics": "bits.rs",
+    "opt_shipped": "bits.rs",
     "opt_ip_mod": "bits.rs",
     "opt_ip_inplace": "src/bits.rs",
     "bl_mbits_edited": "bits.rs",

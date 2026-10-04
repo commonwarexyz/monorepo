@@ -24,6 +24,7 @@ fresh() {
     cp -R "$repo/sandblaster/bench/opt-corpus/ideal/src" "$tmp/r/sandblaster/bench/opt-corpus/ideal/"
     cp -R "$repo/$corpus" "$tmp/r/$corpus"
     if [ -d "$repo/sandblaster/bench/heldout" ]; then cp -R "$repo/sandblaster/bench/heldout" "$tmp/r/sandblaster/bench/"; fi
+    if [ -d "$repo/sandblaster/bench/heldout-v2" ]; then cp -R "$repo/sandblaster/bench/heldout-v2" "$tmp/r/sandblaster/bench/"; fi
 }
 g6() { (cd "$tmp/r" && bash sandblaster/tools/gates/g6.sh "$@") > "$tmp/log" 2>&1; }
 fails=0
@@ -132,6 +133,37 @@ if g6 --record && ! grep -qE 'heldout/REPORT\.md|__pycache__' "$tmp/r/sandblaste
     g6 && ok "the generated held-out report and Python caches are never frozen" || bad "a regenerated held-out report fails G6"
 else
     bad "--record froze the generated held-out report or a Python cache"
+fi
+
+# held-out v2 (frozen before the reader and optimizer work): its rule, seed
+# and blind set cannot be edited or removed once recorded, and its generated
+# report is never frozen. v2 FILE: a fresh copy with held-out v2 recorded (a
+# placeholder rule and manifest stand in when the repository has none yet)
+v2_rule=sandblaster/bench/heldout-v2/h2/RULE.md
+v2_manifest=sandblaster/bench/heldout-v2/manifest.toml
+v2() {
+    fresh
+    mkdir -p "$tmp/r/$(dirname $v2_rule)"
+    [ -f "$tmp/r/$v2_rule" ] || printf '# rule (self-test)\nseed = 1\n' > "$tmp/r/$v2_rule"
+    [ -f "$tmp/r/$v2_manifest" ] || printf 'seed = "1"\n' > "$tmp/r/$v2_manifest"
+    g6 --record > /dev/null 2>&1
+}
+if v2 && g6; then
+    echo 'seed = 2' >> "$tmp/r/$v2_rule"
+    expect_refused "an edited held-out v2 rule"
+    v2; edit 's/seed/Seed/' "$v2_manifest"
+    expect_refused "an edited held-out v2 manifest"
+    v2; rm "$tmp/r/$v2_rule"
+    expect_refused "a removed held-out v2 rule"
+    v2; printf 'report 1\n' > "$tmp/r/sandblaster/bench/heldout-v2/REPORT.md"
+    if g6 --record && ! grep -q 'heldout-v2/REPORT\.md' "$tmp/r/sandblaster/tools/gates/frozen.sha256"; then
+        printf 'report 2\n' > "$tmp/r/sandblaster/bench/heldout-v2/REPORT.md"
+        g6 && ok "the generated held-out v2 report is never frozen" || bad "a regenerated held-out v2 report fails G6"
+    else
+        bad "--record froze the generated held-out v2 report"
+    fi
+else
+    bad "--record refused the held-out v2 files"
 fi
 
 [ $fails = 0 ] && say "pass: G6 detects every change and --record only appends"

@@ -1,0 +1,1704 @@
+{
+ "h1": [
+  {
+   "function": "crate::h1::parse_u32",
+   "secs": 0.7,
+   "opt_ms": 14,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "optimizer": {
+    "name": "crate::h1::parse_u32",
+    "set": null,
+    "outcome": "Specialized",
+    "reason": "",
+    "failure": false,
+    "nodes": 9,
+    "rung": "Driven",
+    "link": "Lemma(\"crate::h1::parse_u32__residual::equiv\")",
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Eq(Usize))",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": true,
+      "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 1 split, 2 leafs",
+      "rejected_by": null,
+      "cost": {
+       "portable": 9
+      }
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::parse_u32",
+    "lowered": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 23336 vs 23586 milli-cycles)"
+   },
+   "outcome": "Specialized",
+   "rung": "Driven",
+   "stage": "kept",
+   "changed": false,
+   "reason": "the residual is not 3% cheaper than the source (portable model: 23336 vs 23586 milli-cycles)",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::hex_encode_lower",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:25:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::hex_decode",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:47:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::adler32",
+   "secs": 0.3,
+   "opt_ms": 13,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::adler32__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::fletcher16",
+   "secs": 0.3,
+   "opt_ms": 14,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::fletcher16__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::luhn_valid",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:85:8: error[unsupported]: lift: a constructor of `std::iter::Rev`",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::manhattan",
+   "secs": 1.8,
+   "opt_ms": 15,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "panic_reading": "crate::h1::manhattan__panics",
+   "unproven": [
+    {
+     "def": "crate::h1::manhattan",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms))), 4294967295",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+    },
+    {
+     "def": "crate::h1::manhattan",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms))), 4294967295",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+    },
+    {
+     "def": "crate::h1::manhattan",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms))), 4294967295",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+    },
+    {
+     "def": "crate::h1::manhattan",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms))), 4294967295",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+    }
+   ],
+   "optimizer": {
+    "name": "crate::h1::manhattan__panics",
+    "set": null,
+    "outcome": "Specialized",
+    "reason": "",
+    "failure": false,
+    "nodes": 35,
+    "rung": "Driven",
+    "link": "Lemma(\"crate::h1::manhattan__panics__residual::equiv\")",
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": true,
+      "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 7 splits, 8 leafs",
+      "rejected_by": null,
+      "cost": {
+       "portable": 35
+      }
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::manhattan",
+    "lowered": false,
+    "reason": "the residual cannot be printed as Rust: the lift prelude type `crate::__lift::I32` has no host spelling"
+   },
+   "outcome": "Specialized",
+   "rung": "Driven",
+   "stage": "kept",
+   "changed": false,
+   "reason": "the residual cannot be printed as Rust: the lift prelude type `crate::__lift::I32` has no host spelling",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::rect_intersection_area",
+   "secs": 18.6,
+   "opt_ms": 5929,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Unreachable obligation Failed: Empty; Overflow obligation Failed: Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)); no panic-explicit reading: its elaboration leaves obligations unproven: Unreachable obligation `Empty`; Unreachable obligation `Empty`; Unreachable obligation `Empty`",
+   "unproven": [
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::rect_intersection_area",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 ",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+    }
+   ],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::polygon_twice_area",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:145:8: error[unsupported]: lift: MIR reading of `polygon_twice_area` (in `heldout_h1v2_mir::h1::polygon_twice_area`): checked `mul` of a signed or non-integer type with a tested flag",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::is_leap_year",
+   "secs": 0.2,
+   "opt_ms": 14,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "optimizer": {
+    "name": "crate::h1::is_leap_year",
+    "set": null,
+    "outcome": "Specialized",
+    "reason": "",
+    "failure": false,
+    "nodes": 14,
+    "rung": "Driven",
+    "link": "Lemma(\"crate::h1::is_leap_year__residual::equiv\")",
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Eq(U32))",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": true,
+      "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 2 splits, 3 leafs",
+      "rejected_by": null,
+      "cost": {
+       "portable": 14
+      }
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::is_leap_year",
+    "lowered": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 7390 vs 7390 milli-cycles); a tie keeps the source"
+   },
+   "outcome": "Specialized",
+   "rung": "Driven",
+   "stage": "kept",
+   "changed": false,
+   "reason": "the residual is not 3% cheaper than the source (portable model: 7390 vs 7390 milli-cycles); a tie keeps the source",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::days_in_month",
+   "secs": 0.3,
+   "opt_ms": 15,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Unproven (Unreachable obligation Failed: Empty); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [
+    {
+     "def": "crate::h1::days_in_month",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #eq_u32(month, 1u32), false)\", \"Eq(Bool, #eq_u32(month, 3u32), false)\", \"Eq(Bool, #eq_u32(month, 5u32), false)\", \"Eq(Bool, #eq_u32(month, 7u32), false)\", \"Eq(Bool, #eq_u32(month, 8u32), false)\", \"Eq(Bool, #eq_u32(month, 10u32), false)\", \"Eq(Bool,",
+     "goal": "Empty"
+    }
+   ],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::day_of_week",
+   "secs": 0.5,
+   "opt_ms": 21,
+   "lowering_ms": 2,
+   "roundtrip_extractions": 0,
+   "panic_reading": "crate::h1::day_of_week__panics",
+   "unproven": [
+    {
+     "def": "crate::h1::day_of_week",
+     "kind": "Underflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_u32(1u32, year), true)\", facts: [\"Eq(Bool, #lt_u32(month, 3u32), true)\"], stuck: [\"#le_u32(1u32, year)\"], tried: [\"basic: linarith over 1 hypothesis(es): no certificate\"] })",
+     "goal": "Eq(Bool, #le_u32(1u32, year), true)"
+    },
+    {
+     "def": "crate::h1::day_of_week",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(match #lt_u32(month, 3u32) with 2 arms _), #cast { from: u32, to: int }(#div_u32(match #lt_u32(month, 3u32) with 2 arms _, 4u32))), 4294967295int), true)\", facts: [], stuck: [\"#le_int(#iadd(#cast { from: u32, to: int }(m",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(j), #cast_u32_int(__t2)), 4294967295int), true)"
+    },
+    {
+     "def": "crate::h1::day_of_week",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#sub_u32(#add_u32(match #lt_u32(month, 3u32) with 2 arms _, #div_u32(match #lt_u32(month, 3u32) with 2 arms _, 4u32)), #div_u32(match #lt_u32(month, 3u32) with 2 arms _, 100u32))), #cast { from: u32, to: int }(#div_u32(m",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(__t5), #cast_u32_int(__t6)), 4294967295int), true)"
+    },
+    {
+     "def": "crate::h1::day_of_week",
+     "kind": "Underflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_u32(1u32, month), true)\", facts: [], stuck: [\"#le_u32(1u32, month)\"], tried: [\"basic: linarith over 0 hypothesis(es): no certificate\"] })",
+     "goal": "Eq(Bool, #le_u32(1u32, month), true)"
+    },
+    {
+     "def": "crate::h1::day_of_week",
+     "kind": "IndexBounds",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #lt_usize(#cast { from: u32, to: usize }(#sub_u32(month, 1u32)), 12usize), true)\", facts: [], stuck: [\"#lt_usize(#cast { from: u32, to: usize }(#sub_u32(month, 1u32)), 12usize)\"], tried: [\"basic: linarith over 0 hypothesis(es): no certificate\"] })",
+     "goal": "Eq(Bool, #lt_usize(#cast_u32_usize(__t8), 12usize), true)"
+    },
+    {
+     "def": "crate::h1::day_of_week",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#add_u32(#sub_u32(#add_u32(match #lt_u32(month, 3u32) with 2 arms _, #div_u32(match #lt_u32(month, 3u32) with 2 arms _, 4u32)), #div_u32(match #lt_u32(month, 3u32) with 2 arms _, 100u32)), #div_u32(match #lt_u32(month, 3",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(__t7), #cast_u32_int(__t9)), 4294967295int), true)"
+    },
+    {
+     "def": "crate::h1::day_of_week",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#add_u32(#add_u32(#sub_u32(#add_u32(match #lt_u32(month, 3u32) with 2 arms _, #div_u32(match #lt_u32(month, 3u32) with 2 arms _, 4u32)), #div_u32(match #lt_u32(month, 3u32) with 2 arms _, 100u32)), #div_u32(match #lt_u32",
+     "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(__t10), #cast_u32_int(day)), 4294967295int), true)"
+    }
+   ],
+   "optimizer": {
+    "name": "crate::h1::day_of_week__panics",
+    "set": null,
+    "outcome": "Unspecialized",
+    "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))",
+    "failure": false,
+    "nodes": 0,
+    "rung": null,
+    "link": null,
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": false,
+      "reason": "driven residual not printable: a slice whose list is not a sub-list of a known slice",
+      "rejected_by": null,
+      "cost": {}
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::day_of_week",
+    "lowered": false,
+    "reason": "its panic-explicit reading is not specialized: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))"
+   },
+   "outcome": "Unspecialized",
+   "rung": null,
+   "stage": "kept",
+   "changed": false,
+   "reason": "optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::day_of_year",
+   "secs": 0.4,
+   "opt_ms": 16,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::seconds_to_hms",
+   "secs": 0.2,
+   "opt_ms": 17,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "optimizer": {
+    "name": "crate::h1::seconds_to_hms",
+    "set": null,
+    "outcome": "Specialized",
+    "reason": "",
+    "failure": false,
+    "nodes": 10,
+    "rung": "StraightLine",
+    "link": "Conversion",
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": true,
+      "reason": "admitted: kernel-checked conversion (check_residual_equal)",
+      "rejected_by": null,
+      "cost": {
+       "portable": 10
+      }
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::seconds_to_hms",
+    "lowered": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 12050 vs 12050 milli-cycles); a tie keeps the source"
+   },
+   "outcome": "Specialized",
+   "rung": "StraightLine",
+   "stage": "kept",
+   "changed": false,
+   "reason": "the residual is not 3% cheaper than the source (portable model: 12050 vs 12050 milli-cycles); a tie keeps the source",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::count_overlapping_pairs",
+   "secs": 0.3,
+   "opt_ms": 15,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::count_overlapping_pairs__loop1`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::high_nibble_histogram",
+   "secs": 0.3,
+   "opt_ms": 14,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::high_nibble_histogram__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::argmax",
+   "secs": 0.2,
+   "opt_ms": 14,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::argmax__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::min_max",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:250:8: error[unsupported]: lift: MIR reading of `min_max` (in `core::slice::<impl [u16]>::split_first`): projection (cindex 0 1 false)",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::prefix_sums",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:267:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::range_sum",
+   "secs": 0.2,
+   "opt_ms": 18,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Unreachable obligation Failed: Empty; IndexBounds obligation Failed: Eq(Bool, #lt_usize(hi, fst(prefix)), true)); no panic-explicit reading: its elaboration leaves obligations unproven: Unreachable obligation `Empty`; Unreachable obligation `Empty`",
+   "unproven": [
+    {
+     "def": "crate::h1::range_sum",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #le_int(#cast { from: usize, to: int }(fst(prefix)), 9223372036854775807int), true)\", \"Eq(Bool, #le_usize(lo, hi), false)\"], stuck: [], tried: [\"basic: linarith over 2 hypothesis(es): no certificate\"] })",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::range_sum",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #le_int(#cast { from: usize, to: int }(fst(prefix)), 9223372036854775807int), true)\", \"Eq(Bool, #le_usize(lo, hi), true)\", \"Eq(Bool, match #lt_usize(hi, fst(prefix)) with 2 arms, true)\"], stuck: [], tried: [\"basic: linarith over 2 hypothesis(es):",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::range_sum",
+     "kind": "IndexBounds",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #lt_usize(hi, fst(prefix)), true)\", facts: [\"Eq(Bool, #le_int(#cast { from: usize, to: int }(fst(prefix)), 9223372036854775807int), true)\", \"Eq(Bool, #le_usize(lo, hi), true)\"], stuck: [\"#lt_usize(hi, fst(prefix))\"], tried: [\"basic: linarith over 2 hypothesis(es)",
+     "goal": "Eq(Bool, #lt_usize(hi, fst(prefix)), true)"
+    },
+    {
+     "def": "crate::h1::range_sum",
+     "kind": "Unreachable",
+     "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #le_int(#cast { from: usize, to: int }(fst(prefix)), 9223372036854775807int), true)\", \"Eq(Bool, #le_usize(lo, hi), true)\", \"Eq(Bool, match #lt_usize(lo, fst(prefix)) with 2 arms, true)\"], stuck: [], tried: [\"basic: linarith over 2 hypothesis(es):",
+     "goal": "Empty"
+    },
+    {
+     "def": "crate::h1::range_sum",
+     "kind": "IndexBounds",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #lt_usize(lo, fst(prefix)), true)\", facts: [\"Eq(Bool, #le_int(#cast { from: usize, to: int }(fst(prefix)), 9223372036854775807int), true)\", \"Eq(Bool, #le_usize(lo, hi), true)\"], stuck: [\"#lt_usize(lo, fst(prefix))\"], tried: [\"basic: linarith over 2 hypothesis(es)",
+     "goal": "Eq(Bool, #lt_usize(lo, fst(prefix)), true)"
+    },
+    {
+     "def": "crate::h1::range_sum",
+     "kind": "Underflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_u64(seq::index U64 (fst(snd(prefix))) (#cast { from: usize, to: int }(lo)) _ _, seq::index U64 (fst(snd(prefix))) (#cast { from: usize, to: int }(hi)) _ _), true)\", facts: [\"Eq(Bool, #le_int(#cast { from: usize, to: int }(fst(prefix)), 9223372036854775807int)",
+     "goal": "Eq(Bool, #le_u64(__t2, __t1), true)"
+    }
+   ],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::has_pair_with_sum",
+   "secs": 3.9,
+   "opt_ms": 26,
+   "lowering_ms": 2,
+   "roundtrip_extractions": 0,
+   "panic_reading": "crate::h1::has_pair_with_sum__panics",
+   "unproven": [],
+   "optimizer": {
+    "name": "crate::h1::has_pair_with_sum__panics",
+    "set": null,
+    "outcome": "Unspecialized",
+    "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))",
+    "failure": false,
+    "nodes": 0,
+    "rung": null,
+    "link": null,
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": false,
+      "reason": "the equality lemma was not proven: a leaf of the process tree is not closed (goal: Eq(Option(Bool), Some(false), Some(crate::h1::has_pair_with_sum__loop0 0usize (#sub_usize(fst(sorted), 1usize)) sorted target)))",
+      "rejected_by": "proof builder",
+      "cost": {}
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 3
+   },
+   "lowering": {
+    "function": "crate::h1::has_pair_with_sum",
+    "lowered": false,
+    "reason": "its panic-explicit reading is not specialized: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))"
+   },
+   "outcome": "Unspecialized",
+   "rung": null,
+   "stage": "kept",
+   "changed": false,
+   "reason": "optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::dedup_sorted",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:309:8: error[unsupported]: lift: `dedup_sorted`: rustc's MIR parameter `values` is `&mut` but the lift does not pass it as a state",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::lower_bound",
+   "secs": 0.2,
+   "opt_ms": 17,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::rgb565_pack",
+   "secs": 0.2,
+   "opt_ms": 20,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "optimizer": {
+    "name": "crate::h1::rgb565_pack",
+    "set": null,
+    "outcome": "Specialized",
+    "reason": "",
+    "failure": false,
+    "nodes": 18,
+    "rung": "Driven",
+    "link": "Lemma(\"crate::h1::rgb565_pack__residual::equiv\")",
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (variable #0)",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": true,
+      "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 1 leaf",
+      "rejected_by": null,
+      "cost": {
+       "portable": 18
+      }
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::rgb565_pack",
+    "lowered": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 2936 vs 2936 milli-cycles); a tie keeps the source"
+   },
+   "outcome": "Specialized",
+   "rung": "Driven",
+   "stage": "kept",
+   "changed": false,
+   "reason": "the residual is not 3% cheaper than the source (portable model: 2936 vs 2936 milli-cycles); a tie keeps the source",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::rgb565_unpack",
+   "secs": 0.2,
+   "opt_ms": 20,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "optimizer": {
+    "name": "crate::h1::rgb565_unpack",
+    "set": null,
+    "outcome": "Specialized",
+    "reason": "",
+    "failure": false,
+    "nodes": 26,
+    "rung": "StraightLine",
+    "link": "Conversion",
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": true,
+      "reason": "admitted: kernel-checked conversion (check_residual_equal)",
+      "rejected_by": null,
+      "cost": {
+       "portable": 26
+      }
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::rgb565_unpack",
+    "lowered": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 3783 vs 3783 milli-cycles); a tie keeps the source"
+   },
+   "outcome": "Specialized",
+   "rung": "StraightLine",
+   "stage": "kept",
+   "changed": false,
+   "reason": "the residual is not 3% cheaper than the source (portable model: 3783 vs 3783 milli-cycles); a tie keeps the source",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::gcd",
+   "secs": 0.2,
+   "opt_ms": 21,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "optimizer": {
+    "name": "crate::h1::gcd",
+    "set": null,
+    "outcome": "Unspecialized",
+    "reason": "not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)",
+    "failure": false,
+    "nodes": 0,
+    "rung": null,
+    "link": null,
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": false,
+      "reason": "driven residual not printable: a stuck application of `crate::h1::gcd::loop#0`",
+      "rejected_by": null,
+      "cost": {}
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 0
+   },
+   "lowering": {
+    "function": "crate::h1::gcd",
+    "lowered": false,
+    "reason": "not specialized: not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)"
+   },
+   "outcome": "Unspecialized",
+   "rung": null,
+   "stage": "kept",
+   "changed": false,
+   "reason": "optimizer: not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::lcm",
+   "secs": 0.3,
+   "opt_ms": 24,
+   "lowering_ms": 2,
+   "roundtrip_extractions": 0,
+   "panic_reading": "crate::h1::lcm__panics",
+   "unproven": [
+    {
+     "def": "crate::h1::lcm",
+     "kind": "DivZero",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #ne_u64(crate::h1::gcd a b, 0u64), true)\", facts: [\"Eq(Bool, #eq_u64(a, 0u64), false)\", \"Eq(Bool, #eq_u64(b, 0u64), false)\"], stuck: [\"#ne_u64(crate::h1::gcd a b, 0u64)\", \"crate::h1::gcd a b\"], tried: [\"basic: linarith over 0 hypothesis(es): no certificate\", \"bas",
+     "goal": "Eq(Bool, #ne_u64(crate::h1::gcd a b, 0u64), true)"
+    },
+    {
+     "def": "crate::h1::lcm",
+     "kind": "Overflow",
+     "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(#div_u64(a, crate::h1::gcd a b)), #cast { from: u64, to: int }(b)), 18446744073709551615int), true)\", facts: [\"Eq(Bool, #eq_u64(a, 0u64), false)\", \"Eq(Bool, #eq_u64(b, 0u64), false)\"], stuck: [\"#le_int(#imul(#cast { from",
+     "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(__t1), #cast_u64_int(b)), 18446744073709551615int), true)"
+    }
+   ],
+   "optimizer": {
+    "name": "crate::h1::lcm__panics",
+    "set": null,
+    "outcome": "Specialized",
+    "reason": "",
+    "failure": false,
+    "nodes": 17,
+    "rung": "Driven",
+    "link": "Lemma(\"crate::h1::lcm__panics__residual::equiv\")",
+    "candidates": [
+     {
+      "rung": "StraightLine",
+      "chosen": false,
+      "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Eq(U64))",
+      "rejected_by": null,
+      "cost": {}
+     },
+     {
+      "rung": "Driven",
+      "chosen": true,
+      "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 4 splits, 5 leafs",
+      "rejected_by": null,
+      "cost": {
+       "portable": 17
+      }
+     }
+    ],
+    "loopsum_steps": 0,
+    "millis": 2
+   },
+   "lowering": {
+    "function": "crate::h1::lcm",
+    "lowered": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 23692 vs 24067 milli-cycles) (its panic-explicit reading's residual, in its Rust form)"
+   },
+   "outcome": "Specialized",
+   "rung": "Driven",
+   "stage": "kept",
+   "changed": false,
+   "reason": "the residual is not 3% cheaper than the source (portable model: 23692 vs 24067 milli-cycles) (its panic-explicit reading's residual, in its Rust form)",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::max_subarray_sum",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:388:8: error[unsupported]: lift: MIR reading of `max_subarray_sum` (in `core::slice::<impl [i32]>::split_first`): projection (cindex 0 1 false)",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::brackets_balanced",
+   "secs": 0.0,
+   "opt_ms": null,
+   "lowering_ms": null,
+   "roundtrip_extractions": 0,
+   "stage": "reader",
+   "changed": false,
+   "reason": "sandblaster/bench/heldout-v2/h1/src/lib.rs:404:8: error[unsupported]: lift: a constructor of `std::mem::Alignment`",
+   "set": "H1"
+  },
+  {
+   "function": "crate::h1::count_inversions",
+   "secs": 0.5,
+   "opt_ms": 19,
+   "lowering_ms": 1,
+   "roundtrip_extractions": 0,
+   "stage": "elaboration",
+   "changed": false,
+   "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::count_inversions__loop1`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+   "unproven": [],
+   "set": "H1"
+  }
+ ],
+ "h2": [],
+ "union": {
+  "items": [
+   "parse_u32",
+   "adler32",
+   "fletcher16",
+   "manhattan",
+   "rect_intersection_area",
+   "is_leap_year",
+   "days_in_month",
+   "day_of_week",
+   "day_of_year",
+   "seconds_to_hms",
+   "count_overlapping_pairs",
+   "high_nibble_histogram",
+   "argmax",
+   "range_sum",
+   "has_pair_with_sum",
+   "lower_bound",
+   "rgb565_pack",
+   "rgb565_unpack",
+   "gcd",
+   "lcm",
+   "count_inversions"
+  ],
+  "front_end": true,
+  "errors": null,
+  "records": [
+   {
+    "function": "crate::h1::parse_u32",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "optimizer": {
+     "name": "crate::h1::parse_u32",
+     "set": null,
+     "outcome": "Specialized",
+     "reason": "",
+     "failure": false,
+     "nodes": 9,
+     "rung": "Driven",
+     "link": "Lemma(\"crate::h1::parse_u32__residual::equiv\")",
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Eq(Usize))",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": true,
+       "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 1 split, 2 leafs",
+       "rejected_by": null,
+       "cost": {
+        "portable": 9
+       }
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 0
+    },
+    "lowering": {
+     "function": "crate::h1::parse_u32",
+     "lowered": false,
+     "reason": "the residual is not 3% cheaper than the source (portable model: 23336 vs 23586 milli-cycles)"
+    },
+    "outcome": "Specialized",
+    "rung": "Driven",
+    "stage": "kept",
+    "changed": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 23336 vs 23586 milli-cycles)"
+   },
+   {
+    "function": "crate::h1::adler32",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::adler32__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::fletcher16",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::fletcher16__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::manhattan",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "panic_reading": "crate::h1::manhattan__panics",
+    "unproven": [
+     {
+      "def": "crate::h1::manhattan",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms))), 4294967295",
+      "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+     },
+     {
+      "def": "crate::h1::manhattan",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms))), 4294967295",
+      "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+     },
+     {
+      "def": "crate::h1::manhattan",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms))), 4294967295",
+      "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+     },
+     {
+      "def": "crate::h1::manhattan",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#iadd(#cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms)), #cast { from: u32, to: int }(#wsub_u32(match match b with 1 arms with 1 arms, match match a with 1 arms with 1 arms))), 4294967295",
+      "goal": "Eq(Bool, #le_int(#iadd(#cast_u32_int(u32::wrapping_sub (match (match b : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end) (match (match a : crate::h1::Point as y return crate::__lift::I32 with | Point(x, x1) => x end) : crate::__lift::I32 as y return U32 with | I32(x) => x end)), #cast_u32_int(u32::wrapping_s"
+     }
+    ],
+    "optimizer": {
+     "name": "crate::h1::manhattan__panics",
+     "set": null,
+     "outcome": "Specialized",
+     "reason": "",
+     "failure": false,
+     "nodes": 35,
+     "rung": "Driven",
+     "link": "Lemma(\"crate::h1::manhattan__panics__residual::equiv\")",
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": true,
+       "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 7 splits, 8 leafs",
+       "rejected_by": null,
+       "cost": {
+        "portable": 35
+       }
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 1
+    },
+    "lowering": {
+     "function": "crate::h1::manhattan",
+     "lowered": false,
+     "reason": "the residual cannot be printed as Rust: the lift prelude type `crate::__lift::I32` has no host spelling"
+    },
+    "outcome": "Specialized",
+    "rung": "Driven",
+    "stage": "kept",
+    "changed": false,
+    "reason": "the residual cannot be printed as Rust: the lift prelude type `crate::__lift::I32` has no host spelling"
+   },
+   {
+    "function": "crate::h1::rect_intersection_area",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Unproven (Unreachable obligation Failed: Empty; Unreachable obligation Failed: Empty; Overflow obligation Failed: Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)); no panic-explicit reading: its elaboration leaves obligations unproven: Unreachable obligation `Empty`; Unreachable obligation `Empty`; Unreachable obligation `Empty`",
+    "unproven": [
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 ",
+      "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 ",
+      "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 ",
+      "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 ",
+      "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Overflow",
+      "status": "Failed(AutoFailure { goal: \"Eq(Bool, #le_int(#imul(#cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match b with 1 arms with 1 arms, match match b with 1 arms with 1 arms), 2147483648u32) with 2 arms _), #cast { from: u64, to: int }(match #lt_u32(#wsub_u32(match match a with 1 arms with 1 ",
+      "goal": "Eq(Bool, #le_int(#imul(#cast_u64_int(j), #cast_u64_int(j)), 18446744073709551615int), true)"
+     },
+     {
+      "def": "crate::h1::rect_intersection_area",
+      "kind": "Unreachable",
+      "status": "Failed(AutoFailure { goal: \"Empty\", facts: [\"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match match a with 1 arms with 1 arms, 2147483648u32)), false)\", \"Eq(Bool, #lt_u32(#xor_u32(match match b with 1 arms with 1 arms, 2147483648u32), #xor_u32(match mat",
+      "goal": "Empty"
+     }
+    ]
+   },
+   {
+    "function": "crate::h1::is_leap_year",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "optimizer": {
+     "name": "crate::h1::is_leap_year",
+     "set": null,
+     "outcome": "Specialized",
+     "reason": "",
+     "failure": false,
+     "nodes": 14,
+     "rung": "Driven",
+     "link": "Lemma(\"crate::h1::is_leap_year__residual::equiv\")",
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Eq(U32))",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": true,
+       "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 2 splits, 3 leafs",
+       "rejected_by": null,
+       "cost": {
+        "portable": 14
+       }
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 0
+    },
+    "lowering": {
+     "function": "crate::h1::is_leap_year",
+     "lowered": false,
+     "reason": "the residual is not 3% cheaper than the source (portable model: 7390 vs 7390 milli-cycles); a tie keeps the source"
+    },
+    "outcome": "Specialized",
+    "rung": "Driven",
+    "stage": "kept",
+    "changed": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 7390 vs 7390 milli-cycles); a tie keeps the source"
+   },
+   {
+    "function": "crate::h1::days_in_month",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::day_of_week",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "panic_reading": "crate::h1::day_of_week__panics",
+    "unproven": [],
+    "optimizer": {
+     "name": "crate::h1::day_of_week__panics",
+     "set": null,
+     "outcome": "Unspecialized",
+     "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))",
+     "failure": false,
+     "nodes": 0,
+     "rung": null,
+     "link": null,
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": false,
+       "reason": "driven residual not printable: a slice whose list is not a sub-list of a known slice",
+       "rejected_by": null,
+       "cost": {}
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 0
+    },
+    "lowering": {
+     "function": "crate::h1::day_of_week",
+     "lowered": false,
+     "reason": "its panic-explicit reading is not specialized: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))"
+    },
+    "outcome": "Unspecialized",
+    "rung": null,
+    "stage": "kept",
+    "changed": false,
+    "reason": "optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(U32))"
+   },
+   {
+    "function": "crate::h1::day_of_year",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::seconds_to_hms",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "optimizer": {
+     "name": "crate::h1::seconds_to_hms",
+     "set": null,
+     "outcome": "Specialized",
+     "reason": "",
+     "failure": false,
+     "nodes": 10,
+     "rung": "StraightLine",
+     "link": "Conversion",
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": true,
+       "reason": "admitted: kernel-checked conversion (check_residual_equal)",
+       "rejected_by": null,
+       "cost": {
+        "portable": 10
+       }
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 0
+    },
+    "lowering": {
+     "function": "crate::h1::seconds_to_hms",
+     "lowered": false,
+     "reason": "the residual is not 3% cheaper than the source (portable model: 12050 vs 12050 milli-cycles); a tie keeps the source"
+    },
+    "outcome": "Specialized",
+    "rung": "StraightLine",
+    "stage": "kept",
+    "changed": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 12050 vs 12050 milli-cycles); a tie keeps the source"
+   },
+   {
+    "function": "crate::h1::count_overlapping_pairs",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::count_overlapping_pairs__loop1`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::high_nibble_histogram",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::high_nibble_histogram__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::argmax",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::argmax__loop0`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::range_sum",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Unproven; no panic-explicit reading: its elaboration leaves obligations unproven: Unreachable obligation `Empty`; Unreachable obligation `Empty`",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::has_pair_with_sum",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "panic_reading": "crate::h1::has_pair_with_sum__panics",
+    "unproven": [],
+    "optimizer": {
+     "name": "crate::h1::has_pair_with_sum__panics",
+     "set": null,
+     "outcome": "Unspecialized",
+     "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))",
+     "failure": false,
+     "nodes": 0,
+     "rung": null,
+     "link": null,
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": false,
+       "reason": "the equality lemma was not proven: a leaf of the process tree is not closed (goal: Eq(Option(Bool), Some(false), Some(crate::h1::has_pair_with_sum__loop0 0usize (#sub_usize(fst(sorted), 1usize)) sorted target)))",
+       "rejected_by": "proof builder",
+       "cost": {}
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 2
+    },
+    "lowering": {
+     "function": "crate::h1::has_pair_with_sum",
+     "lowered": false,
+     "reason": "its panic-explicit reading is not specialized: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))"
+    },
+    "outcome": "Unspecialized",
+    "rung": null,
+    "stage": "kept",
+    "changed": false,
+    "reason": "optimizer: not stuck-free: a `match` on a neutral scrutinee (primitive Lt(Usize))"
+   },
+   {
+    "function": "crate::h1::lower_bound",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Unproven; no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   },
+   {
+    "function": "crate::h1::rgb565_pack",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "optimizer": {
+     "name": "crate::h1::rgb565_pack",
+     "set": null,
+     "outcome": "Specialized",
+     "reason": "",
+     "failure": false,
+     "nodes": 18,
+     "rung": "Driven",
+     "link": "Lemma(\"crate::h1::rgb565_pack__residual::equiv\")",
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (variable #0)",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": true,
+       "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 1 leaf",
+       "rejected_by": null,
+       "cost": {
+        "portable": 18
+       }
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 0
+    },
+    "lowering": {
+     "function": "crate::h1::rgb565_pack",
+     "lowered": false,
+     "reason": "the residual is not 3% cheaper than the source (portable model: 2936 vs 2936 milli-cycles); a tie keeps the source"
+    },
+    "outcome": "Specialized",
+    "rung": "Driven",
+    "stage": "kept",
+    "changed": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 2936 vs 2936 milli-cycles); a tie keeps the source"
+   },
+   {
+    "function": "crate::h1::rgb565_unpack",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "optimizer": {
+     "name": "crate::h1::rgb565_unpack",
+     "set": null,
+     "outcome": "Specialized",
+     "reason": "",
+     "failure": false,
+     "nodes": 26,
+     "rung": "StraightLine",
+     "link": "Conversion",
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": true,
+       "reason": "admitted: kernel-checked conversion (check_residual_equal)",
+       "rejected_by": null,
+       "cost": {
+        "portable": 26
+       }
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 0
+    },
+    "lowering": {
+     "function": "crate::h1::rgb565_unpack",
+     "lowered": false,
+     "reason": "the residual is not 3% cheaper than the source (portable model: 3783 vs 3783 milli-cycles); a tie keeps the source"
+    },
+    "outcome": "Specialized",
+    "rung": "StraightLine",
+    "stage": "kept",
+    "changed": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 3783 vs 3783 milli-cycles); a tie keeps the source"
+   },
+   {
+    "function": "crate::h1::gcd",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "optimizer": {
+     "name": "crate::h1::gcd",
+     "set": null,
+     "outcome": "Unspecialized",
+     "reason": "not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)",
+     "failure": false,
+     "nodes": 0,
+     "rung": null,
+     "link": null,
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": false,
+       "reason": "driven residual not printable: a stuck application of `crate::h1::gcd::loop#0`",
+       "rejected_by": null,
+       "cost": {}
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 0
+    },
+    "lowering": {
+     "function": "crate::h1::gcd",
+     "lowered": false,
+     "reason": "not specialized: not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)"
+    },
+    "outcome": "Unspecialized",
+    "rung": null,
+    "stage": "kept",
+    "changed": false,
+    "reason": "optimizer: not stuck-free: a `match` on a neutral scrutinee (`crate::h1::gcd::loop#0`)"
+   },
+   {
+    "function": "crate::h1::lcm",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "panic_reading": "crate::h1::lcm__panics",
+    "unproven": [],
+    "optimizer": {
+     "name": "crate::h1::lcm__panics",
+     "set": null,
+     "outcome": "Specialized",
+     "reason": "",
+     "failure": false,
+     "nodes": 17,
+     "rung": "Driven",
+     "link": "Lemma(\"crate::h1::lcm__panics__residual::equiv\")",
+     "candidates": [
+      {
+       "rung": "StraightLine",
+       "chosen": false,
+       "reason": "not stuck-free: a `match` on a neutral scrutinee (primitive Eq(U64))",
+       "rejected_by": null,
+       "cost": {}
+      },
+      {
+       "rung": "Driven",
+       "chosen": true,
+       "reason": "admitted: kernel-checked equality lemma (Link::Lemma); process tree: 1 unfold, 4 splits, 5 leafs",
+       "rejected_by": null,
+       "cost": {
+        "portable": 17
+       }
+      }
+     ],
+     "loopsum_steps": 0,
+     "millis": 1
+    },
+    "lowering": {
+     "function": "crate::h1::lcm",
+     "lowered": false,
+     "reason": "the residual is not 3% cheaper than the source (portable model: 23692 vs 24067 milli-cycles) (its panic-explicit reading's residual, in its Rust form)"
+    },
+    "outcome": "Specialized",
+    "rung": "Driven",
+    "stage": "kept",
+    "changed": false,
+    "reason": "the residual is not 3% cheaper than the source (portable model: 23692 vs 24067 milli-cycles) (its panic-explicit reading's residual, in its Rust form)"
+   },
+   {
+    "function": "crate::h1::count_inversions",
+    "secs": 25.1,
+    "opt_ms": 5641,
+    "lowering_ms": 1,
+    "roundtrip_extractions": 0,
+    "stage": "elaboration",
+    "changed": false,
+    "reason": "exec-only elaboration: Blocked(\"depends on `crate::h1::count_inversions__loop1`, which did not verify (checked only against a stand-in body)\"); no panic-explicit reading: no operation it can panic at is read (its unproven obligations are elsewhere: inside a loop, an `unreachable!()`, a callee's `requires` or an indexed place)",
+    "unproven": []
+   }
+  ]
+ }
+}

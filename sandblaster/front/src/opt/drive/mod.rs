@@ -207,6 +207,16 @@ pub fn relevant_size(t: &sandblaster_kernel::term::Tm, cap: usize) -> usize {
     crate::elab::tm::size_capped(&crate::roundtrip::strip(t), cap)
 }
 
+/// The checked arithmetic of the prelude the driver keeps folded
+/// (`w::checked_add` and the like, with their `_some`/`_none` lemmas,
+/// `lemmas/int.core`): a decided call is rewritten by its lemma
+/// (`Step::Checked`), an undecided one stays a call (a match on it splits
+/// on its result). These are the operations whose test is exactly a Rust
+/// operator's panic test (overflow, a zero divisor), so the residual of a
+/// panic-explicit reading (`opt::panics`) prints each kept one as that
+/// operator.
+pub const CHECKED_OPS: [&str; 4] = ["checked_add", "checked_sub", "checked_mul", "checked_div"];
+
 /// Prelude builtins the driver keeps folded that the residual printer
 /// prints (`residual::tree`, `global_node`: `split_first_chunk` and
 /// `first_chunk` as the slice methods, `bool::not` as `!b`, `bool::as_uN`
@@ -303,7 +313,8 @@ pub struct CratePolicy<'a> {
     pub fold_root: Option<GlobalId>,
     /// The checked arithmetic calls kept folded (`w::checked_add`,
     /// `w::checked_sub` with their lemmas loaded): a decided one is
-    /// rewritten by its lemma (`Step::Checked`), an undecided one unfolded.
+    /// rewritten by its lemma (`Step::Checked`), an undecided one kept (a
+    /// match on it splits on its result, which prints as the call).
     checked: HashSet<GlobalId>,
     /// Fact-directed unfolding and guard specialization (plan O6,
     /// `opt::facts`, `opt::guardspec`) are on (the driven function's own
@@ -332,7 +343,7 @@ impl<'a> CratePolicy<'a> {
         let unprinted = KEPT_UNPRINTED.iter().filter_map(|n| env.lookup_global(n)).collect();
         let checked = ["u8", "u16", "u32", "u64", "usize"]
             .iter()
-            .flat_map(|w| ["checked_add", "checked_sub"].map(|op| format!("{w}::{op}")))
+            .flat_map(|w| CHECKED_OPS.map(|op| format!("{w}::{op}")))
             .filter(|n| env.lookup_global(&format!("{n}_some")).is_some() && env.lookup_global(&format!("{n}_none")).is_some())
             .filter_map(|n| env.lookup_global(&n))
             .collect();
@@ -816,6 +827,20 @@ impl Policy for CratePolicy<'_> {
                 CallForm::Inline => Unfold::Bind { res: def, lemma: None },
                 CallForm::Keep => Unfold::Keep,
             };
+        }
+        // an undecided checked arithmetic call (a decided one is rewritten
+        // by its lemma before the policy is asked, `Driver::drive`): kept,
+        // so a match on it splits on its result and the residual prints the
+        // call (`a.checked_add(b)`). Unfolded, the split would be on its
+        // overflow test over `Int` (`a as Int + b as Int <= MAX`), which no
+        // exec expression prints, and the whole residual would be refused
+        // (a branch on an argument's overflow, e.g. `n.checked_add(1)` in a
+        // function that branches anyway). Not inside a fold (design §6.6):
+        // there the accumulator's growth is read from the arithmetic
+        // (`acc + e` at the back-edges) and the overflow test is what the
+        // bound invariant decides, so the call is unfolded as before
+        if self.checked.contains(&def) && self.fold_root.is_none() {
+            return Unfold::Keep;
         }
         // a folded non-recursive prelude definition (opaque): unfold small ones
         if self.is_small(def) { Unfold::Inline } else { Unfold::Keep }

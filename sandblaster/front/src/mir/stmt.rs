@@ -25,6 +25,25 @@
 //!   projections of the relevant fields. S's result (its states in
 //!   parameter order, then its return value) is erased component-wise into
 //!   `Out` (the cells' final values, then the return place).
+//!
+//! **The panic statement** ([`statement_panic`], DESIGN.md §8.2 item 12),
+//! for a *panic-explicit reading* `P` of an exec-only function that can
+//! panic (`opt::panics`: `P x̄ : Option(R)`, `None` the panic outcome):
+//!
+//! ```text
+//! Π x̄ (.h̄ : pre). Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
+//!     Eq(Option(Out), L::<f>::run n b0 (Some(init(x̄))),
+//!        match P x̄ with None => None | Some(y) => Some(erase(y)))
+//! ```
+//!
+//! On the inputs where `P` returns a value it says what the plain statement
+//! says. Where `P` is `None`, it says that the literal reading returns no
+//! value: the run panics, or reaches what `L` reads as `None` for another
+//! reason (undefined behaviour, an unmodeled construct, no fuel). The gate
+//! (`gate::Ledger::accept_shipped_panic`) accepts it only for MIR whose
+//! literal reading reads nothing but a panic as `None` there (no fault, no
+//! loop, every block it reads as panicking checked to panic), so that `None`
+//! means "panics"; it is never a theorem of a verified build.
 
 use sandblaster_kernel::api::Env;
 use sandblaster_kernel::term::{Rel, Term};
@@ -49,6 +68,9 @@ pub struct StmtSpec {
     pub init_slots: Vec<String>,
     /// `erase` of S's result `@Y@` (core text).
     pub erase_ret: String,
+    /// The panic statement ([`statement_panic`]): S's result is
+    /// `Option(s_ret)`, `None` the panic outcome.
+    pub panic: bool,
 }
 
 impl StmtSpec {
@@ -84,9 +106,26 @@ impl StmtSpec {
         self.eq_under(&format!("{}(n : List(Unit)) -> (.hle : Eq(Bool, #le_int({need}, seq::len Unit n), true)) -> ", self.tele()), "")
     }
 
+    /// S's result type (`Option(s_ret)` for the panic statement).
+    pub fn s_full_ret(&self) -> String {
+        if self.panic { format!("Option({})", self.s_ret) } else { self.s_ret.clone() }
+    }
+
+    /// The equation's right side for the structured value `s` (core text
+    /// of type [`Self::s_full_ret`]): `Some(erase(s))`, or for the panic
+    /// statement `match s with None => None | Some(yy) => Some(erase(yy))`.
+    pub fn rhs_of(&self, s: &str) -> String {
+        let out = &self.l_out;
+        if self.panic {
+            let er = self.erase_ret.replace("@Y@", "yy");
+            format!("(match {s} : Option({}) as _ return Option({out}) with | None => None[{out}] | Some(yy) => Some[{out}]({er}) end)", self.s_ret)
+        } else {
+            format!("Some[{out}]({})", self.erase_ret.replace("@Y@", &format!("({s})")))
+        }
+    }
+
     fn eq_under(&self, pre: &str, post: &str) -> String {
-        let er = self.erase_ret.replace("@Y@", &format!("({})", self.app()));
-        format!("{pre}Eq(Option({out}), {}, Some[{out}]({er})){post}", self.l_of(), out = self.l_out)
+        format!("{pre}Eq(Option({out}), {}, {}){post}", self.l_of(), self.rhs_of(&self.app()), out = self.l_out)
     }
 }
 
@@ -94,6 +133,16 @@ impl StmtSpec {
 /// its MIR instance `f` (also, untrusted, of a model lemma: a library
 /// function's reading against the lift prelude's model, `u64::div_ceil`).
 pub fn statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str) -> Result<StmtSpec, String> {
+    statement_as(env, g, lf, f, s_global, false)
+}
+
+/// The panic statement (module docs) of the panic-explicit reading
+/// `s_global` (result `Option(R)`) against the literal reading `lf`.
+pub fn statement_panic(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str) -> Result<StmtSpec, String> {
+    statement_as(env, g, lf, f, s_global, true)
+}
+
+fn statement_as(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str, panic: bool) -> Result<StmtSpec, String> {
     let sg = env.lookup_global(s_global).ok_or_else(|| format!("no definition `{s_global}`"))?;
     let (mut cur, arity) = (env.global_type(sg).ok_or("no type")?, env.global_arity(sg).ok_or("no arity")?);
     let mut params: Vec<(String, Rel, String)> = Vec::new();
@@ -103,6 +152,13 @@ pub fn statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &st
         params.push((format!("x{i}"), *rel, env.print_term(&names, dom)));
         names.push(std::rc::Rc::from(format!("x{i}").as_str()));
         cur = cod.clone();
+    }
+    // (the panic statement: S's result `Option(R)`, the statement about `R`)
+    if panic {
+        match &*cur {
+            Term::Ind { ind, params: ps } if Some(*ind) == env.lookup_ind("Option") && ps.len() == 1 => cur = ps[0].clone(),
+            _ => return Err(format!("`{s_global}` does not return an `Option` (a panic-explicit reading does)")),
+        }
     }
     let s_ret = env.print_term(&names, &cur);
     let rel: Vec<String> = params.iter().filter(|p| p.1 == Rel::Rel).map(|p| p.0.clone()).collect();
@@ -153,7 +209,7 @@ pub fn statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &st
             format!("(match @Y@ : @SRET@ as _ return {} with | tuple{n}({}) => tuple{n}[{}]({}) end)", lf.out_ty, ys.join(", "), outs.join(", "), es.join(", "))
         }
     };
-    Ok(StmtSpec { s_global: s_global.to_string(), params, s_ret: s_ret.clone(), l_run: lf.run.clone(), l_st: lf.st.clone(), l_blk: lf.blk.clone(), l_out: lf.out_ty.clone(), init_slots: slots, erase_ret: erase_ret.replace("@SRET@", &s_ret) })
+    Ok(StmtSpec { s_global: s_global.to_string(), params, s_ret: s_ret.clone(), l_run: lf.run.clone(), l_st: lf.st.clone(), l_blk: lf.blk.clone(), l_out: lf.out_ty.clone(), init_slots: slots, erase_ret: erase_ret.replace("@SRET@", &s_ret), panic })
 }
 
 fn s_ty(_env: &Env, params: &[(String, Rel, String)], x: &str) -> String {

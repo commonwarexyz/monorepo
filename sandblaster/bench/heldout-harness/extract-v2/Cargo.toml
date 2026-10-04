@@ -1,0 +1,19 @@
+# MIR extraction only (run.sh --set v2, step 2): held-out v2's H1
+# (sandblaster/bench/heldout-v2/h1/src/lib.rs) as module `h1` of a crate
+# whose directory holds it at `h1/` (a symlink to ../../heldout-v2/h1), so
+# the .sbmir names the source `h1/src/lib.rs`, a suffix of the path the DSL
+# roots lift. Never built for timing; a standalone workspace (the edition
+# and overflow checks of the subjects). The same as ../extract/ for v1.
+[workspace]
+
+[package]
+name = "heldout_h1v2_mir"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[profile.dev]
+overflow-checks = true

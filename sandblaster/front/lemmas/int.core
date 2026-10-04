@@ -23,7 +23,8 @@ def[lemma, arity = 3] $w::ne_sound : (a : $W) -> (b : $W) -> (.h : Eq(Bool, #eq_
 
 -- Decided checked arithmetic (optimizer design §6.3): `a.checked_add(b)` is
 -- `Some(a + b)` when the sum does not overflow and `None` when it does (and
--- likewise `checked_sub`, `checked_mul`), so the optimizer rewrites the
+-- likewise `checked_sub`, `checked_mul`, and `checked_div` on a divisor
+-- that is or is not zero), so the optimizer rewrites the
 -- call where linear arithmetic decides its condition, without unfolding it
 -- into a dependent `if` nested in the caller's match.
 %for W in u8 u16 u32 u64 usize
@@ -54,4 +55,32 @@ def[lemma] $w::checked_sub_none : (a : $W) -> (b : $W) -> (.h : Eq(Bool, #le_$w(
      | false => fun (.e : Eq(Bool, #le_$w(b, a), false)) => refl(Option($W), None[$W])
      | true => fun (.e : Eq(Bool, #le_$w(b, a), true)) => absurd(Eq(Option($W), Some[$W](#sub_$w(a, b; e)), None[$W]), bool::false_ne_true (eq::trans Bool false (#le_$w(b, a)) true (eq::sym Bool (#le_$w(b, a)) false h) e))
      end) .refl(Bool, #le_$w(b, a))
+
+def[lemma] $w::checked_mul_some : (a : $W) -> (b : $W) -> (.h : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), true)) -> Eq(Option($W), $w::checked_mul a b, Some[$W](#mul_$w(a, b; h))) :=
+  fun (a : $W) (b : $W) (.h : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), true)) =>
+    (match #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint) : Bool as y return (.e : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), y)) -> Eq(Option($W), (match y : Bool as y2 return (.h2 : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), y2)) -> Option($W) with | false => fun (.h2 : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), false)) => None[$W] | true => fun (.h2 : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), true)) => Some[$W](#mul_$w(a, b; h2)) end) .e, Some[$W](#mul_$w(a, b; h))) with
+     | false => fun (.e : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), false)) => absurd(Eq(Option($W), None[$W], Some[$W](#mul_$w(a, b; h))), bool::false_ne_true (eq::trans Bool false (#le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint)) true (eq::sym Bool (#le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint)) false e) h))
+     | true => fun (.e : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), true)) => refl(Option($W), Some[$W](#mul_$w(a, b; h)))
+     end) .refl(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint))
+
+def[lemma] $w::checked_mul_none : (a : $W) -> (b : $W) -> (.h : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), false)) -> Eq(Option($W), $w::checked_mul a b, None[$W]) :=
+  fun (a : $W) (b : $W) (.h : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), false)) =>
+    (match #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint) : Bool as y return (.e : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), y)) -> Eq(Option($W), (match y : Bool as y2 return (.h2 : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), y2)) -> Option($W) with | false => fun (.h2 : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), false)) => None[$W] | true => fun (.h2 : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), true)) => Some[$W](#mul_$w(a, b; h2)) end) .e, None[$W]) with
+     | false => fun (.e : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), false)) => refl(Option($W), None[$W])
+     | true => fun (.e : Eq(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint), true)) => absurd(Eq(Option($W), Some[$W](#mul_$w(a, b; e)), None[$W]), bool::false_ne_true (eq::trans Bool false (#le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint)) true (eq::sym Bool (#le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint)) false h) e))
+     end) .refl(Bool, #le_int(#imul(#cast_$w_int(a), #cast_$w_int(b)), $MAXint))
+
+def[lemma] $w::checked_div_some : (a : $W) -> (b : $W) -> (.h : Eq(Bool, #ne_$w(b, 0$w), true)) -> Eq(Option($W), $w::checked_div a b, Some[$W](#div_$w(a, b; h))) :=
+  fun (a : $W) (b : $W) (.h : Eq(Bool, #ne_$w(b, 0$w), true)) =>
+    (match #ne_$w(b, 0$w) : Bool as y return (.e : Eq(Bool, #ne_$w(b, 0$w), y)) -> Eq(Option($W), (match y : Bool as y2 return (.h2 : Eq(Bool, #ne_$w(b, 0$w), y2)) -> Option($W) with | false => fun (.h2 : Eq(Bool, #ne_$w(b, 0$w), false)) => None[$W] | true => fun (.h2 : Eq(Bool, #ne_$w(b, 0$w), true)) => Some[$W](#div_$w(a, b; h2)) end) .e, Some[$W](#div_$w(a, b; h))) with
+     | false => fun (.e : Eq(Bool, #ne_$w(b, 0$w), false)) => absurd(Eq(Option($W), None[$W], Some[$W](#div_$w(a, b; h))), bool::false_ne_true (eq::trans Bool false (#ne_$w(b, 0$w)) true (eq::sym Bool (#ne_$w(b, 0$w)) false e) h))
+     | true => fun (.e : Eq(Bool, #ne_$w(b, 0$w), true)) => refl(Option($W), Some[$W](#div_$w(a, b; h)))
+     end) .refl(Bool, #ne_$w(b, 0$w))
+
+def[lemma] $w::checked_div_none : (a : $W) -> (b : $W) -> (.h : Eq(Bool, #ne_$w(b, 0$w), false)) -> Eq(Option($W), $w::checked_div a b, None[$W]) :=
+  fun (a : $W) (b : $W) (.h : Eq(Bool, #ne_$w(b, 0$w), false)) =>
+    (match #ne_$w(b, 0$w) : Bool as y return (.e : Eq(Bool, #ne_$w(b, 0$w), y)) -> Eq(Option($W), (match y : Bool as y2 return (.h2 : Eq(Bool, #ne_$w(b, 0$w), y2)) -> Option($W) with | false => fun (.h2 : Eq(Bool, #ne_$w(b, 0$w), false)) => None[$W] | true => fun (.h2 : Eq(Bool, #ne_$w(b, 0$w), true)) => Some[$W](#div_$w(a, b; h2)) end) .e, None[$W]) with
+     | false => fun (.e : Eq(Bool, #ne_$w(b, 0$w), false)) => refl(Option($W), None[$W])
+     | true => fun (.e : Eq(Bool, #ne_$w(b, 0$w), true)) => absurd(Eq(Option($W), Some[$W](#div_$w(a, b; e)), None[$W]), bool::false_ne_true (eq::trans Bool false (#ne_$w(b, 0$w)) true (eq::sym Bool (#ne_$w(b, 0$w)) false h) e))
+     end) .refl(Bool, #ne_$w(b, 0$w))
 %end
