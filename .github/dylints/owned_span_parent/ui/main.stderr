@@ -1,0 +1,59 @@
+error: owned `Span` passed as a tracing span parent or `follows_from` source
+  --> $DIR/main.rs:81:39
+   |
+LL |     let _process = info_span!(parent: span.clone(), "component.process");
+   |                                       ^^^^^^^^^^^^ help: borrow the span: `&span.clone()`
+   |
+   = note: tracing drops this handle before using the span's ID; if no other handle is alive, the span has closed and the subscriber panics
+   = note: `#[deny(owned_span_parent)]` on by default
+
+error: owned `Span` passed as a tracing span parent or `follows_from` source
+  --> $DIR/main.rs:82:39
+   |
+LL |     let _process = info_span!(parent: view_span(), "component.process");
+   |                                       ^^^^^^^^^^^ help: borrow the span: `&view_span()`
+   |
+   = note: tracing drops this handle before using the span's ID; if no other handle is alive, the span has closed and the subscriber panics
+
+error: owned `Span` passed as a tracing span parent or `follows_from` source
+  --> $DIR/main.rs:83:19
+   |
+LL |     info!(parent: span.clone(), "component.processed");
+   |                   ^^^^^^^^^^^^ help: borrow the span: `&span.clone()`
+   |
+   = note: tracing drops this handle before using the span's ID; if no other handle is alive, the span has closed and the subscriber panics
+
+error: owned `Span` passed as a tracing span parent or `follows_from` source
+  --> $DIR/main.rs:84:23
+   |
+LL |     span.follows_from(cause.clone());
+   |                       ^^^^^^^^^^^^^ help: borrow the span: `&cause.clone()`
+   |
+   = note: tracing drops this handle before using the span's ID; if no other handle is alive, the span has closed and the subscriber panics
+
+error: owned `Span` passed as a tracing span parent or `follows_from` source
+  --> $DIR/main.rs:85:40
+   |
+LL |     tracing::Span::follows_from(&span, cause.clone());
+   |                                        ^^^^^^^^^^^^^ help: borrow the span: `&cause.clone()`
+   |
+   = note: tracing drops this handle before using the span's ID; if no other handle is alive, the span has closed and the subscriber panics
+
+error: owned `Span` passed as a tracing span parent or `follows_from` source
+  --> $DIR/main.rs:86:67
+   |
+LL |     let process_span = |parent: tracing::Span| info_span!(parent: parent, "component.process");
+   |                                                                   ^^^^^^ help: borrow the span: `&parent`
+   |
+   = note: tracing drops this handle before using the span's ID; if no other handle is alive, the span has closed and the subscriber panics
+
+error: owned `Span` passed as a tracing span parent or `follows_from` source
+  --> $DIR/main.rs:98:39
+   |
+LL |     let _process = info_span!(parent: span, "component.process");
+   |                                       ^^^^ help: borrow the span: `&span`
+   |
+   = note: tracing drops this handle before using the span's ID; if no other handle is alive, the span has closed and the subscriber panics
+
+error: aborting due to 7 previous errors
+

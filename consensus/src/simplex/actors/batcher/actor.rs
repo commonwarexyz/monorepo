@@ -415,7 +415,7 @@ where
                 let view = message.view();
                 let operation = message.name();
                 let epoch = self.epoch;
-                let process_span = |parent: Span| {
+                let process_span = |parent: &Span| {
                     info_span!(
                         parent: parent,
                         "simplex.batcher.process",
@@ -432,7 +432,7 @@ where
                         finalized: new_finalized,
                         forwardable_proposal,
                     } => {
-                        let process = process_span(span.clone());
+                        let process = process_span(&span);
                         let _guard = process.entered();
                         let me = self.scheme.me();
                         let am_leader = me.is_some_and(|me| me == leader);
@@ -525,7 +525,7 @@ where
                         // votes, we can safely add the message even if the view is
                         // arbitrarily far in the future.
                         let round = self.round_for_view(&current, &mut work, view);
-                        let process = process_span(round.span());
+                        let process = process_span(&round.span());
                         let _guard = process.entered();
                         round.accept_vote(message, true);
                         self.added.inc();
@@ -576,7 +576,7 @@ where
                 // creating per-view state for certificates that fail verification)
                 let parent = round.map(|round| round.span()).unwrap_or_else(Span::none);
                 let span = info_span!(
-                    parent: parent,
+                    parent: &parent,
                     "simplex.batcher.verify_certificate",
                     %kind,
                     epoch = self.epoch.traced(),

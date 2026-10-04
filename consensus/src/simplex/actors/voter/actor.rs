@@ -351,7 +351,7 @@ impl<
 
         // Request proposal from application
         let span = info_span!(
-            parent: self.state.view_span(context.view()),
+            parent: &self.state.view_span(context.view()),
             "simplex.voter.propose",
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
@@ -388,7 +388,7 @@ impl<
 
         // Request verification
         let span = info_span!(
-            parent: self.state.view_span(context.view()),
+            parent: &self.state.view_span(context.view()),
             "simplex.voter.verify",
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
@@ -1052,7 +1052,7 @@ impl<
                     let view = round.view();
                     debug!(%view, "attempting certification");
                     let span = info_span!(
-                        parent: self.state.view_span(view),
+                        parent: &self.state.view_span(view),
                         "simplex.voter.certify",
                         epoch = round.epoch().traced(),
                         view = view.traced()
@@ -1090,7 +1090,7 @@ impl<
                 // Process the timeout (the constructed nullify is staged for the broadcast phase)
                 let current_view = self.state.current_view();
                 let span = info_span!(
-                    parent: self.state.view_span(current_view),
+                    parent: &self.state.view_span(current_view),
                     "simplex.voter.timeout",
                     epoch = self.state.epoch().traced(),
                     view = current_view.traced(),
@@ -1160,7 +1160,7 @@ impl<
                 // any votes for the new current view). This has no impact on liveness, however, we may miss
                 // building a finalization for an old view where we otherwise could have contributed.
                 let span = info_span!(
-                    parent: self.state.view_span(view),
+                    parent: &self.state.view_span(view),
                     "simplex.voter.notify",
                     epoch = self.state.epoch().traced(),
                     view = view.traced()
