@@ -83,12 +83,12 @@ impl<
     }
 
     /// Returns the root span of the view.
-    pub fn span(&self) -> Span {
+    pub fn span(&self) -> &Span {
         self.span.get()
     }
 
     /// Adopts the root span of the view from the voter.
-    pub fn set_span(&mut self, span: Span) {
+    pub fn adopt_span(&mut self, span: Span) {
         self.span.adopt(span);
     }
 
