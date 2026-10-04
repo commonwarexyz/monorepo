@@ -12,6 +12,7 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{self, Ty};
 use rustc_span::sym;
 
+// TODO(https://github.com/commonwarexyz/monorepo/issues/5104): Delete this lint after upgrading to tracing 0.2.
 dylint_linting::declare_late_lint! {
     /// ### What it does
     ///
