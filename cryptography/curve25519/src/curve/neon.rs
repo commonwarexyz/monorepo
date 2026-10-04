@@ -531,6 +531,27 @@ impl FBackend for Backend {
     fn square(self, a: FVec) -> FVec {
         map_f(a, square_regs)
     }
+
+    /// Loads the vector's register tiles once and squares each `k` times in place, rather than
+    /// going through [`map_f`] once per squaring.
+    #[inline(always)]
+    fn pow2k(self, mut a: FVec, k: u32) -> FVec {
+        let mut tiles: [Regs; TILES] = [
+            load(&a.limbs, 0),
+            load(&a.limbs, 1),
+            load(&a.limbs, 2),
+            load(&a.limbs, 3),
+        ];
+        for _ in 0..k {
+            for tile in &mut tiles {
+                *tile = square_regs(*tile);
+            }
+        }
+        for (tile, regs) in tiles.into_iter().enumerate() {
+            store(regs, &mut a.limbs, tile);
+        }
+        a
+    }
 }
 
 /// Packs two independent field elements into register lanes.

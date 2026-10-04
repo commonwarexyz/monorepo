@@ -40,7 +40,7 @@ const fn num_buckets(width: u32) -> usize {
     1usize << (width - 1)
 }
 
-/// Picks the window width for a batch of `terms` MSM terms executed at `parallelism`: wider
+/// Picks the window width for a batch of `terms` MSM terms, run in parallel or serially: wider
 /// windows mean fewer bucket-fill passes over the terms (the input-proportional cost) but a
 /// bigger bucket array for every fill/fold instance to initialize, fold, and keep cache-resident.
 ///
@@ -49,12 +49,13 @@ const fn num_buckets(width: u32) -> usize {
 /// shallower than the textbook `log2(terms) - 4` rule, because the wide-window penalty on real
 /// hardware includes the AVX-512 bucket array (`8 * 2^(width-1)` points, ~320KB at width 9)
 /// spilling L2, not just the fold-count arithmetic. Parallel runs want one step narrower than
-/// serial: folds replicate once per tile range, and every concurrent tile holds its own bucket
-/// array. Every prediction below matched the sweep's measured optimum (or a runner-up within
-/// ~0.5%): serial 7/8/9/10 and parallel 7/8/9/9 for 1k/4k/16k/64k-signature batches.
-pub(super) fn width_for(terms: usize, parallelism: usize) -> u32 {
+/// serial: every concurrent batch holds its own bucket array, and a window split between batches
+/// is folded once in each. Every prediction below matched the sweep's measured optimum (or a
+/// runner-up within ~0.5%): serial 7/8/9/10 and parallel 7/8/9/9 for 1k/4k/16k/64k-signature
+/// batches.
+pub(super) fn width_for(terms: usize, parallel: bool) -> u32 {
     let bits = terms.max(2).ilog2();
-    if parallelism > 1 {
+    if parallel {
         ((bits + 3) / 2).clamp(MIN_WIDTH, MAX_WIDTH - 1)
     } else {
         ((bits + 4) / 2).clamp(MIN_WIDTH, MAX_WIDTH)
@@ -62,10 +63,10 @@ pub(super) fn width_for(terms: usize, parallelism: usize) -> u32 {
 }
 
 /// One MSM term: a decompressed, mixed-addition-prepared point together with its scalar's signed
-/// digits. Recoding happens exactly once, here, no matter how many bucket-fill passes later read
-/// the digits (one per window). Digits are stored as `i16` (ample for any width up to 16) to
-/// keep the per-term footprint, and therefore each pass's memory traffic, small; entries above
-/// the chosen width's window count stay zero.
+/// digits. The digits are recoded before the MSM, which then reads them once per window. Digits
+/// are stored as `i16` (ample for any width up to 16) to keep the per-term footprint, and
+/// therefore each pass's memory traffic, small; entries above the chosen width's window count
+/// stay zero.
 #[derive(Clone, Copy)]
 pub(super) struct Term {
     point: GAffine,
@@ -76,11 +77,23 @@ impl Term {
     /// Recodes `scalar` at `width` (the batch-wide value from [`width_for`]; every term of one
     /// MSM must use the same width).
     pub(super) fn new(point: GAffine, scalar: &Scalar, width: u32) -> Self {
-        let digits: [i32; MAX_WINDOWS] = scalar.signed_digits(width);
+        let mut term = Self::zero(point);
+        term.recode(scalar, width);
+        term
+    }
+
+    /// A term for `point` with scalar zero.
+    pub(super) const fn zero(point: GAffine) -> Self {
         Self {
             point,
-            digits: digits.map(|d| d as i16),
+            digits: [0; MAX_WINDOWS],
         }
+    }
+
+    /// Replaces this term's scalar with `scalar`, recoded as in [`Term::new`].
+    pub(super) fn recode(&mut self, scalar: &Scalar, width: u32) {
+        let digits: [i32; MAX_WINDOWS] = scalar.signed_digits(width);
+        self.digits = digits.map(|d| d as i16);
     }
 }
 
@@ -408,29 +421,29 @@ mod tests {
 
     #[test]
     fn width_for_matches_measured_optima() {
-        // The sweep's measured optima (see `width_for`'s doc comment), as (signatures, threads,
+        // The sweep's measured optima (see `width_for`'s doc comment), as (signatures, parallel,
         // width): terms per batch are ~2 * signatures + 1.
-        for (sigs, parallelism, expected) in [
-            (1024, 32, 7),
-            (4096, 32, 8),
-            (16384, 32, 9),
-            (65536, 32, 9),
-            (1024, 1, 7),
-            (4096, 1, 8),
-            (16384, 1, 9),
-            (65536, 1, 10),
+        for (sigs, parallel, expected) in [
+            (1024, true, 7),
+            (4096, true, 8),
+            (16384, true, 9),
+            (65536, true, 9),
+            (1024, false, 7),
+            (4096, false, 8),
+            (16384, false, 9),
+            (65536, false, 10),
         ] {
             assert_eq!(
-                width_for(2 * sigs + 1, parallelism),
+                width_for(2 * sigs + 1, parallel),
                 expected,
-                "sigs={sigs} parallelism={parallelism}"
+                "sigs={sigs} parallel={parallel}"
             );
         }
         // Clamps: tiny batches never drop below MIN_WIDTH, huge parallel batches never exceed
         // MAX_WIDTH - 1 (bucket footprint), huge serial batches never exceed MAX_WIDTH.
-        assert_eq!(width_for(1, 32), MIN_WIDTH);
-        assert_eq!(width_for(usize::MAX, 32), MAX_WIDTH - 1);
-        assert_eq!(width_for(usize::MAX, 1), MAX_WIDTH);
+        assert_eq!(width_for(1, true), MIN_WIDTH);
+        assert_eq!(width_for(usize::MAX, true), MAX_WIDTH - 1);
+        assert_eq!(width_for(usize::MAX, false), MAX_WIDTH);
     }
 
     #[test]
