@@ -22,8 +22,8 @@ dylint_linting::declare_late_lint! {
     /// Tracing converts an owned span into its ID and drops the handle before the
     /// ID is used. If no other handle is alive at that moment, for example because
     /// another task released its handle concurrently, the span has already
-    /// closed: `tracing-subscriber`'s registry panics while registering a child
-    /// span, and an event or `follows_from` link refers to a closed span.
+    /// closed. `tracing-subscriber`'s registry then panics while registering a
+    /// child span, and an event or `follows_from` link refers to a closed span.
     /// Borrowing keeps the handle alive during the call, regardless of who else
     /// owns the span.
     ///
