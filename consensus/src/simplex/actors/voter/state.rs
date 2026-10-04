@@ -413,12 +413,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         }
     }
 
-    /// Returns the root span for `view` and the finalized view, the two state
-    /// values a batcher update carries.
-    pub fn batcher_context(&self, view: View) -> (Span, View) {
-        (self.view_span(view).clone(), self.last_finalized)
-    }
-
     /// Returns the next timeout deadline and its reason.
     pub fn next_timeout(&mut self) -> (SystemTime, TimeoutReason) {
         let now = self.context.current();
