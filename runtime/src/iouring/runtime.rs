@@ -1468,7 +1468,7 @@ impl Worker {
         // task set retains, so discarding it runs no user code.
         for message in self.inbox.drain(..) {
             match message {
-                Message::Wake(Target::Task(token)) => token.discard(),
+                Message::Wake(Target::Task(runnable)) => runnable.discard(),
                 message => {
                     Panics::contain(|| drop(message));
                 }
@@ -1578,7 +1578,7 @@ impl Worker {
                     let mut local = self.local.borrow_mut();
                     match target {
                         Target::Root => local.root_ready = true,
-                        Target::Task(token) => local.ready.push(token),
+                        Target::Task(runnable) => local.ready.push(runnable),
                     }
                 }
                 Message::Forward(forward) => {
@@ -1654,16 +1654,16 @@ impl Worker {
             // Bound task polling so a self-waking task cannot starve the root,
             // mailbox, or ring service.
             for _ in 0..BATCH_SIZE {
-                let Some(token) = self.local.borrow_mut().ready.pop() else {
+                let Some(runnable) = self.local.borrow_mut().ready.pop() else {
                     break;
                 };
 
                 // The inner wrapper handles user polling policy. The poll also
                 // contains the destruction of a finished or cancelled future.
-                match token.poll() {
+                match runnable.poll() {
                     AfterPoll::Done => {}
                     // Join the tail so self-waking tasks cannot skip other ready work.
-                    AfterPoll::Requeue(token) => self.local.borrow_mut().ready.push(token),
+                    AfterPoll::Requeue(runnable) => self.local.borrow_mut().ready.push(runnable),
                     // The future is gone, so releasing the set's reference and
                     // the token's runs no user code.
                     AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),

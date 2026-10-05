@@ -184,10 +184,10 @@ mod tests {
     }
 
     /// A ready token holding the only reference to a task with no worker.
-    fn token(future: impl Future<Output = ()> + Send + 'static) -> Runnable {
-        let (task, token) = Task::new(future, &Tasks::new(1), Weak::new());
+    fn runnable(future: impl Future<Output = ()> + Send + 'static) -> Runnable {
+        let (task, runnable) = Task::new(future, &Tasks::new(1), Weak::new());
         drop(task);
-        token
+        runnable
     }
 
     /// A wake carrying the only reference to a task, so the task's cell is
@@ -198,7 +198,7 @@ mod tests {
             mailbox: Arc::downgrade(mailbox),
             dropped: dropped.clone(),
         };
-        let wake = Target::Task(token(async move {
+        let wake = Target::Task(runnable(async move {
             let _guard = guard;
             pending::<()>().await;
         }));
@@ -210,9 +210,9 @@ mod tests {
     /// worker teardown does through the task set, before discarding its token.
     fn dispose(messages: impl IntoIterator<Item = Message>) {
         for message in messages {
-            if let Message::Wake(Target::Task(token)) = message {
-                token.task().clear();
-                token.discard();
+            if let Message::Wake(Target::Task(runnable)) = message {
+                runnable.task().clear();
+                runnable.discard();
             }
         }
     }
@@ -229,7 +229,7 @@ mod tests {
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
         assert!(
             mailbox
-                .send(Message::Wake(Target::Task(token(pending()))))
+                .send(Message::Wake(Target::Task(runnable(pending()))))
                 .is_ok()
         );
         assert!(mailbox.waker.pending(0));

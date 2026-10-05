@@ -256,21 +256,21 @@ impl Tasks {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let (task, token) = Task::new(future, self, mailbox);
+        let (task, runnable) = Task::new(future, self, mailbox);
 
         // The factory runs after the spawn's open check, so the set checks
         // closure again. Insertion precedes delivery, so a token the mailbox
         // refuses belongs to a task teardown clears. A refused task goes back
         // to the caller, which clears it.
         if let Err(task) = self.insert(task) {
-            token.discard();
+            runnable.discard();
             return Err(task);
         }
 
         #[cfg(test)]
         tests::after_insert();
 
-        token.schedule();
+        runnable.schedule();
         Ok(())
     }
 
@@ -455,8 +455,8 @@ pub mod tests {
     /// A pending task for `set` to retain, with no worker. Its first token is
     /// discarded, since these tests never poll.
     pub fn task(set: &Tasks) -> Task {
-        let (task, token) = Task::new(pending::<()>(), set, Weak::new());
-        token.discard();
+        let (task, runnable) = Task::new(pending::<()>(), set, Weak::new());
+        runnable.discard();
         task
     }
 

@@ -799,10 +799,10 @@ impl Runnable {
             self.discard();
             return;
         };
-        if let Err(Message::Wake(Target::Task(token))) =
+        if let Err(Message::Wake(Target::Task(runnable))) =
             mailbox.send(Message::Wake(Target::Task(self)))
         {
-            token.discard();
+            runnable.discard();
         }
     }
 
@@ -995,26 +995,26 @@ impl Wake for RootWaker {
 #[derive(Default)]
 pub struct Ready {
     /// Tokens in FIFO order.
-    tokens: VecDeque<Runnable>,
+    runnables: VecDeque<Runnable>,
 }
 
 impl Ready {
     /// Queue a ready token.
     #[inline]
-    pub fn push(&mut self, token: Runnable) {
-        self.tokens.push_back(token);
+    pub fn push(&mut self, runnable: Runnable) {
+        self.runnables.push_back(runnable);
     }
 
     /// Take the oldest ready token.
     #[inline]
     #[must_use]
     pub fn pop(&mut self) -> Option<Runnable> {
-        self.tokens.pop_front()
+        self.runnables.pop_front()
     }
 
     /// Whether no ready token is queued.
     pub fn is_empty(&self) -> bool {
-        self.tokens.is_empty()
+        self.runnables.is_empty()
     }
 
     /// Discard every ready token at teardown.
@@ -1022,8 +1022,8 @@ impl Ready {
     /// The closed task set retains each token's task, so discarding them loses
     /// nothing and runs no user code.
     pub fn discard(&mut self) {
-        for token in self.tokens.drain(..) {
-            token.discard();
+        for runnable in self.runnables.drain(..) {
+            runnable.discard();
         }
     }
 }
@@ -1174,9 +1174,9 @@ pub mod tests {
         mailbox: &Arc<Mailbox>,
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Task {
-        let (task, token) = Task::new(future, set, Arc::downgrade(mailbox));
+        let (task, runnable) = Task::new(future, set, Arc::downgrade(mailbox));
         assert!(set.insert(task.clone()).is_ok());
-        ready.push(token);
+        ready.push(runnable);
         task
     }
 
@@ -1197,7 +1197,7 @@ pub mod tests {
         messages
             .into_iter()
             .map(|message| match message {
-                Message::Wake(Target::Task(token)) => token,
+                Message::Wake(Target::Task(runnable)) => runnable,
                 _ => panic!("expected only ready tokens"),
             })
             .collect()
@@ -1224,7 +1224,7 @@ pub mod tests {
     fn test_links_follow_the_future() {
         fn check<F: Future<Output = ()> + Send + 'static>(future: F) {
             let set = Tasks::new(1);
-            let (task, token) = Task::new(future, &set, Weak::new());
+            let (task, runnable) = Task::new(future, &set, Weak::new());
             let cell = task.as_ptr().cast::<Cell<F>>();
             // SAFETY: the task's reference keeps the cell alive, and `new`
             // leaked a `Cell<F>` at this pointer.
@@ -1233,7 +1233,7 @@ pub mod tests {
             let links = unsafe { Header::links(task.as_ptr()) };
             assert_eq!(links.as_ptr().cast_const(), expected);
             task.clear();
-            token.discard();
+            runnable.discard();
         }
 
         check(pending::<()>());
@@ -1269,13 +1269,13 @@ pub mod tests {
 
         // A new task holds the caller's reference, its first token's, and
         // one mailbox reference.
-        let (task, token) = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
+        let (task, runnable) = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
         assert_eq!(refs(&task), 2);
         assert_eq!(Arc::weak_count(&mailbox), 1);
 
         // Polling borrows the token's reference for the waker it passes in,
         // and going idle releases it.
-        assert!(matches!(token.poll(), AfterPoll::Done));
+        assert!(matches!(runnable.poll(), AfterPoll::Done));
         assert_eq!(refs(&task), 1);
 
         // Cloned wakers count, and dropped ones release.
@@ -1288,11 +1288,11 @@ pub mod tests {
         // Waking by value hands the waker's reference to the published token.
         waker.wake();
         assert_eq!(refs(&task), 2);
-        let mut tokens = scheduled(&mailbox);
-        assert_eq!(tokens.len(), 1);
-        let token = tokens.pop().unwrap();
-        assert_eq!(token.task().as_ptr(), task.as_ptr());
-        token.discard();
+        let mut runnables = scheduled(&mailbox);
+        assert_eq!(runnables.len(), 1);
+        let runnable = runnables.pop().unwrap();
+        assert_eq!(runnable.task().as_ptr(), task.as_ptr());
+        runnable.discard();
         assert_eq!(refs(&task), 1);
 
         // The last reference frees the cell, and with it the mailbox reference.
@@ -1323,11 +1323,11 @@ pub mod tests {
         .join()
         .unwrap();
         assert_eq!(refs(&task), 3);
-        let mut tokens = scheduled(&mailbox);
-        assert_eq!(tokens.len(), 1);
+        let mut runnables = scheduled(&mailbox);
+        assert_eq!(runnables.len(), 1);
 
         // The token polls the task again, which leaves it idle once more.
-        ready.push(tokens.pop().unwrap());
+        ready.push(runnables.pop().unwrap());
         assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
         assert!(scheduled(&mailbox).is_empty());
         task.clear();
@@ -1369,14 +1369,14 @@ pub mod tests {
 
         // Wakes during the poll leave exactly one successor token, returned
         // to the poller rather than published.
-        let AfterPoll::Requeue(token) = ready.pop().unwrap().poll() else {
+        let AfterPoll::Requeue(runnable) = ready.pop().unwrap().poll() else {
             panic!("self-woken pending poll must requeue");
         };
-        assert_eq!(token.task().as_ptr(), task.as_ptr());
+        assert_eq!(runnable.task().as_ptr(), task.as_ptr());
         assert!(scheduled(&mailbox).is_empty());
 
         // The final poll wakes itself again, which the terminal state discards.
-        let AfterPoll::Retire(retired) = token.poll() else {
+        let AfterPoll::Retire(retired) = runnable.poll() else {
             panic!("final poll must complete");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -1435,11 +1435,11 @@ pub mod tests {
         // The set retains the task, and its first token arrives as a wake.
         assert!(set.register(pending(), Arc::downgrade(&mailbox)).is_ok());
         assert_eq!(set.live(), 1);
-        let mut tokens = scheduled(&mailbox);
-        assert_eq!(tokens.len(), 1);
-        let token = tokens.pop().unwrap();
-        assert_eq!(refs(token.task()), 2);
-        token.discard();
+        let mut runnables = scheduled(&mailbox);
+        assert_eq!(runnables.len(), 1);
+        let runnable = runnables.pop().unwrap();
+        assert_eq!(refs(runnable.task()), 2);
+        runnable.discard();
 
         // A closed or dropped mailbox discards the token, and the set keeps
         // the task until teardown clears it.
@@ -1558,8 +1558,8 @@ pub mod tests {
         assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
         assert!(matches!(ready.pop().unwrap().poll(), AfterPoll::Done));
         handles[1].wake_by_ref();
-        let mut tokens = scheduled(&mailbox);
-        assert_eq!(tokens.len(), 1);
+        let mut runnables = scheduled(&mailbox);
+        assert_eq!(runnables.len(), 1);
 
         // Teardown discards the ready tokens and closes the set, which hands
         // out every task without dropping any future.
@@ -1583,7 +1583,7 @@ pub mod tests {
             task.wake_by_ref();
         }
         assert!(scheduled(&mailbox).is_empty());
-        assert!(matches!(tokens.pop().unwrap().poll(), AfterPoll::Done));
+        assert!(matches!(runnables.pop().unwrap().poll(), AfterPoll::Done));
         assert_eq!(refs(&handles[1]), 2);
 
         // A closed set has already handed out every task.
@@ -1870,15 +1870,15 @@ mod loom_tests {
         signaled(Arc::new(AtomicBool::new(false)), drops)
     }
 
-    /// Poll `token` as a worker does, polling again while wakes arrive
+    /// Poll `runnable` as a worker does, polling again while wakes arrive
     /// during its polls, and remove the task from `set` once it completes.
     /// Returns whether it completed.
-    fn run(set: &Tasks, token: Runnable) -> bool {
-        let mut next = Some(token);
-        while let Some(token) = next.take() {
-            match token.poll() {
+    fn run(set: &Tasks, runnable: Runnable) -> bool {
+        let mut next = Some(runnable);
+        while let Some(runnable) = next.take() {
+            match runnable.poll() {
                 AfterPoll::Done => {}
-                AfterPoll::Requeue(token) => next = Some(token),
+                AfterPoll::Requeue(runnable) => next = Some(runnable),
                 AfterPoll::Retire(task) => {
                     drop(set.remove(&task));
                     return true;
@@ -1889,9 +1889,9 @@ mod loom_tests {
     }
 
     /// The ready tokens among `messages`, which carry nothing else.
-    fn tokens(messages: Vec<Message>) -> impl Iterator<Item = Runnable> {
+    fn runnables(messages: Vec<Message>) -> impl Iterator<Item = Runnable> {
         messages.into_iter().map(|message| match message {
-            Message::Wake(Target::Task(token)) => token,
+            Message::Wake(Target::Task(runnable)) => runnable,
             _ => panic!("expected only ready tokens"),
         })
     }
@@ -1901,8 +1901,8 @@ mod loom_tests {
     /// inside the panic boundary.
     fn teardown(set: &Tasks, mailbox: &Mailbox) {
         set.close();
-        for token in tokens(mailbox.close()) {
-            token.discard();
+        for runnable in runnables(mailbox.close()) {
+            runnable.discard();
         }
         for task in set.drain() {
             Panics::contain(|| task.clear());
@@ -1921,7 +1921,7 @@ mod loom_tests {
                 let set = Tasks::new(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
-                let (task, token) = Task::new(
+                let (task, runnable) = Task::new(
                     signaled(signal.clone(), &drops),
                     &set,
                     std::sync::Arc::downgrade(&mailbox),
@@ -1939,15 +1939,15 @@ mod loom_tests {
                         waker.wake_by_ref();
                     }
                 });
-                let mut completed = run(&set, token);
+                let mut completed = run(&set, runnable);
                 waking.join().unwrap();
 
                 // A wake that found the task idle delivered a token.
                 let mut delivered = Vec::new();
                 mailbox.take(&mut delivered);
-                for token in tokens(delivered) {
+                for runnable in runnables(delivered) {
                     assert!(!completed, "a completed task received a token");
-                    completed = run(&set, token);
+                    completed = run(&set, runnable);
                 }
                 assert!(completed, "wake lost");
                 assert_eq!(drops.load(Ordering::Relaxed), 1);
@@ -1970,7 +1970,7 @@ mod loom_tests {
             let mailbox = mailbox();
             let set = Tasks::new(1);
             let drops = Arc::new(AtomicUsize::new(0));
-            let (task, token) =
+            let (task, runnable) =
                 Task::new(pending(&drops), &set, std::sync::Arc::downgrade(&mailbox));
 
             // The set takes the only plain reference, so the waker's can be
@@ -1980,7 +1980,7 @@ mod loom_tests {
 
             // The first poll leaves the task idle, so the wake publishes a
             // token.
-            assert!(!run(&set, token));
+            assert!(!run(&set, runnable));
             let waking = thread::spawn(move || waker.wake());
             teardown(&set, &mailbox);
             waking.join().unwrap();
@@ -2041,7 +2041,7 @@ mod loom_tests {
                 }
                 Poll::<()>::Pending
             });
-            let (task, token) = Task::new(future, &set, std::sync::Arc::downgrade(&mailbox));
+            let (task, runnable) = Task::new(future, &set, std::sync::Arc::downgrade(&mailbox));
             assert!(set.insert(task).is_ok());
 
             let tearing_down = thread::spawn({
@@ -2049,7 +2049,7 @@ mod loom_tests {
                 let mailbox = mailbox.clone();
                 move || teardown(&set, &mailbox)
             });
-            run(&set, token);
+            run(&set, runnable);
             tearing_down.join().unwrap();
 
             // Every reference is gone, so the cell freed its mailbox handle.
