@@ -60,10 +60,10 @@ pub struct PruneConfig {
     ///
     /// QMDB operations below the active range are only needed to serve state sync requests for
     /// lagging peers. A peer keeps serving a block's state sync targets for at least about
-    /// `max_pending_acks + 1 + retained_qmdb_blocks` blocks after it. A syncing node with a single
-    /// database converges once the database's tail round trip fits within that window. Some
-    /// network topologies may benefit from a non-zero value here to provide a larger buffer for
-    /// serving state sync requests during periods of instability.
+    /// `max_pending_acks + 1 + retained_qmdb_blocks` blocks after it. A syncing node converges once
+    /// each database's tail round trip fits within that window. Some network topologies may
+    /// benefit from a non-zero value here to provide a larger buffer for serving state sync
+    /// requests during periods of instability.
     pub retained_qmdb_blocks: usize,
 }
 

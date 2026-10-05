@@ -34,51 +34,46 @@
 //! - Upon a tip at a greater height: adopt its anchor. If its targets differ from the current
 //!   targets, send them to the databases (tuple sets follow the
 //!   [convergence rules](#convergence-tuple-sets)).
-//! - Upon a single database reporting the current target: converge, leaving queued tips
-//!   unobserved.
-//! - Upon a single database reporting a target older than the current one: hold. A holding sync
-//!   refuses every later tip and finishes at the current target, unless a forced tip releases the
-//!   hold. A forced tip is recorded as above.
+//! - Upon every database reporting its current target: converge, leaving queued tips unobserved.
+//! - Upon every database having reached a target: hold. A holding sync refuses every later tip
+//!   and finishes at the most recently adopted anchor.
+//! - Upon a forced tip: end any hold and handle the tip as above. The sync holds again once every
+//!   database reaches a target.
 //!
 //! Queued tips are coalesced: a tip superseded by a newer one before the sync dispatches it may
 //! never reach the databases. [`StateSyncSet::sync`] returns an anchor whose targets every database
-//! reached. Tips delivered after convergence are not observed, so the returned anchor can trail
-//! the latest tip sent.
+//! reached. Refused tips and tips delivered after convergence never reach the databases. The
+//! returned anchor can trail the latest tip sent.
 //!
 //! ## Convergence (tuple sets)
 //!
 //! A tuple set assigns a _generation_ each time it dispatches a tip to its databases, and tracks
-//! the generation each database is assigned and whether it has reached that generation's target.
+//! whether each database has reached the current generation's targets.
 //!
-//! - Upon a tip while some database is still seeking its target: start a new generation and send
-//!   its targets only to the seeking databases. Databases that already reached their target stay
-//!   frozen at their generation, so they cannot run ahead to a newer anchor. A reached database
-//!   whose target is unchanged in the new generation counts as reached for it.
-//! - Upon every database reaching the same generation with a tip pending: start a new generation
-//!   for all databases.
-//! - Upon every database reaching the same generation with no tip pending: finish at that
+//! - Upon dispatching a recorded tip: start a new generation and send its targets to every
+//!   database whose target changed. A database that already reached an unchanged target counts
+//!   as reached for the new generation.
+//! - Upon every database reaching the current generation with no tip pending: finish at that
 //!   generation's anchor.
-//! - Upon every database reaching its target, at different generations: _regroup_. Send the
-//!   highest generation's targets to the databases behind it and mark them seeking again.
+//! - Upon every database having reached a target since the sync started or the last forced tip:
+//!   refuse every later tip until a forced tip.
 //!
-//! The coordinator retains state only for generations assigned to some database, so its memory
-//! is bounded by the number of databases however long sync runs.
+//! The coordinator retains the current generation's anchor and targets and the latest recorded tip
+//! not yet dispatched.
 //!
 //! ### Chasing a moving tip
 //!
 //! ```text
-//! time ------------------------------------------------------------------------------->
+//! time ---------------------------------------------------------------------------->
 //!
-//! tips:          A0      A1                A2 A3
-//! generation:    g0      g1                g2 = A3 (A2 is superseded before dispatch)
+//! tips:           A0              A1              A2  A3              A4
+//! generation:     g0              g1                  g2 (A2 is superseded before dispatch)
 //!
-//! db0 (slow):    g0 ---- g1 -------------- g2 ------- reached g2
-//! db1 (fast):    g0 ---- g1 -- reached g1 -- frozen ------------ regroup -- reached g2
-//! db2 (fast):    g0 ---- g1 -- reached g1 -- frozen ------------ regroup -- reached g2
+//! db0 (slow):     g0 ------------ g1 ---------------- g2  reached g1 ---- reached g2
+//! db1 (fast):     g0  reached g0  g1  reached g1 ---- g2  reached g2
 //!
-//! finish at A3 only when:
-//! - every database has reported the same generation
-//! - no newer tip update is pending
+//! - A4 arrives after every database has reached a target and is refused
+//! - finish at A3 once every database has reached g2
 //! ```
 //!
 //! # Failures
@@ -106,7 +101,6 @@ use futures::{
     join,
 };
 use std::{
-    collections::BTreeMap,
     fmt::Debug,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
@@ -619,6 +613,8 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// - When `reached_target` is `Some`, report each reached target on it at most once, before
     ///   adopting a newer target. A report may wait for channel capacity, so callers must drain
     ///   the receiver.
+    /// - Keep receiving from `tip_updates` until completing, pausing only while a report waits for
+    ///   `reached_target` capacity. Callers may wait for capacity to send a target.
     #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,
@@ -1122,6 +1118,85 @@ impl<T> DbSyncChannels<T> {
     }
 }
 
+/// A database's report that it reached a sync target.
+///
+/// Coalescing keeps the greatest report. A generation report also counts toward the hold, and
+/// only a report of the current generation, the highest, counts as reached.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Reached {
+    /// The database reached a target older than its current one.
+    Earlier,
+    /// The database reached the target of this generation.
+    Generation(usize),
+}
+
+/// Per-database reached reports not yet taken by the tuple coordinator.
+type ReachedReports = Arc<commonware_utils::sync::Mutex<Vec<Option<Reached>>>>;
+
+/// Records reached reports for the tuple coordinator without waiting for it.
+#[derive(Clone)]
+struct ReachedSender {
+    reports: ReachedReports,
+    wake: mpsc::Sender<()>,
+}
+
+impl ReachedSender {
+    /// Records that database `idx` reached a target, keeping its greatest untaken report, and
+    /// wakes the coordinator.
+    ///
+    /// Returns `false` if the coordinator stopped.
+    fn send(&self, idx: usize, report: Reached) -> bool {
+        {
+            let mut reports = self.reports.lock();
+            reports[idx] = reports[idx].max(Some(report));
+        }
+        !matches!(
+            self.wake.try_send(()),
+            Err(mpsc::error::TrySendError::Closed(()))
+        )
+    }
+}
+
+/// Takes the reached reports recorded by [`ReachedSender`]s.
+struct ReachedReceiver {
+    reports: ReachedReports,
+    wake: mpsc::Receiver<()>,
+}
+
+impl ReachedReceiver {
+    /// Takes every report recorded since the last call, in database order.
+    fn take(&self) -> Vec<(usize, Reached)> {
+        self.reports
+            .lock()
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(idx, report)| report.take().map(|report| (idx, report)))
+            .collect()
+    }
+
+    /// Waits until a report may have been recorded. Returns `false` once every sender is dropped.
+    async fn wait(&mut self) -> bool {
+        self.wake.recv().await.is_some()
+    }
+}
+
+/// Creates a reached report channel for `db_count` databases.
+fn reached_channel(db_count: usize) -> (ReachedSender, ReachedReceiver) {
+    let reports: ReachedReports =
+        Arc::new(commonware_utils::sync::Mutex::new(vec![None; db_count]));
+    let (wake_tx, wake_rx) = mpsc::channel(1);
+    (
+        ReachedSender {
+            reports: reports.clone(),
+            wake: wake_tx,
+        },
+        ReachedReceiver {
+            reports,
+            wake: wake_rx,
+        },
+    )
+}
+
 struct CoordinatorSyncSenders<T> {
     target_tx: mpsc::Sender<T>,
     finish_tx: mpsc::Sender<()>,
@@ -1170,9 +1245,9 @@ macro_rules! impl_state_sync_set {
                         generation_tx: db_channels.$idx.generation_tx,
                     },
                 )+);
-                let (reached_event_tx, mut reached_event_rx) = mpsc::channel(16);
-                let (completion_tx, mut completion_rx) = mpsc::channel(1);
                 let db_count = [$($idx,)+].len();
+                let (reached_event_tx, mut reached_event_rx) = reached_channel(db_count);
+                let (completion_tx, mut completion_rx) = mpsc::channel(1);
                 let coordinator_targets = targets.clone();
                 let initial_targets = targets.clone();
                 let first_db_error: Arc<commonware_utils::sync::Mutex<Option<String>>> =
@@ -1187,31 +1262,12 @@ macro_rules! impl_state_sync_set {
                         let mut last_dispatched_targets = initial_targets;
 
                         loop {
-                            loop {
-                                match reached_event_rx.try_recv() {
-                                    Ok((idx, generation)) => state.record_reached(idx, generation),
-                                    Err(mpsc::error::TryRecvError::Empty) => break,
-                                    Err(mpsc::error::TryRecvError::Disconnected) => return None,
-                                }
+                            for (idx, report) in reached_event_rx.take() {
+                                state.record_reached(idx, report);
                             }
 
-                            if let Some(updates) = tip_updates.as_mut() {
-                                loop {
-                                    match updates.try_recv() {
-                                        Ok(update) => {
-                                            update.record(|anchor, targets| {
-                                                state.record_tip_update(anchor, targets);
-                                            });
-                                        }
-                                        Err(ring::TryRecvError::Empty) => break,
-                                        Err(ring::TryRecvError::Disconnected) => {
-                                            tip_updates = None;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
+                            // Convergence is checked before queued tips are handled, so a queued
+                            // forced tip cannot discard a finished sync.
                             match state.next_action() {
                                 CoordinatorAction::Converged { anchor, targets } => {
                                     $(
@@ -1223,6 +1279,11 @@ macro_rules! impl_state_sync_set {
                                     generation,
                                     targets: dispatch_targets,
                                 } => {
+                                    // These sends wait only while a database task is busy. Each
+                                    // task keeps taking generation updates, and each database
+                                    // keeps taking targets as `StateSyncDb::sync_db` requires,
+                                    // since its reached reports go to a task that never waits on
+                                    // this coordinator.
                                     $(
                                         let dispatch_target = dispatch_targets.$idx.clone();
                                         if !coordinator_senders.$idx
@@ -1232,19 +1293,15 @@ macro_rules! impl_state_sync_set {
                                         {
                                             return None;
                                         }
-                                        if state.should_dispatch($idx) {
-                                            if dispatch_target != last_dispatched_targets.$idx {
-                                                if !coordinator_senders.$idx
-                                                    .target_tx
-                                                    .send_lossy(dispatch_target.clone())
-                                                    .await
-                                                {
-                                                    return None;
-                                                }
-                                                last_dispatched_targets.$idx = dispatch_target;
+                                        if dispatch_target != last_dispatched_targets.$idx {
+                                            if !coordinator_senders.$idx
+                                                .target_tx
+                                                .send_lossy(dispatch_target.clone())
+                                                .await
+                                            {
+                                                return None;
                                             }
-                                        } else if dispatch_target == last_dispatched_targets.$idx {
-                                            state.mark_reached_same_target($idx, generation);
+                                            last_dispatched_targets.$idx = dispatch_target;
                                         }
                                     )+
                                     continue;
@@ -1252,14 +1309,40 @@ macro_rules! impl_state_sync_set {
                                 CoordinatorAction::Wait => {}
                             }
 
+                            // Once every database reaches a target, the set refuses every later
+                            // tip until a forced one ends the hold.
+                            let mut drained = 0usize;
+                            if let Some(updates) = tip_updates.as_mut() {
+                                loop {
+                                    match updates.try_recv() {
+                                        Ok(update) => {
+                                            drained += 1;
+                                            state.handle_tip(update);
+                                            if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
+                                                reschedule().await;
+                                            }
+                                        }
+                                        Err(ring::TryRecvError::Empty) => break,
+                                        Err(ring::TryRecvError::Disconnected) => {
+                                            tip_updates = None;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if drained > 0 {
+                                continue;
+                            }
+
                             let update_future = tip_updates.as_mut().map_or_else(
                                 || Either::Right(pending()),
                                 |updates| Either::Left(updates.recv()),
                             );
                             select! {
-                                reached_event = reached_event_rx.recv() => {
-                                    let (idx, generation) = reached_event?;
-                                    state.record_reached(idx, generation);
+                                woken = reached_event_rx.wait() => {
+                                    if !woken {
+                                        return None;
+                                    }
                                 },
                                 _ = completion_rx.recv() => {
                                     drop(coordinator_owned_senders);
@@ -1270,17 +1353,15 @@ macro_rules! impl_state_sync_set {
                                         tip_updates = None;
                                         continue;
                                     };
-                                    update.record(|anchor, targets| {
-                                        state.record_tip_update(anchor, targets);
-                                    });
+                                    state.handle_tip(update);
                                 },
                             };
                         }
                     }
                 });
 
-                // Each database task runs its sync and reports every generation whose target it
-                // has reached.
+                // Each database task runs its sync and reports each target it reaches, and each
+                // new generation whose target it already reached.
                 let db_handles = (
                     $(
                         context.child(concat!("db_", stringify!($idx))).spawn({
@@ -1345,15 +1426,22 @@ macro_rules! impl_state_sync_set {
                                                 )
                                                 .await;
 
+                                                // A target of an earlier generation counts only
+                                                // toward the hold.
                                                 if reached_target != current_target {
+                                                    if !reached_event_sender
+                                                        .send($idx, Reached::Earlier)
+                                                    {
+                                                        return;
+                                                    }
                                                     continue;
                                                 }
 
                                                 if last_reported_generation != Some(current_generation) {
-                                                    if !reached_event_sender
-                                                        .send_lossy(($idx, current_generation))
-                                                        .await
-                                                    {
+                                                    if !reached_event_sender.send(
+                                                        $idx,
+                                                        Reached::Generation(current_generation),
+                                                    ) {
                                                         return;
                                                     }
                                                     last_reported_generation = Some(current_generation);
@@ -1369,10 +1457,10 @@ macro_rules! impl_state_sync_set {
                                                 if last_reached_target.as_ref() == Some(&current_target)
                                                     && last_reported_generation != Some(current_generation)
                                                 {
-                                                    if !reached_event_sender
-                                                        .send_lossy(($idx, current_generation))
-                                                        .await
-                                                    {
+                                                    if !reached_event_sender.send(
+                                                        $idx,
+                                                        Reached::Generation(current_generation),
+                                                    ) {
                                                         return;
                                                     }
                                                     last_reported_generation = Some(current_generation);
@@ -1408,6 +1496,7 @@ macro_rules! impl_state_sync_set {
                         }),
                     )+
                 );
+                drop(reached_event_tx);
 
                 let synced = join!(
                     $(
@@ -1478,7 +1567,7 @@ async fn drain_generation_updates<T>(
     current_target: &mut T,
     last_reached_target: &Option<T>,
     last_reported_generation: &mut Option<usize>,
-    reached_event_sender: &mpsc::Sender<(usize, usize)>,
+    reached_event_sender: &ReachedSender,
     idx: usize,
 ) where
     T: Clone + PartialEq,
@@ -1495,9 +1584,7 @@ async fn drain_generation_updates<T>(
                     if last_reached_target.as_ref() == Some(current_target)
                         && *last_reported_generation != Some(*current_generation)
                     {
-                        if !reached_event_sender
-                            .send_lossy((idx, *current_generation))
-                            .await
+                        if !reached_event_sender.send(idx, Reached::Generation(*current_generation))
                         {
                             return;
                         }
@@ -1517,32 +1604,11 @@ async fn drain_generation_updates<T>(
     }
 }
 
-/// Per-database sync tracking state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DbSyncState {
-    /// Database is still syncing toward its assigned generation's targets.
-    Seeking { generation: usize },
-    /// Database reported it reached its assigned generation's targets.
-    Reached { generation: usize },
-}
-
-impl DbSyncState {
-    const fn generation(self) -> usize {
-        match self {
-            Self::Seeking { generation } | Self::Reached { generation } => generation,
-        }
-    }
-
-    const fn is_reached(self) -> bool {
-        matches!(self, Self::Reached { .. })
-    }
-}
-
 /// What the coordinator should do after processing events.
 enum CoordinatorAction<D: Digest, T> {
     /// Nothing to do until the next event.
     Wait,
-    /// Dispatch `targets` as `generation` to the databases still seeking.
+    /// Dispatch `targets` as `generation` to every database.
     Dispatch { generation: usize, targets: T },
     /// Every database reached the targets of one generation, carried by `anchor`.
     Converged { anchor: Anchor<D>, targets: T },
@@ -1551,53 +1617,80 @@ enum CoordinatorAction<D: Digest, T> {
 /// State machine for tuple-set sync convergence (see the
 /// [module docs](crate::stateful::db#convergence-tuple-sets)).
 ///
-/// Tracks each database's assigned generation and whether it has reached it, and decides when to
-/// dispatch, regroup, or finish.
+/// Tracks whether each database has reached the current generation and whether it has reached a
+/// target of any generation. Holds the current generation's anchor and targets and the latest
+/// recorded tip not yet dispatched. Decides when to dispatch or finish.
 struct CoordinatorState<D: Digest, T> {
-    dbs: Vec<DbSyncState>,
-    generation_state: BTreeMap<usize, (Anchor<D>, T)>,
-    current_generation: usize,
+    /// Whether each database reached the current generation's targets.
+    reached: Vec<bool>,
+    /// Whether each database has reached a target of any generation since the last release.
+    reported: Vec<bool>,
+    /// The current generation, which increments on each dispatch.
+    generation: usize,
+    /// Anchor and targets of the current generation.
+    current: (Anchor<D>, T),
+    /// Anchor and targets of the latest recorded tip, pending dispatch as the next generation.
     latest_tip: Option<(Anchor<D>, T)>,
-    last_dispatched_anchor: Anchor<D>,
 }
 
 impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     fn new(db_count: usize, anchor: Anchor<D>, targets: T) -> Self {
-        let dbs = vec![DbSyncState::Seeking { generation: 0 }; db_count];
-        let mut generation_state = BTreeMap::new();
-        generation_state.insert(0, (anchor, targets));
         Self {
-            dbs,
-            generation_state,
-            current_generation: 0,
+            reached: vec![false; db_count],
+            reported: vec![false; db_count],
+            generation: 0,
+            current: (anchor, targets),
             latest_tip: None,
-            last_dispatched_anchor: anchor,
         }
     }
 
-    /// Records that database `idx` reached `generation`.
+    /// Records that database `idx` reached a target.
     ///
-    /// Reached events can arrive late. An event for a generation the database is no longer
-    /// assigned is ignored.
-    fn record_reached(&mut self, idx: usize, generation: usize) {
-        if self.dbs[idx].generation() != generation {
-            return;
+    /// Reached events can arrive late. An event for an earlier generation counts only toward the
+    /// hold.
+    fn record_reached(&mut self, idx: usize, report: Reached) {
+        self.reported[idx] = true;
+        if report == Reached::Generation(self.generation) {
+            self.reached[idx] = true;
         }
-        if self.dbs[idx].is_reached() {
-            return;
+    }
+
+    /// Returns whether every database has reached a target of any generation since the last
+    /// release.
+    ///
+    /// A holding coordinator refuses every later tip until [`Self::release`].
+    fn held(&self) -> bool {
+        self.reported.iter().all(|reported| *reported)
+    }
+
+    /// Ends a hold. The coordinator holds again once every database reports reaching a target
+    /// again.
+    fn release(&mut self) {
+        self.reported.fill(false);
+    }
+
+    /// Handles a tip update. A forced tip ends any hold. A holding coordinator refuses the tip,
+    /// and otherwise records it.
+    fn handle_tip(&mut self, update: TipUpdate<D, T>) {
+        if update.forced() {
+            self.release();
         }
-        self.dbs[idx] = DbSyncState::Reached { generation };
+        if self.held() {
+            update.refuse();
+        } else {
+            update.record(|anchor, targets| self.record_tip_update(anchor, targets));
+        }
     }
 
     /// Records a tip as the pending dispatch, replacing any earlier pending tip.
     ///
-    /// A tip at or below the height of the pending or last dispatched anchor is ignored. Targets
-    /// are not compared.
+    /// A tip at or below the height of the pending or current anchor is ignored. Targets are not
+    /// compared.
     fn record_tip_update(&mut self, anchor: Anchor<D>, targets: T) {
         let current_height = self
             .latest_tip
             .as_ref()
-            .map_or(self.last_dispatched_anchor.height, |(latest_anchor, _)| {
+            .map_or(self.current.0.height, |(latest_anchor, _)| {
                 latest_anchor.height
             });
         if anchor.height <= current_height {
@@ -1606,106 +1699,25 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
         self.latest_tip = Some((anchor, targets));
     }
 
-    /// Returns the next coordinator action, updating assignments for a `Dispatch`.
+    /// Returns the next coordinator action.
     ///
-    /// Returns `Converged` when every database reached the same generation and no tip is pending.
-    /// Returns `Dispatch` for a pending tip (a new generation) or a regroup (every database
-    /// reached, at different generations), and `Wait` otherwise. After a `Dispatch`,
-    /// [`Self::should_dispatch`] identifies the databases that receive the targets.
+    /// Returns `Dispatch` for a pending tip (a new generation), `Converged` when every database
+    /// reached the current generation, and `Wait` otherwise.
     fn next_action(&mut self) -> CoordinatorAction<D, T> {
-        let all_reached = self.dbs.iter().all(|db| db.is_reached());
-
-        if all_reached {
-            let min_gen = self.dbs.iter().map(|db| db.generation()).min().unwrap();
-            let max_gen = self.dbs.iter().map(|db| db.generation()).max().unwrap();
-
-            if min_gen == max_gen {
-                if let Some((anchor, targets)) = self.latest_tip.take() {
-                    let generation = self.current_generation + 1;
-                    self.current_generation = generation;
-                    self.dbs.fill(DbSyncState::Seeking { generation });
-                    self.generation_state
-                        .insert(generation, (anchor, targets.clone()));
-                    self.last_dispatched_anchor = anchor;
-                    self.prune_generations();
-                    return CoordinatorAction::Dispatch {
-                        generation,
-                        targets,
-                    };
-                }
-
-                let (anchor, targets) = self
-                    .generation_state
-                    .get(&min_gen)
-                    .expect("missing state for converged generation")
-                    .clone();
-                return CoordinatorAction::Converged { anchor, targets };
-            }
-
-            // Regroup: reset behind databases to seek the highest generation.
-            let (_anchor, targets) = self
-                .generation_state
-                .get(&max_gen)
-                .expect("missing state for regroup generation")
-                .clone();
-            for db in &mut self.dbs {
-                if db.generation() != max_gen {
-                    *db = DbSyncState::Seeking {
-                        generation: max_gen,
-                    };
-                }
-            }
-            self.prune_generations();
+        if let Some((anchor, targets)) = self.latest_tip.take() {
+            self.generation += 1;
+            self.reached.fill(false);
+            self.current = (anchor, targets.clone());
             return CoordinatorAction::Dispatch {
-                generation: max_gen,
+                generation: self.generation,
                 targets,
             };
         }
-
-        // With some database still seeking, a pending tip starts a new generation for the
-        // seeking databases only.
-        let Some((anchor, targets)) = self.latest_tip.take() else {
-            return CoordinatorAction::Wait;
-        };
-
-        let generation = self.current_generation + 1;
-        self.current_generation = generation;
-        for db in &mut self.dbs {
-            if !db.is_reached() {
-                *db = DbSyncState::Seeking { generation };
-            }
+        if self.reached.iter().all(|reached| *reached) {
+            let (anchor, targets) = self.current.clone();
+            return CoordinatorAction::Converged { anchor, targets };
         }
-        self.generation_state
-            .insert(generation, (anchor, targets.clone()));
-        self.last_dispatched_anchor = anchor;
-
-        self.prune_generations();
-        CoordinatorAction::Dispatch {
-            generation,
-            targets,
-        }
-    }
-
-    /// Drops the state of generations no database is assigned.
-    fn prune_generations(&mut self) {
-        self.generation_state
-            .retain(|r#gen, _| self.dbs.iter().any(|db| db.generation() == *r#gen));
-    }
-
-    /// Returns whether database `idx` receives a dispatch's targets (it has not reached its
-    /// generation).
-    fn should_dispatch(&self, idx: usize) -> bool {
-        !self.dbs[idx].is_reached()
-    }
-
-    /// Marks a reached database as reached for `generation` (no effect on a seeking database).
-    ///
-    /// Callers must only use this when the database's target is unchanged in `generation`.
-    fn mark_reached_same_target(&mut self, idx: usize, generation: usize) {
-        if !self.dbs[idx].is_reached() {
-            return;
-        }
-        self.dbs[idx] = DbSyncState::Reached { generation };
+        CoordinatorAction::Wait
     }
 }
 
@@ -1980,7 +1992,8 @@ mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, InitError, MAX_CHANNEL_DRAIN_PER_TICK,
-        ManagedDb, Observation, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
+        ManagedDb, Observation, Reached, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig,
+        TipUpdate, reached_channel,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -4532,6 +4545,228 @@ mod tests {
         });
     }
 
+    /// The set records tips and sends them to every database until every database reaches a
+    /// target. It then refuses later tips and finishes at the newest recorded tip.
+    #[test]
+    fn tuple_state_sync_refuses_tips_once_every_database_reaches_a_target() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (reported_tx, reported_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let fast_ready = Arc::new(AtomicBool::new(false));
+            let fast_update_count = Arc::new(AtomicUsize::new(0));
+            let fast_source = FastSyncObserver {
+                ready: fast_ready.clone(),
+                update_count: fast_update_count.clone(),
+            };
+            let sync =
+                context
+                    .child("tuple_state_sync_refuses_tips")
+                    .spawn(move |context| async move {
+                        <(Shared<LaggingSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
+                            deterministic::Context,
+                            (LagGate, FastSyncObserver),
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            ((), ()),
+                            ((reported_tx, release_rx), fast_source),
+                            anchor(0),
+                            (0, 0),
+                            tip_rx,
+                            SyncEngineConfig {
+                                fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                                apply_batch_size: NZU64!(1),
+                                max_outstanding_requests: NZUsize!(1),
+                                update_channel_size: NonZeroUsize::new(4).unwrap(),
+                            },
+                        )
+                        .await
+                        .expect("tuple state sync should succeed")
+                    });
+
+            // The fast database reaches its initial target first. The next tip is still recorded
+            // and reaches both databases.
+            while !fast_ready.load(Ordering::SeqCst) {
+                reschedule().await;
+            }
+            let (update, observed) = TipUpdate::with_observation(anchor(1), (1, 1));
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            while fast_update_count.load(Ordering::SeqCst) == 0 {
+                reschedule().await;
+            }
+
+            // The lagging database reports its initial target. Every database has reached a
+            // target, and a later tip is refused.
+            reported_rx
+                .await
+                .expect("lagging database should report its initial target");
+            let (update, observed) = TipUpdate::with_observation(anchor(2), (2, 2));
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Refused));
+
+            // Once released, both databases finish at the newest recorded tip.
+            release_tx.send(()).unwrap();
+            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(synced.0.read().await.final_target, 1);
+            assert_eq!(synced.1.read().await.final_target, 1);
+            assert_eq!(converged_anchor, anchor(1));
+            assert_eq!(fast_update_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    /// A forced tip releases a holding set: it is recorded and sent to every database, and the set
+    /// finishes there.
+    #[test]
+    fn tuple_state_sync_forced_tip_releases_hold() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (reported_tx, reported_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let fast_ready = Arc::new(AtomicBool::new(false));
+            let fast_update_count = Arc::new(AtomicUsize::new(0));
+            let fast_source = FastSyncObserver {
+                ready: fast_ready.clone(),
+                update_count: fast_update_count.clone(),
+            };
+            let sync =
+                context
+                    .child("tuple_state_sync_forced_tip")
+                    .spawn(move |context| async move {
+                        <(Shared<LaggingSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
+                            deterministic::Context,
+                            (LagGate, FastSyncObserver),
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            ((), ()),
+                            ((reported_tx, release_rx), fast_source),
+                            anchor(0),
+                            (0, 0),
+                            tip_rx,
+                            SyncEngineConfig {
+                                fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                                apply_batch_size: NZU64!(1),
+                                max_outstanding_requests: NZUsize!(1),
+                                update_channel_size: NonZeroUsize::new(4).unwrap(),
+                            },
+                        )
+                        .await
+                        .expect("tuple state sync should succeed")
+                    });
+
+            // Both databases reach a target after the first tip, and a later tip is refused.
+            while !fast_ready.load(Ordering::SeqCst) {
+                reschedule().await;
+            }
+            let (update, observed) = TipUpdate::with_observation(anchor(1), (1, 1));
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            reported_rx
+                .await
+                .expect("lagging database should report its initial target");
+            let (update, observed) = TipUpdate::with_observation(anchor(2), (2, 2));
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Refused));
+
+            // A forced tip is recorded and sent to both databases, and the set finishes there.
+            let (update, observed) = TipUpdate::forced_with_observation(anchor(3), (3, 3));
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            while fast_update_count.load(Ordering::SeqCst) < 2 {
+                reschedule().await;
+            }
+            release_tx.send(()).unwrap();
+            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(synced.0.read().await.final_target, 3);
+            assert_eq!(synced.1.read().await.final_target, 3);
+            assert_eq!(converged_anchor, anchor(3));
+            assert_eq!(fast_update_count.load(Ordering::SeqCst), 2);
+        });
+    }
+
+    /// A holding set whose databases reach the current generation while a forced tip is queued
+    /// finishes there, unless the coordinator takes the forced tip first. Each seed orders the
+    /// coordinator and the database tasks differently, and some seed must finish first.
+    #[test]
+    fn tuple_state_sync_converges_before_queued_forced_tip() {
+        let mut converged_first = false;
+        for seed in 0..16 {
+            let final_target = deterministic::Runner::seeded(seed).start(|context| async move {
+                let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+                let (reported_tx, reported_rx) = oneshot::channel();
+                let (release_tx, release_rx) = oneshot::channel();
+                let fast_ready = Arc::new(AtomicBool::new(false));
+                let fast_source = FastSyncObserver {
+                    ready: fast_ready.clone(),
+                    update_count: Arc::new(AtomicUsize::new(0)),
+                };
+                let sync = context.child("tuple_state_sync_queued_forced_tip").spawn(
+                    move |context| async move {
+                        <(Shared<LaggingSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
+                            deterministic::Context,
+                            (LagGate, FastSyncObserver),
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            ((), ()),
+                            ((reported_tx, release_rx), fast_source),
+                            anchor(0),
+                            (0, 0),
+                            tip_rx,
+                            SyncEngineConfig {
+                                fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                                apply_batch_size: NZU64!(1),
+                                max_outstanding_requests: NZUsize!(1),
+                                update_channel_size: NonZeroUsize::new(4).unwrap(),
+                            },
+                        )
+                        .await
+                        .expect("tuple state sync should succeed")
+                    },
+                );
+
+                // Both databases reach a target after the first tip, and the set holds.
+                while !fast_ready.load(Ordering::SeqCst) {
+                    reschedule().await;
+                }
+                let (update, observed) = TipUpdate::with_observation(anchor(1), (1, 1));
+                let _ = tip_tx.send(update).await;
+                assert_eq!(observed.await, Ok(Observation::Recorded));
+                reported_rx
+                    .await
+                    .expect("lagging database should report its initial target");
+                let (update, observed) = TipUpdate::with_observation(anchor(2), (2, 2));
+                let _ = tip_tx.send(update).await;
+                assert_eq!(observed.await, Ok(Observation::Refused));
+
+                // A forced tip is queued as the lagging database reaches the recorded tip.
+                let (update, observed) = TipUpdate::forced_with_observation(anchor(3), (3, 3));
+                let _ = tip_tx.send(update).await;
+                release_tx.send(()).unwrap();
+                let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+                let final_target = synced.0.read().await.final_target;
+                assert_eq!(synced.1.read().await.final_target, final_target);
+                assert_eq!(converged_anchor, anchor(final_target));
+
+                // A set that converged first never handles the forced tip.
+                drop(tip_tx);
+                match final_target {
+                    1 => assert!(observed.await.is_err()),
+                    3 => assert_eq!(observed.await, Ok(Observation::Recorded)),
+                    _ => panic!("sync finished at target {final_target}"),
+                }
+                final_target
+            });
+            converged_first |= final_target == 1;
+        }
+        assert!(
+            converged_first,
+            "no seed converged before taking the forced tip"
+        );
+    }
+
     #[test]
     fn tuple_state_sync_converges_before_finish() {
         deterministic::Runner::default().start(|context| async move {
@@ -4628,10 +4863,14 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let _ = tip_tx.send(TipUpdate::new(anchor(2), (2, 2))).await;
-            let _ = tip_tx.send(TipUpdate::new(anchor(1), (1, 1))).await;
+            // Both tips are recorded before the slow database reaches a target.
+            let (newer, newer_observed) = TipUpdate::with_observation(anchor(2), (2, 2));
+            let (older, older_observed) = TipUpdate::with_observation(anchor(1), (1, 1));
+            let _ = tip_tx.send(newer).await;
+            let _ = tip_tx.send(older).await;
             drop(tip_tx);
-            context.sleep(Duration::from_millis(1)).await;
+            assert_eq!(newer_observed.await, Ok(Observation::Recorded));
+            assert_eq!(older_observed.await, Ok(Observation::Recorded));
             slow_release.store(true, Ordering::SeqCst);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
@@ -4813,6 +5052,66 @@ mod tests {
         });
     }
 
+    /// A forced tip ends the hold: it is recorded and dispatched, and the coordinator holds again
+    /// only once every database reaches another target.
+    #[test]
+    fn coordinator_forced_tip_releases_hold() {
+        deterministic::Runner::default().start(|_context| async move {
+            let mut state = CoordinatorState::new(2, anchor(0), (0u64, 0u64));
+            state.record_reached(0, Reached::Generation(0));
+            state.record_reached(1, Reached::Earlier);
+            assert!(state.held());
+
+            // A tip is refused while held.
+            let (update, observed) = TipUpdate::with_observation(anchor(1), (1, 1));
+            state.handle_tip(update);
+            assert_eq!(observed.await, Ok(Observation::Refused));
+            assert!(matches!(state.next_action(), CoordinatorAction::Wait));
+
+            // A forced tip ends the hold and is dispatched as the next generation.
+            let (update, observed) = TipUpdate::forced_with_observation(anchor(2), (2, 2));
+            state.handle_tip(update);
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            assert!(!state.held());
+            assert!(matches!(
+                state.next_action(),
+                CoordinatorAction::Dispatch { generation: 1, .. }
+            ));
+
+            // The set holds again once every database reaches another target.
+            state.record_reached(0, Reached::Generation(1));
+            assert!(!state.held());
+            state.record_reached(1, Reached::Generation(1));
+            assert!(state.held());
+        });
+    }
+
+    /// Reached reports never wait for the coordinator. Reports a database records before the
+    /// coordinator takes them coalesce to its newest generation, and a closed coordinator stops
+    /// the sender.
+    #[test]
+    fn reached_reports_coalesce_without_waiting() {
+        let (sender, receiver) = reached_channel(3);
+
+        // Many reports with no take in between record without waiting.
+        for generation in 0..64 {
+            assert!(sender.send(0, Reached::Generation(generation)));
+            assert!(sender.send(1, Reached::Earlier));
+        }
+        assert!(sender.send(0, Reached::Earlier));
+
+        // A take yields each reporting database once, with its newest generation.
+        assert_eq!(
+            receiver.take(),
+            vec![(0, Reached::Generation(63)), (1, Reached::Earlier)]
+        );
+        assert!(receiver.take().is_empty());
+
+        // Once the coordinator stops, the sender reports it.
+        drop(receiver);
+        assert!(!sender.send(2, Reached::Earlier));
+    }
+
     #[test]
     fn coordinator_rejects_stale_reached_event_from_older_generation() {
         let mut state = CoordinatorState::new(2, anchor(0), (0u64, 0u64));
@@ -4834,10 +5133,10 @@ mod tests {
 
         // This reached event belongs to generation 0 but arrives after the
         // coordinator has already advanced the database to generation 1.
-        state.record_reached(1, 0);
+        state.record_reached(1, Reached::Generation(0));
 
         // Only database 0 has actually reached generation 1 so far.
-        state.record_reached(0, 1);
+        state.record_reached(0, Reached::Generation(1));
 
         match state.next_action() {
             CoordinatorAction::Wait => {}
@@ -4871,8 +5170,8 @@ mod tests {
             }
         }
 
-        state.record_reached(0, 1);
-        state.record_reached(1, 1);
+        state.record_reached(0, Reached::Generation(1));
+        state.record_reached(1, Reached::Generation(1));
         state.record_tip_update(anchor(2), (2, 2));
 
         match state.next_action() {
@@ -4890,11 +5189,64 @@ mod tests {
         }
     }
 
+    /// The coordinator dispatches every recorded tip to every database and holds only once every
+    /// database has reached a target. A tip recorded before the hold is still dispatched.
     #[test]
-    fn tuple_state_sync_stops_updates_after_reached_until_regroup() {
-        deterministic::Runner::default().start(|context| async move {
-            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(32).unwrap());
-            let slow_release = Arc::new(AtomicBool::new(true));
+    fn coordinator_holds_once_every_database_reaches_a_target() {
+        let mut state = CoordinatorState::new(2, anchor(0), (0u64, 0u64));
+
+        // Database 1 reaches generation 0. A tip starts generation 1 for both databases.
+        state.record_reached(1, Reached::Generation(0));
+        state.record_tip_update(anchor(1), (1, 1));
+        assert!(matches!(
+            state.next_action(),
+            CoordinatorAction::Dispatch { generation: 1, .. }
+        ));
+        assert!(!state.held());
+        assert!(matches!(state.next_action(), CoordinatorAction::Wait));
+
+        // Database 1 reaches generation 1, and another tip is recorded.
+        state.record_reached(1, Reached::Generation(1));
+        state.record_tip_update(anchor(2), (2, 2));
+
+        // Database 0 reaches an earlier target. Every database has now reached one, and the
+        // recorded tip is dispatched as generation 2.
+        state.record_reached(0, Reached::Earlier);
+        assert!(state.held());
+        let CoordinatorAction::Dispatch {
+            generation,
+            targets,
+        } = state.next_action()
+        else {
+            panic!("a recorded tip must be dispatched");
+        };
+        assert_eq!((generation, targets), (2, (2, 2)));
+
+        // A late event for generation 1 does not count toward generation 2.
+        state.record_reached(0, Reached::Generation(1));
+        state.record_reached(1, Reached::Generation(2));
+        assert!(matches!(state.next_action(), CoordinatorAction::Wait));
+
+        // Both databases reach generation 2, and the coordinator converges at its anchor.
+        state.record_reached(0, Reached::Generation(2));
+        let CoordinatorAction::Converged {
+            anchor: converged,
+            targets,
+        } = state.next_action()
+        else {
+            panic!("the coordinator should converge at generation 2");
+        };
+        assert_eq!(converged, anchor(2));
+        assert_eq!(targets, (2, 2));
+    }
+
+    /// A database that reached its target keeps receiving each recorded tip while another has not
+    /// reached one, and every database finishes at the same anchor.
+    #[test]
+    fn tuple_state_sync_reached_database_follows_tips() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let slow_release = Arc::new(AtomicBool::new(false));
             let fast_ready = Arc::new(AtomicBool::new(false));
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
@@ -4905,41 +5257,47 @@ mod tests {
                 ready: fast_ready.clone(),
                 update_count: fast_update_count.clone(),
             };
-            let sync = context.child("tuple_state_sync_algorithm").spawn(
-                move |context| async move {
-                    <(
-                        Shared<ObservedSlowSyncDb>,
-                        Shared<ObservedFastSyncDb>,
-                    ) as StateSyncSet<
-                        deterministic::Context,
-                        (SlowSyncController, FastSyncObserver),
-                        sha256::Digest,
-                    >>::sync(
-                        context,
-                        ((), ()),
-                        (slow_source, fast_source),
-                        anchor(0),
-                        (0, 0),
-                        tip_rx,
-                        SyncEngineConfig {
-                            fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                            apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: NZUsize!(1),
-                            update_channel_size: NonZeroUsize::new(1).unwrap(),
-                        },
-                    )
-                    .await
-                    .expect("tuple state sync should succeed")
-                },
-            );
+            let sync =
+                context
+                    .child("tuple_state_sync_algorithm")
+                    .spawn(move |context| async move {
+                        <(Shared<ObservedSlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
+                            deterministic::Context,
+                            (SlowSyncController, FastSyncObserver),
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            ((), ()),
+                            (slow_source, fast_source),
+                            anchor(0),
+                            (0, 0),
+                            tip_rx,
+                            SyncEngineConfig {
+                                fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                                apply_batch_size: NZU64!(1),
+                                max_outstanding_requests: NZUsize!(1),
+                                update_channel_size: NonZeroUsize::new(4).unwrap(),
+                            },
+                        )
+                        .await
+                        .expect("tuple state sync should succeed")
+                    });
 
             while !fast_ready.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            for target in 1..=16u64 {
-                let _ = tip_tx.send(TipUpdate::new(anchor(target), (target, target))).await;
+            // The fast database receives each tip while the slow one has not started.
+            for target in 1..=3u64 {
+                let (update, observed) =
+                    TipUpdate::with_observation(anchor(target), (target, target));
+                let _ = tip_tx.send(update).await;
+                assert_eq!(observed.await, Ok(Observation::Recorded));
+                while fast_update_count.load(Ordering::SeqCst) < target as usize {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
             }
+            slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 
             let (synced, converged_anchor) = sync.await.expect("sync task should complete");
@@ -4951,14 +5309,12 @@ mod tests {
                 "all databases should finish on the same converged target set"
             );
             assert_eq!(
-                converged_anchor.height.get(), slow_target,
+                converged_anchor.height.get(),
+                slow_target,
                 "returned anchor height should match the converged generation"
             );
-            assert_eq!(
-                fast_update_count.load(Ordering::SeqCst),
-                1,
-                "a reached database must not receive tip updates before regroup; only regroup retarget should be observed"
-            );
+            assert_eq!(slow_target, 3);
+            assert_eq!(fast_update_count.load(Ordering::SeqCst), 3);
         });
     }
 
@@ -5024,51 +5380,51 @@ mod tests {
     }
 
     #[test]
-    fn tuple_state_sync_regroup_completes_when_database_target_is_unchanged() {
+    fn tuple_state_sync_completes_when_database_target_is_unchanged() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
             let slow_release = Arc::new(AtomicBool::new(false));
             let fast_ready = Arc::new(AtomicBool::new(false));
             let fast_update_count = Arc::new(AtomicUsize::new(0));
 
-            let sync = context
-                .child("tuple_state_sync_regroup_unchanged_target")
-                .spawn({
-                    let slow_source = slow_release.clone();
-                    let fast_source = FastSyncObserver {
-                        ready: fast_ready.clone(),
-                        update_count: fast_update_count.clone(),
-                    };
-                    move |context| async move {
-                        <(Shared<SlowSyncDb>, Shared<DistinctObservedFastSyncDb>) as StateSyncSet<
-                            deterministic::Context,
-                            (Arc<AtomicBool>, FastSyncObserver),
-                            sha256::Digest,
-                        >>::sync(
-                            context,
-                            ((), ()),
-                            (slow_source, fast_source),
-                            anchor(0),
-                            (0, 7),
-                            tip_rx,
-                            SyncEngineConfig {
-                                fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                                apply_batch_size: NZU64!(1),
-                                max_outstanding_requests: NZUsize!(1),
-                                update_channel_size: NonZeroUsize::new(4).unwrap(),
-                            },
-                        )
-                        .await
-                        .expect("tuple state sync should succeed")
-                    }
-                });
+            let sync = context.child("tuple_state_sync_unchanged_target").spawn({
+                let slow_source = slow_release.clone();
+                let fast_source = FastSyncObserver {
+                    ready: fast_ready.clone(),
+                    update_count: fast_update_count.clone(),
+                };
+                move |context| async move {
+                    <(Shared<SlowSyncDb>, Shared<DistinctObservedFastSyncDb>) as StateSyncSet<
+                        deterministic::Context,
+                        (Arc<AtomicBool>, FastSyncObserver),
+                        sha256::Digest,
+                    >>::sync(
+                        context,
+                        ((), ()),
+                        (slow_source, fast_source),
+                        anchor(0),
+                        (0, 7),
+                        tip_rx,
+                        SyncEngineConfig {
+                            fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                            apply_batch_size: NZU64!(1),
+                            max_outstanding_requests: NZUsize!(1),
+                            update_channel_size: NonZeroUsize::new(4).unwrap(),
+                        },
+                    )
+                    .await
+                    .expect("tuple state sync should succeed")
+                }
+            });
 
             while !fast_ready.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
             }
 
-            let _ = tip_tx.send(TipUpdate::new(anchor(9), (9, 7))).await;
-            context.sleep(Duration::from_millis(1)).await;
+            // The tip is recorded before the slow database reaches a target.
+            let (update, observed) = TipUpdate::with_observation(anchor(9), (9, 7));
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 

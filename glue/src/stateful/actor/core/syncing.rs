@@ -308,7 +308,7 @@ where
                 let _ = self.metrics.sync_held.try_set(1);
                 info!(
                     retained = self.pending_finalizations.len(),
-                    "state sync reached an earlier target, holding finalized blocks"
+                    "state sync refused the target, holding finalized blocks"
                 );
             }
             Outcome::Converged(artifact) => {
