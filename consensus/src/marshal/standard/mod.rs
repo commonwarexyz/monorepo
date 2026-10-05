@@ -9429,6 +9429,288 @@ mod tests {
         });
     }
 
+    /// Only active speculative demand owns a resolver request, so retiring queued or completed
+    /// demand needs no resolver cancellation, and a resolver delivery leaves its own request to
+    /// the delivery verdict.
+    #[test_traced("WARN")]
+    fn test_standard_prefetch_demand_cancels_resolver_only_while_active() {
+        const PARTITION: &str = "prefetch-cancels-only-active";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
+            let mut config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(1);
+            let (actor, mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, blocks, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(
+                application.clone(),
+                RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let active_fetch = |key| {
+                resolver.active_fetches().into_iter().find(|fetch| {
+                    fetch.key == key && fetch.subscriber == handler::Annotation::Subscription
+                })
+            };
+
+            // A body ingested locally while its speculative request is active retires that
+            // request. Consuming the completed body afterwards needs no cancellation.
+            let local = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let local_key = handler::Key::Block(local.digest());
+            let _local_lease = mailbox.prefetch(Arc::from([local.digest()]), 0..1);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active local prefetch",
+                || active_fetch(local_key).is_some(),
+            )
+            .await;
+            let retains = resolver.retain_count();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            assert!(mailbox.verified(round, local.clone()).await);
+            assert_eq!(resolver.retain_count(), retains + 1);
+            assert!(active_fetch(local_key).is_none());
+            assert_eq!(
+                mailbox.acquire(local.digest()).await.unwrap().digest(),
+                local.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains + 1);
+
+            // A resolver delivery, a local body for queued demand, a local re-ingest of a
+            // completed body, and its consumption each leave the resolver untouched.
+            let ready = make_raw_block(local.digest(), Height::new(2), 200);
+            let queued = make_raw_block(ready.digest(), Height::new(3), 300);
+            let ready_key = handler::Key::Block(ready.digest());
+            let queued_key = handler::Key::Block(queued.digest());
+            let _lease = mailbox.prefetch(Arc::from([ready.digest(), queued.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active ready prefetch",
+                || active_fetch(ready_key).is_some(),
+            )
+            .await;
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == queued_key)
+            );
+            let retains = resolver.retain_count();
+            let fetch = active_fetch(ready_key).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &ready).await;
+            assert_eq!(resolver.retain_count(), retains, "resolver delivery");
+            let round = Round::new(Epoch::zero(), View::new(3));
+            assert!(mailbox.verified(round, queued.clone()).await);
+            assert_eq!(resolver.retain_count(), retains, "queued demand");
+            let round = Round::new(Epoch::zero(), View::new(2));
+            assert!(mailbox.verified(round, ready.clone()).await);
+            assert_eq!(resolver.retain_count(), retains, "completed body re-ingest");
+            assert_eq!(
+                mailbox.acquire(ready.digest()).await.unwrap().digest(),
+                ready.digest()
+            );
+            assert_eq!(
+                resolver.retain_count(),
+                retains,
+                "completed body consumption"
+            );
+            assert!(
+                !resolver
+                    .fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == queued_key)
+            );
+        });
+    }
+
+    async fn deliver_finalized_test_block(
+        resolver: &RecordingResolver,
+        finalization: Finalization<S, D>,
+        block: &B,
+    ) {
+        let (response, response_rx) = oneshot::channel();
+        assert!(
+            resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Finalized {
+                            height: block.height(),
+                        },
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Height(block.height()),
+                            tracing::Span::none(),
+                        )),
+                    },
+                    value: (finalization, block.clone()).encode(),
+                    response,
+                })
+                .accepted()
+        );
+        assert!(
+            response_rx
+                .await
+                .expect("finalized delivery verdict missing")
+        );
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_satisfies_prefetch_demand() {
+        const PARTITION: &str = "finalized-prefetch-demand";
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations, blocks) = prunable_finalized_stores(&context, PARTITION).await;
+            let mut config = test_config(
+                &context,
+                PARTITION,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+            );
+            config.max_repair = NZUsize!(1);
+            let (actor, mailbox, _) =
+                Actor::init(context.child("actor"), finalizations, blocks, config).await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let application = Application::<B>::manual_ack();
+            let _actor = actor.start(
+                application.clone(),
+                RecordingBuffer::default(),
+                (resolver_rx, resolver.clone()),
+            );
+            assert_eq!(application.acknowledged().await, Height::zero());
+            let finalization = |block: &B| {
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(block.height().get())),
+                        View::new(block.height().previous().unwrap().get()),
+                        block.digest(),
+                    ),
+                    &schemes,
+                    QUORUM,
+                )
+            };
+            let active = |block: &B| {
+                resolver.active_fetches().into_iter().find(|fetch| {
+                    fetch.key == handler::Key::Block(block.digest())
+                        && fetch.subscriber == handler::Annotation::Subscription
+                })
+            };
+            let fetched = |block: &B| {
+                resolver.fetches().iter().any(|fetch| {
+                    fetch.key == handler::Key::Block(block.digest())
+                        && fetch.subscriber == handler::Annotation::Subscription
+                })
+            };
+            let anchor = make_raw_block(Sha256::hash(&[b"predecessor"]), Height::new(5), 500);
+            let next = make_raw_block(anchor.digest(), Height::new(6), 600);
+            let queued = make_raw_block(next.digest(), Height::new(7), 700);
+            let lease = mailbox.prefetch(
+                Arc::from([anchor.digest(), next.digest(), queued.digest()]),
+                0..3,
+            );
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "active anchor prefetch",
+                || active(&anchor).is_some(),
+            )
+            .await;
+            let canonical = mailbox.finalized(anchor.height());
+            mailbox.set_floor(finalization(&anchor));
+            mailbox.hint_finalized(anchor.height(), NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            deliver_finalized_test_block(&resolver, finalization(&anchor), &anchor).await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Absent(Height::new(4)))
+            );
+            assert_eq!(canonical.await.unwrap().digest(), anchor.digest());
+            assert!(
+                active(&anchor).is_none(),
+                "finalized anchor must cancel active exact demand"
+            );
+            assert!(resolver.active_fetches().iter().any(|fetch| {
+                fetch.key
+                    == handler::Key::Finalized {
+                        height: anchor.height(),
+                    }
+                    && fetch.subscriber == handler::Annotation::Height(anchor.height())
+            }));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "anchor releases prefetch slot",
+                || active(&next).is_some(),
+            )
+            .await;
+
+            // Queued demand owns no request; a finalized body retires it locally.
+            assert!(!fetched(&queued));
+            mailbox.hint_finalized(queued.height(), NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            let retains = resolver.retain_count();
+            deliver_finalized_test_block(&resolver, finalization(&queued), &queued).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(resolver.retain_count(), retains, "queued finalized demand");
+            assert!(!fetched(&queued));
+            drop(lease);
+            wait_until(&context, Duration::from_secs(1), "old lease closes", || {
+                active(&next).is_none()
+            })
+            .await;
+
+            // A verdict-completed body occupies capacity until canonical storage claims it.
+            let ready = make_raw_block(queued.digest(), Height::new(8), 800);
+            let tail = make_raw_block(ready.digest(), Height::new(9), 900);
+            let _lease = mailbox.prefetch(Arc::from([ready.digest(), tail.digest()]), 0..2);
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "ready body prefetch",
+                || active(&ready).is_some(),
+            )
+            .await;
+            let fetch = active(&ready).unwrap();
+            deliver_acquisition_test_block(&resolver, fetch.clone(), &ready).await;
+            resolver.complete(&fetch);
+            let _ = mailbox.get_processed().await;
+            assert!(!fetched(&tail));
+            mailbox.hint_finalized(ready.height(), NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            let retains = resolver.retain_count();
+            deliver_finalized_test_block(&resolver, finalization(&ready), &ready).await;
+            let _ = mailbox.get_processed().await;
+            assert_eq!(resolver.retain_count(), retains, "ready finalized demand");
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "canonical storage releases ready slot",
+                || active(&tail).is_some(),
+            )
+            .await;
+            assert!(!fetched(&queued));
+            assert_eq!(
+                mailbox.acquire(ready.digest()).await.unwrap().digest(),
+                ready.digest()
+            );
+            assert_eq!(resolver.retain_count(), retains);
+        });
+    }
+
     fn independent_acquisition_with_parked_request(speculative: bool) {
         deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
             let Fixture { schemes, .. } =

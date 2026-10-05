@@ -75,6 +75,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// `commitments` is the consensus-supplied suffix in increasing height order.
     /// Consecutive re-proposals occupy one entry. The suffix is shared without
     /// copying; older heights are supplied by canonical finalized storage.
+    ///
+    /// A polled range keeps its remaining selected suffix prefetched in forward order, within
+    /// the capacity shared by all ranges ([`Config::max_repair`](super::Config)). Each range's
+    /// window of pending acquisitions and buffered bodies is additional to that capacity.
     pub fn blocks(
         &self,
         parent_height: Height,

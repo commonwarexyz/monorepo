@@ -1094,6 +1094,8 @@ where
         });
     }
 
+    /// Starts speculative fetches for queued demand while capacity allows, skipping
+    /// commitments that are already available locally.
     async fn dispatch_acquisitions<Buf: Buffer<V>>(
         &mut self,
         buffer: &Buf,
@@ -1104,8 +1106,7 @@ where
                 break;
             };
             let digest = V::commitment_to_inner(commitment);
-            if self.block_subscriptions.contains(&commitment)
-                || buffer.find_by_commitment(commitment).await.is_some()
+            if buffer.find_by_commitment(commitment).await.is_some()
                 || self.cache.has_block(digest).await
                 || self
                     .finalized_blocks
@@ -1136,8 +1137,8 @@ where
                 self.certified.insert(parent, V::parent_commitment(&block));
             }
             let consumed = self.block_subscriptions.notify(block.clone());
-            if consumed || self.acquisitions.contains(&commitment) {
-                self.acquisitions.satisfied(commitment);
+            let active = self.acquisitions.claim(commitment);
+            if consumed || active {
                 Self::cancel_acquisitions(resolver, vec![commitment]);
             }
             response.send_lossy(block);
@@ -1251,24 +1252,23 @@ where
 
     /// Hands a validated block to its direct callers and speculative demand.
     ///
-    /// Returns whether any caller or speculative demand was registered for it.
+    /// Returns whether a resolver request for the block may still be outstanding: a direct
+    /// caller was waiting, or speculative demand was still fetching it. Queued and completed
+    /// speculative demand own no request.
     fn satisfy_demand(&mut self, block: &V::Block) -> bool {
         let commitment = V::commitment(block);
-        let demanded = self.acquisitions.contains(&commitment);
-        let consumed = self.block_subscriptions.notify(block.clone());
-        if consumed {
+        if self.block_subscriptions.notify(block.clone()) {
             self.acquisitions.satisfied(commitment);
-        } else {
-            self.acquisitions.complete(block.clone());
+            return true;
         }
-        demanded || consumed
+        self.acquisitions.complete(block.clone())
     }
 
     /// Notifies subscribers of a validated block and applies any pending floor transition.
     ///
-    /// Local ingress and verified height finalizations satisfy exact-body subscriptions
-    /// independently of the resolver's block-delivery verdict. Their satisfied demand
-    /// is canceled here; a height delivery retains its own finalized-height request.
+    /// Local ingress and verified height finalizations cancel exact-body demand when a
+    /// direct caller was consumed or a speculative fetch was active. A height delivery
+    /// retains its finalized-height request for the resolver's verdict.
     ///
     /// Subscribers are notified before the block is persisted and may hold a
     /// block that marshal never durably stores. Subscriptions make no durability promise. Durable
@@ -2338,7 +2338,6 @@ where
                 .map_err(BoxedError::from),
         )
         .unwrap_or_else(|e| panic!("failed to prune finalized archives: {e}"));
-        self.finalized_subscriptions.prune(height);
         self
     }
 

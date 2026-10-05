@@ -714,22 +714,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver
     }
 
-    /// Register forward prefetch demand for `range` within a sequence of commitments.
+    /// Registers best-effort forward prefetch demand for `range` within `commitments`.
     ///
-    /// The lease retains commitment metadata. Marshal bounds the combined number of active
-    /// prefetches and speculative bodies awaiting consumption. Prefetch is best effort: local
-    /// availability fulfills demand, and an explicit acquisition takes over shared work
-    /// and retires its prefetch demand. Explicit acquisitions are owned by their callers
-    /// and are independent of the prefetch bound. Use [Self::acquire] to obtain a body.
-    ///
-    /// Keep the returned receiver alive while the demand is needed; drop it to release
-    /// unused demand. The receiver does not deliver a value and should not be awaited.
-    /// Empty or invalid ranges return a closed receiver.
-    pub fn prefetch(
+    /// Dropping the returned receiver releases the demand. The receiver never delivers a
+    /// value; empty or invalid ranges return one that is already closed.
+    pub(crate) fn prefetch(
         &self,
         commitments: Arc<[V::Commitment]>,
         range: Range<usize>,
     ) -> oneshot::Receiver<()> {
+        // The actor retires the demand when it observes the receiver dropped. Local
+        // availability or an explicit acquisition of a commitment also retires its demand.
         let (lease, receiver) = oneshot::channel();
         if !commitments
             .get(range.clone())
@@ -749,7 +744,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Wait for the finalized block at `height` to become available locally.
     ///
     /// This does not initiate a network request. Drop the receiver to cancel the wait.
-    /// The receiver closes without delivery if marshal shuts down or prunes the height.
+    /// The receiver closes without delivery if marshal shuts down or a floor update skips
+    /// the height.
     pub fn finalized(&self, height: Height) -> oneshot::Receiver<V::Block> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::AwaitFinalized {
