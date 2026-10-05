@@ -152,6 +152,9 @@ where
     /// authenticate the target.
     pub target: Target<DB::Family, DB::Digest>,
     /// Maximum number of outstanding requests for operation batches
+    ///
+    /// Sync requests no operations starting `2 * max_outstanding_requests * fetch_batch_size` or
+    /// more past the journal tip, which bounds how many fetched operations wait in memory.
     pub max_outstanding_requests: usize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
@@ -357,6 +360,9 @@ where
     }
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
+    ///
+    /// Only operations within twice the in-flight capacity of the journal tip are requested, so a
+    /// stalled request at the tip bounds how many operations are buffered behind it.
     fn schedule_requests(&mut self) {
         let target_size = self.target.range.end();
 
@@ -380,7 +386,11 @@ where
             .max_outstanding_requests
             .saturating_sub(self.outstanding_requests.len());
 
+        let lookahead = (self.max_outstanding_requests as u64)
+            .saturating_mul(2)
+            .saturating_mul(self.fetch_batch_size.get());
         let log_size = self.journal.size();
+        let lookahead_end = log_size.saturating_add(lookahead);
 
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
@@ -393,6 +403,9 @@ where
             ) else {
                 break; // No more gaps to fill
             };
+            if *gap_range.start >= lookahead_end {
+                break; // The rest waits for the journal to advance
+            }
 
             // Calculate batch size for this gap
             let gap_size = *gap_range.end.checked_sub(*gap_range.start).unwrap();
@@ -649,8 +662,11 @@ where
                 if let Ok(fetch_result) = fetch_result {
                     self.handle_fetch_result(fetch_result)?;
                 }
-                self.schedule_requests();
+                // Schedule after applying. Measured from the journal tip before the apply, the
+                // lookahead could leave nothing in flight once the tip request lands, and sync
+                // would stall.
                 let mut engine = self.apply_operations().await?;
+                engine.schedule_requests();
                 engine.record_progress();
                 Ok(NextStep::Continue(engine))
             }
