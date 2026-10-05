@@ -76,7 +76,7 @@ use std::{
     num::NonZeroU64,
     ops::Deref,
     pin::Pin,
-    ptr::NonNull,
+    ptr::{self, NonNull},
     sync::{Arc, Weak},
     task::{Context, Poll, RawWaker, RawWakerVTable, Wake, Waker},
 };
@@ -753,14 +753,14 @@ impl Task {
 /// back. It leaves through [`schedule`](Self::schedule), [`poll`](Self::poll),
 /// or [`discard`](Self::discard).
 ///
-/// Dropping a runnable releases its reference and leaves its task queued with
-/// no runnable to poll it, so a later wake publishes nothing. A runnable may
-/// therefore be discarded only when its task is complete, or when another
-/// reference is obliged to clear the task: the closed task set's, which
-/// teardown drains, or the [`Task`] a refused registration returns to its
-/// caller.
+/// A lost runnable leaves its task queued with no runnable to poll it, so a
+/// later wake publishes nothing. Dropping a runnable any other way therefore
+/// panics, unless the thread is already panicking. A runnable may be discarded
+/// only when its task is complete, or when another reference is obliged to
+/// clear the task: the closed task set's, which teardown drains, or the
+/// [`Task`] a refused registration returns to its caller.
 #[repr(transparent)]
-#[must_use = "a dropped runnable wedges its task, so schedule, poll, or discard it"]
+#[must_use = "a runnable must be scheduled, polled, or discarded"]
 pub struct Runnable(Task);
 
 impl Runnable {
@@ -852,12 +852,30 @@ impl Runnable {
         // continues past `complete`, since `start_poll` and `clear` both do
         // nothing once the state is COMPLETE.
         Panics::contain(|| unsafe { (task.vtable.drop_future)(task.0) });
-        AfterPoll::Retire(self.0)
+        AfterPoll::Retire(self.into_task())
     }
 
     /// Release the runnable where the contract on [`Runnable`] permits it.
     pub fn discard(self) {
-        drop(self);
+        drop(self.into_task());
+    }
+
+    /// The runnable's reference as a plain task, without the drop check.
+    fn into_task(self) -> Task {
+        let this = ManuallyDrop::new(self);
+
+        // SAFETY: `this` is never dropped, so the task is read out once.
+        unsafe { ptr::read(&this.0) }
+    }
+}
+
+impl Drop for Runnable {
+    fn drop(&mut self) {
+        // A second panic while unwinding would abort, and the task field still
+        // releases its reference after this returns or panics.
+        if !std::thread::panicking() {
+            panic!("runnable dropped without being scheduled, polled, or discarded");
+        }
     }
 }
 
@@ -1033,10 +1051,12 @@ impl Ready {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use crate::utils::extract_panic_message;
     use commonware_utils::sync::Mutex;
     use std::{
         future::{pending, poll_fn},
         marker::PhantomPinned,
+        panic::{AssertUnwindSafe, catch_unwind},
         ptr,
         sync::{
             Barrier,
@@ -1266,6 +1286,33 @@ pub mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
 
         assert_send_sync::<Header>();
+    }
+
+    /// Dropping a runnable without scheduling, polling, or discarding it panics
+    /// and still releases its reference. A runnable dropped while the thread
+    /// unwinds releases its reference without a second panic.
+    #[test]
+    fn test_dropped_runnable_panics_unless_unwinding() {
+        let set = Tasks::new(1);
+        let (task, runnable) = Task::new(pending::<()>(), &set, Weak::new());
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(runnable))).unwrap_err();
+        assert_eq!(
+            extract_panic_message(&*panic),
+            "runnable dropped without being scheduled, polled, or discarded"
+        );
+        assert_eq!(refs(&task), 1);
+
+        let (other, runnable) = Task::new(pending::<()>(), &set, Weak::new());
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _runnable = runnable;
+            panic!("original panic");
+        }))
+        .unwrap_err();
+        assert_eq!(extract_panic_message(&*panic), "original panic");
+        assert_eq!(refs(&other), 1);
+
+        task.clear();
+        other.clear();
     }
 
     /// Every waker and runnable counts a reference, and the last one frees the
@@ -1799,7 +1846,10 @@ pub mod tests {
                 };
                 retire(&set, retired);
             } else {
-                // Teardown drops the idle future in place.
+                // Teardown discards the queued runnable and drops the future in
+                // place.
+                ready.discard();
+
                 for retired in set.teardown() {
                     retired.clear();
                 }
