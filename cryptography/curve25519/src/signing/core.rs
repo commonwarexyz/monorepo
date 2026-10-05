@@ -6,12 +6,12 @@ mod scalar;
 use crate::curve::{Backend, G, GAffine, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use commonware_cryptography::{Hasher as _, Sha512};
 use commonware_parallel::{Sequential, Strategy};
 use core::num::NonZeroUsize;
 use msm::Term;
 use rand_core::CryptoRng;
 pub(super) use scalar::Scalar;
-use sha2::{Digest, Sha512};
 
 /// The exact byte encoding used to identify an Ed25519 verifying key.
 ///
@@ -29,15 +29,6 @@ impl VerifyingKeyBytes {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
-}
-
-/// Computes `SHA-512(parts[0] || parts[1] || ...)`, the Ed25519 challenge hash `H(R || A || M)`.
-fn sha512(parts: &[&[u8]]) -> [u8; 64] {
-    let mut hasher = Sha512::new();
-    for part in parts {
-        hasher.update(part);
-    }
-    hasher.finalize().into()
 }
 
 /// An Ed25519 signature split into its two wire components.
@@ -70,7 +61,7 @@ impl Signature {
 /// coefficients and verdict deterministic functions of `(items, seed)`, identical at every thread
 /// count.
 fn batch_coefficients(seed: &[u8; 32], block: u64) -> [Scalar; 4] {
-    let digest = sha512(&[seed, &block.to_le_bytes()]);
+    let digest = Sha512::hash(&[seed, &block.to_le_bytes()]).0;
     core::array::from_fn(|k| {
         let mut bytes = [0u8; 16];
         bytes.copy_from_slice(&digest[k * 16..(k + 1) * 16]);
@@ -141,7 +132,8 @@ fn decompress_terms<B: Backend>(
     valid
 }
 
-/// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. The unit's `R`
+/// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. The unit's
+/// challenge inputs `R || A || M` are laid out in `challenges` and hashed together, and its `R`
 /// encodings decompress in one backend batch. Lanes past the last item hold identity terms.
 fn signature_unit<B: Backend>(
     backend: B,
@@ -149,6 +141,7 @@ fn signature_unit<B: Backend>(
     seed: &[u8; 32],
     width: u32,
     unit: usize,
+    challenges: &mut Vec<u8>,
     partition: &mut Partition,
 ) {
     let start = unit * UNIT;
@@ -164,18 +157,27 @@ fn signature_unit<B: Backend>(
         *coefficients = batch_coefficients(seed, (start / 4 + block) as u64);
     }
     let mut encodings = [IDENTITY_ENCODING; LANES];
-    for (encoding, (_, sig, _)) in encodings.iter_mut().zip(lanes) {
+    challenges.clear();
+    for (encoding, &(a_bytes, sig, msg)) in encodings.iter_mut().zip(lanes) {
         *encoding = sig.r;
+        challenges.extend_from_slice(&sig.r);
+        challenges.extend_from_slice(a_bytes.as_bytes());
+        challenges.extend_from_slice(msg);
     }
+    let mut inputs: [&[u8]; UNIT] = [&[]; UNIT];
+    let mut rest = challenges.as_slice();
+    for (input, (a_bytes, sig, msg)) in inputs.iter_mut().zip(lanes) {
+        (*input, rest) = rest.split_at(sig.r.len() + a_bytes.as_bytes().len() + msg.len());
+    }
+    let digests = Sha512::hash_many(&inputs[..lanes.len()]);
 
     let mut zh = [Scalar::ZERO; UNIT];
-    for (j, &(a_bytes, sig, msg)) in lanes.iter().enumerate() {
+    for (j, (_, sig, _)) in lanes.iter().enumerate() {
         let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
             partition.valid = false;
             continue;
         };
-        let digest = sha512(&[&sig.r, a_bytes.as_bytes(), msg]);
-        let h = Scalar::from_bytes_mod_order_wide(&digest);
+        let h = Scalar::from_bytes_mod_order_wide(&digests[j].0);
         zh[j] = z[j].mul_mod_l(&h);
         partition.zs_sum = partition.zs_sum.add_mod_l(&z[j].mul_mod_l(&s));
     }
@@ -217,8 +219,17 @@ fn signature_phase<B: Backend>(
                         zs_sum: Scalar::ZERO,
                         valid: true,
                     };
+                    let mut challenges = Vec::new();
                     for unit in range {
-                        signature_unit(backend, items, seed, width, unit, &mut partition);
+                        signature_unit(
+                            backend,
+                            items,
+                            seed,
+                            width,
+                            unit,
+                            &mut challenges,
+                            &mut partition,
+                        );
                     }
                     partition
                 },
@@ -410,7 +421,7 @@ fn verify_pipeline<B: Backend>(
         }
     });
 
-    // The coalesced basepoint term: `sum(z*s)·B` moved to the equation's other side by negating
+    // The coalesced basepoint term: `sum(z*s)*B` moved to the equation's other side by negating
     // its scalar, one more ordinary MSM term.
     let s_sum = signatures.iter().fold(Scalar::ZERO, |sum, partition| {
         sum.add_mod_l(&partition.zs_sum)
@@ -506,7 +517,7 @@ pub fn verify(
             point.to_extended()
         }
     };
-    let h = Scalar::from_bytes_mod_order_wide(&sha512(&[&sig.r, a_bytes.as_bytes(), msg]));
+    let h = Scalar::from_bytes_mod_order_wide(&Sha512::hash(&[&sig.r, a_bytes.as_bytes(), msg]).0);
 
     // With `v = u*h (mod L)`, `[8](u*s*B - u*R - v*A) = u*[8](s*B - R - h*A)` because `[8]`
     // maps every point into the prime-order subgroup. Since `0 < |u| < L`, one side is the
@@ -803,7 +814,7 @@ mod tests {
     }
 
     /// Batch verification's verdict is a deterministic function of `(items, seed)` (see
-    /// [`batch_coefficients`]), so serial and parallel strategies must agree on every batch --
+    /// [`batch_coefficients`]), so serial and parallel strategies must agree on every batch,
     /// including invalid ones, where the accept/reject outcome depends on the derived
     /// coefficients.
     #[test]
@@ -852,7 +863,9 @@ mod tests {
             let mut expected_terms = Vec::with_capacity(batch.len());
             for (i, &(key, sig, msg)) in items.iter().enumerate() {
                 let z = batch_coefficients(&seed, (i / 4) as u64)[i % 4];
-                let h = Scalar::from_bytes_mod_order_wide(&sha512(&[&sig.r, key.as_bytes(), msg]));
+                let h = Scalar::from_bytes_mod_order_wide(
+                    &Sha512::hash(&[&sig.r, key.as_bytes(), msg]).0,
+                );
                 assert_eq!(
                     zh[i / UNIT][i % UNIT].to_bytes(),
                     z.mul_mod_l(&h).to_bytes()
@@ -984,7 +997,7 @@ mod tests {
 
         // With `A = B` and `s = h`, the equation `s*B = R + h*A` holds for `R` the identity.
         let challenge = |r: &[u8; 32], key: &[u8; 32]| {
-            Scalar::from_bytes_mod_order_wide(&sha512(&[r, key, &message]))
+            Scalar::from_bytes_mod_order_wide(&Sha512::hash(&[r, key, &message]).0)
         };
         let bad_r = item(invalid, basepoint, challenge(&invalid, &basepoint));
         let good_r = item(identity, basepoint, challenge(&identity, &basepoint));
