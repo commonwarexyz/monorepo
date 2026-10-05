@@ -48,15 +48,13 @@ pub enum Error {
 /// Clones share commitment metadata and the acquisition service. They retain no
 /// block bodies and do not start requests. Each [`range`](Self::range) owns its
 /// cursor and bounds both pending acquisitions and completed bodies awaiting
-/// consumption. Marshal separately schedules forward prefetch for the whole
-/// requested range within its shared capacity. Each range's window is additional
-/// to that capacity. Dropping a range cancels its remaining demand.
+/// consumption. Dropping a range cancels its remaining demand.
 pub struct Blocks<B: Block> {
     tip: Height,
     digest: Arc<DigestAt<B>>,
     fetch: Arc<Fetch<B>>,
     demand: Option<Arc<Demand>>,
-    prefetch: usize,
+    window: usize,
 }
 
 impl<B: Block> Clone for Blocks<B> {
@@ -66,7 +64,7 @@ impl<B: Block> Clone for Blocks<B> {
             digest: self.digest.clone(),
             fetch: self.fetch.clone(),
             demand: self.demand.clone(),
-            prefetch: self.prefetch,
+            window: self.window,
         }
     }
 }
@@ -77,6 +75,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// `commitments` is the consensus-supplied suffix in increasing height order.
     /// Consecutive re-proposals occupy one entry. The suffix is shared without
     /// copying; older heights are supplied by canonical finalized storage.
+    ///
+    /// A polled range keeps its remaining selected suffix prefetched in forward order, within
+    /// the capacity shared by all ranges ([`Config::max_repair`](super::Config)). Each range's
+    /// window of pending acquisitions and buffered bodies is additional to that capacity.
     pub fn blocks(
         &self,
         parent_height: Height,
@@ -143,8 +145,8 @@ impl<B: Block> Blocks<B> {
     /// arrive, and return `None` only when acquisition can no longer complete.
     /// The closures must share their metadata and must not retain block bodies.
     ///
-    /// Each range holds at most `prefetch` pending or buffered body acquisitions.
-    pub fn new<D, F, Fut>(tip: Height, prefetch: NonZeroUsize, digest: D, fetch: F) -> Self
+    /// Each range holds at most `window` pending or buffered body acquisitions.
+    pub fn new<D, F, Fut>(tip: Height, window: NonZeroUsize, digest: D, fetch: F) -> Self
     where
         D: Fn(Height) -> Option<B::Digest> + Send + Sync + 'static,
         F: Fn(Height) -> Fut + Send + Sync + 'static,
@@ -171,7 +173,7 @@ impl<B: Block> Blocks<B> {
             digest,
             fetch,
             demand: None,
-            prefetch: prefetch.get(),
+            window: window.get(),
         }
     }
 
@@ -243,7 +245,7 @@ impl<B: Block> Stream for BlockRange<B> {
         {
             this.lease = Some(demand(height..=this.end));
         }
-        while this.pending.len() < this.source.prefetch {
+        while this.pending.len() < this.source.window {
             let Some(height) = this.next else {
                 break;
             };
@@ -359,13 +361,13 @@ mod tests {
 
     fn pending_source(
         blocks: &[TestBlock],
-        prefetch: NonZeroUsize,
+        window: NonZeroUsize,
         requests: Requests,
     ) -> Blocks<TestBlock> {
         let digests: Arc<[_]> = blocks.iter().map(Digestible::digest).collect();
         Blocks::new(
             blocks.last().unwrap().height(),
-            prefetch,
+            window,
             move |height| digests.get(height.get() as usize).copied(),
             move |height| {
                 let (sender, receiver) = oneshot::channel();

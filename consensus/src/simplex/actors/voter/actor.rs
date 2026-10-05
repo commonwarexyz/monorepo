@@ -46,19 +46,6 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
 
-/// Tracks which certificate type was received from the resolver in the current iteration.
-///
-/// Used to prevent "boomerang" where we send a certificate back to the resolver
-/// that we just received from it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Resolved {
-    #[default]
-    None,
-    Notarization,
-    Nullification,
-    Finalization,
-}
-
 /// Messages built and recorded during an event loop iteration, staged for
 /// broadcast after the journal sync barrier (see [Actor::construct] and
 /// [Actor::notify]).
@@ -500,26 +487,27 @@ impl<
         (self, Some((nullify, entry)))
     }
 
-    /// Tracks a verified nullification certificate if it is new.
-    async fn handle_nullification(mut self, nullification: Nullification<S>) -> Self {
+    /// Tracks a verified nullification certificate and returns whether it is new.
+    async fn handle_nullification(mut self, nullification: Nullification<S>) -> (Self, bool) {
         let artifact = Artifact::Nullification(nullification.clone());
 
         // Add verified nullification to journal
         if !self.state.add_nullification(nullification) {
-            return self;
+            return (self, false);
         }
-        self.append_journal(artifact).await
+        (self.append_journal(artifact).await, true)
     }
 
-    /// Records a notarization certificate and blocks any equivocating leader.
-    async fn handle_notarization(mut self, notarization: Notarization<S, D>) -> Self {
+    /// Records a notarization certificate, blocks any equivocating leader, and
+    /// returns whether it is new.
+    async fn handle_notarization(mut self, notarization: Notarization<S, D>) -> (Self, bool) {
         let artifact = Artifact::Notarization(notarization.clone());
         let (added, equivocator) = self.state.add_notarization(notarization);
         if added {
             self = self.append_journal(artifact).await;
         }
         self.block_equivocator(equivocator);
-        self
+        (self, added)
     }
 
     /// Handles the certification of a proposal.
@@ -545,20 +533,21 @@ impl<
         (self, Some(notarization))
     }
 
-    /// Stores a finalization certificate and guards against leader equivocation.
+    /// Stores a finalization certificate, guards against leader equivocation, and
+    /// returns whether it is new.
     ///
     /// The finalization is appended to the journal without an immediate sync.
     /// If a crash loses a finalization that healed the same-term finalize
     /// gate, replay restores the blocked gate (which is safe) and it heals
     /// again as soon as peers redeliver any covering finalization.
-    async fn handle_finalization(mut self, finalization: Finalization<S, D>) -> Self {
+    async fn handle_finalization(mut self, finalization: Finalization<S, D>) -> (Self, bool) {
         let artifact = Artifact::Finalization(finalization.clone());
         let (added, equivocator) = self.state.add_finalization(finalization);
         if added {
             self = self.append_journal(artifact).await;
         }
         self.block_equivocator(equivocator);
-        self
+        (self, added)
     }
 
     /// Builds and records a notarize vote when this view is ready.
@@ -575,57 +564,15 @@ impl<
         (self, Some(notarize))
     }
 
-    /// Builds and records a notarization certificate once we can assemble it locally.
-    async fn prepare_notarization(
-        mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-        view: View,
-        resolved: Resolved,
-    ) -> (Self, Option<Notarization<S, D>>) {
-        // Construct a notarization certificate
-        let Some(notarization) = self.state.broadcast_notarization(view) else {
-            return (self, None);
-        };
+    /// Returns the notarization certificate to broadcast, at most once per view.
+    fn prepare_notarization(&mut self, view: View) -> Option<Notarization<S, D>> {
+        let notarization = self.state.broadcast_notarization(view)?;
 
         // Only the leader sees an unbiased latency sample, so record it now.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.notarization_latency.observe(elapsed);
         }
-
-        // Tell the resolver this view is complete so it can stop requesting it.
-        // For a certificate from the batcher, this update is enqueued before
-        // the next loop iteration can emit any targeted ancestry repair it
-        // exposes. The resolver's unrestricted backfill therefore cannot be
-        // narrowed by that later target. Skip if the resolver just sent us
-        // this certificate (avoid boomerang).
-        if resolved != Resolved::Notarization {
-            resolver.updated(Certificate::Notarization(notarization.clone()));
-        }
-        // Update our local round with the certificate.
-        self = self.handle_notarization(notarization.clone()).await;
-        (self, Some(notarization))
-    }
-
-    /// Builds and records a nullification certificate if the round provides a candidate.
-    async fn prepare_nullification(
-        mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-        view: View,
-        resolved: Resolved,
-    ) -> (Self, Option<Nullification<S>>) {
-        // Construct the nullification certificate.
-        let Some(nullification) = self.state.broadcast_nullification(view) else {
-            return (self, None);
-        };
-
-        // Notify resolver so dependent parents can progress.
-        // Skip if the resolver just sent us this certificate (avoid boomerang).
-        if resolved != Resolved::Nullification {
-            resolver.updated(Certificate::Nullification(nullification.clone()));
-        }
-        // Track the certificate locally to avoid rebuilding it.
-        self = self.handle_nullification(nullification.clone()).await;
-        (self, Some(nullification))
+        Some(notarization)
     }
 
     /// Builds and records a finalize vote if the round provides a candidate.
@@ -642,31 +589,15 @@ impl<
         (self, Some(finalize))
     }
 
-    /// Builds and records a finalization certificate if the round provides a candidate.
-    async fn prepare_finalization(
-        mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-        view: View,
-        resolved: Resolved,
-    ) -> (Self, Option<Finalization<S, D>>) {
-        // Construct the finalization certificate.
-        let Some(finalization) = self.state.broadcast_finalization(view) else {
-            return (self, None);
-        };
+    /// Returns the finalization certificate to broadcast, at most once per view.
+    fn prepare_finalization(&mut self, view: View) -> Option<Finalization<S, D>> {
+        let finalization = self.state.broadcast_finalization(view)?;
 
         // Only record latency if we are the current leader.
         if let Some(elapsed) = self.leader_elapsed(view) {
             self.finalization_latency.observe(elapsed);
         }
-
-        // Tell the resolver this view is complete so it can stop requesting it.
-        // Skip if the resolver just sent us this certificate (avoid boomerang).
-        if resolved != Resolved::Finalization {
-            resolver.updated(Certificate::Finalization(finalization.clone()));
-        }
-        // Advance the consensus core with the finalization proof.
-        self = self.handle_finalization(finalization.clone()).await;
-        (self, Some(finalization))
+        Some(finalization)
     }
 
     /// Processes the automaton's response to a proposal request.
@@ -698,7 +629,7 @@ impl<
 
         // Construct proposal
         let proposal = Proposal::new(context.round, context.parent.0, proposed);
-        if !self.state.proposed(proposal) {
+        if !self.state.proposed(proposal, context.parent.1) {
             warn!(round = ?context.round, "dropped our proposal");
             return None;
         }
@@ -785,9 +716,12 @@ impl<
 
     /// Processes a message from the resolver or batcher.
     ///
-    /// Returns the view to notify and whether the message was a certificate
-    /// from the resolver.
-    async fn process_message(mut self, msg: Message<S, D>) -> (Self, Option<(View, Resolved)>) {
+    /// Returns the view to notify.
+    async fn process_message(
+        mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+        msg: Message<S, D>,
+    ) -> (Self, Option<View>) {
         match msg {
             Message::Proposal { proposal, .. } => {
                 let view = proposal.view();
@@ -799,13 +733,9 @@ impl<
                 if !self.state.set_proposal(view, proposal) {
                     return (self, None);
                 }
-                (self, Some((view, Resolved::None)))
+                (self, Some(view))
             }
-            Message::Verified {
-                certificate,
-                from_resolver,
-                ..
-            } => {
+            Message::Verified { certificate, .. } => {
                 // Certificates can come from future views (they advance our view)
                 let view = certificate.view();
                 if !self.state.admits_certificate(view) {
@@ -813,43 +743,41 @@ impl<
                     return (self, None);
                 }
 
-                // Track resolved status to avoid sending back to resolver
-                let mut resolved = Resolved::None;
+                // Record the certificate, keeping a copy to report if it is new.
+                // This includes certificates the resolver delivered, which it
+                // accepts again (see `resolver::Mailbox::updated`).
+                let forward = certificate.clone();
+                let added;
                 match certificate {
                     Certificate::Notarization(notarization) => {
-                        trace!(%view, from_resolver, "received notarization");
-                        self = self.handle_notarization(notarization).await;
-                        if from_resolver {
-                            resolved = Resolved::Notarization;
-                        }
+                        trace!(%view, "received notarization");
+                        (self, added) = self.handle_notarization(notarization).await;
                     }
                     Certificate::Nullification(nullification) => {
-                        trace!(%view, from_resolver, "received nullification");
-                        self = self.handle_nullification(nullification).await;
-                        if from_resolver {
-                            resolved = Resolved::Nullification;
-                        }
+                        trace!(%view, "received nullification");
+                        (self, added) = self.handle_nullification(nullification).await;
                     }
                     Certificate::Finalization(finalization) => {
-                        trace!(%view, from_resolver, "received finalization");
-                        self = self.handle_finalization(finalization).await;
-                        if from_resolver {
-                            resolved = Resolved::Finalization;
-                        }
+                        trace!(%view, "received finalization");
+                        (self, added) = self.handle_finalization(finalization).await;
                     }
                 }
-                (self, Some((view, resolved)))
+                if added {
+                    resolver.updated(forward);
+                }
+                (self, Some(view))
             }
             Message::Timeout { round, reason, .. } => {
                 let view = round.view();
                 debug!(%view, ?reason, "timing out view");
                 self.state.trigger_timeout(view, reason);
-                (self, Some((view, Resolved::None)))
+                (self, Some(view))
             }
         }
     }
 
-    /// Builds and records any votes or certificates that became available for `view`.
+    /// Builds and records any votes that became available for `view`, and takes
+    /// any certificates for `view` not yet broadcast.
     ///
     /// Returned artifacts must be synced through [Self::sync_journal] before
     /// [Self::notify] publishes them.
@@ -859,18 +787,13 @@ impl<
     /// proactively retry finalize votes for views certified while the gate was blocked: such a view
     /// only emits its vote if a later message touches it again (see the module documentation on
     /// same-term vote safety for the consequences when none arrives).
-    async fn construct(
-        mut self,
-        resolver: &mut resolver::Mailbox<S, D>,
-        view: View,
-        resolved: Resolved,
-    ) -> (Self, Staged<S, D>) {
-        let (notarize, notarization, nullification, finalize, finalization);
+    async fn construct(mut self, view: View) -> (Self, Staged<S, D>) {
+        let (notarize, finalize);
         (self, notarize) = self.prepare_notarize(view).await;
-        (self, notarization) = self.prepare_notarization(resolver, view, resolved).await;
-        (self, nullification) = self.prepare_nullification(resolver, view, resolved).await;
+        let notarization = self.prepare_notarization(view);
+        let nullification = self.state.broadcast_nullification(view);
         (self, finalize) = self.prepare_finalize(view).await;
-        (self, finalization) = self.prepare_finalization(resolver, view, resolved).await;
+        let finalization = self.prepare_finalization(view);
         (
             self,
             Staged {
@@ -907,7 +830,7 @@ impl<
             // after a nullification for the same view because certification is
             // asynchronous; finalization is the boundary that cancels in-flight
             // certification and suppresses late reporting.
-            resolver.certified(notarization.view(), certified);
+            resolver.certified(notarization.clone(), certified);
             if certified {
                 self.reporter.report(Activity::Certification(notarization));
             }
@@ -1046,7 +969,7 @@ impl<
                         self.reporter.report(Activity::Notarize(notarize));
                     }
                     Artifact::Notarization(notarization) => {
-                        self = self.handle_notarization(notarization.clone()).await;
+                        (self, _) = self.handle_notarization(notarization.clone()).await;
                         resolver.updated(Certificate::Notarization(notarization.clone()));
                         self.reporter.report(Activity::Notarization(notarization));
                     }
@@ -1057,7 +980,7 @@ impl<
                         let Some(notarization) = notarization else {
                             continue;
                         };
-                        resolver.certified(round.view(), success);
+                        resolver.certified(notarization.clone(), success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
                         }
@@ -1066,7 +989,7 @@ impl<
                         self.reporter.report(Activity::Nullify(nullify));
                     }
                     Artifact::Nullification(nullification) => {
-                        self = self.handle_nullification(nullification.clone()).await;
+                        (self, _) = self.handle_nullification(nullification.clone()).await;
                         resolver.updated(Certificate::Nullification(nullification.clone()));
                         self.reporter.report(Activity::Nullification(nullification));
                     }
@@ -1074,7 +997,7 @@ impl<
                         self.reporter.report(Activity::Finalize(finalize));
                     }
                     Artifact::Finalization(finalization) => {
-                        self = self.handle_finalization(finalization.clone()).await;
+                        (self, _) = self.handle_finalization(finalization.clone()).await;
                         resolver.updated(Certificate::Finalization(finalization.clone()));
                         self.reporter.report(Activity::Finalization(finalization));
                     }
@@ -1109,8 +1032,13 @@ impl<
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        let (span, finalized) = self.state.batcher_context(observed_view);
-        batcher.update(span, observed_view, leader, finalized, None);
+        batcher.update(
+            self.state.view_span(observed_view).clone(),
+            observed_view,
+            leader,
+            self.state.last_finalized(),
+            None,
+        );
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
@@ -1171,7 +1099,6 @@ impl<
                 // Wait for a timeout to fire or for a message to arrive
                 let (deadline, reason) = self.state.next_timeout();
                 let start = self.state.current_view();
-                let mut resolved = Resolved::None;
                 let mut nullify = None;
                 let mut certification = None;
                 let view;
@@ -1235,12 +1162,14 @@ impl<
                     view = msg.view().traced()
                 );
                 let processed;
-                (self, processed) = self.process_message(msg).instrument(span).await;
-                let Some((processed_view, processed_resolved)) = processed else {
+                (self, processed) = self
+                    .process_message(&mut resolver, msg)
+                    .instrument(span)
+                    .await;
+                let Some(processed_view) = processed else {
                     continue;
                 };
                 view = processed_view;
-                resolved = processed_resolved;
             },
             on_end => {
                 // Attempt to send any new view messages
@@ -1259,9 +1188,7 @@ impl<
                 self = async {
                     // Build and record everything that became available for `view`.
                     let mut staged;
-                    (self, staged) = self
-                        .construct(&mut resolver, view, resolved)
-                        .await;
+                    (self, staged) = self.construct(view).await;
                     staged.nullify = nullify;
                     staged.certification = certification;
 
@@ -1316,8 +1243,13 @@ impl<
 
                     // If the leader nullified or is inactive, the batcher
                     // responds with a timeout that expires the view immediately
-                    let (span, finalized) = self.state.batcher_context(current_view);
-                    batcher.update(span, current_view, leader, finalized, forwardable_proposal);
+                    batcher.update(
+                        self.state.view_span(current_view).clone(),
+                        current_view,
+                        leader,
+                        self.state.last_finalized(),
+                        forwardable_proposal,
+                    );
                 }
             },
         }

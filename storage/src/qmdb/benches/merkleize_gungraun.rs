@@ -40,7 +40,9 @@ async fn run(context: Context, options: BenchOptions) -> Digest {
             let metrics_context = context.child("metrics");
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
             let cfg = any_fix_cfg_with_cache(&context, page_cache.clone());
-            let db = AnyUFix::init(context.child("storage"), cfg).await.unwrap();
+            let db = AnyUFix::init(context.child("storage"), cfg, None)
+                .await
+                .unwrap();
             options
                 .benchmark()
                 .gungraun(MerkleizeWorkload::<MmrFamily, _>::new(
@@ -56,7 +58,7 @@ async fn run(context: Context, options: BenchOptions) -> Digest {
             let metrics_context = context.child("metrics");
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE);
             let cfg = cur_fix_cfg_with_cache(&context, page_cache.clone());
-            let db = CurOFix256Mmb::init(context.child("storage"), cfg)
+            let db = CurOFix256Mmb::init(context.child("storage"), cfg, None)
                 .await
                 .unwrap();
             options

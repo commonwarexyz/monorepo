@@ -65,7 +65,7 @@ stability_scope!(BETA {
     /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
     /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
     /// the same block.
-    pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
+    pub trait Block: Heightable + Codec + Digestible {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
     }
@@ -324,7 +324,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
         /// `blocks` supplies forward ranges of the selected parent branch, including
-        /// finalized history. Select only the history needed to build the block.
+        /// finalized history. It ends at `parent` (`blocks.tip() == parent.height()`). Select
+        /// only the history needed to build the block.
         /// `input` is the per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
@@ -340,11 +341,12 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// Verify `block` produced by the application's proposer against `parent`.
         ///
         /// `blocks` supplies forward ranges of the selected parent branch, including
-        /// finalized history. It excludes the candidate block.
+        /// finalized history. It ends at `parent` (`blocks.tip() == parent.height()`) and
+        /// excludes the candidate block.
         ///
         /// This future should not resolve until the implementation can produce a stable verdict.
         /// Return `false` only when the block is permanently invalid for the supplied context and
-        /// ancestry. If validity may still change as additional information becomes available,
+        /// selected history. If validity may still change as additional information becomes available,
         /// continue waiting instead of returning `false`.
         ///
         /// In other words, to abstain from voting, do not resolve this future yet. Keep it

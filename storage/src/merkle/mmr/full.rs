@@ -35,6 +35,7 @@ mod tests {
         BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
+    use rstest::rstest;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     fn test_digest(v: usize) -> Digest {
@@ -80,7 +81,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             let mmr = mmr.apply_batch(&batch).unwrap();
             assert_eq!(mmr.root(&hasher, 0).unwrap(), expected_root);
 
@@ -108,12 +109,16 @@ mod tests {
                 c_hasher = next_hasher;
                 batch = batch.add(&hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             mmr = mmr.apply_batch(&batch).unwrap();
 
-            // Rewind one node at a time without syncing until empty, confirming the root matches.
+            // Sync and reopen one leaf earlier until empty, confirming the root each time.
             for i in (0..NUM_ELEMENTS).rev() {
-                mmr = mmr.rewind(1).await.unwrap();
+                let cap = mmr.leaves() - 1;
+                _ = mmr.sync().await.unwrap();
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                    .await
+                    .unwrap();
                 let root = mmr.root(&hasher, 0).unwrap();
                 let mut reference_mmr = mem::Mmr::new();
                 let batch = {
@@ -130,17 +135,22 @@ mod tests {
                 assert_eq!(
                     root,
                     reference_mmr.root(&hasher, 0).unwrap(),
-                    "root mismatch after rewind at {i}"
+                    "root mismatch after bounded initialization at {i}"
                 );
             }
-            mmr = mmr.rewind(0).await.unwrap();
-            assert!(matches!(mmr.rewind(1).await, Err(Error::Empty)));
+            let cap = mmr.leaves();
+            _ = mmr.sync().await.unwrap();
+            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                .await
+                .unwrap();
+            drop(mmr);
             let mut mmr = Mmr::init(context.child("reopen1"), &hasher, test_config(&context))
                 .await
                 .unwrap();
 
             // Repeat the test though sync part of the way to tip to test crossing the boundary from
-            // cached to uncached leaves, and rewind 2 at a time instead of just 1.
+            // cached to uncached leaves, and reduce the initialization bound by 2 at a time instead
+            // of just 1.
             {
                 let mut batch = mmr.new_batch();
                 for i in 0u64..NUM_ELEMENTS {
@@ -154,7 +164,7 @@ mod tests {
                         break;
                     }
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
                 mmr = mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
@@ -164,12 +174,16 @@ mod tests {
                     c_hasher = next_hasher;
                     batch = batch.add(&hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
             }
 
             for i in (0..NUM_ELEMENTS - 1).rev().step_by(2) {
-                mmr = mmr.rewind(2).await.unwrap();
+                let cap = mmr.leaves() - 2;
+                _ = mmr.sync().await.unwrap();
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                    .await
+                    .unwrap();
                 let root = mmr.root(&hasher, 0).unwrap();
                 let reference_mmr = mem::Mmr::new();
                 let reference_mmr = build_test_mmr(&hasher, reference_mmr, i);
@@ -181,7 +195,7 @@ mod tests {
             }
             // Persist the empty state so re-initialization below starts from it.
             mmr = mmr.sync().await.unwrap();
-            assert!(matches!(mmr.rewind(99).await, Err(Error::Empty)));
+            drop(mmr);
             let mut mmr = Mmr::init(context.child("reopen2"), &hasher, test_config(&context))
                 .await
                 .unwrap();
@@ -195,7 +209,7 @@ mod tests {
                     c_hasher = next_hasher;
                     batch = batch.add(&hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
                 mmr = mmr.sync().await.unwrap();
                 let mut batch = mmr.new_batch();
@@ -205,26 +219,46 @@ mod tests {
                     c_hasher = next_hasher;
                     batch = batch.add(&hasher, &element);
                 }
-                let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+                let batch = batch.merkleize(mmr.mem(), &hasher);
                 mmr = mmr.apply_batch(&batch).unwrap();
             }
             let prune_loc = Location::new(50);
             let prune_pos = Position::try_from(prune_loc).unwrap();
             mmr = mmr.prune(prune_loc).await.unwrap();
-            // Rewind enough nodes to cause the mem-mmr to be completely emptied, and then some.
-            mmr = mmr.rewind(80).await.unwrap();
-            // Make sure the pinned node boundary is valid by generating a proof for the oldest item.
+
+            // Reopen below the previous in-memory boundary and verify the retained pinned nodes.
+            let cap = mmr.leaves() - 80;
+            _ = mmr.sync().await.unwrap();
+            mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                .await
+                .unwrap();
+
+            // A proof for the oldest item validates the pinned node boundary.
             mmr.proof(&hasher, prune_loc, 0).await.unwrap();
             // prune all remaining leaves 1 at a time.
             while mmr.size() > prune_pos {
-                mmr = mmr.rewind(1).await.unwrap();
+                let cap = mmr.leaves() - 1;
+                _ = mmr.sync().await.unwrap();
+                mmr = Mmr::init_at_most(context.child("cap"), &hasher, test_config(&context), cap)
+                    .await
+                    .unwrap();
             }
 
             // Make sure pruning to an older location is a no-op.
             mmr = mmr.prune(prune_loc - 1).await.unwrap();
             assert_eq!(mmr.bounds().start, prune_loc);
 
-            assert!(matches!(mmr.rewind(1).await, Err(Error::ElementPruned(_))));
+            drop(mmr);
+            assert!(matches!(
+                Mmr::<_, Digest, Sequential>::init_at_most(
+                    context.child("pruned_cap"),
+                    &hasher,
+                    test_config(&context),
+                    prune_loc - 1
+                )
+                .await,
+                Err(Error::ElementPruned(_))
+            ));
         });
     }
 
@@ -250,7 +284,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch = batch.add(&hasher, &element);
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             let mmr = mmr.apply_batch(&batch).unwrap();
             let mmr = mmr.sync().await.unwrap();
 
@@ -260,7 +294,7 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch_a = batch_a.add(&hasher, &element);
             }
-            let merkleized_a = mmr.with_mem(|mem| batch_a.merkleize(mem, &hasher));
+            let merkleized_a = batch_a.merkleize(mmr.mem(), &hasher);
 
             // Batch B on merkleized A: add 5 more elements.
             let mut batch_b = merkleized_a.new_batch();
@@ -268,10 +302,8 @@ mod tests {
                 let element = hasher.digest(&i.to_be_bytes());
                 batch_b = batch_b.add(&hasher, &element);
             }
-            let merkleized_b = mmr.with_mem(|mem| batch_b.merkleize(mem, &hasher));
-            let expected_root = mmr
-                .with_mem(|mem| merkleized_b.root(mem, &hasher, 0))
-                .unwrap();
+            let merkleized_b = batch_b.merkleize(mmr.mem(), &hasher);
+            let expected_root = merkleized_b.root(mmr.mem(), &hasher, 0).unwrap();
 
             // Apply.
             let mmr = mmr.apply_batch(&merkleized_b).unwrap();
@@ -289,12 +321,20 @@ mod tests {
         });
     }
 
-    /// Regression: init_sync's "fresh start" path (journal data entirely before sync range)
-    /// calls clear_to_size which changes the journal size, but journal_size must be re-read
-    /// afterward. Without the re-read, nodes_to_pin and the mem_mmr are initialized with a
-    /// stale size, causing incorrect pinned nodes or init failure.
+    /// Regression: init_sync's "fresh start" path (retained tree ending at or before the sync
+    /// start) resets the journal to the range start. A sync start past every stored blob leaves
+    /// the journal unopened and checks the cleared journal. A sync start inside the stored blobs
+    /// but past the recovered tree opens a journal too short to serve the range. Only that case
+    /// reaches the raised journal_size. A stale size would initialize nodes_to_pin and the
+    /// in-memory tree incorrectly or fail init.
+    #[rstest]
+    #[case::unopened(100, false)]
+    #[case::opened_short(6, true)]
     #[test_traced]
-    fn test_init_sync_fresh_start_updates_journal_size() {
+    fn test_init_sync_fresh_start_updates_journal_size(
+        #[case] leaves: usize,
+        #[case] opened: bool,
+    ) {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let hasher = Standard::<Sha256>::new(ForwardFold);
@@ -311,13 +351,12 @@ mod tests {
             for i in 0..5 {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(mmr.mem(), &hasher);
             let mmr = mmr.apply_batch(&batch).unwrap();
             let mmr = mmr.sync().await.unwrap();
             drop(mmr);
 
-            // Build a reference MMR to 100 leaves to get valid pinned nodes for the
-            // sync boundary.
+            // Build a reference MMR to the sync boundary to supply its pins and the expected root.
             let ref_cfg = Config {
                 journal_partition: "ref-journal".into(),
                 metadata_partition: "ref-metadata".into(),
@@ -332,24 +371,31 @@ mod tests {
                     .await
                     .unwrap();
             let mut batch = ref_mmr.new_batch();
-            for i in 0..100 {
+            for i in 0..leaves {
                 batch = batch.add(&hasher, &test_digest(i));
             }
-            let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(ref_mmr.mem(), &hasher);
             let ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
-            let expected_size = ref_mmr.size();
-            let prune_loc = Location::new(100);
+
+            // Read the pins for a boundary at `leaves` from the reference, in the `nodes_to_pin`
+            // order init_sync expects.
+            let prune_loc = Location::from(leaves);
             let mut pinned = Vec::new();
             for pos in Family::nodes_to_pin(prune_loc) {
                 pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
             }
-            ref_mmr.destroy().await.unwrap();
 
-            // init_sync with range starting beyond the existing data triggers the
-            // "fresh start" path (clear_to_size).
+            // Two local blobs with capacity 7 span positions 0..14 but recover a tree of size 8, so
+            // both sync starts lie past the recovered tree and init_sync resets the journal to the
+            // start. Position 197 (100 leaves) lies past every blob, so the journal stays unopened.
+            // Position 10 (6 leaves) lies inside the second blob, so the journal is opened and
+            // found too short. The asserts pin each case's start against 8 and 14.
+            let expected_size = Position::try_from(prune_loc).unwrap();
+            assert!(*expected_size > 8);
+            assert_eq!(*expected_size < 14, opened);
             let sync_cfg = SyncConfig::<Digest, Sequential> {
                 config: test_config(&context),
-                range: non_empty_range!(Location::new(100), Location::new(200)),
+                range: non_empty_range!(prune_loc, Location::new(200)),
                 pinned_nodes: Some(pinned),
             };
             let sync_mmr = Mmr::init_sync(context.child("sync"), sync_cfg)
@@ -359,12 +405,33 @@ mod tests {
             // The MMR should have size matching the prune boundary position.
             assert_eq!(sync_mmr.size(), expected_size);
 
-            // Should be able to add new elements without panic.
+            // Appending the same leaf to both trees must yield the same root. Below its start the
+            // sync tree holds only the pins, so a match shows init_sync placed the pins and sized
+            // the tree at the boundary.
             let batch = sync_mmr.new_batch().add(&hasher, &test_digest(999));
-            let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            let batch = batch.merkleize(sync_mmr.mem(), &hasher);
             let sync_mmr = sync_mmr.apply_batch(&batch).unwrap();
+            let batch = ref_mmr.new_batch().add(&hasher, &test_digest(999));
+            let batch = batch.merkleize(ref_mmr.mem(), &hasher);
+            let ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
+            let root = ref_mmr.root(&hasher, 0).unwrap();
+            assert_eq!(sync_mmr.root(&hasher, 0).unwrap(), root);
+            ref_mmr.destroy().await.unwrap();
 
-            sync_mmr.destroy().await.unwrap();
+            // Ordinary init must recover the appended leaf from the reset journal and the
+            // boundary pins from metadata.
+            _ = sync_mmr.sync().await.unwrap();
+            let mmr = Mmr::<_, Digest, Sequential>::init(
+                context.child("reopen"),
+                &hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(mmr.bounds(), prune_loc..prune_loc + 1);
+            assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
+
+            mmr.destroy().await.unwrap();
         });
     }
 }

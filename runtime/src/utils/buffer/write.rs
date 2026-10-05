@@ -19,12 +19,15 @@ use std::num::NonZeroUsize;
 /// # Access
 ///
 /// [Write] is a single-owner buffered handle that owns mutation ordering and durability
-/// bookkeeping for the wrapped [Blob]. Raw [Blob] handles cloned before wrapping observe only
+/// bookkeeping for the wrapped [Blob]. Raw [Blob] handles shared before wrapping observe only
 /// flushed data and may not see the latest buffered writes until [Self::sync], [Self::resize], or
 /// an overlapping [Self::write_at] flushes them. Those raw handles must not be used to write,
 /// resize, or otherwise mutate the blob while a [Write] exists. External mutations bypass the
 /// buffer state and [Self::sync] may use [Blob::write_at] with [WriteOptions::SYNC], which is
 /// not a durability barrier for those external mutations.
+///
+/// Storage-mutating functions consume the writer and return it only on success: an error (or a
+/// dropped future) destroys the handle.
 ///
 /// # Example
 ///
@@ -39,16 +42,17 @@ use std::num::NonZeroUsize;
 ///     assert_eq!(size, 0);
 ///
 ///     // Create a buffered writer with 16-byte buffer
-///     let mut blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
-///     blob.write_at(0, b"hello").await.expect("write failed");
-///     blob.sync().await.expect("sync failed");
+///     let blob = Write::from_pooler(&context, blob, 0, NZUsize!(16));
+///     let blob = blob.write_at(0, b"hello").await.expect("write failed");
+///     let blob = blob.sync().await.expect("sync failed");
 ///
 ///     // Write more data in multiple flushes
-///     blob.write_at(5, b" world").await.expect("write failed");
-///     blob.write_at(11, b"!").await.expect("write failed");
-///     blob.sync().await.expect("sync failed");
+///     let blob = blob.write_at(5, b" world").await.expect("write failed");
+///     let blob = blob.write_at(11, b"!").await.expect("write failed");
+///     let blob = blob.sync().await.expect("sync failed");
 ///
-///     // Read back the data to verify
+///     // Release the writer and read back the persisted data through a new open.
+///     drop(blob);
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
 ///     let buf = reader.read(size as usize).await.expect("read failed");
@@ -93,6 +97,11 @@ impl<B: Blob> Write<B> {
     /// This represents the total size of data that would be present after flushing.
     pub const fn size(&self) -> u64 {
         self.buffer.size()
+    }
+
+    /// Whether [Self::sync] would write buffered bytes, sync the blob, or observe a started sync.
+    pub const fn needs_sync(&self) -> bool {
+        !self.buffer.is_empty() || !self.sync_state.is_clean()
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
@@ -144,6 +153,16 @@ impl<B: Blob> Write<B> {
             .freeze())
     }
 
+    /// Merge `buf` into the in-memory tip buffer at `offset`.
+    ///
+    /// Returns whether `buf` fit. Returns `false` without changing the writer when it does not
+    /// fit. Performs no I/O and does not make the write durable. Callers can fall back to
+    /// [`Self::write_at`] when it does not fit.
+    pub fn try_write_at(&mut self, offset: u64, buf: &[u8]) -> bool {
+        buf.is_empty()
+            || (offset.checked_add(buf.len() as u64).is_some() && self.buffer.merge(buf, offset))
+    }
+
     /// Write bytes from `buf` at `offset`.
     ///
     /// Data is merged into the in-memory tip buffer when possible, otherwise buffered data may be
@@ -151,10 +170,10 @@ impl<B: Blob> Write<B> {
     ///
     /// Returns [Error::OffsetOverflow] when `offset + bufs.len()` overflows.
     pub async fn write_at(
-        &mut self,
+        mut self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
-    ) -> Result<(), Error> {
+    ) -> Result<Self, Error> {
         let mut bufs = bufs.into();
 
         // Ensure the write doesn't overflow.
@@ -207,14 +226,14 @@ impl<B: Blob> Write<B> {
             self.buffer.offset = self.buffer.offset.max(current_offset);
         }
 
-        Ok(())
+        Ok(self)
     }
 
     /// Resize the logical blob to `len`.
     ///
     /// If buffered data exists and the resize extends beyond current size, buffered data is flushed
     /// before resizing the underlying blob.
-    pub async fn resize(&mut self, len: u64) -> Result<(), Error> {
+    pub async fn resize(mut self, len: u64) -> Result<Self, Error> {
         // Flush buffered data to the underlying blob.
         //
         // This can only happen if the new size is greater than the current size.
@@ -226,40 +245,41 @@ impl<B: Blob> Write<B> {
 
         self.sync_state.resize(&self.blob, len).await?;
 
-        Ok(())
+        Ok(self)
     }
 
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
-    pub async fn sync(&mut self) -> Result<(), Error> {
-        if let Some((buf, offset)) = self.buffer.take() {
-            return self.write_blob_sync(offset, buf).await;
+    pub async fn sync(mut self) -> Result<Self, Error> {
+        match self.buffer.take() {
+            Some((buf, offset)) => self.write_blob_sync(offset, buf).await?,
+            None => self.sync_blob().await?,
         }
-
-        self.sync_blob().await
+        Ok(self)
     }
 
     /// Flush buffered bytes and begin durably syncing mutations tracked by this writer.
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob wait before issuing blob operations. A flush failure is retained the same
-    /// way: the handle reports it, and so does the next such call.
-    pub async fn start_sync(&mut self) -> Handle<()> {
-        if let Some((buf, offset)) = self.buffer.take()
-            && let Err(err) = self
-                .sync_state
+    /// mutate the blob wait before issuing blob operations. A failure of the started sync is
+    /// reported by the handle and by the next such call. Flush errors are returned directly.
+    pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
+        // Complete buffered writes before requesting their durability barrier.
+        if let Some((buf, offset)) = self.buffer.take() {
+            self.sync_state
                 .write_at(&self.blob, offset, buf, WriteOptions::default())
-                .await
-        {
-            return self.sync_state.fail(err);
+                .await?;
         }
 
-        self.sync_state.start_sync(&self.blob).await
+        // The runtime runs the sync. The returned handle observes its completion.
+        let handle = self.sync_state.start_sync(&self.blob).await;
+        Ok((self, handle))
     }
 
     /// Wait for any started sync to complete without starting a new sync.
-    pub async fn wait_for_sync(&mut self) -> Result<(), Error> {
-        self.sync_state.wait_for_pending().await
+    pub async fn wait_for_sync(mut self) -> Result<Self, Error> {
+        self.sync_state.wait_for_pending().await?;
+        Ok(self)
     }
 
     /// Write bytes to the underlying blob and make them durable.
