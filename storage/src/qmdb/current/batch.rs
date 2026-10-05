@@ -18,13 +18,13 @@ use crate::{
             batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
-        bitmap::{Shared, fill_from},
+        bitmap::{Candidates, Shared, fill_from},
         chain::Bounds,
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
         },
-        floor::{Limits, Policy},
+        floor::Policy,
         operation::Key,
     },
 };
@@ -153,14 +153,18 @@ impl<const N: usize> ChunkOverlay<N> {
 /// committed base is locked once per untouched chunk, rather than several times per
 /// candidate. The iterator's chunk caching is sound here because bitmap mutators require
 /// `&mut` on the database, which cannot coexist with the `&db` a merkleize holds.
-pub(crate) fn fill_candidates<F: Graftable, const N: usize>(
-    bitmap: &BitmapBatch<N>,
-    floor: Location<F>,
-    tip: u64,
-    limit: usize,
-    out: &mut Vec<Location<F>>,
-) -> Location<F> {
-    Location::new(fill_from(bitmap, *floor, tip, limit, out))
+impl<F: Graftable, const N: usize> Candidates<F> for &BitmapBatch<N> {
+    const EXCLUDES_SUPERSEDED: bool = true;
+
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F> {
+        Location::new(fill_from(*self, *floor, tip, limit, out))
+    }
 }
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
@@ -548,29 +552,18 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
-            fill_candidates(&bitmap_parent, floor, tip, limit, out)
-        };
-        let (prepared, staged, prefetched) = match policy.limits() {
-            Limits::Proportional => {
-                // Overlap the update resolution with a candidate prefetch. The helper clamps the
-                // prefetch to the committed prefix.
-                let (prepared, staged, prefetched) = inner
-                    .resolve_updates_prefetched(updates, upserts, &db.any, fill)
-                    .await?;
-                (prepared, staged, Some(prefetched))
-            }
-            limits => {
-                let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
-                let (prepared, staged) = inner
-                    .prepare(&db.any)?
-                    .advance(staged, policy, limits, fill)
-                    .await?;
-                (prepared, staged, None)
-            }
-        };
+
+        // Overlap the update resolution with a candidate prefetch. The helper clamps the prefetch
+        // to the committed prefix.
+        let limits = policy.limits();
+        let (prepared, staged) = inner
+            .resolve_updates_prefetched(updates, upserts, &db.any, limits, &bitmap_parent)
+            .await?;
+        let (prepared, staged) = prepared
+            .advance(staged, policy, limits, &bitmap_parent)
+            .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, prefetched, fill)
+            .merkleize_with_floor_scan(metadata, staged, &bitmap_parent)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -630,15 +623,14 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
-            fill_candidates(&bitmap_parent, floor, tip, limit, out)
-        };
         let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let limits = policy.limits();
-        let (prepared, staged) = prepared.advance(staged, policy, limits, fill).await?;
+        let (prepared, staged) = prepared
+            .advance(staged, policy, limits, &bitmap_parent)
+            .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, fill)
+            .merkleize_with_floor_scan(metadata, staged, &bitmap_parent)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -685,14 +677,13 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
-            fill_candidates(&bitmap_parent, floor, tip, limit, out)
-        };
         let prepared = inner.prepare(&db.any)?;
         let limits = policy.limits();
-        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
+        let (prepared, staged) = prepared
+            .advance(Vec::new(), policy, limits, &bitmap_parent)
+            .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, None, fill)
+            .merkleize_with_floor_scan(metadata, staged, &bitmap_parent)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -739,14 +730,13 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let fill = |floor, tip, limit, out: &mut Vec<Location<F>>| {
-            fill_candidates(&bitmap_parent, floor, tip, limit, out)
-        };
         let prepared = inner.prepare(&db.any)?;
         let limits = policy.limits();
-        let (prepared, staged) = prepared.advance(Vec::new(), policy, limits, fill).await?;
+        let (prepared, staged) = prepared
+            .advance(Vec::new(), policy, limits, &bitmap_parent)
+            .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged, fill)
+            .merkleize_with_floor_scan(metadata, staged, &bitmap_parent)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -1710,7 +1700,7 @@ mod tests {
 
     // ---- next_candidate tests ----
 
-    /// Single-step oracle for [`fill_candidates`]: return the next floor-raise candidate in
+    /// Single-step oracle for [`Candidates::fill`]: return the next floor-raise candidate in
     /// `[floor, tip)` over any [`bitmap::Readable`]. `fill_candidates_matches_oracle` proves
     /// the production scan produces exactly this sequence over every chain shape.
     fn next_candidate<B: bitmap::Readable<N2>, const N2: usize>(
@@ -1815,7 +1805,7 @@ mod tests {
         // Sequence parity plus split-resume for one (chain, tip): the scan matches
         // single-stepping the oracle over the same chain, and any split point resumes
         // seamlessly via the returned continuation.
-        fn assert_matches(name: &str, chain: &BitmapBatch<N>, tip: u64) {
+        fn assert_matches(name: &str, mut chain: &BitmapBatch<N>, tip: u64) {
             for floor in 0..=tip {
                 let mut want = Vec::new();
                 let mut scan = Location::new(floor);
@@ -1825,8 +1815,8 @@ mod tests {
                 }
                 for split in 0..=want.len() {
                     let mut got = Vec::new();
-                    let next = fill_candidates(chain, Location::new(floor), tip, split, &mut got);
-                    fill_candidates(chain, next, tip, want.len() + 1, &mut got);
+                    let next = chain.fill(Location::new(floor), tip, split, &mut got);
+                    chain.fill(next, tip, want.len() + 1, &mut got);
                     assert_eq!(got, want, "{name} floor={floor} split={split}");
                 }
             }
@@ -1912,8 +1902,8 @@ mod tests {
             let pruned_bits = bitmap::Readable::<N>::pruned_bits(&chain);
             for floor in pruned_bits..=committed {
                 let mut got = Vec::new();
-                let next = fill_candidates(&chain, Location::new(floor), committed, cap, &mut got);
-                fill_candidates(&chain, next, tip, cap, &mut got);
+                let next = (&chain).fill(Location::new(floor), committed, cap, &mut got);
+                (&chain).fill(next, tip, cap, &mut got);
                 let want: Vec<Location> = (floor..tip)
                     .filter(|&loc| loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc))
                     .map(Location::new)
@@ -1955,9 +1945,9 @@ mod tests {
         // or appended, from whichever layer materialized the chunk last -- are emitted
         // ascending, and locations at or beyond the layered length up to `tip` are emitted
         // sequentially.
-        let scan = |chain: &BitmapBatch<N>, tip: u64| {
+        let scan = |mut chain: &BitmapBatch<N>, tip: u64| {
             let mut got = Vec::new();
-            fill_candidates(chain, Location::new(0), tip, 16, &mut got);
+            chain.fill(Location::new(0), tip, 16, &mut got);
             got
         };
         let want = |locs: &[u64]| locs.iter().copied().map(Location::new).collect::<Vec<_>>();
@@ -1991,7 +1981,7 @@ mod tests {
         // Chunk 0 bits come from the base, chunk 1 bits from the overlay (35 filtered,
         // the appended 41 emitted).
         let mut got = Vec::new();
-        fill_candidates(&chain, Location::new(0), 44, 16, &mut got);
+        (&chain).fill(Location::new(0), 44, 16, &mut got);
         let want: Vec<Location> = [1, 30, 33, 38, 41].into_iter().map(Location::new).collect();
         assert_eq!(got, want);
     }

@@ -14,8 +14,9 @@
 //!
 //! Kept updates move to the tip as under [`Limits::Proportional`]. Evictions and replacements
 //! resolve as writes to their keys. The batch commits the floor the pass reached, or its commit
-//! location if its final state is empty. The pass reads only locations below both the tip before
-//! the batch's writes and the inherited floor plus `skips` plus `entries`.
+//! location if its final state is empty. The limits bound what the pass decides and passes, not
+//! what it reads: it may read locations it then passes or never reaches, but only below both the
+//! tip before the batch's writes and the inherited floor plus `skips` plus `entries`.
 
 use crate::merkle::{Family, Location};
 use std::marker::PhantomData;
@@ -33,8 +34,7 @@ pub enum Limits {
     /// Decide at most `entries` active updates and pass at most `skips` inactive locations. Skips
     /// left once `entries` updates are decided go unspent, and zero `entries` passes no location.
     Fixed {
-        /// The most active updates to decide. A pass may read ahead as many active updates as it
-        /// has entries left, so a policy that often stops early should keep it small.
+        /// The most active updates to decide.
         entries: usize,
         /// The most inactive locations to pass.
         skips: u64,

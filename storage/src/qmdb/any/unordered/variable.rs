@@ -151,7 +151,10 @@ pub(crate) mod test {
     use crate::{
         index::Unordered as _,
         mmr,
-        qmdb::floor::{Compact, Proportional},
+        qmdb::{
+            bitmap::{Candidates, FnCandidates},
+            floor::{Compact, Limits, Proportional},
+        },
         translator::TwoCap,
     };
     use commonware_cryptography::{Sha256, sha256::Digest};
@@ -849,16 +852,17 @@ pub(crate) mod test {
             assert_eq!(values, vec![Some(to_bytes(1_000))]);
             let weak_grandparent = Arc::downgrade(&grandparent);
             let mut caller_ancestors = Some((grandparent, parent));
-            let (prepared, updates, prefetched) = staged
+            let (prepared, updates) = staged
                 .resolve_updates_prefetched(
                     vec![(0, Some(to_bytes(3_000)))],
                     vec![(key(101), Some(to_bytes(3_001)))],
                     &db,
-                    |floor, tip, limit, out| {
+                    Limits::Proportional,
+                    FnCandidates(|floor, tip, limit, out: &mut Vec<_>| {
                         // Preparation must retain the chain before prefetch starts.
                         drop(caller_ancestors.take());
-                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
-                    },
+                        db.bitmap.as_ref().fill(floor, tip, limit, out)
+                    }),
                 )
                 .await
                 .unwrap();
@@ -866,14 +870,7 @@ pub(crate) mod test {
             assert!(weak_grandparent.upgrade().is_some());
 
             let (batch, retained_ancestors) = prepared
-                .merkleize_with_floor_scan(
-                    None,
-                    updates,
-                    Some(prefetched),
-                    |floor, tip, limit, out| {
-                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
-                    },
-                )
+                .merkleize_with_floor_scan(None, updates, db.bitmap.as_ref())
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);

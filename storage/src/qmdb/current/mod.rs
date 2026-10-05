@@ -5307,6 +5307,109 @@ pub mod tests {
         });
     }
 
+    /// A staged floor raise over a pending parent, whose committed candidates run out before the
+    /// raise moves enough updates, continues into the parent's operations over a pruned bitmap.
+    /// The staged batch matches the unstaged one and a twin merkleized after the parent is
+    /// applied.
+    #[test_traced("INFO")]
+    fn test_current_staged_raise_continues_past_committed_candidates() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let mut db: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("current-staged-raise-live", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Rewrite one key until the floor passes a bitmap chunk, then prune the chunks below
+            // it. Each rewrite moves the key's update to the floor.
+            let rounds = CHUNK_BITS / 2;
+            for i in 0..rounds {
+                let batch = db
+                    .new_batch()
+                    .write(key(0), Some(val(i)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+            }
+            let db = db.commit().await.unwrap();
+            let floor = db.inactivity_floor_loc();
+            let db = db
+                .prune(Location::new(*floor / CHUNK_BITS * CHUNK_BITS))
+                .await
+                .unwrap();
+            assert!(db.pruned_bits() > 0);
+
+            // Seed four more keys in key order with a held floor, and rewrite them all in a
+            // pending parent, so the only committed update the parent leaves active is the
+            // rewritten key's.
+            let mut keys: Vec<_> = (1..5).map(key).collect();
+            keys.sort();
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, k| batch.write(*k, Some(val(1))))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let parent = keys
+                .iter()
+                .fold(db.new_batch(), |batch, k| batch.write(*k, Some(val(2))))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // A child that stages and rewrites the parent's first key takes two steps. The
+            // committed update at the floor takes one, and the parent's update of the second key
+            // takes the other.
+            let (_, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&[&keys[0]], &db)
+                .await
+                .unwrap();
+            let staged = staged
+                .merkleize(
+                    vec![(0, Some(val(3)))],
+                    Vec::new(),
+                    None,
+                    &db,
+                    &mut Proportional,
+                )
+                .await
+                .unwrap();
+            let direct = parent
+                .new_batch::<Sha256>()
+                .write(keys[0], Some(val(3)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(staged.root(), direct.root());
+            let (_, operations) = staged.operations();
+            assert_eq!(
+                operations[1..3],
+                [
+                    Operation::Update(update::Unordered(key(0), val(rounds - 1))),
+                    Operation::Update(update::Unordered(keys[1], val(2))),
+                ]
+            );
+
+            // A twin merkleized after the parent is applied produces the same root.
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let twin = db
+                .new_batch()
+                .write(keys[0], Some(val(3)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(twin.root(), staged.root());
+            drop((staged, direct, twin));
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Instantiate the staged policy test for one current DB kind. A staged write supersedes its
     /// key's update, so the policy passes that update as inactive. The batch matches an unstaged
     /// batch with the same write and policy, and survives reopen.

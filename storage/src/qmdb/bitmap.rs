@@ -8,6 +8,7 @@
 //! Reads through an invalidated `MerkleizedBatch` (see its "Branch validity" docs) return
 //! inconsistent bytes; callers must drop invalid batches.
 
+use crate::merkle::{Family, Location};
 #[cfg(test)]
 use commonware_utils::bitmap::Readable as _;
 use commonware_utils::{
@@ -44,23 +45,6 @@ impl<const N: usize> Shared<N> {
         self.read().ones_iter_from(from).next()
     }
 
-    /// Fill `out` with up to `limit` floor-raise candidates in `[scan_from, tip)`, holding a single
-    /// read guard for the whole batch. Returns the next `scan_from`.
-    ///
-    /// The candidate sequence is identical to repeatedly calling `any::batch::next_candidate`
-    /// (the test oracle): set bits in the committed prefix are returned in order via one
-    /// `ones_iter_range`, then locations at or beyond the committed boundary are returned
-    /// sequentially.
-    pub(crate) fn fill_candidates<T: From<u64>>(
-        &self,
-        scan_from: u64,
-        tip: u64,
-        limit: usize,
-        out: &mut Vec<T>,
-    ) -> u64 {
-        fill_from(&*self.read(), scan_from, tip, limit, out)
-    }
-
     /// Return the number of pruned bits. Acquires the read lock briefly.
     pub(crate) fn pruned_bits(&self) -> u64 {
         self.read().pruned_bits()
@@ -70,6 +54,59 @@ impl<const N: usize> Shared<N> {
     #[cfg(any(test, feature = "test-traits"))]
     pub(crate) fn get_bit(&self, loc: u64) -> bool {
         self.read().get_bit(loc)
+    }
+}
+
+/// Floor candidates in ascending location order, within and across successive fills. A source
+/// yields every location that may hold an active update in the batch chain. Below the database's
+/// size, it yields only locations whose committed bit is set.
+pub(crate) trait Candidates<F: Family> {
+    /// Whether the source excludes committed locations superseded by pending ancestors. Such
+    /// sources need neither ancestor-list filtering nor superseded lists recorded for descendants.
+    const EXCLUDES_SUPERSEDED: bool = false;
+
+    /// Append candidates in `[floor, tip)` in ascending order while `out.len() < limit`, returning
+    /// the next scan location. Successive calls resume there and preserve ascending order. Below
+    /// the database's size, candidates must have their committed bit set.
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F>;
+}
+
+impl<F: Family, const N: usize> Candidates<F> for &Shared<N> {
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F> {
+        Location::new(fill_from(&*self.read(), *floor, tip, limit, out))
+    }
+}
+
+/// A closure as a [`Candidates`] source that keeps superseded locations, for tests with custom
+/// candidate sequences.
+#[cfg(test)]
+pub(crate) struct FnCandidates<T>(pub(crate) T);
+
+#[cfg(test)]
+impl<F: Family, T> Candidates<F> for FnCandidates<T>
+where
+    T: FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
+{
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F> {
+        (self.0)(floor, tip, limit, out)
     }
 }
 
