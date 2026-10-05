@@ -7,14 +7,11 @@ use core::ops::Range;
 /// Returns a Range of operations to fetch, or None if no gaps.
 /// Empty coverage ranges are ignored, and returned gaps are bounded by `range`.
 ///
-/// Outstanding request ranges describe their maximum responses, but the source may return fewer
-/// operations. In that case, we'll fetch the remaining operations in a subsequent request.
-///
 /// # Arguments
 ///
 /// * `range` - The sync range
 /// * `fetched_ranges` - Ranges of fetched batches, in ascending order of start location
-/// * `outstanding_ranges` - Maximum ranges of outstanding requests, in ascending order of start location
+/// * `outstanding_ranges` - Ranges of outstanding requests, in ascending order of start location
 pub fn find_next<F: Family>(
     range: Range<Location<F>>,
     fetched_ranges: impl IntoIterator<Item = Range<Location<F>>>,

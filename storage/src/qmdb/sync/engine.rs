@@ -81,11 +81,16 @@ where
     let hasher = qmdb::hasher::<H>();
     match (&request, response) {
         (
-            Request::Operations { start, max_ops, .. },
+            Request::Operations {
+                size,
+                start,
+                max_ops,
+            },
             Response::Operations { proof, operations },
         ) => {
-            let operations_len = operations.len() as u64;
-            if operations_len == 0 || operations_len > max_ops.get() {
+            // An honest source returns every requested operation that exists at `size`.
+            let expected = max_ops.get().min((**size).saturating_sub(**start));
+            if expected == 0 || operations.len() as u64 != expected {
                 false
             } else {
                 let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
