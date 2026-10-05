@@ -21,6 +21,9 @@
 //! latency). Once a certificate is formed, we wait on the verification result in [`CertifiableAutomaton::certify`]
 //! before voting to finalize (ensuring no invalid blocks are admitted to the canonical chain).
 //!
+//! All validators must run the same wrapper for all views in a given epoch (see
+//! [`crate::marshal::standard`] for more details).
+//!
 //! # Usage
 //!
 //! Wrap your [`Application`] implementation with [`Deferred::new`] and provide it to your
@@ -1811,6 +1814,7 @@ mod tests {
 
             // After certify, the block must be durable across an unclean restart.
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(marshaled);
             drop(marshal);
 

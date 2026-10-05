@@ -20,9 +20,8 @@ pub enum EngineError<F: Family, D: Digest> {
     /// Hash mismatch after sync
     #[error("root digest mismatch - expected {expected:?}, got {actual:?}")]
     RootMismatch { expected: D, actual: D },
-    /// The source served a response that cannot satisfy the target and is not accepting
-    /// feedback. Retrying cannot yield a different answer.
-    #[error("response failed validation and the source accepts no feedback")]
+    /// The source finished without a response that satisfies the request.
+    #[error("source returned no valid response")]
     InvalidResponse,
     /// Invalid target parameters
     #[error("invalid bounds: lower bound {lower_bound_pos} > upper bound {upper_bound_pos}")]

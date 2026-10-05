@@ -543,11 +543,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         &mut self,
         key: &[u8],
         value: Self::Value,
-        should_retain: impl Fn(&Self::Value) -> bool,
+        mut should_retain: impl FnMut(&Self::Value) -> bool,
     ) {
         let (i, _) = partition_index_and_sub_key::<P>(key);
         if let Some(mut cursor) = self.get_mut(key) {
-            cursor.retain(&should_retain);
+            cursor.retain(&mut should_retain);
             if should_retain(&value) {
                 cursor.insert(value);
             }

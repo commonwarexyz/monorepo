@@ -26,11 +26,10 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use tracing::debug;
 
-/// The service phase of the DKG probe actor.
-///
-/// Answers peers' latest-finalization, boundary finalization, and boundary
-/// block requests from the attached marshal. When consensus observes a future
-/// epoch, discovers the active epoch's boundary certificate for marshal.
+/// Serving phase of the probe actor: answers requests from the attached marshal
+/// and, while the orchestrator is catching up, discovers the active epoch's
+/// boundary certificate for marshal (see the
+/// [module docs](crate::dkg::probe#serving)).
 pub(super) struct Service<E, S, V, T, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
@@ -116,8 +115,8 @@ where
                 let epoch = pending.expect("retry requires a pending epoch");
                 let height = self.epocher.last(epoch).expect("active epoch is covered");
                 if self.marshal.get_finalization(height).await.is_some()
-                    || self.marshal.get_processed_height().await
-                        .is_some_and(|processed| processed >= height)
+                    || self.marshal.get_processed().await
+                        .is_some_and(|processed| processed.height() >= height)
                 {
                     pending = None;
                 } else {

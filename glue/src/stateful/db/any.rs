@@ -1,14 +1,12 @@
-//! [`ManagedDb`] implementation for QMDB [`any`](commonware_storage::qmdb::any) databases.
+//! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB
+//! [`any`](commonware_storage::qmdb::any) databases.
 //!
-//! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
-//! read-through to applied state. This module provides wrapper types
-//! that capture a [`Shared`] database handle alongside the raw batch so the
-//! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
-//! traits can be implemented without a DB parameter.
+//! Batch reads fall back to the database's applied state at the time of the read, not to a
+//! snapshot taken when the batch was created.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -48,8 +46,7 @@ use std::{
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
 
-/// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
+/// A speculative batch of updates and deletes over a shared `any` database.
 pub struct AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -66,8 +63,7 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Staged batch returned by [`AnyUnmerkleized::stage`], wrapping a QMDB [`Staged`] with a
-/// reference to the parent database.
+/// A staged batch returned by [`AnyUnmerkleized::stage`].
 ///
 /// Like any speculative batch, this handle is a branch-scoped view of the shared database: it
 /// stays valid only while every batch finalized on the database is an ancestor of this batch
@@ -88,7 +84,6 @@ where
     metadata: Option<U::Value>,
 }
 
-/// Key-value operations shared by both `any` update kinds.
 impl<F, E, C, I, H, U, S> AnyUnmerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -100,30 +95,31 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Set commit metadata included in the next
-    /// [`merkleize`](UnmerkleizedTrait::merkleize) call.
+    /// Sets the metadata committed by [`merkleize`](UnmerkleizedTrait::merkleize).
+    ///
+    /// The metadata carries over to a batch returned by [`Self::stage`].
     pub fn with_metadata(mut self, metadata: U::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
 
-    /// Read multiple values and return a staged batch for the same keys.
+    /// Reads multiple values and returns a staged batch for the same keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn stage(
         self,
         keys: &[&U::Key],
@@ -147,15 +143,14 @@ where
         ))
     }
 
-    /// Record a mutation. `Some(value)` for upsert, `None` for delete.
+    /// Records an upsert (`Some`) or a delete (`None`) of `key`.
     pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.batch = self.batch.write(key, value);
         self
     }
 }
 
-/// Wraps a QMDB [`MerkleizedBatch`] with a reference to the parent
-/// database, implementing the [`Merkleized`](super::Merkleized) trait.
+/// A sealed `any` batch with a computed root.
 pub struct AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -226,7 +221,6 @@ where
     }
 }
 
-/// Read-expansion operations for the `any` staged batch.
 impl<F, E, C, I, H, U, S> AnyStaged<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -238,14 +232,14 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Set commit metadata included in the [`merkleize`](Self::merkleize) call, replacing any
-    /// metadata set before staging.
+    /// Sets the metadata committed by [`merkleize`](Self::merkleize), replacing any metadata set
+    /// before staging.
     pub fn with_metadata(mut self, metadata: U::Value) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Expand this staged batch with more reads.
+    /// Expands this staged batch with more reads.
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
     /// assigned the returned range. Expansion does not deduplicate against previously staged keys
@@ -276,32 +270,28 @@ where
     }
 }
 
-/// Staged merkleize for the `any` unordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, unordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
-    /// this method if more keys must be read into the staged index space.
-    ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](AnyStaged::expand) ranges. Metadata
-    /// set via [`with_metadata`](AnyStaged::with_metadata) (or before staging) is committed with the
-    /// returned batch.
+    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
+    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
+    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
+    /// with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if an index in `updates` is outside the staged read set.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -320,32 +310,28 @@ where
     }
 }
 
-/// Staged merkleize for the `any` ordered update kind.
 impl<F, E, C, I, H, K, V, S> AnyStaged<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
     Operation<F, ordered::Update<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Writes `updates` against staged reads and `upserts` against unread keys, then merkleizes.
     ///
-    /// Consumes the staged handle and write vectors. Call [`expand`](AnyStaged::expand) before
-    /// this method if more keys must be read into the staged index space.
-    ///
-    /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
-    /// set: the initial `stage` input followed by any [`expand`](AnyStaged::expand) ranges. Metadata
-    /// set via [`with_metadata`](AnyStaged::with_metadata) (or before staging) is committed with the
-    /// returned batch.
+    /// A `Some` value is an upsert and `None` is a delete. Each index in `updates` addresses the
+    /// staged read set: the keys passed to `stage` followed by each [`expand`](Self::expand) range.
+    /// Metadata set through [`with_metadata`](Self::with_metadata), or before staging, is committed
+    /// with the batch.
     ///
     /// # Panics
     ///
-    /// Panics if any update's `read_index` is out of the staged read range.
+    /// Panics if an index in `updates` is outside the staged read set.
     pub async fn merkleize(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
@@ -364,7 +350,6 @@ where
     }
 }
 
-/// Read-through operations for the `any` merkleized batch.
 impl<F, E, C, I, H, U, S> AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -376,29 +361,28 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    /// Read a value by key, falling back to applied state.
+    /// Reads a value by key, falling back to applied state.
     pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get(key, &db).await
     }
 
-    /// Read multiple values by key, falling back to applied state.
+    /// Reads multiple values by key, falling back to applied state.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as `keys`.
     pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }
 }
 
-/// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `any` unordered update kind.
 impl<F, E, C, I, H, K, V, S> UnmerkleizedTrait
     for AnyUnmerkleized<F, E, C, I, H, unordered::Update<K, V>, S>
 where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -418,14 +402,13 @@ where
     }
 }
 
-/// Implement [`Unmerkleized`](UnmerkleizedTrait) for the `any` ordered update kind.
 impl<F, E, C, I, H, K, V, S> UnmerkleizedTrait
     for AnyUnmerkleized<F, E, C, I, H, ordered::Update<K, V>, S>
 where
     F: Family,
     E: Context,
     K: Key,
-    V: ValueEncoding + 'static,
+    V: ValueEncoding,
     C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
@@ -445,7 +428,6 @@ where
     }
 }
 
-/// Implement [`Merkleized`](MerkleizedTrait) for all supported `any` update kinds.
 impl<F, E, C, I, H, U, S> MerkleizedTrait for AnyMerkleized<F, E, C, I, H, U, S>
 where
     F: Family,
@@ -474,11 +456,6 @@ where
     }
 }
 
-/// Implement [`ManagedDb`] for unordered QMDB databases with fixed-size values.
-///
-/// `new_batch` captures the [`Shared`] database handle in the returned
-/// wrapper so that `get()` and `merkleize()` can read through to
-/// applied state.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -494,8 +471,8 @@ where
     F: Family,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
-    H: Hasher + 'static,
+    V: value::FixedValue,
+    H: Hasher,
     T: Translator,
     S: Strategy,
 {
@@ -521,8 +498,19 @@ where
     type Config = FixedConfig<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -567,21 +555,8 @@ where
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
 }
 
-/// Implement [`ManagedDb`] for unordered QMDB databases with variable-size values.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -597,7 +572,7 @@ where
     F: Family,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -629,8 +604,19 @@ where
     >;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -675,18 +661,6 @@ where
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
 }
 
 impl<F, E, K, V, H, T, S, R> StateSyncDb<E, R>
@@ -704,7 +678,7 @@ where
     F: Family,
     E: Context + Spawner,
     K: Array,
-    V: value::FixedValue + 'static,
+    V: value::FixedValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -751,7 +725,7 @@ where
     F: Family,
     E: Context + Spawner,
     K: Key,
-    V: value::VariableValue + 'static,
+    V: value::VariableValue,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -840,7 +814,7 @@ mod tests {
     fn unmerkleized_batch_falls_through_to_applied_state() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("unordered-fixed-live-fallback", &context);
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -877,7 +851,7 @@ mod tests {
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("unordered-fixed-glue-staged", &context);
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -978,7 +952,7 @@ mod tests {
             let config = fixed_config("unordered-fixed-deferred", &delayed);
             let db = drive_pending_syncs(
                 &pending,
-                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config, None),
             )
             .await
             .unwrap();

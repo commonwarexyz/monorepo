@@ -11,8 +11,8 @@
 //!
 //! - [`Engine`] accepts commands over [`Mailbox`] to broadcast proposer shards, validate and
 //!   reshare received shards, and serve reconstruction requests.
-//! - Maintains an ephemeral cache of reconstructed blocks, evicted when marshal signals
-//!   durability.
+//! - Retains reconstruction state and reconstructed blocks in a bounded window of commitment
+//!   records. Records with the lowest rounds are evicted first.
 //! - Tracks subscriptions for shard arrival and block reconstruction, notifying waiters when
 //!   data becomes available.
 

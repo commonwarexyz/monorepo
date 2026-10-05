@@ -118,7 +118,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = test_config("store-fuzz-test", &context);
-        let mut db = StoreDb::init(context.child("storage"), cfg)
+        let mut db = StoreDb::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init db");
         let mut restarts = 0usize;
@@ -192,6 +192,7 @@ fn fuzz(input: FuzzInput) {
                     let db = StoreDb::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init db");

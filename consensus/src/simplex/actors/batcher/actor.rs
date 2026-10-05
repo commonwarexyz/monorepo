@@ -1,9 +1,9 @@
-use super::{Config, Mailbox, Message, Round};
+use super::{Config, Mailbox, Message, Round, verifier::Batch};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
         Lookahead, Plan, Viewport,
-        actors::voter,
+        actors::{span::MISSING_SPAN, voter},
         config::{ForwardPolicy, SkipPolicy},
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
@@ -87,12 +87,12 @@ where
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
     added: Counter,
-    verified: Counter,
+    processed: Counter,
     inbound_messages: CounterFamily<Inbound>,
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
-    verify_latency: histogram::Timed,
-    recover_latency: histogram::Timed,
+    construct_latency: histogram::Timed,
+    construct_fallback: Counter,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -109,7 +109,8 @@ where
         let scheme = Arc::new(cfg.scheme);
         let participants = scheme.participants();
         let added = context.counter("added", "number of messages added to the verifier");
-        let verified = context.counter("verified", "number of messages verified");
+        let processed =
+            context.counter("processed", "number of messages processed by the verifier");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
         let latest_vote: GaugeFamily<Peer<S::PublicKey>> =
             context.family("latest_vote", "view of latest vote received per peer");
@@ -118,18 +119,17 @@ where
         }
         let batch_size = context.histogram(
             "batch_size",
-            "number of messages in a signature verification batch",
+            "number of pending messages processed per batch",
             [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
-        let verify_latency = context.histogram(
-            "verify_latency",
-            "latency of signature verification",
+        let construct_latency = context.histogram(
+            "construct_latency",
+            "latency of vote verification and certificate assembly",
             Buckets::CRYPTOGRAPHY,
         );
-        let recover_latency = context.histogram(
-            "recover_latency",
-            "certificate recover latency",
-            Buckets::CRYPTOGRAPHY,
+        let construct_fallback = context.counter(
+            "construct_fallback",
+            "number of optimistic assembly attempts returning attestation verification results",
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
@@ -163,12 +163,12 @@ where
                 mailbox_receiver: receiver,
 
                 added,
-                verified,
+                processed,
                 inbound_messages,
                 latest_vote,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency),
-                recover_latency: histogram::Timed::new(recover_latency),
+                construct_latency: histogram::Timed::new(construct_latency),
+                construct_fallback,
             },
             Mailbox::new(sender),
         )
@@ -315,8 +315,8 @@ where
         }
     }
 
-    /// Batch-verifies any ready votes for `view` and forwards newly
-    /// constructible certificates to the voter.
+    /// Attempts to construct certificates from ready votes for `view` and forwards
+    /// them to the voter.
     async fn process_view(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
@@ -324,40 +324,46 @@ where
         round: &mut Round<S, B, D, Re>,
     ) {
         loop {
-            let timer = self.verify_latency.timer(self.context.as_ref());
-            let Some((batch, failed)) = round
-                .try_verify(self.context.as_mut(), &self.strategy)
+            let timer = self.construct_latency.timer(self.context.as_ref());
+            let Some(Batch {
+                processed,
+                invalid,
+                certificate,
+                fallback,
+            }) = round
+                .try_construct(self.context.as_mut(), &self.strategy)
                 .await
             else {
                 trace!(%view, "no verifier ready");
                 break;
             };
 
+            // Record completed work even when no certificate was produced.
             timer.observe(self.context.as_ref());
+            if fallback {
+                self.construct_fallback.inc();
+            }
 
-            trace!(%view, batch, "batch verified votes");
-            self.verified.inc_by(batch as u64);
-            self.batch_size.observe(batch as f64);
-
-            for invalid in failed {
-                if let Some(signer) = self.scheme.participants().key(invalid) {
+            // Block invalid signers even when the remaining votes produced a certificate.
+            for participant in invalid {
+                if let Some(signer) = self.scheme.participants().key(participant) {
                     commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
                 }
             }
-        }
 
-        // Construct and forward every certificate with a verified quorum.
-        while let Some(certificate) = self
-            .recover_latency
-            .time_some(
-                self.context.as_ref(),
-                round.try_construct_certificate(&self.strategy),
-            )
-            .await
-        {
-            let kind = certificate.kind();
-            debug!(%view, %kind, "constructed certificate, forwarding to voter");
-            voter.recovered(certificate);
+            // Forward the certificate already recorded by the round.
+            if let Some(certificate) = certificate {
+                let kind = certificate.kind();
+                debug!(%view, %kind, "recovered certificate, forwarding to voter");
+                voter.recovered(certificate);
+            }
+
+            // Count processed pending votes, including rejected inputs.
+            if processed != 0 {
+                trace!(%view, batch = processed, "processed votes");
+                self.processed.inc_by(processed as u64);
+                self.batch_size.observe(processed as f64);
+            }
         }
     }
 
@@ -409,7 +415,7 @@ where
                 let view = message.view();
                 let operation = message.name();
                 let epoch = self.epoch;
-                let process_span = |parent: Span| {
+                let process_span = |parent: &Span| {
                     info_span!(
                         parent: parent,
                         "simplex.batcher.process",
@@ -426,7 +432,7 @@ where
                         finalized: new_finalized,
                         forwardable_proposal,
                     } => {
-                        let process = process_span(span.clone());
+                        let process = process_span(&span);
                         let _guard = process.entered();
                         let me = self.scheme.me();
                         let am_leader = me.is_some_and(|me| me == leader);
@@ -445,7 +451,7 @@ where
                         // Track the new current view, adopting the voter's view
                         // span so all of its work shares one trace
                         let round = self.round_for_view(&current, &mut work, current.view);
-                        round.set_span(span);
+                        round.adopt_span(span);
                         dirty_views.push(current.view);
 
                         // Revisit rounds in the admission window now that the
@@ -568,7 +574,7 @@ where
 
                 // Parent under the view's span if we already track the view (we avoid
                 // creating per-view state for certificates that fail verification)
-                let parent = round.map(|round| round.span()).unwrap_or_else(Span::none);
+                let parent = round.map_or(&MISSING_SPAN, |round| round.span());
                 let span = info_span!(
                     parent: parent,
                     "simplex.batcher.verify_certificate",
@@ -645,9 +651,8 @@ where
                         let round = Rnd::new(self.epoch, current.view);
                         let _guard = work
                             .get(&current.view)
-                            .map(|round| round.span())
-                            .unwrap_or_else(Span::none)
-                            .entered();
+                            .map_or(&MISSING_SPAN, |round| round.span())
+                            .enter();
                         voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
                     dirty_views.push(view);
@@ -690,7 +695,7 @@ where
                         continue;
                     }
 
-                    let span = round.span();
+                    let span = round.span().clone();
                     self.process_view(&mut voter, view, round)
                         .instrument(span)
                         .await;
