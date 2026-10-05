@@ -20,6 +20,7 @@ futures = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
+criterion.workspace = true
 dashmap.workspace = true
 futures.workspace = true
 proptest.workspace = true
@@ -29,3 +30,8 @@ rayon.workspace = true
 default = [ "std" ]
 std = [ "commonware-macros/std", "dep:dashmap", "dep:futures", "dep:rayon" ]
 test-utils = [ "std" ]
+
+[[bench]]
+name = "collect"
+harness = false
+path = "src/benches/collect.rs"

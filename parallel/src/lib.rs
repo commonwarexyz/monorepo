@@ -80,12 +80,15 @@ commonware_macros::stability_scope!(BETA {
             };
             use rayon::{
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder, Yield,
-                iter::{IntoParallelIterator, ParallelIterator},
+                iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator},
                 slice::ParallelSliceMut,
             };
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
-                sync::Arc,
+                sync::{
+                    Arc,
+                    atomic::{AtomicBool, Ordering as AtomicOrdering},
+                },
                 time::Instant,
             };
 
@@ -1043,6 +1046,44 @@ commonware_macros::stability_scope!(BETA {
             iter.into_iter().try_fold(identity(), fold_op)
         }
 
+        fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> T + Send + Sync,
+            T: Send,
+        {
+            iter.into_iter().map(map_op).collect()
+        }
+
+        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            let iter = iter.into_iter();
+            let mut output = Vec::with_capacity(iter.size_hint().0);
+            for item in iter {
+                output.push(map_op(item)?);
+            }
+            Ok(output)
+        }
+
+        fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            let mut init_val = init();
+            iter.into_iter()
+                .map(|item| map_op(&mut init_val, item))
+                .collect()
+        }
+
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -1147,6 +1188,100 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         pub const fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
             self.parallelism = parallelism.get();
             self
+        }
+
+        /// Whether a parallel collect of `len` items maps contiguous chunks. Smaller inputs keep
+        /// rayon's adaptive split, which gets every thread working sooner when each has little to do.
+        const fn chunked(&self, len: usize) -> bool {
+            len >= self.parallelism * 1024
+        }
+
+        /// Maps `items` on the pool in contiguous chunks, writing each output at its input's
+        /// index in one preallocated `Vec`. Each chunk calls `init` once.
+        fn try_map_init_collect_chunks<I, INIT, S, F, T, E>(
+            &self,
+            items: Vec<I>,
+            init: INIT,
+            map_op: F,
+        ) -> Result<Vec<T>, E>
+        where
+            I: Send,
+            INIT: Fn() -> S + Send + Sync,
+            F: Fn(&mut S, I) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            const CHUNKS_PER_THREAD: usize = 16;
+
+            let len = items.len();
+            let chunk_len = len.div_ceil(self.parallelism * CHUNKS_PER_THREAD).max(1);
+            let mut output = Vec::with_capacity(len);
+            let failed = AtomicBool::new(false);
+            let mut chunks = Vec::new();
+            self.thread_pool.install(|| {
+                items
+                    .into_par_iter()
+                    .chunks(chunk_len)
+                    .zip(output.spare_capacity_mut()[..len].par_chunks_mut(chunk_len))
+                    .with_max_len(1)
+                    .map(|(items, slots)| {
+                        let mut state = init();
+                        let mut written = 0;
+                        for (item, slot) in items.into_iter().zip(slots) {
+                            if failed.load(AtomicOrdering::Relaxed) {
+                                break;
+                            }
+                            match map_op(&mut state, item) {
+                                Ok(value) => {
+                                    slot.write(value);
+                                    written += 1;
+                                }
+                                Err(err) => {
+                                    failed.store(true, AtomicOrdering::Relaxed);
+                                    return (written, Some(err));
+                                }
+                            }
+                        }
+                        (written, None)
+                    })
+                    .collect_into_vec(&mut chunks);
+            });
+            if failed.into_inner() {
+                let mut error = None;
+                let slots = output.spare_capacity_mut().chunks_mut(chunk_len);
+                for (slots, (written, err)) in slots.zip(chunks) {
+                    for slot in &mut slots[..written] {
+                        // SAFETY: the chunk initialized its first `written` slots.
+                        unsafe { slot.assume_init_drop() };
+                    }
+                    error = error.or(err);
+                }
+                return Err(error.expect("the chunk that set the failure flag returns its error"));
+            }
+            // SAFETY: without a failure, every chunk initialized all of its slots.
+            unsafe { output.set_len(len) };
+            Ok(output)
+        }
+
+        /// Infallible [`Self::try_map_init_collect_chunks`].
+        fn map_init_collect_chunks<I, INIT, S, F, T>(
+            &self,
+            items: Vec<I>,
+            init: INIT,
+            map_op: F,
+        ) -> Vec<T>
+        where
+            I: Send,
+            INIT: Fn() -> S + Send + Sync,
+            F: Fn(&mut S, I) -> T + Send + Sync,
+            T: Send,
+        {
+            match self.try_map_init_collect_chunks(items, init, |state, item| {
+                Ok::<_, Infallible>(map_op(state, item))
+            }) {
+                Ok(output) => output,
+                Err(e) => match e {},
+            }
         }
 
         #[track_caller]
@@ -1426,6 +1561,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
                 policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
+                policy::RunExecution::Parallel if self.chunked(items.len()) => {
+                    self.map_init_collect_chunks(items, || (), |_, item| map_op(item))
+                }
                 policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
@@ -1443,6 +1581,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.try_execute(items.len(), 1, |execution| match execution {
                 policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
+                policy::RunExecution::Parallel if self.chunked(items.len()) => {
+                    self.try_map_init_collect_chunks(items, || (), |_, item| map_op(item))
+                }
                 policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
@@ -1461,6 +1602,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::RunExecution::Parallel if self.chunked(items.len()) => {
+                    self.map_init_collect_chunks(items, init, map_op)
+                }
                 policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map_init(init, map_op).collect()),
@@ -1485,6 +1629,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), multiplier, |execution| match execution {
                 policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::RunExecution::Parallel if self.chunked(items.len()) => {
+                    self.map_init_collect_chunks(items, init, map_op)
+                }
                 policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map_init(init, map_op).collect()),
@@ -2348,5 +2495,36 @@ mod test {
             .try_map_collect_vec(0..128, |i| if i == 17 || i == 42 { Err(i) } else { Ok(i) });
 
         assert!(matches!(result, Err(17 | 42)));
+    }
+
+    #[test]
+    fn collect_vec_parallel_arm_preserves_order_and_drops_on_error() {
+        let strategy = parallel_strategy().manual();
+        // 4 threads chunk inputs of 4096+ items; smaller ones keep rayon's split.
+        for len in [0usize, 1, 3, 31, 1000, 4096, 4103] {
+            let result: Result<Vec<String>, ()> =
+                strategy.try_map_collect_vec(0..len, |i| Ok(i.to_string()));
+            let expected: Vec<String> = (0..len).map(|i| i.to_string()).collect();
+            assert_eq!(result.as_ref(), Ok(&expected));
+            assert_eq!(
+                strategy.map_collect_vec(0..len, |i| i.to_string()),
+                expected
+            );
+            let via_init: Vec<String> =
+                strategy.map_init_collect_vec(0..len, String::new, |_, i| i.to_string());
+            assert_eq!(via_init, expected);
+
+            for fail in [0, len / 2, len.saturating_sub(1)] {
+                let result: Result<Vec<String>, usize> =
+                    strategy.try_map_collect_vec(0..len, |i| {
+                        if i == fail { Err(i) } else { Ok(i.to_string()) }
+                    });
+                if len == 0 {
+                    assert_eq!(result, Ok(Vec::new()));
+                } else {
+                    assert_eq!(result, Err(fail));
+                }
+            }
+        }
     }
 }
