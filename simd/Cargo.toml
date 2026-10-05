@@ -14,7 +14,9 @@ documentation = "https://docs.rs/commonware-simd"
 workspace = true
 
 [features]
-fuzz = ["dep:arbitrary", "arbitrary/derive"]
+default = ["std"]
+std = []
+fuzz = ["std", "dep:arbitrary", "arbitrary/derive"]
 
 [dependencies]
 arbitrary = { workspace = true, optional = true }

@@ -14,12 +14,13 @@
 //! the common vector instructions and execution of child operations. Accelerated profiles extend
 //! `Simd` and target the following deployment platforms:
 //!
-//! - `IceLake`: 512-bit AVX-512F operations, GFNI byte arithmetic, and AVX-512 IFMA's 52-bit
-//!   multiply-accumulates. This is a crate-defined bundle; AVX-512F alone does not imply GFNI
+//! - `IceLake`: 512-bit AVX-512F and AVX-512BW operations, GFNI byte arithmetic, and AVX-512
+//!   IFMA's 52-bit multiply-accumulates. This is a crate-defined bundle; AVX-512F alone does not imply GFNI
 //!   or IFMA support. Any additional AVX-512 subsets required by modeled operations must also
 //!   be documented and checked.
-//! - `ArmV9`: Armv9-A with SVE and SVE2 explicitly required. Optional SVE2 extensions must
-//!   be documented and checked separately. The profile does not imply a fixed vector width.
+//! - `ArmV9`: Baseline NEON plus SVE and SVE2 explicitly required. Logical vectors have
+//!   128 bits; native instructions use the low 128 bits of SVE registers. Optional SVE2
+//!   extensions must be documented and checked separately.
 //! - `Neon`: Baseline AArch64 NEON operations on 128-bit vectors.
 //!
 //! Profiles describe checked instruction bundles, not required CPU models or vendors. A backend
@@ -39,15 +40,16 @@
 //!
 //! [`emulated`] provides array-backed `EmulatedScalar`, `EmulatedIceLake`, `EmulatedArmV9`, and
 //! `EmulatedNeon` execution tokens.
-//! `native::NativeNeon` provides native NEON execution on AArch64 after checking CPU support.
-//! Native providers remain proposed for Ice Lake and Armv9.
+//! [`native`] provides checked NEON and Armv9 tokens on AArch64 and an Ice Lake token on x86-64.
+//! With the default `std` feature, construction detects CPU support at runtime. Without `std`,
+//! construction requires the instruction bundle to be enabled at compile time.
 //! Each token implements its instruction profile, so a generic profile algorithm can run
 //! with either a native or an emulated provider.
 //! Vector and mask representations are associated types of the instruction traits. Native and
 //! emulated backends can use different representations while preserving the same lane semantics.
 //! Ice Lake uses eight `u64` lanes; NEON uses two. [`emulated::EmulatedArmV9`] uses two lanes,
-//! matching Graviton4's 128-bit SVE vectors. Native SVE vector-length
-//! handling remains to be defined. Emulators preserve the modeled widths on any host, so tests
+//! matching Graviton4's 128-bit SVE vectors. Native Armv9 uses the same logical width at every
+//! supported SVE vector length. Emulators preserve the modeled widths on any host, so tests
 //! exercise each profile's vector boundaries and tail handling.
 //!
 //! `EmulatedScalar` implements the common vector operations through `Simd`. It may use
@@ -93,7 +95,7 @@
 //!     // AVX-512, GFNI, and IFMA profile instructions.
 //! }
 //!
-//! pub trait ArmV9: Simd {
+//! pub trait ArmV9: Neon {
 //!     // SVE2 profile instructions.
 //! }
 //!
@@ -164,7 +166,7 @@
 //! without specializations use their portable defaults. This requires neither trait-implementation
 //! discovery nor overlapping fallback implementations.
 //!
-//! [`dispatch()`] selects native NEON when supported, or `EmulatedScalar` at the outer boundary
+//! [`dispatch()`] selects a supported native backend, or `EmulatedScalar` at the outer boundary
 //! and executes the root operation. The concrete token threads through the tree. Child calls to
 //! `execute` repeat neither feature detection nor runtime backend selection and use static dispatch.
 //! Passing a runtime enum through the tree and matching it at every child would lose this property.
@@ -189,6 +191,59 @@
 //! Composing buffer operations also does not automatically fuse their loops; vector-level
 //! components can be combined inside a shared loop to avoid intermediate memory passes.
 //!
+//! ### Bulk loops and shared algorithms
+//!
+//! Make each bulk vector loop an operation and call `s.execute(...)` at its boundary, including
+//! from an outlined function or worker callback. Pass the existing token rather than dispatching
+//! again. Scheduling, allocation, and protocol logic can remain outlined while executing child
+//! operations. Consumers need no target-feature annotations.
+//!
+//! Shared defaults and helpers containing vector arithmetic must inline into the native execution
+//! entry to avoid a feature-gated call per vector. Start with `#[inline]`, and use
+//! `#[inline(always)]` where emitted code shows it is needed. Neither hint guarantees inlining.
+//! Native primitive bodies must also be available to the downstream optimizer. Inspect realistic
+//! cross-crate kernels without LTO and with multiple codegen units for calls inside hot loops and
+//! unnecessary vector spills; a call once per bulk operation can be acceptable.
+//!
+//! This example shares one loop across backends and reenters the feature scope from an outlined
+//! caller. It adds complete vectors and leaves any incomplete trailing vector unchanged:
+//!
+//! ```
+//! use commonware_simd::{Operation, Simd};
+//!
+//! // Expose the shared loop so it can inline into the backend's execution entry.
+//! #[inline]
+//! fn add_loop<S: Simd>(s: S, input: &[u64], output: &mut [u64]) {
+//!     for (input, output) in input.chunks_exact(S::U64_LANES)
+//!         .zip(output.chunks_exact_mut(S::U64_LANES))
+//!     {
+//!         let sum = s.u64_add(s.u64_load(input), s.u64_load(output));
+//!         s.u64_store(sum, output);
+//!     }
+//! }
+//!
+//! struct Add<'a>(&'a [u64], &'a mut [u64]);
+//!
+//! impl Operation for Add<'_> {
+//!     type Output = ();
+//!
+//!     // Keep the adapter in the same feature scope as the shared loop.
+//!     #[inline]
+//!     fn portable<S: Simd>(self, s: S) {
+//!         add_loop(s, self.0, self.1);
+//!     }
+//! }
+//!
+//! #[inline(never)]
+//! fn outlined<S: Simd>(s: S, input: &[u64], output: &mut [u64]) {
+//!     s.execute(Add(input, output));
+//! }
+//!
+//! let mut output = [3, 4];
+//! outlined(commonware_simd::emulated::EmulatedScalar, &[1, 2], &mut output);
+//! assert_eq!(output, [4, 6]);
+//! ```
+//!
 //! ## Consistency testing
 //!
 //! [`check_consistent`] takes an operation factory and compares scalar execution
@@ -210,27 +265,29 @@
 //! orchestration can still exercise different specialized children. Testing composed operations
 //! is therefore useful in addition to testing leaves.
 //!
-//! Once specific profile instructions are available, simple operations such as a hash can
-//! exercise different strategies through the consistency helper. Shared fuzz plans should
-//! generate inputs once for all executions and include boundary values for carries,
-//! truncation, shuffles, masks, and partial memory operations. Agreement between
-//! implementations does not replace an independent mathematical oracle.
+//! Consumers can exercise different algorithm strategies through the consistency helper.
+//! Emulator-specific unit tests live in each backend's module and run on every host, including
+//! checks against independent mathematical oracles.
 //!
-//! Native instruction tests belong in this crate and compare each hardware primitive with its
-//! emulator on supported hosts. This separates instruction correctness from consumer algorithm
+//! Instruction fuzz plans enter through [`dispatch()`] on each target platform and compare the
+//! selected native backend directly with its matching emulator, using identical inputs for both
+//! executions. Include boundary
+//! values for carries, truncation, shuffles, masks, and partial memory operations.
+//! This separates instruction correctness from consumer algorithm
 //! correctness, provided both executions use the same generic algorithm and all hardware-specific
 //! behavior goes through the modeled interface. A few native integration tests remain useful for
 //! dispatch, feature scopes, memory layout, and compiler behavior. Consumer-specific assembly or
 //! native-only algorithms need their own validation.
+//! The goal is to keep the hardware test matrix in this crate; consumers can validate their
+//! generic algorithms through emulation.
 //!
 //! ## Future work
 //!
-//! 1. Define instructions for the `IceLake`, `ArmV9`, and `Neon` profiles and precise primitive
-//!    semantics, starting with operations needed by existing erasure-coding or curve-arithmetic
-//!    kernels. Extend [`Simd`]'s common instructions as needed.
-//! 2. Extend native backends and instruction-level hardware tests beyond NEON. Define native SVE
-//!    vector-length handling for `ArmV9` and extend emulation as profile instructions are added.
-//! 3. Add opaque operation constructors for real kernels and extend native dispatch as backends land.
+//! 1. Extend instruction coverage as real kernels require it, starting with erasure-coding,
+//!    curve-arithmetic, and hashing operations.
+//! 2. Validate every native profile on matching hardware. Armv9 currently exposes fixed 128-bit
+//!    logical vectors rather than a scalable SVE vector interface.
+//! 3. Migrate consumers to opaque operation constructors and shared generic algorithms.
 //!    Preserve generic composition with specialized children under portable parent defaults.
 //! 4. Use [`check_consistent`] in shared fuzz plans when specific instructions enable
 //!    meaningful alternative strategies, including observable mutable state. Keep hardware
@@ -249,8 +306,12 @@
     html_logo_url = "https://commonware.xyz/imgs/rustdoc_logo.svg",
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-// TODO: Use this primitive inventory when implementing the instruction traits and emulators.
+#[cfg(test)]
+extern crate std;
+
+// Consumer primitive inventory.
 // Ocelot reference: PR #4823, commit b6b08b0f7aa59805a38a12e98108010f993a7877:
 // https://github.com/commonwarexyz/monorepo/blob/b6b08b0f7aa59805a38a12e98108010f993a7877/coding/src/ocelot/kernel/avx512.rs
 // Curve references: cryptography/curve25519/src/curve/{avx512,neon}.rs.
@@ -297,7 +358,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub use consistency::check_consistent;
     mod core;
     pub use core::{ArmV9, IceLake, Neon, Operation, Simd};
-    pub mod dispatch;
+    mod dispatch;
     pub use dispatch::dispatch;
     pub mod emulated;
     pub mod native;

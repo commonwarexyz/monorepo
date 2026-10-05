@@ -5,50 +5,35 @@
 
 Abstract over SIMD operations.
 
-## Code generation
+## Backends
 
-Run `just check-simd-codegen` to inspect release consumers compiled as a separate
-integration-test crate, without LTO. The check covers each emulated backend, native
-NEON on AArch64, runtime dispatch, nested operations, and an outlined consumer
-frame. It emits LLVM IR and assembly and rejects residual calls in fixed-size and
-runtime-sized vector computations. Use `just check-simd-codegen --target <target>` to check
-another installed target; `just test -p commonware-simd --test codegen` runs the
-same consumers against scalar expectations.
+Native and array-backed emulated providers implement the same instruction contracts:
 
-On AArch64, `just check-simd-codegen --feature-scopes` also compiles callers with
-NEON disabled to expose feature boundaries hidden by the target's default
-features. This is a compile-only diagnostic because disabling baseline NEON
-violates the target ABI. It permits root feature detection and entry into a native
-scope, then rejects calls inside that scope. Do not execute that diagnostic binary.
-
-Inline annotations on primitive methods expose their bodies to downstream
-optimizers. Keep annotations only where removing them changes consumer code
-generation, and document the reason at the method. Larger consumer algorithms can
-still be outlined; these probes establish the behavior of the tested compositions,
-not an inlining guarantee for every algorithm. An outlined consumer frame should
-call the token's `execute` method at each bulk computation boundary to reenter the
-selected feature scope. The operation adapter and vector loop must inline into
-that scope to avoid a feature-gated call per vector; inspect real consumer code
-when introducing larger kernels or additional call layers.
-
-The annotation audit used Rust 1.95 and 1.98, release builds without LTO, and
-separate consumers with both one and sixteen codegen units:
-
-| Methods | Annotation | Reason |
+| Provider | Byte/u32/u64 lanes | Required instructions |
 | --- | --- | --- |
-| Emulated load, store, add | `inline` | Removing the hint leaves primitive calls in downstream loops. |
-| Emulated splat, execute, shared generic helpers, operation defaults | None | These bodies already inline in the consumer probes. |
-| Native load/store helpers and vector adapters | `inline` | Removes primitive calls and propagates caller length facts. |
-| Native splat helper and adapter | `inline` | Removes broadcast calls before the loop. |
-| Native private add helper | None | Removing its hint leaves identical calls and instructions. |
-| Native execution adapters and dispatch | `inline` | Keeps unannotated consumer loops inside the native feature scope, including outlined-frame reentry. |
-| Native constructor | None | Detection stays at the root; no hint is needed inside vector loops. |
-| Consistency and fuzz helpers | None | These checks do not need a kernel inlining contract. |
+| Scalar | 1/1/1 | None |
+| NEON | 16/4/2 | Baseline AArch64 NEON |
+| Armv9 | 16/4/2 | NEON, SVE, and SVE2; fixed 128-bit logical vectors |
+| Ice Lake | 64/16/8 | AVX-512F, AVX-512BW, GFNI, and AVX-512IFMA |
 
-Removing any one of the native execution or dispatch hints can outline a
-runtime-sized consumer kernel into a baseline feature scope when using sixteen
-codegen units. These hints were checked together with unannotated consumer
-operation bodies; annotating the consumer can mask this interaction.
+The default `std` feature enables runtime detection. Without `std`, native
+providers require the instruction bundle to be enabled at compile time.
+Dispatch selects a supported native provider or falls back to scalar.
+
+## Testing
+
+Shared fuzz plans enter through `Dispatch` to check composition and compare the
+selected native backend directly with its matching emulator on real hardware. Run
+the fuzzer on each target platform to validate that platform's compiled instructions.
+Emulator-specific unit
+tests live in that backend's module and run independently of CPU support.
+Operation variants can be compared separately with `check_consistent`.
+
+Hardware coverage belongs in this crate so consumers using the modeled interface
+can check their algorithms with emulation rather than repeat the hardware matrix.
+
+Run `just test -p commonware-simd` for unit tests and bounded fuzz checks. The
+`simd/fuzz` target uses the same plans for continuous fuzzing.
 
 ## Status
 
