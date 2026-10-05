@@ -1,29 +1,23 @@
-//! Discover the public epoch material a joining node needs before consensus starts.
+//! Discovery of the public epoch material a joining node needs before consensus starts.
 //!
 //! A node that is starting fresh cannot construct epoch-scoped state until it learns the current
 //! epoch's participant set. That set lives in the [`EpochInfo`] of a finalized boundary block.
 //! The [`Actor`] discovers that block, publishes the resulting [`Artifact`] (which also carries
-//! the state-sync floor), and then serves the same boundary material to other joining peers.
+//! the sampled state-sync floor), and then serves the same boundary material to other joining peers.
 //!
-//! This protocol is an extension of [`stateful::probe`](crate::stateful::probe): it begins with
-//! the same solicit-and-sample floor discovery (built on the same shared sample core) and adds
-//! requests for the floor epoch's boundary finalization and block, which carry the epoch's
-//! public [`EpochInfo`].
+//! This protocol extends [`stateful::probe`](crate::stateful::probe): it begins with the same
+//! solicit-and-sample floor discovery and adds requests for the floor epoch's boundary
+//! finalization and block, which carry the epoch's public [`EpochInfo`].
 //!
-//! At startup the node knows a canonical participant snapshot (the complete dealer, player, and
-//! next-player sets of a configured bootstrap epoch), a constant certificate verifier valid
-//! across all epochs, and the epoch length. When discovery begins, the actor tracks the
-//! snapshot's canonical peer set at the bootstrap epoch's own peer-set ID; the orchestrator
-//! tracks identical contents if it later enters that epoch, so the registrations never
-//! conflict. Solicitation, membership, and the fault budgets below all apply to the snapshot's
-//! dealers: the epoch's active committee of share holders and certificate signers.
+//! At startup the node knows a [`Bootstrap`] checkpoint (the complete participant snapshot of a
+//! configured bootstrap epoch and its transport [`Directory`]), a constant certificate verifier
+//! valid across all epochs, and the epoch length. Solicitation, membership checks, and the fault
+//! budgets below apply to the snapshot's dealers, which are the epoch's share holders and
+//! certificate signers.
 //!
-//! Addressable deployments seed the snapshot's transport [`Directory`] alongside this
-//! weak-subjectivity checkpoint through [`Bootstrap::directory`]. The actor activates the
-//! snapshot only when its first subscriber appears. If activation fails, the actor shuts down
-//! before sending a request and drops all pending subscribers. The discovered [`Artifact`]
-//! carries the target epoch's own directory in its [`EpochInfo`], so the joining node needs no
-//! out-of-band address source for the epoch it syncs into.
+//! The actor activates the snapshot only when its first subscriber appears. If activation fails,
+//! the actor shuts down before sending a request and drops all pending subscribers. The
+//! discovered [`Artifact`] carries the target epoch's own directory in its [`EpochInfo`].
 //!
 //! # Trust Model
 //!
@@ -31,28 +25,28 @@
 //! For `n` configured members, `f` is the maximum fault count under the `3f + 1` model and the
 //! discovery sample threshold is `f + 1`.
 //!
-//! Rotation out of the active committee is not what the budgets bound: a rotated-out member that
-//! keeps running an honest, chain-following node at its configured identity costs nothing. What
-//! matters is what members do after rotating. At bootstrap time:
+//! A rotated-out member remains current if it follows the chain at its configured identity.
+//! At discovery time:
 //!
-//! - At most `f` members may be Byzantine or stale, where "stale" means honest but no longer
+//! - At most `f` members may be Byzantine or stale, where _stale_ means honest but no longer
 //!   following the chain. A frozen node replies honestly with an old finalization, which is
 //!   indistinguishable from an adversarial replay, so it spends the same budget.
 //! - At most `f` members may be unreachable (shut down, address changed, identity retired).
-//!   These cost liveness only; they cannot inject anything.
+//!   These cost liveness only and cannot inject anything.
 //! - The remaining `f + 1` honest, current, reachable members guarantee both liveness (the
 //!   sample completes) and recency (every `f + 1` sample contains at least one of them).
 //!
-//! Both budgets may be fully spent simultaneously. Operators should refresh the configured set
-//! once they can no longer vouch that `f + 1` members remain live and current, exactly as one
-//! refreshes a weak-subjectivity checkpoint. Passing a subset of the committee mis-derives `f`
-//! and cannot be detected at startup; it is the same trust class as a wrong genesis.
+//! Both budgets may be fully spent simultaneously. Refresh the checkpoint when fewer than
+//! `f + 1` members remain live and current. Configure the complete snapshot: a subset gives the
+//! wrong fault threshold and cannot be detected at startup.
 //!
-//! Certificate forgery is impossible regardless of these budgets: the threshold group key is
-//! reshare-invariant and finalizations are self-certifying, so an old committee can never sign
-//! for a round it did not finalize. Recency is the only weak-subjectivity dimension, and the
-//! sample supplies exactly that. See [`stateful::probe`](crate::stateful::probe) for the
-//! extended `f + 1` recency argument this actor inherits.
+//! The budgets bound recency, not validity. Every accepted reply verifies under the constant
+//! group key, so it names a block the network finalized provided no adversary holds a threshold
+//! of shares from any committee. The group key is reshare-invariant, so this assumption covers
+//! every past committee as well as the current one: a threshold of shares from an earlier epoch
+//! can sign for any round. Under that assumption, the sample supplies recency. See
+//! [`stateful::probe`](crate::stateful::probe) for the `f + 1` recency argument this actor
+//! inherits.
 //!
 //! # Protocol
 //!
@@ -60,40 +54,42 @@
 //!
 //! ## Discovery: solicit and sample
 //!
-//! Once a subscriber appears, [`Actor`] solicits every configured peer's latest finalization:
+//! Once a subscriber appears, the [`Actor`] asks every dealer in the snapshot for its latest
+//! finalization:
 //!
 //! ```text
-//!                +-- LatestRequest --> peer 1
+//!                +-- LatestRequest --> dealer 1
 //!                |
-//!   Actor -------+-- LatestRequest --> peer 2
+//!   Actor -------+-- LatestRequest --> dealer 2
 //!                |
-//!                +-- LatestRequest --> peer 3
-//!
-//!   peer 2 --LatestResponse(finalization)--> Actor
+//!                +-- LatestRequest --> dealer 3
+//!                |
+//!                +-- LatestRequest --> dealer 4
 //! ```
 //!
-//! Replies are verified with the all-epoch verifier. At most one reply is counted per peer, only
-//! configured members may reply, and replies below the bootstrap epoch are ignored (the chain
-//! reached that epoch by definition, so any current member holds a finalization at or above its
-//! boundary). Once `f + 1` distinct peers have replied, the highest finalization becomes the
-//! state-sync floor and names the target epoch:
+//! Replies are verified with the all-epoch verifier. At most one reply is counted per peer, a
+//! reply from a peer that is not a dealer is blocked, and replies below the bootstrap epoch or
+//! below the epoch of a persisted [`Config::floor`] are ignored without blocking (the chain
+//! reached both epochs, so an older reply is stale rather than proof of misbehavior). Once
+//! `f + 1` distinct dealers have replied, the highest finalization becomes the sampled floor and
+//! names the target epoch.
+//!
+//! With four dealers (`f = 1`), two verified `(epoch, view)` replies suffice:
 //!
 //! ```text
-//!   peer 1 --LatestResponse(round 10)-->\               replies
-//!   peer 2 --LatestResponse(round 12)--> +-> Actor {10, 12, 13}
-//!   peer 3 --LatestResponse(round 13)-->/                     |
-//!                                                             v
-//!                          sample reached, highest reply becomes the floor: 13
+//!   dealer 1 --LatestResponse(5, 10)-->\
+//!                                      +-> Actor --> floor = (6, 1)
+//!   dealer 2 --LatestResponse(6, 1)--->/
 //! ```
 //!
 //! If too few peers reply before `retry_timeout`, collected replies are cleared and the
-//! solicitation is re-issued. Retry is a liveness mechanism only.
+//! solicitation is re-issued.
 //!
 //! ## Discovery: boundary fetch
 //!
-//! The floor's epoch identifies the target epoch, but not its boundary block. The actor asks
-//! every peer for the boundary finalization. These responses are small, so peers can answer in
-//! parallel without duplicating the boundary block:
+//! The actor requests the floor epoch's boundary finalization from every peer, verifies replies,
+//! then requests the committed block from one verified responder. Other verified responders
+//! remain available if that fetch fails.
 //!
 //! ```text
 //!                +-- BoundaryRequest(epoch) --> peer 1
@@ -103,46 +99,34 @@
 //!                +-- BoundaryRequest(epoch) --> peer 3
 //!
 //!   peer 2 --BoundaryResponse(finalization)--> Actor
-//! ```
-//!
-//! After verifying a boundary finalization, the actor requests its committed block only from that
-//! responder. Other verified responders are retained as failover candidates:
-//!
-//! ```text
-//!   Actor --BlockRequest(epoch)-------> peer 2
-//!   peer 2 --BlockResponse(epoch, block)--> Actor
+//!                                               |
+//!                                      verify finalization
+//!                                               |
+//!                                               v
+//!   peer 2 <---------BlockRequest(epoch)------ Actor
+//!   peer 2 --BlockResponse(epoch, block)-----> Actor
 //! ```
 //!
 //! The block's [`EpochInfo`] is packaged into an [`Artifact`] together with the sampled floor and
-//! published to subscribers. The floor and the epoch info are fixed atomically, so the artifact's
-//! epoch always equals the floor's epoch:
-//!
-//! ```text
-//!   floor + boundary finalization + boundary block
-//!       --> Artifact { epoch, finalization, info, floor }
-//! ```
+//! published to subscribers. [`Artifact::info`] always describes the epoch of [`Artifact::floor`].
 //!
 //! A floor in epoch zero resolves from the locally known genesis info without a boundary fetch.
 //!
 //! ## Serving
 //!
-//! After a source of finalized blocks is attached, the actor enters service and answers peers'
-//! latest-finalization, boundary finalization, and boundary block requests for the rest of the
-//! process lifetime:
-//!
-//! ```text
-//!   peer --LatestRequest---------------> Actor --lookup--> LatestResponse -------> peer
-//!   peer --BoundaryRequest(epoch)-----> Actor --lookup--> BoundaryResponse -----> peer
-//!   peer --BlockRequest(epoch)---------> Actor --lookup--> BlockResponse --------> peer
-//! ```
+//! Once marshal is attached and no subscriber is pending, the actor enters service and answers
+//! peers' latest-finalization, boundary finalization, and boundary block requests for the rest of
+//! the process lifetime.
 //!
 //! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
 //! request when marshal has no finalization yet.
 //!
-//! During consensus catchup, the orchestrator requests the boundary certificate of the
-//! active epoch. The service verifies responses with the all-epoch verifier and reports them
-//! to marshal for commitment-based block acquisition. It retries discovery until marshal stores
-//! the boundary, while continuing to serve requests from peers.
+//! During consensus catch-up, the orchestrator asks for the boundary certificate of the active
+//! epoch, naming a peer that has advanced past it. The service requests the certificate from that
+//! peer and, after each `retry_timeout`, from every peer, until marshal stores or has processed
+//! the boundary. It verifies at most one response from each peer asked in the latest request,
+//! using the all-epoch verifier, and ignores other responses. Verified certificates are reported
+//! to marshal for commitment-based block acquisition. Serving continues throughout.
 
 use crate::dkg::{
     ReshareBlock,
@@ -165,7 +149,7 @@ pub use actor::{Actor, Config};
 mod mailbox;
 pub use mailbox::Mailbox;
 
-mod wire;
+pub(crate) mod wire;
 
 /// The weakly subjective checkpoint a joining node bootstraps from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,25 +161,13 @@ pub struct Bootstrap<P: PublicKey, D: Directory<P> = Unit> {
     pub epoch: Epoch,
     /// The complete participant snapshot of [`Bootstrap::epoch`].
     ///
-    /// Discovery solicits and samples `f + 1` of the snapshot's dealers,
-    /// which are the epoch's active committee (its share holders and
-    /// certificate signers), so the dealers must be that complete committee:
-    /// a subset mis-derives `f`. See the module docs for the trust model and
-    /// the budgets on faulty, stale, and unreachable members.
-    ///
-    /// The snapshot must match the epoch's canonical [`Participants`]: when
-    /// discovery begins, the actor tracks the snapshot's
-    /// [`tracked_peers`](Participants::tracked_peers) at the epoch's own
-    /// peer-set ID, and all peers must track the same set contents at the
-    /// same ID. The orchestrator tracks the identical contents if it later
-    /// enters the bootstrap epoch, so the duplicate registration is benign.
+    /// Discovery samples `f + 1` of the snapshot's dealers, so the dealers
+    /// must be the epoch's complete committee (a subset mis-derives `f`). The
+    /// snapshot must equal the epoch's canonical [`Participants`] because it is
+    /// activated at that epoch's peer-set ID. See the
+    /// [trust model](crate::dkg::probe#trust-model) for the fault budgets.
     pub participants: Participants<P>,
-    /// Transport directory for [`Bootstrap::participants`], seeded alongside
-    /// the checkpoint.
-    ///
-    /// Discovery runs before any application state exists, so the directory
-    /// is part of the weak-subjectivity configuration rather than resolved
-    /// from a registry.
+    /// Transport directory for [`Bootstrap::participants`].
     pub directory: D,
 }
 
@@ -220,14 +192,12 @@ where
     ///
     /// Epoch zero is anchored by genesis and has no boundary finalization.
     pub finalization: Option<Finalization<S, D>>,
-    /// Public epoch information from the finalized boundary block.
-    ///
-    /// Carries the epoch's transport directory, so a joining node can activate
-    /// the discovered epoch's peers without any application state.
+    /// Public epoch information for the epoch of [`Artifact::floor`] (the genesis
+    /// information for epoch zero).
     pub info: EpochInfo<V, S::PublicKey, Dir>,
     /// Highest finalization from the `f + 1` peer sample.
     ///
-    /// This is the state-sync floor: it is at least as recent as the freshest
+    /// This is the sampled state-sync floor, at least as recent as the freshest
     /// honest reply in the sample.
     pub floor: Finalization<S, D>,
 }
@@ -235,10 +205,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::{Actor, Bootstrap, Config, wire};
-    use crate::dkg::{
-        probe::Artifact,
-        tests::mocks,
-        types::{EpochInfo, EpochOutcome, Payload},
+    use crate::{
+        dkg::{
+            probe::Artifact,
+            state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+            tests::{max_supported_mode, mocks},
+            types::{EpochInfo, EpochOutcome, Payload},
+        },
+        stateful::SyncPlan,
     };
     use commonware_actor::Feedback;
     use commonware_codec::Encode as _;
@@ -259,7 +233,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_p2p::{
-        Receiver as _, Recipients, Sender as _,
+        Provider as _, Receiver as _, Recipients, Sender as _,
         simulated::{
             Config as NetworkConfig, Link, Network, Oracle, Receiver as SimReceiver,
             Sender as SimSender,
@@ -322,10 +296,13 @@ mod tests {
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
         ) -> Self {
+            let fixture = mocks::scheme_fixture_n(context, 4);
             Self::start_full(
                 context,
+                fixture,
                 source_boundaries,
                 Epoch::zero(),
+                None,
                 Duration::from_millis(500),
             )
             .await
@@ -333,11 +310,12 @@ mod tests {
 
         async fn start_full(
             context: &mut deterministic::Context,
+            fixture: mocks::SchemeFixture,
             source_boundaries: Vec<Epoch>,
             bootstrap_epoch: Epoch,
+            floor: Option<Finalization<mocks::TestScheme, mocks::TestDigest>>,
             retry_timeout: Duration,
         ) -> Self {
-            let fixture = mocks::scheme_fixture_n(context, 4);
             let participants = fixture.participants.clone();
 
             let (network, oracle) = Network::new_with_peers(
@@ -402,6 +380,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                floor: None,
                 verifier: fixture.schemes[0].clone(),
                 genesis: genesis.clone(),
                 strategy: Sequential,
@@ -427,6 +406,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                floor,
                 verifier: fixture.schemes[1].clone(),
                 genesis,
                 strategy: Sequential,
@@ -950,14 +930,33 @@ mod tests {
         });
     }
 
-    #[test]
-    fn ignores_latest_reply_below_bootstrap_epoch() {
+    /// Latest replies below the bootstrap epoch are ignored without blocking
+    /// peers, including when a persisted floor from an earlier epoch is set.
+    #[rstest::rstest]
+    #[case::none(false)]
+    #[case::older(true)]
+    fn ignores_latest_reply_below_bootstrap_epoch(#[case] older: bool) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
+            // In the `older` case, a persisted epoch-zero floor must not lower
+            // the minimum epoch below the bootstrap epoch.
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let floor = older.then(|| {
+                finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        View::zero(),
+                        Sha256::hash(&[b"floor"]),
+                    ),
+                    &fixture.schemes,
+                )
+            });
             let mut harness = Harness::start_full(
                 &mut context,
+                fixture,
                 vec![Epoch::new(1)],
                 Epoch::new(1),
+                floor,
                 Duration::from_millis(500),
             )
             .await;
@@ -984,6 +983,101 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             let artifact = subscription.try_recv().expect("artifact resolved");
             assert_eq!(artifact.floor, target);
+        });
+    }
+
+    /// A node resuming an interrupted state sync ignores latest replies below
+    /// its persisted floor's epoch, so the discovered info describes the floor
+    /// it resumes from. The bootstrap committee is tracked at the bootstrap
+    /// epoch's peer-set ID, not the floor's.
+    #[test]
+    fn ignores_latest_reply_below_floor_epoch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Select an in-progress floor in epoch 2, which persists it, then
+            // reload it as a restarted node.
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let persisted = finalization(
+                Proposal::new(
+                    Round::new(Epoch::new(2), View::new(3)),
+                    View::new(2),
+                    Sha256::hash(&[b"persisted"]),
+                ),
+                &fixture.schemes,
+            );
+            let plan = SyncPlan::<_, mocks::TestScheme, mocks::TestMarshalVariant>::init(
+                context.child("plan"),
+                "floor",
+            )
+            .await
+            .set_floor(persisted.clone())
+            .await;
+            drop(plan);
+            let plan = SyncPlan::<_, mocks::TestScheme, mocks::TestMarshalVariant>::init(
+                context.child("restart"),
+                "floor",
+            )
+            .await;
+            assert_eq!(plan.floor(), Some(&persisted));
+
+            // Valid replies at the bootstrap epoch are below the floor's
+            // epoch: they must neither complete the sample nor block peers,
+            // even though the source can serve that epoch's boundary.
+            let mut harness = Harness::start_full(
+                &mut context,
+                fixture,
+                vec![Epoch::new(1), Epoch::new(2)],
+                Epoch::new(1),
+                plan.floor().cloned(),
+                Duration::from_millis(500),
+            )
+            .await;
+            let mut subscription = harness.joiner.subscribe();
+            let stale = harness.target_finalization();
+            harness.reply_latest_from_client(stale.clone());
+            harness.reply_latest_from_backup(stale);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "below-floor replies must not complete the sample"
+            );
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "stale replies must not block peers");
+
+            // Replies in the floor's epoch resolve that epoch's info. The
+            // network starts with only set 0, so set 1 proves the committee is
+            // tracked at the bootstrap epoch's ID rather than the floor's.
+            let sampled = harness.latest_finalization(Epoch::new(2), Sha256::hash(&[b"sampled"]));
+            harness.reply_latest_from_client(sampled.clone());
+            harness.reply_latest_from_backup(sampled.clone());
+            context.sleep(Duration::from_millis(100)).await;
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_eq!(artifact.floor, sampled);
+            assert_eq!(artifact.info.epoch, Epoch::new(2));
+            let mut manager = harness.oracle.manager();
+            assert!(manager.peer_set(1).await.is_some());
+            assert!(manager.peer_set(2).await.is_none());
+
+            // The plan keeps the later persisted floor, and the DKG startup
+            // material pairs the plan's floor with the discovered info.
+            let plan = plan.set_floor(artifact.floor.clone()).await;
+            assert_eq!(plan.floor(), Some(&persisted));
+            StateSyncPlan::init(
+                context.child("dkg"),
+                StateSyncConfig {
+                    partition_prefix: "floor".into(),
+                    max_participants: NZU32!(16),
+                    max_supported_mode: max_supported_mode(),
+                },
+                Some(StateSync {
+                    info: artifact.info,
+                    floor: plan.floor().cloned().expect("resumed floor"),
+                }),
+            )
+            .await;
         });
     }
 
@@ -1437,10 +1531,13 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
         runner.start(|mut context| async move {
             let retry_timeout = Duration::from_secs(30);
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
             let mut harness = Harness::start_full(
                 &mut context,
+                fixture,
                 Vec::new(),
                 Epoch::zero(),
+                None,
                 retry_timeout,
             )
             .await;
@@ -1488,7 +1585,9 @@ mod tests {
                 } else {
                     assert_eq!(marshal.report(Activity::Finalization(certificate)), Feedback::Ok);
                 }
-                while marshal.get_processed_height().await < Some(Height::new(height)) {
+                while marshal.get_processed().await.map(|processed| processed.height())
+                    < Some(Height::new(height))
+                {
                     context.sleep(Duration::from_millis(1)).await;
                 }
                 assert!(marshal.get_finalization(Height::new(height)).await.is_some());
@@ -1571,6 +1670,73 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(10)).await;
             }
+        });
+    }
+
+    /// Each peer asked in a catch-up request round has at most one boundary
+    /// response verified, and responses from peers outside the round are
+    /// ignored. Invalid certificates expose verification by blocking the peer.
+    #[test]
+    fn catch_up_verifies_one_response_per_asked_peer_per_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start(&mut context).await;
+            let _marshal = harness.attach_joiner(&context).await;
+            let joiner = harness.participants[1].clone();
+            let client = harness.participants[2].clone();
+            harness.joiner.catch_up(Epoch::zero(), client.clone());
+            assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
+
+            let response = |finalization| {
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryResponse(
+                    finalization,
+                )
+                .encode()
+            };
+            let mut invalid = harness.boundary_finalization.clone();
+            invalid.proposal.payload = mocks::TestDigest::EMPTY;
+            let invalid = response(invalid);
+
+            // The first round asks only the client, so the backup's response
+            // is ignored.
+            harness.backup_boundary_sender.send(
+                Recipients::One(joiner.clone()),
+                invalid.clone(),
+                false,
+            );
+
+            // The client's first response is valid but names a block no peer
+            // serves, so catch-up stays pending. Its later responses in the
+            // same round are not verified.
+            let unserved = harness.latest_finalization(Epoch::zero(), Sha256::hash(&[b"unserved"]));
+            harness.client_boundary_sender.send(
+                Recipients::One(joiner.clone()),
+                response(unserved),
+                false,
+            );
+            harness.client_boundary_sender.send(
+                Recipients::One(joiner.clone()),
+                invalid.clone(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(harness.oracle.blocked().await.unwrap().is_empty());
+
+            // The retry round asks every peer again, so the client's next
+            // response is verified.
+            assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
+            harness
+                .client_boundary_sender
+                .send(Recipients::One(joiner.clone()), invalid, false);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                harness
+                    .oracle
+                    .blocked()
+                    .await
+                    .unwrap()
+                    .contains(&(joiner, client))
+            );
         });
     }
 
@@ -1697,6 +1863,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                floor: None,
                 verifier: fixture.schemes[0].clone(),
                 genesis,
                 strategy: Sequential,

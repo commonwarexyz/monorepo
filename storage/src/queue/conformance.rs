@@ -39,7 +39,7 @@ impl StorageWorkload for QueueWorkload {
         mut context: commonware_runtime::deterministic::Context,
         seed: u64,
     ) -> Result<(), Self::Error> {
-        let mut queue = Queue::<_, Vec<u8>>::init(
+        let (mut queue, mut reader) = Queue::<_, Vec<u8>>::init(
             context.child("queue").with_attribute("index", 0),
             config(seed, &context),
         )
@@ -58,20 +58,23 @@ impl StorageWorkload for QueueWorkload {
 
         let dequeue_count = items_count / 2;
         for _ in 0..dequeue_count {
-            let (pos, _) = queue.dequeue().await?.expect("queue should have items");
-            queue.ack(pos)?;
+            let (pos, _) = reader.try_recv().await?.expect("queue should have items");
+            reader.ack(pos)?;
         }
 
+        // The reader's snapshot keeps the journal's blobs open, so drop both handles before
+        // reopening.
         queue.sync().await?;
+        drop(reader);
 
-        let mut queue = Queue::<_, Vec<u8>>::init(
+        let (queue, mut reader) = Queue::<_, Vec<u8>>::init(
             context.child("queue").with_attribute("index", 1),
             config(seed, &context),
         )
         .await?;
-        while let Some((pos, item)) = queue.dequeue().await? {
+        while let Some((pos, item)) = reader.try_recv().await? {
             assert_eq!(item, data[pos as usize]);
-            queue.ack(pos)?;
+            reader.ack(pos)?;
         }
         queue.sync().await?;
         Ok(())

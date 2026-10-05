@@ -28,7 +28,7 @@
 //!     blocks_archive,
 //!     config,
 //! ).await;
-//! // `floor.height()` is `None` until the application acknowledges a block.
+//! // `floor.processed()` records durable progress from acknowledgements or an installed floor.
 //!
 //! // Start with application and buffer
 //! actor.start(application, buffer, resolver);
@@ -49,9 +49,10 @@ mod acks;
 mod acquisition;
 pub(crate) mod cache;
 mod certified;
+mod delivery;
 pub(crate) mod durability;
 mod floor;
-pub use floor::Floor;
+pub use floor::{Floor, Processed};
 mod staged;
 mod stream;
 
@@ -60,4 +61,4 @@ pub use mailbox::Mailbox;
 
 mod subscriptions;
 mod variant;
-pub use variant::{Buffer, ExpectedCommitment, Retirement, Variant};
+pub use variant::{Buffer, ExpectedCommitment, Variant};

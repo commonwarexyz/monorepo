@@ -211,10 +211,10 @@ impl<D: Digest> Key<D> {
     }
 }
 
-/// A commitment lookup with local retention metadata.
+/// A resolver lookup with local retention metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Request<D: Digest> {
-    commitment: D,
+    key: Key<D>,
     retention: Annotation,
 }
 
@@ -222,8 +222,16 @@ impl<D: Digest> Request<D> {
     /// Fetch a block by commitment for the given local retention reason.
     pub const fn new(commitment: D, retention: Annotation) -> Self {
         Self {
-            commitment,
+            key: Key::Block(commitment),
             retention,
+        }
+    }
+
+    /// Fetch a finalization and its application block by height.
+    pub const fn finalized(height: Height) -> Self {
+        Self {
+            key: Key::Finalized { height },
+            retention: Annotation::Height(height),
         }
     }
 
@@ -243,9 +251,9 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    /// Converts this request into a resolver fetch by commitment.
+    /// Converts this request into a resolver fetch.
     pub(crate) fn into_inner(self) -> ResolverFetch<Key<D>, Annotation> {
-        let key = Key::Block(self.commitment);
+        let key = self.key;
         let span = info_span!("marshal.resolver.fetch", key = %key);
         ResolverFetch {
             key,

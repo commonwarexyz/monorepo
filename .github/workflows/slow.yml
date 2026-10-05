@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-slow-${{ github.head_ref || github.ref_name || github.run_id }}
+  group: tests-slow-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -29,15 +29,11 @@ jobs:
         partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
           - "--features commonware-runtime/iouring"
-          - "--no-default-features"
           - ""
         exclude:
           # Only run io_uring features on Ubuntu
           - os: macos-latest
             flags: "--features commonware-runtime/iouring"
-          # Only run --no-default-features on Ubuntu
-          - os: macos-latest
-            flags: "--no-default-features"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -99,19 +95,11 @@ jobs:
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
-            partition: "1/4"
+            partition: "1/2"
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
-            partition: "2/4"
-          - package: commonware-coding
-            test_flags: ""
-            lint_flags: ""
-            partition: "3/4"
-          - package: commonware-coding
-            test_flags: ""
-            lint_flags: ""
-            partition: "4/4"
+            partition: "2/2"
           - package: commonware-math
             test_flags: ""
             lint_flags: ""
@@ -273,6 +261,14 @@ jobs:
       run: |
         cd runtime
         just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/12 --no-tests=pass
+    - name: Run miri tests for runtime::iouring::task
+      run: |
+        cd runtime
+        just miri iouring::task::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
+    - name: Run miri tests for runtime::iouring::tasks
+      run: |
+        cd runtime
+        just miri iouring::tasks::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

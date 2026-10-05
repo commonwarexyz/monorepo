@@ -118,6 +118,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use futures::future::Either;
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span, warn};
@@ -309,9 +310,9 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result.
     ///
-    /// If `prefetched_block` is provided, it will be used directly instead of fetching from
-    /// the marshal. This is useful in `certify` when we've already fetched the block to
-    /// extract its embedded context.
+    /// If `prefetched_block` is provided, it is used directly. This is useful in `certify` when
+    /// we've already fetched the block to extract its embedded context. Otherwise, exact
+    /// acquisition is registered with marshal before this method returns.
     fn deferred_verify(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
@@ -324,6 +325,10 @@ where
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+
+        // Own the candidate or register exact acquisition before the caller publishes the gate.
+        let candidate = prefetched_block
+            .map_or_else(|| Either::Right(marshal.acquire(commitment)), Either::Left);
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -343,12 +348,9 @@ where
                 // Acquire the exact parent concurrently with candidate reconstruction.
                 let parent_request = marshal.acquire(parent_commitment);
 
-                // Reuse the candidate supplied by certification, or acquire it by commitment.
-                let block = if let Some(block) = prefetched_block {
-                    block
-                } else {
-                    let block_request = marshal.acquire(commitment);
-                    select! {
+                let block = match candidate {
+                    Either::Left(block) => block,
+                    Either::Right(block_request) => select! {
                         _ = tx.closed() => {
                             debug!(
                                 reason = "consensus dropped receiver",
@@ -363,7 +365,7 @@ where
                                 return;
                             }
                         },
-                    }
+                    },
                 };
 
                 // Start the candidate store immediately: it depends on neither the
@@ -1104,8 +1106,6 @@ where
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
         // Coding variant does not support targeted forwarding;
         // peers reconstruct blocks from erasure-coded shards.
-        //
-        // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
             return Feedback::Ok;
         };

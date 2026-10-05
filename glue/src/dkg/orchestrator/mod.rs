@@ -1,71 +1,101 @@
-//! Orchestrate [`Epoch`]-specific Simplex engines.
+//! Epoch-scoped Simplex engines driven by finalized epoch artifacts.
 //!
 //! The orchestrator is the bridge between finalized epoch material and
-//! [`simplex`](commonware_consensus::simplex) consensus. It starts one Simplex
-//! engine for the locally resolved epoch, watches marshal's finalized block
-//! stream, and moves to the next epoch whenever the current epoch's final block
-//! is finalized with the next [`EpochInfo`](crate::dkg::types::EpochInfo).
+//! [`simplex`](commonware_consensus::simplex) consensus. It runs one Simplex
+//! engine for the active epoch, watches marshal's finalized block stream, and
+//! moves to the next epoch when the active epoch's final block is finalized with
+//! the next [`EpochInfo`].
 //!
 //! # Epoch Lifecycle
 //!
-//! Epoch changes are driven by finalized blocks:
+//! Upon startup, the orchestrator reads the active epoch, its [`EpochInfo`], and
+//! the certified root its Simplex engine starts from: from the
+//! [`state_sync::Plan`] if it resolves to material, and otherwise from marshal (see
+//! [Marshal Boundary](#marshal-boundary)).
 //!
-//! 1. Startup resolves an epoch, peer set, and floor from marshal or state sync.
-//! 2. After the epoch gate opens, the orchestrator resolves and tracks the peer
-//!    set, loads the epoch scheme from its
-//!    [`Provider`](commonware_cryptography::certificate::Provider), opens
-//!    epoch-specific P2P subchannels, and starts Simplex.
-//! 3. Marshal reports finalized blocks through [`Mailbox`].
-//! 4. When the finalized block is the final block of the active epoch, the
-//!    orchestrator extracts the next epoch's public `EpochInfo`, tracks the next
-//!    peer set, aborts the old Simplex engine, and starts the next one from the
-//!    boundary commitment.
+//! Upon entering an epoch, the orchestrator:
+//!
+//! 1. Waits for the [`Gate`] to reach the epoch.
+//! 2. Activates the epoch's peers from its [`EpochInfo`].
+//! 3. Loads the epoch's scheme from its [`Provider`].
+//! 4. Opens the epoch's vote, certificate, and resolver subchannels and starts
+//!    its Simplex engine.
+//!
+//! Upon a finalized block reported by marshal through [`Mailbox`]:
+//!
+//! - If it is below the active epoch's final block, acknowledge it.
+//! - If it is above the active epoch's final block, panic.
+//! - Otherwise, read the next epoch's [`EpochInfo`] from it, enter the next epoch
+//!   from the block's commitment, stop the previous engine, and only then
+//!   acknowledge the block.
 //!
 //! ```text
-//! marshal boundary or state-sync artifact
-//!        |
-//!        v
-//! Provider::scheme(epoch)
-//!        |
-//!        v
-//! Simplex engine for epoch N
-//!        |
-//!        v
-//! marshal finalized block stream
-//!        |
-//!        v
-//! final block of epoch N carries EpochInfo(N + 1)
-//!        |
-//!        v
-//! abort epoch N + start epoch N + 1
+//! finalized boundary or state-sync artifact: EpochInfo(N)
+//!                         |
+//!                         v
+//!              Gate(N) -> activate peers
+//!                         |
+//!                         v
+//!              Provider::scheme(N)
+//!                         |
+//!                         v
+//!              Simplex engine for epoch N
+//!                         |
+//!                         v
+//!              marshal finalized block stream
+//!                         |
+//!                         v
+//!              final block carries EpochInfo(N + 1)
+//!                         |
+//!                         v
+//!              enter N + 1 -> stop N -> acknowledge
 //! ```
+//!
+//! Once started, the orchestrator requires marshal to deliver every finalized
+//! block above the latest one it acknowledged in height order. It acknowledges
+//! a redelivered block without repeating its effects. The startup state-sync
+//! floor is the only permitted jump, so a live marshal floor must not leave a
+//! height below it that the orchestrator has not acknowledged.
 //!
 //! # Marshal Boundary
 //!
-//! Epoch zero is anchored by marshal's height-zero block. Later epochs are
-//! anchored by the last finalized block of the previous epoch. Ordinary restart
-//! expects that boundary block to remain in marshal's local finalized block
-//! archive; see [`crate::dkg`] for the marshal retention requirement.
-//! The recovered epoch also selects the peer snapshot, so restart and state-sync
-//! entry use the same epoch-scoped addresses as an uninterrupted node.
+//! Epoch zero is anchored by marshal's height-zero block, and each later epoch by
+//! the final block of the previous epoch. Without state-sync material, the
+//! orchestrator recovers the epoch containing marshal's next unprocessed height
+//! and reads that epoch's [`EpochInfo`] and Simplex root from its boundary block,
+//! which must remain in marshal's finalized block archive (see the
+//! [retention requirement](crate::dkg#marshal-retention)).
 //!
 //! # Catching Up
 //!
-//! Consensus votes are multiplexed by epoch. If the vote mux receives a message
-//! for a future epoch that has not been registered locally, the node is behind.
-//! The orchestrator asks the probe to discover the active epoch's boundary
-//! certificate. The probe verifies it and reports it to marshal, which acquires
-//! the committed block and drives the transition through normal delivery.
+//! Upon receiving a vote or certificate for an epoch later than the active one,
+//! the orchestrator asks the probe to discover the active epoch's boundary
+//! certificate, starting with the message's sender. The probe verifies it and
+//! reports it to marshal, which acquires the committed block. Marshal delivery
+//! of that block then drives the transition. Messages for earlier epochs are
+//! ignored.
+//!
+//! # Failures
+//!
+//! The actor exits cleanly if the gate closes, peer activation fails, marshal
+//! cannot supply a boundary block, its mailbox or a consensus muxer closes, the
+//! active Simplex engine stops without error, or the runtime stops. It panics if
+//! a boundary block does not carry the [`EpochInfo`] of the epoch it introduces,
+//! if a finalized block is above the active epoch's final block, if the
+//! [`Provider`] has no scheme for an entered epoch, if the [`SimplexConfig`] is
+//! invalid, if an epoch's Simplex engine fails, or if the [`state_sync::Plan`]
+//! cannot access storage.
 //!
 //! # Configuration
 //!
-//! [`Config`] wires together marshal, the application automaton/relay, the
-//! scheme provider, P2P manager/blocker, optional state-sync material, network
-//! channels, and persistence partitions. [`SimplexConfig`] contains the
-//! per-epoch Simplex tunables; callers must provide these explicitly rather
-//! than relying on hidden defaults.
+//! [`Config`] connects the actor to marshal, the application, the scheme
+//! [`Provider`], and the network. [`SimplexConfig`] holds the per-epoch Simplex
+//! settings.
 //!
-//! [`Epoch`]: commonware_consensus::types::Epoch
+//! [`EpochInfo`]: crate::dkg::types::EpochInfo
+//! [`state_sync::Plan`]: crate::dkg::state_sync::Plan
+//! [`Gate`]: crate::dkg::fence::Gate
+//! [`Provider`]: commonware_cryptography::certificate::Provider
 
 mod mailbox;
 pub use mailbox::{Mailbox, Message};
@@ -267,7 +297,7 @@ mod tests {
             fixture: &mocks::SchemeFixture,
             index: usize,
         ) {
-            self.nodes[index].abort();
+            self.nodes[index].stop().await;
             self.nodes[index] = Node::start(
                 context,
                 &self.oracle,
@@ -405,6 +435,7 @@ mod tests {
                     participants: genesis_info.participants(),
                     directory: Unit,
                 },
+                floor: None,
                 verifier: fixture.schemes[index].clone(),
                 genesis: genesis_info,
                 strategy: Sequential,
@@ -431,7 +462,7 @@ mod tests {
                     probe,
                     application: application.clone(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(),
+                    simplex: mocks::simplex_config(&context),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),
@@ -493,6 +524,14 @@ mod tests {
             self.orchestrator_handle.abort();
             self.marshal_handle.abort();
             self.probe_handle.abort();
+        }
+
+        /// Abort and join the orchestrator, marshal, and probe tasks.
+        async fn stop(&mut self) {
+            self.abort();
+            let _ = (&mut self.orchestrator_handle).await;
+            let _ = (&mut self.marshal_handle).await;
+            let _ = (&mut self.probe_handle).await;
         }
     }
 
@@ -792,7 +831,7 @@ mod tests {
                     probe: probe::Mailbox::new(probe_sender),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(),
+                    simplex: mocks::simplex_config(&context),
                     gate,
                     state_sync: StateSyncPlan::disabled(),
                     blocks_per_epoch: NZU64!(2),
@@ -865,6 +904,34 @@ mod tests {
                     panic!("orchestrator stayed alive after boundary block lookup failed");
                 },
             };
+        });
+    }
+
+    /// Marshal delivers finalized blocks in height order, so a block above the active epoch's
+    /// final block means marshal skipped that final block. The orchestrator panics instead of
+    /// acknowledging the block and remaining in the previous epoch.
+    #[test]
+    #[should_panic(expected = "finalized block skips the final block of epoch 0")]
+    fn skipped_final_block_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(10));
+        runner.start(|mut context| async move {
+            // Without the boundary block, a lone node stays in epoch zero, whose final block is
+            // at height one.
+            let mut cluster = Cluster::start_with_seeded_first(&mut context, 1, false).await;
+            let proposal = wait_for_proposal(&context, &cluster.nodes, Epoch::zero()).await;
+            assert_eq!(proposal.round.epoch(), Epoch::zero());
+
+            // Marshal reports the first block of epoch one without the final block of epoch
+            // zero.
+            let skipped = Arc::new(mocks::child(&cluster.boundary));
+            let node = &mut cluster.nodes[0];
+            let (acknowledgement, waiter) = Exact::handle();
+            assert_eq!(
+                node.orchestrator
+                    .report(marshal::Update::Block(skipped, acknowledgement)),
+                Feedback::Ok
+            );
+            let _ = waiter.await;
         });
     }
 
@@ -1064,7 +1131,7 @@ mod tests {
                     probe: probe::Mailbox::new(probe_sender),
                     application: mocks::MockApplication::default(),
                     strategy: Sequential,
-                    simplex: mocks::simplex_config(),
+                    simplex: mocks::simplex_config(&context),
                     gate,
                     state_sync,
                     blocks_per_epoch: NZU64!(2),

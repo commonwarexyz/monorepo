@@ -6,7 +6,7 @@ use crate::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
-        core::{Buffer, ExpectedCommitment, Mailbox, Retirement, Variant},
+        core::{Buffer, ExpectedCommitment, Mailbox, Variant},
     },
     simplex::types::Context,
     types::{Round, coding::Commitment},
@@ -95,6 +95,13 @@ where
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block.inner_shared()
     }
+
+    fn from_application_block(
+        block: Self::ApplicationBlock,
+        payload: Self::Commitment,
+    ) -> Self::Block {
+        Arc::new(CodedBlock::new_trusted(block, payload))
+    }
 }
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
@@ -125,10 +132,6 @@ where
         commitment: Commitment<B, C, H>,
     ) -> Option<oneshot::Receiver<Arc<CodedBlock<B, C, H>>>> {
         Some(self.subscribe(commitment))
-    }
-
-    fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
-        Self::retire(self, update);
     }
 
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {

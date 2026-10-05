@@ -15,7 +15,10 @@ use commonware_utils::{non_empty_range, range::NonEmptyRange};
 pub struct Target<F: Family, D: Digest> {
     /// The ops root the sync engine verifies streaming batches against.
     pub root: D,
-    /// Range of operations to sync
+    /// Operations to sync, from the inclusive lower bound to the exclusive target size.
+    ///
+    /// The target's inactivity floor is declared by its final commit and may differ from the
+    /// lower bound.
     pub range: NonEmptyRange<Location<F>>,
 }
 

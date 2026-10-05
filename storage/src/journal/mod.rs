@@ -49,8 +49,6 @@ pub enum Error {
     ItemOutOfRange(u64),
     #[error("item pruned: {0}")]
     ItemPruned(u64),
-    #[error("invalid rewind: {0}")]
-    InvalidRewind(u64),
     #[error("compression failed")]
     CompressionFailed,
     #[error("decompression failed")]

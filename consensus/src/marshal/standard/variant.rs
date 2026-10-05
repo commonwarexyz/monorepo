@@ -7,7 +7,7 @@ use crate::{
     Block,
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, ExpectedCommitment, Mailbox, Retirement, Variant},
+        core::{Buffer, ExpectedCommitment, Mailbox, Variant},
     },
     types::Round,
 };
@@ -62,6 +62,13 @@ where
     fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block
     }
+
+    fn from_application_block(
+        block: Self::ApplicationBlock,
+        _payload: Self::Commitment,
+    ) -> Self::Block {
+        Arc::new(block)
+    }
 }
 
 impl<B, K> Buffer<Standard<B>> for buffered::Mailbox<K, B>
@@ -82,8 +89,6 @@ where
     fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
         Some(self.subscribe(commitment))
     }
-
-    fn retire(&self, _update: Retirement<B::Digest>) {}
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
         self.broadcast_shared(recipients, block);
