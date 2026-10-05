@@ -218,7 +218,7 @@ YAML front matter between two `---` lines. Keys, in this order:
 | `id` | yes | Equal to the file name without `.md`. |
 | `title` | yes | One line, at most 80 characters. |
 | `source_kind` | yes | `human`, `issue`, `design`, `comment`, `spec` or `paper`. |
-| `source_ref` | yes | URL, path, `path:line`, document section, or paper page. |
+| `source_ref` | yes | URL, path, `path:line@commit` (section 4.6, rule 10), document section, or paper page. |
 | `scope` | yes | Inline list, one or more of the registry's scope values (below). |
 
 | Registry | Allowed `scope` values |
@@ -238,7 +238,22 @@ Level-2 sections, in this order:
 4. `## Preconditions / assumptions` (optional).
 5. `## Observation hints` (optional, non-binding): where the concepts live in the code,
    including, for an action the Statement constrains, the site past which it is visible
-   outside the replica.
+   outside the replica. Hints name functions, types and fields, not line numbers, because
+   they describe the code a later campaign instruments and lines move.
+6. `## Source excerpts` (generated, last): the lines the file cites, as they read at the
+   commit each citation names, so a reader sees what the invariant was written against
+   without fetching it. `statelens.py excerpts` writes it from the citations and
+   `extract` runs it on the files the agent writes; nobody edits it by hand.
+
+A line number means something only at one commit, so every line a file cites, in
+`source_ref` or in the text, is written `path:line@commit` with the path from the
+repository root; `line` may be a range or a list of ranges. Where a heading or a name is
+enough, a file names it instead: a quote from a document may carry its section, and a
+function, type or test is named rather than located. The registry pins its citations to
+`55cd57fd2137`, the main commit its invariants were written against. Each excerpt is the
+cited range, merged with the ranges of the same file and commit that overlap it or lie at
+most one line away, copied verbatim except that a non-ASCII character is written as a `\u`
+escape (rule 8).
 
 ### 4.4 EARS statements and how they are checked
 
@@ -269,7 +284,7 @@ check, because the state the decision read is not the state the replica acted on
 id: INV-NNNN
 title: <one line, at most 80 characters>
 source_kind: <human | issue | design | comment | spec | paper>
-source_ref: <URL, path, path:line, document section, or paper page>
+source_ref: <URL, path, path:line@commit, document section, or paper page>
 scope: [<one or more of the registry's scope values, listed in the prompt context>]
 ---
 
@@ -280,16 +295,18 @@ scope: [<one or more of the registry's scope values, listed in the prompt contex
 <Why it must hold: the protocol argument, or the reference that states it.>
 
 ## Evidence
-<What the source says. For an issue: the violating scenario in two to five sentences.>
+<What the source says. For an issue: the violating scenario in two to five sentences. Cite a
+line as path:line@commit, with the path from the repository root, or name the section or item.>
 
 ## Preconditions / assumptions
 <Optional. Conditions or modeling assumptions under which the Statement is claimed.
 Delete this section if unused.>
 
 ## Observation hints
-<Optional and non-binding. Where the concepts live in today's code. For an action the
-Statement constrains, name the site past which it is visible outside the replica, not only
-the one that decides it. Delete this section if unused.>
+<Optional and non-binding. Where the concepts live in today's code: name functions, types and
+fields, not line numbers, which move. For an action the Statement constrains, name the site
+past which it is visible outside the replica, not only the one that decides it. Delete this
+section if unused.>
 ~~~
 
 ### 4.6 Lint rules
@@ -314,6 +331,15 @@ the one that decides it. Delete this section if unused.>
 8. Only ASCII characters.
 9. No two files, in any registries, have the same `id`; a repeated ID is a problem for
    each file that has it.
+10. Every line number names its file and the commit it was read at: `path:line@commit`,
+    with a commit of 7 to 40 hex digits (section 4.3). Inside a git clone the citation is
+    resolved: the path, from the repository root, exists at the commit, and the lines lie
+    within it. A citation without a commit, a bare `line N` or `lines N-M`, and a GitHub
+    `#L` link into a branch are problems, because each points at different code as the tree
+    changes. The Source excerpts section is not scanned; rule 11 covers it.
+11. Inside a git clone, a file that pins a citation has a `## Source excerpts` section, and
+    it is exactly what `statelens.py excerpts` writes for those citations; a stale or
+    missing one names the command that regenerates it.
 
 Exit code 0 when clean, 3 otherwise. EARS conformance is not linted; humans review it.
 
@@ -590,6 +616,10 @@ check-scripts *args:
 check-invariants *args:
     python3 scripts/statelens.py lint "$@"
 
+# Write the cited source lines into invariant files: just excerpts [--check] [path...]
+excerpts *args:
+    python3 scripts/statelens.py excerpts "$@"
+
 # Check an instrumentation plan: just check-plan [--profile P] [path...]
 check-plan *args:
     python3 scripts/statelens.py lint-plan "$@"
@@ -608,6 +638,7 @@ prefixed with `statelens:`.
 | Subcommand | Usage | Exit codes |
 |---|---|---|
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
+| `excerpts` | `excerpts [--check] [PATH...]`; writes the Source excerpts section of each invariant file (default: every registry file) from its pinned citations (section 4.3). With `--check` it writes nothing and lists the files whose section is missing or stale | 0 done, 3 stale files under `--check` |
 | `extract` | `extract [--agent A] [--registry R] KIND SOURCE...`, where `R` is `simplex` (default) or `marshal` | 0 done (including zero files), 1 usage, 2 agent failed, 3 problems: a lint problem, an existing invariant modified, a write outside the registry, or a change anywhere else in the worktree |
 | `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, a section that is not state-bearing, or a section asked of a document, 2 no readable corpus root |
 | `lint-examples` | `lint-examples [PATH...]`; with no path it checks every `*.md` in `examples/` | 0 clean, 3 problems |
@@ -937,8 +968,10 @@ the repository root, which is the agent's working directory.
    Placeholders: `KIND`, `NEXT_ID`, `TEMPLATE` (the content of `templates/invariant.md`),
    `SOURCES` (one `- <source>` line per source, with `(text: <path>)` appended for
    converted papers), `REGISTRY` (the registry name), `CONTEXT` (the content of
-   `prompts/subsystems/<registry>-analyst.md`) and `SOURCE_ROOT`
-   (`consensus/src/<registry>`).
+   `prompts/subsystems/<registry>-analyst.md`), `SOURCE_ROOT`
+   (`consensus/src/<registry>`) and `COMMIT` (`git rev-parse --short=12 HEAD`, the commit
+   the agent pins every line it cites to). When a tracked file outside this subproject
+   differs from `HEAD`, warn that a line the agent cites in it may not match the commit.
 6. Run the agent with the Phase 1 invocation (section 12), working directory = the
    repository root, prompt on standard input. Log to
    `SL/extract/<UTC timestamp>-<kind>.log`.
@@ -949,7 +982,8 @@ the repository root, which is the agent's working directory.
    ("agent changed a file outside invariants/"), excepting this subproject's own `extract/`
    and `campaign/`, which the script writes itself and names rather than trusting a
    `.gitignore` to hide.
-8. Lint the new files (section 4.6).
+8. Write the Source excerpts section of each new file that pins a citation (section 4.3),
+   then lint the new files (section 4.6).
 9. Print each new file with its title and the reminder: "Every file in a registry is
    used by the next campaign that binds it. Review, edit or delete these files first."
 
@@ -1802,7 +1836,17 @@ explain why in the Rationale.
 - Follow the template below exactly: the same front matter keys and section headings,
   in the same order. Delete optional sections you do not use.
 - Set `source_kind: {{KIND}}`. Make `source_ref` as precise as you can: URL,
-  `path:line`, document section, or paper page.
+  `path:line@{{COMMIT}}`, document section, or paper page.
+- A line number means something only at one commit, and the code moves after you. Write
+  every line you cite, in `source_ref` and in the text alike, as `path:line@{{COMMIT}}`
+  (or `path:start-end@{{COMMIT}}`), with the path from the repository root;
+  `{{COMMIT}}` is the commit of the tree you are reading. Never write a bare "line N".
+  Where a heading or a name identifies the place, name it instead: a quote from a
+  document can carry its section, and Observation hints, which describe the code a later
+  campaign instruments, name functions, types and fields, never lines.
+- Cite the whole comment, block or property that states what you rely on, as a range, not
+  only its first line. Do not write a `## Source excerpts` section: when you finish, the
+  script copies the lines you cite into it, as they read at `{{COMMIT}}`.
 - Plain ASCII only. Wrap lines at 100 characters.
 - Do not modify or delete existing files, create other files, or write code.
 
@@ -1915,7 +1959,8 @@ Kind: `{{KIND}}`
   happen because", "invariant", "at most", "before", "after". Each one is a candidate.
 - Restate each candidate in protocol terms. Keep Rust identifiers out of the Statement
   and put the code location and identifiers in "Observation hints".
-- source_ref is `path:line` of the comment or assertion.
+- source_ref is `path:line@{{COMMIT}}` of the comment or assertion, with the path from the
+  repository root.
 - Skip comments that describe mechanics without stating a condition.
 ~~~
 
@@ -1933,7 +1978,8 @@ Kind: `{{KIND}}`
 - Record modeling assumptions the implementation may not share (a fixed number of
   replicas, bounded views, a static leader, no crashes) under "Preconditions /
   assumptions".
-- source_ref is `path:line` of the property or action.
+- source_ref is `path:line@{{COMMIT}}` of the property or action, with the path from the
+  repository root, or a URL that names a commit for a specification outside it.
 ~~~
 
 ### 13.6 `prompts/analyst-paper.md`
@@ -2150,7 +2196,9 @@ below:
 1. Read the Statement (EARS). Identify the trigger or state (`pre`) and the required
    response (`post`), or the single condition of a ubiquitous statement. Treat
    "Preconditions / assumptions" as part of `pre`. Treat "Observation hints" as leads,
-   not as facts.
+   not as facts. "Source excerpts" show the code the invariant was written against, at the
+   commit each names; the code may have moved or changed since, so find today's sites with
+   the tools below rather than by those lines.
 2. Find where the implementation establishes and uses the concepts. Trace with search,
    references and call hierarchy across the components the subsystem rules name,
    including the mailbox messages between them and the recovery path on restart.

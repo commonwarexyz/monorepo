@@ -8,5 +8,6 @@
   happen because", "invariant", "at most", "before", "after". Each one is a candidate.
 - Restate each candidate in protocol terms. Keep Rust identifiers out of the Statement
   and put the code location and identifiers in "Observation hints".
-- source_ref is `path:line` of the comment or assertion.
+- source_ref is `path:line@{{COMMIT}}` of the comment or assertion, with the path from the
+  repository root.
 - Skip comments that describe mechanics without stating a condition.

@@ -673,7 +673,7 @@ def registry_files(sl_dir):
 
 
 def lint_file(path):
-    """Checks one invariant file against SPEC section 4.6, rules 1 to 8."""
+    """Checks one invariant file against SPEC section 4.6, rules 1 to 8 and 10."""
     problems = []
     parent = path.resolve().parent
     registry = parent.name if parent.name in SUBSYSTEMS else None
@@ -750,7 +750,221 @@ def lint_file(path):
             positions.append(order.index(name))
     if positions != sorted(positions):
         problems.append("sections Statement, Rationale and Evidence must be in this order")
+    repo = git_toplevel(path.resolve().parent)
+    body, excerpts = split_excerpts(text)
+    problems += line_reference_problems(body, repo)
+    if repo is not None and (excerpts or pinned_ranges(body)):
+        if with_excerpts(text, repo).rstrip("\n") != text.rstrip("\n"):
+            problems.append(
+                "the Source excerpts section is missing or does not match the pinned "
+                f"citations; regenerate it with `just excerpts {path.name}` (rule 11)"
+            )
     return problems
+
+
+# Rule 10 (SPEC section 4.6). A line number means something only at one commit, so it
+# is written `path:line@commit`, with the path from the repository root: `line` may be
+# a range or a list of them. The path is matched only where it starts a word, so the
+# host of a URL is not read as one.
+LINE_REFERENCE = re.compile(
+    r"(?<![\w/.-])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z]{1,5})"
+    r":(\d+(?:-\d+)?(?:,\s?\d+(?:-\d+)?)*)(?:@([0-9a-f]{7,40})\b)?"
+)
+BARE_LINES = re.compile(r"\blines? \d+", re.I)
+BRANCH_PERMALINK = re.compile(
+    r"https?://github\.com/[^\s)`]+?/blob/(?![0-9a-f]{7,40}/)[^/\s)`]+/[^\s)`#]+#L\d+"
+)
+
+
+def git_toplevel(directory):
+    """The root of the git work tree holding `directory`, or None outside one."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True,
+        )
+    except OSError:
+        return None
+    return Path(done.stdout.strip()) if done.returncode == 0 else None
+
+
+def line_reference_problems(text, repo):
+    """Rule 10: every line number names its file and the commit it was read at.
+
+    Inside a git clone a pinned reference is also resolved: the path, read from the
+    repository root, must exist at the commit, and the lines must lie within it. A
+    reference that names no commit, a bare "line N", and a GitHub `#L` link into a
+    branch are reported wherever they occur, because each points at different code
+    as the tree changes.
+    """
+    problems = []
+    for match in LINE_REFERENCE.finditer(text):
+        path, spec, commit = match.group(1), match.group(2), match.group(3)
+        if commit is None:
+            problems.append(
+                f"cites `{path}:{spec}` without a commit; write `<path from the repository "
+                f"root>:{spec}@<commit>`, or name the section or item instead (rule 10)"
+            )
+            continue
+        if repo is None:
+            continue
+        lines = git_file(repo, commit, path)
+        if lines is None:
+            problems.append(
+                f"cites `{path}:{spec}@{commit}`, but no file {path} exists at {commit} in "
+                "this clone; give the path from the repository root and a commit it has "
+                "(rule 10)"
+            )
+            continue
+        last = max(int(number) for number in re.findall(r"\d+", spec))
+        if last > len(lines):
+            problems.append(
+                f"cites `{path}:{spec}@{commit}`, but {path} has {len(lines)} lines there "
+                "(rule 10)"
+            )
+    for match in BARE_LINES.finditer(text):
+        problems.append(
+            f"says `{match.group(0)}` without its file and commit; write "
+            "`path:line@<commit>`, or name the section or item instead (rule 10)"
+        )
+    for match in BRANCH_PERMALINK.finditer(text):
+        problems.append(
+            f"links `{match.group(0)}`, a line of a branch, which moves; link a commit "
+            "instead (rule 10)"
+        )
+    return problems
+
+
+_GIT_FILES = {}
+
+
+def git_file(repo, commit, path):
+    """The lines of `path` at `commit` in the clone at `repo`, or None when it has none."""
+    key = (str(repo), commit, path)
+    if key not in _GIT_FILES:
+        done = subprocess.run(
+            ["git", "-C", str(repo), "show", f"{commit}:{path}"],
+            capture_output=True, text=True, errors="replace",
+        )
+        lines = done.stdout.split("\n") if done.returncode == 0 else None
+        if lines and lines[-1] == "":
+            lines.pop()
+        _GIT_FILES[key] = lines
+    return _GIT_FILES[key]
+
+
+# The Source excerpts section (SPEC section 4.3, lint rule 11): the lines an invariant
+# pins, as they read at their commits, so a reader sees what it was written against
+# without fetching anything. It is the last section, and the script writes it.
+EXCERPTS = "## Source excerpts"
+EXCERPTS_NOTE = (
+    "Generated by `statelens.py excerpts` from the pinned citations above: each cited range as\n"
+    "it reads at the commit it names. They show the code this invariant was written against,\n"
+    "not today's code. Edit the citations, not this section."
+)
+EXCERPT_LANGUAGES = {".rs": "rust", ".toml": "toml", ".md": "markdown", ".py": "python"}
+
+
+def split_excerpts(text):
+    """(`text` before its Source excerpts section, the section), the section "" if absent."""
+    if text.startswith(EXCERPTS + "\n"):
+        return "", text
+    index = text.find("\n" + EXCERPTS + "\n")
+    if index < 0:
+        return text, ""
+    return text[: index + 1], text[index + 1 :]
+
+
+def pinned_ranges(text):
+    """(path, commit, first, last) of every pinned citation in `text`.
+
+    Ranges of one file at one commit are merged when they overlap or lie at most one line
+    apart, so a heading and the paragraph below it make one excerpt. Files keep the order
+    of their first citation.
+    """
+    order, spans = [], {}
+    for match in LINE_REFERENCE.finditer(text):
+        path, spec, commit = match.group(1), match.group(2), match.group(3)
+        if commit is None:
+            continue
+        key = (path, commit)
+        if key not in spans:
+            spans[key] = []
+            order.append(key)
+        for part in spec.split(","):
+            first, _, last = part.strip().partition("-")
+            spans[key].append((int(first), int(last or first)))
+    ranges = []
+    for key in order:
+        merged = []
+        for first, last in sorted(spans[key]):
+            if merged and first <= merged[-1][1] + 2:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+            else:
+                merged.append((first, last))
+        ranges += [(key[0], key[1], first, last) for first, last in merged]
+    return ranges
+
+
+def excerpt_section(text, repo):
+    """The Source excerpts section for the pinned citations of `text`; "" if it pins none.
+
+    The lines are copied as they are, except that a non-ASCII character is written as a
+    `\\u` escape, which keeps the registry ASCII (lint rule 8). A citation that does not
+    resolve is left out, and lint rule 10 reports it.
+    """
+    blocks = []
+    for path, commit, first, last in pinned_ranges(text):
+        lines = git_file(repo, commit, path)
+        if lines is None or first < 1 or last > len(lines):
+            continue
+        body = [
+            line.encode("ascii", "backslashreplace").decode("ascii")
+            for line in lines[first - 1 : last]
+        ]
+        fence = "```"
+        while any(fence in line for line in body):
+            fence += "`"
+        where = f"{first}-{last}" if last != first else str(first)
+        language = EXCERPT_LANGUAGES.get(Path(path).suffix, "")
+        blocks.append(
+            f"`{path}:{where}@{commit}`\n{fence}{language}\n" + "\n".join(body) + f"\n{fence}"
+        )
+    if not blocks:
+        return ""
+    return f"{EXCERPTS}\n{EXCERPTS_NOTE}\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def with_excerpts(text, repo):
+    """`text` with its Source excerpts section written afresh from its pinned citations."""
+    body, _section = split_excerpts(text)
+    body = body.rstrip("\n") + "\n"
+    section = excerpt_section(body, repo)
+    return body + ("\n" + section if section else "")
+
+
+def cmd_excerpts(args):
+    """Writes the Source excerpts section of invariant files (SPEC section 4.3)."""
+    repo = repo_root()
+    sl_dir = repo / SL
+    paths = [Path(path) for path in args.paths] if args.paths else registry_files(sl_dir)
+    stale = []
+    for path in paths:
+        text = path.read_text()
+        body, section = split_excerpts(text)
+        if not section and not pinned_ranges(body):
+            continue
+        fresh = with_excerpts(text, repo)
+        if fresh.rstrip("\n") == text.rstrip("\n"):
+            continue
+        stale.append(path)
+        if not args.check:
+            path.write_text(fresh)
+    state = "out of date" if args.check else "rewritten"
+    for path in stale:
+        print(f"{path}: Source excerpts {state}", flush=True)
+    say(f"excerpts: {len(stale)} of {len(paths)} file(s) {state}")
+    return 3 if args.check and stale else 0
 
 
 def lint_paths(paths, others=()):
@@ -835,7 +1049,21 @@ def extract_values(repo, sl_dir, kind, registry, sources):
         "REGISTRY": registry,
         "CONTEXT": subsystem_prompt(sl_dir, registry, "analyst"),
         "SOURCE_ROOT": f"consensus/src/{registry}",
+        # The commit every line the agent cites is pinned to (lint rule 10).
+        "COMMIT": git(repo, "rev-parse", "--short=12", "HEAD").strip(),
     }
+
+
+def unpinnable(tree):
+    """Tracked files outside this subproject that differ from HEAD in a worktree state.
+
+    The agent reads the tree as it stands but pins the lines it cites to HEAD, so a line
+    cited in one of these files may not be the line HEAD has there.
+    """
+    return sorted(
+        path for path, (status, _digest) in tree.items()
+        if status != "??" and not path.startswith(f"{SL}/")
+    )
 
 
 def files_under(root):
@@ -875,6 +1103,14 @@ def cmd_extract(args):
     before = files_under(invariants)
     values = extract_values(repo, sl_dir, args.kind, args.registry, args.sources)
     prompt = compose(sl_dir, "analyst.md", f"analyst-{args.kind}.md", values)
+    tree_before = worktree_state(repo)
+    changed = unpinnable(tree_before)
+    if changed:
+        say(
+            f"warning: {len(changed)} tracked file(s) differ from {values.get('COMMIT', 'HEAD')}, "
+            "the commit the agent pins cited lines to, so a line it cites in one of them may "
+            f"not match: {', '.join(changed[:5])}" + (" ..." if len(changed) > 5 else "")
+        )
 
     stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
     log = sl_dir / "extract" / f"{stamp}-{args.kind}.log"
@@ -884,7 +1120,6 @@ def cmd_extract(args):
         f"extract: {agent} reads {len(args.sources)} {args.kind} source(s) for the "
         f"{args.registry} registry, from {values['NEXT_ID']}; log {log.relative_to(repo)}"
     )
-    tree_before = worktree_state(repo)
     code, _ = run_logged(agent_command(config, agent, 1, repo), log, repo, stdin_text=prompt)
     if code != 0:
         raise Abort(2, f"the agent exited with code {code}; see {log.relative_to(repo)}")
@@ -915,6 +1150,11 @@ def cmd_extract(args):
             continue
         print(f"{path}: the agent changed a file outside invariants/")
         problems += 1
+    # The agent pins the lines it cites; the script copies them in, so no excerpt is
+    # retyped by hand (SPEC section 4.3).
+    for path in new:
+        if path.parent == registry and pinned_ranges(path.read_text()):
+            path.write_text(with_excerpts(path.read_text(), repo))
     problems += lint_paths(new, registry_files(sl_dir))
     for path in new:
         say(f"new: {path.relative_to(sl_dir)}: {title_of(path)}")
@@ -4743,6 +4983,18 @@ def main(argv):
         ),
     )
     lint.add_argument("paths", nargs="*", metavar="PATH", help="an invariant file")
+    excerpts = commands.add_parser(
+        "excerpts",
+        help="write the cited source lines into invariant files",
+        description=(
+            "Write the Source excerpts section of invariant files from their pinned citations "
+            "(SPEC section 4.3). Without PATH, every file in invariants/ and "
+            "false-invariants/. With --check, only report the files whose section is missing "
+            "or out of date (exit code 3)."
+        ),
+    )
+    excerpts.add_argument("paths", nargs="*", metavar="PATH", help="an invariant file")
+    excerpts.add_argument("--check", action="store_true", help="report, do not write")
     extract = commands.add_parser(
         "extract",
         help="turn sources into invariants of a registry (Phase 1)",
@@ -4975,6 +5227,8 @@ def main(argv):
     try:
         if args.command == "lint":
             return cmd_lint(args)
+        if args.command == "excerpts":
+            return cmd_excerpts(args)
         if args.command == "extract":
             return cmd_extract(args)
         if args.command == "kb":

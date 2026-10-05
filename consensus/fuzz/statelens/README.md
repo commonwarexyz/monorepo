@@ -83,6 +83,15 @@ rendered prompts and paper text go to `extract/`.
 profile binds the simplex registry, the `marshal` profile both), so review the new files
 first: edit them, delete the ones you do not want, and run `just check-invariants`.
 
+A line number means something only at one commit, so an invariant cites lines as
+`path:line@commit`, with the path from the repository root; the agent pins them to the
+commit you run it on, and hints name functions and types instead of lines. Each file ends
+with a `## Source excerpts` section holding the cited lines as they read at that commit, so
+you can review an invariant without fetching anything. The script writes it after the agent
+finishes; when you change a citation by hand, run `just excerpts <file>` to rewrite it.
+`just check-invariants` reports a citation without a commit, one that does not resolve, and
+an excerpt section that no longer matches its citations.
+
 ## The knowledge base
 
 A campaign's beacon step can consult a knowledge base of developer artifacts while it

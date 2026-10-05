@@ -55,7 +55,17 @@ explain why in the Rationale.
 - Follow the template below exactly: the same front matter keys and section headings,
   in the same order. Delete optional sections you do not use.
 - Set `source_kind: {{KIND}}`. Make `source_ref` as precise as you can: URL,
-  `path:line`, document section, or paper page.
+  `path:line@{{COMMIT}}`, document section, or paper page.
+- A line number means something only at one commit, and the code moves after you. Write
+  every line you cite, in `source_ref` and in the text alike, as `path:line@{{COMMIT}}`
+  (or `path:start-end@{{COMMIT}}`), with the path from the repository root;
+  `{{COMMIT}}` is the commit of the tree you are reading. Never write a bare "line N".
+  Where a heading or a name identifies the place, name it instead: a quote from a
+  document can carry its section, and Observation hints, which describe the code a later
+  campaign instruments, name functions, types and fields, never lines.
+- Cite the whole comment, block or property that states what you rely on, as a range, not
+  only its first line. Do not write a `## Source excerpts` section: when you finish, the
+  script copies the lines you cite into it, as they read at `{{COMMIT}}`.
 - Plain ASCII only. Wrap lines at 100 characters.
 - Do not modify or delete existing files, create other files, or write code.
 

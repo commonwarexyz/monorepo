@@ -9,4 +9,5 @@
 - Record modeling assumptions the implementation may not share (a fixed number of
   replicas, bounded views, a static leader, no crashes) under "Preconditions /
   assumptions".
-- source_ref is `path:line` of the property or action.
+- source_ref is `path:line@{{COMMIT}}` of the property or action, with the path from the
+  repository root, or a URL that names a commit for a specification outside it.

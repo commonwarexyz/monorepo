@@ -183,6 +183,10 @@ check-scripts *args:
 check-invariants *args:
     python3 scripts/statelens.py lint "$@"
 
+# Write the cited source lines into invariant files: just excerpts [--check] [path...]
+excerpts *args:
+    python3 scripts/statelens.py excerpts "$@"
+
 # Check an instrumentation plan: just check-plan [--profile P] [path...]
 check-plan *args:
     python3 scripts/statelens.py lint-plan "$@"

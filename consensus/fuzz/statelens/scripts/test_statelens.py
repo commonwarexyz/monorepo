@@ -2377,6 +2377,137 @@ class KbSnippets(unittest.TestCase):
         self.assertIn("Excluded sentinel", snippet)
 
 
+class LineCitations(unittest.TestCase):
+    """A line number means something only at one commit: an invariant cites lines as
+    `path:line@commit` (lint rule 10), and ends with the cited lines copied in at that
+    commit (rule 11), which `statelens.py excerpts` writes."""
+
+    SOURCE = (
+        "//! First line\n"                       # 1
+        "//! Second, with a dash — here\n"  # 2  non-ASCII, escaped in an excerpt
+        "//! see line 5 of the table\n"          # 3  prose a bare-line check must not read
+        "/// ```rust\n"                          # 4  a fence inside the excerpt
+        "/// code\n"                             # 5
+        "/// ```\n"                              # 6
+        "fn main() {}\n"                         # 7
+    )
+
+    def setUp(self):
+        self.repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        source = self.repo / "consensus/src/x.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text(self.SOURCE)
+        self.registry = self.repo / "consensus/fuzz/statelens/invariants/simplex"
+        self.registry.mkdir(parents=True)
+        for args in (("init", "-q", "."), ("config", "user.email", "t@example.invalid"),
+                     ("config", "user.name", "t"), ("add", "-A"), ("commit", "-qm", "base")):
+            subprocess.run(("git",) + args, cwd=self.repo, capture_output=True, check=True)
+        self.commit = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"], cwd=self.repo,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        sl._GIT_FILES.clear()
+
+    def invariant(self, evidence, name="INV-0001.md"):
+        path = self.registry / name
+        path.write_text(
+            "---\nid: INV-0001\ntitle: t\nsource_kind: comment\n"
+            f"source_ref: consensus/src/x.rs:1@{self.commit}\nscope: [replica]\n---\n\n"
+            "## Statement\nThe replica shall hold.\n\n## Rationale\nBecause.\n\n"
+            f"## Evidence\n{evidence}\n"
+        )
+        return path
+
+    def rule(self, path, number):
+        return [problem for problem in sl.lint_file(path) if f"(rule {number})" in problem]
+
+    def test_a_line_without_a_commit_is_reported(self):
+        path = self.invariant("`consensus/src/x.rs:3` says so.")
+        self.assertTrue(any("without a commit" in p for p in self.rule(path, 10)))
+
+    def test_a_pinned_line_that_resolves_needs_only_its_excerpt(self):
+        path = self.invariant(f"`consensus/src/x.rs:3-6@{self.commit}` says so.")
+        self.assertEqual(self.rule(path, 10), [])
+        self.assertTrue(self.rule(path, 11), "a pinned citation needs its excerpt")
+        path.write_text(sl.with_excerpts(path.read_text(), self.repo))
+        self.assertEqual(sl.lint_file(path), [])
+
+    def test_a_citation_that_does_not_resolve_is_reported(self):
+        path = self.invariant(
+            f"`x.rs:3@{self.commit}` and `consensus/src/x.rs:99@{self.commit}` say so."
+        )
+        problems = self.rule(path, 10)
+        self.assertTrue(any("no file x.rs exists" in p for p in problems), problems)
+        self.assertTrue(any("has 7 lines there" in p for p in problems), problems)
+
+    def test_bare_lines_and_branch_links_are_reported(self):
+        path = self.invariant(
+            "It says so (lines 3-4), in https://github.com/o/r/blob/main/x.rs#L3, unlike "
+            f"https://github.com/o/r/blob/{self.commit}/x.rs#L3 and https://example.invalid:443/."
+        )
+        problems = self.rule(path, 10)
+        self.assertEqual(len(problems), 2, problems)
+        self.assertTrue(any("`lines 3`" in p for p in problems))
+        self.assertTrue(any("a line of a branch" in p for p in problems))
+
+    def test_an_excerpt_merges_near_ranges_escapes_and_fences(self):
+        text = self.invariant(
+            f"`consensus/src/x.rs:3-6@{self.commit}` says so."
+        ).read_text()
+        section = sl.excerpt_section(text, self.repo)
+        # source_ref cites line 1 and the text 3-6: one line apart, so one excerpt.
+        self.assertIn(f"`consensus/src/x.rs:1-6@{self.commit}`\n````rust\n", section)
+        self.assertIn("//! Second, with a dash \\u2014 here", section)
+        self.assertIn("/// ```\n````", section, "the fence outgrows the one inside")
+        self.assertTrue(section.isascii())
+
+    def test_the_excerpt_section_is_not_read_as_citations(self):
+        path = self.invariant(f"`consensus/src/x.rs:3@{self.commit}` says so.")
+        path.write_text(sl.with_excerpts(path.read_text(), self.repo))
+        self.assertIn("see line 5 of the table", path.read_text())
+        self.assertEqual(sl.lint_file(path), [], "prose inside an excerpt is not a bare line")
+        self.assertEqual(sl.with_excerpts(path.read_text(), self.repo), path.read_text())
+
+    def test_a_stale_excerpt_is_reported_and_rewritten(self):
+        path = self.invariant(f"`consensus/src/x.rs:3@{self.commit}` says so.")
+        path.write_text(sl.with_excerpts(path.read_text(), self.repo).replace("code", "edited"))
+        self.assertTrue(self.rule(path, 11))
+        saved = (sl.repo_root, sl.say)
+        sl.repo_root, sl.say = (lambda: self.repo), (lambda *_a, **_k: None)
+        self.addCleanup(lambda: (setattr(sl, "repo_root", saved[0]), setattr(sl, "say", saved[1])))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(sl.cmd_excerpts(argparse.Namespace(paths=[str(path)], check=True)), 3)
+            self.assertEqual(sl.cmd_excerpts(argparse.Namespace(paths=[str(path)], check=False)), 0)
+            self.assertEqual(sl.cmd_excerpts(argparse.Namespace(paths=[str(path)], check=True)), 0)
+        self.assertEqual(sl.lint_file(path), [])
+
+    def test_a_file_without_pinned_citations_gets_no_section(self):
+        path = self.invariant("Human-authored.")
+        path.write_text(path.read_text().replace(f"consensus/src/x.rs:1@{self.commit}", "x"))
+        self.assertEqual(sl.lint_file(path), [])
+        self.assertNotIn(sl.EXCERPTS, sl.with_excerpts(path.read_text(), self.repo))
+
+    def test_outside_a_clone_citations_are_not_resolved(self):
+        elsewhere = pathlib.Path(tempfile.mkdtemp()) / "invariants/simplex"
+        self.addCleanup(shutil.rmtree, elsewhere.parent.parent, True)
+        elsewhere.mkdir(parents=True)
+        path = self.invariant(f"`consensus/src/x.rs:99@{self.commit}` says so.")
+        moved = elsewhere / "INV-0001.md"
+        moved.write_text(path.read_text())
+        self.assertEqual(self.rule(moved, 10) + self.rule(moved, 11), [])
+
+    def test_extraction_pins_head_and_names_tracked_changes(self):
+        values = sl.extract_values(
+            self.repo, HERE.parent, "comment", "simplex", ["consensus/src/x.rs"]
+        )
+        self.assertEqual(values["COMMIT"], self.commit)
+        (self.repo / "consensus/src/x.rs").write_text(self.SOURCE + "// edited\n")
+        (self.repo / "consensus/src/new.rs").write_text("// untracked\n")
+        (self.registry / "INV-0002.md").write_text("draft\n")
+        self.assertEqual(sl.unpinnable(sl.worktree_state(self.repo)), ["consensus/src/x.rs"])
+
+
 class ConfigLayers(unittest.TestCase):
     """`config.env` is tracked, so a knowledge-base root or any private value goes
     in `config.local.env`, which git ignores and which overrides the tracked file;

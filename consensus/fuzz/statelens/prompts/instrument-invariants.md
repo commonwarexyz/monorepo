@@ -6,7 +6,9 @@ below:
 1. Read the Statement (EARS). Identify the trigger or state (`pre`) and the required
    response (`post`), or the single condition of a ubiquitous statement. Treat
    "Preconditions / assumptions" as part of `pre`. Treat "Observation hints" as leads,
-   not as facts.
+   not as facts. "Source excerpts" show the code the invariant was written against, at the
+   commit each names; the code may have moved or changed since, so find today's sites with
+   the tools below rather than by those lines.
 2. Find where the implementation establishes and uses the concepts. Trace with search,
    references and call hierarchy across the components the subsystem rules name,
    including the mailbox messages between them and the recovery path on restart.
