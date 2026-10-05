@@ -191,8 +191,6 @@ impl Tasks {
     }
 
     /// A set with `count` shards, a power of two.
-    ///
-    /// Loom models use one shard so heap addresses do not affect the replay path.
     pub(super) fn with_shards(count: usize) -> Self {
         assert!(
             count.is_power_of_two(),
