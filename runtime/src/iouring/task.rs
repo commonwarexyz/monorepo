@@ -767,12 +767,6 @@ impl Task {
 pub struct Runnable(Task);
 
 impl Runnable {
-    /// The task this runnable entitles its holder to poll.
-    #[cfg(test)]
-    pub const fn task(&self) -> &Task {
-        &self.0
-    }
-
     /// Deliver the runnable to the owning worker, directly on its thread and
     /// through its mailbox otherwise.
     ///
@@ -1201,6 +1195,11 @@ pub mod tests {
         (task.state.0.load(Ordering::Acquire) & REFS) / REF_ONE
     }
 
+    /// The task `runnable` entitles its holder to poll.
+    pub const fn task_of(runnable: &Runnable) -> &Task {
+        &runnable.0
+    }
+
     /// Take the runnables delivered to `mailbox`.
     fn scheduled(mailbox: &Mailbox) -> Vec<Runnable> {
         let mut messages = Vec::new();
@@ -1303,7 +1302,7 @@ pub mod tests {
         let mut runnables = scheduled(&mailbox);
         assert_eq!(runnables.len(), 1);
         let runnable = runnables.pop().unwrap();
-        assert_eq!(runnable.task().as_ptr(), task.as_ptr());
+        assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
         runnable.discard();
         assert_eq!(refs(&task), 1);
 
@@ -1385,7 +1384,7 @@ pub mod tests {
         let AfterPoll::Requeue(runnable) = ready.pop().unwrap().poll() else {
             panic!("self-woken pending poll must requeue");
         };
-        assert_eq!(runnable.task().as_ptr(), task.as_ptr());
+        assert_eq!(task_of(&runnable).as_ptr(), task.as_ptr());
         assert!(scheduled(&mailbox).is_empty());
 
         // The final poll wakes itself again, which the terminal state ignores.
@@ -1451,7 +1450,7 @@ pub mod tests {
         let mut runnables = scheduled(&mailbox);
         assert_eq!(runnables.len(), 1);
         let runnable = runnables.pop().unwrap();
-        assert_eq!(refs(runnable.task()), 2);
+        assert_eq!(refs(task_of(&runnable)), 2);
         runnable.discard();
 
         // A closed or dropped mailbox discards the runnable, and the set keeps

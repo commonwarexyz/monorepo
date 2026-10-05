@@ -150,7 +150,7 @@ impl Mailbox {
 mod tests {
     use super::*;
     use crate::iouring::{
-        task::{Runnable, Task},
+        task::{Runnable, Task, tests::task_of},
         tasks::Tasks,
         waker::tests::eventfd_count,
     };
@@ -212,7 +212,7 @@ mod tests {
     fn dispose(messages: impl IntoIterator<Item = Message>) {
         for message in messages {
             if let Message::Wake(Target::Task(runnable)) = message {
-                runnable.task().clear();
+                task_of(&runnable).clear();
                 runnable.discard();
             }
         }
