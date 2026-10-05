@@ -301,7 +301,7 @@ impl<S: Scheme, H: Hasher> Config<S> for RoundRobin<H> {
             .collect();
 
         if let Some(seed) = &self.seed {
-            permutation.sort_by_key(|&index| H::hash(&[seed, &index.get().encode()]));
+            permutation.sort_by_cached_key(|&index| H::hash(&[seed, &index.get().encode()]));
         }
 
         RoundRobinElector {

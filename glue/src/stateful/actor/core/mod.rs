@@ -1,16 +1,17 @@
-//! Stateful application that manages the pending-tip DAG of merkleized batches on behalf of an [`Application`].
+//! The [`Stateful`] actor and its two modes.
 //!
-//! The [`Stateful`] actor is split into two control loops:
-//! - [`Syncing`] manages the state sync process.
-//! - [`Processing`] manages the pending-tip DAG and drives the inner application.
+//! - [`Syncing`] serves requests while state sync runs and hands the converged state to
+//!   [`Processing`].
+//! - [`Processing`] serves proposals, verifications, and finalizations against the live databases.
 
 use crate::stateful::{
     Application,
     actor::{
+        BlockDigest, SyncTargets,
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
         metrics::Metrics as StatefulMetrics,
-        processor::{PendingSyncTargets, Processor, Pruning},
-        syncer::{self, SyncPlan, SyncResult},
+        processor::{Processor, Pruning},
+        syncer::{self, Artifact, SyncPlan},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
 };
@@ -22,7 +23,7 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
 };
-use commonware_cryptography::{Digestible, certificate::Scheme};
+use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
@@ -37,8 +38,6 @@ pub(super) use mailbox::Verification;
 mod processing;
 mod syncing;
 mod verifications;
-
-type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,7 +66,11 @@ pub struct PruneConfig {
 }
 
 impl PruneConfig {
-    /// Ensure marshal is never pruned more aggressively than QMDB.
+    /// Checks that marshal retains at least as many blocks as QMDB.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `retained_marshal_blocks` is less than `retained_qmdb_blocks`.
     pub const fn assert_valid(self) {
         assert!(
             self.retained_marshal_blocks >= self.retained_qmdb_blocks,
@@ -96,31 +99,34 @@ where
     /// Marshal mailbox and the durable floor returned with it during initialization.
     pub marshal: (MarshalMailbox<S, V>, Floor),
 
-    /// Capacity of the stateful actor mailbox channel.
+    /// Capacity of the actor's mailbox.
     pub mailbox_size: NonZeroUsize,
 
-    /// Startup plan loaded via [`SyncPlan::init`], optionally augmented with
-    /// a finalized floor via [`SyncPlan::with_floor`]. Carries the durable
-    /// metadata handle and the startup decision shared with marshal.
+    /// Startup plan from [`SyncPlan::init`] (and [`SyncPlan::set_floor`] when a floor is
+    /// selected).
+    ///
+    /// Marshal must start from [`SyncPlan::marshal_start`] of the same plan.
     pub plan: SyncPlan<E, S, V>,
 
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
+    /// Resolvers that fetch state sync data from peers and serve the local databases to them.
     pub resolvers: R,
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
-    /// Periodic database and marshal pruning configuration.
+    /// Periodic database and marshal pruning configuration (no pruning when `None`).
     ///
-    /// When enabled, glue retains `max_pending_acks + 1` finalized blocks plus
-    /// the configured retained block windows before pruning. Marshal must retain
-    /// at least as many blocks as QMDB.
+    /// When set, [`Stateful`] retains the last `max_pending_acks + 1` finalized blocks (marshal's
+    /// pending acknowledgement window plus one) and the configured retained block windows beyond
+    /// them. Marshal must retain at least as many blocks as QMDB (see
+    /// [`PruneConfig::assert_valid`]).
     pub prune_config: Option<PruneConfig>,
 }
 
-/// Stateful application that manages the pending-tip DAG of merkleized
-/// batches on behalf of an [`Application`], implementing the consensus
-/// application and verifying traits.
+/// Actor that maintains speculative and finalized state for an [`Application`].
+///
+/// Consensus and marshal reach it through its [`Mailbox`]. See the [module docs](crate::stateful)
+/// for the protocol.
 pub struct Stateful<E, A, S, V, R>
 where
     E: Rng + Spawner + Context,
@@ -128,35 +134,27 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
-    /// Runtime context providing RNG, task spawning, metrics, and clock.
+    /// Runtime context.
     context: ContextCell<E>,
-
     /// The receiver for messages.
     mailbox: actor_mailbox::Receiver<Message<E, A>>,
-
     /// The inner application that drives state transitions.
     application: A,
-
     /// Provider cloned into each proposal.
     provider: A::Provider,
-
-    /// Marshal mailbox and the durable floor returned with it during initialization.
+    /// Marshal mailbox and the durable floor returned during initialization.
     marshal: (MarshalMailbox<S, V>, Floor),
-
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-
     /// Startup plan carrying the metadata handle and floor decision.
     plan: SyncPlan<E, S, V>,
-
-    /// Resolver(s) for state sync fetches and post-bootstrap serving.
+    /// Resolvers for state sync fetches and post-bootstrap serving.
     resolvers: R,
-
-    /// Sync engine tuning knobs.
+    /// Sync engine settings.
     sync_config: SyncEngineConfig,
 
-    /// Periodic pruning state.
-    pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
+    /// Pruning schedule from [`Config::prune_config`], with a random phase.
+    pruning: Option<Pruning<SyncTargets<A, E>>>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -169,11 +167,14 @@ where
     R: AttachableResolverSet<A::Databases>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
-    /// Construct a [`Stateful`] actor and its [`Mailbox`].
+    /// Creates a [`Stateful`] actor and its [`Mailbox`].
     ///
-    /// This only wires dependencies and allocates the mailbox. The actor does
-    /// not process messages until [`Stateful::start`] is called.
-    pub fn init(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
+    /// The actor handles no messages until [`Stateful::start`] is called.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Config::prune_config`] fails [`PruneConfig::assert_valid`].
+    pub fn new(mut context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
         let pruning = config.prune_config.map(|prune_config| {
             Pruning::random(
                 prune_config,
@@ -200,31 +201,28 @@ where
         )
     }
 
+    /// Spawns the actor and returns its handle.
+    ///
+    /// With a persisted floor, the actor runs state sync first: proposals return `None` and
+    /// verifications wait until it completes. Otherwise it recovers from marshal before handling
+    /// any message. See [Startup](crate::stateful#startup).
     pub fn start(mut self) -> Handle<()> {
         spawn_cell!(self.context, self.run())
     }
 
     async fn run(self) {
-        if let Some(floor) = self.plan.floor().cloned() {
-            self.start_state_sync(floor).await;
-        } else if self.plan.requires_state_sync_floor() {
-            panic!("interrupted state sync is missing its persisted floor");
+        if let Some(finalization) = self.plan.floor().cloned() {
+            self.sync(finalization).await;
         } else {
-            self.start_from_marshal().await;
+            self.recover().await;
         }
     }
 
-    /// Starts the application in [`Syncing`] mode, kicking off a state sync process
-    /// towards the finalized floor specified in the [`SyncPlan`].
-    async fn start_state_sync(self, finalization: Finalization<S, V::Commitment>) {
+    /// Runs state sync toward `finalization`, then processing.
+    async fn sync(self, finalization: Finalization<S, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let sync_metadata = self
-            .plan
-            .into_sync_metadata()
-            .begin_sync(finalization.clone())
-            .await;
-        let (sync_complete, sync_completed) = oneshot::channel();
+        let (sender, receiver) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
@@ -232,7 +230,7 @@ where
             resolvers: self.resolvers.clone(),
             finalization,
             marshal: (marshal.clone(), floor),
-            sync_complete,
+            completion: sender,
         });
         let syncing = Syncing {
             context: self.context,
@@ -240,38 +238,32 @@ where
             application: self.application,
             provider: self.provider,
             marshal,
-            sync_metadata,
+            plan: self.plan,
             syncer: syncer_mailbox,
             deferred_verifications: Vec::new(),
             database_subscribers: Vec::new(),
-            artifact: None,
             resolvers: self.resolvers,
-            sync_completed,
+            completion: receiver,
             pending_finalizations: Default::default(),
             pruning: self.pruning,
             metrics,
         };
-        let _ = join!(syncer.start(), syncing.start());
+        let _ = join!(syncer.start(), syncing.run());
     }
 
-    /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self) {
+    /// Opens the database set from marshal, records completion, then runs processing.
+    async fn recover(self) {
         let (marshal, _) = self.marshal;
-        let syncer::StartupResult {
-            sync: SyncResult { databases, anchor },
-            skip_finalized_until,
-        } = syncer::init_databases_from_marshal::<E, A, S, V>(
-            self.context.as_present(),
+        let Artifact { databases, anchor } = syncer::open::<E, A, S, V>(
+            self.context.child("databases"),
             &marshal,
             self.db_config,
-            self.plan.into_sync_metadata(),
+            self.plan.completed(),
         )
         .await;
 
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs. The
-        // resolver handles can be dropped after this: serving runs on the resolver
-        // actors' own contexts.
+        self.plan.set_completed(anchor.height).await;
+
         self.resolvers.attach_databases(databases.clone()).await;
 
         let metrics = StatefulMetrics::new(self.context.as_present());
@@ -284,9 +276,8 @@ where
             marshal,
             processor,
             deferred_verifications: Vec::new(),
-            skip_finalized_until,
         }
-        .start()
+        .run()
         .await
     }
 }
@@ -399,8 +390,9 @@ mod tests {
             )
             .await;
 
-            let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
-            let (stateful, mut mailbox) = Stateful::init(
+            let plan =
+                SyncPlan::init(context.child("plan"), "pending-floor-stateful".to_string()).await;
+            let (stateful, mut mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
                     application: TestApp::default(),
@@ -408,7 +400,7 @@ mod tests {
                     provider: (),
                     marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
-                    plan: plan.with_floor(finalization),
+                    plan: plan.set_floor(finalization).await,
                     resolvers: NoopResolver::default(),
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
@@ -458,8 +450,8 @@ mod tests {
             .await;
 
             let (resolver, startup_started, startup_release) = NoopResolver::gated();
-            let plan = SyncPlan::init(&context, format!("{prefix}-stateful")).await;
-            let (stateful, mut mailbox) = Stateful::init(
+            let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
+            let (stateful, mut mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
                     application: TestApp::default(),

@@ -24,6 +24,9 @@
 //! availability in marshal. No additional deferred verification state needs to
 //! be awaited at certify time.
 //!
+//! All validators must run the same wrapper for all views in a given epoch (see
+//! [`crate::marshal::standard`] for more details).
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -132,7 +135,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     context: Arc<E>,
@@ -151,7 +154,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     fn clone(&self) -> Self {
@@ -179,7 +182,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     /// Creates a new inline-verification wrapper.
@@ -229,7 +232,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -560,7 +563,7 @@ where
             Context = Context<B::Digest, S::PublicKey>,
             Input = (),
         >,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     #[allow(clippy::async_yields_async)]
@@ -638,7 +641,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     type Digest = B::Digest;
@@ -656,7 +659,7 @@ where
     S: Scheme,
     A: Application<E, Block = B, Context = Context<B::Digest, S::PublicKey>>
         + Reporter<Activity = Update<B>>,
-    B: Block + Clone,
+    B: Block,
     ES: Epocher,
 {
     type Activity = A::Activity;
@@ -710,7 +713,7 @@ mod tests {
                 Context = Context<B::Digest, S::PublicKey>,
                 Input = (),
             >,
-        B: Block + Clone,
+        B: Block,
         ES: crate::types::Epocher,
     {
         fn assert_automaton<T: Automaton>() {}
@@ -1147,6 +1150,7 @@ mod tests {
             assert!(certify_result, "certify should succeed");
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(verify_rx);
             drop(inline);
             drop(marshal);
@@ -1256,6 +1260,7 @@ mod tests {
 
             // After certify, the block must be durable across an unclean restart.
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(inline);
             drop(marshal);
 
@@ -1514,6 +1519,7 @@ mod tests {
             // Simulate a crash: abort the actor and drop every handle so the
             // storage partition is fully released before reopening.
             pre_actor.abort();
+            let _ = pre_actor.await;
             drop(pre_marshal);
             drop(pre_extra);
             drop(pre_application);

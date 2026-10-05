@@ -13,7 +13,7 @@ pub(crate) mod tests {
         fn from_seed(seed: u64) -> Self;
     }
 
-    pub trait TestValue: Codec + Eq + PartialEq + Debug + Send + Sync {
+    pub trait TestValue: Codec + Eq + Debug + Send + Sync {
         fn from_seed(seed: u64) -> Self;
     }
 

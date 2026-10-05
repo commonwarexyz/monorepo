@@ -6,7 +6,6 @@ const GRID = '#e4e4e4';
 const INK = '#111111';
 const SIG = 64;
 const KEY = 32;
-const AGG = 48;
 const ACCOUNT_RECORD = KEY + 8;
 
 const MAX_ACCOUNTS = 1e9;
@@ -54,7 +53,7 @@ function scenario(N, k) {
     rows: varint(A) + A * (KEY + 1) + S,
     signatures: S * SIG,
     entries: S * varint(perSender) + (A - S) + references + 2 * E,
-    operator: 1 + (S > 0 ? AGG : 0),
+    operator: SIG,
   };
   return { E, A, parts };
 }

@@ -89,6 +89,8 @@ pub trait Certificates: Send + Sync + Sized + 'static {
 
     /// Prune the store to the provided minimum height (inclusive).
     ///
+    /// Heights below `min` may also remain.
+    ///
     /// # Arguments
     ///
     /// * `min`: The lowest height that must remain after pruning.
@@ -168,6 +170,8 @@ pub trait Blocks: Send + Sync + Sized + 'static {
 
     /// Prune the store to the provided minimum height (inclusive).
     ///
+    /// Heights below `min` may also remain.
+    ///
     /// # Arguments
     ///
     /// * `min`: The lowest height that must remain after pruning.
@@ -176,6 +180,10 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ///
     /// The store when pruning is applied or unnecessary, or `Err` if pruning fails.
     fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+
+    /// Returns up to `max` missing heights at or above `start`, in ascending order.
+    /// Only gaps before a subsequent stored range are included.
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height>;
 
     /// Finds the end of the range containing `value` and the start of the
     /// range succeeding `value`. This method is useful for identifying gaps around a given point.
@@ -290,6 +298,13 @@ where
         Ok(self)
     }
 
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+        <Self as Archive>::missing_items(self, start.get(), max)
+            .into_iter()
+            .map(Height::new)
+            .collect()
+    }
+
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
         let (a, b) = <Self as Archive>::next_gap(self, value.get());
         (a.map(Height::new), b.map(Height::new))
@@ -381,6 +396,13 @@ where
 
     async fn prune(self, min: Height) -> Result<Self, Self::Error> {
         Self::prune(self, min.get()).await
+    }
+
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+        <Self as Archive>::missing_items(self, start.get(), max)
+            .into_iter()
+            .map(Height::new)
+            .collect()
     }
 
     fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {

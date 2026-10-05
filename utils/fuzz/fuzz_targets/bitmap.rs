@@ -1,7 +1,10 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_codec::codec::{EncodeSize, Read, Write};
+use commonware_codec::{
+    Error,
+    codec::{EncodeSize, Read, Write},
+};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 100_000;
@@ -447,7 +450,7 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::Codec(bools) => {
-                let v = BitMap::from(&bools);
+                let v = BitMap::from(&bools[..bools.len().min(MAX_SIZE)]);
 
                 let encoded_size = v.encode_size();
                 assert!(encoded_size > 0);
@@ -457,11 +460,16 @@ fn fuzz(input: Vec<FuzzInput>) {
                 assert!(!buf.is_empty());
 
                 let mut cursor = bytes::Bytes::from(buf);
-                if let Ok(decoded) = BitMap::read_cfg(&mut cursor, &(MAX_SIZE as u64)) {
-                    assert_eq!(decoded.len(), v.len());
-                    for i in 0..decoded.len() {
-                        assert_eq!(decoded.get(i), v.get(i));
-                    }
+                assert!(matches!(
+                    BitMap::read_cfg(&mut cursor.clone(), &(v.len() + 1..).into()),
+                    Err(Error::InvalidLength(len)) if len == v.len() as usize
+                ));
+
+                let decoded = BitMap::read_cfg(&mut cursor, &(v.len()..=MAX_SIZE as u64).into())
+                    .expect("roundtrip at lower bound must decode");
+                assert_eq!(decoded.len(), v.len());
+                for i in 0..decoded.len() {
+                    assert_eq!(decoded.get(i), v.get(i));
                 }
             }
 

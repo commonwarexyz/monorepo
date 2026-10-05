@@ -310,13 +310,13 @@ fn generate(
         let config = any_fix_cfg_full(&ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1));
         match index {
             IndexKind::Ordered => {
-                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 populate(db, keyspace, num_updates, zipf_exponent).await
             }
             IndexKind::Unordered => {
-                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 populate(db, keyspace, num_updates, zipf_exponent).await
@@ -394,7 +394,7 @@ fn get_bench(
         match index {
             IndexKind::Ordered => {
                 let db = Arc::new(
-                    AnyOFixP3Db::<Mmr>::init(ctx.child("db"), config)
+                    AnyOFixP3Db::<Mmr>::init(ctx.child("db"), config, None)
                         .await
                         .unwrap(),
                 );
@@ -411,7 +411,7 @@ fn get_bench(
             }
             IndexKind::Unordered => {
                 let db = Arc::new(
-                    AnyUFixP64kDb::<Mmr>::init(ctx.child("db"), config)
+                    AnyUFixP64kDb::<Mmr>::init(ctx.child("db"), config, None)
                         .await
                         .unwrap(),
                 );
@@ -431,7 +431,7 @@ fn get_bench(
 }
 
 /// Run the cold/warm read passes for each reader count against an opened database.
-async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_reads<D: DbAny<Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     opened: Duration,
@@ -470,7 +470,7 @@ async fn run_reads<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
 /// deterministic key stream (so a repeat pass replays the same keys). With a `batch` size, each
 /// reader issues its gets in `batch`-key `get_many` calls instead of point gets. Returns the
 /// elapsed time, the number of gets issued, and how many found a value.
-async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
+async fn run_gets<D: DbAny<Mmr, Key = Digest> + 'static>(
     ctx: &Context,
     db: Arc<D>,
     keyspace: u64,
@@ -580,13 +580,13 @@ fn time_init(
         let start = Instant::now();
         match index {
             IndexKind::Ordered => {
-                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyOFixP3Db::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 measure(&db, start)
             }
             IndexKind::Unordered => {
-                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config)
+                let db = AnyUFixP64kDb::<Mmr>::init(ctx.child("storage"), config, None)
                     .await
                     .unwrap();
                 measure(&db, start)

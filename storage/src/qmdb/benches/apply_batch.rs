@@ -53,6 +53,7 @@ async fn open_db(ctx: &Context) -> Db {
     Db::init(
         ctx.child("storage"),
         any_fix_cfg_with(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE),
+        None,
     )
     .await
     .unwrap()
@@ -79,6 +80,7 @@ async fn open_ord_db(ctx: &Context) -> ODb {
     ODb::init(
         ctx.child("storage"),
         any_fix_cfg_full(ctx, ITEMS_PER_BLOB, PAGE_CACHE_SIZE, NZUsize!(1)),
+        None,
     )
     .await
     .unwrap()
@@ -206,15 +208,19 @@ async fn seed_imm_db(db: ImmDb, keys: u64, counter: &mut u64, rng: &mut TestRng)
         batch = batch.set(key, make_fixed_value(rng));
     }
     let floor = db.inactivity_floor_loc();
-    let batch = batch.merkleize(&db, None, floor).await;
+    let batch = batch.merkleize(&db, None, floor).await.unwrap();
     let (db, _) = db.apply_batch(batch).await.unwrap();
     db.commit().await.unwrap()
 }
 
 async fn open_imm_db(ctx: &Context) -> ImmDb {
-    ImmDb::init(ctx.child("storage"), imm_fix_cfg_with(ctx, ITEMS_PER_BLOB))
-        .await
-        .unwrap()
+    ImmDb::init(
+        ctx.child("storage"),
+        imm_fix_cfg_with(ctx, ITEMS_PER_BLOB),
+        None,
+    )
+    .await
+    .unwrap()
 }
 
 #[boxed]
@@ -231,7 +237,7 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
         batch = batch.set(key, make_fixed_value(&mut rng));
     }
     let floor = db.inactivity_floor_loc();
-    let batch = batch.merkleize(&db, None, floor).await;
+    let batch = batch.merkleize(&db, None, floor).await.unwrap();
 
     let start = Instant::now();
     let (db, _) = db.apply_batch(batch).await.unwrap();
@@ -255,7 +261,7 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
         counter += 1;
         parent = parent.set(key, make_fixed_value(&mut rng));
     }
-    let parent = parent.merkleize(&db, None, floor).await;
+    let parent = parent.merkleize(&db, None, floor).await.unwrap();
 
     let mut child = parent.new_batch();
     for _ in 0..updates {
@@ -263,7 +269,7 @@ async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) 
         counter += 1;
         child = child.set(key, make_fixed_value(&mut rng));
     }
-    let child = child.merkleize(&db, None, floor).await;
+    let child = child.merkleize(&db, None, floor).await.unwrap();
 
     let start = Instant::now();
     let (db, _) = db.apply_batch(child).await.unwrap();

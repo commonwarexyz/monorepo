@@ -8,10 +8,9 @@
 //! - The pruning boundary, when it falls mid-blob (from
 //!   [Journal::init_at_size](super::fixed::Journal::init_at_size)): recovery needs the exact
 //!   position where the oldest blob's items begin.
-//! - The recovery watermark: a floor on the journal size that has been durably recorded. Items
-//!   below the watermark must survive a crash; items above it may be replayed, discarded, or (after
-//!   an in-place rewind followed by new appends) decode to a value from neither the pre- nor
-//!   post-rewind history.
+//! - The recovery watermark records a durable floor on the journal size. Items below it must
+//!   survive a crash unless an initialization bound discards them. Items above it may be replayed
+//!   or discarded. Initialization durably selects a retained prefix before returning a writer.
 //! - The clear target, while a clear/reset is in progress: the target is recorded before any
 //!   blob is deleted, so a crash mid-clear is finished on reopen instead of being misread as
 //!   corruption.
@@ -21,7 +20,7 @@
 //! [Checkpoint] is a passive store; the journal upholds these by ordering its calls:
 //!
 //! - An entry advances only after the blob state it describes is durable.
-//! - An entry is lowered before blob state moves backward (rewind, clear).
+//! - An entry is lowered before blob state moves backward (truncate, clear).
 //!
 //! Together they keep the checkpoint a safe under-estimate of what is on disk: recovery may find
 //! more durable data than the checkpoint claims, never less.

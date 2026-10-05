@@ -1,5 +1,8 @@
 use tracing::Span;
 
+/// Disabled span returned for a view without an open root span.
+pub(crate) static MISSING_SPAN: Span = Span::none();
+
 /// Lifecycle of a view's root tracing span.
 ///
 /// A view is anchored by a single root span that opens when the view becomes
@@ -22,11 +25,11 @@ impl ViewSpan {
         Self::Pending
     }
 
-    /// Returns the active span, or a disabled span when pending or closed.
-    pub(crate) fn get(&self) -> Span {
+    /// Returns the active span, or `MISSING_SPAN` when pending or closed.
+    pub(crate) fn get(&self) -> &Span {
         match self {
-            Self::Open(span) => span.clone(),
-            Self::Pending | Self::Closed => Span::none(),
+            Self::Open(span) => span,
+            Self::Pending | Self::Closed => &MISSING_SPAN,
         }
     }
 

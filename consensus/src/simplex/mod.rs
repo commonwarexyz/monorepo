@@ -329,8 +329,11 @@
 //! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
 //! arrive since there is no batching benefit.
 //!
-//! If an invalid signature is detected, the `Batcher` will perform repeated bisections over collected
-//! messages to find the offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
+//! When buffered votes of one kind reach quorum, the `Batcher` asks the scheme to construct an
+//! authenticated certificate using
+//! [`Scheme::optimistic_assemble`](commonware_cryptography::certificate::Scheme::optimistic_assemble).
+//! Successful construction does not guarantee individual vote validity. Failed attempts retain valid
+//! votes and block identified invalid senders via [commonware_p2p::Blocker].
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
@@ -431,8 +434,11 @@
 //! ## Persistence
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
-//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
+//! the critical path. To enable recovery, it records its own votes, verified certificates, and
+//! application certification results in a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
+//! Raw votes from peers are neither journaled nor rebroadcast, though they may be reported as
+//! unverified [`types::Activity`].
+//!
 //! Before sending a message, any pending `Journal` appends are synced to prevent inadvertent Byzantine
 //! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
 //! loop iteration are coalesced into a single sync that runs after messages are constructed and before
@@ -1251,7 +1257,7 @@ mod tests {
                     let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
-                        let Some(finalization) = finalizations.get(&view) else {
+                        let Some((finalization, _)) = finalizations.get(&view) else {
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
@@ -1439,7 +1445,7 @@ mod tests {
                     .iter()
                     .find(|(view, _)| !view.is_term_start(term_length))
                     .or_else(|| eligible.first())
-                    .map(|(view, finalization)| (**view, (*finalization).clone()))
+                    .map(|(view, (finalization, _))| (**view, finalization.clone()))
                     .expect("non-genesis floor finalization missing")
             };
             assert!(floor_view > View::zero());
@@ -1966,7 +1972,7 @@ mod tests {
                     .finalizations
                     .lock()
                     .get(&required_view)
-                    .cloned()
+                    .map(|(finalization, _)| finalization.clone())
                     .unwrap_or_else(|| panic!("reporter {idx} missing tip finalization"));
                 assert_eq!(
                     finalization.proposal.round.view(),
@@ -2346,8 +2352,8 @@ mod tests {
     /// while a higher same-term notarization survives in some journals. Nodes
     /// stuck below that view must be able to fetch the exact-view notarization
     /// (a higher-view floor cannot substitute for certification's per-view
-    /// parent requirement) or the cluster wedges permanently (see
-    /// [`resolver::State::get`]).
+    /// parent requirement) or the cluster wedges permanently (see the resolver's
+    /// `State::produce`).
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown_stable_leader_optimistic() {
@@ -7863,7 +7869,7 @@ mod tests {
                     let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
-                        let Some(finalization) = finalizations.get(&view) else {
+                        let Some((finalization, _)) = finalizations.get(&view) else {
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
@@ -8329,7 +8335,7 @@ mod tests {
                 let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
                 for reporter in reporters.iter().skip(honest_start) {
                     let finalizations = reporter.finalizations.lock();
-                    for (view, finalization) in finalizations.iter() {
+                    for (view, (finalization, _)) in finalizations.iter() {
                         let digest = finalization.proposal.payload;
                         if let Some(existing) = finalized_at_view.get(view) {
                             assert_eq!(

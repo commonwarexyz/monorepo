@@ -41,8 +41,8 @@
 //! Notarized data and certificates live in prunable archives managed internally, while finalized
 //! blocks are migrated into immutable archives. Any gaps are filled by asking peers for specific
 //! commitments through the resolver pipeline. The shard engine keeps only ephemeral, in-memory
-//! caches; once a block is finalized it is evicted from the reconstruction map, reducing memory
-//! pressure.
+//! caches. Its commitment records are bounded by a window that evicts records with the lowest
+//! rounds first.
 //!
 //! # When to Use
 //!
@@ -70,11 +70,12 @@ mod tests {
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
-                    CodedBlock, StoredCodedBlock, coding_config_for_participants, hash_context,
+                    CodedBlock, Shard, StoredCodedBlock, coding_config_for_participants,
+                    hash_context,
                 },
             },
             config::{Config, Start},
-            core,
+            core::{self, Processed},
             mocks::{
                 application::Application,
                 harness::{
@@ -98,7 +99,7 @@ mod tests {
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
     use commonware_codec::{Encode, FixedSize};
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon, Scheme as _};
+    use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
         certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
@@ -107,7 +108,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Resolver};
+    use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
         utils::reschedule,
@@ -122,6 +123,7 @@ mod tests {
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
+    type TestShard = Shard<CodingB, ReedSolomon<Sha256>, Sha256>;
     type CodingSendRecord = (Round, Arc<TestCodedBlock>, Recipients<K>);
 
     // Smallest valid coding config used to build trusted genesis commitments.
@@ -136,14 +138,29 @@ mod tests {
         assert_provider::<core::Mailbox<S, TestCodingVariant>>();
     }
 
-    /// A coding buffer that records subscriptions and never resolves them.
+    /// A coding buffer that serves inserted blocks and records subscriptions without resolving
+    /// them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
+        blocks: Arc<Mutex<Vec<Arc<TestCodedBlock>>>>,
+        evict_on_next_hit: Arc<Mutex<bool>>,
         commitment_subscriptions: Arc<Mutex<Vec<oneshot::Sender<Arc<TestCodedBlock>>>>>,
         sends: Arc<Mutex<Vec<CodingSendRecord>>>,
     }
 
     impl RecordingCodingBuffer {
+        fn insert_transient(&self, block: TestCodedBlock) {
+            self.blocks.lock().push(Arc::new(block));
+            *self.evict_on_next_hit.lock() = true;
+        }
+
+        fn contains(&self, commitment: TestCommitment) -> bool {
+            self.blocks
+                .lock()
+                .iter()
+                .any(|block| block.commitment() == commitment)
+        }
+
         fn subscription_count(&self) -> usize {
             self.commitment_subscriptions.lock().len()
         }
@@ -162,9 +179,16 @@ mod tests {
 
         async fn find_by_commitment(
             &self,
-            _commitment: TestCommitment,
+            commitment: TestCommitment,
         ) -> Option<Arc<TestCodedBlock>> {
-            None
+            let mut blocks = self.blocks.lock();
+            let index = blocks
+                .iter()
+                .position(|block| block.commitment() == commitment)?;
+            if std::mem::take(&mut *self.evict_on_next_hit.lock()) {
+                return Some(blocks.remove(index));
+            }
+            Some(Arc::clone(&blocks[index]))
         }
 
         fn subscribe_by_commitment(
@@ -175,8 +199,6 @@ mod tests {
             self.commitment_subscriptions.lock().push(sender);
             Some(receiver)
         }
-
-        fn retire(&self, _update: core::Retirement<TestCommitment>) {}
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
@@ -338,6 +360,28 @@ mod tests {
         }
     }
 
+    impl TargetedResolver for RecordingResolver {
+        type PublicKey = K;
+
+        fn fetch_targeted(
+            &mut self,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            self.fetch(fetch)
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            self.fetch_all(fetches.into_iter().map(|(fetch, _)| fetch).collect())
+        }
+    }
+
     type Finalizations =
         immutable::Archive<deterministic::Context, D, Finalization<S, TestCommitment>>;
     type FinalizedBlocks = immutable::Archive<
@@ -496,16 +540,15 @@ mod tests {
             setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
                 .await;
         let control = oracle.control(me.clone());
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
+            max_block_size: NZUsize!(1024 * 1024),
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
+            records: harness::RECORDS,
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
@@ -551,6 +594,28 @@ mod tests {
         (candidate_ctx, coded_candidate)
     }
 
+    /// Rebinds the shards of [`missing_candidate`] to a commitment that claims another digest.
+    /// The shards verify against the commitment's coding root, but the decoded block fails
+    /// validation.
+    fn undecodable(me: K) -> (TestCommitment, Vec<TestShard>) {
+        let (_, candidate) = missing_candidate(me);
+        let real = candidate.commitment();
+        let commitment = TestCommitment::from((
+            Sha256::hash(&[b"undecodable"]),
+            real.root(),
+            real.context(),
+            real.config(),
+        ));
+        let shards = (0..NUM_VALIDATORS as u16)
+            .map(|index| {
+                let mut shard = candidate.shard(index).expect("missing shard");
+                shard.commitment = commitment;
+                shard
+            })
+            .collect();
+        (commitment, shards)
+    }
+
     /// Builds `length` coded blocks above genesis, each proposed at the view
     /// matching its height and naming the block below it as its parent.
     fn coding_chain(leader: K, length: u64) -> Vec<(Round, TestCodedBlock)> {
@@ -582,172 +647,6 @@ mod tests {
             .chain(chain.iter().map(|(_, block)| block.commitment()))
             .collect::<Vec<_>>()
             .into()
-    }
-
-    #[test_traced("WARN")]
-    fn test_coding_batched_acks_retire_each_exact_commitment() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-            let mut setup = CodingHarness::setup_validator_with(
-                context.child("validator"),
-                &mut oracle,
-                participants[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(2),
-                Application::manual_ack(),
-            )
-            .await;
-            assert_eq!(setup.application.acknowledged().await, Height::zero());
-
-            let mut parent = Sha256::hash(&[b""]);
-            let mut parent_commitment =
-                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
-            let mut commitments = Vec::new();
-            for height in 1..=2 {
-                let round = Round::new(Epoch::zero(), View::new(height));
-                let block = CodingHarness::make_test_block(
-                    parent,
-                    parent_commitment,
-                    Height::new(height),
-                    height,
-                    NUM_VALIDATORS as u16,
-                );
-                let commitment = block.commitment();
-                parent = block.digest();
-                parent_commitment = commitment;
-                commitments.push(commitment);
-
-                setup.extra.proposed(
-                    Round::new(Epoch::zero(), View::new(height + 10)),
-                    block.clone(),
-                );
-                assert!(setup.extra.get(commitment).await.is_some());
-                assert!(setup.mailbox.verified(round, block).await);
-                CodingHarness::report_finalization(
-                    &mut setup.mailbox,
-                    CodingHarness::make_finalization(
-                        Proposal {
-                            round,
-                            parent: View::new(height - 1),
-                            payload: commitment,
-                        },
-                        &schemes,
-                        QUORUM,
-                    ),
-                )
-                .await;
-            }
-
-            while setup.application.pending_ack_heights() != vec![Height::new(1), Height::new(2)] {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(1)));
-            assert_eq!(setup.application.acknowledge_next(), Some(Height::new(2)));
-
-            while setup.extra.get(commitments[1]).await.is_some() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert!(setup.extra.get(commitments[0]).await.is_none());
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_coding_floor_retires_only_superseded_ack_commitments() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let mut oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                participants.clone(),
-            )
-            .await;
-            let mut setup = CodingHarness::setup_validator_with(
-                context.child("validator"),
-                &mut oracle,
-                participants[0].clone(),
-                ConstantProvider::new(schemes[0].clone()),
-                NZUsize!(3),
-                Application::manual_ack(),
-            )
-            .await;
-            assert_eq!(setup.application.acknowledged().await, Height::zero());
-
-            let mut parent = Sha256::hash(&[b""]);
-            let mut parent_commitment =
-                CodingHarness::genesis_parent_commitment(NUM_VALIDATORS as u16);
-            let mut commitments = Vec::new();
-            let mut floor = None;
-            for height in 1..=3 {
-                let round = Round::new(Epoch::zero(), View::new(height));
-                let block = CodingHarness::make_test_block(
-                    parent,
-                    parent_commitment,
-                    Height::new(height),
-                    height * 100,
-                    NUM_VALIDATORS as u16,
-                );
-                let commitment = block.commitment();
-                parent = block.digest();
-                parent_commitment = commitment;
-                commitments.push(commitment);
-
-                // Every cache observation is newer than the floor, so only an exact
-                // commitment retirement can remove it.
-                setup.extra.proposed(
-                    Round::new(Epoch::zero(), View::new(height + 10)),
-                    block.clone(),
-                );
-                assert!(setup.mailbox.verified(round, block).await);
-                let finalization = CodingHarness::make_finalization(
-                    Proposal {
-                        round,
-                        parent: View::new(height - 1),
-                        payload: commitment,
-                    },
-                    &schemes,
-                    QUORUM,
-                );
-                if height == 2 {
-                    floor = Some(finalization.clone());
-                }
-                CodingHarness::report_finalization(&mut setup.mailbox, finalization).await;
-            }
-
-            while setup.application.pending_ack_heights()
-                != vec![Height::new(1), Height::new(2), Height::new(3)]
-            {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-
-            setup
-                .mailbox
-                .set_floor(floor.expect("height 2 floor missing"));
-
-            // The height-2 floor makes height 1 durable application progress. Heights 2 and 3
-            // are re-dispatched, so their coding-buffer commitments remain live.
-            while setup.mailbox.get_processed_height().await != Some(Height::new(1)) {
-                context.sleep(Duration::from_millis(10)).await;
-            }
-            assert!(setup.extra.get(commitments[0]).await.is_none());
-            assert!(setup.extra.get(commitments[1]).await.is_some());
-            assert!(setup.extra.get(commitments[2]).await.is_some());
-        });
     }
 
     #[test_traced("WARN")]
@@ -1129,6 +1028,81 @@ mod tests {
         });
     }
 
+    /// Certification shares a pending verifier's ownership of a transiently buffered block
+    /// after the shard buffer evicts it.
+    #[test_traced("WARN")]
+    fn test_coding_certify_retains_transient_buffer_hit_through_eviction() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let me = participants[0].clone();
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, _resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-certify-transient-buffer",
+                provider.clone(),
+                buffer.clone(),
+            )
+            .await;
+            let shards =
+                start_shard_mailbox(context.child("shard_stack"), participants, provider.clone())
+                    .await;
+
+            let (application, verify_started, release_verify): (
+                GatedVerifyingApp<CodingB, S>,
+                _,
+                _,
+            ) = GatedVerifyingApp::new();
+            let cfg = MarshaledConfig {
+                application,
+                marshal: marshal.clone(),
+                shards,
+                scheme_provider: provider,
+                epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                strategy: Sequential,
+            };
+            let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+
+            let (candidate_ctx, candidate) = missing_candidate(me);
+            let commitment = candidate.commitment();
+            let round = candidate_ctx.round;
+
+            // The next lookup returns ownership while removing the buffer entry, modeling
+            // shard engine eviction.
+            buffer.insert_transient(candidate);
+            let ancestry: Arc<[_]> = Arc::from([candidate_ctx.parent.1]);
+            let _verify_rx = marshaled
+                .verify(candidate_ctx, commitment, ancestry.clone())
+                .await;
+            let certify_rx = marshaled.certify(round, commitment, ancestry).await;
+
+            // This request follows the candidate acquisition in the marshal mailbox, so the
+            // one-shot buffer hit and eviction have both occurred when it returns.
+            marshal.get_processed().await;
+            verify_started
+                .await
+                .expect("application verification did not start");
+            assert!(
+                !buffer.contains(commitment),
+                "the buffered block must be evicted before verification completes"
+            );
+
+            release_verify
+                .send(())
+                .expect("verification task dropped release receiver");
+            assert!(
+                certify_rx.await.expect("certify result missing"),
+                "certify should succeed via the shared verification gate"
+            );
+            assert!(marshal.get_block(&commitment.block()).await.is_some());
+        });
+    }
+
     #[test_group("slow")]
     #[test_traced("WARN")]
     fn test_coding_finalize_good_links() {
@@ -1316,6 +1290,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_floor_retains_processed_predecessor() {
+        harness::floor_retains_processed_predecessor::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_rejects_block_delivery_below_floor() {
         harness::reject_stale_block_delivery_after_floor_update::<CodingHarness>();
     }
@@ -1474,14 +1453,12 @@ mod tests {
         });
     }
 
-    /// Finalizing a descendant must not height-prune the shard-engine buffer before
-    /// `try_repair_gaps` has consumed buffer-only ancestors.
+    /// Gap repair archives a finalized block's ancestor that only the shard engine holds.
     ///
-    /// Places parent (height 1) and descendant (height 2) in the shard engine's
-    /// reconstructed-block cache via `proposed()`, then reports a finalization
-    /// for the descendant only.
+    /// The parent (height 1) and descendant (height 2) are cached only in the shard engine, and
+    /// only the descendant has a finalization.
     #[test_traced("WARN")]
-    fn test_coding_store_finalization_does_not_prune_buffer_before_repair() {
+    fn test_coding_repair_reads_buffer_only_ancestor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
             let Fixture {
@@ -1503,10 +1480,8 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
-            let mut handle = harness::ValidatorHandle::<CodingHarness> {
-                mailbox: setup.mailbox,
-                extra: setup.extra,
-            };
+            let mut marshal = setup.mailbox;
+            let shards = setup.extra;
 
             // Build a 2-block chain: parent at height 1, descendant at height 2.
             let parent_block = CodingHarness::make_test_block(
@@ -1528,24 +1503,15 @@ mod tests {
             );
             let descendant_commitment = CodingHarness::commitment(&descendant_block);
 
-            // Seed the shard engine's reconstructed-block cache with both blocks.
-            CodingHarness::propose(
-                &mut handle,
-                Round::new(Epoch::new(0), View::new(1)),
-                &parent_block,
-            )
-            .await;
-            CodingHarness::propose(
-                &mut handle,
-                Round::new(Epoch::new(0), View::new(2)),
-                &descendant_block,
-            )
-            .await;
+            // Cache both blocks in the shard engine only.
+            shards.proposed(Round::new(Epoch::new(0), View::new(1)), parent_block);
+            shards.proposed(Round::new(Epoch::new(0), View::new(2)), descendant_block);
+            assert!(shards.get(parent_commitment).await.is_some());
+            assert!(shards.get(descendant_commitment).await.is_some());
 
-            // Report finalization for the descendant only. The parent has no
-            // finalization certificate: it must be archived by walking the
-            // parent link from the descendant and sourcing the block from the
-            // shard-engine buffer.
+            // Report finalization for the descendant only. The parent has no finalization, so
+            // repair must walk the descendant's parent link and read the parent from the shard
+            // engine.
             let descendant_proposal = Proposal {
                 round: Round::new(Epoch::new(0), View::new(2)),
                 parent: View::new(1),
@@ -1553,19 +1519,17 @@ mod tests {
             };
             let descendant_finalization =
                 CodingHarness::make_finalization(descendant_proposal, &schemes, QUORUM);
-            CodingHarness::report_finalization(&mut handle.mailbox, descendant_finalization).await;
+            CodingHarness::report_finalization(&mut marshal, descendant_finalization).await;
 
-            // Wait until the descendant is archived: that proves finalization processing
-            // has completed, at which point the parent must already have been repaired
-            // from the shard buffer.
-            while handle.mailbox.get_block(Height::new(2)).await.is_none() {
-                context.sleep(Duration::from_millis(10)).await;
+            // Archiving the descendant runs repair, which archives the parent.
+            while marshal.get_block(Height::new(2)).await.is_none() {
+                reschedule().await;
             }
-
-            let parent = handle.mailbox.get_block(Height::new(1)).await;
-            assert!(
-                parent.is_some(),
-                "parent must be archived from shard buffer before height-prune evicts it"
+            let parent = marshal.get_block(Height::new(1)).await;
+            assert_eq!(
+                parent.map(|block| block.commitment()),
+                Some(parent_commitment),
+                "repair must archive the parent from the shard engine"
             );
         });
     }
@@ -2126,12 +2090,12 @@ mod tests {
         })
     }
 
-    /// Exact commitment retirement (durable application progress) can occur on
-    /// either side of re-proposal verification. The re-proposal must remain live
-    /// through core marshal's verified cache, while a post-retirement `discovered`
-    /// announcement must recreate shard state needed before notarization.
+    /// The shard engine's window can evict a commitment's record on either side of
+    /// re-proposal verification. The re-proposal must remain live through core marshal's
+    /// verified cache, while a `discovered` announcement after eviction must recreate shard
+    /// state needed before notarization.
     #[test_traced("WARN")]
-    fn test_coding_reproposal_recreates_shard_state_after_retirement() {
+    fn test_coding_reproposal_recreates_shard_state_after_eviction() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -2147,6 +2111,7 @@ mod tests {
             .await;
 
             let me = participants[0].clone();
+            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -2173,11 +2138,31 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
+            // Discovers a window of commitments in the views starting at `first`.
+            let fill = |first: u64| {
+                for view in first..first + harness::RECORDS.get() as u64 {
+                    let commitment = TestCommitment::from((
+                        Sha256::hash(&[&view.to_be_bytes()]),
+                        Sha256::hash(&[b"filler_root"]),
+                        Sha256::hash(&[b"filler_context"]),
+                        coding_config,
+                    ));
+                    shards.discovered(
+                        commitment,
+                        participants[1].clone(),
+                        Round::new(Epoch::new(0), View::new(view)),
+                    );
+                }
+            };
+
             // Build the epoch boundary block, store it in core marshal (the durable
             // backstop), and cache it in the shard engine.
             let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
             let chain = coding_chain(me.clone(), boundary_height.get());
             let selected = selected_chain(&chain);
+            for (round, block) in &chain[..chain.len() - 1] {
+                assert!(marshal.verified(*round, block.clone()).await);
+            }
             let (boundary_round, coded_boundary) = chain.last().unwrap().clone();
             let boundary_commitment = coded_boundary.commitment();
             assert!(
@@ -2187,21 +2172,16 @@ mod tests {
             );
             shards.discovered(boundary_commitment, me.clone(), boundary_round);
             shards.proposed(boundary_round, coded_boundary.clone());
-            context.sleep(Duration::from_millis(10)).await;
             assert!(shards.get(boundary_commitment).await.is_some());
 
-            // Exact retirement with a round floor below the commitment's observed
-            // round: only the exact commitment list can retire it.
-            shards.retire(core::Retirement {
-                round_floor: Round::new(Epoch::zero(), View::new(1)),
-                exact_retirements: vec![boundary_commitment],
-            });
-            context.sleep(Duration::from_millis(10)).await;
+            // Records for a window of later views evict the cached block.
+            fill(boundary_height.get() + 1);
             assert!(shards.get(boundary_commitment).await.is_none());
 
-            // Re-propose the boundary block in the same epoch. Verification must
-            // fetch the block from the core backstop and re-announce discovery.
-            let reproposal_round = Round::new(Epoch::new(0), View::new(20));
+            // Re-propose the boundary block above those views in the same epoch.
+            // Verification must fetch the block from the core backstop and re-announce
+            // discovery.
+            let reproposal_round = Round::new(Epoch::new(0), View::new(40));
             let reproposal_context = CodingCtx {
                 round: reproposal_round,
                 leader: participants[1].clone(),
@@ -2217,7 +2197,7 @@ mod tests {
                 .await;
             assert!(
                 verdict.expect("re-proposal verdict missing"),
-                "re-proposal should verify from the core backstop after exact retirement"
+                "re-proposal should verify from the core backstop after eviction"
             );
 
             // The recreated reconstruction state must accept this node's assigned
@@ -2235,21 +2215,22 @@ mod tests {
                 },
             }
 
-            // Retiring again after verification removes the newly recreated shard
-            // state, but not the block persisted in core marshal. Certification and
-            // caller-owned core subscriptions must remain live through that cache.
-            shards.retire(core::Retirement {
-                round_floor: Round::new(Epoch::zero(), View::new(1)),
-                exact_retirements: vec![boundary_commitment],
-            });
-            while shards.get(boundary_commitment).await.is_some() {
-                context.sleep(Duration::from_millis(10)).await;
-            }
+            // Records for a window of later views evict the recreated shard state, so a new
+            // assigned-shard subscription waits. The block persisted in core marshal remains,
+            // and certification and caller-owned core subscriptions stay live through that
+            // cache.
+            fill(reproposal_round.view().get() + 1);
+            let mut evicted = shards.subscribe_assigned_shard_verified(boundary_commitment);
+            assert!(shards.get(boundary_commitment).await.is_none());
+            assert!(matches!(
+                evicted.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
 
             let block = marshal
                 .acquire(boundary_commitment)
                 .await
-                .expect("core block subscription closed after shard retirement");
+                .expect("core block subscription closed after shard eviction");
             assert_eq!(block.commitment(), boundary_commitment);
 
             let certify = marshaled
@@ -2258,7 +2239,7 @@ mod tests {
                 .await;
             assert!(
                 certify.expect("certify result missing"),
-                "re-proposal should certify after exact retirement"
+                "re-proposal should certify after eviction"
             );
         })
     }
@@ -2544,7 +2525,6 @@ mod tests {
             .await;
 
             let me = participants[0].clone();
-            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
 
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
@@ -2553,6 +2533,16 @@ mod tests {
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
+            let mut senders = Vec::new();
+            for peer in &participants[1..3] {
+                let (sender, _) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                senders.push(sender);
+            }
+            setup_network_links(&mut oracle, &participants[..3], LINK).await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
@@ -2567,17 +2557,12 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            // Re-proposal payload with valid coding config, but no block available.
-            let missing_payload = TestCommitment::from((
-                Sha256::hash(&[b"missing_block"]),
-                Sha256::hash(&[b"missing_root"]),
-                Sha256::hash(&[b"missing_context"]),
-                coding_config,
-            ));
+            // Re-proposal payload with valid coding config, but no decodable block.
+            let (missing_payload, missing_shards) = undecodable(me.clone());
             let round = Round::new(Epoch::zero(), View::new(1));
             let reproposal_context = CodingCtx {
                 round,
-                leader: me,
+                leader: me.clone(),
                 parent: (View::zero(), missing_payload),
             };
 
@@ -2590,21 +2575,31 @@ mod tests {
                 )
                 .await;
 
-            // Losing the local shard subscription leaves remote acquisition pending.
-            context.sleep(Duration::from_millis(100)).await;
-            shards.retire(core::Retirement {
-                round_floor: round,
-                exact_retirements: vec![missing_payload],
-            });
+            let failed = shards.subscribe(missing_payload);
 
-            context.sleep(Duration::from_millis(100)).await;
+            // The FIFO barrier registers the core acquisition before reconstruction fails.
+            marshal.get_processed().await;
+            shards.notarized(missing_payload, round);
+            for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
+                sender.send(Recipients::One(me.clone()), shard.encode(), true);
+            }
+
+            select! {
+                result = failed => {
+                    assert!(result.is_err(), "failed reconstruction must close its shard waiter");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("shard waiter remained open after failed reconstruction");
+                },
+            }
+            marshal.get_processed().await;
             assert!(matches!(
                 verify_rx.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
             drop(verify_rx);
 
-            // Certification stays pending until data arrives or its caller cancels.
+            // Certification remains pending for this undecodable commitment until its caller cancels.
             let mut certify_rx = marshaled
                 .certify(
                     round,
@@ -2624,8 +2619,10 @@ mod tests {
         })
     }
 
+    /// A failed reconstruction closes its shard waiter while core exact acquisition remains
+    /// pending until its caller cancels.
     #[test_traced("WARN")]
-    fn test_core_acquisition_survives_coding_buffer_pruning() {
+    fn test_core_acquisition_survives_coding_reconstruction_failure() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -2640,45 +2637,61 @@ mod tests {
             )
             .await;
 
+            let me = participants[0].clone();
             let setup = CodingHarness::setup_validator(
                 context.child("validator").with_attribute("index", 0),
                 &mut oracle,
-                participants[0].clone(),
+                me.clone(),
                 ConstantProvider::new(schemes[0].clone()),
             )
             .await;
+            let mut senders = Vec::new();
+            for peer in &participants[1..3] {
+                let (sender, _) = oracle
+                    .control(peer.clone())
+                    .register(2, TEST_QUOTA)
+                    .await
+                    .unwrap();
+                senders.push(sender);
+            }
+            setup_network_links(&mut oracle, &participants[..3], LINK).await;
             let marshal = setup.mailbox;
             let shards = setup.extra;
 
-            let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
-            let missing_commitment = TestCommitment::from((
-                Sha256::hash(&[b"missing_block"]),
-                Sha256::hash(&[b"missing_root"]),
-                Sha256::hash(&[b"missing_context"]),
-                coding_config,
-            ));
+            // The commitment's shards verify, but the block they decode fails validation.
+            let (missing_commitment, missing_shards) = undecodable(me.clone());
             let round = Round::new(Epoch::zero(), View::new(1));
 
             // Subscribe through the core actor. This internally subscribes to the
             // coding shard buffer and registers local waiters.
             let mut block_rx = marshal.acquire(missing_commitment);
+            let failed = shards.subscribe(missing_commitment);
 
-            // Allow core actor to register the underlying buffer subscription.
-            context.sleep(Duration::from_millis(100)).await;
+            // Once the underlying buffer subscription reaches the shard engine, a failed
+            // reconstruction of the commitment closes it.
+            marshal.get_processed().await;
+            shards.notarized(missing_commitment, round);
+            for (sender, shard) in senders.iter_mut().zip(&missing_shards[1..]) {
+                sender.send(Recipients::One(me.clone()), shard.encode(), true);
+            }
 
-            // Prune the missing commitment in the shard engine, which should cancel
-            // the underlying buffer subscription.
-            shards.retire(core::Retirement {
-                round_floor: round,
-                exact_retirements: vec![missing_commitment],
-            });
-
-            context.sleep(Duration::from_millis(100)).await;
+            select! {
+                result = failed => {
+                    assert!(result.is_err(), "failed reconstruction must close its shard waiter");
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("shard waiter remained open after failed reconstruction");
+                },
+            }
+            marshal.get_processed().await;
             assert!(matches!(
                 block_rx.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
-            assert_eq!(marshal.get_processed_height().await, Some(Height::zero()));
+            assert_eq!(
+                marshal.get_processed().await,
+                Some(Processed::Block(Height::zero()))
+            );
             drop(block_rx);
         })
     }
@@ -2744,7 +2757,7 @@ mod tests {
                 QUORUM,
             ));
 
-            while marshal.get_processed_height().await != Some(Height::new(2)) {
+            while marshal.get_processed().await != Some(Processed::Block(Height::new(2))) {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -3854,7 +3867,7 @@ mod tests {
                 QUORUM,
             );
             CodingHarness::report_finalization(&mut mailbox, finalization).await;
-            let _ = mailbox.get_processed_height().await;
+            let _ = mailbox.get_processed().await;
             let fetch = resolver
                 .fetches()
                 .into_iter()
@@ -4165,7 +4178,7 @@ mod tests {
                 assert_eq!(fetch.key, handler::Key::Block(ancestor.commitment()));
                 assert_eq!(fetch.subscriber, handler::Annotation::Subscription);
                 let mut subscription = mailbox.acquire(ancestor.commitment());
-                let _ = mailbox.get_processed_height().await;
+                let _ = mailbox.get_processed().await;
 
                 if index == 0 {
                     assert!(
@@ -4217,11 +4230,14 @@ mod tests {
                 QUORUM,
             )));
             let mut delivered_fetches = 3;
-            while mailbox.get_processed_height().await != Some(candidate.height()) {
+            while mailbox.get_processed().await != Some(Processed::Block(candidate.height())) {
+                // This peer supplies exact bodies without historical finalizations.
                 let fetches = resolver.fetches();
                 for fetch in &fetches[delivered_fetches..] {
-                    let handler::Key::Block(commitment) = fetch.key else {
-                        panic!("non-commitment repair");
+                    let commitment = match fetch.key {
+                        handler::Key::Block(commitment) => commitment,
+                        handler::Key::Finalized { .. } => continue,
+                        handler::Key::Notarized { .. } => panic!("notarized repair"),
                     };
                     let block = chain
                         .iter()
@@ -4236,7 +4252,14 @@ mod tests {
                 let finalized = mailbox.get_block(block.height()).await.unwrap();
                 assert_eq!(finalized.commitment(), block.commitment());
             }
-            assert_eq!(resolver.fetches().len(), 5);
+            assert_eq!(
+                resolver
+                    .fetches()
+                    .iter()
+                    .filter(|fetch| matches!(fetch.key, handler::Key::Block(_)))
+                    .count(),
+                5,
+            );
         });
     }
 
@@ -4347,7 +4370,7 @@ mod tests {
             );
             mailbox.report(Activity::Certification(certification.clone()));
             let subscription = mailbox.acquire(parent.commitment());
-            let _ = mailbox.get_processed_height().await;
+            let _ = mailbox.get_processed().await;
             let fetch = resolver
                 .fetches()
                 .into_iter()
@@ -4365,11 +4388,11 @@ mod tests {
                 &schemes,
                 QUORUM,
             )));
-            while mailbox.get_processed_height().await != Some(tip.height()) {
+            while mailbox.get_processed().await != Some(Processed::Block(tip.height())) {
                 reschedule().await;
             }
             mailbox.report(Activity::Certification(certification));
-            let _ = mailbox.get_processed_height().await;
+            let _ = mailbox.get_processed().await;
 
             // An outstanding acquisition retains demand, but cannot retain or restore trust.
             assert!(resolver.deliver(fetch, parent.encode()).await);
@@ -4567,7 +4590,7 @@ mod tests {
             if cached {
                 assert!(mailbox.verified(floor_round, coded_floor).await);
                 mailbox.set_floor(finalization);
-                let _ = mailbox.get_processed_height().await;
+                let _ = mailbox.get_processed().await;
             } else {
                 resolver.respond_to_next_fetch(coded_floor.encode());
                 mailbox.set_floor(finalization);
@@ -4575,7 +4598,10 @@ mod tests {
                     reschedule().await;
                 }
                 assert!(!resolver.wait_for_delivery_response().await);
-                assert_eq!(mailbox.get_processed_height().await, Some(Height::zero()));
+                assert_eq!(
+                    mailbox.get_processed().await,
+                    Some(Processed::Block(Height::zero()))
+                );
                 assert!(mailbox.get_block(Height::new(2)).await.is_none());
                 assert!(mailbox.get_finalization(Height::new(2)).await.is_none());
             }
@@ -4765,6 +4791,7 @@ mod tests {
             // Abort marshal immediately after certify returns to prove the
             // block is already persisted at that point.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             drop(marshaled);
             drop(marshal);
             drop(shards);
@@ -4898,6 +4925,7 @@ mod tests {
 
             // Abort marshal after certify; the leader's own block must be durable.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             drop(marshaled);
             drop(marshal);
             drop(shards);
@@ -5326,6 +5354,56 @@ mod tests {
             assert!(
                 commitment_rx.await.is_err(),
                 "propose must drop the receiver when the cached block's context no longer matches"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_coding_finalized_height_delivery_uses_verified_commitment() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "finalized-height-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                RecordingCodingBuffer::default(),
+            )
+            .await;
+            let (candidate_ctx, candidate) = missing_candidate(participants[0].clone());
+            let commitment = candidate.commitment();
+            let height = candidate.height();
+            let subscription = mailbox.acquire(commitment);
+            mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            let fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| fetch.key == handler::Key::Finalized { height })
+                .expect("targeted finalized-height fetch");
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(candidate_ctx.round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            assert!(
+                resolver
+                    .deliver(fetch, (finalization, candidate.inner_shared()).encode())
+                    .await
+            );
+            let delivered = subscription.await.expect("subscription dropped");
+            assert_eq!(delivered.commitment(), commitment);
+            assert!(
+                delivered.shard(0).is_none(),
+                "a verified finalized commitment owns the coding root"
+            );
+            assert_eq!(
+                mailbox.get_block(height).await.unwrap().commitment(),
+                commitment
             );
         });
     }
