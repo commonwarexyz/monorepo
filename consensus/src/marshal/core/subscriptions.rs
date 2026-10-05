@@ -50,7 +50,7 @@ impl<V: Variant> Subscriptions<V> {
     }
 
     /// Removes canceled subscribers and returns commitments with no remaining callers.
-    pub(super) fn retain_open(&mut self) -> Vec<V::Commitment> {
+    fn retain_open(&mut self) -> Vec<V::Commitment> {
         let mut removed = Vec::new();
         self.entries.retain(|commitment, subscription| {
             subscription

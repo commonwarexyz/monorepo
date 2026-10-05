@@ -4414,6 +4414,199 @@ mod tests {
         });
     }
 
+    /// An exact resolver delivery leaves its caller-owned demand for the delivery verdict to retire,
+    /// while local ingress retires the demand itself.
+    #[test_traced("WARN")]
+    fn test_standard_acquire_delivery_leaves_demand_to_verdict() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "acquire-delivery-verdict",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone().into()),
+            )
+            .await;
+            let is_acquisition = |fetch: &FetchRecord, block: &B| {
+                fetch.key == handler::Key::Block(StandardHarness::commitment(block))
+                    && fetch.subscriber == handler::Annotation::Subscription
+            };
+
+            // The resolver must still hold the demand when the delivery verdict resolves, so the
+            // verdict reaches the resolver and retires it.
+            let delivered = make_raw_block(genesis.digest(), Height::new(1), 100);
+            let acquisition = mailbox.acquire(StandardHarness::commitment(&delivered));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "delivered acquisition",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| is_acquisition(fetch, &delivered))
+                },
+            )
+            .await;
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(|fetch| is_acquisition(fetch, &delivered))
+                .unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &delivered).await;
+            assert!(
+                resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| is_acquisition(fetch, &delivered)),
+                "resolver delivery must not cancel demand before its verdict"
+            );
+            assert_eq!(acquisition.await.unwrap().digest(), delivered.digest());
+
+            // A locally verified block satisfies its caller without a resolver verdict.
+            let verified = make_raw_block(genesis.digest(), Height::new(1), 200);
+            let acquisition = mailbox.acquire(StandardHarness::commitment(&verified));
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "verified acquisition",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| is_acquisition(fetch, &verified))
+                },
+            )
+            .await;
+            assert!(
+                mailbox
+                    .verified(Round::new(Epoch::zero(), View::new(1)), verified.clone())
+                    .await
+            );
+            assert_eq!(acquisition.await.unwrap().digest(), verified.digest());
+            assert!(
+                !resolver
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| is_acquisition(fetch, &verified)),
+                "local ingress must retire satisfied demand"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_retires_only_exact_acquisition() {
+        deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let (mailbox, _, mut resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-demand",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(genesis.clone().into()),
+            )
+            .await;
+            let height = Height::new(1);
+            let block = make_raw_block(genesis.digest(), height, 100);
+            let commitment = StandardHarness::commitment(&block);
+            let acquisition = mailbox.acquire(commitment);
+            let other = make_raw_block(genesis.digest(), height, 200);
+            let other_commitment = StandardHarness::commitment(&other);
+            let _other_acquisition = mailbox.acquire(other_commitment);
+            mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
+            let _ = mailbox.get_processed().await;
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(1)),
+                    View::zero(),
+                    commitment,
+                ),
+                &schemes,
+                QUORUM,
+            );
+            let observed = resolver.clone();
+            let is_active = |key, subscriber| {
+                observed
+                    .active_fetches()
+                    .iter()
+                    .any(|fetch| fetch.key == key && fetch.subscriber == subscriber)
+            };
+            assert!(is_active(
+                handler::Key::Block(commitment),
+                handler::Annotation::Subscription
+            ));
+            assert!(is_active(
+                handler::Key::Finalized { height },
+                handler::Annotation::Height(height)
+            ));
+            let retained_round = Round::new(Epoch::zero(), View::new(10));
+            resolver.fetch(handler::Request::new(
+                commitment,
+                handler::Annotation::Height(height),
+            ));
+            resolver.fetch(handler::Request::new(
+                commitment,
+                handler::Annotation::Round(retained_round),
+            ));
+            let (response, response_rx) = oneshot::channel();
+            assert!(
+                resolver
+                    .enqueue(handler::Message::Deliver {
+                        delivery: Delivery {
+                            key: handler::Key::Finalized { height },
+                            subscribers: NonEmptyVec::new((
+                                handler::Annotation::Height(height),
+                                tracing::Span::none()
+                            )),
+                        },
+                        value: (finalization, block.clone()).encode(),
+                        response,
+                    })
+                    .accepted()
+            );
+            assert!(response_rx.await.unwrap());
+            let _ = mailbox.get_processed().await;
+            assert_eq!(acquisition.await.unwrap().digest(), block.digest());
+
+            assert!(
+                !is_active(
+                    handler::Key::Block(commitment),
+                    handler::Annotation::Subscription
+                ),
+                "height delivery must retire the satisfied independent exact acquisition"
+            );
+            assert!(
+                is_active(
+                    handler::Key::Finalized { height },
+                    handler::Annotation::Height(height)
+                ),
+                "height delivery must preserve its own request for its verdict"
+            );
+            assert!(is_active(
+                handler::Key::Block(commitment),
+                handler::Annotation::Height(height)
+            ));
+            assert!(is_active(
+                handler::Key::Block(commitment),
+                handler::Annotation::Round(retained_round)
+            ));
+            assert!(is_active(
+                handler::Key::Block(other_commitment),
+                handler::Annotation::Subscription
+            ));
+        });
+    }
+
     /// Recorded `send` call on the [`RecordingBuffer`].
     type BufferSend = (Round, Arc<B>, Recipients<PublicKey>);
 
@@ -4702,7 +4895,9 @@ mod tests {
             fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((fetch.into().key, targets));
+            let fetch = fetch.into();
+            self.targeted.lock().push((fetch.key, targets));
+            self.record_fetch(fetch);
             Feedback::Ok
         }
 
@@ -4713,9 +4908,8 @@ mod tests {
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
-            let mut targeted = self.targeted.lock();
             for (fetch, targets) in fetches {
-                targeted.push((fetch.into().key, targets));
+                self.fetch_targeted(fetch, targets);
             }
             Feedback::Ok
         }
@@ -8735,6 +8929,171 @@ mod tests {
             assert!(
                 !ops[written..].contains(&Op::Get(Some(Height::new(1)))),
                 "dispatch must not read the finalized block back from the archive: {ops:?}"
+            );
+        });
+    }
+
+    /// Exact deliveries unrelated to finalized gap repair do not read the gap's boundary block.
+    #[test_traced("WARN")]
+    fn test_standard_unrelated_deliveries_skip_gap_boundary_read() {
+        const PARTITION_PREFIX: &str = "unrelated-delivery-gap-boundary";
+        const DELIVERIES: u64 = 5;
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let (finalizations_by_height, finalized_blocks) =
+                prunable_finalized_stores(&context, PARTITION_PREFIX).await;
+            let finalized_blocks =
+                Recording::new(finalized_blocks, |block: &Arc<B>| Arc::as_ptr(block).addr());
+            let ops = finalized_blocks.ops();
+            let (actor, mut mailbox, _) = Actor::init(
+                context.child("actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                test_config(
+                    &context,
+                    PARTITION_PREFIX,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                ),
+            )
+            .await;
+            let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+            let buffer = RecordingBuffer::default();
+            let _actor_handle = actor.start(
+                Application::<B>::default(),
+                buffer.clone(),
+                (resolver_rx, resolver.clone()),
+            );
+
+            // Finalize the tip of a chain whose ancestors are missing, opening a gap below it.
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let mut parent = genesis.digest();
+            let mut chain = Vec::new();
+            for height in 1..=6 {
+                let block = make_raw_block(parent, Height::new(height), height);
+                parent = block.digest();
+                chain.push(block);
+            }
+            let boundary = chain[5].clone();
+            buffer.insert(boundary.clone());
+            StandardHarness::report_finalization(
+                &mut mailbox,
+                StandardHarness::make_finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(6)),
+                        View::new(5),
+                        StandardHarness::commitment(&boundary),
+                    ),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            let is_repair = |fetch: &FetchRecord, block: &B| {
+                fetch.key == handler::Key::Block(StandardHarness::commitment(block))
+                    && fetch.subscriber == handler::Annotation::Height(block.height())
+            };
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "gap repair request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| is_repair(fetch, &chain[4]))
+                },
+            )
+            .await;
+
+            // Acquire unfinalized blocks above the gap.
+            let unrelated: Vec<_> = (0..DELIVERIES)
+                .map(|i| make_raw_block(genesis.digest(), Height::new(10 + i), 1000 + i))
+                .collect();
+            let acquisitions: Vec<_> = unrelated
+                .iter()
+                .map(|block| mailbox.acquire(StandardHarness::commitment(block)))
+                .collect();
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "unrelated acquisitions",
+                || {
+                    let active = resolver.active_fetches();
+                    unrelated.iter().all(|block| {
+                        active.iter().any(|fetch| {
+                            fetch.key == handler::Key::Block(StandardHarness::commitment(block))
+                        })
+                    })
+                },
+            )
+            .await;
+
+            // Deliver every unrelated block in one resolver batch. Only the batch's gap repair
+            // pass may read the boundary.
+            ops.lock().clear();
+            let responses: Vec<_> = unrelated
+                .iter()
+                .map(|block| {
+                    let (response, response_rx) = oneshot::channel();
+                    assert!(
+                        resolver
+                            .enqueue(handler::Message::Deliver {
+                                delivery: Delivery {
+                                    key: handler::Key::Block(StandardHarness::commitment(block)),
+                                    subscribers: NonEmptyVec::new((
+                                        handler::Annotation::Subscription,
+                                        tracing::Span::none(),
+                                    )),
+                                },
+                                value: block.encode(),
+                                response,
+                            })
+                            .accepted()
+                    );
+                    response_rx
+                })
+                .collect();
+            for response in responses {
+                assert!(response.await.unwrap());
+            }
+            for (acquisition, block) in acquisitions.into_iter().zip(&unrelated) {
+                assert_eq!(acquisition.await.unwrap().digest(), block.digest());
+            }
+            let reads = ops
+                .lock()
+                .iter()
+                .filter(|op| **op == Op::Get(Some(boundary.height())))
+                .count();
+            assert!(
+                reads <= 1,
+                "boundary read {reads} times for unrelated deliveries"
+            );
+
+            // The requested gap parent is still archived, so repair advances to its parent.
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(|fetch| is_repair(fetch, &chain[4]))
+                .unwrap();
+            deliver_acquisition_test_block(&resolver, fetch, &chain[4]).await;
+            wait_until(
+                &context,
+                Duration::from_secs(1),
+                "next gap repair request",
+                || {
+                    resolver
+                        .active_fetches()
+                        .iter()
+                        .any(|fetch| is_repair(fetch, &chain[3]))
+                },
+            )
+            .await;
+            assert_eq!(
+                mailbox.get_block(Height::new(5)).await.unwrap().digest(),
+                chain[4].digest()
             );
         });
     }

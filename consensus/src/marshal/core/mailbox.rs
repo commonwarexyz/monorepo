@@ -663,6 +663,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Callers for the same commitment share acquisition work. Drop the receiver to cancel
     /// this caller's interest. The receiver closes without delivery if marshal shuts down.
     ///
+    /// Acquisition ignores marshal's processed height and round floors: a request for a block no
+    /// peer serves stays live until the block arrives or every caller drops its receiver.
+    ///
     /// Delivery does not imply application validity or durability. Consumers that need durable,
     /// height-ordered delivery should use application dispatch.
     pub fn acquire(&self, commitment: V::Commitment) -> oneshot::Receiver<V::Block> {

@@ -3896,6 +3896,62 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_gap_repair_delivery_skips_recoding() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let buffer = RecordingCodingBuffer::default();
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("validator"),
+                "gap-repair-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                buffer.clone(),
+            )
+            .await;
+            let chain = coding_chain(participants[0].clone(), 2);
+            let parent = chain[0].1.clone();
+            let (round, tip) = chain[1].clone();
+            let subscription = mailbox.acquire(parent.commitment());
+
+            // Finalize a buffered tip whose parent is missing, so gap repair requests the parent.
+            buffer.blocks.lock().push(Arc::new(tip.clone()));
+            CodingHarness::report_finalization(
+                &mut mailbox,
+                CodingHarness::make_finalization(
+                    Proposal::new(round, View::new(1), tip.commitment()),
+                    &schemes,
+                    QUORUM,
+                ),
+            )
+            .await;
+            let _ = mailbox.get_processed().await;
+            let fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| {
+                    fetch.key == handler::Key::Block(parent.commitment())
+                        && fetch.subscriber == handler::Annotation::Height(Height::new(1))
+                })
+                .expect("gap repair fetch");
+
+            // The archived tip names the parent commitment, so the parent is rebuilt from it
+            // without recomputing the coding root.
+            assert!(resolver.deliver(fetch, parent.encode()).await);
+            let delivered = subscription.await.expect("subscription dropped");
+            assert_eq!(delivered.commitment(), parent.commitment());
+            assert!(
+                delivered.shard(0).is_none(),
+                "gap repair delivery should not recompute shards"
+            );
+            assert!(mailbox.get_block(Height::new(1)).await.is_some());
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_retention_annotations_do_not_authenticate_delivery() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

@@ -142,6 +142,10 @@ where
     block_subscriptions: Subscriptions<V>,
     // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
+    // Parent commitment most recently requested by finalized gap repair. Repair
+    // derives it from an archived finalized block, so it stays evidence of
+    // finality after its gap closes.
+    repair_parent: Option<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
     // covering them completes
     dispatch_gate: DispatchGate,
@@ -264,6 +268,7 @@ where
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
                 certified: Certified::new(),
+                repair_parent: None,
                 dispatch_gate: DispatchGate::default(),
                 staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
                 cache,
@@ -438,10 +443,6 @@ where
 
         select_loop! {
             self.context,
-            on_start => {
-                let closed = self.block_subscriptions.retain_open();
-                Self::cancel_acquisitions(&mut resolver, closed);
-            },
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
@@ -1165,8 +1166,11 @@ where
         self
     }
 
-    /// Notifies subscribers of a validated block and applies it to any
-    /// pending floor transition.
+    /// Notifies subscribers of a validated block and applies any pending floor transition.
+    ///
+    /// Local ingress and verified height finalizations satisfy exact-body subscriptions
+    /// independently of the resolver's block-delivery verdict. Their satisfied demand
+    /// is canceled here; a height delivery retains its own finalized-height request.
     ///
     /// Subscribers are notified before the block is persisted and may hold a
     /// block that marshal never durably stores. Subscriptions make no durability promise. Durable
@@ -1292,9 +1296,7 @@ where
         // Keep the processed block so the application can restart from it.
         self = self.prune_after_floor(dispatch_floor).await;
 
-        // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
-        // stops obsolete network work, but later local ingress can still satisfy these waiters,
-        // and callers do not retry a closed subscription.
+        // Resume gap repair and dispatch above the new floor.
         let repaired;
         (self, repaired) = self.try_repair_gaps(buffer, resolver, application).await;
         if repaired {
@@ -1381,14 +1383,13 @@ where
                 .expect("failed to read archived finalization")
                 .filter(|certificate| certificate.proposal.payload == commitment),
         };
-        let parent_height = self.finalized_parent_height(commitment).await;
-        let certified_height = self.certified.height(&commitment);
-        let expected =
-            if finalization.is_some() || parent_height.is_some() || certified_height.is_some() {
-                ExpectedCommitment::Trusted(commitment)
-            } else {
-                ExpectedCommitment::Untrusted(commitment)
-            };
+        let repairing = self.repair_parent == Some(commitment);
+        let certified = self.certified.height(&commitment).is_some();
+        let expected = if finalization.is_some() || repairing || certified {
+            ExpectedCommitment::Trusted(commitment)
+        } else {
+            ExpectedCommitment::Untrusted(commitment)
+        };
         let cfg = V::block_cfg(&self.block_codec_config, expected);
         let Ok(block) = V::Block::decode_cfg(value, &cfg) else {
             response.send_lossy(false);
@@ -1399,23 +1400,24 @@ where
             || (self.floor.matches_pending_anchor(commitment)
                 && block.height() > Height::zero()
                 && block.parent() != V::commitment_to_inner(V::parent_commitment(&block)))
-            || parent_height.is_some_and(|height| height != block.height())
-            || certified_height.is_some_and(|height| height != block.height())
         {
             response.send_lossy(false);
             return self;
         }
         let height = block.height();
-        if certified_height.is_some()
-            && let Some(parent) = height.previous()
-        {
+        if certified && let Some(parent) = height.previous() {
             self.certified.insert(parent, V::parent_commitment(&block));
         }
-        let anchored;
-        (self, anchored) = self
-            .ingest(block.clone(), buffer, application, resolver)
-            .await;
-        if anchored {
+
+        // The resolver retires the delivered demand when it receives this
+        // delivery's verdict.
+        self.block_subscriptions.notify(block.clone());
+
+        // Apply the pending floor transition this block anchors.
+        if let Some(anchor) = self.floor.take_matching(commitment) {
+            self = self
+                .apply_floor(anchor, block, buffer, application, resolver)
+                .await;
             response.send_lossy(true);
             return self;
         }
@@ -1430,11 +1432,14 @@ where
                 )
                 .await;
         }
-        if finalization.is_some() || self.finalized_commitment(height).await == Some(commitment) {
+        if finalization.is_some()
+            || repairing
+            || self.finalized_commitment(height).await == Some(commitment)
+        {
             (self, _) = self
                 .store_finalization(height, digest, &block, finalization, application)
                 .await;
-        } else if certified_height.is_some()
+        } else if certified
             && height > self.floor.processed_height()
             && let Some(bounds) = self.epocher.containing(height)
         {
@@ -1522,21 +1527,6 @@ where
                 .await;
         }
         self
-    }
-
-    /// The first unresolved archive gap owns the active ancestry repair.
-    async fn finalized_parent_height(&self, commitment: V::Commitment) -> Option<Height> {
-        let (_, next) = self
-            .finalized_blocks
-            .next_gap(self.floor.processed_height().next());
-        let next = next?;
-        let block = self
-            .get_finalized_block(next)
-            .await
-            .expect("finalized gap boundary missing");
-        (V::parent_commitment(&block) == commitment)
-            .then(|| next.previous())
-            .flatten()
     }
 
     async fn finalized_commitment(&self, height: Height) -> Option<V::Commitment> {
@@ -2049,6 +2039,7 @@ where
                     let parent_height = height
                         .previous()
                         .expect("cursor above gap start has a parent");
+                    self.repair_parent = Some(parent_commitment);
                     self.floor.fetch_if_permitted(
                         resolver,
                         Request::new(parent_commitment, Annotation::Height(parent_height)),
