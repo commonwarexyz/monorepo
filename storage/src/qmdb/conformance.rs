@@ -316,10 +316,15 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
 #[cfg(feature = "arbitrary")]
 mod tests {
     use super::*;
-    use crate::qmdb::keyless;
+    use crate::qmdb::{
+        floor::{Compact, Decision, Entry, Hold, Limits, Policy},
+        keyless, store,
+    };
     use commonware_conformance::{Conformance, conformance_tests};
     use commonware_runtime::conformance::{StorageConformance, StorageWorkload};
     use commonware_utils::sequence::U64;
+    use core::mem;
+    use std::collections::{BTreeMap, BTreeSet};
 
     type KeylessMmrFixed = keyless::fixed::Db<mmr::Family, Ctx, U64, Sha256, Sequential>;
     type KeylessMmbFixed = keyless::fixed::Db<mmb::Family, Ctx, U64, Sha256, Sequential>;
@@ -391,6 +396,21 @@ mod tests {
         }
     }
 
+    type Store = store::db::Db<Ctx, Digest, Digest, OneCap>;
+
+    fn store_config(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> store::db::Config<OneCap, ((), ())> {
+        let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        store::db::Config {
+            log: variable_log_config(suffix, pc, ((), ())),
+            translator: OneCap,
+            init_cache: Some(NZUsize!(1024)),
+            init_buffer: NZUsize!(1 << 21),
+        }
+    }
+
     /// Deterministically select ~20% of keys for deletion. XOR with the seed ensures
     /// the set of deleted indices varies across seeds.
     const fn is_deleted(seed: u64, i: u64) -> bool {
@@ -429,21 +449,17 @@ mod tests {
     /// 2. Delete ~20% of keys, update the rest.
     /// 3. Recreate the deleted keys alongside new keys that collide under the translator.
     /// 4. Update original keys; delete odd-indexed colliding keys, update even-indexed ones.
-    async fn keyed_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
-        db: D,
-        seed: u64,
-    ) -> (D, Vec<u8>) {
+    fn keyed_batches(seed: u64) -> [Vec<(Digest, Option<Digest>)>; 4] {
         let n = seed % 50 + 5;
 
         // Choose a translator bucket for colliding keys (varies per seed).
         let prefix = (seed % 256) as u8;
 
         // 1. Create n keys.
-        let writes: Vec<_> = (0..n).map(|i| (to_digest(i), Some(to_val(i, 1)))).collect();
-        let db = apply_writes(db, writes).await;
+        let created: Vec<_> = (0..n).map(|i| (to_digest(i), Some(to_val(i, 1)))).collect();
 
         // 2. Delete ~20% of keys, update the rest with new values.
-        let writes: Vec<_> = (0..n)
+        let mixed: Vec<_> = (0..n)
             .map(|i| {
                 let key = to_digest(i);
                 if is_deleted(seed, i) {
@@ -453,38 +469,377 @@ mod tests {
                 }
             })
             .collect();
-        let db = apply_writes(db, writes).await;
 
         // 3. Recreate every deleted key, and introduce new keys that share a translator
         //    bucket (offset by 10000 to avoid overlapping with the original key range).
-        let mut writes = Vec::new();
+        let mut recreated = Vec::new();
         for i in 0..n {
             if is_deleted(seed, i) {
-                writes.push((to_digest(i), Some(to_val(i, 3))));
+                recreated.push((to_digest(i), Some(to_val(i, 3))));
             }
         }
         for i in 0..n / 2 {
-            writes.push((colliding_digest(prefix, 10000 + i), Some(to_val(i, 4))));
+            recreated.push((colliding_digest(prefix, 10000 + i), Some(to_val(i, 4))));
         }
-        let db = apply_writes(db, writes).await;
 
         // 4. Update original keys; delete odd-indexed colliding keys, update even-indexed.
-        let mut writes = Vec::new();
+        let mut updated = Vec::new();
         for i in 0..n {
-            writes.push((to_digest(i), Some(to_val(i, 5))));
+            updated.push((to_digest(i), Some(to_val(i, 5))));
         }
         for i in 0..n / 2 {
             let key = colliding_digest(prefix, 10000 + i);
             if i % 2 == 1 {
-                writes.push((key, None));
+                updated.push((key, None));
             } else {
-                writes.push((key, Some(to_val(i, 6))));
+                updated.push((key, Some(to_val(i, 6))));
             }
         }
-        let db = apply_writes(db, writes).await;
 
+        [created, mixed, recreated, updated]
+    }
+
+    /// Apply [`keyed_batches`] for `seed` to `db` and return its root.
+    async fn keyed_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+        mut db: D,
+        seed: u64,
+    ) -> (D, Vec<u8>) {
+        for writes in keyed_batches(seed) {
+            db = apply_writes(db, writes).await;
+        }
         let root = db.root().to_vec();
         (db, root)
+    }
+
+    /// [`keyed_batches`] on a store with [`Proportional`] for every batch.
+    struct StoreStorage;
+
+    impl StorageWorkload for StoreStorage {
+        type Error = crate::qmdb::Error<mmr::Family>;
+
+        async fn run(context: Ctx, seed: u64) -> Result<(), Self::Error> {
+            let cfg = store_config("store", &context);
+            let mut db = Store::init(context.child("db"), cfg, None).await?;
+            for writes in keyed_batches(seed) {
+                let batch = writes.into_iter().collect();
+                (db, _) = db.apply_batch(batch, &mut Proportional).await?;
+            }
+            db.sync().await?;
+            Ok(())
+        }
+    }
+
+    /// The policy a batch of the floor workload advances its floor with.
+    #[derive(Clone, Copy)]
+    enum Rule {
+        Proportional,
+        Hold,
+        Compact { entries: usize, skips: u64 },
+        Seeded { entries: usize, skips: u64 },
+    }
+
+    /// The writes of a batch and the policy it advances its floor with.
+    type Batch = (Vec<(Digest, Option<Digest>)>, Rule);
+
+    /// A policy that keeps, evicts, replaces, or stops at each update by a rule over its
+    /// location, its key, and `seed`.
+    struct Seeded {
+        seed: u64,
+        entries: usize,
+        skips: u64,
+    }
+
+    impl<F: Family> Policy<F, Digest, Digest> for Seeded {
+        fn limits(&self) -> Limits {
+            Limits::Fixed {
+                entries: self.entries,
+                skips: self.skips,
+            }
+        }
+
+        fn decide<'a>(&mut self, entry: Entry<'a, F, Digest, Digest>) -> Decision<'a, Digest> {
+            match (*entry.location() ^ self.seed ^ u64::from(entry.key()[31])) % 8 {
+                0 => entry.evict().0,
+                1 => {
+                    let value = Sha256::hash(&[entry.value().as_ref()]);
+                    entry.replace(value)
+                }
+                2 => entry.stop(),
+                _ => entry.keep(),
+            }
+        }
+    }
+
+    /// The first id of the keys that share a translator bucket.
+    const COLLIDING: u64 = 10_000;
+
+    /// Builds the batches of [`floor_batches`] over key ids.
+    struct Plan {
+        seed: u64,
+        prefix: u8,
+        live: BTreeSet<u64>,
+        dead: BTreeSet<u64>,
+        writes: BTreeMap<Digest, Option<Digest>>,
+        batches: Vec<Batch>,
+    }
+
+    impl Plan {
+        /// The key with `id`. Keys with ids from [`COLLIDING`] share a translator bucket.
+        fn key(&self, id: u64) -> Digest {
+            if id >= COLLIDING {
+                colliding_digest(self.prefix, id)
+            } else {
+                to_digest(id)
+            }
+        }
+
+        /// Write a new value for `id` in the open batch.
+        fn set(&mut self, id: u64) {
+            let value = to_val(id, self.batches.len() as u64);
+            self.writes.insert(self.key(id), Some(value));
+            self.dead.remove(&id);
+            self.live.insert(id);
+        }
+
+        /// Delete `id` in the open batch.
+        fn delete(&mut self, id: u64) {
+            self.writes.insert(self.key(id), None);
+            if self.live.remove(&id) {
+                self.dead.insert(id);
+            }
+        }
+
+        /// The `j`th seeded pick from the `ids` the open batch does not write yet.
+        fn pick(&self, ids: &BTreeSet<u64>, j: u64) -> Option<u64> {
+            let ids: Vec<u64> = ids
+                .iter()
+                .copied()
+                .filter(|id| !self.writes.contains_key(&self.key(*id)))
+                .collect();
+            if ids.is_empty() {
+                return None;
+            }
+            let round = self.batches.len() as u64;
+            let digest = Sha256::hash(&[
+                &self.seed.to_be_bytes(),
+                &round.to_be_bytes(),
+                &j.to_be_bytes(),
+            ]);
+            let mix = u64::from_be_bytes(digest[..8].try_into().unwrap());
+            Some(ids[(mix % ids.len() as u64) as usize])
+        }
+
+        /// The `j`th seeded pick from the live ids the open batch does not write yet.
+        fn live(&self, j: u64) -> u64 {
+            self.pick(&self.live, j).unwrap()
+        }
+
+        /// Close the open batch with `rule`.
+        fn close(&mut self, rule: Rule) {
+            let writes = mem::take(&mut self.writes).into_iter().collect();
+            self.batches.push((writes, rule));
+        }
+
+        /// Close the open batch with the rule its index selects.
+        fn push(&mut self) {
+            let round = self.batches.len() as u64;
+            let rule = match round % 8 {
+                2 => Rule::Hold,
+                4 => Rule::Compact {
+                    entries: 1 + (self.seed % 3) as usize,
+                    skips: round % 5,
+                },
+                6 => Rule::Seeded {
+                    entries: 2 + (self.seed % 4) as usize,
+                    skips: round % 7,
+                },
+                _ => Rule::Proportional,
+            };
+            self.close(rule);
+        }
+    }
+
+    /// Floor-sensitive keyed workload. Returns the writes of each batch and the policy it advances
+    /// its floor with.
+    ///
+    /// Early batches write a few of many planned live keys, so floor advances move updates of
+    /// unwritten keys and the root commits to how many each advance moves. The plan does not track
+    /// policy evictions, so a planned update may recreate an evicted key. Unless a step names its
+    /// policy, batches at indices 2, 4, and 6 modulo 8 use [`Hold`], [`Compact`] under small
+    /// limits, and [`Seeded`] respectively. The rest use [`Proportional`].
+    ///
+    /// 1. Create n keys and eight keys that share a translator bucket.
+    /// 2. Update three live keys in each of 12 batches.
+    /// 3. Delete two live keys, update one, and delete one missing key in each of 12 batches.
+    /// 4. Recreate two deleted keys and update one live key in each of 8 batches.
+    /// 5. Delete or recreate one colliding key, and update another if it is live, in each of 6
+    ///    batches.
+    /// 6. Apply a batch without writes under [`Proportional`], then another under [`Seeded`].
+    /// 7. Delete four live keys in each batch until four keys remain.
+    /// 8. Create 16 keys, then update two live keys in each of 4 batches.
+    fn floor_batches(seed: u64) -> Vec<Batch> {
+        let n = seed % 48 + 40;
+        let mut plan = Plan {
+            seed,
+            prefix: (seed % 256) as u8,
+            live: BTreeSet::new(),
+            dead: BTreeSet::new(),
+            writes: BTreeMap::new(),
+            batches: Vec::new(),
+        };
+
+        // 1. Create n keys and eight colliding keys.
+        for id in (0..n).chain(COLLIDING..COLLIDING + 8) {
+            plan.set(id);
+        }
+        plan.close(Rule::Proportional);
+
+        // 2. Update three live keys per batch.
+        for _ in 0..12 {
+            for j in 0..3 {
+                plan.set(plan.live(j));
+            }
+            plan.push();
+        }
+
+        // 3. Delete two live keys, update one, and delete a missing key per batch. Missing keys
+        //    alternate between fresh ids and fresh colliding ids.
+        for round in 0..12 {
+            for j in 0..2 {
+                plan.delete(plan.live(j));
+            }
+            plan.set(plan.live(2));
+            let missing = if round % 2 == 0 {
+                5_000
+            } else {
+                COLLIDING + 5_000
+            };
+            plan.delete(missing + round);
+            plan.push();
+        }
+
+        // 4. Recreate two deleted keys and update one live key per batch.
+        for _ in 0..8 {
+            for j in 0..2 {
+                if let Some(id) = plan.pick(&plan.dead, j) {
+                    plan.set(id);
+                }
+            }
+            plan.set(plan.live(2));
+            plan.push();
+        }
+
+        // 5. Toggle one colliding key and update another per batch.
+        for round in 0..6 {
+            let toggled = COLLIDING + (3 * round) % 8;
+            if plan.live.contains(&toggled) {
+                plan.delete(toggled);
+            } else {
+                plan.set(toggled);
+            }
+            let updated = COLLIDING + (3 * round + 1) % 8;
+            if plan.live.contains(&updated) {
+                plan.set(updated);
+            }
+            plan.push();
+        }
+
+        // 6. Apply two batches without writes.
+        plan.close(Rule::Proportional);
+        plan.close(Rule::Seeded {
+            entries: 4,
+            skips: 4,
+        });
+
+        // 7. Delete four live keys per batch until four remain.
+        while plan.live.len() > 4 {
+            for j in 0..4 {
+                if plan.live.len() > 4 {
+                    plan.delete(plan.live(j));
+                }
+            }
+            plan.push();
+        }
+
+        // 8. Create 16 keys, then update two live keys per batch.
+        for id in n..n + 16 {
+            plan.set(id);
+        }
+        plan.push();
+        for _ in 0..4 {
+            for j in 0..2 {
+                plan.set(plan.live(j));
+            }
+            plan.push();
+        }
+        plan.batches
+    }
+
+    /// Apply [`floor_batches`] for `seed` to `db` and return its root.
+    async fn floor_root<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
+        mut db: D,
+        seed: u64,
+    ) -> (D, Vec<u8>) {
+        for (writes, rule) in floor_batches(seed) {
+            let batch = writes
+                .into_iter()
+                .fold(db.new_batch(), |batch, (key, value)| {
+                    batch.write(key, value)
+                });
+            let merkleized = match rule {
+                Rule::Proportional => batch.merkleize(&db, None, &mut Proportional).await,
+                Rule::Hold => batch.merkleize(&db, None, &mut Hold).await,
+                Rule::Compact { entries, skips } => {
+                    let mut policy = Compact { entries, skips };
+                    batch.merkleize(&db, None, &mut policy).await
+                }
+                Rule::Seeded { entries, skips } => {
+                    let mut policy = Seeded {
+                        seed,
+                        entries,
+                        skips,
+                    };
+                    batch.merkleize(&db, None, &mut policy).await
+                }
+            }
+            .unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+        }
+        let root = db.root().to_vec();
+        (db, root)
+    }
+
+    /// [`floor_batches`] on a store with each batch's policy.
+    struct StoreFloorStorage;
+
+    impl StorageWorkload for StoreFloorStorage {
+        type Error = crate::qmdb::Error<mmr::Family>;
+
+        async fn run(context: Ctx, seed: u64) -> Result<(), Self::Error> {
+            let cfg = store_config("store", &context);
+            let mut db = Store::init(context.child("db"), cfg, None).await?;
+            for (writes, rule) in floor_batches(seed) {
+                let batch = writes.into_iter().collect();
+                (db, _) = match rule {
+                    Rule::Proportional => db.apply_batch(batch, &mut Proportional).await,
+                    Rule::Hold => db.apply_batch(batch, &mut Hold).await,
+                    Rule::Compact { entries, skips } => {
+                        let mut policy = Compact { entries, skips };
+                        db.apply_batch(batch, &mut policy).await
+                    }
+                    Rule::Seeded { entries, skips } => {
+                        let mut policy = Seeded {
+                            seed,
+                            entries,
+                            skips,
+                        };
+                        db.apply_batch(batch, &mut policy).await
+                    }
+                }?;
+            }
+            db.sync().await?;
+            Ok(())
+        }
     }
 
     /// 3-batch immutable workload. Each batch inserts a disjoint set of keys (immutable
@@ -577,6 +932,16 @@ mod tests {
         ($name:ident, $db:ty, $cfg_fn:expr) => {
             db_conformance!($name, $db, $cfg_fn, |db, seed| {
                 let (d, root) = keyed_root(db, seed).await;
+                db = d;
+                root
+            });
+        };
+    }
+
+    macro_rules! floor_conformance {
+        ($name:ident, $db:ty, $cfg_fn:expr) => {
+            db_conformance!($name, $db, $cfg_fn, |db, seed| {
+                let (d, root) = floor_root(db, seed).await;
                 db = d;
                 root
             });
@@ -696,6 +1061,87 @@ mod tests {
     );
     keyed_conformance!(
         CurrentMmbOrderedVariableConf,
+        CurrentMmbOrderedVariable,
+        current_variable_config
+    );
+
+    floor_conformance!(
+        AnyMmrUnorderedFixedFloorConf,
+        AnyMmrUnorderedFixed,
+        any_fixed_config
+    );
+    floor_conformance!(
+        AnyMmrUnorderedVariableFloorConf,
+        AnyMmrUnorderedVariable,
+        any_variable_config
+    );
+    floor_conformance!(
+        AnyMmrOrderedFixedFloorConf,
+        AnyMmrOrderedFixed,
+        any_fixed_config
+    );
+    floor_conformance!(
+        AnyMmrOrderedVariableFloorConf,
+        AnyMmrOrderedVariable,
+        any_variable_config
+    );
+    floor_conformance!(
+        AnyMmbUnorderedFixedFloorConf,
+        AnyMmbUnorderedFixed,
+        any_fixed_config
+    );
+    floor_conformance!(
+        AnyMmbUnorderedVariableFloorConf,
+        AnyMmbUnorderedVariable,
+        any_variable_config
+    );
+    floor_conformance!(
+        AnyMmbOrderedFixedFloorConf,
+        AnyMmbOrderedFixed,
+        any_fixed_config
+    );
+    floor_conformance!(
+        AnyMmbOrderedVariableFloorConf,
+        AnyMmbOrderedVariable,
+        any_variable_config
+    );
+    floor_conformance!(
+        CurrentMmrUnorderedFixedFloorConf,
+        CurrentMmrUnorderedFixed,
+        current_fixed_config
+    );
+    floor_conformance!(
+        CurrentMmrUnorderedVariableFloorConf,
+        CurrentMmrUnorderedVariable,
+        current_variable_config
+    );
+    floor_conformance!(
+        CurrentMmrOrderedFixedFloorConf,
+        CurrentMmrOrderedFixed,
+        current_fixed_config
+    );
+    floor_conformance!(
+        CurrentMmrOrderedVariableFloorConf,
+        CurrentMmrOrderedVariable,
+        current_variable_config
+    );
+    floor_conformance!(
+        CurrentMmbUnorderedFixedFloorConf,
+        CurrentMmbUnorderedFixed,
+        current_fixed_config
+    );
+    floor_conformance!(
+        CurrentMmbUnorderedVariableFloorConf,
+        CurrentMmbUnorderedVariable,
+        current_variable_config
+    );
+    floor_conformance!(
+        CurrentMmbOrderedFixedFloorConf,
+        CurrentMmbOrderedFixed,
+        current_fixed_config
+    );
+    floor_conformance!(
+        CurrentMmbOrderedVariableFloorConf,
         CurrentMmbOrderedVariable,
         current_variable_config
     );
@@ -1014,6 +1460,22 @@ mod tests {
         CurrentMmbUnorderedVariableConf => 200,
         CurrentMmbOrderedFixedConf => 200,
         CurrentMmbOrderedVariableConf => 200,
+        AnyMmrUnorderedFixedFloorConf => 200,
+        AnyMmrUnorderedVariableFloorConf => 200,
+        AnyMmrOrderedFixedFloorConf => 200,
+        AnyMmrOrderedVariableFloorConf => 200,
+        AnyMmbUnorderedFixedFloorConf => 200,
+        AnyMmbUnorderedVariableFloorConf => 200,
+        AnyMmbOrderedFixedFloorConf => 200,
+        AnyMmbOrderedVariableFloorConf => 200,
+        CurrentMmrUnorderedFixedFloorConf => 200,
+        CurrentMmrUnorderedVariableFloorConf => 200,
+        CurrentMmrOrderedFixedFloorConf => 200,
+        CurrentMmrOrderedVariableFloorConf => 200,
+        CurrentMmbUnorderedFixedFloorConf => 200,
+        CurrentMmbUnorderedVariableFloorConf => 200,
+        CurrentMmbOrderedFixedFloorConf => 200,
+        CurrentMmbOrderedVariableFloorConf => 200,
         ImmutableMmrFixedConf => 200,
         ImmutableMmbFixedConf => 200,
         ImmutableMmrVariableConf => 200,
@@ -1046,6 +1508,8 @@ mod tests {
         StorageConformance<CurrentMmbUnorderedVariableStorage> => 64,
         StorageConformance<CurrentMmbOrderedFixedStorage> => 64,
         StorageConformance<CurrentMmbOrderedVariableStorage> => 64,
+        StorageConformance<StoreStorage> => 64,
+        StorageConformance<StoreFloorStorage> => 200,
         StorageConformance<ImmutableMmrFixedStorage> => 64,
         StorageConformance<ImmutableMmbFixedStorage> => 64,
         StorageConformance<ImmutableMmrVariableStorage> => 64,
