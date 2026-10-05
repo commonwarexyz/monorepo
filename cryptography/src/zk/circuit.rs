@@ -523,7 +523,7 @@ impl<'ctx, F: Additive> AddAssign<&Self> for Var<'ctx, F> {
     }
 }
 
-impl<'ctx, F: Additive + Ring> Neg for Var<'ctx, F> {
+impl<'ctx, F: Ring> Neg for Var<'ctx, F> {
     type Output = Self;
     fn neg(self) -> Self {
         match self.inner {
@@ -550,14 +550,14 @@ impl<'ctx, F: Additive + Ring> Neg for Var<'ctx, F> {
     }
 }
 
-impl<'ctx, F: Additive + Ring> Sub<&Self> for Var<'ctx, F> {
+impl<'ctx, F: Ring> Sub<&Self> for Var<'ctx, F> {
     type Output = Self;
     fn sub(self, rhs: &Self) -> Self {
         self + &(-rhs.clone())
     }
 }
 
-impl<'ctx, F: Additive + Ring> SubAssign<&Self> for Var<'ctx, F> {
+impl<'ctx, F: Ring> SubAssign<&Self> for Var<'ctx, F> {
     fn sub_assign(&mut self, rhs: &Self) {
         *self = self.clone() - rhs;
     }
@@ -613,7 +613,7 @@ impl<'ctx, F: Field> DivAssign<&Self> for Var<'ctx, F> {
     }
 }
 
-impl<'ctx, F: Additive + Ring> Additive for Var<'ctx, F> {
+impl<'ctx, F: Ring> Additive for Var<'ctx, F> {
     fn zero() -> Self {
         Self {
             inner: VarInner::Native(F::zero()),
@@ -736,9 +736,7 @@ impl<'ctx, F: Ring> BoolVar<'ctx, F> {
     pub fn select(&self, on_true: &Var<'ctx, F>, on_false: &Var<'ctx, F>) -> Var<'ctx, F> {
         on_false.clone() + &(self.var.clone() * &(on_true.clone() - on_false))
     }
-}
 
-impl<'ctx, F: Ring + PartialEq> BoolVar<'ctx, F> {
     /// Allocate a fresh boolean witness, constrained to be `0` or `1`.
     ///
     /// In prover mode, `init` receives the values assigned so far and must
@@ -897,7 +895,7 @@ impl<'ctx, F: Ring> Selector<'ctx, F> {
 /// # Panics
 ///
 /// Panics if any returned var is native (not backed by the circuit).
-pub fn build<F: Ring + PartialEq>(
+pub fn build<F: Ring>(
     f: impl for<'ctx> FnOnce(Context<'ctx, F>) -> Vec<Var<'ctx, F>>,
 ) -> (Circuit<F>, Vec<CircuitIdx>) {
     let inner = ContextInner {
@@ -926,7 +924,7 @@ pub fn build<F: Ring + PartialEq>(
 /// # Panics
 ///
 /// Panics if any returned var is native (not backed by the circuit).
-pub fn build_with_values<F: Ring + PartialEq>(
+pub fn build_with_values<F: Ring>(
     f: impl for<'ctx> FnOnce(Context<'ctx, F>) -> Vec<Var<'ctx, F>>,
 ) -> (ValuedCircuit<F>, Vec<CircuitIdx>) {
     let inner = ContextInner {

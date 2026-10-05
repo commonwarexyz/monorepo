@@ -226,6 +226,24 @@ impl Policy {
             .is_some_and(|entry| entry.overhead_ns.get().is_some() || entry.job_ns.get().is_some())
     }
 
+    /// Records the wall time of a run on `execution` for this call site.
+    #[cfg(test)]
+    pub(super) fn record_run(
+        &self,
+        caller: &'static Location<'static>,
+        len: usize,
+        work: usize,
+        parallelism: usize,
+        execution: RunExecution,
+        elapsed: Duration,
+    ) {
+        let key = Key::new(caller, len, work, parallelism);
+        self.run_entries
+            .entry(key)
+            .or_default()
+            .record(execution, elapsed);
+    }
+
     #[cfg(test)]
     pub(super) fn get_entry(
         &self,

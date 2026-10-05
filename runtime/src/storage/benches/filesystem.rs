@@ -58,7 +58,7 @@ pub fn cleanup_root(root: &Path) -> Result<()> {
     }
 }
 
-/// Force physical allocation for a blob that already has the desired size.
+/// Durably allocate space for a blob that already has the desired size.
 ///
 /// Overwrite workloads call this so they measure the steady-state write path
 /// rather than first-write allocation behavior.
@@ -82,7 +82,7 @@ fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()>
     if result != 0 {
         return Err(io::Error::from_raw_os_error(result));
     }
-    Ok(())
+    file.sync_all()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -133,7 +133,6 @@ pub async fn prepare_blob<S: Storage>(
         drop(blob);
         preallocate_blob(root, partition, name)?;
         let (blob, _) = storage.open(partition, name).await?;
-        blob.sync().await?;
         return Ok(blob);
     }
     Ok(blob)
@@ -177,15 +176,14 @@ pub fn random_write_payload(rng: &mut impl Rng, io_size: usize, shape: WriteShap
             const CHUNKS: usize = 4;
             let base = io_size / CHUNKS;
             let remainder = io_size % CHUNKS;
-            let chunks = (0..CHUNKS)
+            (0..CHUNKS)
                 .map(|idx| {
                     let len = base + usize::from(idx < remainder);
                     let mut chunk = vec![0u8; len];
                     rng.fill_bytes(&mut chunk);
                     IoBuf::from(chunk)
                 })
-                .collect::<Vec<_>>();
-            IoBufs::from(chunks)
+                .collect()
         }
     }
 }

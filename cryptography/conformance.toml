@@ -130,6 +130,10 @@ hash = "42867052b1619b912d08f0a6bf5f964f587897a0eed8612732fd27813f6c03bd"
 n_cases = 65536
 hash = "41ef7a306dd2032d7d1b73fe2799cff6f2e8fb1edcd02a0b9798f18f900a19fa"
 
+["commonware_cryptography::chacha20_poly1305::tests::conformance::Seal"]
+n_cases = 4096
+hash = "71757a47b2a770101ab8c2ad2c5537f70fc033a38543e5598baf7c4219f1d3ae"
+
 ["commonware_cryptography::crc32::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536
 hash = "d0101a0688d45c8f7428b3861ed6e7e77c2ed25033cb7d6b47b3fa58148a3f18"
@@ -150,25 +154,29 @@ hash = "9010ca9b2849258179377f855fb77967ff003c8f349258d868bab76b0bfa1c5a"
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
-["commonware_cryptography::handshake::conformance::Handshake"]
-n_cases = 4096
-hash = "057cc42a74390f0b43250b8fba2c42abad651bee6beacb510f2f2a950185a694"
-
-["commonware_cryptography::handshake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
+["commonware_cryptography::handshake::sake::conformance::CodecConformance<Ack>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
-["commonware_cryptography::handshake::test::conformance::CodecConformance<Ack>"]
-n_cases = 65536
-hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
-
-["commonware_cryptography::handshake::test::conformance::CodecConformance<Syn<crate::ed25519::Signature>>"]
+["commonware_cryptography::handshake::sake::conformance::CodecConformance<Syn<crate::ed25519::Signature>>"]
 n_cases = 65536
 hash = "6776e093b02edc1c846c2a1f2f7525709a7d51e9743f81ac388cdee53a601aaf"
 
-["commonware_cryptography::handshake::test::conformance::CodecConformance<SynAck<crate::ed25519::Signature>>"]
+["commonware_cryptography::handshake::sake::conformance::CodecConformance<SynAck<crate::ed25519::Signature>>"]
 n_cases = 65536
 hash = "b98d0717af705e8b60af88a8337154eaced6659c3cc9f604aa4f55585a28b77f"
+
+["commonware_cryptography::handshake::sake::conformance::SakeV0"]
+n_cases = 4096
+hash = "7334b4f046d39deb32066592cd2428730efa93fba0d93cf4a7c0bca125d2176e"
+
+["commonware_cryptography::handshake::sake::conformance::SakeV1"]
+n_cases = 4096
+hash = "5050ef7d884501c20b8a3d871a5f929b57ae0e35db922debb178b476d38255c4"
+
+["commonware_cryptography::handshake::sake::exchange::conformance::CodecConformance<EphemeralPublicKey>"]
+n_cases = 65536
+hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
 
 ["commonware_cryptography::keccak256::tests::conformance::CodecConformance<Digest>"]
 n_cases = 65536

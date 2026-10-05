@@ -65,10 +65,6 @@ impl<V: Variant> Acquisitions<V> {
         }
     }
 
-    pub(super) fn contains(&self, commitment: &V::Commitment) -> bool {
-        self.entries.contains_key(commitment)
-    }
-
     pub(super) fn lease(
         &mut self,
         commitments: Arc<[V::Commitment]>,
@@ -143,15 +139,19 @@ impl<V: Variant> Acquisitions<V> {
     }
 
     /// Retains a prefetched body only in a slot reserved by an active request.
-    pub(super) fn complete(&mut self, block: V::Block) {
+    ///
+    /// Returns whether the demand was active, which means its fetch is still outstanding.
+    pub(super) fn complete(&mut self, block: V::Block) -> bool {
         let commitment = V::commitment(&block);
         if let Some(demand) = self.entries.get_mut(&commitment)
             && !matches!(demand.phase, Phase::Queued(_))
         {
+            let active = matches!(demand.phase, Phase::Active);
             demand.phase = Phase::Ready(block);
-            return;
+            return active;
         }
         self.satisfied(commitment);
+        false
     }
 
     /// Removes closed leases and returns active fetches whose final owner disappeared.
@@ -250,6 +250,23 @@ mod tests {
     }
 
     #[test]
+    fn complete_reports_only_active_demand() {
+        let mut acquisitions = TestAcquisitions::new(2);
+        let blocks: Vec<_> = (1..=3).map(block).collect();
+        let commitments: Vec<_> = blocks.iter().map(Digestible::digest).collect();
+        let _lease = lease(&mut acquisitions, &commitments);
+        assert_eq!(acquisitions.next(), Some(commitments[0]));
+        assert_eq!(acquisitions.next(), Some(commitments[1]));
+        assert!(!acquisitions.complete(blocks[2].clone()));
+        assert!(!acquisitions.entries.contains_key(&commitments[2]));
+        assert!(acquisitions.complete(blocks[0].clone()));
+        assert!(!acquisitions.complete(blocks[0].clone()));
+        assert!(acquisitions.get_ready(&commitments[0]).is_some());
+        assert!(!acquisitions.complete(block(4)));
+        assert!(acquisitions.get_ready(&commitments[1]).is_none());
+    }
+
+    #[test]
     fn overlapping_leases_share_and_release_ready_bodies() {
         let mut acquisitions = TestAcquisitions::new(1);
         let body = block(1);
@@ -343,7 +360,7 @@ mod tests {
         let (sender, receiver) = oneshot::channel();
         acquisitions.lease(commitments.clone(), 1..3, sender);
         assert_eq!(Arc::strong_count(&commitments), 2);
-        assert!(!acquisitions.contains(&commitments[0]));
+        assert!(!acquisitions.entries.contains_key(&commitments[0]));
         assert_eq!(acquisitions.next(), Some(commitments[1]));
         assert_eq!(acquisitions.next(), Some(commitments[2]));
         drop(receiver);

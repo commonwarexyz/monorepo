@@ -17,6 +17,11 @@ where
     B: ReshareBlock,
     A: Acknowledgement,
 {
+    /// A block finalized by marshal.
+    ///
+    /// The orchestrator acknowledges the final block of the active epoch only after
+    /// entering the next epoch, and every earlier block immediately. It panics on
+    /// a later block, which means marshal skipped the final block.
     Finalized { block: Arc<B>, acknowledgement: A },
 }
 
@@ -28,12 +33,13 @@ where
     type Overflow = VecDeque<Self>;
 
     fn handle(overflow: &mut VecDeque<Self>, message: Self) {
-        // Ensure delivery
+        // A dropped report would leave its block unacknowledged.
         overflow.push_back(message);
     }
 }
 
-/// Inbound communication channel for epoch transitions.
+/// Marshal reporter that forwards finalized blocks to the orchestrator (other
+/// updates are ignored).
 #[derive(Debug, Clone)]
 pub struct Mailbox<B, A = Exact>
 where
@@ -48,7 +54,7 @@ where
     B: ReshareBlock,
     A: Acknowledgement,
 {
-    /// Create a new [Mailbox].
+    /// Creates a mailbox that sends to `sender`.
     pub const fn new(sender: Sender<Message<B, A>>) -> Self {
         Self { sender }
     }

@@ -79,7 +79,7 @@ where
     B: CertifiableBlock + Committable<Commitment = Commitment<CB, C, H>>,
     CB: Digestible<Digest = B::Digest>,
     C: Scheme,
-    B::Context: Epochable + EncodeSize + Write + PartialEq,
+    B::Context: Epochable + PartialEq,
 {
     if block.commitment() != commitment {
         return Err(BlockError::Commitment);
@@ -116,7 +116,6 @@ where
     H: Hasher,
     B: CertifiableBlock,
     C: Scheme,
-    B::Context: EncodeSize + Write,
 {
     if block.digest() != commitment.block() {
         return Err(ReconstructionError::BlockDigest);

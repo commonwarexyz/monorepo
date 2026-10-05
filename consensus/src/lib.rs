@@ -65,7 +65,7 @@ stability_scope!(BETA {
     /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
     /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
     /// the same block.
-    pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
+    pub trait Block: Heightable + Codec + Digestible {
         /// Get the parent block's digest.
         fn parent(&self) -> Self::Digest;
     }

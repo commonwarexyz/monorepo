@@ -73,7 +73,7 @@ pub(super) async fn precheck_epoch_and_reproposal<ES, S, B>(
 where
     ES: Epocher,
     S: Scheme,
-    B: Block + Clone,
+    B: Block,
 {
     // Block heights must map to the expected epoch.
     if !is_block_in_expected_epoch(epocher, block.height(), context.epoch()) {
@@ -194,7 +194,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     S: Scheme,
     A: Application<E, Block = B, SigningScheme = S, Context = Context<B::Digest, S::PublicKey>>,
-    B: Block + Clone,
+    B: Block,
 {
     let (parent_view, parent_commitment) = context.parent;
     let blocks = marshal.blocks(parent.height(), ancestry);
