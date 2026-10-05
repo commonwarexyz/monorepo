@@ -3,8 +3,6 @@
 //! This is useful for hashing data, committing to it, and extracting secure
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
-#[cfg(any(feature = "bls12381", test))]
-use crate::{BatchEntry, PublicKey};
 use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use commonware_codec::{
@@ -485,22 +483,6 @@ impl Summary {
         // within the transcript summary already via `Transcript::new`.
         v.verify(b"", self.as_ref(), sig)
     }
-
-    /// Create a batch entry for a signature produced by [Summary::sign].
-    #[cfg(any(feature = "bls12381", test))]
-    pub(crate) fn batch_entry<'a, P: PublicKey>(
-        &'a self,
-        public_key: &'a P,
-        signature: &'a P::Signature,
-    ) -> BatchEntry<'a, P> {
-        // The namespace may already be included by `Transcript::new`.
-        BatchEntry {
-            namespace: b"",
-            message: self.as_ref(),
-            public_key,
-            signature,
-        }
-    }
 }
 
 /// Represents a summary of a transcript.
@@ -598,7 +580,7 @@ impl arbitrary::Arbitrary<'_> for Summary {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{BatchVerifier, ed25519};
+    use crate::{BatchEntry, BatchVerifier, ed25519};
     use bytes::Buf as _;
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_parallel::Sequential;
@@ -840,7 +822,8 @@ mod test {
     }
 
     #[test]
-    fn test_summary_batch_entry_matches_transcript() {
+    fn test_summary_batch_verify_matches_transcript() {
+        // Sign a transcript that commits to both a namespace and message data.
         let sk = ed25519::PrivateKey::from_seed(7);
         let pk = sk.public_key();
         let mut transcript = v0(b"test");
@@ -848,10 +831,23 @@ mod test {
         let summary = transcript.summarize();
         let sig = transcript.sign(&sk);
 
-        let summary_batch = [summary.batch_entry(&pk, &sig)];
+        // Exercise both saved and freshly computed summaries. The summary already
+        // commits to the namespace, so each batch uses an empty outer namespace.
+        let summary_batch = [BatchEntry {
+            namespace: b"",
+            message: summary.as_ref(),
+            public_key: &pk,
+            signature: &sig,
+        }];
         let transcript_summary = transcript.summarize();
-        let transcript_batch = [transcript_summary.batch_entry(&pk, &sig)];
+        let transcript_batch = [BatchEntry {
+            namespace: b"",
+            message: transcript_summary.as_ref(),
+            public_key: &pk,
+            signature: &sig,
+        }];
 
+        // Both batches must verify the same transcript signature.
         assert!(ed25519::Batch::verify(
             &mut test_rng(),
             &summary_batch,
@@ -990,8 +986,14 @@ mod test {
             log.extend(summary.verify(&public_key, &summary_sig).encode());
             log.extend(transcript.verify(&public_key, &transcript_sig).encode());
 
-            let summary_batch = [summary.batch_entry(&public_key, &summary_sig)];
-            // Entries are admitted unconditionally; verification validates them.
+            // Record summary batch verification with the fixed `true` prefix
+            // required by the conformance log format.
+            let summary_batch = [BatchEntry {
+                namespace: b"",
+                message: summary.as_ref(),
+                public_key: &public_key,
+                signature: &summary_sig,
+            }];
             log.extend(true.encode());
             log.extend(
                 ed25519::Batch::verify(
@@ -1003,8 +1005,14 @@ mod test {
                 .encode(),
             );
 
+            // Record transcript batch verification with its fixed `true` prefix.
             let transcript_summary = transcript.summarize();
-            let transcript_batch = [transcript_summary.batch_entry(&public_key, &transcript_sig)];
+            let transcript_batch = [BatchEntry {
+                namespace: b"",
+                message: transcript_summary.as_ref(),
+                public_key: &public_key,
+                signature: &transcript_sig,
+            }];
             log.extend(true.encode());
             log.extend(
                 ed25519::Batch::verify(

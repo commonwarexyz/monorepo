@@ -346,7 +346,7 @@
 //! For a complete example with resharing, see [commonware-dkg](https://docs.rs/commonware-dkg).
 
 use crate::{
-    BatchVerifier, PublicKey, Secret, Signer,
+    BatchEntry, BatchVerifier, PublicKey, Secret, Signer,
     bls12381::primitives::{
         group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
@@ -872,7 +872,12 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
-                    ack_batch.push(ack_summary.batch_entry(player, &ack.sig));
+                    ack_batch.push(BatchEntry {
+                        namespace: b"",
+                        message: ack_summary.as_ref(),
+                        public_key: player,
+                        signature: &ack.sig,
+                    });
                 }
                 AckOrReveal::Reveal(priv_msg) => {
                     reveal_count += 1;
