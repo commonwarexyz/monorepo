@@ -25,7 +25,9 @@ use commonware_math::algebra::Random;
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range};
+use commonware_utils::{
+    NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range, probability,
+};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
@@ -145,6 +147,15 @@ where
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
 
+        // The engine already synced this state, so building the database adds no sync.
+        let metrics = commonware_runtime::Metrics::encode(&context);
+        assert!(
+            metrics
+                .lines()
+                .any(|line| line == "client_sync_calls_total 0"),
+            "{metrics}"
+        );
+
         let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
         assert_eq!(bounds.start, target_oldest_retained_loc);
@@ -169,6 +180,72 @@ where
 
         H::destroy(got_db).await;
         H::destroy(target_db).await;
+    });
+}
+
+/// Test that a synced database survives a crash right after sync, before any later sync. Every
+/// write not yet synced is lost at the crash, and the reopened database still has the target root.
+/// With `prune`, the target's lower bound is above zero, so its pinned nodes must be durable too.
+pub(crate) fn test_sync_survives_crash_after_sync<H: SyncTestHarness>(prune: bool)
+where
+    OpOf<H>: Encode + Clone,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+{
+    let (expected, checkpoint) =
+        deterministic::Runner::default().start_and_recover(|context| async move {
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                write_rate: Some(deterministic::WriteConfig {
+                    failure_rate: probability!(0.0),
+                    retention_rate: probability!(0.0),
+                    mode: deterministic::PartialWriteMode::Prefix,
+                }),
+                resize_rate: Some(deterministic::ResizeConfig {
+                    failure_rate: probability!(0.0),
+                    partial_rate: probability!(0.0),
+                }),
+                ..Default::default()
+            };
+            let target_db = H::init_db(context.child("target")).await;
+            let mut target_db =
+                H::apply_ops(target_db, H::create_ops(50), Some(H::sample_metadata())).await;
+            if prune {
+                target_db = H::prune(target_db, Location::new(10)).await;
+            }
+            let bounds = H::bounds(&target_db);
+            assert_eq!(bounds.start > Location::new(0), prune);
+            let target_root = H::db_root(&target_db);
+            let config = Config {
+                db_config: H::config("sync_crash_client", &context),
+                fetch_batch_size: NZU64!(10),
+                target: Target {
+                    root: target_root,
+                    range: non_empty_range!(bounds.start, bounds.end),
+                },
+                context: context.child("client"),
+                source: Arc::new(target_db),
+                apply_batch_size: NZU64!(1024),
+                max_outstanding_requests: 1,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
+            };
+            let synced: DbOf<H> = sync::sync(config).await.unwrap();
+            assert_eq!(H::db_root(&synced), target_root);
+            (target_root, bounds)
+        });
+
+    let (target_root, bounds) = expected;
+    deterministic::Runner::from(checkpoint).start(|context| async move {
+        *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+        let reopened = H::init_db_with_config(
+            context.child("reopen"),
+            H::config("sync_crash_client", &context),
+        )
+        .await;
+        assert_eq!(H::bounds(&reopened), bounds);
+        assert_eq!(H::db_root(&reopened), target_root);
+        H::destroy(reopened).await;
     });
 }
 
@@ -206,6 +283,15 @@ where
             max_retained_roots: 8,
         };
         let got_db: DbOf<H> = sync::sync(config).await.unwrap();
+
+        // The engine already synced this state, so building the database adds no sync.
+        let metrics = commonware_runtime::Metrics::encode(&context);
+        assert!(
+            metrics
+                .lines()
+                .any(|line| line == "client_sync_calls_total 0"),
+            "{metrics}"
+        );
 
         let bounds = H::bounds(&got_db);
         assert_eq!(bounds.end, target_op_count);
@@ -1079,6 +1165,16 @@ macro_rules! sync_tests_for_harness {
                     target_db_ops,
                     NonZeroU64::new(fetch_batch_size).unwrap(),
                 );
+            }
+
+            #[test_traced("WARN")]
+            fn test_sync_survives_crash_after_sync() {
+                super::test_sync_survives_crash_after_sync::<$harness>(false);
+            }
+
+            #[test_traced("WARN")]
+            fn test_sync_survives_crash_after_sync_pruned() {
+                super::test_sync_survives_crash_after_sync::<$harness>(true);
             }
 
             #[test_traced("WARN")]

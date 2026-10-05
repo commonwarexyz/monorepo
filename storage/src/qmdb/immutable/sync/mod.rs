@@ -119,7 +119,7 @@ where
         };
         db.update_metrics();
 
-        db.sync().await
+        Ok(db)
     }
 
     async fn persist_sync_result(self) -> Result<Self, Error<F>> {
