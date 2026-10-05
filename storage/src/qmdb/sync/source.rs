@@ -24,7 +24,8 @@ use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
 
 /// A request for operations from a source's log.
 pub enum Request<F: Family> {
-    /// Fetch the operations in `[start, start + max_ops)`.
+    /// Fetch the operations in `[start, min(start + max_ops, size))`. A response with any other
+    /// number of operations is invalid.
     Operations {
         /// Prove against the root the database had at this size.
         size: Location<F>,

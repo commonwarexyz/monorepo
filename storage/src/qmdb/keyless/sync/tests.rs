@@ -260,6 +260,45 @@ where
             Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
         ));
 
+        // A batch shorter than the request is invalid, even with a valid proof for its range.
+        let short = target_db
+            .serve(sync::Request::Operations {
+                size,
+                start,
+                max_ops: NonZeroU64::new(max_ops.get() - 1).unwrap(),
+            })
+            .await
+            .unwrap()
+            .0;
+        let source = SequenceSource::new(vec![short.clone()]);
+        let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
+            context.child("short"),
+            "short",
+            source,
+            max_ops,
+            &target,
+        ))
+        .await;
+        assert!(matches!(
+            result,
+            Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
+        ));
+
+        // A full candidate after the short one completes the same request.
+        let source = SequenceSource::new(vec![short, good.clone()]);
+        let synced: DbOf<H> = sync::sync(config_for::<H, _>(
+            context.child("short_retry"),
+            "short_retry",
+            source.clone(),
+            max_ops,
+            &target,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(source.take_verdicts().await, vec![false, true]);
+        assert_eq!(H::db_root(&synced), target_root);
+        H::destroy(synced).await;
+
         // A boundary-shaped answer to an operations request is invalid even when its proof
         // is plausible.
         let boundary = sync::Response::Boundary {
