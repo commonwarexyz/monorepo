@@ -510,6 +510,9 @@ where
     }
 
     /// Store a batch of fetched operations. If the input list is empty, this is a no-op.
+    ///
+    /// Each start has at most one outstanding request, and gaps skip stored batches, so a batch
+    /// never replaces another.
     pub(crate) fn store_operations(
         &mut self,
         start_loc: Location<DB::Family>,
@@ -628,9 +631,12 @@ where
             Response::Boundary {
                 op, pinned_nodes, ..
             } => {
-                // A tracked boundary request is at the current lower bound.
+                // A tracked boundary request is at the current lower bound. A fetched batch
+                // there already holds its operation.
                 self.pinned_nodes = Some(pinned_nodes);
-                self.store_operations(start_loc, vec![op]);
+                self.fetched_operations
+                    .entry(start_loc)
+                    .or_insert_with(|| vec![op]);
             }
         }
 
@@ -971,6 +977,64 @@ mod tests {
                 operations: vec![99],
             })),
         }
+    }
+
+    /// A boundary response keeps a fetched batch that starts at the lower bound.
+    #[test]
+    fn boundary_response_keeps_fetched_batch_at_lower_bound() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut engine = Engine::new(test_engine_config(
+                context,
+                5,
+                Arc::new(AtomicUsize::new(0)),
+            ))
+            .await
+            .unwrap();
+            engine
+                .fetched_operations
+                .insert(Location::new(6), vec![1, 2, 3]);
+
+            // Move the lower bound to the start of the fetched batch.
+            let next = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(12)),
+            };
+            let mut engine = engine.reset_for_target_update(next).await.unwrap();
+            assert!(engine.pinned_nodes.is_none());
+
+            // The boundary response sets pinned nodes without replacing the batch.
+            let id = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(12),
+                    start: Location::new(6),
+                },
+            );
+            let pinned = vec![sha256::Digest::from([7; 32])];
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Boundary {
+                        proof: Proof {
+                            leaves: Location::new(12),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        op: 1,
+                        pinned_nodes: pinned.clone(),
+                    })),
+                })
+                .unwrap();
+            assert_eq!(engine.pinned_nodes, Some(pinned));
+            assert_eq!(
+                engine.fetched_operations.get(&Location::new(6)),
+                Some(&vec![1, 2, 3])
+            );
+
+            // Applying moves the journal past the whole batch.
+            let engine = engine.apply_operations().await.unwrap();
+            assert_eq!(engine.journal.size(), 9);
+        });
     }
 
     /// Moving the lower bound past an operation request cancels it with the old boundary and
