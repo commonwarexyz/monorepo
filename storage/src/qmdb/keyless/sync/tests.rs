@@ -2006,6 +2006,70 @@ mod compact_variable_mmr {
         });
     }
 
+    /// A compact source serves a target below its tip from the retained witness, until pruning
+    /// drops that witness.
+    #[test_traced("WARN")]
+    fn test_compact_source_serves_retained_target() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-keyless-retained-{}", context.next_u64());
+            let mut source_cfg = client_config(&format!("{suffix}-source"), &context);
+            // One witness per section, so pruning past the first target drops its witness.
+            source_cfg.witness.items_per_section = NZU64!(1);
+            let mut source = ClientDb::init(context.child("source"), source_cfg, None)
+                .await
+                .unwrap();
+
+            // Apply two commits, recording the target after each.
+            let mut targets = Vec::new();
+            for i in 1u8..=2 {
+                let floor = source.inactivity_floor_loc();
+                let batch = source
+                    .new_batch()
+                    .append(vec![i])
+                    .merkleize(&source, Some(vec![i]), floor)
+                    .await
+                    .unwrap();
+                (source, _) = source.apply_batch(batch).await.unwrap();
+                source = source.sync().await.unwrap();
+                targets.push(source.target());
+            }
+            let source = Arc::new(source);
+
+            // The first target is below the tip, and syncing to it succeeds.
+            let synced: ClientDb = sync::sync(compact_engine_config(
+                context.child("first"),
+                source.clone(),
+                targets[0].clone(),
+                client_config(&format!("{suffix}-first"), &context),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(synced.root(), targets[0].root);
+            assert_eq!(synced.get_metadata(), Some(vec![1]));
+            synced.destroy().await.unwrap();
+
+            // Pruning past the first target drops its witness.
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            let source = Arc::new(source.prune(targets[1].size).await.unwrap());
+            let result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+                context.child("pruned"),
+                source.clone(),
+                targets[0].clone(),
+                client_config(&format!("{suffix}-pruned"), &context),
+            ))
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Source(qmdb::Error::Journal(
+                    crate::journal::Error::ItemPruned(_)
+                )))
+            ));
+
+            let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
+            source.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_compact_source_reopen_bounded_initialization_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -2140,21 +2204,18 @@ mod compact_variable_mmr {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright because the witness serves
-            // only its latest commit.
-            let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+            // A target below the retained tip is served from its retained witness.
+            let stale: ClientDb = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),
                 target1.clone(),
                 client_config(&format!("{suffix}-stale"), &context),
             ))
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Source(qmdb::Error::Journal(
-                    crate::journal::Error::ItemPruned(_)
-                )))
-            ));
+            .await
+            .unwrap();
+            assert_eq!(stale.root(), target1.root);
+            assert_eq!(stale.get_metadata(), Some(metadata1.clone()));
+            stale.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
@@ -2998,21 +3059,18 @@ mod compact_variable_mmb {
                 Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
             ));
 
-            // A target below the retained tip is refused outright because the witness serves
-            // only its latest commit.
-            let stale_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
+            // A target below the retained tip is served from its retained witness.
+            let stale: ClientDb = sync::sync(compact_engine_config(
                 context.child("stale_client"),
                 source.clone(),
                 target1.clone(),
                 client_config(&format!("{suffix}-stale"), &context),
             ))
-            .await;
-            assert!(matches!(
-                stale_result,
-                Err(sync::Error::Source(qmdb::Error::Journal(
-                    crate::journal::Error::ItemPruned(_)
-                )))
-            ));
+            .await
+            .unwrap();
+            assert_eq!(stale.root(), target1.root);
+            assert_eq!(stale.get_metadata(), Some(metadata1.clone()));
+            stale.destroy().await.unwrap();
 
             let source = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
             source.destroy().await.unwrap();
