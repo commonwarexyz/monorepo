@@ -234,6 +234,11 @@ impl<const N: usize> Prunable<N> {
         self.bitmap.push_chunk(chunk);
     }
 
+    /// Append every bit of `other`, in order. See [`BitMap::extend_from_bitmap`].
+    pub fn extend_from_bitmap<const M: usize>(&mut self, other: &BitMap<M>) {
+        self.bitmap.extend_from_bitmap(other);
+    }
+
     /// Remove and return the last complete chunk from the bitmap.
     ///
     /// # Warning
@@ -547,6 +552,35 @@ mod tests {
 
         let retrieved_chunk = prunable.get_chunk_containing(0);
         assert_eq!(retrieved_chunk, &chunk);
+    }
+
+    #[test]
+    fn test_extend_from_bitmap_with_pruning() {
+        // Appending after pruned chunks and a zero-filled gap matches pushing bit by bit.
+        let mut src: BitMap = BitMap::new();
+        for i in 0..1000u64 {
+            src.push(i % 3 == 0 || i % 7 == 0);
+        }
+        for floor in [128, 129, 191, 255, 256, 300] {
+            let mut actual = Prunable::<16>::new();
+            actual.extend_to(128);
+            actual.prune_to_bit(128);
+            actual.extend_to(floor);
+            let mut expected = actual.clone();
+            for bit in src.iter() {
+                expected.push(bit);
+            }
+            actual.extend_from_bitmap(&src);
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(actual.pruned_bits(), expected.pruned_bits());
+            for bit in actual.pruned_bits()..actual.len() {
+                assert_eq!(
+                    actual.get_bit(bit),
+                    expected.get_bit(bit),
+                    "floor={floor} bit={bit}"
+                );
+            }
+        }
     }
 
     #[test]
