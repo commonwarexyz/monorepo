@@ -524,11 +524,13 @@ pub mod tests {
                 operation::update,
                 test::{
                     Choice, Inspect, Links, Script, assert_exact, build, colliding_digest, counter,
-                    keep, live, test_any_ordered_policy_evictions_keep_links,
-                    test_any_policy_decisions_match_writes, test_any_policy_hold,
-                    test_any_policy_keep_evict_and_recover, test_any_policy_limits,
-                    test_any_policy_limits_after_colliding_writes, test_any_policy_matches_raise,
-                    test_any_policy_stop, test_any_proportional_bound,
+                    keep, live, test_any_activity_depths,
+                    test_any_ordered_policy_evictions_keep_links,
+                    test_any_policy_decisions_match_writes, test_any_policy_freed_ancestors,
+                    test_any_policy_hold, test_any_policy_keep_evict_and_recover,
+                    test_any_policy_limits, test_any_policy_limits_after_colliding_writes,
+                    test_any_policy_matches_raise, test_any_policy_stop,
+                    test_any_proportional_bound,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -5590,6 +5592,10 @@ pub mod tests {
         fn ops(batch: &Self::Merkleized) -> (Location<F>, Arc<Vec<Operation<F, U>>>) {
             batch.operations()
         }
+
+        async fn read(&self, batch: &Self::Merkleized, key: &Digest) -> Option<Digest> {
+            batch.get(key, self).await.unwrap()
+        }
     }
 
     impl<F, C, I, V, const N: usize, S> Links<F>
@@ -5623,6 +5629,23 @@ pub mod tests {
         }
     }
 
+    /// [`test_any_activity_depths`] on a current database. Current raises and policies draw
+    /// candidates from the speculative bitmap.
+    async fn test_current_activity_depths<M, C, F, Fut>(context: Context, open_db: F)
+    where
+        M: merkle::Graftable,
+        C: Inspect<M>,
+        Operation<M, C::Update>: Codec,
+        F: Fn(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        let db = open_db(context.child("db"), "activity".into()).await;
+        let reopen = |ctx| open_db(ctx, "activity".into());
+        test_any_activity_depths(context, db, reopen, val).await;
+    }
+
+    test_for_all_variants!(test_current_activity_depths, "WARN");
+
     /// Define `$name` to run the Any test `$any` on a current database opened in `$partition` for
     /// every variant.
     macro_rules! current_test {
@@ -5643,6 +5666,11 @@ pub mod tests {
         };
     }
 
+    current_test!(
+        test_current_policy_freed_ancestors,
+        test_any_policy_freed_ancestors,
+        "freed"
+    );
     current_test!(
         test_current_proportional_bound,
         test_any_proportional_bound,

@@ -2368,6 +2368,9 @@ pub(crate) mod test {
     test_for_all_variants!(with_make_value: test_any_policy_matches_raise, "WARN");
     test_for_all_variants!(with_make_value: test_any_policy_decisions_match_writes, "WARN");
     test_for_all_variants!(with_make_value: test_any_policy_after_staged_writes, "WARN");
+    test_for_all_variants!(with_reopen: test_any_policy_after_ancestor_applied, "WARN");
+    test_for_all_variants!(with_reopen: test_any_activity_depths, "WARN");
+    test_for_all_variants!(with_make_value: test_any_policy_freed_ancestors, "WARN");
     test_for_all_variants!(with_make_value: test_any_proportional_bound, "WARN");
     with_ordered_variants!(
         test_for_variant!(with_make_value: test_any_ordered_policy_evictions_keep_links, "WARN")
@@ -3298,6 +3301,94 @@ pub(crate) mod test {
         assert_same(db, &staged, &written);
     }
 
+    /// A batch whose parent is applied before merkleize decides the same updates, reads only the
+    /// decided updates below the parent's operations, and produces the same batch as a twin over
+    /// the pending parent. A batch whose chain a fork replaced returns `StaleBatch` before
+    /// deciding any update.
+    pub(crate) async fn test_any_policy_after_ancestor_applied<F, C, I, U, const N: usize, S, Fut>(
+        context: Context,
+        db: Db<F, Context, C, I, Sha256, U, N, S>,
+        reopen: impl Fn(Context) -> Fut,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        F: Family,
+        C: Mutable<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = GenericLocation<F>> + 'static,
+        U: Update<Key = Digest, Value = Digest>,
+        S: Strategy,
+        Operation<F, U>: Codec,
+        Db<F, Context, C, I, Sha256, U, N, S>: DbAny<
+                F,
+                Key = Digest,
+                Value = Digest,
+                Digest = Digest,
+                Merkleized = Arc<batch::MerkleizedBatch<F, Digest, U, S>>,
+                Batch = batch::UnmerkleizedBatch<F, Sha256, U, S>,
+            >,
+        Fut: Future<Output = Db<F, Context, C, I, Sha256, U, N, S>>,
+    {
+        // Seed eight updates in key order at locations 1..9 with a held floor.
+        let mut keys: Vec<_> = (0..8).map(to_digest).collect();
+        keys.sort();
+        let seed: Vec<_> = keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| (*key, Some(make_value(i as u64))))
+            .collect();
+        let db = hold(db, &seed).await;
+        let superseded = GenericLocation::<F>::new(2);
+
+        // A pending parent supersedes the second update.
+        let parent = hold_batch(&db, db.new_batch(), &[(keys[1], Some(make_value(101)))]).await;
+
+        // A twin over the pending parent keeps every update.
+        let (twin, expected) = decide(&db, parent.new_batch::<Sha256>(), keep).await;
+        assert!(!expected.contains(&superseded));
+
+        // Apply the parent, then merkleize a batch started before the apply. The parent's
+        // update resolves in memory.
+        let batch = parent.new_batch::<Sha256>();
+        let base = parent.bounds().base.size;
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let before = counter(&context, "log_journal_items_read_total");
+        let (merkleized, decided) = decide(&db, batch, keep).await;
+        assert_eq!(decided, expected);
+        let below_base = expected.iter().filter(|loc| **loc < base).count() as u64;
+        assert!(below_base < expected.len() as u64);
+        assert_eq!(
+            counter(&context, "log_journal_items_read_total"),
+            before + below_base
+        );
+        assert_same(&db, &twin, &merkleized);
+        drop(twin);
+
+        // The applied batch serves the parent's write and survives reopen.
+        let root = merkleized.root();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        assert_eq!(db.root(), root);
+        assert_eq!(db.get(&keys[1]).await.unwrap(), Some(make_value(101)));
+        let db = db.commit().await.unwrap();
+        drop(db);
+        let db = reopen(context.child("reopen")).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.get(&keys[1]).await.unwrap(), Some(make_value(101)));
+
+        // A fork replaces the chain of a pending batch. The batch returns `StaleBatch` before
+        // deciding any update.
+        let parent = hold_batch(&db, db.new_batch(), &[(keys[3], Some(make_value(103)))]).await;
+        let fork = hold_batch(&db, db.new_batch(), &[(keys[4], Some(make_value(104)))]).await;
+        let batch = parent.new_batch::<Sha256>();
+        let (db, _) = db.apply_batch(fork).await.unwrap();
+        let mut policy = Script::new(usize::MAX, u64::MAX, keep);
+        assert!(matches!(
+            merkleize(&db, batch, &mut policy).await,
+            Err(crate::qmdb::Error::StaleBatch)
+        ));
+        assert!(policy.visited.is_empty());
+        drop(parent);
+        db.destroy().await.unwrap();
+    }
+
     /// Database access the policy tests need beyond [`DbAny`].
     pub(crate) trait Inspect<F: Family>:
         DbAny<F, Key = Digest, Value = Digest, Digest = Digest>
@@ -3322,6 +3413,9 @@ pub(crate) mod test {
         fn ops(
             batch: &Self::Merkleized,
         ) -> (GenericLocation<F>, Arc<Vec<Operation<F, Self::Update>>>);
+
+        /// Read `key` through `batch`.
+        async fn read(&self, batch: &Self::Merkleized, key: &Digest) -> Option<Digest>;
     }
 
     impl<F, C, I, U, const N: usize, S> Inspect<F> for Db<F, Context, C, I, Sha256, U, N, S>
@@ -3361,6 +3455,10 @@ pub(crate) mod test {
 
         fn ops(batch: &Self::Merkleized) -> (GenericLocation<F>, Arc<Vec<Operation<F, U>>>) {
             batch.operations()
+        }
+
+        async fn read(&self, batch: &Self::Merkleized, key: &Digest) -> Option<Digest> {
+            batch.get(key, self).await.unwrap()
         }
     }
 
@@ -3413,6 +3511,326 @@ pub(crate) mod test {
         assert_eq!(encoded(a), encoded(b));
         assert_eq!(D::span(a).inactivity_floor, D::span(b).inactivity_floor);
         assert_eq!(MerkleizedTrait::root(a), MerkleizedTrait::root(b));
+    }
+
+    /// Assert that `db` serves the value `model` holds for every written key.
+    async fn assert_values<F, D>(db: &D, model: &Model)
+    where
+        F: Family,
+        D: DbAny<F, Key = Digest, Value = Digest>,
+    {
+        for key in &model.keys {
+            assert_eq!(
+                db.get(key).await.unwrap(),
+                model.values.get(key).copied(),
+                "value of {key} diverged from the model",
+            );
+        }
+    }
+
+    /// Assert that `batch` serves the value `model` holds for every written key.
+    async fn assert_serves<F: Family, D: Inspect<F>>(db: &D, batch: &D::Merkleized, model: &Model) {
+        for key in &model.keys {
+            assert_eq!(
+                db.read(batch, key).await,
+                model.values.get(key).copied(),
+                "value of {key} diverged from the model",
+            );
+        }
+    }
+
+    /// Merkleize `batch` with a policy and apply the result to `db`. `batch` is a child of the
+    /// pending `ancestors` (oldest first). The policy writes the value `decisions` holds for a key
+    /// (`None` evicts) and keeps every other update. It decides the live update of every key in
+    /// location order. The applied state serves `model` with the decisions recorded and keeps an
+    /// exact activity bitmap.
+    async fn apply_decided<F: Family, D: Inspect<F>>(
+        db: D,
+        ancestors: &[&D::Merkleized],
+        batch: D::Batch,
+        decisions: &[(Digest, Option<Digest>)],
+        model: &mut Model,
+    ) -> D
+    where
+        Operation<F, D::Update>: Codec,
+    {
+        // Replay the log, then each ancestor. The policy decides every live update.
+        let expected = active(&db, ancestors, &[]).await;
+
+        // Decide each update, then apply over the pending ancestors.
+        let choose = |key: &Digest| match decisions.iter().find(|(k, _)| k == key) {
+            Some((_, Some(value))) => Choice::Replace(*value),
+            Some((_, None)) => Choice::Evict,
+            None => Choice::Keep,
+        };
+        let (merkleized, decided) = decide(&db, batch, choose).await;
+        assert_eq!(decided, expected);
+        model.apply(decisions);
+        let db = db.apply_batch(merkleized).await.unwrap().0;
+        assert_values(&db, model).await;
+        db.assert_exact().await;
+        db
+    }
+
+    /// Over two pending ancestors, one, and none, and for batches started before their ancestors
+    /// are applied, the [`Proportional`] raise produces the same batch, and so does a policy that
+    /// keeps every update. Policies that keep, evict, and replace each ancestor's updates then
+    /// apply over two pending ancestors and over one. Every policy decides exactly the live
+    /// updates of keys its batch does not write, every batch serves the model's values, and every
+    /// applied state keeps an exact activity bitmap. Every key shares one translated-key bucket.
+    #[boxed]
+    pub(crate) async fn test_any_activity_depths<F, D, Fut>(
+        context: Context,
+        db: D,
+        reopen: impl Fn(Context) -> Fut,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        F: Family,
+        D: Inspect<F>,
+        Operation<F, D::Update>: Codec,
+        Fut: Future<Output = D>,
+    {
+        // Seed eight keys with a held floor.
+        let key = |i: u64| colliding_digest(0xB0, i);
+        let seed: Vec<_> = (0..8).map(|i| (key(i), Some(make_value(i)))).collect();
+        let mut model = Model::default();
+        let db = hold(db, &seed).await;
+        model.apply(&seed);
+        db.assert_exact().await;
+
+        // The grandparent updates and deletes seeded keys and creates two keys. The parent updates
+        // and deletes seeded keys and the grandparent's creates, and creates a key.
+        let grand = [
+            (key(1), Some(make_value(101))),
+            (key(2), None),
+            (key(100), Some(make_value(102))),
+            (key(101), Some(make_value(103))),
+        ];
+        let middle = [
+            (key(3), Some(make_value(201))),
+            (key(4), None),
+            (key(100), Some(make_value(202))),
+            (key(101), None),
+            (key(102), Some(make_value(203))),
+        ];
+        let grandparent = hold_batch(&db, db.new_batch(), &grand).await;
+        let parent = hold_batch(&db, D::child(&grandparent), &middle).await;
+        model.apply(&grand);
+        model.apply(&middle);
+
+        // The batch deletes and updates seeded keys, updates the grandparent's update, and updates
+        // the parent's create.
+        let writes = [
+            (key(0), None),
+            (key(1), Some(make_value(301))),
+            (key(5), Some(make_value(302))),
+            (key(102), Some(make_value(303))),
+        ];
+        let with = |batch: D::Batch| {
+            writes
+                .iter()
+                .fold(batch, |batch, &(k, v)| batch.write(k, v))
+        };
+
+        // Replay the log, then the grandparent and the parent. A policy decides the live update
+        // of every key the batch does not write, in location order.
+        let expected = active(&db, &[&grandparent, &parent], &writes).await;
+        model.apply(&writes);
+
+        // Depth 2: the raise passes the grandparent's operations, and a policy decides the
+        // expected updates.
+        let raised = build(&db, D::child(&parent), &writes).await;
+        assert!(
+            D::span(&raised).inactivity_floor > D::span(&parent).base.size,
+            "the raise passes the grandparent's operations",
+        );
+        assert_serves(&db, &raised, &model).await;
+        let (kept, decided) = decide(&db, with(D::child(&parent)), keep).await;
+        assert_eq!(decided, expected);
+        assert_serves(&db, &kept, &model).await;
+
+        // A raise and two policy batches start before the grandparent is applied.
+        let early = with(D::child(&parent));
+        let first = with(D::child(&parent));
+        let last = with(D::child(&parent));
+
+        // Depth 1: apply and free the grandparent. The raise and the policy started after the
+        // apply, and the raise and first policy batch started before it, match depth 2. The first
+        // policy batch has one more entry than there are updates to decide, so its pass reaches
+        // the tip in read rounds sized to its remaining entries.
+        let db = db.apply_batch(grandparent).await.unwrap().0;
+        db.assert_exact().await;
+        let raised1 = build(&db, D::child(&parent), &writes).await;
+        assert_same(&db, &raised, &raised1);
+        let early = early.merkleize(&db, None, &mut Proportional).await.unwrap();
+        assert_same(&db, &raised, &early);
+        let (kept1, decided1) = decide(&db, with(D::child(&parent)), keep).await;
+        assert_eq!(decided1, expected);
+        assert_same(&db, &kept, &kept1);
+        let mut policy = Script::new(expected.len() + 1, u64::MAX, keep);
+        let first = first.merkleize(&db, None, &mut policy).await.unwrap();
+        assert_eq!(policy.locations(), expected);
+        assert_same(&db, &kept, &first);
+
+        // Depth 0: apply the parent. The raise and the policy started after the apply, and the
+        // last policy batch started before the grandparent's apply, match depth 2.
+        let db = db.apply_batch(parent).await.unwrap().0;
+        db.assert_exact().await;
+        let (last, decided) = decide(&db, last, keep).await;
+        assert_eq!(decided, expected);
+        assert_same(&db, &kept, &last);
+        let raised0 = build(&db, db.new_batch(), &writes).await;
+        assert_same(&db, &raised, &raised0);
+        let (kept0, decided0) = decide(&db, with(db.new_batch()), keep).await;
+        assert_eq!(decided0, expected);
+        assert_same(&db, &kept, &kept0);
+
+        // Apply the raise. The state serves the model and keeps an exact bitmap.
+        drop((raised, raised1, early, kept, kept1, first, last, kept0));
+        let db = db.apply_batch(raised0).await.unwrap().0;
+        assert_values(&db, &model).await;
+        db.assert_exact().await;
+
+        // Apply a policy that keeps every live update. The state serves the model and keeps an
+        // exact bitmap.
+        let expected = active(&db, &[], &[]).await;
+        let (kept, decided) = decide(&db, db.new_batch(), keep).await;
+        assert_eq!(decided, expected);
+        let db = db.apply_batch(kept).await.unwrap().0;
+        assert_values(&db, &model).await;
+        db.assert_exact().await;
+
+        // Depth 2 apply: the grandparent and the parent each update two existing keys and create a
+        // key. The policy keeps one update of each ancestor, evicts the other, and replaces the
+        // create.
+        let grand = [
+            (key(1), Some(make_value(401))),
+            (key(6), Some(make_value(402))),
+            (key(103), Some(make_value(403))),
+        ];
+        let middle = [
+            (key(3), Some(make_value(404))),
+            (key(102), Some(make_value(405))),
+            (key(104), Some(make_value(406))),
+        ];
+        let grandparent = hold_batch(&db, db.new_batch(), &grand).await;
+        let parent = hold_batch(&db, D::child(&grandparent), &middle).await;
+        model.apply(&grand);
+        model.apply(&middle);
+        let decisions = [
+            (key(6), None),
+            (key(103), Some(make_value(407))),
+            (key(102), None),
+            (key(104), Some(make_value(408))),
+        ];
+        let ancestors = [&grandparent, &parent];
+        let db = apply_decided(db, &ancestors, D::child(&parent), &decisions, &mut model).await;
+        drop((grandparent, parent));
+
+        // Depth 1 apply: the parent updates three existing keys and creates a key. The policy keeps
+        // one update, evicts another and the create, and replaces the third.
+        let middle = [
+            (key(1), Some(make_value(501))),
+            (key(5), Some(make_value(502))),
+            (key(104), Some(make_value(503))),
+            (key(105), Some(make_value(504))),
+        ];
+        let parent = hold_batch(&db, db.new_batch(), &middle).await;
+        model.apply(&middle);
+        let decisions = [
+            (key(5), None),
+            (key(104), Some(make_value(505))),
+            (key(105), None),
+        ];
+        let db = apply_decided(db, &[&parent], D::child(&parent), &decisions, &mut model).await;
+        drop(parent);
+
+        // Prune to the sync boundary. The bitmap stays exact.
+        let db = db.commit().await.unwrap();
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        db.assert_exact().await;
+
+        // Reopen. The rebuilt state matches and keeps an exact bitmap.
+        let root = db.root();
+        let db = db.commit().await.unwrap();
+        drop(db);
+        let db = reopen(context.child("reopen")).await;
+        assert_eq!(db.root(), root);
+        assert_values(&db, &model).await;
+        db.assert_exact().await;
+        db.destroy().await.unwrap();
+    }
+
+    /// Batches created at depth 2 keep the same live updates as a twin over the pending ancestors,
+    /// including updates in both ancestors' regions, whether they merkleize after the grandparent
+    /// is applied and freed or after the parent is also applied. The applied state serves the
+    /// model with an exact activity bitmap. Every key shares one translated-key bucket.
+    pub(crate) async fn test_any_policy_freed_ancestors<F, D>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        F: Family,
+        D: Inspect<F>,
+        Operation<F, D::Update>: Codec,
+    {
+        // Seed eight keys with a held floor.
+        let key = |i: u64| colliding_digest(0xC0, i);
+        let seed: Vec<_> = (0..8).map(|i| (key(i), Some(make_value(i)))).collect();
+        let mut model = Model::default();
+        let db = hold(db, &seed).await;
+        model.apply(&seed);
+
+        // The grandparent updates two seeded keys and creates a key. The parent updates a seeded
+        // key and the grandparent's create.
+        let grand = [
+            (key(1), Some(make_value(101))),
+            (key(2), Some(make_value(102))),
+            (key(100), Some(make_value(103))),
+        ];
+        let middle = [
+            (key(3), Some(make_value(201))),
+            (key(100), Some(make_value(202))),
+        ];
+        let grandparent = hold_batch(&db, db.new_batch(), &grand).await;
+        let parent = hold_batch(&db, D::child(&grandparent), &middle).await;
+        model.apply(&grand);
+        model.apply(&middle);
+
+        // A twin over the pending ancestors keeps every live update. Some lie in the
+        // grandparent's region.
+        let expected = active(&db, &[&grandparent, &parent], &[]).await;
+        let region = D::span(&grandparent).base.size..D::span(&grandparent).tip.size;
+        assert!(
+            expected.iter().any(|loc| region.contains(loc)),
+            "a kept update lies in the grandparent's region",
+        );
+        let (twin, decided) = decide(&db, D::child(&parent), keep).await;
+        assert_eq!(decided, expected);
+
+        // Start two batches at depth 2.
+        let first = D::child(&parent);
+        let last = D::child(&parent);
+
+        // Apply and free the grandparent. The first batch matches the twin.
+        let db = db.apply_batch(grandparent).await.unwrap().0;
+        let (first, decided) = decide(&db, first, keep).await;
+        assert_eq!(decided, expected);
+        assert_same(&db, &twin, &first);
+
+        // Apply the parent. The last batch matches the twin.
+        let db = db.apply_batch(parent).await.unwrap().0;
+        let (last, decided) = decide(&db, last, keep).await;
+        assert_eq!(decided, expected);
+        assert_same(&db, &twin, &last);
+
+        // Apply the last batch. The state serves the model and keeps an exact bitmap.
+        drop((twin, first));
+        let db = db.apply_batch(last).await.unwrap().0;
+        assert_values(&db, &model).await;
+        db.assert_exact().await;
+        db.destroy().await.unwrap();
     }
 
     /// Merkleize `writes` as one [`Proportional`] batch, replay its operations into `live`, and
@@ -3931,6 +4349,97 @@ pub(crate) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// A child policy decides each applied and pending-ancestor update once, and decides the same
+    /// updates after the parent is applied. Applying the child makes its sibling stale.
+    #[test_traced("INFO")]
+    fn test_any_policy_speculative_ancestors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("policy-chain", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Seed two keys, then write one of them and a new key in a pending parent.
+            let seeded = db
+                .new_batch()
+                .write(key(0), Some(val(0)))
+                .write(key(1), Some(val(1)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seeded).await.unwrap();
+            let original_db_size = db.size();
+            let parent = db
+                .new_batch()
+                .write(key(0), Some(val(100)))
+                .write(key(2), Some(val(2)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let child = parent.new_batch::<Sha256>();
+            let sibling = parent.new_batch::<Sha256>();
+
+            // A twin over the pending parent evicts the key the parent leaves untouched and keeps
+            // the parent's keys. It decides each live update once.
+            let evict = |k: &Digest| {
+                if *k == key(1) {
+                    Choice::Evict
+                } else {
+                    Choice::Keep
+                }
+            };
+            let mut policy = Script::new(usize::MAX, u64::MAX, evict);
+            let twin = parent
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            let expected = policy.visited;
+            assert_eq!(expected.len(), 3);
+            for (location, k, value) in &expected {
+                let want = if *k == key(0) {
+                    val(100)
+                } else if *k == key(1) {
+                    val(1)
+                } else {
+                    assert_eq!(*k, key(2));
+                    val(2)
+                };
+                assert_eq!(*value, want);
+                assert!(*location >= original_db_size || *k == key(1));
+                assert_eq!(
+                    expected.iter().filter(|(_, other, _)| other == k).count(),
+                    1
+                );
+            }
+
+            // Apply the parent, then merkleize the child started before the apply. It decides
+            // the same updates and matches the twin.
+            let (db, _) = db.apply_batch(parent.clone()).await.unwrap();
+            let mut policy = Script::new(usize::MAX, u64::MAX, evict);
+            let child = child.merkleize(&db, None, &mut policy).await.unwrap();
+            assert_eq!(policy.visited, expected);
+            assert_eq!(child.root(), twin.root());
+
+            // Applying the child makes the sibling stale.
+            let (db, _) = db.apply_batch(child).await.unwrap();
+            assert!(matches!(
+                sibling.merkleize(&db, None, &mut Hold).await,
+                Err(crate::qmdb::Error::StaleBatch)
+            ));
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), None);
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+            drop((twin, parent));
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// Evicting the last live key emits its delete and commits the floor at the commit
     /// location.
     #[test_traced("INFO")]
@@ -3979,6 +4488,87 @@ pub(crate) mod test {
             assert_eq!(db.get(&key(0)).await.unwrap(), None);
             assert_eq!(db.active_keys(), 0);
             assert_eq!(db.inactivity_floor_loc(), commit_location);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Skips that run out before a live update leave it unread, and a policy that stops at the
+    /// update commits the floor at its location.
+    #[test_traced("INFO")]
+    fn test_any_policy_skips_stop_before_live_update() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("policy-skips", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Seed two keys, then delete the first, with a held floor.
+            let mut keys = [key(0), key(1)];
+            keys.sort();
+            let seed = db
+                .new_batch()
+                .write(keys[0], Some(val(0)))
+                .write(keys[1], Some(val(1)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+            let deleted = db
+                .new_batch()
+                .write(keys[0], None)
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(deleted).await.unwrap();
+            let reads = || counter(&context, "log_journal_items_read_total");
+            let live = seed_range.start + 1;
+            let gap = *live - *db.inactivity_floor_loc();
+
+            // One skip short of the live update, the policy reads nothing.
+            let before = reads();
+            let mut policy = Script::new(usize::MAX, gap - 1, keep);
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert!(policy.visited.is_empty());
+            assert_eq!(*merkleized.bounds().inactivity_floor, *live - 1);
+            assert_eq!(reads(), before, "unreachable updates are not read");
+            drop(merkleized);
+
+            // A policy with unbounded limits reads only the live update. The inactive suffix and
+            // the last commit need no read.
+            let before = reads();
+            let mut policy = Script::new(usize::MAX, u64::MAX, keep);
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(policy.locations(), [live]);
+            assert_eq!(merkleized.bounds().inactivity_floor, db.size());
+            assert_eq!(reads(), before + 1, "only the live update is read");
+            drop(merkleized);
+
+            // With exactly enough skips, a policy that stops at the live update commits the
+            // floor at its location.
+            let mut policy = Script::new(usize::MAX, gap, |_: &Digest| Choice::Stop);
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(policy.locations(), [live]);
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.inactivity_floor_loc(), live);
+            assert_eq!(db.get(&keys[0]).await.unwrap(), None);
+            assert_eq!(db.get(&keys[1]).await.unwrap(), Some(val(1)));
             db.destroy().await.unwrap();
         });
     }
