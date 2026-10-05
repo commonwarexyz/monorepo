@@ -279,7 +279,12 @@ pub trait Encode: Write + EncodeSize {
     /// Panics if `encode_size()` does not return the same number of bytes actually written by
     /// `write()`
     fn encode(&self) -> Bytes {
-        self.encode_mut().freeze()
+        let len = self.encode_size();
+        let mut buffer = Vec::with_capacity(len);
+        self.write(&mut buffer);
+        assert_eq!(buffer.len(), len, "write() did not write expected bytes");
+        // Exact capacity lets `Bytes` take the allocation without reallocating.
+        Bytes::from(buffer)
     }
 
     /// Encodes `self` into a new [BytesMut] buffer.

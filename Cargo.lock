@@ -1752,6 +1752,7 @@ dependencies = [
  "commonware-codec-macros",
  "commonware-conformance",
  "commonware-macros",
+ "criterion",
  "paste",
  "proptest",
  "rand_chacha 0.10.0",

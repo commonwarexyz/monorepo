@@ -376,6 +376,22 @@ fn write<T: UPrim>(value: T, buf: &mut impl BufMut) {
         return;
     }
 
+    // Up to 64-bit values encode to at most 10 bytes. Assemble them in a register so the bulk
+    // write reads one wide store: reading back separately stored bytes stalls store forwarding.
+    if T::SIZE <= 8 {
+        let mut word = 0u128;
+        let mut shift = 0;
+        let mut val = value;
+        while val >= continuation_threshold {
+            word |= u128::from(val.as_u8() | CONTINUATION_BIT_MASK) << shift;
+            shift += BITS_PER_BYTE;
+            val >>= DATA_BITS_PER_BYTE;
+        }
+        word |= u128::from(val.as_u8()) << shift;
+        buf.put_slice(&word.to_le_bytes()[..shift / BITS_PER_BYTE + 1]);
+        return;
+    }
+
     // Stage the encoded bytes on the stack so the buffer receives a single bulk write.
     let mut bytes = [0u8; MAX_U128_VARINT_SIZE];
     let mut len = 0;
