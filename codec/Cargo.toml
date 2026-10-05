@@ -45,7 +45,11 @@ thiserror.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 
+[lib]
+bench = false
+
 [[bench]]
 name = "codec"
 harness = false
 path = "src/benches/bench.rs"
+required-features = [ "std" ]

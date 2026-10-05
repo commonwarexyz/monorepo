@@ -410,6 +410,22 @@ mod test {
         assert_eq!(value, &b"hello"[..]);
         assert!(range.contains(&value.as_ptr()));
 
+        // Retained fields after a scalar slice at their own offsets.
+        let fields = (
+            Bytes::from_static(b"hello"),
+            7u32,
+            Bytes::from_static(b"world"),
+        )
+            .encode();
+        let cfg = ((..).into(), (), (..).into());
+        let lazy = Lazy::<(Bytes, u32, Bytes)>::deferred(&mut fields.clone(), cfg);
+        let (first, scalar, second) = lazy.get().unwrap();
+        assert_eq!(first, &b"hello"[..]);
+        assert_eq!(*scalar, 7);
+        assert_eq!(second, &b"world"[..]);
+        assert_eq!(first.as_ptr(), fields[1..].as_ptr());
+        assert_eq!(second.as_ptr(), fields[11..].as_ptr());
+
         // Trailing bytes fail decoding.
         let mut extra = encoded.to_vec();
         extra.push(0);
