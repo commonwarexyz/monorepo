@@ -167,7 +167,7 @@ mod tests {
             mailbox: Arc::downgrade(mailbox),
             dropped: dropped.clone(),
         };
-        let task = Task::new(
+        let token = Task::new(
             async move {
                 let _guard = guard;
                 pending::<()>().await;
@@ -176,16 +176,16 @@ mod tests {
             Weak::new(),
         );
 
-        (Message::Wake(Target::Task(task)), dropped)
+        (Message::Wake(Target::Task(token)), dropped)
     }
 
     /// Dispose of messages, clearing each carried task's future in place, as
-    /// worker teardown does through the task set, before releasing the
-    /// message.
+    /// worker teardown does through the task set, before discarding its token.
     fn dispose(messages: impl IntoIterator<Item = Message>) {
         for message in messages {
-            if let Message::Wake(Target::Task(task)) = &message {
-                task.clear();
+            if let Message::Wake(Target::Task(token)) = message {
+                token.task().clear();
+                token.discard();
             }
         }
     }

@@ -14,13 +14,13 @@
 //! reach only a few shards.
 //!
 //! [`Tasks::register`] allocates each task for its set and retains it before
-//! the first token reaches a worker, so no token exists before the set retains
-//! its task. The set holds one reference to each linked task, which removal or
-//! draining hands back. Only removal and a drain unlink a task, and a drain
-//! requires a closed set, so an open set retains every task it accepted until
-//! its removal. Every task carries the identity of the set that retains it,
-//! checked on insertion and removal, so a task routed to another runtime's set
-//! panics instead of corrupting that set's lists.
+//! the first token reaches a worker, so no token reaches a worker before the
+//! set retains its task. The set holds one reference to each linked task, which
+//! removal or draining hands back. Only removal and a drain unlink a task, and
+//! a drain requires a closed set, so an open set retains every task it
+//! accepted until its removal. Every task carries the identity of the set that
+//! retains it, checked on insertion and removal, so a task routed to another
+//! runtime's set panics instead of corrupting that set's lists.
 
 use super::{
     mailbox::Mailbox,
@@ -247,19 +247,22 @@ impl Tasks {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let task = Task::new(future, self, mailbox);
+        let token = Task::new(future, self, mailbox);
 
         // The factory runs after the spawn's open check, so the set checks
         // closure again. Insertion precedes delivery, so a token the mailbox
-        // refuses belongs to a task teardown clears.
-        if !self.insert(&task) {
+        // refuses belongs to a task teardown clears. A refused task goes back
+        // to the caller, which clears it.
+        if !self.insert(token.task()) {
+            let task = token.task().clone();
+            token.discard();
             return Err(task);
         }
 
         #[cfg(test)]
         tests::after_insert();
 
-        task.schedule();
+        token.schedule();
         Ok(())
     }
 
@@ -441,9 +444,13 @@ pub mod tests {
         }
     }
 
-    /// A pending task for `set` to retain, with no worker.
-    fn task(set: &Tasks) -> Task {
-        Task::new(pending::<()>(), set, Weak::new())
+    /// A pending task for `set` to retain, with no worker. Its first token is
+    /// discarded, since these tests never poll.
+    pub fn task(set: &Tasks) -> Task {
+        let token = Task::new(pending::<()>(), set, Weak::new());
+        let task = token.task().clone();
+        token.discard();
+        task
     }
 
     /// Drop a test task, clearing its future first.
@@ -740,10 +747,9 @@ pub mod tests {
 
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::*;
+    use super::{tests::task, *};
     use crate::iouring::task::tests::refs;
     use loom::{sync::Arc, thread};
-    use std::{future::pending, sync::Weak};
 
     /// Insertion, removal, and closure with its drain race on neighbors in
     /// one shard. Each inserted task comes back exactly once, by its removal
@@ -752,8 +758,7 @@ mod loom_tests {
     fn test_insert_remove_and_close_race_in_one_shard() {
         loom::model(|| {
             let set = Arc::new(Tasks::with_shards(1));
-            let tasks: Arc<[Task; 3]> =
-                Arc::new([(); 3].map(|_| Task::new(pending::<()>(), &set, Weak::new())));
+            let tasks: Arc<[Task; 3]> = Arc::new([(); 3].map(|_| task(&set)));
             assert!(set.insert(&tasks[0]));
             assert!(set.insert(&tasks[1]));
 

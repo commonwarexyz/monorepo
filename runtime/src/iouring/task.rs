@@ -11,14 +11,16 @@
 //!
 //! # Lifecycle
 //!
-//! A ready token is the reference that entitles its holder to poll the task
-//! once. It waits in the owning worker's ready queue, or travels there through
-//! the worker's mailbox, and a task has at most one. A wake publishes a token
-//! only when the task has none, so duplicate wakes coalesce. A wake that
-//! arrives during a poll is recorded in the state and becomes the next token
-//! only if that poll returns pending. That token joins the tail of the ready
-//! queue, so a self-waking task cannot skip other ready work. Completion is
-//! terminal, so a late wake of a finished task is a no-op.
+//! A ready token, a [`Runnable`], is the reference that entitles its holder to
+//! poll the task once. It waits in the owning worker's ready queue, or travels
+//! there through the worker's mailbox, and a task has at most one. Only a
+//! token polls or schedules its task, so a cloned [`Task`] cannot manufacture
+//! queued work. A wake publishes a token only when the task has none, so
+//! duplicate wakes coalesce. A wake that arrives during a poll is recorded in
+//! the state and becomes the next token only if that poll returns pending.
+//! That token joins the tail of the ready queue, so a self-waking task cannot
+//! skip other ready work. Completion is terminal, so a late wake of a finished
+//! task is a no-op.
 //!
 //! ```text
 //! Wakers, from any thread (`notify_by_ref`, `notify_by_value`):
@@ -414,8 +416,10 @@ impl State {
 
 /// Next step for a worker that polled a ready token.
 ///
-/// [`Task::poll`] has already released a spent token and dropped a finished
-/// future.
+/// [`Runnable::poll`] has already released a spent token and dropped a
+/// finished future. Ignoring the result would lose the successor token in
+/// [`Requeue`](Self::Requeue).
+#[must_use]
 pub enum AfterPoll {
     /// Nothing. The poll returned pending with no wake during it, so the next
     /// wake publishes a new token, or the token belonged to a task teardown
@@ -423,7 +427,7 @@ pub enum AfterPoll {
     Done,
     /// Queue the carried token again. A wake arrived during the pending poll,
     /// so the task needs another poll.
-    Requeue(Task),
+    Requeue(Runnable),
     /// Remove the carried task from its [`Tasks`] set. The future returned
     /// ready, panicked, or was cleared during the poll, and has been dropped.
     Retire(Task),
@@ -573,8 +577,8 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
 
 /// An owning reference to a task, counted in its state.
 ///
-/// Ready tokens and task set entries are `Task`s. Dropping the last
-/// reference frees the cell, whose future must already be gone.
+/// Task set entries are `Task`s, and a [`Runnable`] wraps one. Dropping the
+/// last reference frees the cell, whose future must already be gone.
 pub struct Task(NonNull<Header>);
 
 // SAFETY: `Task::new` requires `F: Send`, and the header (including its
@@ -625,7 +629,9 @@ impl Task {
     /// Allocate a task for `tasks` to retain, owned by the worker behind
     /// `mailbox`, with its first poll queued. Returns its one reference, which
     /// is that poll's token.
-    pub fn new<F>(future: F, tasks: &Tasks, mailbox: Weak<Mailbox>) -> Self
+    // Allocation hands out the first poll's token, not a plain reference.
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new<F>(future: F, tasks: &Tasks, mailbox: Weak<Mailbox>) -> Runnable
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -641,7 +647,7 @@ impl Task {
             _align: [],
         });
 
-        Self(NonNull::from(Box::leak(cell)).cast())
+        Runnable(Self(NonNull::from(Box::leak(cell)).cast()))
     }
 
     /// The header pointer, with the allocation's provenance, holding no
@@ -688,7 +694,7 @@ impl Task {
         let this = ManuallyDrop::new(self);
 
         match this.state.notify_by_value() {
-            AfterWake::Schedule => ManuallyDrop::into_inner(this).schedule(),
+            AfterWake::Schedule => Runnable(ManuallyDrop::into_inner(this)).schedule(),
             AfterWake::Done => {}
             AfterWake::Dealloc => {
                 // SAFETY: the exchange released the last reference and
@@ -703,8 +709,8 @@ impl Task {
     fn wake_by_ref(&self) {
         if self.state.notify_by_ref() {
             // SAFETY: the exchange counted a reference for the published
-            // token, which the new `Task` owns.
-            unsafe { Self::from_raw(self.0) }.schedule();
+            // token, which the new runnable owns.
+            Runnable(unsafe { Self::from_raw(self.0) }).schedule();
         }
     }
 
@@ -723,23 +729,50 @@ impl Task {
         // running and none can start.
         unsafe { (self.vtable.drop_future)(self.0) };
     }
+}
 
-    /// Deliver the ready token this reference represents to the owning worker,
-    /// directly on its thread and through its mailbox otherwise.
+/// A ready token: the reference that entitles its holder to poll its task
+/// once.
+///
+/// A runnable comes only from allocation or from a wake that finds the task
+/// idle, and a pending poll that a wake interrupted hands its own token back.
+/// It leaves through [`schedule`](Self::schedule), [`poll`](Self::poll), or
+/// [`discard`](Self::discard).
+///
+/// Dropping a runnable releases its reference and leaves its task queued with
+/// no token to poll it, so a later wake publishes nothing. A runnable may
+/// therefore be discarded only when its task is complete, or when another
+/// reference is obliged to clear the task: the closed task set's, which
+/// teardown drains, or the [`Task`] a refused registration returns to its
+/// caller.
+#[repr(transparent)]
+#[must_use = "a dropped token wedges its task, so schedule, poll, or discard it"]
+pub struct Runnable(Task);
+
+impl Runnable {
+    /// The task this token entitles its holder to poll.
+    pub const fn task(&self) -> &Task {
+        &self.0
+    }
+
+    /// Deliver the token to the owning worker, directly on its thread and
+    /// through its mailbox otherwise.
     ///
-    /// A closing worker, or a closed or dropped mailbox, releases the token.
-    /// The task then stays queued until teardown clears it.
+    /// A closing worker, or a closed or dropped mailbox, discards the token,
+    /// and teardown clears the task if it has not already.
     pub fn schedule(self) {
         // On the owning thread, the token goes straight to the ready queue.
         // Polls and destructors run without the local borrow, so a wake from
         // inside one can take it here.
-        if let Some(local) = Local::owner(&self.mailbox) {
+        if let Some(local) = Local::owner(&self.0.mailbox) {
             let mut local = local.borrow_mut();
 
-            // A closing worker polls nothing more, so the token is dropped.
-            // Releasing a reference runs no user code, so dropping it under
-            // the borrow is fine.
-            if !local.closing {
+            // A closing worker polls nothing more, and its closed task set
+            // retains the task for the drain. Releasing a reference runs no
+            // user code, so discarding the token under the borrow is fine.
+            if local.closing {
+                self.discard();
+            } else {
                 local.ready.push(self);
             }
 
@@ -747,40 +780,49 @@ impl Task {
         }
 
         // Any other thread hands the token to the mailbox, and the worker
-        // queues it when it applies its messages. A closed mailbox returns
-        // the token, which is dropped here, as is a token for a worker whose
-        // mailbox is gone.
-        if let Some(mailbox) = self.mailbox.upgrade() {
-            let _ = mailbox.send(Message::Wake(Target::Task(self)));
+        // queues it when it applies its messages. A closed mailbox returns the
+        // token, and a dropped one takes none. Either way the ordinary worker,
+        // which owns every task, has closed its task set, so the drain clears
+        // the task or already has.
+        let Some(mailbox) = self.0.mailbox.upgrade() else {
+            self.discard();
+            return;
+        };
+        if let Err(Message::Wake(Target::Task(token))) =
+            mailbox.send(Message::Wake(Target::Task(self)))
+        {
+            token.discard();
         }
     }
 
-    /// Poll the ready token this reference represents, containing panics.
+    /// Poll the task, containing panics.
     ///
     /// The caller holds no worker borrow, since the poll and the destructors it
     /// runs are user code.
     pub fn poll(self) -> AfterPoll {
-        // A token of a task teardown already cleared is released here.
-        if !self.state.start_poll() {
+        // A token of a task teardown already cleared is stale.
+        if !self.0.state.start_poll() {
+            self.discard();
             return AfterPoll::Done;
         }
 
         // The poll and the destructors it may run stay behind one boundary,
         // and a panic completes the task like a ready future does. The waker
         // borrows this token's reference, so passing it counts nothing.
+        let task = &self.0;
         let polled = Panics::contain(|| {
-            let waker = self.waker();
+            let waker = task.waker();
             let mut cx = Context::from_waker(&waker);
 
             // SAFETY: start_poll granted this thread exclusive access to the
             // future until the state leaves RUNNING or NOTIFIED below.
-            unsafe { (self.vtable.poll)(self.0, &mut cx) }
+            unsafe { (task.vtable.poll)(task.0, &mut cx) }
         });
 
         // A pending poll leaves the task idle or requeues this token, unless
         // teardown cleared the task meanwhile, which completes it below.
         if matches!(polled, Some(Poll::Pending)) {
-            match self.state.finish_pending() {
+            match task.state.finish_pending() {
                 AfterPending::Done => {
                     // The exchange released this token's reference.
                     mem::forget(self);
@@ -793,12 +835,17 @@ impl Task {
 
         // Publish the terminal state before destructors run. A destructor may
         // wake this task or panic, and either must observe a completed cell.
-        self.state.complete();
+        task.state.complete();
 
         // SAFETY: exclusive access continues past `complete`, since
         // `start_poll` and `clear` both do nothing once the state is COMPLETE.
-        Panics::contain(|| unsafe { (self.vtable.drop_future)(self.0) });
-        AfterPoll::Retire(self)
+        Panics::contain(|| unsafe { (task.vtable.drop_future)(task.0) });
+        AfterPoll::Retire(self.0)
+    }
+
+    /// Release the token where the contract on [`Runnable`] permits it.
+    pub fn discard(self) {
+        drop(self);
     }
 }
 
@@ -894,7 +941,7 @@ pub enum Target {
     /// The root future pinned separately on the worker's stack.
     Root,
     /// A task, carrying its ready token.
-    Task(Task),
+    Task(Runnable),
 }
 
 /// Waker for the root future, which the worker pins on its stack.
@@ -937,19 +984,20 @@ impl Wake for RootWaker {
 #[derive(Default)]
 pub struct Ready {
     /// Tokens in FIFO order.
-    tokens: VecDeque<Task>,
+    tokens: VecDeque<Runnable>,
 }
 
 impl Ready {
     /// Queue a ready token.
     #[inline]
-    pub fn push(&mut self, task: Task) {
-        self.tokens.push_back(task);
+    pub fn push(&mut self, token: Runnable) {
+        self.tokens.push_back(token);
     }
 
     /// Take the oldest ready token.
     #[inline]
-    pub fn pop(&mut self) -> Option<Task> {
+    #[must_use]
+    pub fn pop(&mut self) -> Option<Runnable> {
         self.tokens.pop_front()
     }
 
@@ -958,12 +1006,14 @@ impl Ready {
         self.tokens.is_empty()
     }
 
-    /// Release every ready token.
+    /// Discard every ready token at teardown.
     ///
-    /// Each token is a second reference to a task the task set retains, so
-    /// releasing them runs no user code.
-    pub fn clear(&mut self) {
-        self.tokens.clear();
+    /// The closed task set retains each token's task, so discarding them loses
+    /// nothing and runs no user code.
+    pub fn discard(&mut self) {
+        for token in self.tokens.drain(..) {
+            token.discard();
+        }
     }
 }
 
@@ -1113,9 +1163,10 @@ pub mod tests {
         mailbox: &Arc<Mailbox>,
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Task {
-        let task = Task::new(future, set, Arc::downgrade(mailbox));
-        assert!(set.insert(&task));
-        ready.push(task.clone());
+        let token = Task::new(future, set, Arc::downgrade(mailbox));
+        assert!(set.insert(token.task()));
+        let task = token.task().clone();
+        ready.push(token);
         task
     }
 
@@ -1130,13 +1181,13 @@ pub mod tests {
     }
 
     /// Take the ready tokens delivered to `mailbox`.
-    fn scheduled(mailbox: &Mailbox) -> Vec<Task> {
+    fn scheduled(mailbox: &Mailbox) -> Vec<Runnable> {
         let mut messages = Vec::new();
         mailbox.take(&mut messages);
         messages
             .into_iter()
             .map(|message| match message {
-                Message::Wake(Target::Task(task)) => task,
+                Message::Wake(Target::Task(token)) => token,
                 _ => panic!("expected only ready tokens"),
             })
             .collect()
@@ -1163,7 +1214,8 @@ pub mod tests {
     fn test_links_follow_the_future() {
         fn check<F: Future<Output = ()> + Send + 'static>(future: F) {
             let set = Tasks::new(1);
-            let task = Task::new(future, &set, Weak::new());
+            let token = Task::new(future, &set, Weak::new());
+            let task = token.task();
             let cell = task.as_ptr().cast::<Cell<F>>();
             // SAFETY: the task's reference keeps the cell alive, and `new`
             // leaked a `Cell<F>` at this pointer.
@@ -1172,6 +1224,7 @@ pub mod tests {
             let links = unsafe { Header::links(task.as_ptr()) };
             assert_eq!(links.as_ptr().cast_const(), expected);
             task.clear();
+            token.discard();
         }
 
         check(pending::<()>());
@@ -1206,12 +1259,14 @@ pub mod tests {
         let mailbox = mailbox();
 
         // A new task holds only its first token and one mailbox reference.
-        let task = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
-        assert_eq!(refs(&task), 1);
+        let token = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
+        assert_eq!(refs(token.task()), 1);
         assert_eq!(Arc::weak_count(&mailbox), 1);
 
-        // Polling borrows the token's reference for the waker it passes in.
-        assert!(matches!(task.clone().poll(), AfterPoll::Done));
+        // Polling borrows the token's reference for the waker it passes in,
+        // and going idle releases it.
+        let task = token.task().clone();
+        assert!(matches!(token.poll(), AfterPoll::Done));
         assert_eq!(refs(&task), 1);
 
         // Cloned wakers count, and dropped ones release.
@@ -1224,10 +1279,11 @@ pub mod tests {
         // Waking by value hands the waker's reference to the published token.
         waker.wake();
         assert_eq!(refs(&task), 2);
-        let tokens = scheduled(&mailbox);
+        let mut tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].as_ptr(), task.as_ptr());
-        drop(tokens);
+        let token = tokens.pop().unwrap();
+        assert_eq!(token.task().as_ptr(), task.as_ptr());
+        token.discard();
         assert_eq!(refs(&task), 1);
 
         // The last reference frees the cell, and with it the mailbox reference.
@@ -1307,15 +1363,15 @@ pub mod tests {
         let AfterPoll::Requeue(token) = ready.pop().unwrap().poll() else {
             panic!("self-woken pending poll must requeue");
         };
-        assert_eq!(token.as_ptr(), task.as_ptr());
+        assert_eq!(token.task().as_ptr(), task.as_ptr());
         assert!(scheduled(&mailbox).is_empty());
 
         // The final poll wakes itself again, which the terminal state discards.
-        let AfterPoll::Retire(token) = token.poll() else {
+        let AfterPoll::Retire(retired) = token.poll() else {
             panic!("final poll must complete");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        retire(&set, token);
+        retire(&set, retired);
         assert!(scheduled(&mailbox).is_empty());
         assert_eq!(refs(&task), 1);
     }
@@ -1336,11 +1392,11 @@ pub mod tests {
         let waker = Waker::clone(&first.waker());
 
         // The panicking poll completes the task and drops its future.
-        let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
+        let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
             panic!("panicking poll must complete the task");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        retire(&set, token);
+        retire(&set, retired);
         assert_eq!(set.live(), 0);
 
         // The completed task's waker neither publishes nor reaches the next
@@ -1358,8 +1414,9 @@ pub mod tests {
 
     /// A task registered from a thread without its worker joins the set at
     /// once and sends its first token through the mailbox. A closed or dropped
-    /// mailbox drops the token and leaves the task to teardown, and a closed
-    /// set returns the new task to the caller with its future intact.
+    /// mailbox discards the token and leaves the task to teardown, and a closed
+    /// set returns the new task to the caller with its future intact and its
+    /// token discarded.
     #[test]
     fn test_foreign_registration_retains_the_task_and_mails_its_token() {
         let drops = Arc::new(AtomicUsize::new(0));
@@ -1369,12 +1426,13 @@ pub mod tests {
         // The set retains the task, and its first token arrives as a wake.
         assert!(set.register(pending(), Arc::downgrade(&mailbox)).is_ok());
         assert_eq!(set.live(), 1);
-        let tokens = scheduled(&mailbox);
+        let mut tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(refs(&tokens[0]), 2);
-        drop(tokens);
+        let token = tokens.pop().unwrap();
+        assert_eq!(refs(token.task()), 2);
+        token.discard();
 
-        // A closed or dropped mailbox releases the token, and the set keeps
+        // A closed or dropped mailbox discards the token, and the set keeps
         // the task until teardown clears it.
         drop(mailbox.close());
         assert!(set.register(pending(), Arc::downgrade(&mailbox)).is_ok());
@@ -1400,6 +1458,7 @@ pub mod tests {
             panic!("a closed set must reject the task");
         };
         assert_eq!(drops.load(Ordering::Relaxed), 0);
+        assert_eq!(refs(&rejected), 1);
         rejected.clear();
         assert_eq!(drops.load(Ordering::Relaxed), 1);
 
@@ -1408,10 +1467,10 @@ pub mod tests {
         }
     }
 
-    /// A wake whose mailbox is closed or gone releases its token instead of
+    /// A wake whose mailbox is closed or gone discards its token instead of
     /// leaking it.
     #[test]
-    fn test_wake_to_a_closed_or_dropped_mailbox_releases_its_token() {
+    fn test_wake_to_a_closed_or_dropped_mailbox_discards_its_token() {
         let set = Tasks::new(1);
         let mut ready = Ready::default();
         let closed = mailbox();
@@ -1458,7 +1517,7 @@ pub mod tests {
             );
 
             match ready.pop().unwrap().poll() {
-                AfterPoll::Retire(token) => retire(&set, token),
+                AfterPoll::Retire(retired) => retire(&set, retired),
                 AfterPoll::Done => task.clear(),
                 _ => panic!("the poll must complete or leave the task idle"),
             }
@@ -1493,9 +1552,9 @@ pub mod tests {
         let mut tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
 
-        // Teardown releases the ready tokens and closes the set, which hands
+        // Teardown discards the ready tokens and closes the set, which hands
         // out every task without dropping any future.
-        ready.clear();
+        ready.discard();
         assert!(ready.is_empty());
         let retired = set.teardown();
         assert_eq!(retired.len(), 3);
@@ -1558,11 +1617,11 @@ pub mod tests {
 
             // The poller completes the task and drops the future, and a later
             // wake publishes nothing.
-            let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
+            let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
                 panic!("a task cleared during its poll must complete");
             };
             assert_eq!(drops.load(Ordering::Relaxed), 1);
-            retire(&set, token);
+            retire(&set, retired);
             task.wake_by_ref();
             assert!(scheduled(&mailbox).is_empty());
             cell.lock().take();
@@ -1625,10 +1684,10 @@ pub mod tests {
         });
         let waker = Waker::clone(&task.waker());
 
-        let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
+        let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
             panic!("ready future must complete");
         };
-        retire(&set, token);
+        retire(&set, retired);
         drop(task);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
 
@@ -1661,10 +1720,10 @@ pub mod tests {
 
             if complete {
                 // The ready future's destructor panics inside the poll.
-                let AfterPoll::Retire(token) = outcome else {
+                let AfterPoll::Retire(retired) = outcome else {
                     panic!("ready future must complete despite its destructor panic");
                 };
-                retire(&set, token);
+                retire(&set, retired);
             } else {
                 // Teardown clears the idle task and contains its destructor panic.
                 assert!(matches!(outcome, AfterPoll::Done));
@@ -1717,10 +1776,10 @@ pub mod tests {
             }
             if complete {
                 // The third poll completes the future, which drops in place.
-                let AfterPoll::Retire(token) = ready.pop().unwrap().poll() else {
+                let AfterPoll::Retire(retired) = ready.pop().unwrap().poll() else {
                     panic!("the third poll must complete");
                 };
-                retire(&set, token);
+                retire(&set, retired);
             } else {
                 // Teardown drops the idle future in place.
                 for retired in set.teardown() {

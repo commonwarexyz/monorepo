@@ -1455,17 +1455,22 @@ impl Worker {
         // Closing the driver and timer table below subsumes queued cancellations.
         // Discard queued forwarding messages so their receivers observe closure.
         // Senders can run callbacks on drop, so destroy these messages outside
-        // the local borrow. A queued wake's token is a second reference to a
-        // task the task set retains, so releasing it runs no user code.
+        // the local borrow. A queued wake's token belongs to a task the closed
+        // task set retains, so discarding it runs no user code.
         for message in self.inbox.drain(..) {
-            Panics::contain(|| drop(message));
+            match message {
+                Message::Wake(Target::Task(token)) => token.discard(),
+                message => {
+                    Panics::contain(|| drop(message));
+                }
+            }
         }
 
         // Destroy tasks before closing I/O, letting their futures detach
-        // observers. Ready tokens are second references as well. The ordinary
-        // worker drains the task set it closed and clears each task outside
-        // the local borrow and the set's locks.
-        self.local.borrow_mut().ready.clear();
+        // observers. Ready tokens belong to retained tasks as well. The
+        // ordinary worker drains the task set it closed and clears each task
+        // outside the local borrow and the set's locks.
+        self.local.borrow_mut().ready.discard();
         if self.ordinary {
             let shared = self.local.borrow().shared.clone();
             for task in shared.tasks.drain() {
@@ -1564,7 +1569,7 @@ impl Worker {
                     let mut local = self.local.borrow_mut();
                     match target {
                         Target::Root => local.root_ready = true,
-                        Target::Task(task) => local.ready.push(task),
+                        Target::Task(token) => local.ready.push(token),
                     }
                 }
                 Message::Forward(forward) => {
@@ -1640,16 +1645,16 @@ impl Worker {
             // Bound task polling so a self-waking task cannot starve the root,
             // mailbox, or ring service.
             for _ in 0..BATCH_SIZE {
-                let Some(task) = self.local.borrow_mut().ready.pop() else {
+                let Some(token) = self.local.borrow_mut().ready.pop() else {
                     break;
                 };
 
                 // The inner wrapper handles user polling policy. The poll also
                 // contains the destruction of a finished or cancelled future.
-                match task.poll() {
+                match token.poll() {
                     AfterPoll::Done => {}
                     // Join the tail so self-waking tasks cannot skip other ready work.
-                    AfterPoll::Requeue(task) => self.local.borrow_mut().ready.push(task),
+                    AfterPoll::Requeue(token) => self.local.borrow_mut().ready.push(token),
                     // The future is gone, so releasing the set's reference and
                     // the token's runs no user code.
                     AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
