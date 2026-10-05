@@ -299,8 +299,9 @@ struct ReplayFlights<D: Copy + Ord> {
 /// Replay sharing for one proposal or verification attempt.
 ///
 /// Verifications report their replay phase to `progress` so a finalization can classify them.
-/// Proposals report none: the actor completes each proposal before it handles a finalization or
-/// prune, so a proposal's replay never crosses either.
+/// Proposals report none: while a proposal is active, the actor admits only verification requests
+/// and defers every other message until the proposal completes, so a proposal's replay never
+/// crosses a finalization or prune.
 #[derive(Clone, Copy)]
 struct ReplayTracking<'a, D: Copy + Ord> {
     flights: &'a ReplayFlights<D>,
@@ -924,7 +925,7 @@ where
                         warn!(
                             ?digest,
                             ?error,
-                            "finalization could not reuse active verification replay"
+                            "finalization could not reuse active replay"
                         );
                         continue;
                     }
@@ -1255,6 +1256,9 @@ where
 
     /// Replays `block` on its parent's state and caches the result as unverified.
     ///
+    /// `digest` must be the digest of `block`: the state is cached under it without rehashing
+    /// `block`.
+    ///
     /// Returns [`PrepareBatchesError::Cancelled`] without caching if `cancellation` fires first.
     /// Returns [`PrepareBatchesError::Invalid`] if the parent's state cannot be forked, if the
     /// application cannot execute `block`, if the result does not match `block`'s commitments, or
@@ -1322,16 +1326,18 @@ where
     }
 
     /// Replays `block` as [`Self::replay`] does, sharing the work with concurrent proposals and
-    /// verifications.
+    /// verifications by `digest`, which must be the digest of `block`.
     ///
     /// One request executes the replay and the others wait for its result. If the executing
     /// request is cancelled, a remaining request takes over. A waiter adopts the executing
     /// request's failure unless `block` has since become the winner or the processed anchor.
+    #[allow(clippy::too_many_arguments)]
     async fn replay_shared<C>(
         &self,
         app: &mut A,
         context: &E,
         target_digest: BlockDigest<A, E>,
+        digest: BlockDigest<A, E>,
         block: Arc<A::Block>,
         cancellation: &mut C,
         tracking: ReplayTracking<'_, BlockDigest<A, E>>,
@@ -1339,7 +1345,7 @@ where
     where
         C: Cancellation,
     {
-        let (digest, parent, round) = (block.digest(), block.parent(), block.context().round());
+        let (parent, round) = (block.parent(), block.context().round());
         loop {
             match self.claim_replay(tracking.flights, digest) {
                 ReplayClaim::Ready => return Ok(()),
@@ -1487,7 +1493,9 @@ where
             }
             anchor
         };
-        let mut expected = anchor;
+        // Each acquired block's digest is computed once, both to link the next block and to key
+        // its replay. The held target's digest is reused.
+        let (mut expected_height, mut expected_digest) = (anchor.height, anchor.digest);
         let mut range = blocks
             .range(
                 anchor.height.next()
@@ -1495,24 +1503,33 @@ where
                         .previous()
                         .expect("unprocessed target must have a parent"),
             )
-            .chain(futures::stream::iter([Ok(target)]));
+            .map(|block| block.map(|block| (block.digest(), block)))
+            .chain(futures::stream::iter([Ok((target_digest, target))]));
         let mut depth = 0;
         while let Some(block) = await_or_cancel(cancellation, range.next())
             .await
             .ok_or(PrepareBatchesError::Cancelled)?
         {
-            let block = block.map_err(|error| match error {
+            let (digest, block) = block.map_err(|error| match error {
                 BlocksError::Unavailable => PrepareBatchesError::Incomplete,
                 _ => PrepareBatchesError::Invalid,
             })?;
-            if block.height().previous() != Some(expected.height)
-                || block.parent() != expected.digest
+            if block.height().previous() != Some(expected_height)
+                || block.parent() != expected_digest
             {
                 return Err(PrepareBatchesError::Invalid);
             }
-            expected = Anchor::from(block.as_ref());
-            self.replay_shared(app, context, target_digest, block, cancellation, tracking)
-                .await?;
+            (expected_height, expected_digest) = (block.height(), digest);
+            self.replay_shared(
+                app,
+                context,
+                target_digest,
+                digest,
+                block,
+                cancellation,
+                tracking,
+            )
+            .await?;
             depth += 1;
         }
         self.update_pending_metric();
@@ -1621,6 +1638,7 @@ mod tests {
         NZU16, NZU64, NZUsize, channel::oneshot, non_empty_range, range::NonEmptyRange, sync::Mutex,
     };
     use futures::StreamExt;
+    use rstest::rstest;
     use std::{
         cell::Cell,
         collections::{BTreeMap, HashSet, VecDeque},
@@ -2744,6 +2762,7 @@ mod tests {
                 &mut owner_app,
                 replay_context,
                 child.digest(),
+                child.digest(),
                 Arc::new(child.clone()),
                 &mut owner_cancellation,
                 ReplayTracking {
@@ -2757,6 +2776,7 @@ mod tests {
             let mut waiter = Box::pin(execution.replay_shared(
                 &mut waiter_app,
                 replay_context,
+                child.digest(),
                 child.digest(),
                 Arc::new(child.clone()),
                 &mut waiter_cancellation,
@@ -2837,6 +2857,7 @@ mod tests {
                 &mut owner_app,
                 replay_context,
                 child.digest(),
+                child.digest(),
                 Arc::new(child.clone()),
                 &mut owner_cancellation,
                 ReplayTracking {
@@ -2850,6 +2871,7 @@ mod tests {
             let mut waiter = Box::pin(execution.replay_shared(
                 &mut waiter_app,
                 replay_context,
+                child.digest(),
                 child.digest(),
                 Arc::new(child),
                 &mut waiter_cancellation,
@@ -2921,6 +2943,7 @@ mod tests {
                 &mut owner_app,
                 replay_context,
                 winner.digest(),
+                winner.digest(),
                 Arc::new(winner.clone()),
                 &mut owner_cancellation,
                 ReplayTracking {
@@ -2984,6 +3007,7 @@ mod tests {
             let mut waiter = Box::pin(execution.replay_shared(
                 &mut waiter_app,
                 replay_context,
+                winner.digest(),
                 winner.digest(),
                 Arc::new(winner.clone()),
                 &mut waiter_cancellation,
@@ -3109,6 +3133,7 @@ mod tests {
                 &mut owner_app,
                 replay_context,
                 winner.digest(),
+                winner.digest(),
                 Arc::new(winner.clone()),
                 &mut owner_cancellation,
                 ReplayTracking {
@@ -3122,6 +3147,7 @@ mod tests {
             let mut waiter = Box::pin(execution.replay_shared(
                 &mut waiter_app,
                 replay_context,
+                winner.digest(),
                 winner.digest(),
                 Arc::new(winner.clone()),
                 &mut waiter_cancellation,
@@ -3223,15 +3249,21 @@ mod tests {
         });
     }
 
-    #[test]
-    fn execution_rebuild_pending_reuses_replay_digest() {
+    /// Execution hashes each replayed block once, reusing the target's digest. `Blocks` hashes
+    /// each acquired ancestor once more to check it against its selected commitment.
+    #[rstest]
+    #[case::target(1)]
+    #[case::missing_ancestors(3)]
+    fn execution_rebuild_pending_reuses_replay_digest(#[case] depth: u64) {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context).await;
-            let block = harness
-                .stage_pending_child(&Block::genesis(), View::new(1))
-                .await;
-            let digest = block.digest();
-            let blocks = harness.provider.source(&block);
+            let mut target = Block::genesis();
+            let mut digests = Vec::new();
+            for view in 1..=depth {
+                target = harness.stage_pending_child(&target, View::new(view)).await;
+                digests.push(target.digest());
+            }
+            let blocks = harness.provider.source(&target);
             harness.processor.clear_pending();
             let (mut response, _live) = oneshot::channel::<bool>();
 
@@ -3241,18 +3273,23 @@ mod tests {
                 .rebuild_pending(
                     harness.context_cell.as_present(),
                     blocks,
-                    Arc::new(block),
+                    Arc::new(target),
                     &mut response,
                 )
                 .await;
-            let digest_calls = DIGEST_CALLS.get();
+            let digest_calls = DIGEST_CALLS.get() as u64;
 
             assert_eq!(result, Ok(()));
-            assert!(harness.processor.pending_contains(&digest));
-            assert!(harness.processor.replays.is_empty());
             assert!(
-                digest_calls <= 3,
-                "replay must reuse its registered digest: {digest_calls} hashes",
+                digests
+                    .iter()
+                    .all(|digest| harness.processor.pending_contains(digest))
+            );
+            assert!(harness.processor.replays.is_empty());
+            assert_eq!(
+                digest_calls,
+                2 * depth - 1,
+                "replay must reuse each block's validated digest",
             );
         });
     }

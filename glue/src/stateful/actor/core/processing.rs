@@ -448,7 +448,7 @@ where
                     let retry = verifications.quiesce().await;
                     assert!(
                         self.processor.replays_idle(),
-                        "verification replay remained active after quiescence"
+                        "replay remained active after quiescence"
                     );
 
                     // A prune target applied after the last barrier started is not yet durable.
