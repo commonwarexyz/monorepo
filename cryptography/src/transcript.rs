@@ -3,7 +3,9 @@
 //! This is useful for hashing data, committing to it, and extracting secure
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
-use crate::{BatchEntry, PublicKey, Signer, Verifier};
+#[cfg(any(feature = "bls12381", test))]
+use crate::{BatchEntry, PublicKey};
+use crate::{Signer, Verifier};
 use blake3::BLOCK_LEN;
 use commonware_codec::{
     Buf, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
@@ -485,6 +487,7 @@ impl Summary {
     }
 
     /// Create a batch entry for a signature produced by [Summary::sign].
+    #[cfg(any(feature = "bls12381", test))]
     pub(crate) fn batch_entry<'a, P: PublicKey>(
         &'a self,
         public_key: &'a P,

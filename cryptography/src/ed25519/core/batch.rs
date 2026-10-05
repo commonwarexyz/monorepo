@@ -70,6 +70,9 @@ fn gen_u128<R: CryptoRng>(mut rng: R) -> u128 {
 /// A supplied namespace is framed identically to `union_unique`. `None` verifies
 /// a raw message. Rejects empty batches, invalid signatures, and namespace lengths
 /// that cannot be represented as a `u32`.
+///
+/// The projection must return the same entry each time it is called for an item
+/// and may be called concurrently.
 pub fn verify_projected<'a, R, T, F>(
     rng: &mut R,
     items: &'a [T],
