@@ -1,4 +1,4 @@
-use commonware_cryptography::{BatchVerifier, Signer as _, ed25519};
+use commonware_cryptography::{BatchEntry, BatchVerifier, Signer as _, ed25519};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, TestRng, test_rng};
@@ -29,20 +29,40 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let mut batch = ed25519::Batch::new(n_messages);
                             let signer = ed25519::PrivateKey::random(&mut rng);
-                            for msg in msgs.iter() {
-                                let sig = signer.sign(namespace, msg);
-                                assert!(batch.add(namespace, msg, &signer.public_key(), &sig));
-                            }
-                            batch
+                            let public_key = signer.public_key();
+                            let signatures = msgs
+                                .iter()
+                                .map(|msg| (msg, signer.sign(namespace, msg)))
+                                .collect::<Vec<_>>();
+                            (public_key, signatures)
                         },
-                        |batch| {
+                        |(public_key, signatures)| {
                             #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
-                                black_box(batch.verify(&mut verify_rng, rayon))
+                                black_box(ed25519::Batch::verify(
+                                    &mut verify_rng,
+                                    &signatures,
+                                    |(msg, signature)| BatchEntry {
+                                        namespace,
+                                        message: msg.as_slice(),
+                                        public_key: &public_key,
+                                        signature,
+                                    },
+                                    rayon,
+                                ))
                             } else {
-                                black_box(batch.verify(&mut verify_rng, &Sequential))
+                                black_box(ed25519::Batch::verify(
+                                    &mut verify_rng,
+                                    &signatures,
+                                    |(msg, signature)| BatchEntry {
+                                        namespace,
+                                        message: msg.as_slice(),
+                                        public_key: &public_key,
+                                        signature,
+                                    },
+                                    &Sequential,
+                                ))
                             }
                         },
                         BatchSize::SmallInput,

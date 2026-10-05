@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::{
-    BatchVerifier, Signer, Verifier,
+    BatchEntry, BatchVerifier, Signer, Verifier,
     ed25519::{self, Batch as Ed25519Batch},
 };
 use commonware_parallel::Sequential;
@@ -50,7 +50,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 fn fuzz(input: FuzzInput) {
     let mut rng = TestRng::new(input.rng_seed);
 
-    let mut ed25519_batch = Ed25519Batch::new(0);
+    let mut ed25519_batch = Vec::new();
     let mut expected_ed25519_result = None;
 
     for op in input.operations {
@@ -67,9 +67,7 @@ fn fuzz(input: FuzzInput) {
                 // Verify individual signature is valid
                 assert!(public_key.verify(namespace.as_slice(), &message, &signature));
 
-                let added =
-                    ed25519_batch.add(namespace.as_slice(), &message, &public_key, &signature);
-                assert!(added, "Valid signature should be added to batch");
+                ed25519_batch.push((namespace, message, public_key, signature));
                 expected_ed25519_result = Some(expected_ed25519_result.unwrap_or(true));
             }
 
@@ -90,20 +88,23 @@ fn fuzz(input: FuzzInput) {
                     // Verify individual signature is invalid
                     assert!(!wrong_public_key.verify(namespace.as_slice(), &message, &signature));
 
-                    let added = ed25519_batch.add(
-                        namespace.as_slice(),
-                        &message,
-                        &wrong_public_key,
-                        &signature,
-                    );
-                    if added {
-                        expected_ed25519_result = Some(false);
-                    }
+                    ed25519_batch.push((namespace, message, wrong_public_key, signature));
+                    expected_ed25519_result = Some(false);
                 }
             }
 
             BatchOperation::VerifyEd25519 => {
-                let result = ed25519_batch.verify(&mut rng, &Sequential);
+                let result = Ed25519Batch::verify(
+                    &mut rng,
+                    &ed25519_batch,
+                    |(namespace, message, public_key, signature)| BatchEntry {
+                        namespace,
+                        message,
+                        public_key,
+                        signature,
+                    },
+                    &Sequential,
+                );
                 assert_eq!(
                     result,
                     expected_ed25519_result.unwrap_or(false),
@@ -111,14 +112,24 @@ fn fuzz(input: FuzzInput) {
                 );
 
                 // Reset batch and expectation after verification
-                ed25519_batch = Ed25519Batch::new(0);
+                ed25519_batch.clear();
                 expected_ed25519_result = None;
             }
         }
     }
 
     // Final verification of any remaining items
-    let ed25519_result = ed25519_batch.verify(&mut rng, &Sequential);
+    let ed25519_result = Ed25519Batch::verify(
+        &mut rng,
+        &ed25519_batch,
+        |(namespace, message, public_key, signature)| BatchEntry {
+            namespace,
+            message,
+            public_key,
+            signature,
+        },
+        &Sequential,
+    );
     assert_eq!(
         ed25519_result,
         expected_ed25519_result.unwrap_or(false),

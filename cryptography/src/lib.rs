@@ -173,48 +173,84 @@ commonware_macros::stability_scope!(BETA {
         fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
     }
 
-    /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
+    /// A borrowed view of one signature and the message it authenticates.
+    ///
+    /// All fields must remain available throughout batch verification. Messages are
+    /// supplied unhashed, and namespaces must match those used during signing.
+    pub struct BatchEntry<'a, P: PublicKey> {
+        /// The namespace used during signing.
+        pub namespace: &'a [u8],
+        /// The message used during signing.
+        pub message: &'a [u8],
+        /// The signer's public key.
+        pub public_key: &'a P,
+        /// The signature to verify.
+        pub signature: &'a P::Signature,
+    }
+
+    impl<P: PublicKey> Copy for BatchEntry<'_, P> {}
+
+    impl<P: PublicKey> Clone for BatchEntry<'_, P> {
+        fn clone(&self) -> Self {
+            *self
+        }
+    }
+
+    /// Verifies whether all [Signature]s are correct or some [Signature] is incorrect.
     pub trait BatchVerifier {
         /// The type of public keys that this verifier can accept.
         type PublicKey: PublicKey;
 
-        /// Create a new batch verifier with capacity for at least `capacity` items.
+        /// Verify a slice of items through borrowed views of their signature data.
         ///
-        /// The capacity is a hint: more than `capacity` items may be added, and
-        /// implementations may ignore it.
-        fn new(capacity: usize) -> Self;
-
-        /// Append item to the batch.
+        /// The projection must return the same entry whenever called for an item.
+        /// It may be called more than once and concurrently. Its references must
+        /// point to data that remains available throughout this call. The message
+        /// must not be hashed before verification. Namespace framing follows
+        /// [commonware_utils::union_unique], matching individual verification.
         ///
-        /// The message should not be hashed prior to calling this function. If a particular scheme
-        /// requires a payload to be hashed before it is signed, it will be done internally.
+        /// Returns `false` if the slice is empty or any signature is invalid.
         ///
-        /// A namespace must be used to prevent replay attacks. It will be prepended to the message so
-        /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
-        /// a message on the network layer can't accidentally spend funds on the execution layer). See
-        /// [commonware_utils::union_unique] for details.
-        fn add(
-            &mut self,
-            namespace: &[u8],
-            message: &[u8],
-            public_key: &Self::PublicKey,
-            signature: &<Self::PublicKey as Verifier>::Signature,
-        ) -> bool;
-
-        /// Verify all items added to the batch.
+        /// # Examples
         ///
-        /// Returns `false` if no items were added or any item is invalid.
+        /// ```
+        /// use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, ed25519};
+        /// use commonware_math::algebra::Random;
+        /// use commonware_parallel::Sequential;
+        /// use commonware_utils::test_rng;
+        ///
+        /// let key = ed25519::PrivateKey::random(test_rng());
+        /// let public_key = key.public_key();
+        /// let namespace = b"example";
+        /// let records = [(b"message".as_slice(), key.sign(namespace, b"message"))];
+        /// assert!(ed25519::Batch::verify(
+        ///     &mut test_rng(),
+        ///     &records,
+        ///     |(message, signature)| BatchEntry {
+        ///         namespace,
+        ///         message,
+        ///         public_key: &public_key,
+        ///         signature,
+        ///     },
+        ///     &Sequential,
+        /// ));
+        /// ```
         ///
         /// # Why Randomness?
         ///
-        /// When performing batch verification, it is often important to add some randomness
-        /// to prevent an attacker from constructing a malicious batch of signatures that pass
-        /// batch verification but are invalid individually. Abstractly, think of this as
-        /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
-        /// (`c_1 + d` and `c_2 - d`).
-        ///
-        /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-        fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
+        /// Randomness prevents an attacker from constructing invalid signatures
+        /// whose errors cancel in the batch equation. The RNG must be unpredictable
+        /// to an adversary. See this [discussion](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
+        fn verify<'a, R, T, F>(
+            rng: &mut R,
+            items: &'a [T],
+            project: F,
+            strategy: &impl Strategy,
+        ) -> bool
+        where
+            R: CryptoRng,
+            T: Sync,
+            F: Fn(&'a T) -> BatchEntry<'a, Self::PublicKey> + Sync;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests

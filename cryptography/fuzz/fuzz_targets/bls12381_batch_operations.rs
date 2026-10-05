@@ -2,7 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::{
-    BatchVerifier, Signer, Verifier,
+    BatchEntry, BatchVerifier, Signer, Verifier,
     bls12381::{self, Batch},
 };
 use commonware_parallel::Sequential;
@@ -47,14 +47,14 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 struct FuzzState {
-    batch: Batch,
+    batch: Vec<(Vec<u8>, Vec<u8>, bls12381::PublicKey, bls12381::Signature)>,
     expected_result: Option<bool>,
 }
 
 impl FuzzState {
     fn new() -> Self {
         Self {
-            batch: Batch::new(0),
+            batch: Vec::new(),
             expected_result: None,
         }
     }
@@ -73,10 +73,9 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
 
             assert!(public_key.verify(namespace.as_slice(), &message, &signature));
 
-            let added = state
+            state
                 .batch
-                .add(namespace.as_slice(), &message, &public_key, &signature);
-            assert!(added, "Valid signature should be added to batch");
+                .push((namespace, message, public_key, signature));
             state.expected_result = Some(state.expected_result.unwrap_or(true));
         }
 
@@ -94,15 +93,10 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
             if private_key_seed != wrong_private_key_seed {
                 assert!(!wrong_public_key.verify(namespace.as_slice(), &message, &signature));
 
-                let added = state.batch.add(
-                    namespace.as_slice(),
-                    &message,
-                    &wrong_public_key,
-                    &signature,
-                );
-                if added {
-                    state.expected_result = Some(false);
-                }
+                state
+                    .batch
+                    .push((namespace, message, wrong_public_key, signature));
+                state.expected_result = Some(false);
             }
         }
     }
@@ -124,7 +118,17 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let result = state.batch.verify(&mut rng, &Sequential);
+    let result = Batch::verify(
+        &mut rng,
+        &state.batch,
+        |(namespace, message, public_key, signature)| BatchEntry {
+            namespace,
+            message,
+            public_key,
+            signature,
+        },
+        &Sequential,
+    );
     assert_eq!(
         result,
         state.expected_result.unwrap_or(false),

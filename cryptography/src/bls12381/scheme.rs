@@ -32,7 +32,7 @@ use super::primitives::{
     ops,
     variant::{MinPk, Variant},
 };
-use crate::{BatchVerifier, Secret, Signer as _};
+use crate::{BatchEntry, BatchVerifier, Secret, Signer as _};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
@@ -372,39 +372,36 @@ impl arbitrary::Arbitrary<'_> for Signature {
 }
 
 /// BLS12-381 batch verifier.
-pub struct Batch {
-    publics: Vec<<MinPk as Variant>::Public>,
-    hms: Vec<<MinPk as Variant>::Signature>,
-    signatures: Vec<<MinPk as Variant>::Signature>,
-}
+pub struct Batch;
 
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
-    fn new(capacity: usize) -> Self {
-        Self {
-            publics: Vec::with_capacity(capacity),
-            hms: Vec::with_capacity(capacity),
-            signatures: Vec::with_capacity(capacity),
+    fn verify<'a, R, T, F>(
+        rng: &mut R,
+        items: &'a [T],
+        project: F,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRng,
+        T: Sync,
+        F: Fn(&'a T) -> BatchEntry<'a, Self::PublicKey> + Sync,
+    {
+        let mut publics = Vec::with_capacity(items.len());
+        let mut hms = Vec::with_capacity(items.len());
+        let mut signatures = Vec::with_capacity(items.len());
+        for item in items {
+            let entry = project(item);
+            publics.push(entry.public_key.key);
+            hms.push(ops::hash_with_namespace::<MinPk>(
+                MinPk::MESSAGE,
+                entry.namespace,
+                entry.message,
+            ));
+            signatures.push(entry.signature.signature);
         }
-    }
-
-    fn add(
-        &mut self,
-        namespace: &[u8],
-        message: &[u8],
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) -> bool {
-        self.publics.push(public_key.key);
-        let hm = ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, namespace, message);
-        self.hms.push(hm);
-        self.signatures.push(signature.signature);
-        true
-    }
-
-    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
-        MinPk::batch_verify(rng, &self.publics, &self.hms, &self.signatures, strategy).is_ok()
+        MinPk::batch_verify(rng, &publics, &hms, &signatures, strategy).is_ok()
     }
 }
 
@@ -485,8 +482,43 @@ mod tests {
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new(0);
-        assert!(!batch.verify(&mut test_rng(), &Sequential));
+        let entries: [BatchEntry<'_, PublicKey>; 0] = [];
+        assert!(!Batch::verify(
+            &mut test_rng(),
+            &entries,
+            |entry| *entry,
+            &Sequential,
+        ));
+    }
+
+    #[test]
+    fn batch_verify_invalid_message() {
+        // Start with a valid namespaced signature.
+        let mut rng = test_rng();
+        let private_key = PrivateKey::random(&mut rng);
+        let public_key = private_key.public_key();
+        let signature = private_key.sign(b"ns", b"message");
+        let mut entries = [BatchEntry {
+            namespace: b"ns",
+            message: b"message",
+            public_key: &public_key,
+            signature: &signature,
+        }];
+        assert!(Batch::verify(
+            &mut rng,
+            &entries,
+            |entry| *entry,
+            &Sequential,
+        ));
+
+        // Changing the message must invalidate the signature.
+        entries[0].message = b"invalid";
+        assert!(!Batch::verify(
+            &mut rng,
+            &entries,
+            |entry| *entry,
+            &Sequential,
+        ));
     }
 
     #[cfg(feature = "arbitrary")]

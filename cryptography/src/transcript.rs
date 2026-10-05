@@ -3,7 +3,7 @@
 //! This is useful for hashing data, committing to it, and extracting secure
 //! randomness from it. The API evades common footguns when doing these things
 //! in an ad hoc way.
-use crate::{BatchVerifier, Signer, Verifier};
+use crate::{BatchEntry, PublicKey, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use commonware_codec::{
     Buf, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
@@ -451,16 +451,6 @@ impl Transcript {
     pub fn verify<V: Verifier>(&self, v: &V, sig: &<V as Verifier>::Signature) -> bool {
         self.summarize().verify(v, sig)
     }
-
-    /// Append a signature produced by [Transcript::sign] to a batch verifier.
-    pub fn add_to_batch<B: BatchVerifier>(
-        &self,
-        batch: &mut B,
-        public_key: &B::PublicKey,
-        signature: &<B::PublicKey as Verifier>::Signature,
-    ) -> bool {
-        self.summarize().add_to_batch(batch, public_key, signature)
-    }
 }
 
 /// Sample a uniform value in `0..bound` from an infallible RNG.
@@ -494,16 +484,19 @@ impl Summary {
         v.verify(b"", self.as_ref(), sig)
     }
 
-    /// Append a signature produced by [Summary::sign] to a batch verifier.
-    pub fn add_to_batch<B: BatchVerifier>(
-        &self,
-        batch: &mut B,
-        public_key: &B::PublicKey,
-        signature: &<B::PublicKey as Verifier>::Signature,
-    ) -> bool {
-        // Note: We pass an empty namespace here, since the namespace may be included
-        // within the transcript summary already via `Transcript::new`.
-        batch.add(b"", self.as_ref(), public_key, signature)
+    /// Create a batch entry for a signature produced by [Summary::sign].
+    pub(crate) fn batch_entry<'a, P: PublicKey>(
+        &'a self,
+        public_key: &'a P,
+        signature: &'a P::Signature,
+    ) -> BatchEntry<'a, P> {
+        // The namespace may already be included by `Transcript::new`.
+        BatchEntry {
+            namespace: b"",
+            message: self.as_ref(),
+            public_key,
+            signature,
+        }
     }
 }
 
@@ -602,7 +595,7 @@ impl arbitrary::Arbitrary<'_> for Summary {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ed25519;
+    use crate::{BatchVerifier, ed25519};
     use bytes::Buf as _;
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_parallel::Sequential;
@@ -844,7 +837,7 @@ mod test {
     }
 
     #[test]
-    fn test_summary_add_to_batch_matches_transcript() {
+    fn test_summary_batch_entry_matches_transcript() {
         let sk = ed25519::PrivateKey::from_seed(7);
         let pk = sk.public_key();
         let mut transcript = v0(b"test");
@@ -852,13 +845,22 @@ mod test {
         let summary = transcript.summarize();
         let sig = transcript.sign(&sk);
 
-        let mut summary_batch = ed25519::Batch::new(1);
-        assert!(summary.add_to_batch(&mut summary_batch, &pk, &sig));
-        let mut transcript_batch = ed25519::Batch::new(1);
-        assert!(transcript.add_to_batch(&mut transcript_batch, &pk, &sig));
+        let summary_batch = [summary.batch_entry(&pk, &sig)];
+        let transcript_summary = transcript.summarize();
+        let transcript_batch = [transcript_summary.batch_entry(&pk, &sig)];
 
-        assert!(summary_batch.verify(&mut test_rng(), &Sequential));
-        assert!(transcript_batch.verify(&mut test_rng(), &Sequential));
+        assert!(ed25519::Batch::verify(
+            &mut test_rng(),
+            &summary_batch,
+            |entry| *entry,
+            &Sequential,
+        ));
+        assert!(ed25519::Batch::verify(
+            &mut test_rng(),
+            &transcript_batch,
+            |entry| *entry,
+            &Sequential,
+        ));
     }
 
     #[test]
@@ -985,28 +987,30 @@ mod test {
             log.extend(summary.verify(&public_key, &summary_sig).encode());
             log.extend(transcript.verify(&public_key, &transcript_sig).encode());
 
-            let mut summary_batch = ed25519::Batch::new(1);
+            let summary_batch = [summary.batch_entry(&public_key, &summary_sig)];
+            // Entries are admitted unconditionally; verification validates them.
+            log.extend(true.encode());
             log.extend(
-                summary
-                    .add_to_batch(&mut summary_batch, &public_key, &summary_sig)
-                    .encode(),
-            );
-            log.extend(
-                summary_batch
-                    .verify(&mut transcript.noise(b"summary batch"), &Sequential)
-                    .encode(),
+                ed25519::Batch::verify(
+                    &mut transcript.noise(b"summary batch"),
+                    &summary_batch,
+                    |entry| *entry,
+                    &Sequential,
+                )
+                .encode(),
             );
 
-            let mut transcript_batch = ed25519::Batch::new(1);
+            let transcript_summary = transcript.summarize();
+            let transcript_batch = [transcript_summary.batch_entry(&public_key, &transcript_sig)];
+            log.extend(true.encode());
             log.extend(
-                transcript
-                    .add_to_batch(&mut transcript_batch, &public_key, &transcript_sig)
-                    .encode(),
-            );
-            log.extend(
-                transcript_batch
-                    .verify(&mut transcript.noise(b"transcript batch"), &Sequential)
-                    .encode(),
+                ed25519::Batch::verify(
+                    &mut transcript.noise(b"transcript batch"),
+                    &transcript_batch,
+                    |entry| *entry,
+                    &Sequential,
+                )
+                .encode(),
             );
 
             let mut pending = Transcript::new(&namespace, version);

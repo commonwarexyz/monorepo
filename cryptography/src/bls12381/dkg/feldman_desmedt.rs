@@ -864,7 +864,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
             return Ok(DealerLogOutcome::Unavailable);
         };
         let ack_summary = transcript_for_ack(round_transcript, dealer, &log.pub_msg).summarize();
-        let mut ack_batch = B::new(self.players.len());
+        let mut ack_batch = Vec::with_capacity(self.players.len());
         let mut reveal_count = 0;
         let max_reveals = self.max_reveals::<M>();
         let mut reveal_eval_points = Vec::new();
@@ -872,9 +872,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
-                    if !ack_summary.add_to_batch(&mut ack_batch, player, &ack.sig) {
-                        return Err(DealerLogError::Fault(FaultReason::InvalidAck));
-                    }
+                    ack_batch.push(ack_summary.batch_entry(player, &ack.sig));
                 }
                 AckOrReveal::Reveal(priv_msg) => {
                     reveal_count += 1;
@@ -896,7 +894,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 }
             }
         }
-        if !ack_batch.verify(&mut *rng, strategy) {
+        if !B::verify(&mut *rng, &ack_batch, |entry| *entry, strategy) {
             return Err(DealerLogError::Fault(FaultReason::InvalidAck));
         }
         let lhs = log.pub_msg.commitment.lin_comb_eval(
