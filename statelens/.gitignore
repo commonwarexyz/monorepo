@@ -1,0 +1,5 @@
+campaign/
+extract/
+scripts/__pycache__/
+config.local.env
+invariants.local/
