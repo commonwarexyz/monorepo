@@ -340,6 +340,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Verify `block` produced by the application's proposer against `parent`.
         ///
+        /// `block` already extends `parent`: its parent digest is `parent`'s digest and
+        /// its height is one above `parent`'s.
+        ///
         /// `blocks` supplies forward ranges of the selected parent branch, including
         /// finalized history. It ends at `parent` (`blocks.tip() == parent.height()`) and
         /// excludes the candidate block.

@@ -63,15 +63,17 @@ where
 {
     /// Verifies `block` on the state of `parent`, replaying missing history from `blocks`.
     ///
+    /// The caller guarantees that `block` extends `parent`.
+    ///
     /// Returns `Some(true)` to accept the block, `Some(false)` to reject it, and `None` if
     /// `verification` is cancelled first. Unavailable history is not a verdict: the request stays
     /// pending until cancelled.
     ///
     /// A block that was proposed or verified locally, or that is the canonical block at or below
     /// the processed height, is accepted without execution. Any other block at or below the
-    /// processed height is rejected, as is a block that does not directly extend `parent`.
-    /// Otherwise, the block is accepted only if the application verifies it and the resulting
-    /// state matches the block's commitments and can still be cached.
+    /// processed height is rejected. Otherwise, the block is accepted only if the application
+    /// verifies it and the resulting state matches the block's commitments and can still be
+    /// cached.
     ///
     /// `progress` records the attempt's phase so it can be classified across a finalization.
     #[allow(clippy::too_many_arguments)]
@@ -116,9 +118,6 @@ where
         }
 
         let parent_digest = parent.digest();
-        if block.height().previous() != Some(parent.height()) || block.parent() != parent_digest {
-            return Some(false);
-        }
 
         // Missing ancestors are replayed once per block digest, shared with concurrent proposals
         // and verifications. Replayed state is not a verdict, so `block` is still verified below.

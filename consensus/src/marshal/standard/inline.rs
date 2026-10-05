@@ -403,8 +403,11 @@ where
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
 
-        // Register acquisition before publishing the gate so certification shares its work.
-        let block_request = self.marshal.acquire(digest);
+        // A proposal alone does not show that its block is available, so verification waits for
+        // local delivery and certification acquires the notarized block from peers. Register the
+        // wait before publishing the gate so it receives a buffered block or is waiting when
+        // certification delivers one.
+        let block_request = self.marshal.subscribe(digest);
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
 
@@ -568,6 +571,10 @@ where
         // instead of freezing certify with a fresh fsync.
         let task = self.gates.take(round, digest);
 
+        // The notarization behind this request shows the block is available. Fetching it
+        // unblocks a verification waiting for local delivery and supplies recovery below.
+        let block_request = self.marshal.acquire(digest);
+
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -599,13 +606,13 @@ where
                 }
 
                 // No local certification gate task (for example after an unclean restart):
-                // fetch the notarized block and persist it. A Byzantine leader can form a
+                // persist the notarized block fetched above. A Byzantine leader can form a
                 // notarization after sending the proposal to only f+1 honest validators, so
-                // the validators left without the block must fetch it here to certify and
-                // avoid getting stuck.
-                let block_rx = marshal.acquire(digest);
+                // the validators left without the block must fetch it to certify and avoid
+                // getting stuck.
                 let Some(block) =
-                    await_block_subscription(&mut tx, block_rx, &digest, "certification").await
+                    await_block_subscription(&mut tx, block_request, &digest, "certification")
+                        .await
                 else {
                     return;
                 };

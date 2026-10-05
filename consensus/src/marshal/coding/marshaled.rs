@@ -301,8 +301,8 @@ where
     /// the verification result.
     ///
     /// If `prefetched_block` is provided, it is used directly. This is useful in `certify` when
-    /// we've already fetched the block to extract its embedded context. Otherwise, exact
-    /// acquisition is registered with marshal before this method returns.
+    /// we've already fetched the block to extract its embedded context. Otherwise, a wait for
+    /// local delivery is registered with marshal before this method returns.
     fn deferred_verify(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
@@ -316,9 +316,14 @@ where
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
 
-        // Own the candidate or register exact acquisition before the caller publishes the gate.
-        let candidate = prefetched_block
-            .map_or_else(|| Either::Right(marshal.acquire(commitment)), Either::Left);
+        // A proposal alone does not show that its block is available, so verification waits for
+        // local reconstruction and certification acquires the notarized block from peers. Own
+        // the candidate or register the wait before the caller publishes the gate so it receives
+        // a cached block or is waiting when certification delivers one.
+        let candidate = prefetched_block.map_or_else(
+            || Either::Right(marshal.subscribe(commitment)),
+            Either::Left,
+        );
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -460,27 +465,21 @@ where
         &mut self,
         round: Round,
         payload: Commitment<B, C, H>,
+        block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
         ancestry: Arc<[Commitment<B, C, H>]>,
     ) -> oneshot::Receiver<bool> {
-        // Certify may be reached without an earlier `verify`, so the shard
-        // engine may not know the leader yet. A notarized commitment is still
-        // enough to start reconstruction from sender-indexed gossip shards
-        // already buffered for the commitment.
-        self.shards.notarized(payload, round);
-
         // No in-progress task means we never verified this proposal locally.
         // We can use the block's embedded context to move to the next view. If a Byzantine
         // proposer embedded a malicious context, the f+1 honest validators from the notarizing quorum
         // will verify against the proper context and reject the mismatch, preventing a 2f+1
         // finalization quorum.
         //
-        // Acquire the notarized commitment and verify its embedded context when available.
+        // Verify the acquired block against its embedded context once it arrives.
         debug!(
             ?round,
             ?payload,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.acquire(payload);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -569,13 +568,13 @@ where
         round: Round,
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
+        block_rx: oneshot::Receiver<Arc<CodedBlock<B, C, H>>>,
         ancestry: Arc<[Commitment<B, C, H>]>,
     ) -> oneshot::Receiver<bool> {
-        self.shards.notarized(payload, round);
-
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
-        // recovers via the embedded-context fetch path.
+        // recovers via the embedded-context fetch path. The acquisition stays live until
+        // the gate resolves or recovery consumes it.
         let mut marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
@@ -584,7 +583,7 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, payload, move || {
-                marshaled.certify_from_embedded_context(round, payload, ancestry)
+                marshaled.certify_from_embedded_context(round, payload, block_rx, ancestry)
             })
             .instrument(info_span!(
                 "marshal.coding.certify.existing",
@@ -1062,13 +1061,23 @@ where
     ) -> oneshot::Receiver<bool> {
         self.gates.flush_unrelayed(&self.marshal, round, payload);
 
+        // Certify may be reached without an earlier `verify`, so the shard engine may not know
+        // the leader yet. A notarized commitment is still enough to start reconstruction from
+        // sender-indexed gossip shards already buffered for the commitment.
+        self.shards.notarized(payload, round);
+
+        // A pending verification waits only for local reconstruction. The notarization behind
+        // this request shows the block is available, so acquire it from peers for the existing
+        // gate or for recovery from the block's embedded context.
+        let block_rx = self.marshal.acquire(payload);
+
         // First, check for an in-progress certification gate task.
         let task = self.gates.take(round, payload);
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, payload, task, ancestry);
+            return self.certify_from_existing_task(round, payload, task, block_rx, ancestry);
         }
 
-        self.certify_from_embedded_context(round, payload, ancestry)
+        self.certify_from_embedded_context(round, payload, block_rx, ancestry)
     }
 }
 

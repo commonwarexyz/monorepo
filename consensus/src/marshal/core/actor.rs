@@ -39,7 +39,10 @@ use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
-    telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
+    telemetry::{
+        metrics::{Gauge, GaugeExt, MetricsExt as _},
+        traces::TracedExt as _,
+    },
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
@@ -899,7 +902,7 @@ where
                     .lease(commitments.clone(), range.clone(), lease);
                 if let Some(selected) = commitments.get(range) {
                     for commitment in selected {
-                        if self.block_subscriptions.contains(commitment) {
+                        if self.block_subscriptions.fetching(commitment) {
                             self.acquisitions.satisfied(*commitment);
                         }
                     }
@@ -908,7 +911,14 @@ where
             Message::HintFinalized {
                 height, targets, ..
             } => {
-                if self.get_finalization_by_height(height).await.is_some() {
+                // Skip heights whose finalization is already stored. Stored ranges
+                // answer this from memory without reading the certificate.
+                if self
+                    .finalizations_by_height
+                    .ranges_from(height)
+                    .next()
+                    .is_some_and(|(start, _)| start <= height)
+                {
                     return self;
                 }
                 self.floor.fetch_targeted_if_permitted(
@@ -920,9 +930,10 @@ where
             Message::Acquire {
                 span,
                 commitment,
+                fetch,
                 response,
             } => {
-                self.handle_acquire(span, commitment, response, resolver, waiters, buffer)
+                self.handle_acquire(span, commitment, fetch, response, resolver, waiters, buffer)
                     .await;
             }
             Message::SetFloor { finalization, .. } => {
@@ -1121,10 +1132,12 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_acquire<Buf: Buffer<V>>(
         &mut self,
         span: Span,
         commitment: V::Commitment,
+        fetch: bool,
         response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         waiters: &mut AbortablePool<'_, Option<V::Block>>,
@@ -1144,12 +1157,17 @@ where
             response.send_lossy(block);
             return;
         }
-        let active = self.acquisitions.claim(commitment);
-        if !active && !self.block_subscriptions.contains(&commitment) {
-            resolver.fetch(Request::new(commitment, Annotation::Subscription));
+
+        // Only fetching callers own peer demand. A caller that waits without fetching
+        // leaves speculative demand and any existing request to their owners.
+        if fetch {
+            let active = self.acquisitions.claim(commitment);
+            if !active && !self.block_subscriptions.fetching(&commitment) {
+                resolver.fetch(Request::new(commitment, Annotation::Subscription));
+            }
         }
         self.block_subscriptions
-            .insert(span, commitment, response, waiters, buffer);
+            .insert(span, commitment, fetch, response, waiters, buffer);
     }
 
     /// Verifies and installs a floor, awaiting the anchor block from the buffer or peers if needed.
@@ -1475,15 +1493,11 @@ where
             return self;
         };
         let digest = V::commitment_to_inner(commitment);
-        let finalization = match self.cache.get_finalization_for(digest).await {
-            Some(certificate) if certificate.proposal.payload == commitment => Some(certificate),
-            _ => self
-                .finalizations_by_height
-                .get(ArchiveID::Key(&digest))
-                .await
-                .expect("failed to read archived finalization")
-                .filter(|certificate| certificate.proposal.payload == commitment),
-        };
+        let finalization = self
+            .cache
+            .get_finalization_for(digest)
+            .await
+            .filter(|certificate| certificate.proposal.payload == commitment);
         let repairing = self.repair_parent == Some(commitment);
         let certified = self.certified.height(&commitment).is_some();
         let expected = if finalization.is_some() || repairing || certified {
@@ -1555,6 +1569,7 @@ where
     }
 
     /// Verifies finalizations under each epoch's captured admission scope.
+    #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len().traced()))]
     async fn verify_delivered<Buf: Buffer<V>>(
         mut self: Box<Self>,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,

@@ -308,6 +308,7 @@ where
         &mut self,
         round: Round,
         digest: B::Digest,
+        block_rx: oneshot::Receiver<Arc<B>>,
         ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<bool> {
         // No in-progress task means we never verified this proposal locally. We can use the
@@ -316,13 +317,12 @@ where
         // the f+1 honest validators from the notarizing quorum will verify against the proper
         // context and reject the mismatch, preventing a 2f+1 finalization quorum.
         //
-        // Acquire the notarized commitment and verify its embedded context when available.
+        // Verify the acquired block against its embedded context once it arrives.
         debug!(
             ?round,
             ?digest,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self.marshal.acquire(digest);
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -410,11 +410,13 @@ where
         round: Round,
         digest: B::Digest,
         task: oneshot::Receiver<GateOutcome>,
+        block_rx: oneshot::Receiver<Arc<B>>,
         ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<bool> {
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
-        // recovers via the embedded-context fetch path.
+        // recovers via the embedded-context fetch path. The acquisition stays live until
+        // the gate resolves or recovery consumes it.
         let mut marshaled = self.clone();
         let (tx, rx) = oneshot::channel();
         let context = self
@@ -423,7 +425,7 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, digest, move || {
-                marshaled.certify_from_embedded_context(round, digest, ancestry)
+                marshaled.certify_from_embedded_context(round, digest, block_rx, ancestry)
             })
             .instrument(info_span!(
                 "marshal.deferred.certify.existing",
@@ -655,8 +657,11 @@ where
         let mut marshaled = self.clone();
         let round = context.round;
 
-        // Register acquisition before publishing the gate so certification shares its work.
-        let block_request = marshal.acquire(digest);
+        // A proposal alone does not show that its block is available, so verification waits for
+        // local delivery and certification acquires the notarized block from peers. Register the
+        // wait before publishing the gate so it receives a buffered block or is waiting when
+        // certification delivers one.
+        let block_request = marshal.subscribe(digest);
         let (task_tx, task_rx) = oneshot::channel();
         self.gates.insert(round, digest, task_rx);
 
@@ -804,13 +809,18 @@ where
     ) -> oneshot::Receiver<bool> {
         self.gates.flush_unrelayed(&self.marshal, round, digest);
 
+        // A pending verification waits only for local delivery. The notarization behind this
+        // request shows the block is available, so acquire it from peers for the existing gate
+        // or for recovery from the block's embedded context.
+        let block_rx = self.marshal.acquire(digest);
+
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.take(round, digest);
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, digest, task, ancestry);
+            return self.certify_from_existing_task(round, digest, task, block_rx, ancestry);
         }
 
-        self.certify_from_embedded_context(round, digest, ancestry)
+        self.certify_from_embedded_context(round, digest, block_rx, ancestry)
     }
 }
 

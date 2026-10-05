@@ -18,7 +18,10 @@ use tracing::{Span, info_span};
 ///
 /// Dropping the subscription aborts the backing buffer waiter, if one exists.
 struct BlockSubscription<V: Variant> {
-    subscribers: Vec<Subscriber<V>>,
+    /// Callers that requested the block from peers.
+    fetching: Vec<Subscriber<V>>,
+    /// Callers that wait without requesting the block from peers.
+    waiting: Vec<Subscriber<V>>,
     _aborter: Option<Aborter>,
 }
 
@@ -46,32 +49,43 @@ impl<V: Variant> Subscriptions<V> {
         }
     }
 
-    pub(super) fn contains(&self, commitment: &V::Commitment) -> bool {
-        self.entries.contains_key(commitment)
+    /// Returns whether a caller waiting for `commitment` requested it from peers.
+    pub(super) fn fetching(&self, commitment: &V::Commitment) -> bool {
+        self.entries
+            .get(commitment)
+            .is_some_and(|subscription| !subscription.fetching.is_empty())
     }
 
-    /// Removes canceled subscribers and returns commitments with no remaining callers.
+    /// Removes canceled subscribers and returns commitments whose last fetching caller left.
     fn retain_open(&mut self) -> Vec<V::Commitment> {
-        let mut removed = Vec::new();
+        let mut ended = Vec::new();
         self.entries.retain(|commitment, subscription| {
+            let fetching = !subscription.fetching.is_empty();
             subscription
-                .subscribers
+                .fetching
                 .retain(|subscriber| !subscriber.sender.is_closed());
-            if subscription.subscribers.is_empty() {
-                removed.push(*commitment);
-                false
-            } else {
-                true
+            subscription
+                .waiting
+                .retain(|subscriber| !subscriber.sender.is_closed());
+            if fetching && subscription.fetching.is_empty() {
+                ended.push(*commitment);
             }
+            !subscription.fetching.is_empty() || !subscription.waiting.is_empty()
         });
-        removed
+        ended
     }
 
-    /// Waits until cancellation removes the last caller for a commitment.
+    /// Waits until cancellation removes the last fetching caller for a commitment.
+    ///
+    /// Canceled callers that only wait are removed without being reported.
     pub(super) async fn closed(&mut self) -> Vec<V::Commitment> {
         poll_fn(|cx| {
             for subscription in self.entries.values_mut() {
-                for subscriber in &mut subscription.subscribers {
+                for subscriber in subscription
+                    .fetching
+                    .iter_mut()
+                    .chain(subscription.waiting.iter_mut())
+                {
                     let _ = subscriber.sender.poll_closed(cx);
                 }
             }
@@ -90,16 +104,22 @@ impl<V: Variant> Subscriptions<V> {
         let Some(subscription) = self.entries.remove(&V::commitment(&block)) else {
             return false;
         };
-        for subscriber in subscription.subscribers {
+        for subscriber in subscription
+            .fetching
+            .into_iter()
+            .chain(subscription.waiting)
+        {
             deliver(subscriber, &block);
         }
         true
     }
 
+    /// Registers a caller for `commitment`, recording whether it requested the block from peers.
     pub(super) fn insert<Buf: Buffer<V>>(
         &mut self,
         span: Span,
         commitment: V::Commitment,
+        fetch: bool,
         response: oneshot::Sender<V::Block>,
         waiters: &mut AbortablePool<'_, Option<V::Block>>,
         buffer: &Buf,
@@ -108,19 +128,23 @@ impl<V: Variant> Subscriptions<V> {
             span,
             sender: response,
         };
-        match self.entries.entry(commitment) {
-            Entry::Occupied(mut entry) => {
-                entry.get_mut().subscribers.push(subscriber);
-            }
+        let subscription = match self.entries.entry(commitment) {
+            Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
                 let aborter = buffer
                     .subscribe_by_commitment(commitment)
                     .map(|rx| waiters.push(async move { rx.await.ok() }));
                 entry.insert(BlockSubscription {
-                    subscribers: vec![subscriber],
+                    fetching: Vec::new(),
+                    waiting: Vec::new(),
                     _aborter: aborter,
-                });
+                })
             }
+        };
+        if fetch {
+            subscription.fetching.push(subscriber);
+        } else {
+            subscription.waiting.push(subscriber);
         }
     }
 }
@@ -272,6 +296,7 @@ mod tests {
         subscriptions.insert(
             Span::none(),
             block.digest(),
+            true,
             first_sender,
             &mut waiters,
             &buffer,
@@ -280,6 +305,7 @@ mod tests {
         subscriptions.insert(
             Span::none(),
             block.digest(),
+            true,
             second_sender,
             &mut waiters,
             &buffer,
@@ -347,6 +373,7 @@ mod tests {
         subscriptions.insert(
             Span::none(),
             block.digest(),
+            true,
             closed_sender,
             &mut waiters,
             &buffer,
@@ -355,6 +382,7 @@ mod tests {
         subscriptions.insert(
             Span::none(),
             block.digest(),
+            true,
             open_sender,
             &mut waiters,
             &buffer,
@@ -366,7 +394,7 @@ mod tests {
             .entries
             .get(&block.digest())
             .expect("open subscriber should remain");
-        assert_eq!(subscription.subscribers.len(), 1);
+        assert_eq!(subscription.fetching.len(), 1);
 
         assert!(subscriptions.notify(Arc::new(block.clone())));
         assert_receives(open_receiver, &block);
@@ -381,7 +409,14 @@ mod tests {
         let block = block(5, 50);
 
         let (sender, receiver) = oneshot::channel();
-        subscriptions.insert(Span::none(), block.digest(), sender, &mut waiters, &buffer);
+        subscriptions.insert(
+            Span::none(),
+            block.digest(),
+            true,
+            sender,
+            &mut waiters,
+            &buffer,
+        );
 
         assert_eq!(subscriptions.entries.len(), 1);
         assert!(!subscriptions.notify(Arc::new(TestBlock::new(
@@ -407,6 +442,7 @@ mod tests {
             subscriptions.insert(
                 Span::none(),
                 commitment,
+                true,
                 first_sender,
                 &mut waiters,
                 &buffer,
@@ -414,6 +450,7 @@ mod tests {
             subscriptions.insert(
                 Span::none(),
                 commitment,
+                true,
                 second_sender,
                 &mut waiters,
                 &buffer,
@@ -446,6 +483,62 @@ mod tests {
     }
 
     #[test]
+    fn closed_reports_only_the_last_fetching_caller() {
+        deterministic::Runner::default().start(|context| async move {
+            let buffer = TestBuffer::default();
+            let mut waiters = TestWaiters::default();
+            let mut subscriptions = Subscriptions::<TestVariant>::new();
+            let commitment = block(8, 80).digest();
+            let (waiting_sender, waiting_receiver) = oneshot::channel();
+            let (fetching_sender, fetching_receiver) = oneshot::channel();
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                false,
+                waiting_sender,
+                &mut waiters,
+                &buffer,
+            );
+            assert!(!subscriptions.fetching(&commitment));
+            subscriptions.insert(
+                Span::none(),
+                commitment,
+                true,
+                fetching_sender,
+                &mut waiters,
+                &buffer,
+            );
+            assert!(subscriptions.fetching(&commitment));
+            assert_eq!(buffer.commitment_subscription_count(), 1);
+
+            // Canceling the only fetching caller ends peer demand but keeps the local wait.
+            select! {
+                ended = subscriptions.closed() => {
+                    assert_eq!(ended, vec![commitment]);
+                },
+                _ = async {
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    drop(fetching_receiver);
+                    std::future::pending::<()>().await;
+                } => unreachable!(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("canceling the last fetching caller must be reported");
+                },
+            }
+            assert!(!subscriptions.fetching(&commitment));
+            assert!(subscriptions.entries.contains_key(&commitment));
+            assert!(!buffer.commitment_subscribers.lock()[0].is_closed());
+
+            // Canceling the remaining wait removes the subscription without reporting it.
+            drop(waiting_receiver);
+            assert!(subscriptions.retain_open().is_empty());
+            assert!(!subscriptions.entries.contains_key(&commitment));
+            assert!(waiters.next_completed().await.is_err());
+            assert!(buffer.commitment_subscribers.lock()[0].is_closed());
+        });
+    }
+
+    #[test]
     fn buffer_closure_keeps_shared_subscription_until_delivery_or_cancellation() {
         deterministic::Runner::default().start(|_| async move {
             let buffer = TestBuffer::default();
@@ -458,6 +551,7 @@ mod tests {
             subscriptions.insert(
                 Span::none(),
                 commitment,
+                true,
                 first_sender,
                 &mut waiters,
                 &buffer,
@@ -465,6 +559,7 @@ mod tests {
             subscriptions.insert(
                 Span::none(),
                 commitment,
+                true,
                 second_sender,
                 &mut waiters,
                 &buffer,
