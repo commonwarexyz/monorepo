@@ -32,10 +32,11 @@ pub trait Journal<F: Family>: Sized + Send {
         range: NonEmptyRange<Location<F>>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Discard all operations before the given location.
+    /// Discard operations before the given location.
     ///
-    /// If current `size() <= start`, initialize as empty at the given location.
-    /// Otherwise prune data before the given location.
+    /// If current `size() < start`, initialize as empty at the given location.
+    /// Otherwise prune data before the given location. Pruning may keep some operations just
+    /// below it.
     fn resize(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
     /// Persist the journal.
@@ -69,7 +70,7 @@ where
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
-        if Contiguous::bounds(&self).end <= *start {
+        if Contiguous::bounds(&self).end < *start {
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
@@ -112,7 +113,7 @@ where
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
-        if Contiguous::bounds(&self).end <= *start {
+        if Contiguous::bounds(&self).end < *start {
             self.clear_to_size(*start).await
         } else {
             let (journal, _) = self.prune(*start).await?;
@@ -486,6 +487,104 @@ mod tests {
                 assert!(!metrics.contains("sync_journal_"), "{metrics}");
             });
         }
+    }
+
+    /// Returns the number of storage syncs the runtime has issued.
+    fn storage_syncs(context: &deterministic::Context) -> u64 {
+        commonware_runtime::Metrics::encode(context)
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("runtime_storage_syncs_total ")?
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Resizing a journal that holds operations below the new lower bound and ends exactly at it
+    /// prunes rather than clears: it keeps the section that holds the bound, and the next
+    /// operation lands at the bound.
+    #[test_traced]
+    fn test_sync_journal_resize_at_size_keeps_section_below_bound() {
+        deterministic::Runner::default().start(|context| async move {
+            let range = non_empty_range!(Location::<F>::new(0), Location::new(20));
+
+            let journal = <FixedJournal as Journal<F>>::new(
+                context.child("fixed"),
+                test_cfg(&context),
+                range.clone(),
+            )
+            .await
+            .unwrap();
+            let ops = (0..8u8).map(|i| Digest::from([i; 32])).collect();
+            let journal = Journal::<F>::append(journal, ops).await.unwrap();
+            let journal = <FixedJournal as Journal<F>>::resize(journal, Location::new(8))
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..8);
+            let journal = Journal::<F>::append(journal, vec![Digest::from([8; 32])])
+                .await
+                .unwrap();
+            assert_eq!(journal.read(5).await.unwrap(), Digest::from([5; 32]));
+            assert_eq!(journal.read(8).await.unwrap(), Digest::from([8; 32]));
+            journal.destroy().await.unwrap();
+
+            let journal = <VariableJournal as Journal<F>>::new(
+                context.child("variable"),
+                variable_test_cfg(&context),
+                range,
+            )
+            .await
+            .unwrap();
+            let journal = Journal::<F>::append(journal, (0..8u64).collect())
+                .await
+                .unwrap();
+            let journal = <VariableJournal as Journal<F>>::resize(journal, Location::new(8))
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 5..8);
+            let journal = Journal::<F>::append(journal, vec![8]).await.unwrap();
+            assert_eq!(journal.read(5).await.unwrap(), 5);
+            assert_eq!(journal.read(8).await.unwrap(), 8);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_sync_journal_resize_at_size_issues_no_syncs() {
+        deterministic::Runner::default().start(|context| async move {
+            let range = non_empty_range!(Location::<F>::new(7), Location::new(20));
+
+            let journal = <FixedJournal as Journal<F>>::new(
+                context.child("fixed"),
+                test_cfg(&context),
+                range.clone(),
+            )
+            .await
+            .unwrap();
+            let syncs = storage_syncs(&context);
+            let journal = <FixedJournal as Journal<F>>::resize(journal, Location::new(7))
+                .await
+                .unwrap();
+            assert_eq!(storage_syncs(&context), syncs);
+            assert_eq!(journal.bounds(), 7..7);
+            journal.destroy().await.unwrap();
+
+            let journal = <VariableJournal as Journal<F>>::new(
+                context.child("variable"),
+                variable_test_cfg(&context),
+                range,
+            )
+            .await
+            .unwrap();
+            let syncs = storage_syncs(&context);
+            let journal = <VariableJournal as Journal<F>>::resize(journal, Location::new(7))
+                .await
+                .unwrap();
+            assert_eq!(storage_syncs(&context), syncs);
+            assert_eq!(journal.bounds(), 7..7);
+            journal.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]
