@@ -577,21 +577,6 @@ impl Backend {
         }
     }
 
-    /// Weights and sums every stripe's buckets, with the stripes' buckets at each digit
-    /// transposed into lanes.
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn fold(self, buckets: &[G], nb: usize, used: usize) -> G {
-        let mut sum = identity();
-        let mut weighted = identity();
-        for digit in (0..used).rev() {
-            let rows = core::array::from_fn(|lane| &raw const buckets[lane * nb + digit]);
-            // SAFETY: every pointer is a bucket in `buckets`.
-            sum = self.add_lanes(sum, unsafe { load_points(rows) });
-            weighted = self.add_lanes(weighted, sum);
-        }
-        store_point(weighted).sum_lanes(self)
-    }
-
     /// Runs a native-lane computation with AVX-512 enabled for the entire entry point.
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn call_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
@@ -666,12 +651,6 @@ impl super::msm::Backend for Backend {
     }
 
     #[inline(always)]
-    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> G {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
-        unsafe { self.fold(buckets, nb, used) }
-    }
-
-    #[inline(always)]
     fn with_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
         // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { self.call_lanes(computation) }
@@ -700,9 +679,21 @@ impl msm::Lanes<LANES> for Backend {
     }
 
     #[inline(always)]
+    fn load_extended(self, points: [&G; LANES]) -> Point {
+        // SAFETY: Backend construction checks the CPU features, and every pointer is a live point
+        // supplied by the caller.
+        unsafe { load_points(points.map(core::ptr::from_ref)) }
+    }
+
+    #[inline(always)]
     fn add_mixed(self, point: Point, affine: Affine) -> Point {
         // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.
         unsafe { add_mixed_regs(point, affine) }
+    }
+
+    #[inline(always)]
+    fn add(self, a: Point, b: Point) -> Point {
+        self.add_lanes(a, b)
     }
 
     /// Point doubling using the dedicated `dbl-2008-hwcd` formula.
@@ -768,6 +759,27 @@ impl msm::Lanes<LANES> for Backend {
                 point,
                 [neg_lanes(x, negative), y, neg_lanes(t, negative), z],
             )
+        }
+    }
+
+    #[inline(always)]
+    fn select(self, point: Point, keep: [bool; LANES]) -> Point {
+        let mask = keep
+            .iter()
+            .enumerate()
+            .fold(0, |mask, (lane, &keep)| mask | (u8::from(keep) << lane));
+        // SAFETY: Backend construction checks AVX-512F support.
+        unsafe {
+            let identity = identity();
+            core::array::from_fn(|coordinate| {
+                core::array::from_fn(|limb| {
+                    _mm512_mask_blend_epi64(
+                        mask,
+                        identity[coordinate][limb],
+                        point[coordinate][limb],
+                    )
+                })
+            })
         }
     }
 

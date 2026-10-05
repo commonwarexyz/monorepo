@@ -121,8 +121,18 @@ impl msm::Lanes<1> for Backend {
     }
 
     #[inline(always)]
+    fn load_extended(self, [point]: [&G; 1]) -> G {
+        *point
+    }
+
+    #[inline(always)]
     fn add_mixed(self, point: G, affine: GAffine) -> G {
         point.add_mixed(affine)
+    }
+
+    #[inline(always)]
+    fn add(self, a: G, b: G) -> G {
+        a.add(b)
     }
 
     #[inline(always)]
@@ -137,6 +147,11 @@ impl msm::Lanes<1> for Backend {
             multiple = multiple.negate();
         }
         point.add(multiple)
+    }
+
+    #[inline(always)]
+    fn select(self, point: G, [keep]: [bool; 1]) -> G {
+        if keep { point } else { G::IDENTITY }
     }
 
     #[inline(always)]

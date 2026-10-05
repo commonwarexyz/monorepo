@@ -838,6 +838,7 @@ impl GVec {
         Self::splat(G::IDENTITY)
     }
 
+    #[cfg(any(test, all(target_arch = "x86_64", feature = "std")))]
     #[inline(always)]
     fn add_pairs<const COUNT: usize>(sums: [G; LANES], backend: impl GBackend) -> [G; LANES] {
         let mut left = [G::IDENTITY; LANES];
@@ -852,6 +853,7 @@ impl GVec {
     }
 
     /// Sums all eight lanes with a vector addition tree.
+    #[cfg(any(test, all(target_arch = "x86_64", feature = "std")))]
     pub fn sum_lanes<B: GBackend>(self, backend: B) -> G {
         let sums = Self::add_pairs::<LANES>(self.untranspose(), backend);
         let sums = Self::add_pairs::<{ LANES / 2 }>(sums, backend);

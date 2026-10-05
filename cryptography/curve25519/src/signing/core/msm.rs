@@ -139,6 +139,7 @@ fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> 
 
 mod bucketed {
     use super::{Backend, G, Term};
+    use crate::curve::msm::fold_buckets;
     #[cfg(not(feature = "std"))]
     use alloc::{vec, vec::Vec};
 
@@ -171,7 +172,7 @@ mod bucketed {
                 (&term.point, term.digits[window])
             });
         }
-        backend.fold_buckets(buckets, nb, used)
+        fold_buckets(backend, buckets, nb, used)
     }
 
     /// Computes the full MSM with backend bucket filling and an independent scalar fold.

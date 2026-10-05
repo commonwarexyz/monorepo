@@ -3,22 +3,21 @@
 //! Backends own the bucket geometry and native lane arithmetic. Digit recoding, range
 //! partitioning, and scheduling remain independent of that choice.
 
-use super::{G, GAffine, GAffineVec, GBackend, GVec, LANES};
+use super::{G, GAffine, GAffineVec, GBackend, GVec};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-/// Bucket filling, weighted folding, window recombination, and native lane dispatch for public
-/// scalar digits.
+/// Bucket filling, window recombination, and native lane dispatch for public scalar digits.
 ///
 /// The bucket defaults use one stripe per logical lane and vector point arithmetic. Backends
 /// with narrower physical tiles can override these kernels without changing MSM scheduling.
 pub trait Backend: GBackend + Send + Sync {
     /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`.
     ///
-    /// Must be nonzero. The default fill requires [`super::LANES`] stripes, and the default fold
-    /// supports at most [`super::LANES`] stripes. Override those methods for other geometries.
+    /// Must be nonzero. The default fill requires [`super::LANES`] stripes. Override it for other
+    /// geometries.
     const STRIPES: usize;
 
     /// Adds the projected points and signed digits to `Self::STRIPES * nb` buckets.
@@ -45,14 +44,6 @@ pub trait Backend: GBackend + Send + Sync {
             terms,
             term,
         );
-    }
-
-    /// Returns the sum of all stripes, weighting each bucket by its index plus one.
-    ///
-    /// `used <= nb` is the largest nonzero digit magnitude. Buckets above it contribute nothing.
-    #[inline(always)]
-    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> G {
-        fold_buckets(self, GVec::identity(), buckets, nb, used).sum_lanes(self)
     }
 
     /// Sums `(window, point)` partials, then Horner-folds the windows with `width` doublings.
@@ -99,8 +90,14 @@ pub trait Lanes<const N: usize>: Copy {
     /// Loads one affine point per lane.
     fn load(self, points: [&GAffine; N]) -> Self::Affine;
 
+    /// Loads one extended point per lane.
+    fn load_extended(self, points: [&G; N]) -> Self::Point;
+
     /// Adds an affine point to each extended lane.
     fn add_mixed(self, point: Self::Point, affine: Self::Affine) -> Self::Point;
+
+    /// Adds the extended points in each lane.
+    fn add(self, a: Self::Point, b: Self::Point) -> Self::Point;
 
     /// Doubles every extended lane.
     fn double(self, point: Self::Point) -> Self::Point;
@@ -110,6 +107,9 @@ pub trait Lanes<const N: usize>: Copy {
     /// Every magnitude must be less than `table.len()`. Negation changes X and T only.
     fn add_signed(self, point: Self::Point, table: &[Self::Point], digits: [i16; N])
     -> Self::Point;
+
+    /// Keeps the lanes `keep` selects and replaces every other lane with the identity.
+    fn select(self, point: Self::Point, keep: [bool; N]) -> Self::Point;
 
     /// Returns the sum of the extended lanes.
     fn sum(self, point: Self::Point) -> G;
@@ -270,31 +270,98 @@ pub fn fill_buckets<const STRIPES: usize, T>(
     }
 }
 
-/// Folds each bucket stripe into its corresponding result lane with a running sum.
+/// Returns the sum of all stripes, weighting each bucket by its index plus one.
 ///
-/// Lanes without a stripe contribute the identity. Untouched top buckets can be skipped
-/// because their identity values leave both running sums unchanged.
-fn fold_buckets<B: Backend>(
+/// `used <= nb` is the largest nonzero digit magnitude. Buckets above it contribute nothing.
+pub fn fold_buckets<B: Backend>(backend: B, buckets: &[G], nb: usize, used: usize) -> G {
+    backend.with_lanes(Fold {
+        buckets,
+        nb,
+        used,
+        stripes: B::STRIPES,
+    })
+}
+
+/// Inputs to [`fold`] dispatched through [`Backend::with_lanes`].
+struct Fold<'a> {
+    buckets: &'a [G],
+    nb: usize,
+    used: usize,
+    stripes: usize,
+}
+
+impl WithLanes for Fold<'_> {
+    type Output = G;
+
+    #[inline(always)]
+    fn call<B: Lanes<N>, const N: usize>(self, backend: B) -> G {
+        fold(backend, self.buckets, self.nb, self.used, self.stripes)
+    }
+}
+
+/// Weights and sums `stripes` bucket stripes, with `N` consecutive buckets in each vector.
+///
+/// Let `B[k, lane]` sum the stripes at bucket index `k*N + lane`. The descending pass builds
+/// `sum[lane] = sum_k B[k, lane]` and `rows[lane] = sum_k k*B[k, lane]`, and the final weighting
+/// gives `N*rows[lane] + (lane + 1)*sum[lane]`, so every bucket gets its index-plus-one weight.
+/// Merging the stripes first lets each pair of running-sum additions cover `N` buckets. `N` must
+/// be a power of two.
+#[inline(always)]
+fn fold<B: Lanes<N>, const N: usize>(
     backend: B,
-    result: GVec,
     buckets: &[G],
     nb: usize,
     used: usize,
-) -> GVec {
-    let mut sum = GVec::identity();
-    let mut window_sum = GVec::identity();
-    for d in (0..used).rev() {
-        let bucket_group: [G; LANES] = core::array::from_fn(|lane| {
-            if lane < B::STRIPES {
-                buckets[lane * nb + d]
-            } else {
-                G::IDENTITY
-            }
-        });
-        sum = backend.g_add(sum, GVec::transpose(bucket_group));
-        window_sum = backend.g_add(window_sum, sum);
+    stripes: usize,
+) -> G {
+    const { assert!(N.is_power_of_two()) };
+
+    // A lone bucket has weight one, so its stripes only need summing.
+    if used == 1 {
+        let mut total = backend.identity();
+        for first in (0..stripes).step_by(N) {
+            let group = backend.load_extended(core::array::from_fn(|lane| {
+                if first + lane < stripes {
+                    &buckets[(first + lane) * nb]
+                } else {
+                    &G::IDENTITY
+                }
+            }));
+            total = backend.add(total, group);
+        }
+        return backend.sum(total);
     }
-    backend.g_add(result, window_sum)
+
+    let mut sum = backend.identity();
+    let mut rows = backend.identity();
+    for block in (0..used.div_ceil(N)).rev() {
+        let gather = |stripe: usize| {
+            backend.load_extended(core::array::from_fn(|lane| {
+                let index = block * N + lane;
+                if index < used {
+                    &buckets[stripe * nb + index]
+                } else {
+                    &G::IDENTITY
+                }
+            }))
+        };
+        let mut combined = gather(0);
+        for stripe in 1..stripes {
+            combined = backend.add(combined, gather(stripe));
+        }
+        rows = backend.add(rows, sum);
+        sum = backend.add(sum, combined);
+    }
+
+    // Seed the row weight and the high bit of lane + 1. Doubling shifts both together.
+    let top = core::array::from_fn(|lane| lane + 1 == N);
+    let mut weighted = backend.add(rows, backend.select(sum, top));
+    for bit in (0..N.ilog2()).rev() {
+        weighted = backend.double(weighted);
+        let keep = core::array::from_fn(|lane| (lane + 1) & (1 << bit) != 0);
+        weighted = backend.add(weighted, backend.select(sum, keep));
+    }
+    backend.sum(weighted)
 }
 
 #[test]
@@ -330,7 +397,7 @@ fn fold_preserves_every_bucket_weight() {
                             .scalar_mul((0..usize::BITS).rev().map(|bit| used & (1 << bit) != 0));
                         expected = expected.add(weighted);
                     }
-                    let actual = backend.fold_buckets(&buckets, nb, used);
+                    let actual = fold_buckets(backend, &buckets, nb, used);
                     assert!(
                         actual.add(expected.negate()).is_identity(),
                         "width={width} used={used}"
