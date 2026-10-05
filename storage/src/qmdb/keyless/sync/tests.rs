@@ -6,8 +6,8 @@
 //! by the [`sync_tests_for_harness!`] macro.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{self, Family, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous},
+    merkle::{self, Family, Location, mmb, mmr},
     qmdb::{
         self,
         keyless::{self, Operation, variable},
@@ -1178,13 +1178,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -1425,11 +1422,10 @@ macro_rules! sync_tests_for_harness {
 sync_tests_for_harness!(harnesses::VariableMmrHarness, variable_mmr);
 sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
 
-/// A completed sync journal reuses local pinned nodes only when the persisted state can
-/// authenticate the target: a target starting below the local pruning boundary is declined,
-/// while a matching target serves the pinned nodes locally.
+/// A completed local journal serves a matching target's pinned nodes, but cannot hold a target
+/// starting below its pruning boundary.
 #[commonware_macros::test_traced]
-fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
+fn test_keyless_open_sync_journal_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();
@@ -1447,48 +1443,36 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
 
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the database as the sync engine does. A matching target authenticates locally.
         drop(db);
-        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
-            context.child("journal"),
-            qmdb::sync::DatabaseConfig::journal_config(&config),
-            non_empty_range!(local_start, local_end),
-        )
-        .await
-        .unwrap();
-
-        let stale_target = Target {
-            root: sync_root,
-            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
-        };
-        assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_stale"),
-                &config,
-                &stale_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
-
         let matching_target = Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
-        assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_matching"),
-                &config,
-                &matching_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_some()
+        let (state, journal, pins) = <DbOf<H> as qmdb::sync::Database>::open_sync_journal(
+            &context,
+            &config,
+            &matching_target,
+        )
+        .await
+        .unwrap();
+        assert!(pins.is_some());
+        drop((state, journal));
+
+        // A journal pruned past a target's start cannot hold that target.
+        let stale_target = Target {
+            root: sync_root,
+            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+        };
+        let (_, journal, pins) =
+            <DbOf<H> as qmdb::sync::Database>::open_sync_journal(&context, &config, &stale_target)
+                .await
+                .unwrap();
+        assert!(pins.is_none());
+        assert_eq!(
+            crate::journal::contiguous::Contiguous::bounds(&journal),
+            *stale_target.range.start()..*stale_target.range.start()
         );
-        drop(journal);
     });
 }
 
@@ -1527,6 +1511,11 @@ mod compact_variable_mmr {
     use crate::qmdb::sync::source::tests::{SequenceSource, fetch_compact_state};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        mocks::{DelayedSyncContext, PendingSyncs},
+        reschedule,
+    };
+    use futures::FutureExt as _;
 
     type SourceDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type ClientDb = variable::CompactDb<
@@ -1545,13 +1534,10 @@ mod compact_variable_mmr {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{suffix}"),
@@ -1609,7 +1595,6 @@ mod compact_variable_mmr {
             let fine_config = |sfx: &str, pooler: &deterministic::Context| {
                 let mut config = source_config(sfx, pooler);
                 config.log.items_per_section = NZU64!(1);
-                config.merkle.items_per_blob = NZU64!(1);
                 config
             };
             let source = SourceDb::init(
@@ -2233,6 +2218,432 @@ mod compact_variable_mmr {
         });
     }
 
+    fn engine_config<DB>(
+        context: DB::Context,
+        source: Arc<SourceDb>,
+        target: sync::Target<mmr::Family, sha256::Digest>,
+        db_config: DB::Config,
+    ) -> sync::engine::Config<DB, Arc<SourceDb>>
+    where
+        DB: sync::Database<Family = mmr::Family, Digest = sha256::Digest>,
+        Arc<SourceDb>: sync::SourceFor<DB>,
+        DB::Op: Encode,
+    {
+        sync::engine::Config {
+            context,
+            db_config,
+            fetch_batch_size: NZU64!(2),
+            target,
+            source,
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 0,
+        }
+    }
+
+    /// Divergent operations that stop short of the target are reused, so the completed import fails
+    /// root verification and makes the next attempt discard them. Interrupting later attempts at
+    /// their first durability operation or at any started sync leaves the database either blocked
+    /// or authenticated at the target.
+    #[test_traced("WARN")]
+    fn test_full_sync_rejected_import_discards_divergent_operations() {
+        type DelayedDb = variable::Db<
+            mmr::Family,
+            DelayedSyncContext<deterministic::Context>,
+            Vec<u8>,
+            Sha256,
+            Sequential,
+        >;
+
+        deterministic::Runner::default().start(|context| async move {
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config("rejected-source", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .append(vec![2])
+                .append(vec![3])
+                .append(vec![4])
+                .append(vec![5])
+                .append(vec![6])
+                .merkleize(&source, None, Location::new(0))
+                .await
+                .unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = Arc::new(source.commit().await.unwrap());
+            let target = sync::Target {
+                root: source.root(),
+                range: non_empty_range!(Location::new(0), source.bounds().end),
+            };
+
+            // Retain a divergent prefix that stops short of the target.
+            let config = source_config("rejected-client", &context);
+            let client = SourceDb::init(context.child("divergent"), config.clone(), None)
+                .await
+                .unwrap();
+            let batch = client
+                .new_batch()
+                .append(vec![7])
+                .append(vec![8])
+                .merkleize(&client, None, Location::new(0))
+                .await
+                .unwrap();
+            let (client, _) = client.apply_batch(batch).await.unwrap();
+            let client = client.commit().await.unwrap();
+            assert!(client.bounds().end < source.bounds().end);
+            assert_ne!(client.root(), target.root);
+            drop(client);
+
+            let result: Result<SourceDb, _> = sync::sync(engine_config(
+                context.child("first"),
+                source.clone(),
+                target.clone(),
+                config.clone(),
+            ))
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+            assert!(matches!(
+                SourceDb::init(context.child("blocked"), config.clone(), None).await,
+                Err(qmdb::Error::Authenticated(
+                    crate::journal::authenticated::Error::IncompleteSync
+                ))
+            ));
+
+            // Interrupt the restarted attempt at its first durability operation. The rejection
+            // survives until the divergent operations have been durably discarded.
+            {
+                let pending = PendingSyncs::default();
+                pending.arm();
+                let delayed = DelayedSyncContext {
+                    inner: context.child("gated"),
+                    pending: pending.clone(),
+                };
+                let mut attempt = std::pin::pin!(sync::sync(engine_config::<DelayedDb>(
+                    delayed,
+                    source.clone(),
+                    target.clone(),
+                    config.clone(),
+                )));
+                assert!(attempt.as_mut().now_or_never().is_none());
+                assert!(
+                    pending.calls() > 0,
+                    "attempt stalled before any durability operation"
+                );
+            }
+            let frontier = crate::journal::authenticated::Frontier::<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+            >::open(
+                context.child("gated_frontier"),
+                config.merkle.metadata_partition.clone(),
+            )
+            .await
+            .unwrap();
+            assert!(frontier.rejected());
+            drop(frontier);
+
+            // Drop successive attempts after releasing 0, 1, 2, ... started syncs.
+            for released in 0usize.. {
+                assert!(released < 1000, "import never completed");
+                let pending = PendingSyncs::default();
+                let delayed = DelayedSyncContext {
+                    inner: context
+                        .child("attempt")
+                        .with_attribute("released", released),
+                    pending: pending.clone(),
+                };
+                let result = {
+                    let mut attempt = std::pin::pin!(sync::sync(engine_config::<DelayedDb>(
+                        delayed,
+                        source.clone(),
+                        target.clone(),
+                        config.clone(),
+                    )));
+                    let (mut releases, mut idle) = (0, 0);
+                    loop {
+                        if let Some(result) = attempt.as_mut().now_or_never() {
+                            break Some(result);
+                        }
+                        if pending.lock().is_empty() {
+                            idle += 1;
+                            assert!(idle < 1000, "attempt stalled without a parked sync");
+                            reschedule().await;
+                            continue;
+                        }
+                        if releases == released {
+                            break None;
+                        }
+                        releases += 1;
+                        let sync = pending.lock().remove(0);
+                        let _ = sync.release.send(Ok(()));
+                    }
+                };
+                let completed = result.map(|db| db.unwrap().root());
+                match SourceDb::init(
+                    context.child("check").with_attribute("released", released),
+                    config.clone(),
+                    None,
+                )
+                .await
+                {
+                    Ok(db) => assert_eq!(db.root(), target.root),
+                    Err(qmdb::Error::Authenticated(
+                        crate::journal::authenticated::Error::IncompleteSync,
+                    )) => {}
+                    Err(err) => panic!("interrupted import exposed an invalid database: {err}"),
+                }
+                if let Some(root) = completed {
+                    assert_eq!(root, target.root);
+                    break;
+                }
+            }
+            let client = SourceDb::init(context.child("reopened"), config, None)
+                .await
+                .unwrap();
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
+        });
+    }
+
+    /// Retained operations that reach the target but do not authenticate against it are discarded
+    /// before fetching, whether or not the operation before the target's end is a commit.
+    #[test_traced("WARN")]
+    fn test_full_sync_discards_unauthenticated_operations_at_target() {
+        deterministic::Runner::default().start(|context| async move {
+            for (floor, appends) in [(0u64, 6u8), (0, 8), (4, 6), (4, 8)] {
+                let case = format!("{floor}-{appends}");
+                let source = SourceDb::init(
+                    context.child("source").with_attribute("case", &case),
+                    source_config(&format!("unauthenticated-source-{case}"), &context),
+                    None,
+                )
+                .await
+                .unwrap();
+                let mut batch = source.new_batch();
+                for value in 0..6u8 {
+                    batch = batch.append(vec![value]);
+                }
+                let batch = batch
+                    .merkleize(&source, None, Location::new(floor))
+                    .await
+                    .unwrap();
+                let (source, _) = source.apply_batch(batch).await.unwrap();
+                let source = Arc::new(source.commit().await.unwrap());
+                let target = sync::Target {
+                    root: source.root(),
+                    range: non_empty_range!(Location::new(floor), source.bounds().end),
+                };
+
+                // Retain a divergent log that reaches the target. With 6 appends its operation at
+                // `end - 1` is a commit, and with 8 it is an append.
+                let config = source_config(&format!("unauthenticated-client-{case}"), &context);
+                let client = SourceDb::init(
+                    context.child("divergent").with_attribute("case", &case),
+                    config.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let mut batch = client.new_batch();
+                for value in 100..100 + appends {
+                    batch = batch.append(vec![value]);
+                }
+                let batch = batch
+                    .merkleize(&client, None, Location::new(0))
+                    .await
+                    .unwrap();
+                let (client, _) = client.apply_batch(batch).await.unwrap();
+                let client = client.commit().await.unwrap();
+                assert!(client.bounds().end >= target.range.end());
+                drop(client);
+
+                let synced: SourceDb = sync::sync(engine_config(
+                    context.child("sync").with_attribute("case", &case),
+                    source.clone(),
+                    target.clone(),
+                    config,
+                ))
+                .await
+                .unwrap();
+                assert_eq!(synced.root(), target.root);
+                synced.destroy().await.unwrap();
+            }
+        });
+    }
+
+    /// A local database whose frontier lies several blobs below the target's start, and whose
+    /// operations already reach the target, completes from its own operations without fetching
+    /// any. Operations retained below the new boundary are not readable.
+    #[test_traced("WARN")]
+    fn test_full_sync_reuses_local_operations_below_target_start() {
+        deterministic::Runner::default().start(|context| async move {
+            async fn build(context: deterministic::Context, config: Config) -> SourceDb {
+                let db = SourceDb::init(context, config, None).await.unwrap();
+                let mut batch = db.new_batch();
+                for value in 0..40u8 {
+                    batch = batch.append(vec![value]);
+                }
+                let batch = batch.merkleize(&db, None, Location::new(30)).await.unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                db.commit().await.unwrap()
+            }
+            type Config = variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential>;
+
+            let source = build(
+                context.child("source"),
+                source_config("reuse-source", &context),
+            )
+            .await;
+            let target = sync::Target {
+                root: source.root(),
+                range: non_empty_range!(Location::new(30), source.bounds().end),
+            };
+            drop(source);
+
+            // The client holds the same operations, pruned to a frontier several blobs below the
+            // target's start.
+            let config = source_config("reuse-client", &context);
+            let client = build(context.child("client"), config.clone()).await;
+            let client = client.prune(Location::new(7)).await.unwrap();
+            assert_eq!(client.bounds().start, Location::new(7));
+            drop(client.sync().await.unwrap());
+
+            // A peer with none of the operations cannot serve any request.
+            let empty = SourceDb::init(
+                context.child("empty"),
+                source_config("reuse-empty", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let synced: SourceDb = sync::sync(engine_config(
+                context.child("sync"),
+                Arc::new(empty),
+                target.clone(),
+                config,
+            ))
+            .await
+            .unwrap();
+            assert_eq!(synced.root(), target.root);
+            assert_eq!(synced.bounds(), target.range.start()..target.range.end());
+            assert!(matches!(
+                synced.get(Location::new(29)).await,
+                Err(qmdb::Error::Journal(crate::journal::Error::ItemPruned(29)))
+            ));
+            synced.destroy().await.unwrap();
+        });
+    }
+
+    /// A completed import that fails root verification leaves the database unopenable until a
+    /// later sync succeeds.
+    #[test_traced("WARN")]
+    fn test_full_sync_root_mismatch_blocks_open_until_resync() {
+        deterministic::Runner::default().start(|context| async move {
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config("full-mismatch-source", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .append(vec![2])
+                .append(vec![3])
+                .append(vec![4])
+                .append(vec![5])
+                .append(vec![6])
+                .merkleize(&source, Some(vec![9]), Location::new(0))
+                .await
+                .unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = Arc::new(source.commit().await.unwrap());
+            let size = source.bounds().end;
+            let last = size - 1;
+            let canonical = sync::CompactTarget {
+                root: source.root(),
+                size,
+            };
+            let response = fetch_compact_state(&source, canonical.clone())
+                .await
+                .unwrap();
+            let sync::Response::Boundary {
+                op, pinned_nodes, ..
+            } = response
+            else {
+                unreachable!()
+            };
+            let hasher = qmdb::hasher::<Sha256>();
+            let proof = merkle::verification::historical_range_proof(
+                &hasher,
+                &source.journal,
+                size,
+                last..last + 1,
+                1,
+            )
+            .await
+            .unwrap();
+            let noncanonical = source.journal.merkle.root(&hasher, 1).unwrap();
+            assert_ne!(noncanonical, canonical.root);
+            let config = source_config("full-mismatch-client", &context);
+            let result: Result<SourceDb, _> = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource::new(vec![sync::Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                }]),
+                sync::CompactTarget {
+                    root: noncanonical,
+                    size,
+                },
+                config.clone(),
+            ))
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+            assert!(matches!(
+                SourceDb::init(context.child("rejected"), config.clone(), None).await,
+                Err(qmdb::Error::Authenticated(
+                    crate::journal::authenticated::Error::IncompleteSync
+                ))
+            ));
+            let client: SourceDb = sync::sync(compact_engine_config(
+                context.child("resume"),
+                source.clone(),
+                canonical.clone(),
+                config.clone(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(client.root(), canonical.root);
+            drop(client);
+            let client = SourceDb::init(context.child("reopened"), config, None)
+                .await
+                .unwrap();
+            assert_eq!(client.root(), canonical.root);
+            client.destroy().await.unwrap();
+            Arc::try_unwrap(source)
+                .unwrap_or_else(|_| panic!("single source ref"))
+                .destroy()
+                .await
+                .unwrap();
+        });
+    }
+
     /// A boundary response can verify against its target while reconstructing a different
     /// canonical root. Rejecting that import must preserve the destination's durable witness.
     #[test_traced("WARN")]
@@ -2298,12 +2709,15 @@ mod compact_variable_mmr {
             // for this target, but the commit's encoded floor reconstructs the source's canonical
             // root instead, so only the engine's final root check rejects the import.
             let hasher = qmdb::hasher::<Sha256>();
-            let proof = source
-                .journal
-                .merkle
-                .historical_proof(&hasher, size, last_commit_loc, 1)
-                .await
-                .unwrap();
+            let proof = merkle::verification::historical_range_proof(
+                &hasher,
+                &source.journal,
+                size,
+                last_commit_loc..last_commit_loc + 1,
+                1,
+            )
+            .await
+            .unwrap();
             let noncanonical_root = source.journal.merkle.root(&hasher, 1).unwrap();
             assert_ne!(noncanonical_root, source.root());
 
@@ -2478,13 +2892,10 @@ mod compact_variable_mmb {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{suffix}"),

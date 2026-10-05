@@ -11,8 +11,8 @@
 //!
 //! In addition to the shared harness-based suite, this module contains focused tests for
 //! `current`-specific sync behavior: pruned MMB round-trip (canonical-root reconstruction across
-//! a pruned chunk boundary) and `local_pinned_nodes` returning `None` for targets starting below
-//! the local lower bound.
+//! a pruned chunk boundary) and a local journal that cannot hold a target starting below its
+//! pruning boundary.
 
 use crate::qmdb::{
     any::sync::tests::{ConfigOf, SyncTestHarness},
@@ -573,7 +573,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 }
 
 #[test_traced]
-fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
+fn test_current_open_sync_journal_target_before_local_lower_bound() {
     type Db = crate::qmdb::current::unordered::variable::Db<
         crate::merkle::mmr::Family,
         Context,
@@ -615,50 +615,33 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
 
         assert!(local_start > crate::merkle::Location::new(0));
 
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the database as the sync engine does. A matching target authenticates locally.
         drop(db);
-        let journal = <<Db as SyncDatabase>::Journal as crate::qmdb::sync::Journal<
-            crate::merkle::mmr::Family,
-        >>::new(
-            context.child("journal"),
-            crate::qmdb::sync::DatabaseConfig::journal_config(&config),
-            non_empty_range!(local_start, local_end),
-        )
-        .await
-        .unwrap();
-
-        let stale_target = crate::qmdb::sync::Target {
-            root: sync_root,
-            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
-        };
-        assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
-                context.child("probe_stale"),
-                &config,
-                &stale_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
-
         let matching_target = crate::qmdb::sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
-        assert!(
-            <Db as SyncDatabase>::local_pinned_nodes(
-                context.child("probe_matching"),
-                &config,
-                &matching_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_some()
+        let (state, journal, pins) =
+            <Db as SyncDatabase>::open_sync_journal(&context, &config, &matching_target)
+                .await
+                .unwrap();
+        assert!(pins.is_some());
+        drop((state, journal));
+
+        // A journal pruned past a target's start cannot hold that target.
+        let stale_target = crate::qmdb::sync::Target {
+            root: sync_root,
+            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+        };
+        let (_, journal, pins) =
+            <Db as SyncDatabase>::open_sync_journal(&context, &config, &stale_target)
+                .await
+                .unwrap();
+        assert!(pins.is_none());
+        assert_eq!(
+            crate::journal::contiguous::Contiguous::bounds(&journal),
+            *stale_target.range.start()..*stale_target.range.start()
         );
-        drop(journal);
     });
 }
 
@@ -795,8 +778,8 @@ macro_rules! current_sync_tests_for_harness {
             }
 
             #[test_traced]
-            fn test_local_pinned_nodes_below_floor() {
-                crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
+            fn test_local_operations_authenticate_below_floor() {
+                crate::qmdb::any::sync::tests::test_local_operations_authenticate_below_floor::<$harness>();
             }
         }
     };

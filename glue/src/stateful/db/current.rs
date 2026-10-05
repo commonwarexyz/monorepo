@@ -1156,10 +1156,13 @@ mod tests {
         },
     };
     use commonware_storage::{
-        journal::contiguous::{
-            fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+        journal::{
+            authenticated::Config as MerkleConfig,
+            contiguous::{
+                fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+            },
         },
-        merkle::{full::Config as MerkleConfig, mmr},
+        merkle::mmr,
         qmdb::{
             any::unordered::fixed::Operation as FixedOperation,
             current::{
@@ -1234,13 +1237,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: FixedJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
@@ -1264,13 +1264,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
@@ -1715,7 +1712,6 @@ mod tests {
             config.journal_config.write_buffer =
                 NonZeroUsize::new(CAPACITY as usize * size).unwrap();
             config.journal_config.items_per_blob = NZU64!(1000);
-            config.merkle_config.items_per_blob = NZU64!(1000);
             config
         }
 

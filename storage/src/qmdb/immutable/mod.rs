@@ -76,9 +76,10 @@ use crate::{
     index::{Unordered as _, unordered::Index},
     journal::{
         authenticated,
+        authenticated::Config as MerkleConfig,
         contiguous::{Contiguous, Mutable},
     },
-    merkle::{Family, Location, Proof, full::Config as MerkleConfig},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
         sync::source,
@@ -157,7 +158,7 @@ where
 /// Configuration for an [Immutable] authenticated db.
 #[derive(Clone)]
 pub struct Config<T: Translator, J, S: Strategy> {
-    /// Configuration for the Merkle structure backing the authenticated journal.
+    /// Configuration for durable pruning metadata and the volatile Merkle digest cache.
     pub merkle_config: MerkleConfig<S>,
 
     /// Configuration for the operations log journal.
@@ -570,16 +571,11 @@ where
 
     /// Return the pinned Merkle nodes at the given location.
     pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
-        self.journal
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.journal.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 
-    /// Sync all database state to disk. While this isn't necessary to ensure durability of
-    /// committed operations, periodic invocation may reduce memory usage and the time required to
-    /// recover the database on restart.
+    /// Sync all database state to disk. This isn't necessary to ensure durability of committed
+    /// operations.
     #[tracing::instrument(name = "qmdb.immutable.db.sync", level = "info", skip_all)]
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         let _timer = self.metrics.sync_timer();
@@ -591,13 +587,13 @@ where
     /// Begin durably persisting the journal state published by prior [`Immutable::apply_batch`]
     /// calls.
     ///
-    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit],
-    /// plus a best-effort attempt to bound the recovery needed on startup. Use [Self::sync] to
-    /// guarantee none is needed. A new sync waits for the prior sync before starting. Failures
-    /// of the deferred durability work surface on the returned handle. A failed data sync also
-    /// fails the next durability operation. A failed recovery-watermark sync is not observed by
-    /// [Self::commit], and a failed merkle-node sync may not be. Both resurface on the next
-    /// [Self::sync].
+    /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
+    /// The backing journal also attempts to advance its recovery watermark. Recovery always
+    /// replays retained operations to rebuild Merkle state.
+    ///
+    /// A new sync waits for the prior sync before starting. A failed data sync surfaces on the
+    /// returned handle and the next durability operation. A recovery-watermark failure surfaces
+    /// on the handle and the next [Self::sync], but is not observed by [Self::commit].
     #[tracing::instrument(name = "qmdb.immutable.db.start_sync", level = "info", skip_all)]
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
         self.metrics.start_sync_calls.inc();

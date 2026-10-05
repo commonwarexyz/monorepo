@@ -7,8 +7,8 @@ use commonware_runtime::{
     BufferPooler, Runner, Strategizer as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
-    merkle::{Family, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
+    merkle::{Family, Location, mmb, mmr},
     qmdb::{
         Error,
         keyless::variable::{Config, Db as Keyless},
@@ -203,13 +203,13 @@ fn test_config<S: Strategy>(
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
-            journal_partition: format!("{test_name}-journal"),
             metadata_partition: format!("{test_name}-meta"),
-            items_per_blob: NZU64!(3),
-            write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy,
-            page_cache: page_cache.clone(),
+            // One cached region, so proofs evict and rebuild digests.
+            cache: commonware_storage::journal::authenticated::CacheConfig::with_regions::<
+                commonware_cryptography::sha256::Digest,
+            >(2, 1),
         },
         log: VConfig {
             partition: format!("{test_name}-log"),

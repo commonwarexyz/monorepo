@@ -79,7 +79,7 @@ cfg_if::cfg_if! {
 }
 
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
-use crate::merkle::{self, Family as _, Graftable};
+use crate::merkle::{self, Graftable};
 pub use crate::merkle::{Readable, hasher};
 pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 use commonware_cryptography::Digest;
@@ -218,6 +218,28 @@ impl merkle::Family for Family {
         }
         true
     }
+    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
+        let leaf_pos = Self::location_to_position(leaf_start);
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+
+        leaf_pos
+            .checked_add(shift)
+            .and_then(|v| v.checked_sub(2))
+            .expect("position overflow")
+    }
+    fn leftmost_leaf(pos: Position, height: u32) -> Location {
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+        let leftmost_pos = pos
+            .checked_add(2)
+            .and_then(|v| v.checked_sub(shift))
+            .expect("position underflow or overflow");
+
+        Self::position_to_location(leftmost_pos).expect("leftmost descendant must be a leaf")
+    }
 }
 
 impl Graftable for Family {
@@ -243,36 +265,12 @@ impl Graftable for Family {
 
         core::iter::once((root_pos, grafting_height))
     }
-
-    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
-        let leaf_pos = Self::location_to_position(leaf_start);
-        let shift = 1u64
-            .checked_shl(height + 1)
-            .expect("height excessively large");
-
-        leaf_pos
-            .checked_add(shift)
-            .and_then(|v| v.checked_sub(2))
-            .expect("position overflow")
-    }
-
-    fn leftmost_leaf(pos: Position, height: u32) -> Location {
-        let shift = 1u64
-            .checked_shl(height + 1)
-            .expect("height excessively large");
-        let leftmost_pos = pos
-            .checked_add(2)
-            .and_then(|v| v.checked_sub(shift))
-            .expect("position underflow or overflow");
-
-        Self::position_to_location(leftmost_pos).expect("leftmost descendant must be a leaf")
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::Bagging::ForwardFold;
+    use crate::merkle::{Bagging::ForwardFold, Family as _};
     use commonware_cryptography::Sha256;
 
     const MAX_NODES: Position = <Family as crate::merkle::Family>::MAX_NODES;

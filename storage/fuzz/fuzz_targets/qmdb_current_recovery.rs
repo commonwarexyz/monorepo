@@ -19,14 +19,17 @@ use commonware_runtime::{
     deterministic::{self, Context},
 };
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
-    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{
+        authenticated::{CacheConfig, Config as MerkleConfig},
+        contiguous::variable::Config as VConfig,
+    },
+    merkle::{Graftable, Location, mmb, mmr},
     qmdb::current::{VariableConfig, unordered::variable::Db as Current},
     translator::TwoCap,
 };
 use commonware_storage_fuzz::{
-    bounded_buffer, bounded_items, bounded_nonzero_rate, bounded_page_cache_size,
-    bounded_page_size, faulted_recovery,
+    bounded_buffer, bounded_cache_regions, bounded_items, bounded_nonzero_rate,
+    bounded_page_cache_size, bounded_page_size, bounded_resident_height, faulted_recovery,
 };
 use commonware_utils::{Entropy, NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
@@ -60,9 +63,12 @@ struct FuzzInput {
     /// Number of pages in the buffer pool cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    /// Items per blob for the Merkle journal.
-    #[arbitrary(with = bounded_items)]
-    merkle_items_per_blob: u64,
+    /// Lowest Merkle height kept in memory.
+    #[arbitrary(with = bounded_resident_height)]
+    resident_height: u32,
+    /// Lower digest regions cached. One forces eviction.
+    #[arbitrary(with = bounded_cache_regions)]
+    cache_regions: usize,
     /// Items per section for the operations log.
     #[arbitrary(with = bounded_items)]
     log_items_per_blob: u64,
@@ -94,7 +100,8 @@ struct FuzzInput {
 struct ConfigParams {
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    merkle_items_per_blob: u64,
+    resident_height: u32,
+    cache_regions: usize,
     log_items_per_blob: u64,
     write_buffer: NonZeroUsize,
     replay_buffer: NonZeroUsize,
@@ -108,7 +115,8 @@ fn make_config(
     let ConfigParams {
         page_size,
         page_cache_size,
-        merkle_items_per_blob,
+        resident_height,
+        cache_regions,
         log_items_per_blob,
         write_buffer,
         replay_buffer,
@@ -116,13 +124,13 @@ fn make_config(
     let page_cache = CacheRef::from_pooler(ctx, page_size, page_cache_size);
     VariableConfig {
         merkle_config: MerkleConfig {
-            journal_partition: format!("crash-merkle-journal-{suffix}"),
             metadata_partition: format!("crash-merkle-metadata-{suffix}"),
-            items_per_blob: NZU64!(merkle_items_per_blob),
-            write_buffer,
             replay_buffer,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: CacheConfig::with_regions::<commonware_cryptography::sha256::Digest>(
+                resident_height,
+                cache_regions,
+            ),
         },
         journal_config: VConfig {
             partition: format!("crash-log-{suffix}"),
@@ -240,7 +248,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let params = ConfigParams {
         page_size: NonZeroU16::new(input.page_size).unwrap(),
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
-        merkle_items_per_blob: input.merkle_items_per_blob,
+        resident_height: input.resident_height,
+        cache_regions: input.cache_regions,
         log_items_per_blob: input.log_items_per_blob,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         replay_buffer: NonZeroUsize::new(input.replay_buffer).unwrap(),

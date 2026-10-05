@@ -1829,4 +1829,25 @@ mod tests {
             metadata.destroy().await.unwrap();
         });
     }
+
+    /// A value whose checksum is valid but whose encoding breaks the reader's codec bounds is
+    /// reported as corruption.
+    #[test_traced]
+    fn test_value_outside_codec_bounds() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = |max_len: usize| Config {
+                partition: "test".into(),
+                codec_config: ((0..=max_len).into(), ()),
+            };
+            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg(64))
+                .await
+                .unwrap();
+            metadata.put(U64::new(1), vec![7; 64]);
+            drop(metadata.sync().await.unwrap());
+
+            let result = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg(8)).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
 }

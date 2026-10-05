@@ -17,6 +17,18 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+/// Open a sync journal for `range` and prune below its start.
+pub(super) async fn init_sync<E: crate::Context, J: crate::journal::authenticated::Backing<E>>(
+    context: E,
+    cfg: J::Config,
+    range: std::ops::Range<u64>,
+) -> Result<J, Error> {
+    let journal =
+        crate::journal::authenticated::open_sync::<E, J>(context, cfg, range.clone()).await?;
+    let (journal, _) = journal.prune(range.start).await?;
+    Ok(journal)
+}
+
 /// Run the full suite of generic tests on a [Contiguous] implementation.
 ///
 /// The factory receives a test identifier, a unique invocation index, and an optional cap.
@@ -1942,7 +1954,7 @@ fn test_fresh_sync_avoids_reset_writes() {
                 .unwrap(),
         );
         let (sync, sync_io) = RecordingContext::new(context.child("fixed_sync"));
-        let journal = crate::journal::authenticated::init_sync::<_, fixed::Journal<_, u64>>(
+        let journal = init_sync::<_, fixed::Journal<_, u64>>(
             sync.child("journal"),
             fixed_cfg("fixed-sync"),
             0..10,
@@ -1970,7 +1982,7 @@ fn test_fresh_sync_avoids_reset_writes() {
                 .unwrap(),
         );
         let (sync, sync_io) = RecordingContext::new(context.child("variable_sync"));
-        let journal = crate::journal::authenticated::init_sync::<_, variable::Journal<_, u64>>(
+        let journal = init_sync::<_, variable::Journal<_, u64>>(
             sync.child("journal"),
             variable_cfg("variable-sync"),
             0..10,

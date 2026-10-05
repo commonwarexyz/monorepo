@@ -33,7 +33,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{full, mmb},
+    merkle::mmb,
     qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
     translator::EightCap,
 };
@@ -342,14 +342,11 @@ fn main() {
     Runner::new(RConfig::default()).start(|ctx| async move {
         let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
-        let merkle_config = full::Config {
-            journal_partition: "constantinople-merkle-journal".into(),
+        let merkle_config = commonware_storage::journal::authenticated::Config {
             metadata_partition: "constantinople-merkle-metadata".into(),
-            items_per_blob: ITEMS_PER_BLOB,
-            write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),
-            page_cache: pc.clone(),
+            cache: Default::default(),
         };
         let journal_config = FConfig {
             partition: "constantinople-log".into(),

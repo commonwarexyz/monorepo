@@ -356,6 +356,42 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .collect()
     }
 
+    /// Move the pruning boundary of a structure that retains no nodes forward to `leaves`, pinning
+    /// `peaks` (the nodes [`Family::nodes_to_pin`] returns for `leaves`). Nodes already pinned stay
+    /// pinned.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn skip_to(
+        &mut self,
+        leaves: Location<F>,
+        peaks: impl IntoIterator<Item = (Position<F>, D)>,
+    ) -> Result<(), Error<F>> {
+        let pos = Position::try_from(leaves)?;
+        if !self.nodes.is_empty() || pos < self.pruning_boundary {
+            return Err(Error::DataCorrupted("skip requires a pruned structure"));
+        }
+        self.pruning_boundary = pos;
+        self.pinned_nodes.extend(peaks);
+        debug_assert!(
+            F::nodes_to_pin(leaves).all(|pos| self.pinned_nodes.contains_key(&pos)),
+            "skip must pin every peak"
+        );
+        Ok(())
+    }
+
+    /// Drop every retained node and pinned node except the peaks at the current size and `keep`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a peak at the current size is neither retained nor pinned.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn compact(&mut self, keep: &BTreeMap<Position<F>, D>) {
+        let mut pinned = self.nodes_to_pin(self.leaves());
+        pinned.extend(keep.iter().map(|(&pos, &digest)| (pos, digest)));
+        self.pruning_boundary = self.size();
+        self.nodes.clear();
+        self.pinned_nodes = pinned;
+    }
+
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
     #[cfg(feature = "std")]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
@@ -410,76 +446,12 @@ impl<F: Family, D: Digest> Mem<F, D> {
         &mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<(), Error<F>> {
-        let skip_ancestors = if self.size() == batch.base_size {
-            false
-        } else if self.size() > batch.base_size && self.size() < batch.size() {
-            true
-        } else if self.size() == batch.size() && batch.appended.is_empty() {
-            // All ancestors committed and this batch has overwrites only (no appends).
-            true
-        } else {
-            return Err(Error::StaleBatch {
-                expected: batch.base_size,
-                actual: self.size(),
-            });
-        };
-
-        if self.size() < batch.ancestor_base_size {
-            return Err(Error::AncestorDropped {
-                expected: batch.size(),
-                actual: self.size(),
-            });
-        }
-
-        // Apply ancestor batches in root-to-tip order. Already-committed
-        // batches (whose appended nodes are already in the Mem) are skipped
-        // by tracking a running position through the retained ancestor suffix.
-        let mut batch_pos = *batch.ancestor_base_size;
-        for (appended, overwrites) in batch
-            .ancestor_appended
-            .iter()
-            .zip(&batch.ancestor_overwrites)
-        {
-            batch_pos += appended.len() as u64;
-            // Overwrite-only ancestors don't advance batch_pos, so they can't be
-            // distinguished from their predecessor by size. Use strict < to
-            // avoid skipping them at the boundary. Re-applying committed
-            // overwrites is harmless (idempotent).
-            let committed = if appended.is_empty() {
-                skip_ancestors && batch_pos < *self.size()
-            } else {
-                skip_ancestors && batch_pos <= *self.size()
-            };
-            if committed {
-                continue;
-            }
+        for (appended, overwrites) in batch.unapplied(self.size())? {
             for (&pos, &digest) in overwrites.iter() {
                 self.overwrite(pos, digest);
             }
-            for &digest in appended.iter() {
-                self.nodes.push_back(digest);
-            }
+            self.nodes.extend(appended.iter().copied());
         }
-
-        // Apply this batch's own data.
-        for (&pos, &digest) in batch.overwrites.iter() {
-            self.overwrite(pos, digest);
-        }
-        for &digest in batch.appended.iter() {
-            self.nodes.push_back(digest);
-        }
-
-        // Detect missing ancestor data. If an uncommitted ancestor was dropped
-        // before this batch was merkleized, its appended nodes are absent and the
-        // Mem ends up smaller than expected. This does not catch dropped
-        // overwrite-only ancestors (they don't change the size).
-        if self.size() != batch.size() {
-            return Err(Error::AncestorDropped {
-                expected: batch.size(),
-                actual: self.size(),
-            });
-        }
-
         Ok(())
     }
 }
@@ -573,6 +545,31 @@ mod tests {
                 }
             }
         });
+    }
+
+    /// Skipping a pruned structure ahead, pinning a reference's new peaks, reproduces the
+    /// reference's root, and compacting keeps only its peaks.
+    fn skip_to_then_compact<F: Family>() {
+        let hasher: H = Standard::new(ForwardFold);
+        let reference = build_raw::<F>(&hasher, 20);
+        let mut mem = build_raw::<F>(&hasher, 7);
+        mem.prune_all();
+        let start = mem.size();
+        let leaves = Location::new(20);
+        let peaks: Vec<_> = F::nodes_to_pin(leaves)
+            .filter(|&pos| pos >= start)
+            .map(|pos| (pos, reference.get_node(pos).unwrap()))
+            .collect();
+        mem.skip_to(leaves, peaks).unwrap();
+        assert_eq!(mem.size(), reference.size());
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+        mem.compact(&BTreeMap::new());
+        assert_eq!(mem.pinned_nodes, reference.nodes_to_pin(leaves));
+        assert_eq!(plain_root(&mem, &hasher), plain_root(&reference, &hasher));
+
+        // A structure with retained nodes, or a move backward, is rejected.
+        assert!(build_raw::<F>(&hasher, 7).skip_to(leaves, []).is_err());
+        assert!(mem.skip_to(Location::new(7), []).is_err());
     }
 
     fn prune_all_then_append<F: Family>() {
@@ -1464,6 +1461,10 @@ mod tests {
         validity::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_prune_all_then_append() {
         prune_all_then_append::<crate::mmr::Family>();
     }
@@ -1569,6 +1570,10 @@ mod tests {
     #[test]
     fn mmb_validity() {
         validity::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_skip_to_then_compact() {
+        skip_to_then_compact::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_prune_all_then_append() {

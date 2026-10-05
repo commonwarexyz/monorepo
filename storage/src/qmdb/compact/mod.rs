@@ -7,7 +7,10 @@ use crate::{
     Context,
     journal::contiguous::variable,
     merkle::{Family, Location},
-    qmdb::{Error, sync::journal::Memory},
+    qmdb::{
+        Error,
+        sync::{Journal as _, Target, journal::Memory},
+    },
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
@@ -24,6 +27,24 @@ pub struct Config<C, S: Strategy> {
 
     /// Codec config used to decode the persisted last commit operation on reopen.
     pub commit_codec_config: C,
+}
+
+/// Open the sync journal for `target`. Compact databases keep no operations to reuse, and nothing
+/// is pinned at genesis.
+#[allow(clippy::type_complexity)]
+pub(crate) async fn open_sync_journal<E, F, D, Op>(
+    context: &E,
+    target: &Target<F, D>,
+) -> Result<((), Memory<F, E, Op>, Option<Vec<D>>), Error<F>>
+where
+    E: Context,
+    F: Family,
+    D: Digest,
+    Op: Send + Sync,
+{
+    let start = target.range.start();
+    let journal = Memory::clear(context.child("journal"), (), start).await?;
+    Ok(((), journal, (start == Location::new(0)).then(Vec::new)))
 }
 
 /// Build a compact db from state fetched by the sync engine.

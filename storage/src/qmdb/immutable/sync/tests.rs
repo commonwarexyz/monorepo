@@ -6,8 +6,8 @@
 //! by the [`sync_tests_for_harness!`] macro.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{self, Location, full::Config as MerkleConfig},
+    journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous},
+    merkle::{self, Location},
     qmdb::{
         self,
         immutable::{self, variable::Operation},
@@ -872,13 +872,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -1142,11 +1139,10 @@ macro_rules! sync_tests_for_harness {
 sync_tests_for_harness!(harnesses::VariableMmrHarness, variable_mmr);
 sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
 
-/// A completed sync journal reuses local pinned nodes only when the persisted state can
-/// authenticate the target: a target starting below the local pruning boundary is declined,
-/// while a matching target serves the pinned nodes locally.
+/// A completed local journal serves a matching target's pinned nodes, but cannot hold a target
+/// starting below its pruning boundary.
 #[commonware_macros::test_traced]
-fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
+fn test_immutable_open_sync_journal_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let suffix = context.next_u64().to_string();
@@ -1164,48 +1160,36 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
 
-        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        // Reopen the database as the sync engine does. A matching target authenticates locally.
         drop(db);
-        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
-            context.child("journal"),
-            qmdb::sync::DatabaseConfig::journal_config(&config),
-            non_empty_range!(local_start, local_end),
-        )
-        .await
-        .unwrap();
-
-        let stale_target = Target {
-            root: sync_root,
-            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
-        };
-        assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_stale"),
-                &config,
-                &stale_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
-
         let matching_target = Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
-        assert!(
-            <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_matching"),
-                &config,
-                &matching_target,
-                &journal,
-            )
-            .await
-            .unwrap()
-            .is_some()
+        let (state, journal, pins) = <DbOf<H> as qmdb::sync::Database>::open_sync_journal(
+            &context,
+            &config,
+            &matching_target,
+        )
+        .await
+        .unwrap();
+        assert!(pins.is_some());
+        drop((state, journal));
+
+        // A journal pruned past a target's start cannot hold that target.
+        let stale_target = Target {
+            root: sync_root,
+            range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
+        };
+        let (_, journal, pins) =
+            <DbOf<H> as qmdb::sync::Database>::open_sync_journal(&context, &config, &stale_target)
+                .await
+                .unwrap();
+        assert!(pins.is_none());
+        assert_eq!(
+            crate::journal::contiguous::Contiguous::bounds(&journal),
+            *stale_target.range.start()..*stale_target.range.start()
         );
-        drop(journal);
     });
 }
 
@@ -1274,13 +1258,10 @@ mod compact_variable_mmr {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -2036,13 +2017,10 @@ mod compact_variable_mmb {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),

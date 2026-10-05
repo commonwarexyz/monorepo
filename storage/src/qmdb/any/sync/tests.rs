@@ -12,7 +12,7 @@ use crate::{
         any::traits::DbAny,
         operation::Operation as OperationTrait,
         sync::{
-            self, Engine, Feedback, Target,
+            self, Engine, Feedback, SyncState as _, Target,
             engine::{Config, NextStep},
             source::{self, Request, Response, Source},
         },
@@ -54,6 +54,25 @@ pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
 /// Type alias for the journal type of a harness.
 pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
+/// Type alias for the sync state type of a harness.
+type SyncStateOf<H> = <DbOf<H> as qmdb::sync::Database>::SyncState;
+
+/// Begin an import of `target` into `config` with `pins` staged at its start, as the engine does
+/// before handing a journal to `from_sync_result`.
+async fn staged_state<H: SyncTestHarness>(
+    context: &deterministic::Context,
+    config: &ConfigOf<H>,
+    target: &Target<H::Family, Digest>,
+    pins: Vec<Digest>,
+) -> SyncStateOf<H> {
+    let (state, journal, _) =
+        <DbOf<H> as qmdb::sync::Database>::open_sync_journal(context, config, target)
+            .await
+            .unwrap();
+    drop(journal);
+    state.stage(target.range.start(), pins).await.unwrap()
+}
+
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
     type Family: merkle::Family;
@@ -63,20 +82,12 @@ pub(crate) trait Destructible {
     ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
-// Implement Destructible once for the generic full Merkle type used in tests.
-// This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl<F: merkle::Family> Destructible
-    for crate::merkle::full::Merkle<
-        F,
-        deterministic::Context,
-        Digest,
-        commonware_parallel::Sequential,
-    >
+    for crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>
 {
     type Family = F;
-
     async fn destroy(self) -> Result<(), qmdb::Error<F>> {
-        self.destroy().await.map_err(qmdb::Error::Merkle)
+        self.destroy().await.map_err(Into::into)
     }
 }
 
@@ -1576,14 +1587,25 @@ where
         let target_db_inactivity_floor_loc = db.inactivity_floor_loc();
 
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
-        let (_, journal) = db.into_log_components();
+        let target = Target {
+            root: db.root(),
+            range: non_empty_range!(sync_lower_bound, sync_upper_bound),
+        };
+        drop(db.into_log_components());
 
+        // The local journal reaches the target, so it authenticates without fetching.
+        let (state, journal, local_pins) =
+            <DbOf<H> as qmdb::sync::Database>::open_sync_journal(&context, &db_config, &target)
+                .await
+                .unwrap();
+        assert_eq!(local_pins, Some(pinned_nodes.clone()));
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             db_config,
             journal,
-            Some(pinned_nodes),
-            non_empty_range!(sync_lower_bound, sync_upper_bound),
+            state,
+            local_pins,
+            target.range,
             NZU64!(1024),
         )
         .await
@@ -1650,10 +1672,22 @@ where
         let (mmr, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
+        let target = Target {
+            root: target_hash,
+            range: non_empty_range!(sync_lower_bound, sync_upper_bound),
+        };
+        let state = staged_state::<H>(
+            &client_context,
+            &sync_db_config,
+            &target,
+            pinned_nodes.clone(),
+        )
+        .await;
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             client_context.child("synced"),
             sync_db_config,
             journal,
+            state,
             Some(pinned_nodes),
             non_empty_range!(sync_lower_bound, sync_upper_bound),
             NZU64!(1024),
@@ -1710,10 +1744,17 @@ where
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
+        let target = Target {
+            root: target_hash,
+            range: non_empty_range!(lower_bound, upper_bound),
+        };
+        let state =
+            staged_state::<H>(&context, &new_db_config, &target, pinned_nodes.clone()).await;
         let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
+            state,
             Some(pinned_nodes),
             non_empty_range!(lower_bound, upper_bound),
             NZU64!(1024),
@@ -1755,10 +1796,16 @@ where
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
+        let target = Target {
+            root: target_hash,
+            range: non_empty_range!(Location::new(0), Location::new(1)),
+        };
+        let state = staged_state::<H>(&context, &new_db_config, &target, Vec::new()).await;
         let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
+            state,
             None,
             non_empty_range!(Location::new(0), Location::new(1)),
             NZU64!(1024),
@@ -2387,9 +2434,8 @@ where
     });
 }
 
-/// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
-/// floor.
-pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
+/// Local operations authenticate a target whose lower bound precedes its inactivity floor.
+pub(crate) fn test_local_operations_authenticate_below_floor<H: SyncTestHarness>() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let config = H::config(&context.next_u64().to_string(), &context);
@@ -2417,23 +2463,11 @@ pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
         };
         drop(db.sync().await.unwrap());
 
-        let journal = <JournalOf<H> as sync::Journal<H::Family>>::new(
-            context.child("journal"),
-            sync::DatabaseConfig::journal_config(&config),
-            target.range.clone(),
-        )
-        .await
-        .unwrap();
-        let pinned = <DbOf<H> as sync::Database>::local_pinned_nodes(
-            context.child("probe"),
-            &config,
-            &target,
-            &journal,
-        )
-        .await
-        .unwrap();
+        let (_, _, pinned) =
+            <DbOf<H> as sync::Database>::open_sync_journal(&context, &config, &target)
+                .await
+                .unwrap();
         assert!(pinned.is_some());
-        drop(journal);
     });
 }
 
@@ -3295,8 +3329,8 @@ macro_rules! sync_tests_for_harness {
             }
 
             #[test_traced]
-            fn test_local_pinned_nodes_below_floor() {
-                super::test_local_pinned_nodes_below_floor::<$harness>();
+            fn test_local_operations_authenticate_below_floor() {
+                super::test_local_operations_authenticate_below_floor::<$harness>();
             }
         }
     };

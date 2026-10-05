@@ -1435,20 +1435,28 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         self.bounds.start
     }
 
+    /// Return the retained start that [Self::prune] would leave for `requested`.
+    fn prune_target(&self, requested: u64) -> Result<u64, Error> {
+        // The blob containing `requested`, capped to the tail (which is guaranteed to exist by
+        // our invariant).
+        let items_per_blob = self.items_per_blob.get();
+        let target = super::position_to_blob(requested.min(self.bounds.end), items_per_blob);
+        if target <= self.blobs.oldest_blob_index() {
+            return Ok(self.bounds.start);
+        }
+        super::blob_first_position(target, items_per_blob)
+    }
+
     /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_item_pos: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        // Calculate the blob that would contain min_item_pos, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = super::position_to_blob(min_item_pos, self.items_per_blob.get());
-        let tail_blob = super::position_to_blob(self.bounds.end, self.items_per_blob.get());
-        let min_blob = std::cmp::min(target_blob, tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        let new_boundary = self.prune_target(min_item_pos)?;
+        if new_boundary <= self.bounds.start {
             return Ok((self, false));
         }
+        let min_blob = super::position_to_blob(new_boundary, self.items_per_blob.get());
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -1462,7 +1470,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         sync.await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        let new_boundary = super::blob_first_position(min_blob, self.items_per_blob.get())?;
         self.blobs = self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
@@ -2056,6 +2063,10 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 
     async fn prune(self, min_position: u64) -> Result<(Self, bool), Error> {
         Self::prune(self, min_position).await
+    }
+
+    fn prune_target(&self, min_position: u64) -> Result<u64, Error> {
+        self.0.prune_target(min_position)
     }
 
     async fn start_sync(self) -> Result<(Self, Handle<()>), Error> {
@@ -7258,7 +7269,7 @@ mod tests {
 
             // A staged clear spans only its target. Any other start replaces the intent without
             // recovering the stale blobs. A start at 50 completes it.
-            let mut journal = authenticated::init_sync::<_, Journal<_, Digest>>(
+            let mut journal = super::super::tests::init_sync::<_, Journal<_, Digest>>(
                 context.child("sync"),
                 cfg.clone(),
                 start..start + 20,

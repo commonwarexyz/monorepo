@@ -121,8 +121,9 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        journal::contiguous::fixed::Config as JournalConfig,
-        merkle::full::Config as MerkleConfig,
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as JournalConfig,
+        },
         mmr,
         qmdb::current::{
             FixedConfig,
@@ -142,7 +143,7 @@ pub mod test {
             self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
+    use commonware_utils::{NZU64, NZUsize, TestRng, probability};
     use rand::Rng as _;
     use std::collections::HashMap;
 
@@ -579,13 +580,10 @@ pub mod test {
             .unwrap();
             FixedConfig {
                 merkle_config: MerkleConfig {
-                    journal_partition: "rebranch-merkle-journal".into(),
                     metadata_partition: "rebranch-merkle-metadata".into(),
-                    items_per_blob: NZU64!(100_000),
-                    write_buffer: NZUsize!(4096),
                     replay_buffer: NZUsize!(4096),
                     strategy: Sequential,
-                    page_cache: CacheRef::from_pooler(ctx, NZU16!(1024), NZUsize!(64)),
+                    cache: Default::default(),
                 },
                 journal_config: JournalConfig {
                     partition: "rebranch-ops-journal".into(),

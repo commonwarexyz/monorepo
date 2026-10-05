@@ -697,6 +697,74 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         self.base_size
     }
 
+    /// The appends and overwrites of this batch and its retained ancestors that a structure of
+    /// `size` nodes has not applied, in root-to-tip order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if the structure has diverged from the batch's ancestor chain
+    /// and [`Error::AncestorDropped`] if an unapplied ancestor was dropped before the batch was
+    /// merkleized.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn unapplied(
+        &self,
+        size: Position<F>,
+    ) -> Result<Vec<(&[D], &Overwrites<F, D>)>, Error<F>> {
+        let skip_ancestors = if size == self.base_size {
+            false
+        } else if size > self.base_size && size < self.size() {
+            true
+        } else if size == self.size() && self.appended.is_empty() {
+            // All ancestors committed and this batch has overwrites only (no appends).
+            true
+        } else {
+            return Err(Error::StaleBatch {
+                expected: self.base_size,
+                actual: size,
+            });
+        };
+        if size < self.ancestor_base_size {
+            return Err(Error::AncestorDropped {
+                expected: self.size(),
+                actual: size,
+            });
+        }
+
+        // Already-committed ancestors are skipped by tracking a running position through the
+        // retained ancestor suffix.
+        let mut changes = Vec::with_capacity(self.ancestor_appended.len() + 1);
+        let mut batch_pos = *self.ancestor_base_size;
+        for (appended, overwrites) in self.ancestor_appended.iter().zip(&self.ancestor_overwrites) {
+            batch_pos += appended.len() as u64;
+            // Overwrite-only ancestors don't advance batch_pos, so they can't be distinguished
+            // from their predecessor by size. Use strict < to avoid skipping them at the
+            // boundary. Re-applying committed overwrites is harmless (idempotent).
+            let committed = if appended.is_empty() {
+                skip_ancestors && batch_pos < *size
+            } else {
+                skip_ancestors && batch_pos <= *size
+            };
+            if !committed {
+                changes.push((appended.as_slice(), &**overwrites));
+            }
+        }
+        changes.push((self.appended.as_slice(), &*self.overwrites));
+
+        // An uncommitted ancestor dropped before this batch was merkleized leaves its appended
+        // nodes absent. This does not catch dropped overwrite-only ancestors.
+        let appended: u64 = changes
+            .iter()
+            .map(|(appended, _)| appended.len() as u64)
+            .sum();
+        if *size + appended != *self.size() {
+            return Err(Error::AncestorDropped {
+                expected: self.size(),
+                actual: Position::new(*size + appended),
+            });
+        }
+        Ok(changes)
+    }
+
     /// Return a reference to the batch's strategy.
     pub const fn strategy(&self) -> &S {
         &self.strategy
