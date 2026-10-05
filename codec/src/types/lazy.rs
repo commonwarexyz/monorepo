@@ -80,6 +80,43 @@ struct Pending<T: Read> {
     cfg: T::Cfg,
 }
 
+/// Reads borrowed [Bytes] without cloning the handle, slicing it only for retained fields.
+///
+/// Cloning the handle on every decode makes threads decoding slices of one allocation contend
+/// on its reference count.
+struct View<'a> {
+    bytes: &'a Bytes,
+    pos: usize,
+}
+
+impl bytes::Buf for View<'_> {
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.pos
+    }
+
+    #[inline]
+    fn chunk(&self) -> &[u8] {
+        &self.bytes[self.pos..]
+    }
+
+    #[inline]
+    fn advance(&mut self, cnt: usize) {
+        assert!(cnt <= self.remaining(), "advance past end of buffer");
+        self.pos += cnt;
+    }
+
+    #[inline]
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        assert!(len <= self.remaining(), "copy_to_bytes past end of buffer");
+        let bytes = self.bytes.slice(self.pos..self.pos + len);
+        self.pos += len;
+        bytes
+    }
+}
+
+impl Buf for View<'_> {}
+
 impl<T: Read> Lazy<T> {
     // I considered calling this "now", but this was too close to "new".
     /// Create a [`Lazy`] using a value.
@@ -116,7 +153,7 @@ impl<T: Read> Lazy<T> {
                 }
             } else {
                 Self {
-                    value: T::decode_cfg(bytes.clone(), &cfg).ok(),
+                    value: T::decode_cfg(View { bytes: &bytes, pos: 0 }, &cfg).ok(),
                     pending: Some(Pending { bytes, cfg }),
                 }
             }
@@ -137,7 +174,7 @@ impl<T: Read> Lazy<T> {
                     .pending
                     .as_ref()
                     .expect("Lazy should have pending if value is not initialized");
-                T::decode_cfg(bytes.clone(), cfg).ok()
+                T::decode_cfg(View { bytes, pos: 0 }, cfg).ok()
             })
             .as_ref()
     }
@@ -260,6 +297,7 @@ mod test {
     use crate::{
         Copying, Decode, DecodeExt, Encode, FixedSize, Read, Write, types::tests::TrackingWriteBuf,
     };
+    use bytes::Bytes;
     use proptest::prelude::*;
 
     /// A byte that's always <= 100
@@ -361,5 +399,21 @@ mod test {
         copied.write_bufs(&mut buf);
         assert_eq!(buf.pushed.len(), value.len());
         assert!(buf.pushed.iter().all(|b| !range.contains(&b.as_ptr())));
+    }
+
+    #[test]
+    fn test_lazy_get_shares_retained_bytes() {
+        let encoded = Bytes::from_static(b"hello").encode();
+        let range = encoded.as_ptr_range();
+        let lazy = Lazy::<Bytes>::deferred(&mut encoded.clone(), (..).into());
+        let value = lazy.get().unwrap();
+        assert_eq!(value, &b"hello"[..]);
+        assert!(range.contains(&value.as_ptr()));
+
+        // Trailing bytes fail decoding.
+        let mut extra = encoded.to_vec();
+        extra.push(0);
+        let lazy = Lazy::<Bytes>::deferred(&mut Bytes::from(extra), (..).into());
+        assert!(lazy.get().is_none());
     }
 }
