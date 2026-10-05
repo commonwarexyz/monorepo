@@ -52,9 +52,11 @@ use crate::{
     },
     translator::Translator,
 };
+#[commonware_macros::stability(ALPHA)]
+use commonware_runtime::telemetry::metrics::{Registered, Registration};
 use commonware_runtime::{
     Metrics,
-    telemetry::metrics::{Counter, Gauge, MetricsExt as _, Registered, Registration},
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
 };
 use std::{
     collections::{BTreeMap, HashMap, btree_map, hash_map},
