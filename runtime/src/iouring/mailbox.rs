@@ -183,7 +183,7 @@ mod tests {
         }
     }
 
-    /// A ready token holding the only reference to a task with no worker.
+    /// A runnable holding the only reference to a task with no worker.
     fn runnable(future: impl Future<Output = ()> + Send + 'static) -> Runnable {
         let (task, runnable) = Task::new(future, &Tasks::new(1), Weak::new());
         drop(task);
@@ -206,8 +206,9 @@ mod tests {
         (Message::Wake(wake), dropped)
     }
 
-    /// Dispose of messages, clearing each carried task's future in place, as
-    /// worker teardown does through the task set, before discarding its token.
+    /// Dispose of messages, clearing each carried task's future in place before
+    /// discarding its runnable, which holds the task's only reference. Worker
+    /// teardown clears through the task set instead.
     fn dispose(messages: impl IntoIterator<Item = Message>) {
         for message in messages {
             if let Message::Wake(Target::Task(runnable)) = message {

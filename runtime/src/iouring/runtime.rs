@@ -22,7 +22,7 @@
 //!   |                                               |
 //!   +-- Rc<RefCell<Local>> <------------------------+
 //!   |     +-- Shared (Arc)
-//!   |     +-- Ready (ready tokens)
+//!   |     +-- Ready (runnables)
 //!   |     +-- Timers (sleep registrations and deadlines)
 //!   |     +-- Driver
 //!   |     |     +-- ring (SQ/CQ)
@@ -48,7 +48,7 @@
 //! Factories run on the spawning caller. Ordinary tasks always target the
 //! runner's calling-thread worker, including when spawned from another worker.
 //! Registration allocates the task and retains it in [`Tasks`] on the caller's
-//! thread, then delivers its first token.
+//! thread, then delivers its first runnable.
 //!
 //! ```text
 //! ordinary spawn:
@@ -70,7 +70,7 @@
 //! until worker cleanup and failure reporting finish. It retains only the
 //! [`Workers`] barrier, allowing that worker's [`Shared`] owners to be released first.
 //! I/O registers directly with the current worker on first poll. Mailboxes carry
-//! task wakes (including a foreign spawn's first token), observation transfers,
+//! task wakes (including a foreign spawn's first runnable), observation transfers,
 //! and cancellation messages.
 //!
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
@@ -963,7 +963,7 @@ type OperationResult = (
 pub struct Local {
     /// Ring owner, taken only after kernel retirement so it can be dropped unborrowed.
     pub driver: Option<Driver>,
-    /// FIFO ready tokens.
+    /// FIFO runnables.
     pub ready: Ready,
     /// Sleeper registrations and deadlines.
     pub timers: Timers,
@@ -1464,8 +1464,8 @@ impl Worker {
         // Closing the driver and timer table below subsumes queued cancellations.
         // Discard queued forwarding messages so their receivers observe closure.
         // Senders can run callbacks on drop, so destroy these messages outside
-        // the local borrow. A queued wake's token belongs to a task the closed
-        // task set retains, so discarding it runs no user code.
+        // the local borrow. A queued wake's runnable belongs to a task the
+        // closed task set retains, so discarding it runs no user code.
         for message in self.inbox.drain(..) {
             match message {
                 Message::Wake(Target::Task(runnable)) => runnable.discard(),
@@ -1476,9 +1476,9 @@ impl Worker {
         }
 
         // Destroy tasks before closing I/O, letting their futures detach
-        // observers. Ready tokens belong to retained tasks as well. The
-        // ordinary worker drains the task set it closed and clears each task
-        // outside the local borrow and the set's locks.
+        // observers. Runnables belong to retained tasks as well. The ordinary
+        // worker drains the task set it closed and clears each task outside the
+        // local borrow and the set's locks.
         self.local.borrow_mut().ready.discard();
         if self.ordinary {
             let shared = self.local.borrow().shared.clone();
@@ -1665,12 +1665,12 @@ impl Worker {
                     // Join the tail so self-waking tasks cannot skip other ready work.
                     AfterPoll::Requeue(runnable) => self.local.borrow_mut().ready.push(runnable),
                     // The future is gone, so releasing the set's reference and
-                    // the token's runs no user code.
+                    // the runnable's runs no user code.
                     AfterPoll::Retire(task) => drop(shared.tasks.remove(&task)),
                 }
             }
 
-            // The root has no ready token. Its flag also records notifications
+            // The root has no runnable. Its flag also records notifications
             // forwarded from other workers through the mailbox.
             let poll_root = mem::take(&mut self.local.borrow_mut().root_ready);
 

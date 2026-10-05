@@ -14,13 +14,13 @@
 //! reach only a few shards.
 //!
 //! [`Tasks::register`] allocates each task for its set and retains it before
-//! the first token reaches a worker, so no token reaches a worker before the
-//! set retains its task. The set holds one reference to each linked task, which
+//! delivering its first runnable, so every runnable a worker receives belongs
+//! to a retained task. The set holds one reference to each linked task, which
 //! removal or draining hands back. Only removal and a drain unlink a task, and
-//! a drain requires a closed set, so an open set retains every task it
-//! accepted until its removal. Every task carries the identity of the set that
-//! retains it, checked on insertion and removal, so a task routed to another
-//! runtime's set panics instead of corrupting that set's lists.
+//! a drain requires a closed set, so an open set retains every task it accepted
+//! until its removal. Every task carries the identity of the set that retains
+//! it, checked on insertion and removal, so a task routed to another runtime's
+//! set panics instead of corrupting that set's lists.
 
 use super::{
     cell::UnsafeCell,
@@ -247,8 +247,8 @@ impl Tasks {
     }
 
     /// Allocate a task for this set, owned by the worker behind `mailbox`,
-    /// retain it, then deliver its first poll's token to that worker directly
-    /// or through its mailbox.
+    /// retain it, then deliver its first runnable to that worker directly or
+    /// through its mailbox.
     ///
     /// Returns the new task if the set has closed. The caller clears its
     /// future outside worker borrows.
@@ -259,9 +259,9 @@ impl Tasks {
         let (task, runnable) = Task::new(future, self, mailbox);
 
         // The factory runs after the spawn's open check, so the set checks
-        // closure again. Insertion precedes delivery, so a token the mailbox
-        // refuses belongs to a task teardown clears. A refused task goes back
-        // to the caller, which clears it.
+        // closure again. Insertion precedes delivery, so a runnable the mailbox
+        // refuses belongs to a task that teardown clears. A refused task goes
+        // back to its caller to clear, so its runnable may be discarded.
         if let Err(task) = self.insert(task) {
             runnable.discard();
             return Err(task);
@@ -294,7 +294,7 @@ impl Tasks {
         // SAFETY: as above, and the task is unlinked.
         unsafe { list.push_front(node) };
 
-        // The link carries this reference until removal or closure.
+        // The link carries this reference until removal or a drain.
         let _ = Task::into_raw(task);
         Ok(())
     }
@@ -439,12 +439,12 @@ pub mod tests {
 
     thread_local! {
         /// Callback run once by this thread's next registration, after the set
-        /// retains the task and before its first token is delivered.
+        /// retains the task and before its first runnable is delivered.
         pub static AFTER_INSERT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
     }
 
     /// Run the callback a test installed for the window between retention and
-    /// first-token delivery.
+    /// delivery of the first runnable.
     pub fn after_insert() {
         // A spawn from a TLS destructor can run after this key is destroyed.
         if let Some(callback) = AFTER_INSERT.try_with(RefCell::take).ok().flatten() {
@@ -452,8 +452,8 @@ pub mod tests {
         }
     }
 
-    /// A pending task for `set` to retain, with no worker. Its first token is
-    /// discarded, since these tests never poll.
+    /// A pending task for `set` to retain, with no worker. Its first runnable
+    /// is discarded, since these tests never poll.
     pub fn task(set: &Tasks) -> Task {
         let (task, runnable) = Task::new(pending::<()>(), set, Weak::new());
         runnable.discard();
@@ -466,7 +466,7 @@ pub mod tests {
         drop(task);
     }
 
-    /// Insertion counts the set's reference, and removal hands it back once.
+    /// Insertion takes over the set's reference, which removal hands back once.
     #[test]
     fn test_insert_then_remove_returns_the_reference_once() {
         let set = Tasks::new(4);
