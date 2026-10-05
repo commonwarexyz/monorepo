@@ -2387,6 +2387,186 @@ where
     });
 }
 
+/// Releases every held request except the lowest held operations request, which stands in for a
+/// stalled request at the journal tip. Records each held request in `issued`. Returns whether
+/// anything was released or newly issued.
+fn release_all_but_tip<F: merkle::Family>(
+    log: &Mutex<GateLog<F>>,
+    issued: &mut BTreeSet<Request<F>>,
+) -> bool {
+    let mut log = log.lock();
+    let tip = log.live_operations().min_by_key(|request| request.start());
+    let mut changed = false;
+    for (request, release) in std::mem::take(&mut log.held) {
+        changed |= issued.insert(request);
+        if Some(request) == tip {
+            log.held.push((request, release));
+        } else {
+            changed |= release.send(()).is_ok();
+        }
+    }
+    changed
+}
+
+/// Starts a sync of a pruned source through a closed [GatedSource] and returns the source
+/// database, the target, the gate log, and the sync future.
+async fn gated_sync<H: SyncTestHarness>(
+    context: &mut deterministic::Context,
+    max_outstanding_requests: usize,
+    fetch_batch_size: NonZeroU64,
+) -> (
+    Arc<AsyncRwLock<Option<DbOf<H>>>>,
+    Target<H::Family, Digest>,
+    Arc<Mutex<GateLog<H::Family>>>,
+    Config<DbOf<H>, GatedSource<Arc<AsyncRwLock<Option<DbOf<H>>>>, H::Family>>,
+)
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let mut db = H::init_db(context.child("source")).await;
+    db = H::apply_ops(db, H::create_ops(200)).await;
+    let floor = db.sync_boundary();
+    db = db.prune(floor).await.unwrap();
+    assert!(floor > Location::new(0));
+    let target = Target {
+        root: H::sync_target_root(&db),
+        range: non_empty_range!(floor, db.bounds().end),
+    };
+    let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+    let log = Arc::new(Mutex::new(GateLog {
+        open: false,
+        held: Vec::new(),
+        served: Vec::new(),
+    }));
+    let config = Config {
+        context: context.child("client"),
+        db_config: H::config(&context.next_u64().to_string(), &*context),
+        target: target.clone(),
+        source: GatedSource {
+            inner: source_db.clone(),
+            log: log.clone(),
+        },
+        fetch_batch_size,
+        apply_batch_size: NZU64!(1024),
+        max_outstanding_requests,
+        update_rx: None,
+        finish_rx: None,
+        reached_target_tx: None,
+        max_retained_roots: 0,
+    };
+    (source_db, target, log, config)
+}
+
+/// Test that while the request at the journal tip is outstanding, sync requests operations only
+/// within a bounded window of the tip, so buffered operations stay bounded.
+pub(crate) fn test_sync_bounds_lookahead_behind_stalled_tip<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    const OUTSTANDING: usize = 2;
+    const BATCH: u64 = 2;
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let (source_db, target, log, config) =
+            gated_sync::<H>(&mut context, OUTSTANDING, NZU64!(BATCH)).await;
+        let floor = target.range.start();
+        assert!(*target.range.end() > *floor + 4 * OUTSTANDING as u64 * BATCH);
+
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // Answer every request except the one at the journal tip until no new request
+            // arrives.
+            let mut issued = BTreeSet::new();
+            loop {
+                context.sleep(Duration::from_millis(10)).await;
+                if !release_all_but_tip(&log, &mut issued) {
+                    break;
+                }
+            }
+
+            // The boundary operation moved the journal tip to the floor plus one, where it
+            // stays while the tip request is held. Every batch starting within twice the
+            // in-flight capacity of it is requested, and nothing beyond.
+            let starts = issued
+                .iter()
+                .map(|request| *request.start() - *floor)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(starts, BTreeSet::from([0, 1, 3, 5, 7]));
+
+            // Answer everything, including the tip request.
+            let held = {
+                let mut log = log.lock();
+                log.open = true;
+                std::mem::take(&mut log.held)
+            };
+            for (_, release) in held {
+                let _ = release.send(());
+            }
+        };
+        let (synced, ()) = futures::join!(sync, drive);
+
+        let db = source_db.write().await.take().unwrap();
+        assert_eq!(synced.root(), db.root());
+        synced.destroy().await.unwrap();
+        db.destroy().await.unwrap();
+    });
+}
+
+/// Test that sync completes when the request at the journal tip is answered only after every
+/// request the lookahead window allows has been answered.
+pub(crate) fn test_sync_completes_after_stalled_tip<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let (source_db, _, log, config) = gated_sync::<H>(&mut context, 2, NZU64!(1)).await;
+
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // Each round answers everything but the tip request until the engine goes quiet, then
+            // answers the tip request.
+            let mut issued = BTreeSet::new();
+            loop {
+                context.sleep(Duration::from_millis(10)).await;
+                if release_all_but_tip(&log, &mut issued) {
+                    continue;
+                }
+                let held = std::mem::take(&mut log.lock().held);
+                if held.is_empty() {
+                    break;
+                }
+                for (_, release) in held {
+                    let _ = release.send(());
+                }
+            }
+        };
+        let (synced, ()) = futures::join!(sync, drive);
+
+        let db = source_db.write().await.take().unwrap();
+        assert_eq!(synced.root(), db.root());
+        synced.destroy().await.unwrap();
+        db.destroy().await.unwrap();
+    });
+}
+
 /// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
 /// floor.
 pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
@@ -3292,6 +3472,16 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_target_updates_keep_operations_across_pruned_floors() {
                 super::test_target_updates_keep_operations_across_pruned_floors::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_bounds_lookahead_behind_stalled_tip() {
+                super::test_sync_bounds_lookahead_behind_stalled_tip::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_completes_after_stalled_tip() {
+                super::test_sync_completes_after_stalled_tip::<$harness>();
             }
 
             #[test_traced]
