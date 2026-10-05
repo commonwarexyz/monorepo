@@ -192,6 +192,8 @@ where
 
     /// Builds a block on top of `parent`, using the selected history in `blocks`.
     ///
+    /// `blocks` is the selected branch ending at `parent` (`blocks.tip() == parent.height()`).
+    ///
     /// Returns the block and its merkleized state, or [`None`] if no block is built.
     ///
     /// The merkleized state must match [`sync_targets`](Self::sync_targets) for the returned block:
@@ -214,12 +216,19 @@ where
     /// Verifies `block` received from a peer against `parent` and the selected history in
     /// `blocks`.
     ///
+    /// `blocks` is the selected branch ending at `parent` (`blocks.tip() == parent.height()`) and
+    /// excludes `block`. Acquiring a range from it can fail with a
+    /// [`blocks::Error`](commonware_consensus::marshal::blocks::Error). `Unavailable` means the
+    /// history could not be acquired, which is not a verdict, so keep the request pending.
+    /// `InvalidParent`, `InvalidHeight`, and `InvalidDigest` mean the supplied history is
+    /// inconsistent, so `block` is invalid under it.
+    ///
     /// Called before this node votes to finalize the block (its notarize vote may already have
     /// been cast). The implementation should execute the block against `batches` and return the
     /// merkleized result.
     ///
-    /// Return [`None`] only for permanent invalidity under the supplied context, history, and
-    /// batches. To abstain, keep the future pending until validity is decided or the request is
+    /// Return [`None`] only for permanent invalidity under the supplied context, selected history,
+    /// and batches. To abstain, keep the future pending until validity is decided or the request is
     /// cancelled. Later finalization of a competing branch does not change a completed verdict.
     ///
     /// Reject execution results that differ from the block's commitments. [`Stateful`] checks

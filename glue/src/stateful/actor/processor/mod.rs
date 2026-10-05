@@ -1396,9 +1396,10 @@ where
     /// reading bodies, and the held `target` is never acquired. Returns
     /// [`PrepareBatchesError::Invalid`] if `target` is at or below the processed height, above the
     /// tip of `blocks`, or not the selected block at its height, if a cached ancestor has a
-    /// different height, if an acquired block does not extend the preceding one, or if a replay
-    /// fails. Returns [`PrepareBatchesError::Incomplete`] if a block is unavailable, and
-    /// [`PrepareBatchesError::Cancelled`] if `cancellation` fires first.
+    /// different height, if an acquired block does not extend the preceding one, if `blocks`
+    /// reports any error other than [`BlocksError::Unavailable`], or if a replay fails. Returns
+    /// [`PrepareBatchesError::Incomplete`] on [`BlocksError::Unavailable`], which is not a verdict,
+    /// and [`PrepareBatchesError::Cancelled`] if `cancellation` fires first.
     async fn rebuild_pending<C>(
         &self,
         app: &mut A,
