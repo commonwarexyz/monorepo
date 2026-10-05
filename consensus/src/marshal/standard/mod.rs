@@ -2802,7 +2802,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_verify_missing_candidate_fetches_until_canceled() {
+    fn test_standard_verify_missing_candidate_waits_without_fetching() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
@@ -2839,7 +2839,9 @@ mod tests {
                     parent: (View::zero(), genesis.digest()),
                 };
                 let missing = Sha256::hash(&[b"missing candidate"]);
-                let mut verify = wrapper.verify(consensus_context, missing, Arc::from([genesis.digest()])).await;
+                let mut verify = wrapper
+                    .verify(consensus_context, missing, Arc::from([genesis.digest()]))
+                    .await;
 
                 context.sleep(Duration::from_millis(50)).await;
                 assert!(
@@ -2847,8 +2849,8 @@ mod tests {
                     "{kind:?}: unavailable candidate verification must register a local wait"
                 );
                 assert!(
-                    resolver.fetches().iter().any(|fetch| matches!((&fetch.key, &fetch.subscriber), (handler::Key::Block(commitment), handler::Annotation::Subscription) if *commitment == missing)),
-                    "{kind:?}: unavailable candidate verification must fetch its exact commitment"
+                    resolver.fetches().is_empty(),
+                    "{kind:?}: unavailable candidate verification must not fetch from peers"
                 );
                 assert!(
                     matches!(
@@ -2861,8 +2863,8 @@ mod tests {
                 drop(verify);
                 context.sleep(Duration::from_millis(10)).await;
                 assert!(
-                    resolver.active_fetches().is_empty(),
-                    "{kind:?}: canceling the final waiter must cancel acquisition"
+                    resolver.fetches().is_empty(),
+                    "{kind:?}: canceling a missing candidate wait must not fetch from peers"
                 );
             });
         }
@@ -2999,16 +3001,19 @@ mod tests {
         }
     }
 
-    /// Concurrent verification and certification share candidate acquisition and
-    /// both complete when its exact body arrives.
+    /// Certification fetches a candidate that a pending verification waits for locally,
+    /// and both complete when its exact body arrives.
     #[test_traced("WARN")]
-    fn test_standard_certify_shares_pending_verification_fetch() {
+    fn test_standard_certify_fetches_pending_verification_candidate() {
         for kind in wrapper_kinds() {
             let runner = deterministic::Runner::timed(Duration::from_secs(30));
             runner.start(|mut context| async move {
-                let mut case =
-                    certification_case(&mut context, kind, format!("certify-bumps-fetch-{kind:?}"))
-                        .await;
+                let mut case = certification_case(
+                    &mut context,
+                    kind,
+                    format!("certify-fetches-pending-{kind:?}"),
+                )
+                .await;
                 let round = case.block_context.round;
                 let digest = case.block.digest();
 
@@ -3019,6 +3024,13 @@ mod tests {
                     .wrapper
                     .verify(block_context, digest, Arc::clone(&ancestry))
                     .await;
+
+                // The mailbox barrier follows verification's local wait.
+                case.marshal.get_processed().await;
+                assert!(
+                    case.resolver.fetches().is_empty(),
+                    "{kind:?}: verification must wait for the candidate without fetching it"
+                );
                 let certify_rx = case.wrapper.certify(round, digest, ancestry).await;
 
                 select! {
@@ -3030,7 +3042,7 @@ mod tests {
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
                         panic!(
-                            "{kind:?}: verify must resolve after candidate acquisition"
+                            "{kind:?}: verify must resolve after certification fetches the candidate"
                         );
                     },
                 }
@@ -3038,11 +3050,11 @@ mod tests {
                     result = certify_rx => {
                         assert!(
                             result.expect("certify resolves"),
-                            "{kind:?}: certify should succeed via the shared gate"
+                            "{kind:?}: certify should succeed via the verification gate"
                         );
                     },
                     _ = context.sleep(Duration::from_secs(5)) => {
-                        panic!("{kind:?}: certify must resolve through shared acquisition");
+                        panic!("{kind:?}: certify must resolve once it fetches the candidate");
                     },
                 }
 
@@ -3054,7 +3066,7 @@ mod tests {
                             handler::Annotation::Subscription,
                         ) if *commitment == digest
                     )),
-                    "{kind:?}: certify must share the exact candidate fetch with verify"
+                    "{kind:?}: certification must fetch the exact candidate"
                 );
             });
         }

@@ -84,6 +84,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         span: Span,
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
+        /// Whether to request the block from peers when it is missing locally.
+        fetch: bool,
         /// A channel to send the retrieved block.
         response: oneshot::Sender<V::Block>,
     },
@@ -247,7 +249,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessed { .. } => "get_processed",
             Self::GetAnchor { .. } => "get_anchor",
-            Self::Acquire { .. } => "acquire",
+            Self::Acquire { fetch: true, .. } => "acquire",
+            Self::Acquire { fetch: false, .. } => "subscribe",
             Self::Prefetch { .. } => "prefetch",
             Self::AwaitFinalized { .. } => "await_finalized",
             Self::HintFinalized { .. } => "hint_finalized",
@@ -681,6 +684,23 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let _ = self.sender.enqueue(Message::Acquire {
             span: info_span!("marshal.mailbox.acquire", commitment = %commitment),
             commitment,
+            fetch: true,
+            response,
+        });
+        receiver
+    }
+
+    /// Wait for the block matching `commitment` without requesting it from peers.
+    ///
+    /// The block is delivered once it is available locally, whether from broadcast, storage, or
+    /// another caller's acquisition. Drop the receiver to cancel the wait. The receiver closes
+    /// without delivery if marshal shuts down.
+    pub fn subscribe(&self, commitment: V::Commitment) -> oneshot::Receiver<V::Block> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::Acquire {
+            span: info_span!("marshal.mailbox.subscribe", commitment = %commitment),
+            commitment,
+            fetch: false,
             response,
         });
         receiver
@@ -1188,6 +1208,7 @@ mod tests {
         let acquire = TestMessage::Acquire {
             span: Span::none(),
             commitment: block(1).digest(),
+            fetch: true,
             response,
         };
         let (response, _processed_rx) = oneshot::channel();
@@ -1510,6 +1531,7 @@ mod tests {
                 TestMessage::Acquire {
                     span: Span::none(),
                     commitment: commitment(height),
+                    fetch: true,
                     response,
                 },
             );

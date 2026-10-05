@@ -902,7 +902,7 @@ where
                     .lease(commitments.clone(), range.clone(), lease);
                 if let Some(selected) = commitments.get(range) {
                     for commitment in selected {
-                        if self.block_subscriptions.contains(commitment) {
+                        if self.block_subscriptions.fetching(commitment) {
                             self.acquisitions.satisfied(*commitment);
                         }
                     }
@@ -930,9 +930,10 @@ where
             Message::Acquire {
                 span,
                 commitment,
+                fetch,
                 response,
             } => {
-                self.handle_acquire(span, commitment, response, resolver, waiters, buffer)
+                self.handle_acquire(span, commitment, fetch, response, resolver, waiters, buffer)
                     .await;
             }
             Message::SetFloor { finalization, .. } => {
@@ -1131,10 +1132,12 @@ where
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_acquire<Buf: Buffer<V>>(
         &mut self,
         span: Span,
         commitment: V::Commitment,
+        fetch: bool,
         response: oneshot::Sender<V::Block>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         waiters: &mut AbortablePool<'_, Option<V::Block>>,
@@ -1154,12 +1157,17 @@ where
             response.send_lossy(block);
             return;
         }
-        let active = self.acquisitions.claim(commitment);
-        if !active && !self.block_subscriptions.contains(&commitment) {
-            resolver.fetch(Request::new(commitment, Annotation::Subscription));
+
+        // Only fetching callers own peer demand. A caller that waits without fetching
+        // leaves speculative demand and any existing request to their owners.
+        if fetch {
+            let active = self.acquisitions.claim(commitment);
+            if !active && !self.block_subscriptions.fetching(&commitment) {
+                resolver.fetch(Request::new(commitment, Annotation::Subscription));
+            }
         }
         self.block_subscriptions
-            .insert(span, commitment, response, waiters, buffer);
+            .insert(span, commitment, fetch, response, waiters, buffer);
     }
 
     /// Verifies and installs a floor, awaiting the anchor block from the buffer or peers if needed.
