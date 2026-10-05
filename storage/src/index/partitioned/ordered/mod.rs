@@ -156,6 +156,25 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         }
     }
 
+    /// Hint that partition `i` will be prefetched later (see [Self::prefetch_slot]): prefetch its
+    /// header without reading it, so the later prefetch finds the header cached.
+    #[commonware_macros::stability(ALPHA)]
+    #[allow(clippy::missing_const_for_fn)]
+    fn prefetch_header_slot(&self, i: usize) {
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
+        if i < self.partitions.len() {
+            // SAFETY: prefetch is a hint with no side effects; any address is permitted.
+            unsafe {
+                core::arch::x86_64::_mm_prefetch(
+                    self.partitions.as_ptr().wrapping_add(i).cast::<i8>(),
+                    core::arch::x86_64::_MM_HINT_T0,
+                );
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        let _ = i;
+    }
+
     /// Hint that partition `i` is about to be searched (see `Partition::prefetch`). Spilled
     /// partitions are left to their side-table.
     #[commonware_macros::stability(ALPHA)]
@@ -456,6 +475,11 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
 
     fn for_each_value(&self, f: impl FnMut(&V)) {
         self.index.for_each_value(f);
+    }
+
+    fn prefetch_early(&self, key: &[u8]) {
+        let (i, _) = partition_index_and_sub_key::<P>(key);
+        self.index.prefetch_header_slot(i - self.offset);
     }
 
     fn prefetch(&self, key: &[u8]) {

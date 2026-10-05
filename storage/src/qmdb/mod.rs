@@ -706,34 +706,51 @@ where
 {
     let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
-    // Ops are applied in small windows: each window's partitions are prefetched before any
-    // op is applied, hiding the random-access cache misses partition lookups take.
-    const PREFETCH_WINDOW: usize = 16;
+    // Ops are software pipelined to hide the random-access cache misses their partition lookups
+    // and cache inserts take: each op's partition gets an early hint `2 * PREFETCH_DISTANCE` ops
+    // ahead of it and is prefetched (with the cache set its insert scans) `PREFETCH_DISTANCE` ops
+    // ahead, by which time the early hint has brought in what that prefetch reads.
+    const PREFETCH_DISTANCE: usize = 32;
+    let prefetch = |index: &R, cache: Option<&Cache<_>>, key: &[u8], loc: u64, is_delete: bool| {
+        index.prefetch(key);
+        if !is_delete && let Some(cache) = cache {
+            cache.prefetch(loc);
+        }
+    };
     while let Some(batch) = rx.recv().await {
         let mut ops = batch.into_iter();
-        while !ops.as_slice().is_empty() {
-            // Borrow the window's ops for the prefetch pass, then consume exactly those.
-            let window = ops.as_slice().len().min(PREFETCH_WINDOW);
-            for (key, _, _) in &ops.as_slice()[..window] {
-                index.prefetch(key.as_ref());
-            }
-            for (key, loc, is_delete) in ops.by_ref().take(window) {
-                if is_delete {
-                    if let Some(cursor) = index.get_mut(&key) {
-                        delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
-                    }
-                } else {
-                    let new_loc = Location::new(loc);
-                    if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
-                        update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
-                            .await?;
-                    }
 
-                    // This update op is now a `find_update_op` candidate for later ops of its key.
-                    // `key` is owned by this batch and unused after the update, so move it in.
-                    if let Some(cache) = cache.as_mut() {
-                        cache.put(loc, key);
-                    }
+        // Fill the pipeline for the batch's first ops.
+        for (key, _, _) in ops.as_slice().iter().take(2 * PREFETCH_DISTANCE) {
+            index.prefetch_early(key.as_ref());
+        }
+        for (key, loc, is_delete) in ops.as_slice().iter().take(PREFETCH_DISTANCE) {
+            prefetch(&index, cache.as_ref(), key.as_ref(), *loc, *is_delete);
+        }
+        while let Some((key, loc, is_delete)) = ops.next() {
+            let ahead = ops.as_slice();
+            if let Some((key, _, _)) = ahead.get(2 * PREFETCH_DISTANCE - 1) {
+                index.prefetch_early(key.as_ref());
+            }
+            if let Some((key, loc, is_delete)) = ahead.get(PREFETCH_DISTANCE - 1) {
+                prefetch(&index, cache.as_ref(), key.as_ref(), *loc, *is_delete);
+            }
+
+            if is_delete {
+                if let Some(cursor) = index.get_mut(&key) {
+                    delete_at_cursor::<F, _, _>(cursor, &*log, &key, cache.as_mut()).await?;
+                }
+            } else {
+                let new_loc = Location::new(loc);
+                if let Some(cursor) = index.get_mut_or_insert(&key, new_loc) {
+                    update_at_cursor::<F, _, _>(cursor, &*log, &key, new_loc, cache.as_mut())
+                        .await?;
+                }
+
+                // This update op is now a `find_update_op` candidate for later ops of its key.
+                // `key` is owned by this batch and unused after the update, so move it in.
+                if let Some(cache) = cache.as_mut() {
+                    cache.put(loc, key);
                 }
             }
         }

@@ -55,6 +55,29 @@ impl<K> Cache<K> {
         set * self.ways
     }
 
+    /// Hint that `location` is about to be cached: prefetch the slots of its set that
+    /// [Self::put] scans.
+    #[commonware_macros::stability(ALPHA)]
+    #[allow(clippy::missing_const_for_fn)]
+    pub(crate) fn prefetch(&self, location: u64) {
+        #[cfg(all(target_arch = "x86_64", not(miri)))]
+        {
+            let set = &self.locations[self.set_start(location)..][..self.ways];
+            let start = set.as_ptr().cast::<i8>();
+            for offset in (0..size_of_val(set)).step_by(64) {
+                // SAFETY: prefetch is a hint with no side effects; any address is permitted.
+                unsafe {
+                    core::arch::x86_64::_mm_prefetch(
+                        start.wrapping_add(offset),
+                        core::arch::x86_64::_MM_HINT_T0,
+                    );
+                }
+            }
+        }
+        #[cfg(not(all(target_arch = "x86_64", not(miri))))]
+        let _ = location;
+    }
+
     /// Returns the slot holding `location`, if any.
     fn slot(&self, location: u64) -> Option<usize> {
         let start = self.set_start(location);
