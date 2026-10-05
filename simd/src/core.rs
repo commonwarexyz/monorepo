@@ -5,8 +5,10 @@
 /// Instructions may be implemented with native SIMD or scalar emulation. [`Self::execute`]
 /// selects this backend's operation path without repeating runtime backend selection.
 ///
-/// Each implementation chooses its vector representation and a nonzero lane count.
-/// Algorithms must use [`Self::U64_LANES`] rather than assume a particular width.
+/// Each implementation chooses its vector representations and independent nonzero
+/// [`Self::U8_LANES`], [`Self::U32_LANES`], and [`Self::U64_LANES`] counts.
+/// Algorithms must use the corresponding count rather than assume a particular width
+/// or a relationship between lane types.
 /// All arithmetic and bitwise operations act independently on corresponding lanes.
 /// Lane zero corresponds to the first element loaded or stored.
 ///
@@ -24,11 +26,127 @@
 /// }
 /// ```
 pub trait Simd: Copy {
+    /// Vector of [`Self::U8_LANES`] unsigned 8-bit lanes.
+    type U8: Copy;
+
+    /// Number of lanes in [`Self::U8`]. Must be positive.
+    const U8_LANES: usize;
+
+    /// Vector of [`Self::U32_LANES`] unsigned 32-bit lanes.
+    type U32: Copy;
+
+    /// Number of lanes in [`Self::U32`]. Must be positive.
+    const U32_LANES: usize;
+
     /// Vector of [`Self::U64_LANES`] unsigned 64-bit lanes.
     type U64: Copy;
 
     /// Number of lanes in [`Self::U64`]. Must be greater than zero.
     const U64_LANES: usize;
+
+    /// Loads the first [`Self::U8_LANES`] elements in order. Requires only `u8` alignment.
+    /// Remaining elements are ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the input has too few elements.
+    fn u8_load(self, input: &[u8]) -> Self::U8;
+
+    /// Stores lanes into the first [`Self::U8_LANES`] elements in order.
+    /// Requires only `u8` alignment; remaining elements are unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics before writing if the output has too few elements.
+    fn u8_store(self, value: Self::U8, output: &mut [u8]);
+
+    /// Broadcasts `value` to every lane.
+    fn u8_splat(self, value: u8) -> Self::U8;
+
+    /// Computes bitwise XOR of corresponding lanes.
+    fn u8_xor(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// Loads a prefix into the first lanes, filling remaining lanes with zero.
+    /// Empty prefixes are allowed. Panics if `input.len() > Self::U8_LANES`.
+    fn u8_load_partial(self, input: &[u8]) -> Self::U8;
+
+    /// Stores the first `output.len()` lanes, including an empty prefix.
+    /// Panics before writing if `output.len() > Self::U8_LANES`.
+    fn u8_store_partial(self, value: Self::U8, output: &mut [u8]);
+
+    /// Computes bitwise AND of corresponding lanes.
+    fn u8_and(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// Shifts each byte lane left by `N`, truncating to eight bits.
+    /// Panics if `N >= 8`.
+    fn u8_shl<const N: u32>(self, value: Self::U8) -> Self::U8;
+
+    /// Shifts each byte lane right by `N`, filling with zero.
+    /// Panics if `N >= 8`.
+    fn u8_shr<const N: u32>(self, value: Self::U8) -> Self::U8;
+
+    /// XORs every byte lane into one byte.
+    fn u8_xor_fold(self, value: Self::U8) -> u8;
+
+    /// Loads the first [`Self::U32_LANES`] elements in order. Requires only `u32` alignment.
+    /// Remaining elements are ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the input has too few elements.
+    fn u32_load(self, input: &[u32]) -> Self::U32;
+
+    /// Stores lanes into the first [`Self::U32_LANES`] elements in order.
+    /// Requires only `u32` alignment; remaining elements are unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics before writing if the output has too few elements.
+    fn u32_store(self, value: Self::U32, output: &mut [u32]);
+
+    /// Broadcasts `value` to every lane.
+    fn u32_splat(self, value: u32) -> Self::U32;
+
+    /// Computes bitwise XOR of corresponding lanes.
+    fn u32_xor(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Adds corresponding lanes, wrapping modulo `2^32`.
+    fn u32_add(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Rotates each lane right by `N` bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N >= 32`.
+    fn u32_rotate_right<const N: u32>(self, value: Self::U32) -> Self::U32;
+
+    /// Subtracts corresponding lanes, wrapping modulo `2^32`.
+    fn u32_sub(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Computes bitwise AND of corresponding lanes.
+    fn u32_and(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Computes bitwise OR of corresponding lanes.
+    fn u32_or(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Shifts lanes left by `N`, truncating to 32 bits. Panics if `N >= 32`.
+    fn u32_shl<const N: u32>(self, value: Self::U32) -> Self::U32;
+
+    /// Shifts lanes right by `N`, filling with zero. Panics if `N >= 32`.
+    fn u32_shr<const N: u32>(self, value: Self::U32) -> Self::U32;
+
+    /// Selects individual bits: `(mask & a) | (!mask & b)`.
+    /// Arbitrary partial masks are supported, not just whole-lane masks.
+    fn u32_select(self, mask: Self::U32, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Permutes lanes across the entire vector: output lane `i` is `value[indices[i]]`.
+    /// Reads the first `Self::U32_LANES` indices and ignores any remainder.
+    /// Panics if there are too few indices or an active index is outside the vector.
+    fn u32_permute(self, value: Self::U32, indices: &[usize]) -> Self::U32;
+
+    /// Permutes across concatenated vectors `[a, b]`, using the same index contract
+    /// as [`Self::u32_permute`] with indices below `2 * Self::U32_LANES`.
+    fn u32_permute2(self, a: Self::U32, b: Self::U32, indices: &[usize]) -> Self::U32;
 
     /// Loads the first [`Self::U64_LANES`] elements in order.
     ///
@@ -53,6 +171,42 @@ pub trait Simd: Copy {
 
     /// Adds corresponding lanes, wrapping modulo `2^64`.
     fn u64_add(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Shifts each lane left by `N` bits, filling vacated bits with zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N >= 64`.
+    fn u64_shl<const N: u32>(self, value: Self::U64) -> Self::U64;
+
+    /// Shifts each lane right by `N` bits, filling vacated bits with zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N >= 64`.
+    fn u64_shr<const N: u32>(self, value: Self::U64) -> Self::U64;
+
+    /// Computes bitwise AND of corresponding lanes.
+    fn u64_and(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Computes bitwise OR of corresponding lanes.
+    fn u64_or(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Subtracts corresponding lanes, wrapping modulo `2^64`.
+    fn u64_sub(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Computes bitwise XOR of corresponding lanes.
+    fn u64_xor(self, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Selects individual bits: `(mask & a) | (!mask & b)`.
+    fn u64_select(self, mask: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Returns lane `N`. Panics if `N >= Self::U64_LANES`.
+    fn u64_extract<const N: usize>(self, value: Self::U64) -> u64;
+
+    /// Replaces lane `N`, preserving every other lane.
+    /// Panics if `N >= Self::U64_LANES`.
+    fn u64_insert<const N: usize>(self, value: Self::U64, lane: u64) -> Self::U64;
 
     /// Executes an operation using this backend's algorithm path.
     ///
@@ -79,25 +233,115 @@ pub trait Simd: Copy {
 
 /// Ice Lake instruction profile implemented by native and emulated backend tokens.
 ///
-/// This profile models 512-bit vectors with eight unsigned 64-bit lanes. Native
-/// implementations require AVX-512F, GFNI, and AVX-512 IFMA. Additional instruction
-/// methods and their feature requirements will be defined as kernels are integrated.
+/// This profile models 512-bit vectors with 64 unsigned byte lanes, 16 unsigned
+/// 32-bit lanes, and eight unsigned 64-bit lanes. Native implementations require
+/// AVX-512F, AVX-512BW, GFNI, and AVX-512 IFMA.
 /// The name identifies an instruction bundle, not a required CPU vendor or model.
-pub trait IceLake: Simd {}
+pub trait IceLake: Simd {
+    /// Multiplies corresponding byte lanes in GF(256) with AES modulus `0x11b`.
+    fn u8_gf_mul(self, a: Self::U8, b: Self::U8) -> Self::U8;
+
+    /// Multiplies the low 52 bits of each source lane and adds the low 52 product bits
+    /// into the full accumulator lane, wrapping modulo `2^64`.
+    fn u64_madd52lo(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Multiplies the low 52 bits of each source lane and adds product bits 52..104
+    /// into the full accumulator lane, wrapping modulo `2^64`.
+    fn u64_madd52hi(self, acc: Self::U64, a: Self::U64, b: Self::U64) -> Self::U64;
+
+    /// Shuffles four u32 lanes independently within every 128-bit group.
+    /// Two bits of `MASK` select each output lane, starting with its low bits.
+    /// Requires `0 <= MASK < 256`; invalid constants may be rejected at compile time
+    /// or panic when emulated.
+    fn u32_shuffle128<const MASK: i32>(self, value: Self::U32) -> Self::U32;
+
+    /// Within each 128-bit group, selects output lanes 0/1 from `a` and 2/3 from `b`.
+    /// The four two-bit selectors in `MASK` select the corresponding source lane.
+    /// Requires `0 <= MASK < 256`; invalid constants may be rejected at compile time
+    /// or panic when emulated.
+    fn u32_shuffle2_128<const MASK: i32>(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Within every four-lane group, selects `b` where the corresponding bit of
+    /// `MASK` is set and `a` otherwise. Panics unless `0 <= MASK < 16`.
+    fn u32_blend128<const MASK: i32>(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Interleaves each group's low two u32 lanes: `[a0, b0, a1, b1]`.
+    fn u32_unpacklo32(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Interleaves each group's high two u32 lanes: `[a2, b2, a3, b3]`.
+    fn u32_unpackhi32(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Interleaves each group's low 64-bit halves: `[a0, a1, b0, b1]`.
+    fn u32_unpacklo64(self, a: Self::U32, b: Self::U32) -> Self::U32;
+}
 
 /// Armv9-A with SVE2 instruction profile implemented by native and emulated backend tokens.
 ///
-/// Native implementations require SVE and SVE2 explicitly; an Armv9 architecture label
-/// alone does not establish their availability. Optional SVE2 extensions and vector-length
-/// handling will be defined as kernels are integrated. This profile does not imply a
-/// fixed vector width or a particular CPU model.
-pub trait ArmV9: Simd {}
+/// Requires baseline NEON plus SVE and SVE2 explicitly; an Armv9 architecture label
+/// alone does not establish their availability. Logical vectors retain NEON's 128-bit
+/// shape. Native providers use the low 128 bits of SVE registers, independently of
+/// the thread's full SVE vector length. Optional SVE2 extensions require separate checks.
+pub trait ArmV9: Neon {
+    /// XORs corresponding lanes and rotates each result right by `N` bits.
+    /// Models SVE2 XAR on u32 lanes. Panics if `N >= 32`.
+    fn u32_xor_rotate_right<const N: u32>(self, a: Self::U32, b: Self::U32) -> Self::U32;
+}
 
 /// AArch64 NEON instruction profile implemented by native and emulated backend tokens.
 ///
-/// This profile models 128-bit vectors with two unsigned 64-bit lanes. Additional
-/// instruction methods will be defined as kernels are integrated.
-pub trait Neon: Simd {}
+/// This profile models 128-bit vectors with 16 unsigned byte lanes, four unsigned
+/// 32-bit lanes, and two unsigned 64-bit lanes. Its narrowing and widening primitives
+/// use a separate half-width vector with two unsigned 32-bit lanes.
+pub trait Neon: Simd {
+    /// Eight unsigned 16-bit lanes corresponding to one half of a byte vector.
+    type U16: Copy;
+
+    /// Looks up each index in the 16-byte table; indices >= 16 produce zero.
+    fn u8_table_lookup(self, table: Self::U8, indices: Self::U8) -> Self::U8;
+
+    /// Carryless polynomial multiplication of the low eight byte lanes, unreduced.
+    fn u8_clmul_lo(self, a: Self::U8, b: Self::U8) -> Self::U16;
+
+    /// Carryless polynomial multiplication of the high eight byte lanes, unreduced.
+    fn u8_clmul_hi(self, a: Self::U8, b: Self::U8) -> Self::U16;
+
+    /// Computes bitwise XOR of corresponding 16-bit lanes.
+    fn u16_xor(self, a: Self::U16, b: Self::U16) -> Self::U16;
+
+    /// Shifts lanes left by `N`, truncating to 16 bits. Panics if `N >= 16`.
+    fn u16_shl<const N: u32>(self, value: Self::U16) -> Self::U16;
+
+    /// Shifts lanes right by `N`, filling with zero. Panics if `N >= 16`.
+    fn u16_shr<const N: u32>(self, value: Self::U16) -> Self::U16;
+
+    /// Truncates low/high half-vectors to bytes and concatenates them in lane order.
+    fn u16_narrow_pair(self, low: Self::U16, high: Self::U16) -> Self::U8;
+    /// Vector of [`Self::U64_LANES`] unsigned 32-bit lanes, in matching lane order.
+    /// This is half the width of the common [`Self::U32`] vector.
+    type U32Half: Copy;
+
+    /// Truncates each 64-bit lane to its low 32 bits.
+    fn u64_narrow(self, value: Self::U64) -> Self::U32Half;
+
+    /// Broadcasts `value` to every half-vector lane.
+    fn u32_half_splat(self, value: u32) -> Self::U32Half;
+
+    /// Adds corresponding half-vector lanes, wrapping modulo `2^32`.
+    fn u32_half_add(self, a: Self::U32Half, b: Self::U32Half) -> Self::U32Half;
+
+    /// Shifts each half-vector lane left by `N` bits, filling vacated bits with zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N >= 32`.
+    fn u32_half_shl<const N: u32>(self, value: Self::U32Half) -> Self::U32Half;
+
+    /// Multiplies corresponding unsigned 32-bit lanes into full 64-bit products.
+    fn u32_widen_mul(self, a: Self::U32Half, b: Self::U32Half) -> Self::U64;
+
+    /// Adds full unsigned widening products to wrapping 64-bit accumulators.
+    fn u32_widen_madd(self, acc: Self::U64, a: Self::U32Half, b: Self::U32Half) -> Self::U64;
+}
 
 /// Equivalent algorithm paths selected by a concrete backend token.
 ///
