@@ -3946,7 +3946,9 @@ pub(crate) mod tests {
             any::{
                 BITMAP_CHUNK_BYTES,
                 ordered::fixed::Db as OrderedFixedDb,
-                test::{Choice, Script, colliding_digest, fixed_db_config},
+                test::{
+                    Choice, Script, assert_links, assert_same, colliding_digest, fixed_db_config,
+                },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
                 unordered::fixed::Db as UnorderedFixedDb,
                 value::FixedEncoding,
@@ -7915,4 +7917,246 @@ pub(crate) mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    /// Define `$name` to run the staged ordered eviction differential on a `$db` opened with
+    /// `$config`. `$ops_root` names the method returning a merkleized batch's ops-only root.
+    macro_rules! staged_policy_matches_writes {
+        ($name:ident, $db:ty, $($config:ident)::+, $ops_root:ident) => {
+            /// Staged writes under a policy that evicts and replaces updates in their keys'
+            /// collision and predecessor buckets produce the same batch as explicit writes of the
+            /// decisions, from the database and from a child of a pending parent. Replacing an
+            /// update keeps the key that shares its translated-key bucket available as a deleted
+            /// key's predecessor.
+            #[test]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    let value = |i| colliding_digest(0xA0, i);
+                    let keys = [
+                        (0x10, 0),
+                        (0x10, 1),
+                        (0x20, 0),
+                        (0x20, 1),
+                        (0x30, 0),
+                        (0x30, 1),
+                        (0x40, 0),
+                        (0x50, 0),
+                    ]
+                    .map(|(prefix, suffix)| colliding_digest(prefix, suffix));
+                    let [a0, a1, b0, b1, c0, c1, d, z] = keys;
+                    let new = colliding_digest(0x21, 0);
+                    let choose = |key: &sha256::Digest| {
+                        if [a1, b1, z].contains(key) {
+                            Choice::Evict
+                        } else if *key == b0 {
+                            Choice::Replace(value(102))
+                        } else {
+                            Choice::Keep
+                        }
+                    };
+                    for pending in [false, true] {
+                        let (label, partition) = if pending {
+                            ("pending", "staged-policy-pending")
+                        } else {
+                            ("applied", "staged-policy")
+                        };
+                        let ctx = context.child(label);
+                        let config = $($config)::+::<OneCap>(partition, &ctx);
+                        let db = <$db>::init(ctx, config, None).await.unwrap();
+
+                        // Seed every key with a held floor.
+                        let seed = keys
+                            .iter()
+                            .zip(0..)
+                            .fold(db.new_batch(), |batch, (key, i)| {
+                                batch.write(*key, Some(value(i)))
+                            })
+                            .merkleize(&db, None, &mut Hold)
+                            .await
+                            .unwrap();
+                        let (db, _) = db.apply_batch(seed).await.unwrap();
+
+                        // A pending parent, if any, updates a1, b0, and z with a held floor, so
+                        // their decisions resolve in its diff.
+                        let parent = if pending {
+                            let parent = db
+                                .new_batch()
+                                .write(a1, Some(value(201)))
+                                .write(b0, Some(value(202)))
+                                .write(z, Some(value(207)))
+                                .merkleize(&db, None, &mut Hold)
+                                .await
+                                .unwrap();
+                            Some(parent)
+                        } else {
+                            None
+                        };
+                        let start = || {
+                            parent
+                                .as_ref()
+                                .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                        };
+
+                        // Stage an update of a0, which collides with the evicted a1, and a delete
+                        // of c0, whose predecessor bucket holds the replaced b0 and the evicted b1.
+                        // Upsert a key that sorts between that bucket and c0, so its predecessor
+                        // lies there too. The policy decides the newest update of every other key.
+                        let (_, staged) = start().stage(&[&a0, &c0], &db).await.unwrap();
+                        let mut policy = Script::new(usize::MAX, u64::MAX, choose);
+                        let decided = staged
+                            .merkleize(
+                                vec![(0, Some(value(100))), (1, None)],
+                                vec![(new, Some(value(101)))],
+                                None,
+                                &db,
+                                &mut policy,
+                            )
+                            .await
+                            .unwrap();
+                        let mut visited: Vec<_> = policy
+                            .visited
+                            .iter()
+                            .map(|(_, key, value)| (*key, *value))
+                            .collect();
+                        visited.sort();
+                        let newest = |seed, parent| value(if pending { parent } else { seed });
+                        assert_eq!(
+                            visited,
+                            [
+                                (a1, newest(1, 201)),
+                                (b0, newest(2, 202)),
+                                (b1, value(3)),
+                                (c1, value(5)),
+                                (d, value(6)),
+                                (z, newest(7, 207)),
+                            ]
+                        );
+
+                        // A twin writes the same keys and the decisions and keeps every update.
+                        let written = [
+                            (a0, Some(value(100))),
+                            (c0, None),
+                            (new, Some(value(101))),
+                            (a1, None),
+                            (b1, None),
+                            (z, None),
+                            (b0, Some(value(102))),
+                        ]
+                        .into_iter()
+                        .fold(start(), |batch, (key, value)| batch.write(key, value))
+                        .merkleize(
+                            &db,
+                            None,
+                            &mut Compact {
+                                entries: usize::MAX,
+                                skips: u64::MAX,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                        assert_same(&db, &decided, &written);
+                        assert_eq!(decided.$ops_root(), written.$ops_root());
+                        drop(written);
+
+                        // Apply the chain. The live keys link in key order, and the evicted and
+                        // deleted keys are absent.
+                        let db = match parent {
+                            Some(parent) => db.apply_batch(parent).await.unwrap().0,
+                            None => db,
+                        };
+                        let (db, _) = db.apply_batch(decided).await.unwrap();
+                        let live = BTreeMap::from([
+                            (a0, value(100)),
+                            (b0, value(102)),
+                            (new, value(101)),
+                            (c1, value(5)),
+                            (d, value(6)),
+                        ]);
+                        assert_links(&db, &live, &[a1, b1, c0, z]).await;
+
+                        // Recreate b1 with a held floor. A batch that deletes the new key under a
+                        // policy that replaces b0 rewrites b1, which shares b0's translated-key
+                        // bucket, as the new key's predecessor.
+                        let recreate = db
+                            .new_batch()
+                            .write(b1, Some(value(3)))
+                            .merkleize(&db, None, &mut Hold)
+                            .await
+                            .unwrap();
+                        let (db, _) = db.apply_batch(recreate).await.unwrap();
+                        let choose = |key: &sha256::Digest| {
+                            if *key == b0 {
+                                Choice::Replace(value(103))
+                            } else {
+                                Choice::Keep
+                            }
+                        };
+                        let mut policy = Script::new(usize::MAX, u64::MAX, choose);
+                        let decided = db
+                            .new_batch()
+                            .write(new, None)
+                            .merkleize(&db, None, &mut policy)
+                            .await
+                            .unwrap();
+                        let written = db
+                            .new_batch()
+                            .write(new, None)
+                            .write(b0, Some(value(103)))
+                            .merkleize(
+                                &db,
+                                None,
+                                &mut Compact {
+                                    entries: usize::MAX,
+                                    skips: u64::MAX,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        assert_same(&db, &decided, &written);
+                        assert_eq!(decided.$ops_root(), written.$ops_root());
+                        drop(written);
+                        let (db, _) = db.apply_batch(decided).await.unwrap();
+                        let live = BTreeMap::from([
+                            (a0, value(100)),
+                            (b0, value(103)),
+                            (b1, value(3)),
+                            (c1, value(5)),
+                            (d, value(6)),
+                        ]);
+                        assert_links(&db, &live, &[a1, c0, new, z]).await;
+                        db.destroy().await.unwrap();
+                    }
+                });
+            }
+        };
+    }
+
+    staged_policy_matches_writes!(
+        policy_staged_evictions_match_writes_any_ordered,
+        OrderedFixedDb<
+            mmr::Family,
+            deterministic::Context,
+            sha256::Digest,
+            sha256::Digest,
+            Sha256,
+            OneCap,
+            Sequential,
+        >,
+        fixed_db_config,
+        root
+    );
+    staged_policy_matches_writes!(
+        policy_staged_evictions_match_writes_current_ordered,
+        current::ordered::fixed::Db<
+            mmr::Family,
+            deterministic::Context,
+            sha256::Digest,
+            sha256::Digest,
+            Sha256,
+            OneCap,
+            32,
+            Sequential,
+        >,
+        current::tests::fixed_config,
+        ops_root
+    );
 }
