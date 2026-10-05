@@ -1,0 +1,342 @@
+//! Exclusive logical opens for the memory backend.
+
+use crate::{BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions};
+use commonware_formatting::hex;
+use commonware_utils::sync::{Mutex, MutexGuard};
+use futures::{Future, FutureExt as _};
+use std::{
+    collections::BTreeMap,
+    ptr,
+    sync::{Arc, Weak},
+};
+
+/// Identifies a blob by its partition and name.
+type Key = (String, Vec<u8>);
+
+/// Couples namespace transactions to logical user-handle lifetimes.
+#[derive(Default)]
+pub(crate) struct Opens {
+    live: Mutex<BTreeMap<Key, Weak<Live>>>,
+    #[cfg(test)]
+    test: tests::Hooks,
+}
+
+impl Opens {
+    /// Registers an exclusive open atomically with opening the underlying blob.
+    ///
+    /// The open future must complete in one poll. The returned guard retains the
+    /// namespace lock until [`Opened::finish`] returns the blob.
+    pub(crate) fn open<B: crate::Blob>(
+        self: &Arc<Self>,
+        partition: &str,
+        name: &[u8],
+        open: impl Future<Output = Result<(B, u64, BlobVersion), Error>> + Send,
+    ) -> Result<Opened<'_, B>, Error> {
+        let mut opens = self.enter();
+        let (inner, len, version) = self.complete(open)?;
+        let key = (partition.to_owned(), name.to_vec());
+
+        // Observing liveness must not acquire an owner whose destructor locks this registry.
+        let live = opens
+            .get(&key)
+            .is_some_and(|identity| identity.strong_count() != 0);
+        #[cfg(test)]
+        self.test.observe_open(opens.get(&key));
+        if live {
+            return Err(Error::BlobAlreadyOpen(partition.to_owned(), hex(name)));
+        }
+        let live = Arc::new(Live {
+            key: key.clone(),
+            opens: self.clone(),
+        });
+        opens.insert(key, Arc::downgrade(&live));
+        Ok(Opened {
+            _namespace: opens,
+            result: (Blob { inner, _live: live }, len, version),
+        })
+    }
+
+    /// Retires registrations atomically with a blob or partition removal.
+    ///
+    /// The removal future must complete in one poll. Failed removals leave registrations intact.
+    pub(crate) fn remove<R>(
+        &self,
+        partition: &str,
+        name: Option<&[u8]>,
+        remove: impl Future<Output = Result<R, Error>> + Send,
+    ) -> Result<R, Error> {
+        self.replace(partition, name, || self.complete(remove))
+    }
+
+    /// Retires registrations atomically with removal or installation of a raw memory image.
+    pub(crate) fn replace<R>(
+        &self,
+        partition: &str,
+        name: Option<&[u8]>,
+        replace: impl FnOnce() -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let mut opens = self.enter();
+        let replaced = replace()?;
+        opens.retain(|(stored_partition, stored_name), _| {
+            stored_partition != partition || name.is_some_and(|name| stored_name != name)
+        });
+        Ok(replaced)
+    }
+
+    /// Lock the registry.
+    fn enter(&self) -> MutexGuard<'_, BTreeMap<Key, Weak<Live>>> {
+        #[cfg(test)]
+        self.test.registry_entry(self.live.is_locked());
+        self.live.lock()
+    }
+
+    /// Complete namespace work that must finish in one poll.
+    fn complete<R>(&self, work: impl Future<Output = Result<R, Error>>) -> Result<R, Error> {
+        let result = work
+            .now_or_never()
+            .expect("memory namespace work completes in one poll")?;
+        #[cfg(test)]
+        self.test.namespace_handoff();
+        Ok(result)
+    }
+}
+
+/// Holds the namespace lock until the opened blob is returned.
+pub(crate) struct Opened<'a, B> {
+    // Release the registry before dropping the user lease, including during unwinding.
+    _namespace: MutexGuard<'a, BTreeMap<Key, Weak<Live>>>,
+    result: (Blob<B>, u64, BlobVersion),
+}
+
+impl<B> Opened<'_, B> {
+    pub(crate) fn finish(self) -> (Blob<B>, u64, BlobVersion) {
+        self.result
+    }
+}
+
+/// Marks a blob as open until it is dropped or removed.
+struct Live {
+    key: Key,
+    opens: Arc<Opens>,
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        let mut opens = self.opens.live.lock();
+        if opens
+            .get(&self.key)
+            .is_some_and(|live| ptr::eq(live.as_ptr(), self))
+        {
+            opens.remove(&self.key);
+        }
+    }
+}
+
+/// A blob handle whose open stays exclusive until it is dropped or removed.
+pub struct Blob<B> {
+    inner: B,
+    _live: Arc<Live>,
+}
+
+impl<B: crate::Blob> crate::Blob for Blob<B> {
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at_buf(offset, len, bufs, options).await
+    }
+
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.inner.read_at(offset, len, options).await
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::{
+        Blob as _, BufferPooler as _, Runner as _, Storage as _, deterministic::Runner,
+        mocks::Storage,
+    };
+    use std::{
+        sync::mpsc::{self, Receiver, Sender},
+        thread,
+    };
+
+    type OpenObservation = (Sender<usize>, Receiver<()>);
+
+    /// One-shot observations and pauses for a single logical-open registry.
+    #[derive(Default)]
+    pub(super) struct Hooks {
+        open_observation: Mutex<Option<OpenObservation>>,
+        namespace_handoff: Mutex<Option<(Sender<()>, Receiver<()>)>>,
+        registry_observation: Mutex<Option<Sender<bool>>>,
+    }
+
+    impl Opens {
+        /// Pause the next namespace handoff after reporting arrival through `entered`.
+        /// Resume when `released` receives a message or its sender drops.
+        pub(crate) fn pause_namespace(&self, entered: Sender<()>, released: Receiver<()>) {
+            *self.test.namespace_handoff.lock() = Some((entered, released));
+        }
+
+        /// Report the lock state when the next namespace operation attempts entry.
+        pub(crate) fn watch_registry(&self, entered: Sender<bool>) {
+            *self.test.registry_observation.lock() = Some(entered);
+        }
+    }
+
+    impl Hooks {
+        /// Report the namespace handoff and wait for release.
+        pub(super) fn namespace_handoff(&self) {
+            let hook = self.namespace_handoff.lock().take();
+            if let Some((entered, released)) = hook {
+                entered.send(()).unwrap();
+                let _ = released.recv();
+            }
+        }
+
+        /// Report the lock state before attempting registry entry.
+        pub(super) fn registry_entry(&self, locked: bool) {
+            if let Some(entered) = self.registry_observation.lock().take() {
+                entered.send(locked).unwrap();
+            }
+        }
+
+        /// Report the current owner count and wait for release.
+        /// A missing registration has zero owners.
+        pub(super) fn observe_open(&self, identity: Option<&Weak<Live>>) {
+            let hook = self.open_observation.lock().take();
+            if let Some((entered, released)) = hook {
+                entered
+                    .send(identity.map_or(0, Weak::strong_count))
+                    .unwrap();
+                let _ = released.recv();
+            }
+        }
+    }
+
+    #[test]
+    fn test_open_racing_last_blob_drop() {
+        Runner::default().start(|context| async move {
+            let context = Storage::new(context.storage_buffer_pool().clone());
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"saved", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.sync().await.unwrap();
+            let identity = Arc::downgrade(&blob._live);
+            let opens = blob._live.opens.clone();
+            let (release_drop, dropping) = mpsc::channel();
+            let dropper = thread::spawn(move || {
+                dropping.recv().unwrap();
+                drop(blob);
+            });
+            let (entered, entering) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            *opens.test.open_observation.lock() = Some((entered, released));
+            let coordinator = thread::spawn(move || {
+                let owners = entering.recv().unwrap();
+                release_drop.send(()).unwrap();
+
+                // The strong count changes when the external owner drops. Successful opens below
+                // verify that the registry progresses while the drop is scheduled.
+                while identity.strong_count() == owners {
+                    thread::yield_now();
+                }
+                release.send(()).unwrap();
+            });
+            assert!(matches!(
+                context.open("partition", b"blob").await,
+                Err(Error::BlobAlreadyOpen(partition, name))
+                    if partition == "partition" && name == "626c6f62"
+            ));
+            coordinator.join().unwrap();
+            dropper.join().unwrap();
+            drop(context.open("partition", b"independent").await.unwrap());
+            let (blob, size) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(size, 5);
+            assert_eq!(
+                blob.read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"saved",
+            );
+        });
+    }
+
+    #[test]
+    fn test_replace_retires_only_matching_registrations() {
+        Runner::default().start(|context| async move {
+            let inner = crate::storage::memory::Storage::new(context.storage_buffer_pool().clone());
+            let opens = Arc::new(Opens::default());
+            let open = |partition: &str, name: &[u8]| {
+                let versions = crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION;
+                opens
+                    .open(
+                        partition,
+                        name,
+                        inner.open_versioned(partition, name, versions),
+                    )
+                    .map(Opened::finish)
+            };
+            let refused = |partition: &str, name: &[u8]| {
+                matches!(open(partition, name), Err(Error::BlobAlreadyOpen(..)))
+            };
+            let ax = open("a", b"x").unwrap();
+            let ay = open("a", b"y").unwrap();
+            let bx = open("b", b"x").unwrap();
+
+            // A failed replacement leaves every registration intact.
+            assert!(matches!(
+                opens.replace("a", None, || Err::<(), _>(Error::Closed)),
+                Err(Error::Closed)
+            ));
+            assert!(refused("a", b"x") && refused("a", b"y") && refused("b", b"x"));
+
+            // Replacing a name retires only that name. The old handle cannot release the new one.
+            opens.replace("a", Some(b"x"), || Ok(())).unwrap();
+            assert!(refused("a", b"y") && refused("b", b"x"));
+            let current = open("a", b"x").unwrap();
+            drop(ax);
+            assert!(refused("a", b"x"));
+
+            // Replacing a partition retires its live names but not another partition's.
+            opens.replace("a", None, || Ok(())).unwrap();
+            drop(open("a", b"x").unwrap());
+            drop(open("a", b"y").unwrap());
+            assert!(refused("b", b"x"));
+            drop((current, ay, bx));
+        });
+    }
+}

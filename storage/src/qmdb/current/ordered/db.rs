@@ -21,6 +21,7 @@ use crate::{
 use commonware_codec::Codec;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use core::ops::RangeBounds;
 use futures::stream::Stream;
 
 /// The generic Db type for ordered Current QMDB variants.
@@ -70,16 +71,20 @@ where
         self.any.get_prev_key(key).await
     }
 
-    /// Streams all active (key, value) pairs in the database in key order, starting from the first
-    /// active key greater than or equal to `start`.
-    pub async fn stream_range<'a>(
+    /// Streams active (key, value) pairs in ascending key order within `range`.
+    pub fn stream_range<'a>(
         &'a self,
-        start: K,
-    ) -> Result<impl Stream<Item = Result<(K, V::Value), Error<F>>> + 'a, Error<F>>
-    where
-        V: 'a,
-    {
-        self.any.stream_range(start).await
+        range: impl RangeBounds<K> + Send + 'a,
+    ) -> impl Stream<Item = Result<(K, V::Value), Error<F>>> + Send + 'a {
+        self.any.stream_range(range)
+    }
+
+    /// Streams active keys in ascending order within `range`.
+    pub fn keys<'a>(
+        &'a self,
+        range: impl RangeBounds<K> + Send + 'a,
+    ) -> impl Stream<Item = Result<K, Error<F>>> + Send + 'a {
+        self.any.keys(range)
     }
 }
 

@@ -880,7 +880,7 @@ pub trait GBackend: FBackend {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: FBackend + GBackend + MBackend + Send + Sync + 'static {}
+pub trait Backend: MBackend + 'static {}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///

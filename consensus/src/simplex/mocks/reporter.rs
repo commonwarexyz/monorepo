@@ -30,13 +30,13 @@ use commonware_utils::{
 use rand_core::CryptoRng;
 use std::{
     collections::{HashMap, HashSet},
-    hash::Hash,
     sync::Arc,
 };
 
 // Records which validators have participated in a given view/payload pair.
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
 type Faults<S, D> = HashMap<<S as Verifier>::PublicKey, HashMap<View, HashSet<Activity<S, D>>>>;
+type Finalizations<S, D> = HashMap<View, (Finalization<S, D>, usize)>;
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
@@ -60,7 +60,7 @@ pub struct Reporter<E: CryptoRng, S: Scheme, L: elector::Config<S>, D: Digest> {
     pub nullifies: Arc<Mutex<HashMap<View, HashSet<S::PublicKey>>>>,
     pub nullifications: Arc<Mutex<HashMap<View, Nullification<S>>>>,
     pub finalizes: Arc<Mutex<Participation<S::PublicKey, D>>>,
-    pub finalizations: Arc<Mutex<HashMap<View, Finalization<S, D>>>>,
+    pub finalizations: Arc<Mutex<Finalizations<S, D>>>,
     pub faults: Arc<Mutex<Faults<S, D>>>,
     pub invalid_votes: Arc<Mutex<usize>>,
     pub invalid_certificates: Arc<Mutex<usize>>,
@@ -74,7 +74,6 @@ where
     E: CryptoRng,
     S: Scheme,
     L: elector::Config<S>,
-    L::Elector: Clone,
     D: Digest,
 {
     fn clone(&self) -> Self {
@@ -106,7 +105,7 @@ where
     E: CryptoRng,
     S: Scheme,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let elector = cfg.elector.build(&cfg.participants);
@@ -164,7 +163,7 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: scheme::Scheme<D>,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Activity = Activity<S, D>;
 
@@ -293,7 +292,11 @@ where
                 let encoded = finalization.encode();
                 Finalization::<S, D>::decode_cfg(encoded, &self.scheme.certificate_codec_config())
                     .unwrap();
-                self.finalizations.lock().insert(view, finalization.clone());
+                self.finalizations
+                    .lock()
+                    .entry(view)
+                    .or_insert_with(|| (finalization.clone(), 0))
+                    .1 += 1;
                 self.certified(
                     finalization.round(),
                     finalization.view().next(),
@@ -368,7 +371,7 @@ where
     E: CryptoRng + Send + Sync + 'static,
     S: Scheme,
     L: elector::Config<S>,
-    D: Digest + Eq + Hash + Clone,
+    D: Digest,
 {
     type Index = View;
 

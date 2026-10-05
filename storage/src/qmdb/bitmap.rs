@@ -2,8 +2,8 @@
 //! [`MerkleizedBatch`](super::current::batch::MerkleizedBatch)es via `Arc<Shared<N>>`.
 //!
 //! `any::Db` mutates the inner [`bitmap::Prunable`] under a [`RwLock`] during `apply_batch` /
-//! `prune` / `rewind` while live batches read concurrently. Locking (not snapshotting) keeps
-//! memory at O(bitmap size); snapshots would couple memory to live-batch count and lifetime.
+//! `prune` while live batches read concurrently. Locking (not snapshotting) keeps memory at
+//! O(bitmap size). Snapshots would couple memory to live-batch count and lifetime.
 //!
 //! Reads through an invalidated `MerkleizedBatch` (see its "Branch validity" docs) return
 //! inconsistent bytes; callers must drop invalid batches.
@@ -33,7 +33,7 @@ impl<const N: usize> Shared<N> {
     }
 
     /// Acquire an exclusive write guard. By convention only the inner-`any` mutators
-    /// (`apply_batch`, `prune_bitmap`, `rewind`) hold the write lock.
+    /// (`apply_batch`, `prune_bitmap`) hold the write lock.
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, bitmap::Prunable<N>> {
         self.inner.write()
     }
@@ -62,7 +62,6 @@ impl<const N: usize> Shared<N> {
     }
 
     /// Return the number of pruned bits. Acquires the read lock briefly.
-    #[cfg(any(test, feature = "test-traits"))]
     pub(crate) fn pruned_bits(&self) -> u64 {
         self.read().pruned_bits()
     }
