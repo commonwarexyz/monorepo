@@ -27,10 +27,3 @@ path = "fuzz_targets/reed_solomon.rs"
 test = false
 doc = false
 bench = false
-
-[[bin]]
-name = "zoda"
-path = "fuzz_targets/zoda.rs"
-test = false
-doc = false
-bench = false

@@ -1,4 +1,4 @@
-use crate::Channel;
+use crate::{Channel, authenticated::connection::Label};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::telemetry::metrics::EncodeStruct;
 use std::fmt;
@@ -48,5 +48,15 @@ impl<P: PublicKey> Message<P> {
     }
     pub fn new_invalid(peer: &P) -> Self {
         Self::new(peer, MessageType::Invalid)
+    }
+}
+
+impl<P: PublicKey> Label<P> for Message<P> {
+    fn data(peer: &P, channel: Channel) -> Self {
+        Self::new_data(peer, channel)
+    }
+
+    fn invalid(peer: &P) -> Self {
+        Self::new_invalid(peer)
     }
 }

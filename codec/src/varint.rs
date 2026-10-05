@@ -495,7 +495,7 @@ mod tests {
     }
 
     /// Core round-trip check, generic over any UPrim.
-    fn varuint_round_trip<T: Copy + UPrim + TryFrom<u128>>() {
+    fn varuint_round_trip<T: UPrim + TryFrom<u128>>() {
         const CASES: &[u128] = &[
             0,
             1,
@@ -547,7 +547,7 @@ mod tests {
         varuint_round_trip::<u128>();
     }
 
-    fn varsint_round_trip<T: Copy + SPrim + TryFrom<i128>>() {
+    fn varsint_round_trip<T: SPrim + TryFrom<i128>>() {
         const CASES: &[i128] = &[
             0,
             1,

@@ -225,4 +225,4 @@ BlueBottle and Raptr's sweeps stop at 500,000 offered transactions per second be
 
 We're working to bring Multimmit to production in the coming months. These measurements help ensure we're on the right track on such a large change.
 
-The latest version of the Multimmit paper, now including the experimental results, is available [here](/artifacts/multimmit.pdf).
+The latest version of the Multimmit paper, now including the experimental results, is available [here](https://arxiv.org/abs/2607.21021).

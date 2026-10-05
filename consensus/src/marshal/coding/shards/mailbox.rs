@@ -2,7 +2,7 @@
 
 use crate::{
     CertifiableBlock,
-    marshal::{coding::types::CodedBlock, core::Retirement},
+    marshal::coding::types::CodedBlock,
     types::{Round, coding::Commitment},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -94,12 +94,6 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to retire cached blocks and reconstruction state after durable application
-    /// progress.
-    Retire {
-        /// The retirement to apply.
-        update: Retirement<Commitment<B, C, H>>,
-    },
 }
 
 impl<B, C, H, P> Message<B, C, H, P>
@@ -117,10 +111,7 @@ where
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
             Self::SubscribeByCommitment { response, .. }
             | Self::SubscribeByDigest { response, .. } => response.is_closed(),
-            Self::Proposed { .. }
-            | Self::Discovered { .. }
-            | Self::Notarized { .. }
-            | Self::Retire { .. } => false,
+            Self::Proposed { .. } | Self::Discovered { .. } | Self::Notarized { .. } => false,
         }
     }
 }
@@ -335,19 +326,6 @@ where
             response: responder,
         });
         receiver
-    }
-
-    /// Retire cached blocks and reconstruction state after durable application progress.
-    ///
-    /// Entries last observed at or before [`Retirement::round_floor`] are eligible for
-    /// retirement. Entries in [`Retirement::exact_retirements`] are eligible regardless of
-    /// observation round.
-    ///
-    /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
-    /// close only for exact retirements. Other block subscriptions remain open for local ingress.
-    /// Digest subscriptions remain open, and later consensus notifications may recreate state.
-    pub fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
-        let _ = self.sender.enqueue(Message::Retire { update });
     }
 }
 

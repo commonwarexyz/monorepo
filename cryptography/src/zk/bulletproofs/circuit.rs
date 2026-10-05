@@ -412,11 +412,7 @@ mod zkc {
                 ),
                 Self::Constant(other_constant) => Self::Constant(constant * other_constant),
                 Self::General(items) => {
-                    let mut items = items.clone();
-                    for w in items.values_mut() {
-                        *w = w.clone() * &constant;
-                    }
-                    Self::General(items)
+                    Self::General(items.map_values(|_, w| w.clone() * &constant))
                 }
             };
             Some(out)
@@ -995,7 +991,7 @@ impl<G> Setup<G> {
         strategy: &impl Strategy,
     ) -> Option<Vec<bool>>
     where
-        G: Space<F> + PartialEq,
+        G: Space<F>,
     {
         let (vs, flat) = self.build_virtual::<F>();
         let synths = f(&vs, &mut *rng)?;
@@ -1062,10 +1058,7 @@ impl<G: EncodeSize> EncodeSize for Setup<G> {
     }
 }
 
-impl<G: Read> Read for Setup<G>
-where
-    G::Cfg: Clone,
-{
+impl<G: Read> Read for Setup<G> {
     type Cfg = (usize, G::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (max_len, cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -1223,11 +1216,7 @@ impl<F: EncodeSize, G: EncodeSize> EncodeSize for Proof<F, G> {
     }
 }
 
-impl<F: Read, G: Read> Read for Proof<F, G>
-where
-    F::Cfg: Clone,
-    G::Cfg: Clone,
-{
+impl<F: Read, G: Read> Read for Proof<F, G> {
     /// `(max_len, (g_cfg, f_cfg))` where `max_len` bounds the IPA round count.
     type Cfg = (usize, (G::Cfg, F::Cfg));
 

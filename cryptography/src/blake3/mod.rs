@@ -24,8 +24,9 @@ use bytes::BufMut;
 use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
-use commonware_utils::{Array, Span};
+use commonware_utils::{Array, Span, sequence::FixedBytes};
 use core::{
+    cmp::Ordering,
     fmt::{Debug, Display},
     ops::Deref,
 };
@@ -91,10 +92,24 @@ impl Hasher for Blake3 {
 }
 
 /// Digest of a BLAKE3 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[derive(Clone, Copy, Eq, PartialEq, Hash, FixedArray)]
 #[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
+
+impl Ord for Digest {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        FixedBytes::new(self.0).cmp(&FixedBytes::new(other.0))
+    }
+}
+
+impl PartialOrd for Digest {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 #[cfg(feature = "arbitrary")]
 impl<'a> arbitrary::Arbitrary<'a> for Digest {
@@ -214,6 +229,40 @@ mod tests {
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
+    /// Official BLAKE3 test vectors. Hashing 16 KiB or more in one update reaches the 16-way
+    /// AVX-512 chunk kernel, and 32 KiB or more also reaches the 16-way parent kernel.
+    #[test]
+    fn test_official_vectors() {
+        const VECTORS: [(usize, [u8; DIGEST_LENGTH]); 3] = [
+            (
+                16384,
+                commonware_formatting::hex!(
+                    "f875d6646de28985646f34ee13be9a576fd515f76b5b0a26bb324735041ddde4"
+                ),
+            ),
+            (
+                31744,
+                commonware_formatting::hex!(
+                    "62b6960e1a44bcc1eb1a611a8d6235b6b4b78f32e7abc4fb4c6cdcce94895c47"
+                ),
+            ),
+            (
+                102400,
+                commonware_formatting::hex!(
+                    "bc3e3d41a1146b069abffad3c0d44860cf664390afce4d9661f7902e7943e085"
+                ),
+            ),
+        ];
+        for (len, expected) in VECTORS {
+            // The official input repeats the bytes 0 through 250.
+            let input: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let mut hasher = Blake3::default();
+            hasher.update(&input);
+            let (_, digest) = hasher.finalize();
+            assert_eq!(digest.as_ref(), expected, "len {len}");
+        }
+    }
+
     #[test]
     fn test_blake3_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
@@ -232,6 +281,30 @@ mod tests {
 
         let decoded = Digest::decode(encoded).unwrap();
         assert_eq!(digest, decoded);
+    }
+
+    #[test]
+    fn test_digest_ord() {
+        let a = Digest([0; DIGEST_LENGTH]);
+        let mut b = a;
+        b.0[DIGEST_LENGTH - 1] = 1;
+
+        // The first byte decides even when the remaining bytes order the other way.
+        let mut c = a;
+        c.0[0] = 0x7f;
+        c.0[1..].fill(0xff);
+        let mut d = a;
+        d.0[0] = 0x80;
+        for (a, b, expected) in [
+            (a, a, Ordering::Equal),
+            (a, b, Ordering::Less),
+            (b, a, Ordering::Greater),
+            (c, d, Ordering::Less),
+            (d, c, Ordering::Greater),
+        ] {
+            assert_eq!(a.cmp(&b), expected);
+            assert_eq!(a.partial_cmp(&b), Some(expected));
+        }
     }
 
     #[cfg(feature = "arbitrary")]

@@ -89,9 +89,8 @@ impl<K: Array, V: FixedValue> FixedSize for Update<K, FixedEncoding<V>> {
 
 impl<K, V> Write for Update<K, V>
 where
-    K: Key + Write,
+    K: Key,
     V: ValueEncoding,
-    V::Value: Write,
 {
     fn write(&self, buf: &mut impl BufMut) {
         self.key.write(buf);
@@ -117,7 +116,7 @@ impl<K: Array, V: FixedValue> Read for Update<K, FixedEncoding<V>> {
 
 impl<K, V> EncodeSize for Update<K, VariableEncoding<V>>
 where
-    K: Key + EncodeSize,
+    K: Key,
     V: VariableValue,
 {
     fn encode_size(&self) -> usize {
@@ -127,7 +126,7 @@ where
 
 impl<K, V> Read for Update<K, VariableEncoding<V>>
 where
-    K: Key + Read,
+    K: Key,
     V: VariableValue,
 {
     type Cfg = (<K as Read>::Cfg, <V as Read>::Cfg);

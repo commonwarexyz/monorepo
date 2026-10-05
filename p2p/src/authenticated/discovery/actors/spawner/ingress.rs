@@ -52,15 +52,14 @@ mod tests {
     use crate::authenticated::discovery::actors::tracker::{self, Metadata};
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        Signer as _,
+        ChaCha20Poly1305, Signer as _,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
-        Handshake as _,
-        encrypted::{
-            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
-        },
+        SakeCups, Upgrader,
+        cups::{self, Cups},
+        sake::{self, Sake},
         utils::Timeout,
     };
     use commonware_utils::NZUsize;
@@ -70,20 +69,23 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_discovery_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
-    );
+    type Sender =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Sender<mocks::Stream, mocks::Sink>;
+    type Receiver =
+        <SakeCups<PrivateKey, ChaCha20Poly1305> as Upgrader>::Receiver<mocks::Stream, mocks::Sink>;
+    type Connection = (Sender, Receiver);
 
-    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
-        Timeout::new(
-            StreamHandshake {
+    fn handshake(signer: PrivateKey) -> Timeout<SakeCups<PrivateKey, ChaCha20Poly1305>> {
+        let handshake = Cups::<_, ChaCha20Poly1305>::new(
+            Sake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
+                version: sake::Version::V1,
             },
-            Duration::from_secs(10),
-        )
+            cups::Version::V1,
+        );
+        Timeout::new(handshake, Duration::from_secs(10))
     }
 
     async fn connections(
@@ -145,7 +147,7 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>::new(
+                Mailbox::<Message<Sender, Receiver, PublicKey>>::new(
                     context.child("spawner_mailbox"),
                     NZUsize!(1),
                 );
