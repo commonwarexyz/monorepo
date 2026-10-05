@@ -5,7 +5,6 @@ use crate::dkg::{
     fence::Gate,
     network::{Directory, Manager},
     orchestrator::{Mailbox, mailbox::Message},
-    probe,
     state_sync::{self, Plan as StateSyncPlan},
     types::{EpochInfo, Payload},
 };
@@ -36,7 +35,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc};
+use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -160,9 +159,6 @@ where
     /// Marshal mailbox used to report consensus output and read finalized blocks.
     pub marshal: MarshalMailbox<P::Scheme, MV>,
 
-    /// Probe mailbox used to discover authenticated epoch boundaries during catchup.
-    pub probe: probe::Mailbox<P::Scheme, MV>,
-
     /// Application automaton and relay used by each epoch consensus engine.
     pub application: A,
 
@@ -230,7 +226,6 @@ where
     manager: M,
     provider: P,
     marshal: MarshalMailbox<P::Scheme, MV>,
-    probe: probe::Mailbox<P::Scheme, MV>,
     application: A,
     strategy: T,
     simplex: SimplexConfig<L>,
@@ -294,7 +289,6 @@ where
                 manager: config.manager,
                 provider: config.provider,
                 marshal: config.marshal,
-                probe: config.probe,
                 application: config.application,
                 strategy: config.strategy,
                 simplex: config.simplex,
@@ -387,13 +381,13 @@ where
                 debug!("vote mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
-                self.handle_backup(active.epoch, their_epoch, from);
+                self.handle_backup(&epocher, active.epoch, their_epoch, from);
             },
             Some((their_epoch, (from, _))) = channels.certificate_backup.recv() else {
                 debug!("certificate mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
-                self.handle_backup(active.epoch, their_epoch, from);
+                self.handle_backup(&epocher, active.epoch, their_epoch, from);
             },
             result = &mut active.handle => match result {
                 Ok(()) => {
@@ -563,11 +557,12 @@ where
         }
     }
 
-    /// Asks the probe to discover the finalization of `our_epoch`'s final
-    /// block, starting with `from`, if `their_epoch` is later (see
+    /// Asks `from` for the finalization of `our_epoch`'s final block if
+    /// `their_epoch` is later (see
     /// [Catching Up](crate::dkg::orchestrator#catching-up)).
     fn handle_backup(
         &self,
+        epocher: &FixedEpocher,
         our_epoch: Epoch,
         their_epoch: u64,
         from: <P::Scheme as Verifier>::PublicKey,
@@ -578,13 +573,18 @@ where
             return;
         }
 
+        let boundary_height = epocher
+            .last(our_epoch)
+            .expect("our epoch should be covered by epoch strategy");
         debug!(
             ?from,
             %their_epoch,
             %our_epoch,
+            %boundary_height,
             "received backup message from future epoch, ensuring boundary finalization"
         );
-        self.probe.catch_up(our_epoch, from);
+        self.marshal
+            .hint_finalized(boundary_height, NonEmptyVec::new(from));
     }
 
     /// Handles a finalized block and returns whether the actor keeps running.
