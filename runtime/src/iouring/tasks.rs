@@ -23,13 +23,13 @@
 //! runtime's set panics instead of corrupting that set's lists.
 
 use super::{
+    cell::UnsafeCell,
     mailbox::Mailbox,
     task::{Header, Task},
 };
 use commonware_utils::GOLDEN_RATIO;
 use crossbeam_utils::CachePadded;
 use std::{
-    cell::UnsafeCell,
     future::Future,
     num::NonZeroU64,
     ptr::NonNull,
@@ -81,7 +81,7 @@ impl List {
     unsafe fn contains(&self, node: NonNull<Header>) -> bool {
         // SAFETY: per the contract, and holding the list means holding the
         // shard's lock, which guards the links.
-        let prev = unsafe { *Header::links(node).as_ref().prev.get() };
+        let prev = unsafe { Header::links(node).as_ref().prev.with(|prev| *prev) };
         prev.is_some() || self.head == Some(node)
     }
 
@@ -97,10 +97,13 @@ impl List {
         // guards both tasks' links.
         unsafe {
             let links = Header::links(node).as_ref();
-            *links.prev.get() = None;
-            *links.next.get() = self.head;
+            links.prev.with_mut(|prev| *prev = None);
+            links.next.with_mut(|next| *next = self.head);
             if let Some(head) = self.head {
-                *Header::links(head).as_ref().prev.get() = Some(node);
+                Header::links(head)
+                    .as_ref()
+                    .prev
+                    .with_mut(|prev| *prev = Some(node));
             }
         }
         self.head = Some(node);
@@ -135,17 +138,23 @@ impl List {
         // guards every task's links.
         unsafe {
             let links = Header::links(node).as_ref();
-            let prev = *links.prev.get();
-            let next = *links.next.get();
+            let prev = links.prev.with(|prev| *prev);
+            let next = links.next.with(|next| *next);
             match prev {
-                Some(prev) => *Header::links(prev).as_ref().next.get() = next,
+                Some(prev) => Header::links(prev)
+                    .as_ref()
+                    .next
+                    .with_mut(|slot| *slot = next),
                 None => self.head = next,
             }
             if let Some(next) = next {
-                *Header::links(next).as_ref().prev.get() = prev;
+                Header::links(next)
+                    .as_ref()
+                    .prev
+                    .with_mut(|slot| *slot = prev);
             }
-            *links.prev.get() = None;
-            *links.next.get() = None;
+            links.prev.with_mut(|prev| *prev = None);
+            links.next.with_mut(|next| *next = None);
         }
     }
 
@@ -361,7 +370,7 @@ impl Tasks {
                 while let Some(current) = node {
                     len += 1;
                     // SAFETY: linked tasks are alive, and the lock is held.
-                    node = unsafe { *Header::links(current).as_ref().next.get() };
+                    node = unsafe { Header::links(current).as_ref().next.with(|next| *next) };
                 }
                 len
             })

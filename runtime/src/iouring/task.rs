@@ -61,13 +61,13 @@
 //! mailbox.
 
 use super::{
+    cell::UnsafeCell,
     mailbox::{Mailbox, Message},
     runtime::{Local, Panics},
     tasks::{Links, Tasks},
 };
 use crossbeam_utils::CachePadded;
 use std::{
-    cell::UnsafeCell,
     collections::VecDeque,
     future::Future,
     marker::PhantomData,
@@ -530,14 +530,18 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
     /// provenance, and the caller must hold the running state, which gives it
     /// exclusive access to the future.
     unsafe fn poll(header: NonNull<Header>, cx: &mut Context<'_>) -> Poll<()> {
-        // SAFETY: the header starts a `Cell<F>` per the contract, and the
-        // running state gives this thread exclusive access to the future.
-        let future = unsafe { &mut *header.cast::<Self>().as_ref().future.get() };
-        let future = future.as_mut().expect("queued task retains its future");
+        // SAFETY: the header starts a `Cell<F>` per the contract.
+        let cell = unsafe { header.cast::<Self>().as_ref() };
+        cell.future.with_mut(|future| {
+            // SAFETY: the running state gives this thread exclusive access to
+            // the future.
+            let future = unsafe { &mut *future };
+            let future = future.as_mut().expect("queued task retains its future");
 
-        // SAFETY: the future lives inside the cell and is never moved out of
-        // it, so pinning it in place is sound.
-        unsafe { Pin::new_unchecked(future) }.poll(cx)
+            // SAFETY: the future lives inside the cell and is never moved out
+            // of it, so pinning it in place is sound.
+            unsafe { Pin::new_unchecked(future) }.poll(cx)
+        })
     }
 
     /// Drop the future in place.
@@ -549,7 +553,13 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
     unsafe fn drop_future(header: NonNull<Header>) {
         // SAFETY: per the contract. The old value drops in place, and the
         // slot holds `None` even if its destructor panics.
-        unsafe { *header.cast::<Self>().as_ref().future.get() = None };
+        unsafe {
+            header
+                .cast::<Self>()
+                .as_ref()
+                .future
+                .with_mut(|future| *future = None)
+        };
     }
 
     /// Free the cell.
@@ -566,7 +576,7 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
         // before taking ownership leaks the cell instead.
         // SAFETY: the last reference is gone, so nothing else touches the
         // future.
-        let present = unsafe { (*cell.as_ref().future.get()).is_some() };
+        let present = unsafe { cell.as_ref().future.with(|future| (*future).is_some()) };
         assert!(!present, "task freed with its future still present");
 
         // SAFETY: `Task::new` leaked exactly this box, and the last reference
@@ -1798,9 +1808,15 @@ pub mod tests {
     }
 }
 
+/// Loom models of the state word alone, then of the real task path: cells,
+/// tokens, the waker vtable, the mailbox, and the task set, with a loom thread
+/// standing in for the worker.
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::{AfterPending, AfterWake, REF_ONE, REFS, State};
+    use super::{
+        AfterPending, AfterPoll, AfterWake, Mailbox, Message, Panics, REF_ONE, REFS, Runnable,
+        State, Target, Task, Tasks,
+    };
     use loom::{
         cell::UnsafeCell,
         sync::{
@@ -1809,10 +1825,237 @@ mod loom_tests {
         },
         thread,
     };
+    use std::{
+        future::{Future, poll_fn},
+        task::{Poll, Waker},
+    };
 
     /// References counted in `state`.
     fn refs(state: &State) -> usize {
         (state.0.load(Ordering::Acquire) & REFS) / REF_ONE
+    }
+
+    /// A worker's mailbox. Task headers hold a standard `Weak` to it.
+    fn mailbox() -> std::sync::Arc<Mailbox> {
+        std::sync::Arc::new(Mailbox::new().unwrap())
+    }
+
+    /// Counts the drops of a future's captured state.
+    struct DropCount(Arc<AtomicUsize>);
+
+    impl Drop for DropCount {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A future that completes once `signal` is set, counting its drop.
+    fn signaled(
+        signal: Arc<AtomicBool>,
+        drops: &Arc<AtomicUsize>,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let guard = DropCount(drops.clone());
+        poll_fn(move |_| {
+            let _ = &guard;
+            if signal.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+
+    /// A future that never completes, counting its drop.
+    fn pending(drops: &Arc<AtomicUsize>) -> impl Future<Output = ()> + Send + 'static {
+        signaled(Arc::new(AtomicBool::new(false)), drops)
+    }
+
+    /// Poll `token` as a worker does, polling again while wakes arrive
+    /// during its polls, and remove the task from `set` once it completes.
+    /// Returns whether it completed.
+    fn run(set: &Tasks, token: Runnable) -> bool {
+        let mut next = Some(token);
+        while let Some(token) = next.take() {
+            match token.poll() {
+                AfterPoll::Done => {}
+                AfterPoll::Requeue(token) => next = Some(token),
+                AfterPoll::Retire(task) => {
+                    drop(set.remove(&task));
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// The ready tokens among `messages`, which carry nothing else.
+    fn tokens(messages: Vec<Message>) -> impl Iterator<Item = Runnable> {
+        messages.into_iter().map(|message| match message {
+            Message::Wake(Target::Task(token)) => token,
+            _ => panic!("expected only ready tokens"),
+        })
+    }
+
+    /// Tear down as a closing worker does: close the set, then the mailbox,
+    /// discarding its queued tokens, then drain the set and clear each task
+    /// inside the panic boundary.
+    fn teardown(set: &Tasks, mailbox: &Mailbox) {
+        set.close();
+        for token in tokens(mailbox.close()) {
+            token.discard();
+        }
+        for task in set.drain() {
+            Panics::contain(|| task.clear());
+        }
+    }
+
+    /// A foreign wake racing the poll path, by value or by reference, is
+    /// never lost: the task completes in the poll that sees the signal, in
+    /// the poll its requeued token runs, or in the poll of the token the wake
+    /// delivers through the mailbox. No reference leaks.
+    #[test]
+    fn test_foreign_wake_racing_the_poll_path_is_never_lost() {
+        for by_value in [false, true] {
+            loom::model(move || {
+                let mailbox = mailbox();
+                let set = Tasks::new(1);
+                let signal = Arc::new(AtomicBool::new(false));
+                let drops = Arc::new(AtomicUsize::new(0));
+                let (task, token) = Task::new(
+                    signaled(signal.clone(), &drops),
+                    &set,
+                    std::sync::Arc::downgrade(&mailbox),
+                );
+                assert!(set.insert(task.clone()).is_ok());
+                let waker = Waker::clone(&task.waker());
+
+                // Another thread signals the future and wakes it while this
+                // one polls.
+                let waking = thread::spawn(move || {
+                    signal.store(true, Ordering::Release);
+                    if by_value {
+                        waker.wake();
+                    } else {
+                        waker.wake_by_ref();
+                    }
+                });
+                let mut completed = run(&set, token);
+                waking.join().unwrap();
+
+                // A wake that found the task idle delivered a token.
+                let mut delivered = Vec::new();
+                mailbox.take(&mut delivered);
+                for token in tokens(delivered) {
+                    assert!(!completed, "a completed task received a token");
+                    completed = run(&set, token);
+                }
+                assert!(completed, "wake lost");
+                assert_eq!(drops.load(Ordering::Relaxed), 1);
+
+                // Only this reference remains, and it frees the cell.
+                assert_eq!(refs(&task.state), 1);
+                drop(task);
+                assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+            });
+        }
+    }
+
+    /// Teardown racing a foreign wake drops the future once, whether the
+    /// wake's token reaches the open mailbox or the closed one, or the wake
+    /// finds the task already cleared. Whichever reference goes last frees
+    /// the cell, the consuming waker's included.
+    #[test]
+    fn test_teardown_racing_a_foreign_wake_disposes_of_the_task_once() {
+        loom::model(|| {
+            let mailbox = mailbox();
+            let set = Tasks::new(1);
+            let drops = Arc::new(AtomicUsize::new(0));
+            let (task, token) =
+                Task::new(pending(&drops), &set, std::sync::Arc::downgrade(&mailbox));
+
+            // The set takes the only plain reference, so the waker's can be
+            // the last.
+            let waker = Waker::clone(&task.waker());
+            assert!(set.insert(task).is_ok());
+
+            // The first poll leaves the task idle, so the wake publishes a
+            // token.
+            assert!(!run(&set, token));
+            let waking = thread::spawn(move || waker.wake());
+            teardown(&set, &mailbox);
+            waking.join().unwrap();
+
+            // Every reference is gone, so the cell freed its mailbox handle.
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+        });
+    }
+
+    /// A registration racing teardown disposes of its task once: the drain
+    /// clears a task the set retained, wherever its first token is, and the
+    /// caller clears a task the closed set refused. No reference leaks.
+    #[test]
+    fn test_registration_racing_teardown_disposes_of_the_task_once() {
+        loom::model(|| {
+            let mailbox = mailbox();
+            let set = Arc::new(Tasks::new(1));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let registering = thread::spawn({
+                let set = set.clone();
+                let mailbox = std::sync::Arc::downgrade(&mailbox);
+                let future = pending(&drops);
+                move || {
+                    if let Err(task) = set.register(future, mailbox) {
+                        task.clear();
+                    }
+                }
+            });
+            teardown(&set, &mailbox);
+            registering.join().unwrap();
+
+            // Every reference is gone, so the cell freed its mailbox handle.
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+        });
+    }
+
+    /// Teardown on another thread, racing the poll path of a task that wakes
+    /// itself once, never touches the future during a poll and drops it once:
+    /// the drain's clear when no poll runs, the poller when the clear finds
+    /// its poll running, with or without a wake recorded. The poller's token
+    /// alone keeps the cell alive, and whichever reference goes last frees
+    /// it.
+    #[test]
+    fn test_teardown_racing_the_poll_path_drops_the_future_once() {
+        loom::model(|| {
+            let mailbox = mailbox();
+            let set = Arc::new(Tasks::new(1));
+            let drops = Arc::new(AtomicUsize::new(0));
+            let guard = DropCount(drops.clone());
+            let mut woken = false;
+            let future = poll_fn(move |cx| {
+                let _ = &guard;
+                if !woken {
+                    woken = true;
+                    cx.waker().wake_by_ref();
+                }
+                Poll::<()>::Pending
+            });
+            let (task, token) = Task::new(future, &set, std::sync::Arc::downgrade(&mailbox));
+            assert!(set.insert(task).is_ok());
+
+            let tearing_down = thread::spawn({
+                let set = set.clone();
+                let mailbox = mailbox.clone();
+                move || teardown(&set, &mailbox)
+            });
+            run(&set, token);
+            tearing_down.join().unwrap();
+
+            // Every reference is gone, so the cell freed its mailbox handle.
+            assert_eq!(drops.load(Ordering::Relaxed), 1);
+            assert_eq!(std::sync::Arc::weak_count(&mailbox), 0);
+        });
     }
 
     /// A wake racing the end of a pending poll transfers exactly one token,

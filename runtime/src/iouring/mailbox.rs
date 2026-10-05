@@ -10,8 +10,16 @@
 
 use super::{request::RequestOutput, sleep::TimerId, task::Target, waiter::WaiterId, waker::Waker};
 use crate::Error;
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::channel::oneshot;
 use std::mem;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::sync::{Mutex, MutexGuard};
+    } else {
+        use commonware_utils::sync::{Mutex, MutexGuard};
+    }
+}
 
 /// Owned work delivered to the worker without borrowing its local state.
 pub enum Message {
@@ -69,10 +77,22 @@ impl Mailbox {
         })
     }
 
+    /// Lock the inbox.
+    fn lock(&self) -> MutexGuard<'_, Inbox> {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                let inbox = self.inbox.lock().unwrap();
+            } else {
+                let inbox = self.inbox.lock();
+            }
+        }
+        inbox
+    }
+
     /// Deliver a message, or return it if the mailbox is closed.
     pub fn send(&self, message: Message) -> Result<(), Message> {
         let signal = {
-            let mut inbox = self.inbox.lock();
+            let mut inbox = self.lock();
             if !inbox.open {
                 return Err(message);
             }
@@ -102,7 +122,7 @@ impl Mailbox {
             "mailbox scratch must be drained before transfer"
         );
 
-        let mut inbox = self.inbox.lock();
+        let mut inbox = self.lock();
         if inbox.messages.is_empty() {
             return false;
         }
@@ -114,7 +134,7 @@ impl Mailbox {
     /// Close the mailbox and return the pending messages for cleanup outside
     /// the lock.
     pub fn close(&self) -> Vec<Message> {
-        let mut inbox = self.inbox.lock();
+        let mut inbox = self.lock();
         inbox.open = false;
         mem::take(&mut inbox.messages)
     }
@@ -122,7 +142,7 @@ impl Mailbox {
     /// Whether the mailbox still accepts messages.
     #[cfg(test)]
     pub fn is_open(&self) -> bool {
-        self.inbox.lock().open
+        self.lock().open
     }
 }
 

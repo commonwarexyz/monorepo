@@ -1152,7 +1152,16 @@ impl Panics {
     /// Cancellation can destroy the user future during polling, so both paths need
     /// this boundary. The caller must release worker borrows before invoking it.
     pub fn contain<T>(f: impl FnOnce() -> T) -> Option<T> {
-        match catch_unwind(AssertUnwindSafe(f)) {
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "loom")] {
+                // Loom reports a violation by panicking, and containing that
+                // panic would hide it, so loom builds let every panic through.
+                let result: std::thread::Result<T> = Ok(f());
+            } else {
+                let result = catch_unwind(AssertUnwindSafe(f));
+            }
+        }
+        match result {
             Ok(output) => Some(output),
             Err(panic) => {
                 // Payload destruction can also run user code. A secondary panic
