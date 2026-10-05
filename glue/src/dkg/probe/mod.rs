@@ -121,10 +121,12 @@
 //! An epoch with no known boundary block is answered with nothing, as is a latest-finalization
 //! request when marshal has no finalization yet.
 //!
-//! During consensus catchup, the orchestrator requests the boundary certificate of the
-//! active epoch. The service verifies responses with the all-epoch verifier and reports them
-//! to marshal for commitment-based block acquisition. It retries discovery until marshal stores
-//! the boundary, while continuing to serve requests from peers.
+//! During consensus catch-up, the orchestrator asks for the boundary certificate of the active
+//! epoch, naming a peer that has advanced past it. The service requests the certificate from that
+//! peer and, after each `retry_timeout`, from every peer, until marshal stores or has processed
+//! the boundary. It verifies at most one response from each peer asked in the latest request,
+//! using the all-epoch verifier, and ignores other responses. Verified certificates are reported
+//! to marshal for commitment-based block acquisition. Serving continues throughout.
 
 use crate::dkg::{
     ReshareBlock,
@@ -1668,6 +1670,73 @@ mod tests {
                 }
                 context.sleep(Duration::from_millis(10)).await;
             }
+        });
+    }
+
+    /// Each peer asked in a catch-up request round has at most one boundary
+    /// response verified, and responses from peers outside the round are
+    /// ignored. Invalid certificates expose verification by blocking the peer.
+    #[test]
+    fn catch_up_verifies_one_response_per_asked_peer_per_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let mut harness = Harness::start(&mut context).await;
+            let _marshal = harness.attach_joiner(&context).await;
+            let joiner = harness.participants[1].clone();
+            let client = harness.participants[2].clone();
+            harness.joiner.catch_up(Epoch::zero(), client.clone());
+            assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
+
+            let response = |finalization| {
+                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryResponse(
+                    finalization,
+                )
+                .encode()
+            };
+            let mut invalid = harness.boundary_finalization.clone();
+            invalid.proposal.payload = mocks::TestDigest::EMPTY;
+            let invalid = response(invalid);
+
+            // The first round asks only the client, so the backup's response
+            // is ignored.
+            harness.backup_boundary_sender.send(
+                Recipients::One(joiner.clone()),
+                invalid.clone(),
+                false,
+            );
+
+            // The client's first response is valid but names a block no peer
+            // serves, so catch-up stays pending. Its later responses in the
+            // same round are not verified.
+            let unserved = harness.latest_finalization(Epoch::zero(), Sha256::hash(&[b"unserved"]));
+            harness.client_boundary_sender.send(
+                Recipients::One(joiner.clone()),
+                response(unserved),
+                false,
+            );
+            harness.client_boundary_sender.send(
+                Recipients::One(joiner.clone()),
+                invalid.clone(),
+                false,
+            );
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(harness.oracle.blocked().await.unwrap().is_empty());
+
+            // The retry round asks every peer again, so the client's next
+            // response is verified.
+            assert_eq!(harness.next_client_boundary_request().await, Epoch::new(1));
+            harness
+                .client_boundary_sender
+                .send(Recipients::One(joiner.clone()), invalid, false);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                harness
+                    .oracle
+                    .blocked()
+                    .await
+                    .unwrap()
+                    .contains(&(joiner, client))
+            );
         });
     }
 

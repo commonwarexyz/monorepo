@@ -24,7 +24,17 @@ use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{NonZeroDuration, channel::fallible::OneshotExt as _};
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
+use std::collections::BTreeSet;
 use tracing::debug;
+
+/// Discovery of the finalization that ends the active epoch, pending until
+/// marshal stores or has processed it.
+struct Pending<P> {
+    epoch: Epoch,
+    /// Peers asked in the latest request round whose boundary response has not
+    /// been verified.
+    awaiting: BTreeSet<P>,
+}
 
 /// Serving phase of the probe actor: answers requests from the attached marshal
 /// and, while the orchestrator is catching up, discovers the active epoch's
@@ -69,10 +79,8 @@ where
         catch_up: Option<(Epoch, S::PublicKey)>,
     ) {
         let mut mailbox_drained = false;
-        let mut pending = catch_up.map(|(epoch, peer)| {
-            Self::request_boundary(epoch, Recipients::One(peer), &mut sender);
-            epoch
-        });
+        let mut pending = catch_up
+            .map(|(epoch, peer)| Self::request_boundary(epoch, Recipients::One(peer), &mut sender));
         let mut deadline = self.context.current() + self.retry_timeout.get();
         select_loop! {
             self.context,
@@ -103,24 +111,30 @@ where
                 }
                 Message::Attach { .. } => {}
                 Message::CatchUp { epoch, peer } => {
-                    if pending.is_none_or(|current| epoch > current) {
-                        pending = Some(epoch);
-                        Self::request_boundary(epoch, Recipients::One(peer), &mut sender);
+                    if pending.as_ref().is_none_or(|current| epoch > current.epoch) {
+                        pending = Some(Self::request_boundary(
+                            epoch,
+                            Recipients::One(peer),
+                            &mut sender,
+                        ));
                         deadline = self.context.current() + self.retry_timeout.get();
                     }
                 }
             },
             _ = retry => {
                 // Processed progress remains authoritative after old certificates are pruned.
-                let epoch = pending.expect("retry requires a pending epoch");
+                let epoch = pending.as_ref().expect("retry requires a pending epoch").epoch;
                 let height = self.epocher.last(epoch).expect("active epoch is covered");
                 if self.marshal.get_finalization(height).await.is_some()
-                    || self.marshal.get_processed().await
+                    || self
+                        .marshal
+                        .get_processed()
+                        .await
                         .is_some_and(|processed| processed.height() >= height)
                 {
                     pending = None;
                 } else {
-                    Self::request_boundary(epoch, Recipients::All, &mut sender);
+                    pending = Some(Self::request_boundary(epoch, Recipients::All, &mut sender));
                     deadline = self.context.current() + self.retry_timeout.get();
                 }
             },
@@ -128,23 +142,34 @@ where
                 debug!("boundary receiver closed, shutting down");
                 return;
             } => {
-                if let Some(epoch) = pending {
+                // Responses from peers that are not awaited fall through to
+                // request decoding, which ignores them.
+                if let Some(current) = pending
+                    .as_mut()
+                    .filter(|current| current.awaiting.contains(&peer))
+                {
                     match wire::read_response::<S, V, _>(
                         message.clone(),
                         &self.verifier.certificate_codec_config(),
                     ) {
                         Ok(Some(wire::Response::Boundary(finalization))) => {
-                            if finalization.epoch() != epoch {
+                            if finalization.epoch() != current.epoch {
                                 continue;
                             }
+                            current.awaiting.remove(&peer);
                             if !finalization.verify(
                                 self.context.as_present_mut(),
                                 &self.verifier,
                                 &self.strategy,
                             ) {
-                                commonware_p2p::block!(self.blocker, peer, "invalid boundary finalization");
+                                commonware_p2p::block!(
+                                    self.blocker,
+                                    peer,
+                                    "invalid boundary finalization"
+                                );
                                 continue;
                             }
+
                             // The certificate binds the round and commitment; marshal establishes
                             // its height when the committed block arrives.
                             self.marshal.report(Activity::Finalization(finalization));
@@ -153,7 +178,12 @@ where
                         Ok(Some(_)) => continue,
                         Ok(None) => {}
                         Err(err) => {
-                            commonware_p2p::block!(self.blocker, peer, ?err, "invalid boundary response");
+                            commonware_p2p::block!(
+                                self.blocker,
+                                peer,
+                                ?err,
+                                "invalid boundary response"
+                            );
                             continue;
                         }
                     }
@@ -208,16 +238,22 @@ where
         }
     }
 
+    /// Requests the finalization that ends `epoch` from `recipients`, starting
+    /// a new request round.
     fn request_boundary(
         epoch: Epoch,
         recipients: Recipients<S::PublicKey>,
         sender: &mut impl Sender<PublicKey = S::PublicKey>,
-    ) {
-        sender.send(
-            recipients,
-            wire::Message::<S, V>::BoundaryRequest(epoch.next()).encode(),
-            false,
-        );
+    ) -> Pending<S::PublicKey> {
+        let awaiting = sender
+            .send(
+                recipients,
+                wire::Message::<S, V>::BoundaryRequest(epoch.next()).encode(),
+                false,
+            )
+            .into_iter()
+            .collect();
+        Pending { epoch, awaiting }
     }
 
     async fn produce_finalization(

@@ -387,13 +387,13 @@ where
                 debug!("vote mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
-                self.handle_backup(&epocher, active.epoch, their_epoch, from);
+                self.handle_backup(active.epoch, their_epoch, from);
             },
             Some((their_epoch, (from, _))) = channels.certificate_backup.recv() else {
                 debug!("certificate mux backup channel closed, shutting down orchestrator");
                 break;
             } => {
-                self.handle_backup(&epocher, active.epoch, their_epoch, from);
+                self.handle_backup(active.epoch, their_epoch, from);
             },
             result = &mut active.handle => match result {
                 Ok(()) => {
@@ -568,7 +568,6 @@ where
     /// [Catching Up](crate::dkg::orchestrator#catching-up)).
     fn handle_backup(
         &self,
-        epocher: &FixedEpocher,
         our_epoch: Epoch,
         their_epoch: u64,
         from: <P::Scheme as Verifier>::PublicKey,
@@ -579,14 +578,10 @@ where
             return;
         }
 
-        let boundary_height = epocher
-            .last(our_epoch)
-            .expect("our epoch should be covered by epoch strategy");
         debug!(
             ?from,
             %their_epoch,
             %our_epoch,
-            %boundary_height,
             "received backup message from future epoch, ensuring boundary finalization"
         );
         self.probe.catch_up(our_epoch, from);
