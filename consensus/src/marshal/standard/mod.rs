@@ -5097,6 +5097,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
+        fetch_batches: Arc<Mutex<Vec<Vec<FetchRecord>>>>,
         active_fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
         retains: Arc<Mutex<usize>>,
@@ -5112,6 +5113,7 @@ mod tests {
                 handler::Receiver::new(receiver),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
+                    fetch_batches: Arc::new(Mutex::new(Vec::new())),
                     active_fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     retains: Arc::new(Mutex::new(0)),
@@ -5211,8 +5213,10 @@ mod tests {
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
+            let fetches: Vec<_> = fetches.into_iter().map(Into::into).collect();
+            self.fetch_batches.lock().push(fetches.clone());
             for fetch in fetches {
-                self.record_fetch(fetch.into());
+                self.record_fetch(fetch);
             }
             Feedback::Ok
         }
@@ -9528,6 +9532,18 @@ mod tests {
         });
     }
 
+    fn finalize_test_block(schemes: &[S], block: &B) -> Finalization<S, D> {
+        StandardHarness::make_finalization(
+            Proposal::new(
+                Round::new(Epoch::zero(), View::new(block.height().get())),
+                View::new(block.height().previous().unwrap().get()),
+                block.digest(),
+            ),
+            schemes,
+            QUORUM,
+        )
+    }
+
     async fn deliver_finalized_test_block(
         resolver: &RecordingResolver,
         finalization: Finalization<S, D>,
@@ -9585,17 +9601,7 @@ mod tests {
                 (resolver_rx, resolver.clone()),
             );
             assert_eq!(application.acknowledged().await, Height::zero());
-            let finalization = |block: &B| {
-                StandardHarness::make_finalization(
-                    Proposal::new(
-                        Round::new(Epoch::zero(), View::new(block.height().get())),
-                        View::new(block.height().previous().unwrap().get()),
-                        block.digest(),
-                    ),
-                    &schemes,
-                    QUORUM,
-                )
-            };
+            let finalization = |block: &B| finalize_test_block(&schemes, block);
             let active = |block: &B| {
                 resolver.active_fetches().into_iter().find(|fetch| {
                     fetch.key == handler::Key::Block(block.digest())
@@ -10102,6 +10108,133 @@ mod tests {
                 "dispatch must not read the finalized block back from the archive: {ops:?}"
             );
         });
+    }
+
+    /// Forward repair fills internal gaps in height order within each pass's request bound.
+    #[test_traced("WARN")]
+    fn test_standard_forward_gap_repair_batches_lowest_missing_heights() {
+        for floor in [false, true] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture { schemes, .. } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let partition = format!("forward-repair-batches-{floor}");
+                let (finalizations, blocks) = prunable_finalized_stores(&context, &partition).await;
+                let mut config = test_config(
+                    &context,
+                    &partition,
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                );
+                config.max_repair = if floor { NZUsize!(3) } else { NZUsize!(4) };
+                let max_repair = config.max_repair.get();
+                let (actor, mut mailbox, _) =
+                    Actor::init(context.child("actor"), finalizations, blocks, config).await;
+                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let buffer = RecordingBuffer::default();
+                let application = Application::<B>::manual_ack();
+                let _actor = actor.start(
+                    application.clone(),
+                    buffer.clone(),
+                    (resolver_rx, resolver.clone()),
+                );
+                assert_eq!(application.acknowledged().await, Height::zero());
+                while mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {
+                    reschedule().await;
+                }
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let mut chain = vec![genesis];
+                for height in 1..=9 {
+                    chain.push(make_raw_block(
+                        chain.last().unwrap().digest(),
+                        Height::new(height),
+                        height,
+                    ));
+                }
+                let certify = |block: &B| finalize_test_block(&schemes, block);
+                let processed = if floor { 4 } else { 0 };
+                let assert_batches = |offset: usize, expected: &[u64], last: u64| {
+                    let batches = resolver.fetch_batches.lock();
+                    let observed = &batches[offset..];
+                    if expected.is_empty() {
+                        assert!(
+                            observed.is_empty(),
+                            "a repaired archive must not fetch trailing heights"
+                        );
+                        return;
+                    }
+                    assert!(!observed.is_empty(), "missing forward repair batch");
+                    for batch in observed {
+                        assert!(
+                            batch.len() <= max_repair,
+                            "forward repair exceeded its per-pass bound"
+                        );
+                        let heights: Vec<_> = batch
+                            .iter()
+                            .map(|fetch| {
+                                let handler::Key::Finalized { height } = fetch.key else {
+                                    panic!("forward batch must contain finalized-height requests");
+                                };
+                                assert_eq!(fetch.subscriber, handler::Annotation::Height(height));
+                                assert!(height.get() > processed && height.get() < last);
+                                height.get()
+                            })
+                            .collect();
+                        assert_eq!(
+                            heights, expected,
+                            "forward repair must select the lowest missing heights"
+                        );
+                    }
+                };
+
+                if floor {
+                    buffer.insert(chain[5].clone());
+                    mailbox.set_floor(certify(&chain[5]));
+                    assert_eq!(
+                        mailbox.get_processed().await,
+                        Some(Processed::Absent(Height::new(4)))
+                    );
+                } else {
+                    let offset = resolver.fetch_batches.lock().len();
+                    buffer.insert(chain[4].clone());
+                    StandardHarness::report_finalization(&mut mailbox, certify(&chain[4])).await;
+                    assert!(mailbox.get_block(Height::new(4)).await.is_some());
+                    assert_batches(offset, &[1, 2, 3], 4);
+                }
+
+                let offset = resolver.fetch_batches.lock().len();
+                buffer.insert(chain[9].clone());
+                StandardHarness::report_finalization(&mut mailbox, certify(&chain[9])).await;
+                assert!(mailbox.get_block(Height::new(9)).await.is_some());
+                assert_batches(offset, if floor { &[6, 7, 8] } else { &[1, 2, 3, 5] }, 9);
+
+                let deliveries: Vec<(usize, &[u64])> = if floor {
+                    vec![(6, &[7, 8]), (7, &[8]), (8, &[])]
+                } else {
+                    vec![
+                        (1, &[2, 3, 5, 6]),
+                        (2, &[3, 5, 6, 7]),
+                        (3, &[5, 6, 7, 8]),
+                        (5, &[6, 7, 8]),
+                        (6, &[7, 8]),
+                        (7, &[8]),
+                        (8, &[]),
+                    ]
+                };
+                for (height, expected) in deliveries {
+                    let offset = resolver.fetch_batches.lock().len();
+                    let block = &chain[height];
+                    deliver_finalized_test_block(&resolver, certify(block), block).await;
+                    assert_eq!(
+                        mailbox.get_block(block.height()).await.unwrap().digest(),
+                        block.digest()
+                    );
+                    assert_batches(offset, expected, 9);
+                }
+            });
+        }
     }
 
     /// Exact deliveries unrelated to finalized gap repair do not read the gap's boundary block.
@@ -11416,6 +11549,106 @@ mod tests {
                 .expect("delivered finalization must be durable");
             assert_eq!(recovered_finalization.proposal, finalization.proposal);
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_unbound_response() {
+        for case in ["height", "digest", "trailing"] {
+            deterministic::Runner::timed(Duration::from_secs(30)).start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+                let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                let height = Height::new(1);
+                let valid = make_raw_block(genesis.digest(), height, 100);
+                let offered = match case {
+                    "height" => make_raw_block(valid.digest(), Height::new(2), 200),
+                    "digest" => make_raw_block(genesis.digest(), height, 300),
+                    "trailing" => valid.clone(),
+                    _ => unreachable!(),
+                };
+                let certify = |block: &B| finalize_test_block(&schemes, block);
+                let finalization = certify(&valid);
+                let certificate = if case == "height" {
+                    certify(&offered)
+                } else {
+                    finalization.clone()
+                };
+                let application = Application::<B>::manual_ack();
+                let (mailbox, _buffer, resolver, _actor) = start_standard_actor(
+                    context.child("validator"),
+                    &format!("finalized-unbound-{case}"),
+                    ConstantProvider::new(schemes[0].clone()),
+                    application.clone(),
+                    Some(RecordingBuffer::default()),
+                    Start::Genesis(genesis.into()),
+                )
+                .await;
+                assert_eq!(application.acknowledged().await, Height::zero());
+                let mut exact = mailbox.acquire(offered.digest());
+                let mut canonical = mailbox.finalized(height);
+                mailbox.hint_finalized(height, NonEmptyVec::new(participants[1].clone()));
+                assert!(mailbox.get_block(height).await.is_none());
+
+                let mut value = (certificate, offered.clone()).encode().to_vec();
+                if case == "trailing" {
+                    value.push(0);
+                }
+                let (response, response_rx) = oneshot::channel();
+                assert!(
+                    resolver
+                        .enqueue(handler::Message::Deliver {
+                            delivery: Delivery {
+                                key: handler::Key::Finalized { height },
+                                subscribers: NonEmptyVec::new((
+                                    handler::Annotation::Height(height),
+                                    tracing::Span::none(),
+                                )),
+                            },
+                            value: Bytes::from(value),
+                            response,
+                        })
+                        .accepted()
+                );
+                let verdict = response_rx.await.expect("finalized response missing");
+                let stored = mailbox.get_block(height).await;
+                let archived = mailbox.get_finalization(height).await;
+                let exact_pending = matches!(exact.try_recv(), Err(TryRecvError::Empty));
+                let canonical_pending = matches!(canonical.try_recv(), Err(TryRecvError::Empty));
+                assert!(
+                    !verdict
+                        && stored.is_none()
+                        && archived.is_none()
+                        && exact_pending
+                        && canonical_pending,
+                    "{case} response must be rejected without publishing data: verdict={verdict}, stored={}, archived={}, exact_pending={exact_pending}, canonical_pending={canonical_pending}",
+                    stored.is_some(),
+                    archived.is_some(),
+                );
+                assert!(mailbox.get_block(offered.height()).await.is_none());
+                assert!(!application.blocks().contains_key(&height));
+
+                let valid_exact = mailbox.acquire(valid.digest());
+                deliver_finalized_test_block(&resolver, finalization.clone(), &valid).await;
+                assert_eq!(valid_exact.await.unwrap().digest(), valid.digest());
+                assert_eq!(canonical.await.unwrap().digest(), valid.digest());
+                assert_eq!(
+                    mailbox.get_block(height).await.unwrap().digest(),
+                    valid.digest()
+                );
+                assert_eq!(
+                    mailbox.get_finalization(height).await.unwrap().proposal,
+                    finalization.proposal
+                );
+                if offered.digest() == valid.digest() {
+                    assert_eq!(exact.await.unwrap().digest(), valid.digest());
+                } else {
+                    assert!(matches!(exact.try_recv(), Err(TryRecvError::Empty)));
+                }
+            });
+        }
     }
 
     #[test_traced("WARN")]
