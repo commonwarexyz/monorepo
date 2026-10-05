@@ -6,15 +6,16 @@
 //! per private bucket stripe at once, so updates within each wave never collide.
 //!
 //! Bucket multiplication runs on strategy-supplied `(window, term range)` tiles. The strategy
-//! splits windows into term ranges only when there are too few windows to keep its workers busy.
-//! Each worker reuses private bucket scratch across its tiles. Tiles of the same window are added
-//! together, and one short Horner fold positions the window sums.
+//! cuts a window into term ranges only where the extra tile's fold pays for itself. Each worker
+//! reuses private bucket scratch across its tiles. Tiles of the same window are added together,
+//! and one short Horner fold positions the window sums.
 
 use super::scalar::Scalar;
 use crate::curve::{G, GAffine, LANES, msm::Backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_parallel::{Sequential, Strategy};
+use commonware_utils::NZUsize;
 use core::num::NonZeroUsize;
 
 /// Bounds on the per-batch window width [`width_for`] may pick. The lower bound sizes every
@@ -34,7 +35,7 @@ const fn num_windows(width: u32) -> usize {
 }
 
 /// One bucket per nonzero digit *magnitude*: a signed digit only ever needs a bucket for
-/// `abs(digit)`, which ranges `1..=2^(width-1)` -- half as many buckets as the `1..2^width` an
+/// `abs(digit)`, which ranges `1..=2^(width-1)`, half as many buckets as the `1..2^width` an
 /// unsigned digit would need (see [`Scalar::signed_digits`]).
 const fn num_buckets(width: u32) -> usize {
     1usize << (width - 1)
@@ -45,7 +46,7 @@ const fn num_buckets(width: u32) -> usize {
 /// bigger bucket array for every fill/fold instance to initialize, fold, and keep cache-resident.
 ///
 /// Fit to a measured sweep (width 6-10 x batch 1k-64k signatures x 1/32 threads, AMD EPYC 9354P,
-/// AVX-512): the optimum grows at almost exactly half a bit of width per bit of batch size --
+/// AVX-512): the optimum grows at almost exactly half a bit of width per bit of batch size,
 /// shallower than the textbook `log2(terms) - 4` rule, because the wide-window penalty on real
 /// hardware includes the AVX-512 bucket array (`8 * 2^(width-1)` points, ~320KB at width 9)
 /// spilling L2, not just the fold-count arithmetic. Parallel runs want one step narrower than
@@ -123,9 +124,9 @@ fn pieces<'a>(
 /// One past the highest bucket any digit of `window` lands in over global range `[start, end)`
 /// (`0` if none does, i.e. the largest digit *magnitude*; see [`Scalar::signed_digits`]). Every
 /// bucket at or above this is still the identity after a fill and would contribute nothing to
-/// the bucket fold, and when the terms are a small or sparse range -- a tiny batch, the
-/// recoding's spare top window, or the windows above a short (e.g. 128-bit batch-coefficient)
-/// scalar's digits -- that is *most* of the buckets. Computed as a standalone prescan over the
+/// the bucket fold. When the terms are a small or sparse range (a tiny batch, the recoding's
+/// spare top window, or the windows above the digits of a short scalar such as a 128-bit batch
+/// coefficient), that is *most* of the buckets. Computed as a standalone prescan over the
 /// recoded digits (cheap: two byte-sized loads and a compare per term, no point arithmetic)
 /// rather than tracked inside the bucket-fill loop, which measurably slows the fill's hot wave
 /// prologue.
@@ -143,36 +144,60 @@ mod bucketed {
     #[cfg(not(feature = "std"))]
     use alloc::{vec, vec::Vec};
 
-    /// Independent bucket stripes, with per-batch bucket counts allocated on the heap.
-    pub(super) fn identity_buckets<B: Backend>(_: B, nb: usize) -> Vec<G> {
-        vec![G::IDENTITY; B::STRIPES * nb]
+    /// Independent bucket stripes that a worker reuses across tiles, with the largest digit
+    /// magnitude its current tile has added (zero until the tile adds a nonzero digit).
+    pub(super) struct Scratch {
+        buckets: Vec<G>,
+        used: usize,
     }
 
-    /// One window's contribution to the MSM over global term range `[start, end)`, *before* the
-    /// doubling shift that positions it. The backend folds its bucket stripes into one point.
-    pub(super) fn window_partial<B: Backend>(
-        backend: B,
-        chunks: &[&[Term]],
-        start: usize,
-        end: usize,
-        window: usize,
-        width: u32,
-        buckets: &mut [G],
-    ) -> G {
-        let nb = super::num_buckets(width);
-        debug_assert_eq!(buckets.len(), B::STRIPES * nb);
-        let used = super::used_buckets(chunks, start, end, window);
-        if used == 0 {
-            // An all-zero window contributes the identity without resetting or folding scratch.
-            return G::IDENTITY;
+    impl Scratch {
+        /// Allocates bucket stripes for windows of `width` bits.
+        pub(super) fn new<B: Backend>(_: B, width: u32) -> Self {
+            Self {
+                buckets: vec![G::IDENTITY; B::STRIPES * super::num_buckets(width)],
+                used: 0,
+            }
         }
-        buckets.fill(G::IDENTITY);
-        for piece in super::pieces(chunks, start, end) {
-            backend.fill_buckets(buckets, nb, piece, |term| {
-                (&term.point, term.digits[window])
-            });
+
+        /// Adds the digits of `window` over global term range `[start, end)` to the current
+        /// tile.
+        pub(super) fn fill<B: Backend>(
+            &mut self,
+            backend: B,
+            chunks: &[&[Term]],
+            start: usize,
+            end: usize,
+            window: usize,
+            width: u32,
+        ) {
+            let used = super::used_buckets(chunks, start, end, window);
+            if used == 0 {
+                return;
+            }
+
+            // The tile's first nonzero digits clear the buckets the previous tile left behind.
+            if self.used == 0 {
+                self.buckets.fill(G::IDENTITY);
+            }
+            let nb = super::num_buckets(width);
+            for piece in super::pieces(chunks, start, end) {
+                backend.fill_buckets(&mut self.buckets, nb, piece, |term| {
+                    (&term.point, term.digits[window])
+                });
+            }
+            self.used = self.used.max(used);
         }
-        fold_buckets(backend, buckets, nb, used)
+
+        /// Ends the current tile and returns its window's contribution, *before* the doubling
+        /// shift that positions it. A tile without nonzero digits contributes the identity
+        /// without a fold.
+        pub(super) fn finish<B: Backend>(&mut self, backend: B, width: u32) -> G {
+            match core::mem::take(&mut self.used) {
+                0 => G::IDENTITY,
+                used => fold_buckets(backend, &self.buckets, super::num_buckets(width), used),
+            }
+        }
     }
 
     /// Computes the full MSM with backend bucket filling and an independent scalar fold.
@@ -186,7 +211,7 @@ mod bucketed {
         let nb = super::num_buckets(width);
         let total = super::total_terms(chunks);
         let mut result = G::IDENTITY;
-        let mut buckets = identity_buckets(backend, nb);
+        let mut buckets = vec![G::IDENTITY; B::STRIPES * nb];
         for window in (0..super::num_windows(width)).rev() {
             for _ in 0..width {
                 result = result.double();
@@ -253,13 +278,16 @@ fn straus<B: Backend>(backend: B, terms: &[&Term], width: u32) -> G {
     ))
 }
 
-/// Floor on terms per tile range: a shorter range's fixed per-tile cost (folding the bucket array
-/// down to one point) stops being amortized by its fill.
-const MIN_RANGE_LEN: NonZeroUsize = NonZeroUsize::new(64).unwrap();
+/// A bucket tile's fixed cost, in terms: folding its buckets. Merging the stripes and updating two
+/// running sums takes about `STRIPES + 1` additions per bucket, on lanes where each addition
+/// fills one term per stripe.
+const fn tile_cost<B: Backend>(width: u32) -> NonZeroUsize {
+    NZUsize!(num_buckets(width) * (B::STRIPES + 1))
+}
 
 /// The window at tile row `slot`. Low and high windows alternate: short scalars leave the high
-/// windows sparse, and a worker's tiles cover consecutive rows, so each worker should mix cheap and
-/// expensive windows.
+/// windows sparse, and a worker starts on a share of consecutive rows, so each share should mix
+/// cheap and expensive windows.
 const fn interleaved_window(slot: usize, windows: usize) -> usize {
     if slot.is_multiple_of(2) {
         slot / 2
@@ -269,25 +297,21 @@ const fn interleaved_window(slot: usize, windows: usize) -> usize {
 }
 
 /// Pippenger's bucket method over `chunks`. Each strategy-supplied `(window, term range)` tile
-/// fills and folds its window's buckets over its range, the partials of each window are added, and
-/// the backend positions the window sums.
+/// fills its window's buckets piece by piece and folds them once, the partials of each window are
+/// added, and the backend positions the window sums.
 fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &impl Strategy) -> G {
     let windows = num_windows(width);
-    let partials = strategy.run_tiles(windows, total_terms(chunks), MIN_RANGE_LEN, 1, |tiles| {
-        tiles.map_init_collect_vec(
-            || bucketed::identity_buckets(backend, num_buckets(width)),
+    let total = total_terms(chunks);
+    let partials = strategy.run_tiles(windows, total, tile_cost::<B>(width), 1, |tiles| {
+        tiles.fill_collect_vec(
+            || bucketed::Scratch::new(backend, width),
             |scratch, slot, range| {
                 let window = interleaved_window(slot, windows);
-                let partial = bucketed::window_partial(
-                    backend,
-                    chunks,
-                    range.start,
-                    range.end,
-                    window,
-                    width,
-                    scratch,
-                );
-                (window, partial)
+                scratch.fill(backend, chunks, range.start, range.end, window, width);
+            },
+            |scratch, slot| {
+                let window = interleaved_window(slot, windows);
+                (window, scratch.finish(backend, width))
             },
         )
     });
@@ -681,9 +705,8 @@ mod tests {
             fn call<B: Backend>(self, backend: B) {
                 // `Manual` disables the adaptive serial/parallel policy, forcing every call
                 // through Rayon dispatch. Planning parallelism above the pool size makes more
-                // shares than workers. At the narrower widths each share spans parts of two
-                // windows; at the widest there are more workers than windows, so every window's
-                // terms are cut into ranges.
+                // shares than threads, so shares straddle windows and threads that finish take
+                // halves of the shares still pending, cutting windows at arbitrary terms.
                 let strategy = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(4))
                     .unwrap()
                     .with_parallelism(commonware_utils::NZUsize!(32))
@@ -727,21 +750,14 @@ mod tests {
                 for width in TEST_WIDTHS {
                     let scalar = Scalar::from_u128((1u128 << (2 * width)) | 1);
                     let terms = [Term::new(point, &scalar, width)];
-                    let mut buckets = bucketed::identity_buckets(backend, num_buckets(width));
+                    let mut scratch = bucketed::Scratch::new(backend, width);
                     for (window, expected) in
                         [point.to_extended(), G::IDENTITY, point.to_extended()]
                             .into_iter()
                             .enumerate()
                     {
-                        let actual = bucketed::window_partial(
-                            backend,
-                            &[&terms],
-                            0,
-                            terms.len(),
-                            window,
-                            width,
-                            &mut buckets,
-                        );
+                        scratch.fill(backend, &[&terms], 0, terms.len(), window, width);
+                        let actual = scratch.finish(backend, width);
                         assert!(
                             points_equal(actual, expected),
                             "window={window} width={width}"
@@ -755,10 +771,10 @@ mod tests {
     }
 
     /// Splitting a window's bucket fill at an arbitrary global index (deliberately not a slice
-    /// boundary) and summing the two partials must Horner-fold to the exact same point as
-    /// running the whole MSM over the full range at once -- this is the
-    /// correctness argument the tile-parallel [`multiscalar_mul`] relies on to
-    /// combine same-window tiles with a single addition.
+    /// boundary), either into two tiles whose partials are added or into two pieces of one tile,
+    /// must Horner-fold to the exact same point as running the whole MSM over the full range at
+    /// once. This is the correctness argument the tile-parallel [`multiscalar_mul`] relies on to
+    /// combine same-window tiles with a single addition and to fill a tile in pieces.
     #[test]
     fn split_window_partials_match_whole_range() {
         struct Check;
@@ -782,39 +798,30 @@ mod tests {
                             let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
 
                             let nw = num_windows(WIDTH);
-                            let mut window_partials = vec![G::IDENTITY; nw];
-                            let mut buckets =
-                                bucketed::identity_buckets(backend, num_buckets(WIDTH));
-                            for (window, partial) in window_partials.iter_mut().enumerate() {
-                                let left = bucketed::window_partial(
-                                    backend,
-                                    &chunks,
-                                    0,
-                                    mid,
-                                    window,
-                                    WIDTH,
-                                    &mut buckets,
-                                );
-                                let right = bucketed::window_partial(
-                                    backend,
-                                    &chunks,
-                                    mid,
-                                    total,
-                                    window,
-                                    WIDTH,
-                                    &mut buckets,
-                                );
-                                *partial = left.add(right);
+                            let mut split = vec![G::IDENTITY; nw];
+                            let mut pieced = vec![G::IDENTITY; nw];
+                            let mut scratch = bucketed::Scratch::new(backend, WIDTH);
+                            for window in 0..nw {
+                                scratch.fill(backend, &chunks, 0, mid, window, WIDTH);
+                                let left = scratch.finish(backend, WIDTH);
+                                scratch.fill(backend, &chunks, mid, total, window, WIDTH);
+                                split[window] = left.add(scratch.finish(backend, WIDTH));
+
+                                scratch.fill(backend, &chunks, 0, mid, window, WIDTH);
+                                scratch.fill(backend, &chunks, mid, total, window, WIDTH);
+                                pieced[window] = scratch.finish(backend, WIDTH);
                             }
 
-                            assert!(points_equal(
-                                backend.combine_windows(
-                                    window_partials.into_iter().enumerate(),
-                                    nw,
-                                    WIDTH
-                                ),
-                                expected,
-                            ));
+                            for partials in [split, pieced] {
+                                assert!(points_equal(
+                                    backend.combine_windows(
+                                        partials.into_iter().enumerate(),
+                                        nw,
+                                        WIDTH
+                                    ),
+                                    expected,
+                                ));
+                            }
                         }
                         Ok(())
                     });
@@ -824,7 +831,7 @@ mod tests {
         crate::curve::with_backend(Check);
     }
 
-    /// [`pieces`] must hand back exactly the requested global range, in order, for any cut --
+    /// [`pieces`] must hand back exactly the requested global range, in order, for any cut,
     /// including cuts inside slices, across slice boundaries, and touching empty slices.
     #[test]
     fn pieces_covers_exact_global_ranges() {
