@@ -357,22 +357,6 @@ impl BatchVerifier for Batch {
     }
 }
 
-impl<P: AsRef<[u8]> + Sync> ed_core::batch::Verifier<P> {
-    /// Queues a signature over its already-framed payload.
-    pub(super) fn add_payload(
-        &mut self,
-        payload: P,
-        public_key: &PublicKey,
-        signature: &Signature,
-    ) {
-        self.queue(
-            public_key.key,
-            ed_core::Signature::from(signature.raw),
-            payload,
-        );
-    }
-}
-
 /// Test vectors sourced from https://datatracker.ietf.org/doc/html/rfc8032#section-7.1.
 #[cfg(test)]
 mod tests {

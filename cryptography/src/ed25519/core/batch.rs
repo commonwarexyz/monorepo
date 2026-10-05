@@ -65,32 +65,6 @@ fn gen_u128<R: CryptoRng>(mut rng: R) -> u128 {
     u128::from_le_bytes(bytes)
 }
 
-/// A queue of already-framed messages for batch verification.
-pub struct Verifier<P> {
-    signatures: Vec<(VerificationKey, P, Signature)>,
-}
-
-impl<P: AsRef<[u8]> + Sync> Verifier<P> {
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            signatures: Vec::with_capacity(capacity),
-        }
-    }
-
-    pub fn queue(&mut self, key: VerificationKey, signature: Signature, payload: P) {
-        self.signatures.push((key, payload, signature));
-    }
-
-    pub fn verify<R: CryptoRng>(self, mut rng: R, strategy: &impl Strategy) -> Result<(), Error> {
-        verify_projected(
-            &mut rng,
-            &self.signatures,
-            |(key, payload, signature)| (key, *signature, None, payload.as_ref()),
-            strategy,
-        )
-    }
-}
-
 /// Verify projected signatures without copying message bytes.
 ///
 /// A supplied namespace is framed identically to `union_unique`. `None` verifies
