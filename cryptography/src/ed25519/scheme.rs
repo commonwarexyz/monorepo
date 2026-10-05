@@ -8,7 +8,9 @@ use alloc::{
     vec::Vec,
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
+};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -320,9 +322,56 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
+/// A namespaced message framed as [`union_unique`] frames it, stored inline when it fits so
+/// queueing a signature does not allocate.
+enum Framed {
+    Inline { len: u8, bytes: [u8; Self::INLINE] },
+    Heap(Vec<u8>),
+}
+
+impl Framed {
+    const INLINE: usize = 64;
+
+    fn new(namespace: &[u8], message: &[u8]) -> Self {
+        let prefix = namespace.len();
+        let len = prefix.encode_size() + namespace.len() + message.len();
+        if len > Self::INLINE {
+            let mut payload = Vec::with_capacity(len);
+            prefix.write(&mut payload);
+            payload.extend_from_slice(namespace);
+            payload.extend_from_slice(message);
+            return Self::Heap(payload);
+        }
+        let mut bytes = [0u8; Self::INLINE];
+        let mut cursor = &mut bytes[..];
+        prefix.write(&mut cursor);
+        cursor.put_slice(namespace);
+        cursor.put_slice(message);
+        Self::Inline {
+            len: len as u8,
+            bytes,
+        }
+    }
+}
+
+impl From<Vec<u8>> for Framed {
+    fn from(payload: Vec<u8>) -> Self {
+        Self::Heap(payload)
+    }
+}
+
+impl AsRef<[u8]> for Framed {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(payload) => payload,
+        }
+    }
+}
+
 /// Ed25519 Batch Verifier.
 pub struct Batch {
-    verifier: ed_core::batch::Verifier<Vec<u8>>,
+    verifier: ed_core::batch::Verifier<Framed>,
 }
 
 impl BatchVerifier for Batch {
@@ -345,7 +394,7 @@ impl BatchVerifier for Batch {
         self.verifier.queue(
             public_key.key,
             ed_core::Signature::from(signature.raw),
-            union_unique(namespace, message),
+            Framed::new(namespace, message),
         );
         true
     }
@@ -706,8 +755,8 @@ mod tests {
         let v1 = vector_1();
         let v2 = vector_2();
         let mut batch = ed25519::Batch::new(2);
-        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
-        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
+        batch.verifier.add_payload(v1.2.into(), &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2.into(), &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -719,11 +768,27 @@ mod tests {
         bad_signature[3] = 0xff;
 
         let mut batch = Batch::new(2);
-        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
-        batch
-            .verifier
-            .add_payload(v2.2, &v2.1, &Signature::decode(bad_signature).unwrap());
+        batch.verifier.add_payload(v1.2.into(), &v1.1, &v1.3);
+        batch.verifier.add_payload(
+            v2.2.into(),
+            &v2.1,
+            &Signature::decode(bad_signature).unwrap(),
+        );
         assert!(!batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn framed_matches_union_unique() {
+        for (namespace, message) in [
+            (&b""[..], &b""[..]),
+            (&b"constantinople-tx"[..], &[7u8; 32][..]),
+            (&[1u8; 31][..], &[2u8; 32][..]),
+            (&[1u8; 31][..], &[2u8; 33][..]),
+            (&[3u8; 200][..], &[4u8; 10][..]),
+        ] {
+            let framed = Framed::new(namespace, message);
+            assert_eq!(framed.as_ref(), union_unique(namespace, message).as_slice());
+        }
     }
 
     #[test]
@@ -738,8 +803,8 @@ mod tests {
         let v2 = vector_2();
         // The capacity is a hint: adding more items must still verify.
         let mut batch = Batch::new(1);
-        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
-        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
+        batch.verifier.add_payload(v1.2.into(), &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2.into(), &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
