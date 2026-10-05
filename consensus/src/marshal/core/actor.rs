@@ -39,7 +39,10 @@ use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
-    telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
+    telemetry::{
+        metrics::{Gauge, GaugeExt, MetricsExt as _},
+        traces::TracedExt as _,
+    },
 };
 use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
@@ -908,7 +911,14 @@ where
             Message::HintFinalized {
                 height, targets, ..
             } => {
-                if self.get_finalization_by_height(height).await.is_some() {
+                // Skip heights whose finalization is already stored. Stored ranges
+                // answer this from memory without reading the certificate.
+                if self
+                    .finalizations_by_height
+                    .ranges_from(height)
+                    .next()
+                    .is_some_and(|(start, _)| start <= height)
+                {
                     return self;
                 }
                 self.floor.fetch_targeted_if_permitted(
@@ -1475,15 +1485,11 @@ where
             return self;
         };
         let digest = V::commitment_to_inner(commitment);
-        let finalization = match self.cache.get_finalization_for(digest).await {
-            Some(certificate) if certificate.proposal.payload == commitment => Some(certificate),
-            _ => self
-                .finalizations_by_height
-                .get(ArchiveID::Key(&digest))
-                .await
-                .expect("failed to read archived finalization")
-                .filter(|certificate| certificate.proposal.payload == commitment),
-        };
+        let finalization = self
+            .cache
+            .get_finalization_for(digest)
+            .await
+            .filter(|certificate| certificate.proposal.payload == commitment);
         let repairing = self.repair_parent == Some(commitment);
         let certified = self.certified.height(&commitment).is_some();
         let expected = if finalization.is_some() || repairing || certified {
@@ -1555,6 +1561,7 @@ where
     }
 
     /// Verifies finalizations under each epoch's captured admission scope.
+    #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len().traced()))]
     async fn verify_delivered<Buf: Buffer<V>>(
         mut self: Box<Self>,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,

@@ -12017,9 +12017,25 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
+            // Peers can repeat hints for a stored height, so the check must not
+            // read the stored certificate.
+            let archive_gets = |metrics: String| -> u64 {
+                metrics
+                    .lines()
+                    .filter(|line| line.starts_with("validator_finalizations_by_height_gets"))
+                    .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+                    .sum()
+            };
+            let gets = archive_gets(context.encode());
+            assert!(gets > 0, "finalization lookups must be observable");
             mailbox.hint_finalized(Height::new(1), NonEmptyVec::new(participants[1].clone()));
             context.sleep(Duration::from_millis(50)).await;
 
+            assert_eq!(
+                archive_gets(context.encode()),
+                gets,
+                "hint for a locally-finalized height must not read the archive"
+            );
             assert!(
                 resolver.targeted_is_empty(),
                 "hint for a locally-finalized height must not fetch"

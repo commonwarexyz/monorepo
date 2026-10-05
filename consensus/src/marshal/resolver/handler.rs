@@ -187,6 +187,24 @@ pub enum Annotation {
     Height(Height),
 }
 
+impl Annotation {
+    /// Returns whether this retention survives the inclusive processed height floor.
+    fn above_height_floor(self, floor: Height) -> bool {
+        match self {
+            Self::Height(height) => height > floor,
+            Self::Subscription | Self::Round(_) => true,
+        }
+    }
+
+    /// Returns whether this retention survives the inclusive processed round floor.
+    fn above_round_floor(self, floor: Round) -> bool {
+        match self {
+            Self::Round(round) => round > floor,
+            Self::Subscription | Self::Height(_) => true,
+        }
+    }
+}
+
 /// A raw resolver key for backfilling data.
 #[derive(Clone, Copy)]
 pub enum Key<D: Digest> {
@@ -237,18 +255,12 @@ impl<D: Digest> Request<D> {
 
     /// Returns whether the request survives the inclusive processed height floor.
     pub(crate) fn above_height_floor(&self, floor: Height) -> bool {
-        match self.retention {
-            Annotation::Height(height) => height > floor,
-            Annotation::Subscription | Annotation::Round(_) => true,
-        }
+        self.retention.above_height_floor(floor)
     }
 
     /// Returns whether the request survives the inclusive processed round floor.
     pub(crate) fn above_round_floor(&self, floor: Round) -> bool {
-        match self.retention {
-            Annotation::Round(round) => round > floor,
-            Annotation::Subscription | Annotation::Height(_) => true,
-        }
+        self.retention.above_round_floor(floor)
     }
 
     /// Converts this request into a resolver fetch.
@@ -276,10 +288,7 @@ impl<D: Digest> From<Request<D>> for ResolverFetch<Key<D>, Annotation> {
 pub(crate) fn above_height_floor<D: Digest>(
     height: Height,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
-    move |_, annotation| match annotation {
-        Annotation::Height(requested) => *requested > height,
-        Annotation::Subscription | Annotation::Round(_) => true,
-    }
+    move |_, annotation| annotation.above_height_floor(height)
 }
 
 /// Returns a predicate that keeps resolver requests above the processed round floor.
@@ -289,10 +298,7 @@ pub(crate) fn above_height_floor<D: Digest>(
 pub(crate) fn above_round_floor<D: Digest>(
     round: Round,
 ) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
-    move |_, annotation| match annotation {
-        Annotation::Round(requested) => *requested > round,
-        Annotation::Subscription | Annotation::Height(_) => true,
-    }
+    move |_, annotation| annotation.above_round_floor(round)
 }
 
 impl<D: Digest> Write for Key<D> {
