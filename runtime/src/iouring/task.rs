@@ -419,11 +419,8 @@ impl State {
 
 /// Next step for a worker that polled a runnable.
 ///
-/// [`Runnable::poll`] has already dropped a finished future. Ignoring a
-/// [`Requeue`](Self::Requeue) leaves the task queued with nothing to poll it,
-/// and ignoring a [`Retire`](Self::Retire) leaves the task linked in its set,
-/// each until teardown.
-#[must_use]
+/// [`Runnable::poll`] has already dropped a finished future.
+#[must_use = "an ignored result wedges a requeued task or leaves a retired one in its set"]
 pub enum AfterPoll {
     /// Nothing. The poll returned pending with no wake during it, so the next
     /// wake publishes a new runnable, or the runnable was stale because its
