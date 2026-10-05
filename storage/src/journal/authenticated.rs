@@ -622,6 +622,14 @@ where
         hasher: StandardHasher<H>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
+        let journal_size = journal.bounds().end;
+        if merkle.leaves() < journal_size {
+            debug!(
+                journal_size,
+                merkle_leaves = ?merkle.leaves(),
+                "building Merkle structure from journal"
+            );
+        }
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
 
         // Sync the Merkle structure to disk to avoid having to repeat any recovery that may have
@@ -656,12 +664,6 @@ where
 
         // If the Merkle structure is behind, replay journal items to catch up.
         if merkle_leaves < journal_size {
-            let replay_count = journal_size - *merkle_leaves;
-            warn!(
-                ?journal_size,
-                replay_count, "Merkle structure lags behind journal, replaying journal to catch up"
-            );
-
             while merkle_leaves < journal_size {
                 let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
                 let mut items = Vec::with_capacity(count as usize);
@@ -895,6 +897,13 @@ where
 
         // Finalize the selected Merkle prefix, replay any durable operation suffix, and persist it.
         let merkle = self.merkle.finish().await?;
+        if merkle.leaves() < journal.bounds().end {
+            warn!(
+                journal_size = journal.bounds().end,
+                merkle_leaves = ?merkle.leaves(),
+                "recovering Merkle structure that lags behind journal"
+            );
+        }
         let merkle =
             Journal::<F, E, C, H, S>::align(merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
                 .await?;

@@ -585,7 +585,8 @@ pub struct SyncEngineConfig {
     /// Maximum operations fetched per source request.
     pub fetch_batch_size: NonZeroU64,
 
-    /// Number of operations applied per local apply step.
+    /// Number of operations read and hashed per batch when a synced database rebuilds its Merkle
+    /// structure at the end of sync. Bounds the memory that rebuild uses.
     pub apply_batch_size: NonZeroU64,
 
     /// Maximum number of outstanding source requests.

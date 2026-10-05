@@ -8,11 +8,13 @@ mod common;
 mod generate;
 mod init;
 mod merkleize;
+mod state_sync;
 
 criterion_main!(
     apply_batch::benches,
     chained_growth::benches,
     generate::benches,
     init::benches,
-    merkleize::benches
+    merkleize::benches,
+    state_sync::benches
 );

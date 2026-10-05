@@ -160,7 +160,8 @@ where
     pub max_outstanding_requests: usize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
-    /// Number of operations to apply in a single batch
+    /// Number of operations read and hashed per batch when the Merkle structure is rebuilt from
+    /// the synced journal at the end of sync. Bounds the memory that rebuild uses.
     pub apply_batch_size: NonZeroU64,
     /// Database-specific configuration
     pub db_config: DB::Config,
@@ -220,7 +221,7 @@ where
     /// Maximum operations to fetch in a single batch
     fetch_batch_size: NonZeroU64,
 
-    /// Number of operations to apply in a single batch
+    /// Number of operations per batch when rebuilding the Merkle structure at the end of sync
     apply_batch_size: NonZeroU64,
 
     /// Journal that operations are applied to during sync
