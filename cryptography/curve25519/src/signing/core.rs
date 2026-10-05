@@ -350,7 +350,8 @@ fn verify_pipeline<B: Backend>(
                 .enumerate()
                 .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
                 .collect();
-            strategy.sort_by(&mut order, |x, y| x.0.cmp(&y.0));
+            // The signature phase occupies the pool meanwhile, so sort on this thread.
+            order.sort_unstable_by_key(|&(key, _)| key);
             let groups = group_ranges(&order);
             let encoding = |i: usize| *order[groups[i].0 as usize].0.as_bytes();
             let a_terms = decompress_phase(backend, groups.len(), encoding, strategy);
