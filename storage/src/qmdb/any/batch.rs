@@ -1145,7 +1145,9 @@ where
                     // [`FloorOutcome`]). Revalidation is required even for candidates whose
                     // committed bitmap bit is set: an uncommitted ancestor diff may supersede
                     // the committed location, and that is not reflected in the bitmap.
-                    let classify = |candidate: Location<F>, op: &Operation<F, U>| {
+                    let classify = |committed: &bitmap::Prunable<N>,
+                                    candidate: Location<F>,
+                                    op: &Operation<F, U>| {
                         let Some(key) = op.key() else {
                             return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
                         };
@@ -1163,7 +1165,17 @@ where
                             }
                             Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
                                 || {
-                                    if db.snapshot.get(key).any(|&l| l == candidate) {
+                                    // The committed bitmap sets exactly the locations the
+                                    // snapshot holds, so a bit test replaces the index probe.
+                                    let loc = *candidate;
+                                    let active = loc >= committed.pruned_bits()
+                                        && loc < committed.len()
+                                        && committed.get_bit(loc);
+                                    debug_assert_eq!(
+                                        active,
+                                        db.snapshot.get(key).any(|&l| l == candidate)
+                                    );
+                                    if active {
                                         FloorOutcome::MoveNew {
                                             base_old_loc: Some(candidate),
                                         }
@@ -1185,10 +1197,12 @@ where
                     };
 
                     // Classify each candidate against the pre-raise state, in candidate order.
-                    let outcomes: Vec<FloorOutcome<F>> = strategy.map_collect_vec(
-                        zip_eq(read_candidates.iter(), resolved.iter().flatten()),
-                        |(loc, op)| classify(*loc, op),
-                    );
+                    let outcomes: Vec<FloorOutcome<F>> = db.bitmap.with_read(|committed| {
+                        strategy.map_collect_vec(
+                            zip_eq(read_candidates.iter(), resolved.iter().flatten()),
+                            |(loc, op)| classify(committed, *loc, op),
+                        )
+                    });
                     (resolved, outcomes)
                 };
 

@@ -32,6 +32,11 @@ impl<const N: usize> Shared<N> {
         self.inner.read()
     }
 
+    /// Run `f` with shared read access to the committed bitmap.
+    pub(crate) fn with_read<R>(&self, f: impl FnOnce(&bitmap::Prunable<N>) -> R) -> R {
+        f(&self.read())
+    }
+
     /// Acquire an exclusive write guard. By convention only the inner-`any` mutators
     /// (`apply_batch`, `prune_bitmap`) hold the write lock.
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, bitmap::Prunable<N>> {
