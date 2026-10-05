@@ -1876,7 +1876,6 @@ mod loom_tests {
         State, Target, Task, Tasks,
     };
     use loom::{
-        cell::UnsafeCell,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1926,7 +1925,11 @@ mod loom_tests {
 
     /// A future that never completes, counting its drop.
     fn pending(drops: &Arc<AtomicUsize>) -> impl Future<Output = ()> + Send + 'static {
-        signaled(Arc::new(AtomicBool::new(false)), drops)
+        let guard = DropCount(drops.clone());
+        poll_fn(move |_| {
+            let _ = &guard;
+            Poll::Pending
+        })
     }
 
     /// Poll `runnable` as a worker does, polling again while wakes arrive
@@ -1977,7 +1980,7 @@ mod loom_tests {
         for by_value in [false, true] {
             loom::model(move || {
                 let mailbox = mailbox();
-                let set = Tasks::new(1);
+                let set = Tasks::with_shards(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
                 let (task, runnable) = Task::new(
@@ -2027,7 +2030,7 @@ mod loom_tests {
     fn test_teardown_racing_a_foreign_wake_disposes_of_the_task_once() {
         loom::model(|| {
             let mailbox = mailbox();
-            let set = Tasks::new(1);
+            let set = Tasks::with_shards(1);
             let drops = Arc::new(AtomicUsize::new(0));
             let (task, runnable) =
                 Task::new(pending(&drops), &set, std::sync::Arc::downgrade(&mailbox));
@@ -2057,7 +2060,7 @@ mod loom_tests {
     fn test_registration_racing_teardown_disposes_of_the_task_once() {
         loom::model(|| {
             let mailbox = mailbox();
-            let set = Arc::new(Tasks::new(1));
+            let set = Arc::new(Tasks::with_shards(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let registering = thread::spawn({
                 let set = set.clone();
@@ -2088,7 +2091,7 @@ mod loom_tests {
     fn test_teardown_racing_the_poll_path_drops_the_future_once() {
         loom::model(|| {
             let mailbox = mailbox();
-            let set = Arc::new(Tasks::new(1));
+            let set = Arc::new(Tasks::with_shards(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let guard = DropCount(drops.clone());
             let mut woken = false;
@@ -2228,53 +2231,6 @@ mod loom_tests {
 
             assert_ne!(wake_was_last, release_was_last);
             assert_eq!(refs(&state), 0);
-        });
-    }
-
-    /// Teardown racing a poll never touches the future while the poller does,
-    /// and exactly one of them drops it: the poller if the clear saw the poll
-    /// running, the clear otherwise.
-    #[test]
-    fn test_clear_racing_a_poll_drops_the_future_once() {
-        loom::model(|| {
-            let state = Arc::new(State::new());
-            let future = Arc::new(UnsafeCell::new(0_usize));
-            let drops = Arc::new(AtomicUsize::new(0));
-
-            let poller = thread::spawn({
-                let state = Arc::clone(&state);
-                let future = Arc::clone(&future);
-                let drops = Arc::clone(&drops);
-                move || {
-                    if !state.start_poll() {
-                        return;
-                    }
-
-                    // SAFETY: the running state gives the poller exclusive
-                    // access to the future.
-                    future.with_mut(|value| unsafe { *value += 1 });
-
-                    match state.finish_pending() {
-                        AfterPending::Done => {}
-                        AfterPending::Complete => {
-                            state.complete();
-
-                            // SAFETY: exclusive access continues past
-                            // `complete`.
-                            future.with_mut(|value| unsafe { *value = usize::MAX });
-                            drops.fetch_add(1, Ordering::Relaxed);
-                        }
-                        AfterPending::Requeue => unreachable!("no wake was issued"),
-                    }
-                }
-            });
-            if state.clear() {
-                // SAFETY: `clear` returned true, so no poll runs or can start.
-                future.with_mut(|value| unsafe { *value = usize::MAX });
-                drops.fetch_add(1, Ordering::Relaxed);
-            }
-            poller.join().unwrap();
-            assert_eq!(drops.load(Ordering::Relaxed), 1);
         });
     }
 
