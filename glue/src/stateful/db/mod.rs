@@ -593,10 +593,6 @@ pub struct SyncEngineConfig {
 
     /// Capacity of per-database target-update channels.
     pub update_channel_size: NonZeroUsize,
-
-    /// Number of previous targets whose outstanding requests stay eligible after a target update
-    /// (0 cancels them on every update).
-    pub max_retained_roots: usize,
 }
 
 /// A [`ManagedDb`] that can be built by syncing it from peers.
@@ -1739,7 +1735,6 @@ where
         update_rx: Some(tip_updates),
         finish_rx: finish,
         reached_target_tx: reached_target,
-        max_retained_roots: sync_config.max_retained_roots,
     })
     .await
 }
@@ -1821,7 +1816,6 @@ where
         fetch_batch_size: sync_config.fetch_batch_size,
         apply_batch_size: sync_config.apply_batch_size,
         max_outstanding_requests: sync_config.max_outstanding_requests,
-        max_retained_roots: sync_config.max_retained_roots,
         update_rx: Some(update_rx),
         finish_rx: finish,
         reached_target_tx,
@@ -4047,7 +4041,6 @@ mod tests {
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4086,7 +4079,6 @@ mod tests {
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
                 },
             )
             .await;
@@ -4123,7 +4115,6 @@ mod tests {
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4173,7 +4164,6 @@ mod tests {
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4223,7 +4213,6 @@ mod tests {
                                 apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
-                                max_retained_roots: 0,
                             },
                         )
                         .await
@@ -4274,7 +4263,6 @@ mod tests {
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4333,7 +4321,6 @@ mod tests {
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4391,7 +4378,6 @@ mod tests {
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
                 },
             )
             .await;
@@ -4429,7 +4415,6 @@ mod tests {
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
-                        max_retained_roots: 0,
                     },
                 )
                 .await;
@@ -4471,7 +4456,6 @@ mod tests {
                     apply_batch_size: NZU64!(1),
                     max_outstanding_requests: 1,
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
                 },
             )
             .await;
@@ -4513,7 +4497,6 @@ mod tests {
                         apply_batch_size: NZU64!(1),
                         max_outstanding_requests: 1,
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
-                        max_retained_roots: 0,
                     },
                 )
                 .await;
@@ -4646,7 +4629,6 @@ mod tests {
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4715,7 +4697,6 @@ mod tests {
                             apply_batch_size: NZU64!(1),
                             max_outstanding_requests: 1,
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
-                            max_retained_roots: 0,
                         },
                     )
                     .await
@@ -4778,7 +4759,6 @@ mod tests {
                                 apply_batch_size: NZU64!(1),
                                 max_outstanding_requests: 1,
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
-                                max_retained_roots: 0,
                             },
                         )
                         .await
