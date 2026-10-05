@@ -161,12 +161,12 @@ enum AfterWake {
 struct State(AtomicUsize);
 
 impl State {
-    /// State of a new task whose first poll is queued, holding that token's
-    /// reference.
+    /// State of a new task whose first poll is queued, holding two
+    /// references: that poll's token's, and the one its task set takes over.
     // Loom's atomics have no const constructor.
     #[allow(clippy::missing_const_for_fn)]
-    fn queued() -> Self {
-        Self(AtomicUsize::new(QUEUED | REF_ONE))
+    fn new() -> Self {
+        Self(AtomicUsize::new(QUEUED | (2 * REF_ONE)))
     }
 
     /// `state` with its lifecycle replaced by `lifecycle`, keeping the flags
@@ -627,17 +627,15 @@ impl Drop for Task {
 
 impl Task {
     /// Allocate a task for `tasks` to retain, owned by the worker behind
-    /// `mailbox`, with its first poll queued. Returns its one reference, which
-    /// is that poll's token.
-    // Allocation hands out the first poll's token, not a plain reference.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new<F>(future: F, tasks: &Tasks, mailbox: Weak<Mailbox>) -> Runnable
+    /// `mailbox`, with its first poll queued. Returns the reference for the
+    /// set to take over, and that poll's token.
+    pub fn new<F>(future: F, tasks: &Tasks, mailbox: Weak<Mailbox>) -> (Self, Runnable)
     where
         F: Future<Output = ()> + Send + 'static,
     {
         let cell = Box::new(Cell {
             header: Header {
-                state: State::queued(),
+                state: State::new(),
                 vtable: Cell::<F>::vtable(),
                 mailbox,
                 owner: tasks.id(),
@@ -647,7 +645,9 @@ impl Task {
             _align: [],
         });
 
-        Runnable(Self(NonNull::from(Box::leak(cell)).cast()))
+        // The state counts both references.
+        let ptr = NonNull::from(Box::leak(cell)).cast();
+        (Self(ptr), Runnable(Self(ptr)))
     }
 
     /// The header pointer, with the allocation's provenance, holding no
@@ -751,6 +751,7 @@ pub struct Runnable(Task);
 
 impl Runnable {
     /// The task this token entitles its holder to poll.
+    #[cfg(test)]
     pub const fn task(&self) -> &Task {
         &self.0
     }
@@ -1163,9 +1164,8 @@ pub mod tests {
         mailbox: &Arc<Mailbox>,
         future: impl Future<Output = ()> + Send + 'static,
     ) -> Task {
-        let token = Task::new(future, set, Arc::downgrade(mailbox));
-        assert!(set.insert(token.task()));
-        let task = token.task().clone();
+        let (task, token) = Task::new(future, set, Arc::downgrade(mailbox));
+        assert!(set.insert(task.clone()).is_ok());
         ready.push(token);
         task
     }
@@ -1214,8 +1214,7 @@ pub mod tests {
     fn test_links_follow_the_future() {
         fn check<F: Future<Output = ()> + Send + 'static>(future: F) {
             let set = Tasks::new(1);
-            let token = Task::new(future, &set, Weak::new());
-            let task = token.task();
+            let (task, token) = Task::new(future, &set, Weak::new());
             let cell = task.as_ptr().cast::<Cell<F>>();
             // SAFETY: the task's reference keeps the cell alive, and `new`
             // leaked a `Cell<F>` at this pointer.
@@ -1258,14 +1257,14 @@ pub mod tests {
     fn test_wakers_hold_references_until_the_cell_is_freed() {
         let mailbox = mailbox();
 
-        // A new task holds only its first token and one mailbox reference.
-        let token = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
-        assert_eq!(refs(token.task()), 1);
+        // A new task holds the caller's reference, its first token's, and
+        // one mailbox reference.
+        let (task, token) = Task::new(pending::<()>(), &Tasks::new(1), Arc::downgrade(&mailbox));
+        assert_eq!(refs(&task), 2);
         assert_eq!(Arc::weak_count(&mailbox), 1);
 
         // Polling borrows the token's reference for the waker it passes in,
         // and going idle releases it.
-        let task = token.task().clone();
         assert!(matches!(token.poll(), AfterPoll::Done));
         assert_eq!(refs(&task), 1);
 
@@ -1328,7 +1327,7 @@ pub mod tests {
     /// A running poll keeps exclusive access before and after a wake.
     #[test]
     fn test_running_poll_cannot_be_claimed_again() {
-        let state = State::queued();
+        let state = State::new();
         assert!(state.start_poll());
 
         // A running poll cannot be claimed again.
@@ -1816,20 +1815,12 @@ mod loom_tests {
         (state.0.load(Ordering::Acquire) & REFS) / REF_ONE
     }
 
-    /// State of a registered task whose first poll is queued: the token's
-    /// reference and the task set's.
-    fn registered() -> State {
-        let state = State::queued();
-        state.retain();
-        state
-    }
-
     /// A wake racing the end of a pending poll transfers exactly one token,
     /// regardless of which side wins the handoff.
     #[test]
     fn test_pending_wake_handoff_publishes_once() {
         loom::model(|| {
-            let state = Arc::new(registered());
+            let state = Arc::new(State::new());
             assert!(state.start_poll());
 
             let wake = thread::spawn({
@@ -1851,7 +1842,7 @@ mod loom_tests {
     fn test_wake_by_value_racing_a_pending_poll_keeps_the_count() {
         loom::model(|| {
             // References: the polled token, the task set's, and the waker's.
-            let state = Arc::new(registered());
+            let state = Arc::new(State::new());
             state.retain();
             assert!(state.start_poll());
 
@@ -1872,7 +1863,7 @@ mod loom_tests {
     #[test]
     fn test_ready_wake_handoff_never_publishes() {
         loom::model(|| {
-            let state = Arc::new(State::queued());
+            let state = Arc::new(State::new());
             assert!(state.start_poll());
 
             let wake = thread::spawn({
@@ -1891,8 +1882,7 @@ mod loom_tests {
     #[test]
     fn test_concurrent_releases_find_one_last() {
         loom::model(|| {
-            let state = Arc::new(State::queued());
-            state.retain();
+            let state = Arc::new(State::new());
 
             let other = thread::spawn({
                 let state = Arc::clone(&state);
@@ -1908,10 +1898,9 @@ mod loom_tests {
     #[test]
     fn test_completed_wake_racing_release_finds_one_last() {
         loom::model(|| {
-            let state = Arc::new(State::queued());
+            let state = Arc::new(State::new());
             assert!(state.start_poll());
             state.complete();
-            state.retain();
             let payload = Arc::new(AtomicUsize::new(0));
 
             let releaser = thread::spawn({
@@ -1945,7 +1934,7 @@ mod loom_tests {
     #[test]
     fn test_clear_racing_a_poll_drops_the_future_once() {
         loom::model(|| {
-            let state = Arc::new(registered());
+            let state = Arc::new(State::new());
             let future = Arc::new(UnsafeCell::new(0_usize));
             let drops = Arc::new(AtomicUsize::new(0));
 
@@ -1990,7 +1979,7 @@ mod loom_tests {
     #[test]
     fn test_wake_racing_clear_of_an_idle_task_leaves_nothing_to_poll() {
         loom::model(|| {
-            let state = Arc::new(registered());
+            let state = Arc::new(State::new());
             assert!(state.start_poll());
             assert!(matches!(state.finish_pending(), AfterPending::Done));
 
@@ -2012,7 +2001,7 @@ mod loom_tests {
     #[test]
     fn test_wake_handoff_publishes_payload() {
         loom::model(|| {
-            let state = Arc::new(registered());
+            let state = Arc::new(State::new());
             let payload = Arc::new(AtomicUsize::new(0));
             let done = Arc::new(AtomicBool::new(false));
 

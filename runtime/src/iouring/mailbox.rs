@@ -129,9 +129,13 @@ impl Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::iouring::{task::Task, tasks::Tasks, waker::tests::eventfd_count};
+    use crate::iouring::{
+        task::{Runnable, Task},
+        tasks::Tasks,
+        waker::tests::eventfd_count,
+    };
     use std::{
-        future::pending,
+        future::{Future, pending},
         sync::{
             Arc, Barrier, Weak,
             atomic::{AtomicBool, Ordering},
@@ -159,6 +163,13 @@ mod tests {
         }
     }
 
+    /// A ready token holding the only reference to a task with no worker.
+    fn token(future: impl Future<Output = ()> + Send + 'static) -> Runnable {
+        let (task, token) = Task::new(future, &Tasks::new(1), Weak::new());
+        drop(task);
+        token
+    }
+
     /// A wake carrying the only reference to a task, so the task's cell is
     /// freed wherever the message is released.
     fn wake_message(mailbox: &Arc<Mailbox>) -> (Message, Arc<AtomicBool>) {
@@ -167,16 +178,12 @@ mod tests {
             mailbox: Arc::downgrade(mailbox),
             dropped: dropped.clone(),
         };
-        let token = Task::new(
-            async move {
-                let _guard = guard;
-                pending::<()>().await;
-            },
-            &Tasks::new(1),
-            Weak::new(),
-        );
+        let wake = Target::Task(token(async move {
+            let _guard = guard;
+            pending::<()>().await;
+        }));
 
-        (Message::Wake(Target::Task(token)), dropped)
+        (Message::Wake(wake), dropped)
     }
 
     /// Dispose of messages, clearing each carried task's future in place, as
@@ -202,11 +209,7 @@ mod tests {
         assert!(mailbox.send(Message::Wake(Target::Root)).is_ok());
         assert!(
             mailbox
-                .send(Message::Wake(Target::Task(Task::new(
-                    pending(),
-                    &Tasks::new(1),
-                    Weak::new()
-                ))))
+                .send(Message::Wake(Target::Task(token(pending()))))
                 .is_ok()
         );
         assert!(mailbox.waker.pending(0));
