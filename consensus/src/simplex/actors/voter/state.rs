@@ -110,7 +110,7 @@ pub enum AncestryError {
     /// The selected path needs the proposal at this view.
     #[error("missing proposal at view {0}")]
     Missing(View),
-    /// The path is malformed or skips the current finalized anchor.
+    /// The path is malformed, contradicts a local parent binding, or skips the finalized anchor.
     #[error("invalid selected ancestry")]
     Invalid,
 }
@@ -968,12 +968,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
-    pub fn proposed(&mut self, proposal: Proposal<D>) -> bool {
+    pub fn proposed(&mut self, proposal: Proposal<D>, parent_payload: D) -> bool {
         let now = self.context.current();
-        self.views
-            .get_mut(&proposal.view())
-            .map(|round| round.proposed(now, proposal))
-            .unwrap_or(false)
+        let Some(round) = self.views.get_mut(&proposal.view()) else {
+            return false;
+        };
+        if !round.proposed(now, proposal.clone()) {
+            return false;
+        }
+        round.set_verifying(proposal, parent_payload);
+        true
     }
 
     /// Sets a proposal received from the batcher (leader's first notarize vote).
@@ -1365,21 +1369,26 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // A certificate's ancestors require certificates: a local vote at an
         // earlier view may name a different proposal on an equivocating branch.
         let mut optimistic = true;
+        let mut expected_payload = None;
         loop {
             if parent < self.last_finalized {
                 return Err(AncestryError::Invalid);
             }
             if parent == GENESIS_VIEW {
-                visit(self.genesis.as_ref().expect("genesis must be present"));
+                let genesis = self.genesis.as_ref().expect("genesis must be present");
+                if expected_payload.is_some_and(|expected| expected != *genesis) {
+                    return Err(AncestryError::Invalid);
+                }
+                visit(genesis);
                 return Ok(());
             }
             let round = self
                 .views
                 .get(&parent)
                 .ok_or(AncestryError::Missing(parent))?;
-            let proposal = if round.is_directly_notarized() {
+            let (proposal, parent_payload) = if round.is_directly_notarized() {
                 optimistic = false;
-                round
+                let proposal = round
                     .finalization()
                     .map(|certificate| &certificate.proposal)
                     .or_else(|| {
@@ -1387,16 +1396,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                             .notarization()
                             .map(|certificate| &certificate.proposal)
                     })
+                    .ok_or(AncestryError::Missing(parent))?;
+                (proposal, None)
+            } else if optimistic {
+                let (proposal, parent_payload) = self.optimistic_proposal(parent, round)?;
+                (proposal, Some(parent_payload))
             } else {
-                (optimistic
-                    && round.has_unequivocated_proposal()
-                    && round.broadcast_notarize()
-                    && round.is_verified())
-                .then(|| round.proposal())
-                .flatten()
+                return Err(AncestryError::Missing(parent));
             };
-            let proposal = proposal.ok_or(AncestryError::Missing(parent))?;
-            if proposal.parent >= parent {
+            if proposal.parent >= parent
+                || expected_payload.is_some_and(|expected| expected != proposal.payload)
+            {
                 return Err(AncestryError::Invalid);
             }
             visit(&proposal.payload);
@@ -1404,7 +1414,39 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 return Ok(());
             }
             parent = proposal.parent;
+            expected_payload = parent_payload;
         }
+    }
+
+    /// Returns an optimistic proposal and the parent payload that justified its local vote.
+    fn optimistic_proposal<'a>(
+        &self,
+        view: View,
+        round: &'a Round<S, D>,
+    ) -> Result<(&'a Proposal<D>, D), AncestryError> {
+        let missing = AncestryError::Missing(view);
+        if !round.has_unequivocated_proposal()
+            || !round.broadcast_notarize()
+            || !round.is_verified()
+        {
+            return Err(missing);
+        }
+        let proposal = round.proposal().ok_or(missing)?;
+        let parent_payload = match round.verifying() {
+            Some((verified, parent_payload)) => {
+                if verified != proposal {
+                    return Err(AncestryError::Invalid);
+                }
+                *parent_payload
+            }
+            // Replayed votes omit the parent payload. Only genesis is uniquely
+            // identified by its view without a recorded binding or certificate.
+            None if proposal.parent == GENESIS_VIEW => {
+                self.genesis.ok_or(AncestryError::Invalid)?
+            }
+            None => return Err(AncestryError::Missing(proposal.view())),
+        };
+        Ok((proposal, parent_payload))
     }
 
     /// Returns the payload of `view`'s explicitly certified (or finalized)
@@ -1483,14 +1525,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return None;
         }
 
-        if !round.has_unequivocated_proposal()
-            || !round.broadcast_notarize()
-            || !round.is_verified()
-        {
-            return None;
-        }
-
-        let proposal = round.proposal()?;
+        let (proposal, parent_payload) = self.optimistic_proposal(view, round).ok()?;
         if proposal.parent < self.last_finalized {
             return None;
         }
@@ -1498,7 +1533,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             debug!(%view, %missing_view, "optimistic ancestor missing nullification");
             return None;
         }
-        self.optimistic_ancestry_payload(proposal.parent)?;
+        if *self.optimistic_ancestry_payload(proposal.parent)? != parent_payload {
+            return None;
+        }
         Some(&proposal.payload)
     }
 
@@ -1529,8 +1566,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     }
 
     fn verification_matches(&self, view: View) -> bool {
-        // Bindings are recorded only for peer proposals (in try_verify). A locally
-        // built proposal is never completed through this verification path.
         let Some(round) = self.views.get(&view) else {
             return true;
         };
@@ -1984,7 +2019,7 @@ mod tests {
             Sha256Digest::from([payload; 32]),
         );
         state.create_round(View::new(1));
-        assert!(state.proposed(proposal.clone()));
+        assert!(state.proposed(proposal.clone(), test_genesis()));
         assert!(state.construct_notarize(View::new(1)).is_some());
         proposal
     }
@@ -2060,13 +2095,154 @@ mod tests {
                 vec![test_genesis(), first.payload]
             );
             let second = fetch_proposal(2, 1, 22);
-            assert!(state.proposed(second.clone()));
+            assert!(state.proposed(second.clone(), next.parent.1));
+            assert_eq!(
+                state.views.get(&second.view()).unwrap().verifying(),
+                Some(&(second.clone(), next.parent.1))
+            );
             assert!(state.construct_notarize(second.view()).is_some());
             assert!(state.notarization(first.view()).is_none());
             assert!(state.notarization(second.view()).is_none());
             assert_eq!(
                 state.ancestry(second.view()).unwrap().to_vec(),
                 vec![test_genesis(), first.payload, second.payload]
+            );
+        });
+    }
+
+    fn check_replaced_grandparent_in_optimistic_suffix(finalized: bool) {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+            let ancestor = fetch_proposal(1, 0, 140);
+            let parent = fetch_proposal(2, 1, 141);
+            for (proposal, parent_payload) in
+                [(&ancestor, test_genesis()), (&parent, ancestor.payload)]
+            {
+                assert!(state.set_proposal(proposal.view(), proposal.clone()));
+                let Verify::Ready(context, verifying) = state.try_verify() else {
+                    panic!("optimistic proposal must be ready");
+                };
+                assert_eq!(verifying, *proposal);
+                assert_eq!(context.parent, (proposal.parent, parent_payload));
+                assert!(state.verified(proposal.view()));
+                assert!(state.construct_notarize(proposal.view()).is_some());
+                assert!(state.notarization(proposal.view()).is_none());
+            }
+            assert_eq!(
+                &*state.ancestry(parent.view()).unwrap(),
+                &[test_genesis(), ancestor.payload, parent.payload]
+            );
+
+            // The other quorum can select a different ancestor without our vote.
+            let selected = fetch_proposal(1, 0, 142);
+            let quorum = [schemes[0].clone(), schemes[2].clone(), schemes[3].clone()];
+            if finalized {
+                assert!(
+                    state
+                        .add_finalization(build_finalization(&verifier, &quorum, &selected))
+                        .0
+                );
+            } else {
+                assert!(
+                    state
+                        .add_notarization(build_notarization(&verifier, &quorum, &selected))
+                        .0
+                );
+            }
+            assert_eq!(
+                state.views.get(&parent.view()).unwrap().verifying(),
+                Some(&(parent.clone(), ancestor.payload))
+            );
+            let candidate = fetch_proposal(3, 2, 143);
+            assert!(state.set_proposal(candidate.view(), candidate.clone()));
+            assert!(matches!(state.try_verify(), Verify::Wait));
+            assert_eq!(state.ancestry(parent.view()), Err(AncestryError::Invalid));
+            assert!(state.optimistic_ancestry_payload(parent.view()).is_none());
+            let round = state.views.get(&candidate.view()).unwrap();
+            assert!(round.pending_verification().is_some());
+            assert!(round.verifying().is_none());
+        });
+    }
+
+    #[test]
+    fn ancestry_rejects_replaced_grandparent_in_optimistic_suffix() {
+        check_replaced_grandparent_in_optimistic_suffix(false);
+    }
+
+    #[test]
+    fn ancestry_rejects_finalized_replacement_in_optimistic_suffix() {
+        check_replaced_grandparent_in_optimistic_suffix(true);
+    }
+
+    #[test]
+    fn ancestry_replayed_optimistic_parent_requires_its_certificate() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state_with(
+                &mut context,
+                4,
+                1,
+                9,
+                10,
+                TermLength::new(NZU32!(5)),
+                ViewDelta::new(2),
+                4,
+            );
+            let ancestor = fetch_proposal(1, 0, 144);
+            let parent = fetch_proposal(2, 1, 145);
+            for proposal in [&ancestor, &parent] {
+                let vote = Notarize::sign(&schemes[1], proposal.clone()).unwrap();
+                state.replay(&Artifact::Notarize(vote));
+            }
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &ancestor))
+                    .0
+            );
+            assert_eq!(
+                state.ancestry(parent.view()),
+                Err(AncestryError::Missing(parent.view()))
+            );
+            let candidate = fetch_proposal(3, 2, 146);
+            assert!(state.set_proposal(candidate.view(), candidate.clone()));
+            assert!(matches!(state.try_verify(), Verify::Wait));
+            assert!(
+                state
+                    .views
+                    .get(&candidate.view())
+                    .unwrap()
+                    .pending_verification()
+                    .is_some()
+            );
+            assert!(
+                state
+                    .add_notarization(build_notarization(&verifier, &schemes, &parent))
+                    .0
+            );
+            assert!(
+                matches!(state.try_verify(), Verify::Ready(_, proposal) if proposal == candidate)
+            );
+            assert_eq!(
+                &*state.ancestry(parent.view()).unwrap(),
+                &[test_genesis(), ancestor.payload, parent.payload]
             );
         });
     }
@@ -2360,23 +2536,35 @@ mod tests {
                     .unwrap()
                     .contains(&candidate.view())
             );
-            let finalized = fetch_proposal(3, 2, 83);
             assert!(
                 state
-                    .add_finalization(build_finalization(&verifier, &schemes, &finalized))
+                    .add_finalization(build_finalization(&verifier, &schemes, &parent))
                     .0
             );
             let (ready, fetches) = state.certify_candidates();
-            assert_eq!(ready, vec![candidate]);
+            assert_eq!(ready, vec![candidate.clone()]);
             assert!(fetches.is_empty());
             assert!(state.ancestry_waiters.is_empty());
             assert_eq!(
-                &*state.ancestry(finalized.view()).unwrap(),
-                &[finalized.payload]
+                &*state.ancestry(candidate.parent).unwrap(),
+                &[parent.payload]
             );
+            let mut pending = AbortablePool::<()>::default();
+            let aborter = pending.push(std::future::pending());
+            state.set_certify_handle(candidate.view(), aborter);
+            assert!(
+                !state
+                    .add_finalization(build_finalization(&verifier, &schemes, &parent))
+                    .0
+            );
+            let (ready, fetches) = state.certify_candidates();
+            assert!(ready.is_empty());
+            assert!(fetches.is_empty());
         });
     }
 
+    // Defensive malformed-input coverage: these certificates cannot coexist
+    // under the protocol's fault bound.
     #[test]
     fn ancestry_malformed_optimistic_anchor_does_not_claim_build() {
         deterministic::Runner::default().start(|mut context| async move {
@@ -4474,7 +4662,7 @@ mod tests {
                 first_payload,
             );
             state.create_round(View::new(1));
-            assert!(state.proposed(first));
+            assert!(state.proposed(first, test_genesis()));
 
             let second = Proposal::new(
                 Rnd::new(Epoch::new(9), View::new(2)),
@@ -5170,7 +5358,7 @@ mod tests {
                 child_context.parent.0,
                 Sha256Digest::from([119u8; 32]),
             );
-            assert!(state.proposed(child));
+            assert!(state.proposed(child, child_context.parent.1));
             assert!(
                 state.construct_notarize(View::new(2)).is_none(),
                 "failed-certified parent must block a locally proposed optimistic child"
@@ -5200,6 +5388,7 @@ mod tests {
                     Sha256Digest::from([view.get() as u8; 32]),
                 );
                 assert!(state.set_proposal(view, proposal));
+                assert!(matches!(state.try_verify(), Verify::Ready(context, _) if context.view() == view));
                 assert!(state.verified(view));
                 assert!(
                     state.construct_notarize(view).is_some(),
@@ -5608,7 +5797,7 @@ mod tests {
                 Sha256Digest::from([112u8; 32]),
             );
             state.create_round(View::new(2));
-            assert!(state.proposed(view2));
+            assert!(state.proposed(view2, Sha256Digest::from([111u8; 32])));
             assert!(state.construct_notarize(View::new(2)).is_some());
             let conflicting_view2 = Proposal::new(
                 Rnd::new(Epoch::new(11), View::new(2)),
@@ -5653,7 +5842,7 @@ mod tests {
                 Sha256Digest::from([118u8; 32]),
             );
             state.create_round(View::new(2));
-            assert!(state.proposed(proposal_v2));
+            assert!(state.proposed(proposal_v2, Sha256Digest::from([119u8; 32])));
             assert!(state.construct_notarize(View::new(2)).is_none());
 
             let proposal_v1 = Proposal::new(
@@ -5662,7 +5851,7 @@ mod tests {
                 Sha256Digest::from([119u8; 32]),
             );
             state.create_round(View::new(1));
-            assert!(state.proposed(proposal_v1));
+            assert!(state.proposed(proposal_v1, test_genesis()));
             assert!(state.construct_notarize(View::new(1)).is_some());
             assert!(state.construct_notarize(View::new(2)).is_some());
         });
@@ -5793,8 +5982,9 @@ mod tests {
                 View::new(1),
                 Sha256Digest::from([131u8; 32]),
             );
-            assert!(state.set_proposal(View::new(2), proposal_v2));
-            assert!(state.verified(View::new(2)));
+            let context = state.try_propose().0.expect("optimistic proposal ready");
+            assert_eq!(context.round, proposal_v2.round);
+            assert!(state.proposed(proposal_v2, context.parent.1));
             assert!(state.construct_notarize(View::new(2)).is_some());
 
             // View 3 is inside the window only because view 1 anchors it
@@ -5805,8 +5995,9 @@ mod tests {
                 View::new(2),
                 Sha256Digest::from([132u8; 32]),
             );
-            assert!(state.set_proposal(View::new(3), proposal_v3));
-            assert!(state.verified(View::new(3)));
+            let context = state.try_propose().0.expect("optimistic proposal ready");
+            assert_eq!(context.round, proposal_v3.round);
+            assert!(state.proposed(proposal_v3, context.parent.1));
             assert!(
                 state.construct_notarize(View::new(3)).is_some(),
                 "finalized view 1 should anchor the issuance window"
@@ -6702,7 +6893,7 @@ mod tests {
             );
             state.set_genesis(test_genesis());
             state.create_round(View::new(1));
-            assert!(state.proposed(ancestor));
+            assert!(state.proposed(ancestor, test_genesis()));
             let local_vote = state
                 .construct_notarize(View::new(1))
                 .expect("local notarize vote");

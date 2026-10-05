@@ -629,7 +629,7 @@ impl<
 
         // Construct proposal
         let proposal = Proposal::new(context.round, context.parent.0, proposed);
-        if !self.state.proposed(proposal) {
+        if !self.state.proposed(proposal, context.parent.1) {
             warn!(round = ?context.round, "dropped our proposal");
             return None;
         }
