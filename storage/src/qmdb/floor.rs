@@ -14,9 +14,11 @@
 //!
 //! Kept updates move to the tip as under [`Limits::Proportional`]. Evictions and replacements
 //! resolve as writes to their keys. The batch commits the floor the pass reached, or its commit
-//! location if its final state is empty. The limits bound what the pass decides and passes, not
-//! what it reads: it may read locations it then passes or never reaches, but only below both the
-//! tip before the batch's writes and the inherited floor plus `skips` plus `entries`.
+//! location if its final state is empty.
+//!
+//! The limits bound what the pass decides and passes, not what it reads: it may read locations it
+//! then passes or never reaches, but only below both the tip before the batch's writes and the
+//! inherited floor plus `skips` plus `entries`.
 
 use crate::merkle::{Family, Location};
 use std::marker::PhantomData;
@@ -142,7 +144,7 @@ impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
     /// Leave the update in place. The floor stays at its location and no further update is
     /// decided.
     pub fn stop(self) -> Decision<'a, V> {
-        Decision::new(Action::Stop)
+        Decision::new(Action::Stop(self.value))
     }
 
     /// Write `value` for the key at the tip.
@@ -182,8 +184,8 @@ impl<V> Decision<'_, V> {
 pub(crate) enum Action<V> {
     /// Rebuild the update from its key and the value and move it to the tip.
     Keep(V),
-    /// Leave the update in place and end the pass.
-    Stop,
+    /// Leave the update in place and end the pass, returning its value for reuse.
+    Stop(V),
     /// Write the value for the update's key at the tip.
     Replace(V),
     /// Delete the update's key.

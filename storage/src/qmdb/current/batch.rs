@@ -144,7 +144,7 @@ impl<const N: usize> ChunkOverlay<N> {
 }
 
 /// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Fills `out` with up to
-/// `limit` floor-raise candidates in `[floor, tip)`, returning the next `floor`. Skips
+/// `limit` floor-raise candidates in `[floor, tip)`, returning the next scan location. Skips
 /// locations where the layered bitmap bit is unset (including locations superseded by
 /// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
 /// sequence as repeatedly calling the `next_candidate` test oracle over the chain.

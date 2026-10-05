@@ -99,7 +99,7 @@ use crate::{
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
-        build_snapshot_serial,
+        build_snapshot_from_log,
         floor::{Action, Compact, Entry, Limits, Policy},
         operation::{Committable as _, Floored as _, Key, Operation as _},
     },
@@ -446,14 +446,6 @@ where
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let op = log.read(*last_commit_loc).await?;
         let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
-        let (active_keys, activity) = build_snapshot_serial(
-            inactivity_floor_loc,
-            &log,
-            &mut snapshot,
-            init_buffer,
-            cache_size,
-        )
-        .await?;
 
         // Seed the bitmap so its pruned prefix matches the retained log boundary. Operations
         // below the inactivity floor are inactive.
@@ -463,9 +455,24 @@ where
         let mut bitmap = bitmap::Prunable::new_with_pruned_chunks(pruned_chunks)
             .expect("pruned chunk count fits in u64 bits");
         bitmap.extend_to(*inactivity_floor_loc);
-        for is_active in activity.iter() {
-            bitmap.push(is_active);
-        }
+
+        // Replay the log from the floor, appending each operation's status and clearing the bit
+        // of any location it supersedes. The state after the last operation is each location's
+        // final status.
+        let active_keys = build_snapshot_from_log(
+            inactivity_floor_loc,
+            &log,
+            &mut snapshot,
+            init_buffer,
+            cache_size,
+            |is_active, old_loc| {
+                bitmap.push(is_active);
+                if let Some(loc) = old_loc {
+                    bitmap.set_bit(*loc, false);
+                }
+            },
+        )
+        .await?;
         assert_eq!(bitmap.len(), bounds.end);
 
         Ok(Self {
@@ -717,7 +724,7 @@ where
                         self.bitmap.push(false);
                         Operation::Delete(key)
                     }
-                    Action::Stop => break 'pass,
+                    Action::Stop(_) => break 'pass,
                 };
                 self.bitmap.set_bit(loc, false);
                 ops.push(op);

@@ -198,20 +198,20 @@ fn contains_staged<F: Family, U: update::Update>(
         .is_some_and(|(_, sloc, _, _)| sloc.loc() == *target)
 }
 
-/// Removes from ascending `locations` those holding one of the ascending `kept` updates, passing
-/// each removed location and its update to `feed`.
-fn take_kept<'a, F: Family, U>(
+/// Removes from ascending `locations` those holding one of the ascending `retained` updates,
+/// passing each removed location and its update to `feed`.
+fn take_retained<'a, F: Family, U>(
     locations: &mut Vec<Location<F>>,
-    kept: &'a [(Location<F>, U)],
+    retained: &'a [(Location<F>, U)],
     mut feed: impl FnMut(Location<F>, &'a U),
 ) {
     let mut at = 0;
     locations.retain(|loc| {
-        while kept.get(at).is_some_and(|(kept_loc, _)| kept_loc < loc) {
+        while retained.get(at).is_some_and(|(next, _)| next < loc) {
             at += 1;
         }
-        match kept.get(at) {
-            Some((kept_loc, update)) if kept_loc == loc => {
+        match retained.get(at) {
+            Some((next, update)) if next == loc => {
                 feed(*loc, update);
                 false
             }
@@ -322,11 +322,13 @@ where
     base: Base<F, H::Digest, U, S>,
 }
 
-/// The floor a policy pass reached and the updates it kept.
+/// The floor a policy pass reached and the updates it kept or stopped at.
 struct Frozen<F: Family, U: update::Update> {
     floor: Location<F>,
-    /// Kept updates in ascending location order. Each was active when the policy decided it.
-    kept: Vec<(Location<F>, U)>,
+    /// The kept updates below the floor, then the update the pass stopped at, if any, in
+    /// ascending location order. Each was active when the policy decided it. Merkleize moves the
+    /// kept ones and reuses all of them instead of reading their locations again.
+    retained: Vec<(Location<F>, U)>,
 }
 
 /// Pending mutations whose old locations were already resolved by staged reads or policy decisions.
@@ -378,8 +380,8 @@ struct Cursor<F: Family, U: update::Update> {
 struct Round<F: Family, U: update::Update> {
     /// The selected candidates outside the inactive set, in ascending order.
     candidates: Vec<Location<F>>,
-    /// The operations at the committed `candidates` past the round's head, which precede the
-    /// uncommitted ones. The chunks' concatenation follows candidate order.
+    /// The operations at the committed `candidates`, which precede the uncommitted ones. The
+    /// chunks' concatenation follows candidate order.
     committed: Vec<Vec<Operation<F, U>>>,
     /// The last candidate the round passed, inside the inactive set or not.
     passed: Option<Location<F>>,
@@ -1131,9 +1133,10 @@ where
     /// candidate the floor cannot reach even if every earlier candidate outside `inactive` is
     /// active.
     ///
-    /// The round selects from the committed candidates in `head` first, which the caller has
-    /// already read, and then fills from `scan`, which must lie past them. It reads the committed
-    /// candidates it selects past the head in one batch. `scan` moves past the round.
+    /// The round selects from the committed candidates of a `head` round first, keeping the
+    /// operations already read for those it selects, and then fills from `scan`, which must lie
+    /// past them. It reads the other committed candidates it selects in one batch. `scan` moves
+    /// past the round.
     #[allow(clippy::too_many_arguments)]
     async fn read_round<E, C>(
         &self,
@@ -1145,13 +1148,16 @@ where
         inactive: &[Location<F>],
         existing: &[Location<F>],
         fill: &mut impl Candidates<F>,
-        head: &[Location<F>],
+        head: Option<Round<F, U>>,
     ) -> Result<Round<F, U>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
     {
-        let start = head.first().map_or(*scan, |first| (*first).min(*scan));
+        let head = head.filter(|head| !head.candidates.is_empty());
+        let start = head
+            .as_ref()
+            .map_or(*scan, |head| head.candidates[0].min(*scan));
         let mut candidates = Vec::new();
         if budget.is_none() {
             let room = usize::try_from((*last).saturating_sub(*start)).unwrap_or(usize::MAX);
@@ -1163,13 +1169,13 @@ where
         let mut existing_at = existing.partition_point(|loc| *loc < start);
         let mut possible = 0;
         let mut filled = 0;
-        let mut head = Some(head).filter(|head| !head.is_empty());
+        let mut pending = head.as_ref().map(|head| head.candidates.as_slice());
         let mut from_head = 0;
         loop {
             let kept = candidates.len();
-            let in_head = head.is_some();
-            let next = if let Some(head) = head.take() {
-                candidates.extend_from_slice(head);
+            let in_head = pending.is_some();
+            let next = if let Some(pending) = pending.take() {
+                candidates.extend_from_slice(pending);
                 *scan
             } else {
                 if need == 0 || *scan >= last {
@@ -1254,13 +1260,33 @@ where
             *scan = next;
         }
 
-        // Read the committed candidates past the head in one batch.
+        // Read the committed candidates past the head in one batch, and append their operations
+        // to those already read at the selected head candidates.
         let split = candidates.partition_point(|loc| *loc < self.db_state.size);
         let positions: Vec<u64> = candidates[from_head..split]
             .iter()
             .map(|loc| **loc)
             .collect();
-        let committed = log.read_many_sharded(&positions).await?;
+        let read = log.read_many_sharded(&positions).await?;
+        let committed = match head {
+            Some(Round {
+                candidates: head,
+                committed: mut ops,
+                ..
+            }) => {
+                let mut locs = head.iter();
+                let mut selected = candidates[..from_head].iter().peekable();
+                for chunk in &mut ops {
+                    chunk.retain(|_| {
+                        let loc = locs.next().expect("one operation per head candidate");
+                        selected.next_if_eq(&loc).is_some()
+                    });
+                }
+                ops.extend(read);
+                ops
+            }
+            None => read,
+        };
         Ok(Round {
             candidates,
             committed,
@@ -1517,7 +1543,7 @@ where
                                 &superseded_locs,
                                 &[],
                                 &mut fill_candidates,
-                                &[],
+                                None,
                             )
                             .await?;
                         if round.passed.is_none() {
@@ -1585,22 +1611,28 @@ where
             // DB is empty after this batch; raise floor to tip.
             floor = self.base_state.size + ops.len() as u64;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
-        } else if let Some(Frozen { kept, .. }) = frozen {
+        } else if let Some(Frozen { mut retained, .. }) = frozen {
+            // A stopped update stays at the floor.
+            assert!(retained.is_sorted_by(|a, b| a.0 < b.0));
+            if retained.last().is_some_and(|(loc, _)| *loc == floor) {
+                retained.pop();
+            }
+            assert!(retained.last().is_none_or(|(loc, _)| *loc < floor));
+
             // Move each still-active kept update in location order as the raise would move it.
             // Each update classifies against the diffs independently of the others (see
             // [`FloorOutcome`]), so all of them classify in one parallel pass before any moves.
-            assert!(kept.is_sorted_by(|a, b| a.0 < b.0));
-            assert!(kept.last().is_none_or(|(loc, _)| *loc < floor));
             if let Some(job) = diff_sort.take() {
                 diff = job.await;
             }
-            let outcomes: Vec<FloorOutcome<F>> =
-                db.strategy().map_collect_vec(kept.iter(), |(loc, update)| {
+            let outcomes: Vec<FloorOutcome<F>> = db
+                .strategy()
+                .map_collect_vec(retained.iter(), |(loc, update)| {
                     self.classify(&diff, *loc, update.key())
                 });
-            ops.reserve(kept.len() + 1);
-            floor_diff.reserve(kept.len());
-            for ((_, update), outcome) in zip_eq(kept, outcomes) {
+            ops.reserve(retained.len() + 1);
+            floor_diff.reserve(retained.len());
+            for ((_, update), outcome) in zip_eq(retained, outcomes) {
                 self.relocate(
                     &mut ops,
                     &mut diff,
@@ -2092,7 +2124,7 @@ where
                 &[],
                 &[],
                 &mut fill_candidates,
-                &[],
+                None,
             )
             .await;
 
@@ -2547,10 +2579,10 @@ where
             buffer: VecDeque::new(),
         };
 
-        // Decided updates in ascending location order. Merkleize moves kept updates to the tip,
-        // and the records of evictions (value `None`) and replacements resolve as writes to their
-        // keys.
-        let mut kept = Vec::new();
+        // Decided updates in ascending location order. Merkleize moves kept updates to the tip and
+        // leaves a stopped one in place, and the records of evictions (value `None`) and
+        // replacements resolve as writes to their keys.
+        let mut retained = Vec::new();
         let mut records: StagedUpdates<F, U> = Vec::new();
         while cursor.entries > 0 {
             if cursor.buffer.is_empty() && cursor.scan < cursor.end {
@@ -2571,10 +2603,15 @@ where
             let (key, value, cached) = update.into_parts();
             let decision = policy.decide(Entry::new(sloc.loc(), &key, value));
             match decision.into_action() {
-                Action::Keep(value) => kept.push((sloc.loc(), U::from_parts(key, value, cached))),
+                Action::Keep(value) => {
+                    retained.push((sloc.loc(), U::from_parts(key, value, cached)))
+                }
                 Action::Replace(value) => records.push((key, sloc, cached, Some(value))),
                 Action::Evict => records.push((key, sloc, cached, None)),
-                Action::Stop => break,
+                Action::Stop(value) => {
+                    retained.push((sloc.loc(), U::from_parts(key, value, cached)));
+                    break;
+                }
             }
             cursor.entries -= 1;
             cursor.floor = sloc.loc() + 1;
@@ -2592,7 +2629,7 @@ where
         self.decoded = decoded;
         self.merkleizer.frozen = Some(Frozen {
             floor: cursor.floor,
-            kept,
+            retained,
         });
         let staged = merge_by(staged, records, |a, b| a.1.loc() < b.1.loc());
         Ok((self, staged))
@@ -2637,13 +2674,10 @@ where
 
             // The prefetched candidates head the first round's stream, and the round fills on from
             // where the prefetch stopped.
-            let (head, head_ops) = match head {
-                Some((round, next)) => {
-                    scan = next;
-                    (round.candidates, round.committed)
-                }
-                None => (Vec::new(), Vec::new()),
-            };
+            let head = head.map(|(round, next)| {
+                scan = next;
+                round
+            });
 
             // Only candidates outside `inactive` may hold active updates. The remaining skips
             // bound which candidates the floor can reach.
@@ -2663,38 +2697,24 @@ where
                     inactive,
                     existing,
                     fill,
-                    &head,
+                    head,
                 )
                 .await?;
             if let Some(cut) = cut {
                 end = cut;
             }
             let split = candidates.partition_point(|loc| *loc < db_size);
-            let from_head = head
-                .last()
-                .map_or(0, |last| candidates.partition_point(|loc| loc <= last));
 
             // Classify against this batch's writes, then the ancestor diffs. A committed
-            // candidate whose key appears in neither is active. The selected head candidates
-            // classify the prefetched operations, skipping those the round passed.
+            // candidate whose key appears in neither is active.
             let memory: Vec<&Operation<F, U>> = candidates[split..]
                 .iter()
                 .map(|loc| read_op_from_ancestors(ancestors, **loc, *db_size))
                 .collect();
             let mut ops: Vec<(Location<F>, &Operation<F, U>)> =
                 Vec::with_capacity(candidates.len());
-            let mut prefetched_refs = zip_eq(&head, head_ops.iter().flatten());
-            for loc in &candidates[..from_head] {
-                let op = loop {
-                    let (at, op) = prefetched_refs.next().expect("selected from the head");
-                    if at == loc {
-                        break op;
-                    }
-                };
-                ops.push((*loc, op));
-            }
             ops.extend(zip_eq(
-                candidates[from_head..].iter().copied(),
+                candidates.iter().copied(),
                 shards.iter().flatten().chain(memory.iter().copied()),
             ));
             let outcomes: Vec<Option<StagedLoc<F>>> =
@@ -2712,23 +2732,11 @@ where
             // updates than the remaining entries. The read-ahead keeps at most the first `entries`
             // of them, since the pass decides no more, and resumes at the next. Merkleize resolves
             // the batch's writes at the existing-key locations, so it reuses every other committed
-            // operation read there. The selected head candidates' operations move out of the
-            // prefetch, and the passed ones drop.
-            let mut prefetched_locs = head.iter();
-            let mut prefetched_ops = head_ops.into_iter().flatten();
+            // operation read there.
             let mut owned = shards.into_iter().flatten();
             let mut resume = None;
             for (i, (loc, outcome)) in zip_eq(&candidates, outcomes).enumerate() {
-                let op = if i < from_head {
-                    loop {
-                        let op = prefetched_ops.next().expect("selected from the head");
-                        if prefetched_locs.next() == Some(loc) {
-                            break Some(op);
-                        }
-                    }
-                } else {
-                    (i < split).then(|| owned.next().expect("one read per candidate"))
-                };
+                let op = (i < split).then(|| owned.next().expect("one read per candidate"));
                 if let Some(sloc) = outcome
                     && resume.is_none()
                 {
@@ -2868,8 +2876,8 @@ where
 
         // Resolve existing keys. Reuse their locations when a policy pass gathered them, and the
         // committed operations it already read there. Staged records already resolved their exact
-        // locations, so those need no read. Neither do the updates the pass kept, since the batch
-        // writes none of their keys.
+        // locations, so those need no read. Neither do the updates the pass retained, since the
+        // batch writes none of their keys.
         let mut locations = existing.unwrap_or_else(|| m.gather_existing_locations(&mutations, db));
         if !staged_updates.is_empty() {
             let mut staged_at = 0;
@@ -2878,7 +2886,7 @@ where
             });
         }
         if let Some(frozen) = &m.frozen {
-            take_kept(&mut locations, &frozen.kept, |_, _| {});
+            take_retained(&mut locations, &frozen.retained, |_, _| {});
         }
         let results = m.read_existing(&locations, decoded, &db.log).await?;
 
@@ -3114,13 +3122,13 @@ where
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
-        // A kept update is the active operation the pass read at its location, and the batch writes
-        // none of the kept keys, so it feeds the candidate sets just as reading its location would.
-        let kept = m
+        // A retained update is the active operation the pass read at its location, and the batch
+        // writes none of the retained keys, so it feeds the candidate sets as a read there would.
+        let retained = m
             .frozen
             .as_ref()
-            .map_or(&[][..], |frozen| frozen.kept.as_slice());
-        take_kept(&mut locations, kept, |loc, update| {
+            .map_or(&[][..], |frozen| frozen.retained.as_slice());
+        take_retained(&mut locations, retained, |loc, update| {
             next_candidates.push(update.next_key.clone());
             prev_candidates.push((
                 update.key.clone(),
@@ -3204,7 +3212,7 @@ where
                 !contains_staged::<F, update::Ordered<K, V>>(&staged_updates, &mut staged_at, loc)
             });
         }
-        take_kept(&mut prev_locations, kept, |loc, update| {
+        take_retained(&mut prev_locations, retained, |loc, update| {
             next_candidates.push(update.next_key.clone());
             prev_candidates.push((
                 update.key.clone(),
@@ -5032,6 +5040,80 @@ pub(crate) mod tests {
                 drop((raised, kept));
                 db.destroy().await.unwrap();
             }
+        });
+    }
+
+    /// An ordered batch that rewrites the link of the update its fixed policy stops at reads that
+    /// update no more often than the [`Proportional`] raise.
+    #[test]
+    fn policy_reads_stopped_predecessor_once() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+            let config = fixed_db_config::<OneCap>("stopped-predecessor", &context);
+            let db = TestDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let keys = [2u8, 4, 6, 8, 10].map(|byte| sha256::Digest::from([byte; 32]));
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            assert_eq!(*db.inactivity_floor_loc(), 2);
+
+            // The new key rewrites the fourth key's link. Two moves keep the second and third
+            // keys, leaving the fourth key at the floor.
+            let created = sha256::Digest::from([9; 32]);
+            let write = || db.new_batch().write(created, Some(created));
+            let items =
+                || crate::qmdb::any::test::counter(&context, "log_journal_items_read_total");
+            let before = items();
+            let raised = write()
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(items() - before, 3);
+            let before = items();
+            let compact = write()
+                .merkleize(
+                    &db,
+                    None,
+                    &mut Compact {
+                        entries: 2,
+                        skips: u64::MAX,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(items() - before, 3);
+            assert_same(&db, &raised, &compact);
+
+            let mut policy = Script::new(3, u64::MAX, |key: &sha256::Digest| {
+                if *key == keys[3] {
+                    Choice::Stop
+                } else {
+                    Choice::Keep
+                }
+            });
+            let before = items();
+            let stopped = write().merkleize(&db, None, &mut policy).await.unwrap();
+            let reads = items() - before;
+            assert_eq!(policy.locations(), [loc(2), loc(3), loc(4)]);
+            assert_eq!(*stopped.bounds().inactivity_floor, 4);
+            assert_same(&db, &raised, &stopped);
+            assert_eq!(reads, 3, "the stopped predecessor was read again");
+            drop((raised, compact, stopped));
+            db.destroy().await.unwrap();
         });
     }
 

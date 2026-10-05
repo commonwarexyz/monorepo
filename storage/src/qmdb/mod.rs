@@ -23,6 +23,9 @@
 //! 4. Inspect the root or create child batches.
 //! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
+//! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing;
+//! [store] does so when applying a batch.
+//!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
