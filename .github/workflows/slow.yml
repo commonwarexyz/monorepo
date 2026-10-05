@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: tests-slow-${{ github.head_ref || github.ref_name || github.run_id }}
+  group: tests-slow-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -95,19 +95,11 @@ jobs:
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
-            partition: "1/4"
+            partition: "1/2"
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
-            partition: "2/4"
-          - package: commonware-coding
-            test_flags: ""
-            lint_flags: ""
-            partition: "3/4"
-          - package: commonware-coding
-            test_flags: ""
-            lint_flags: ""
-            partition: "4/4"
+            partition: "2/2"
           - package: commonware-math
             test_flags: ""
             lint_flags: ""
@@ -273,6 +265,10 @@ jobs:
       run: |
         cd runtime
         just miri iouring::task::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
+    - name: Run miri tests for runtime::iouring::tasks
+      run: |
+        cd runtime
+        just miri iouring::tasks::tests:: --features iouring --partition hash:${{matrix.partition}}/12 --no-tests=pass
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"

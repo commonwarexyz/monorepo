@@ -110,7 +110,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
     A::Context: Send,
-    B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock + Clone,
+    B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock,
     V: Variant,
     C: Signer,
     I: Send,

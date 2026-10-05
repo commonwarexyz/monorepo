@@ -5,13 +5,14 @@ use crate::{
     marshal::core::ExpectedCommitment,
     types::{Height, coding::Commitment},
 };
-use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, FixedSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{
     marker::PhantomData,
+    num::NonZeroUsize,
     sync::{Arc, OnceLock},
 };
 
@@ -94,15 +95,19 @@ impl<B: Digestible, C: Scheme, H: Hasher> EncodeSize for Shard<B, C, H> {
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
-    type Cfg = commonware_coding::CodecConfig;
+    /// The maximum encoded size of a block.
+    type Cfg = NonZeroUsize;
 
     fn read_cfg(
         buf: &mut impl commonware_codec::Buf,
-        cfg: &Self::Cfg,
+        max_block_size: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let commitment = Commitment::<B, C, H>::read(buf)?;
         let index = u16::read(buf)?;
-        let inner = C::Shard::read_cfg(buf, cfg)?;
+
+        // A coded payload is the block followed by its coding config.
+        let maximum = max_block_size.get().saturating_add(CodingConfig::SIZE);
+        let inner = C::Shard::read_cfg(buf, &(commitment.config(), maximum))?;
 
         Ok(Self {
             commitment,
@@ -604,18 +609,49 @@ mod test {
     use crate::marshal::mocks::block::EmptyBlock;
     use bytes::Buf as _;
     use commonware_codec::{Decode, Encode, Error};
-    use commonware_coding::{CodecConfig, ReedSolomon};
+    use commonware_coding::ReedSolomon;
     use commonware_cryptography::{Digest, Sha256, sha256::Digest as Sha256Digest};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
+    use commonware_utils::NZUsize;
 
-    const MAX_SHARD_SIZE: CodecConfig = CodecConfig {
-        maximum_shard_size: 1024 * 1024, // 1 MiB
-    };
+    const MAX_BLOCK_SIZE: NonZeroUsize = NZUsize!(1024 * 1024);
 
     type H = Sha256;
     type RS = ReedSolomon<H>;
     type TestBlock = EmptyBlock<H>;
     type RShard = Shard<TestBlock, RS, H>;
+
+    /// A shard decodes only when it is no wider than a block of the maximum size produces under
+    /// the coding config its commitment claims.
+    #[test]
+    fn test_shard_width_bounded_by_commitment_config() {
+        const MAX: NonZeroUsize = NZUsize!(1000);
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(2),
+        };
+        let encode = |len: usize, claimed: CodingConfig| {
+            let (root, shards) =
+                RS::encode(&CONFIG, vec![0u8; len].as_slice(), &Sequential).unwrap();
+            let commitment =
+                Commitment::from((Sha256Digest::EMPTY, root, Sha256Digest::EMPTY, claimed));
+            RShard::new(commitment, 0, shards[0].clone()).encode()
+        };
+
+        // A maximum block and its coding config produce the widest admitted shard.
+        let widest = MAX.get() + CodingConfig::SIZE;
+        assert!(RShard::decode_cfg(encode(widest, CONFIG), &MAX).is_ok());
+
+        // One more byte widens the shard past the bound.
+        assert!(RShard::decode_cfg(encode(widest + 1, CONFIG), &MAX).is_err());
+
+        // A commitment claiming more minimum shards narrows the bound.
+        let claimed = CodingConfig {
+            minimum_shards: NZU16!(4),
+            extra_shards: NZU16!(2),
+        };
+        assert!(RShard::decode_cfg(encode(widest, claimed), &MAX).is_err());
+    }
 
     #[test]
     fn test_shard_wrapper_codec_roundtrip() {
@@ -632,7 +668,7 @@ mod test {
             Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
         let shard = RShard::new(commitment, 0, raw_shard);
         let encoded = shard.encode();
-        let decoded = RShard::decode_cfg(encoded, &MAX_SHARD_SIZE).unwrap();
+        let decoded = RShard::decode_cfg(encoded, &MAX_BLOCK_SIZE).unwrap();
         assert!(shard == decoded);
     }
 
@@ -640,7 +676,7 @@ mod test {
     fn test_shard_decode_truncated_returns_error() {
         let decode = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let buf = commonware_codec::Copying(&[]);
-            RShard::decode_cfg(buf, &MAX_SHARD_SIZE)
+            RShard::decode_cfg(buf, &MAX_BLOCK_SIZE)
         }));
         assert!(decode.is_ok(), "decode must not panic on truncated input");
         assert!(decode.unwrap().is_err());
@@ -674,7 +710,7 @@ mod test {
             Commitment::from((Sha256Digest::EMPTY, commitment, Sha256Digest::EMPTY, CONFIG));
         let shard = RShard::new(commitment, 0, raw_shard);
         let encoded = shard.encode();
-        let decoded = RShard::decode_cfg(encoded, &MAX_SHARD_SIZE).unwrap();
+        let decoded = RShard::decode_cfg(encoded, &MAX_BLOCK_SIZE).unwrap();
         assert!(shard == decoded);
     }
 

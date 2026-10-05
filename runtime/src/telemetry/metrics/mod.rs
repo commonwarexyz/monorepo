@@ -74,7 +74,7 @@ pub trait GaugeExt {
     fn try_set<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
 
     /// Atomically raise a gauge to at least the provided value.
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error>;
+    fn try_set_max<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error>;
 }
 
 impl GaugeExt for raw::Gauge {
@@ -83,7 +83,7 @@ impl GaugeExt for raw::Gauge {
         Ok(self.set(value))
     }
 
-    fn try_set_max<T: TryInto<GaugeValue> + Copy>(&self, value: T) -> Result<GaugeValue, T::Error> {
+    fn try_set_max<T: TryInto<GaugeValue>>(&self, value: T) -> Result<GaugeValue, T::Error> {
         let value = value.try_into()?;
         Ok(self.inner().fetch_max(value, Ordering::Relaxed))
     }

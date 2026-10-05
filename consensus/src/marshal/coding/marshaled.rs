@@ -118,6 +118,7 @@ use commonware_runtime::{
     },
 };
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
+use futures::future::Either;
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span, warn};
@@ -309,9 +310,9 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result.
     ///
-    /// If `prefetched_block` is provided, it will be used directly instead of fetching from
-    /// the marshal. This is useful in `certify` when we've already fetched the block to
-    /// extract its embedded context.
+    /// If `prefetched_block` is provided, it is used directly. This is useful in `certify` when
+    /// we've already fetched the block to extract its embedded context. Otherwise, a local-only
+    /// wait for the block is sent to marshal before this method returns.
     fn deferred_verify(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
@@ -324,6 +325,20 @@ where
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
+
+        // Verification needs the full block but waits only for local delivery. Certification starts
+        // recovery only when the block is not available locally. If the shard engine evicts a
+        // cached block before verification registers its wait, verification is left with neither
+        // the block nor an active fetch. Register the wait before the caller publishes the gate so
+        // it receives the cached block or is waiting when recovery delivers it.
+        let candidate = prefetched_block.map_or_else(
+            || {
+                Either::Right(
+                    marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait),
+                )
+            },
+            Either::Left,
+        );
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -355,12 +370,9 @@ where
                 // Get the candidate block either from the caller or by waiting for
                 // local reconstruction. Candidate data remains local-only: a
                 // notarization is not sufficient reason to request it from peers.
-                let block = if let Some(block) = prefetched_block {
-                    block
-                } else {
-                    let block_request =
-                        marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
-                    select! {
+                let block = match candidate {
+                    Either::Left(block) => block,
+                    Either::Right(block_request) => select! {
                         _ = tx.closed() => {
                             debug!(
                                 reason = "consensus dropped receiver",
@@ -375,7 +387,7 @@ where
                                 return;
                             }
                         },
-                    }
+                    },
                 };
 
                 // Start the candidate store immediately: it depends on neither the
@@ -1161,8 +1173,6 @@ where
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
         // Coding variant does not support targeted forwarding;
         // peers reconstruct blocks from erasure-coded shards.
-        //
-        // TODO(#3389): Support checked data forwarding for PhasedScheme.
         let Plan::Propose { round } = plan else {
             return Feedback::Ok;
         };

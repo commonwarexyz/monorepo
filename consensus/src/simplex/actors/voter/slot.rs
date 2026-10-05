@@ -50,7 +50,7 @@ where
 
 impl<D> Slot<D>
 where
-    D: Digest + Clone + PartialEq,
+    D: Digest,
 {
     pub const fn new() -> Self {
         Self {

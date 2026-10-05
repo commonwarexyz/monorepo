@@ -17,6 +17,7 @@ use std::{marker::PhantomData, sync::Arc};
 /// This mock:
 /// - Returns the configured block (if any) from `propose()`
 /// - Returns a configurable result from `verify()`
+/// - Rejects blocks matching an optional predicate in `verify()`
 #[derive(Clone)]
 pub struct MockVerifyingApp<B, S> {
     /// The block returned by `propose`. If `None`, `propose` returns `None`.
@@ -26,6 +27,8 @@ pub struct MockVerifyingApp<B, S> {
     /// Policy returned for handoff proposal builds.
     handoff_policy: HandoffPolicy,
     proposal_gate: Option<Arc<Mutex<Option<ProposalGate>>>>,
+    /// Blocks for which `verify` returns false.
+    pub reject: Option<fn(&B) -> bool>,
     _phantom: PhantomData<S>,
 }
 
@@ -46,6 +49,12 @@ impl<B, S> MockVerifyingApp<B, S> {
     /// Configure the block returned by `propose`.
     pub fn with_propose_result(mut self, block: B) -> Self {
         self.propose_result = Some(block);
+        self
+    }
+
+    /// Configure the blocks for which `verify` returns false.
+    pub fn with_reject(mut self, reject: fn(&B) -> bool) -> Self {
+        self.reject = Some(reject);
         self
     }
 
@@ -80,6 +89,7 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
             verify_result: true,
             handoff_policy: HandoffPolicy::AwaitCertification,
             proposal_gate: None,
+            reject: None,
             _phantom: PhantomData,
         }
     }
@@ -87,9 +97,9 @@ impl<B, S> Default for MockVerifyingApp<B, S> {
 
 impl<B, S> crate::Application<deterministic::Context> for MockVerifyingApp<B, S>
 where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
 {
     type Block = B;
     type Context = B::Context;
@@ -122,8 +132,13 @@ where
     async fn verify(
         &mut self,
         _context: (deterministic::Context, Self::Context),
-        _ancestry: impl Ancestry<Self::Block>,
+        ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
+        if let (Some(reject), Some(block)) = (self.reject, ancestry.peek())
+            && reject(block)
+        {
+            return false;
+        }
         self.verify_result
     }
 }
@@ -166,9 +181,9 @@ impl<B, S> GatedVerifyingApp<B, S> {
 
 impl<B, S> crate::Application<deterministic::Context> for GatedVerifyingApp<B, S>
 where
-    B: CertifiableBlock + Clone + Send + Sync + 'static,
-    B::Context: Epochable + Clone + Send + Sync + 'static,
-    S: commonware_cryptography::certificate::Scheme + Clone + Send + Sync + 'static,
+    B: CertifiableBlock,
+    B::Context: Epochable + Send + Sync + 'static,
+    S: commonware_cryptography::certificate::Scheme,
 {
     type Block = B;
     type Context = B::Context;

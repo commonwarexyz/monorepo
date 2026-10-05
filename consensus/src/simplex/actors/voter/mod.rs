@@ -496,8 +496,8 @@ mod tests {
                 message = resolver_receiver.recv() => {
                     if matches!(
                         message.unwrap(),
-                        MailboxMessage::Certified { view, success: true, .. }
-                            if view == View::new(1)
+                        MailboxMessage::Certified { notarization, success: true, .. }
+                            if notarization.view() == View::new(1)
                     ) {
                         certified_view_1 = true;
                     }
@@ -820,7 +820,7 @@ mod tests {
                     }
                 },
                 msg = resolver_receiver.recv() => {
-                    if let resolver::MailboxMessage::Certificate {
+                    if let resolver::MailboxMessage::Updated {
                         certificate: Certificate::Finalization(finalization),
                         ..
                     } = msg.expect("resolver mailbox closed")
@@ -921,6 +921,132 @@ mod tests {
                 !finalizations.contains_key(&old_view),
                 "stale journal finalization must be skipped when the configured floor is newer"
             );
+        });
+    }
+
+    /// A voter restarted from a finalized floor reports the floor finalization
+    /// once at startup. A later certificate at the floor view must not report
+    /// or broadcast it again.
+    #[test_traced("WARN")]
+    fn test_voter_restart_floor_finalization_not_resent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(20));
+        runner.start(|mut context| async move {
+            let n = 5;
+            let quorum = quorum(n);
+            let epoch = Epoch::new(333);
+            let namespace = b"voter_restart_floor_not_resent".to_vec();
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            // Observe the certificates the voter broadcasts.
+            let observer = participants[1].clone();
+            let (_, mut certificates) = oracle
+                .control(observer.clone())
+                .register(1, TEST_QUOTA)
+                .await
+                .unwrap();
+            oracle
+                .add_link(
+                    participants[0].clone(),
+                    observer,
+                    Link {
+                        latency: Duration::ZERO,
+                        jitter: Duration::ZERO,
+                        success_rate: probability!(1.0),
+                    },
+                )
+                .await
+                .unwrap();
+
+            // Start from a finalized floor at view 8.
+            let finalization = |view: View| {
+                let proposal = Proposal::new(
+                    Round::new(epoch, view),
+                    view.previous().unwrap(),
+                    Sha256::hash(&[&view.get().to_be_bytes()]),
+                );
+                build_finalization(&schemes, &proposal, quorum).1
+            };
+            let floor_view = View::new(8);
+            let floor_finalization = finalization(floor_view);
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let (
+                mut mailbox,
+                mut batcher_receiver,
+                mut resolver_receiver,
+                _relay,
+                reporter,
+                _handle,
+            ) = start_voter_with_floor(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                RoundRobin::<Sha256>::default(),
+                VoterFloorStart {
+                    partition: "voter_restart_floor_not_resent".to_string(),
+                    epoch,
+                    floor: Floor::Finalized(floor_finalization.clone()),
+                    skip_budget: u64::MAX,
+                    page_cache,
+                },
+            )
+            .await;
+            expect_restarted_voter_at_floor(
+                &mut context,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                floor_view,
+            )
+            .await;
+
+            // A peer forwards the floor finalization again, followed by a new
+            // finalization that ends the observation.
+            let next_view = floor_view.next();
+            mailbox.recovered(Certificate::Finalization(floor_finalization));
+            mailbox.recovered(Certificate::Finalization(finalization(next_view)));
+
+            // Only the new finalization is broadcast, reported to the
+            // application, and reported to the resolver.
+            loop {
+                let (_, encoded) = certificates.recv().await.unwrap();
+                let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
+                    Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config())
+                        .unwrap();
+                assert_ne!(
+                    certificate.view(),
+                    floor_view,
+                    "floor finalization broadcast again"
+                );
+                if certificate.view() == next_view {
+                    break;
+                }
+            }
+            {
+                let finalizations = reporter.finalizations.lock();
+                assert_eq!(finalizations[&floor_view].1, 1);
+                assert_eq!(finalizations[&next_view].1, 1);
+            }
+            loop {
+                if let resolver::MailboxMessage::Updated { certificate, .. } =
+                    resolver_receiver.recv().await.unwrap()
+                {
+                    assert_ne!(
+                        certificate.view(),
+                        floor_view,
+                        "floor finalization reported again"
+                    );
+                    if certificate.view() == next_view {
+                        break;
+                    }
+                }
+            }
         });
     }
 
@@ -1108,7 +1234,7 @@ mod tests {
             payload,
         );
         let (_, finalization) = build_finalization(schemes, &proposal, quorum);
-        mailbox.resolved(Certificate::Finalization(finalization));
+        mailbox.recovered(Certificate::Finalization(finalization));
 
         // Wait for target view update
         loop {
@@ -1279,7 +1405,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1334,7 +1460,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1534,7 +1660,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1558,7 +1684,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -1586,7 +1712,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -1630,7 +1756,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -1730,7 +1856,7 @@ mod tests {
             let mut finalized_view = None;
             while let Some(message) = resolver_receiver.recv().await {
                 match message {
-                    MailboxMessage::Certificate {
+                    MailboxMessage::Updated {
                         certificate: Certificate::Finalization(finalization),
                         ..
                     } => {
@@ -1749,7 +1875,7 @@ mod tests {
                     // Finalization must match the signatures recovered from finalize votes
                     if matches!(
                         finalizations.get(&view),
-                        Some(finalization) if finalization == &expected_finalization
+                        Some((finalization, _)) if finalization == &expected_finalization
                     ) {
                         break;
                     }
@@ -1869,7 +1995,7 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -1995,7 +2121,7 @@ mod tests {
             // Verify the certificate was accepted
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } => {
@@ -2183,7 +2309,7 @@ mod tests {
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(n),
                     ..
                 } => {
@@ -2586,7 +2712,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.recv().await.unwrap();
             match finalization {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -2668,7 +2794,7 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.recv().await.unwrap();
             match finalization {
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Finalization(finalization),
                     ..
                 } => {
@@ -2995,7 +3121,7 @@ mod tests {
                 Sha256::hash(&[b"restore-skip-budget"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Finalization(finalization));
+            mailbox.recovered(Certificate::Finalization(finalization));
 
             let restored_deadline = context.current() + Duration::from_secs(1);
             loop {
@@ -3089,7 +3215,7 @@ mod tests {
 
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
-            mailbox.resolved(Certificate::Nullification(nullification.clone()));
+            mailbox.recovered(Certificate::Nullification(nullification.clone()));
             let (_, encoded) = certificates.recv().await.unwrap();
             let certificate: Certificate<ed25519::Scheme, Sha256Digest> =
                 Certificate::decode_cfg(encoded, &schemes[0].certificate_codec_config()).unwrap();
@@ -3202,7 +3328,7 @@ mod tests {
             mailbox.proposal(proposal_1.clone());
 
             let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization_1));
+            mailbox.recovered(Certificate::Notarization(notarization_1));
 
             loop {
                 if let batcher::Message::Update { current, .. } =
@@ -3317,7 +3443,7 @@ mod tests {
                 Sha256::hash(&[b"finalize_resume_view_1"]),
             );
             let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization_1));
+            mailbox.recovered(Certificate::Notarization(notarization_1));
 
             let view_2 = View::new(2);
             let proposal_2 = Proposal::new(
@@ -3326,7 +3452,7 @@ mod tests {
                 Sha256::hash(&[b"finalize_resume_view_2"]),
             );
             let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization_2));
+            mailbox.recovered(Certificate::Notarization(notarization_2));
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Update { current, .. } if current == View::new(3) => break,
@@ -3340,7 +3466,7 @@ mod tests {
             // The finalization for view 1 arrives: our nullify can never form
             // a nullification, so the gate heals.
             let (_, finalization_1) = build_finalization(&schemes, &proposal_1, quorum);
-            mailbox.resolved(Certificate::Finalization(finalization_1));
+            mailbox.recovered(Certificate::Finalization(finalization_1));
 
             // View 3 (same term) notarizes and certifies: with the gate
             // healed, its finalize vote must be broadcast.
@@ -3351,7 +3477,7 @@ mod tests {
                 Sha256::hash(&[b"finalize_resume_view_3"]),
             );
             let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization_3));
+            mailbox.recovered(Certificate::Notarization(notarization_3));
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
@@ -3656,7 +3782,7 @@ mod tests {
             // immediate parent, so view 2 can never propose. The voter skips to
             // view 3, the term start, which builds on genesis. The stalled
             // view 1 request must not suppress the view 3 request.
-            mailbox.resolved(Certificate::Nullification(nullification));
+            mailbox.recovered(Certificate::Nullification(nullification));
             wait_for_request(&context, &propose_requests, View::new(3)).await;
 
             // The replacement must dispatch at the same-iteration checkpoint,
@@ -4277,10 +4403,10 @@ mod tests {
             self.pending_syncs.unblock();
             loop {
                 if matches!(self.resolver.recv().await.unwrap(), MailboxMessage::Certified {
-                    view,
+                    notarization,
                     success: true,
                     ..
-                } if view == View::new(2))
+                } if notarization.view() == View::new(2))
                 {
                     return;
                 }
@@ -4965,8 +5091,8 @@ mod tests {
                     message = resolver_receiver.recv() => {
                         if matches!(
                             message.unwrap(),
-                            MailboxMessage::Certified { view, success: true, .. }
-                                if view == View::new(2)
+                            MailboxMessage::Certified { notarization, success: true, .. }
+                                if notarization.view() == View::new(2)
                         ) {
                             parent_certified = true;
                         }
@@ -5355,7 +5481,7 @@ mod tests {
             // becomes directly notarized.
             let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
             let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization_1));
+            mailbox.recovered(Certificate::Notarization(notarization_1));
 
             loop {
                 select! {
@@ -5375,7 +5501,7 @@ mod tests {
             // Deliver view 2's certificate and extend the direct chain. The
             // unresolved view-1 rejection must block view 3 before application
             // verification.
-            mailbox.resolved(Certificate::Notarization(notarization_2));
+            mailbox.recovered(Certificate::Notarization(notarization_2));
             let proposal_3 = Proposal::new(
                 Round::new(epoch, View::new(3)),
                 View::new(2),
@@ -5406,7 +5532,7 @@ mod tests {
             // voter can advance.
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(epoch, View::new(1)), quorum);
-            mailbox.resolved(Certificate::Nullification(nullification));
+            mailbox.recovered(Certificate::Nullification(nullification));
             loop {
                 select! {
                     msg = batcher_receiver.recv() => {
@@ -5424,17 +5550,17 @@ mod tests {
         });
     }
 
-    fn finalization_from_resolver<S, F, L>(mut fixture: F, elector: L)
+    /// A recovered finalization above the current view must be applied and
+    /// reported.
+    fn recovered_finalization_is_reported<S, F, L>(mut fixture: F, elector: L)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
     {
-        // This is a regression test as the resolver didn't use to send
-        // finalizations to the voter
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"finalization_from_resolver".to_vec();
+        let namespace = b"recovered_finalization_is_reported".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|mut context| async move {
             // Get participants
@@ -5475,12 +5601,12 @@ mod tests {
                 _ => panic!("unexpected batcher message"),
             }
 
-            // Send a finalization from resolver (view 2, which is current+1)
+            // Recover a finalization for view 2 (one above the current view).
             let view = View::new(2);
             let proposal = Proposal::new(
                 Round::new(Epoch::new(333), view),
                 view.previous().unwrap(),
-                Sha256::hash(&[b"finalization_from_resolver"]),
+                Sha256::hash(&[b"recovered_finalization_is_reported"]),
             );
             let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
             mailbox.recovered(Certificate::Finalization(finalization.clone()));
@@ -5496,7 +5622,7 @@ mod tests {
 
             // Verify finalization was recorded by checking reporter
             let finalizations = reporter.finalizations.lock();
-            let recorded = finalizations
+            let (recorded, _) = finalizations
                 .get(&view)
                 .expect("finalization should be recorded");
             assert_eq!(recorded, &finalization);
@@ -5504,141 +5630,31 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_finalization_from_resolver() {
-        finalization_from_resolver::<_, _, Random>(
+    fn test_recovered_finalization_is_reported() {
+        recovered_finalization_is_reported::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
             Random::new(RandomVersion::V1),
         );
-        finalization_from_resolver::<_, _, Random>(
+        recovered_finalization_is_reported::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
             Random::new(RandomVersion::V1),
         );
-        finalization_from_resolver::<_, _, RoundRobin>(
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
             RoundRobin::default(),
         );
-        finalization_from_resolver::<_, _, RoundRobin>(
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
             RoundRobin::default(),
         );
-        finalization_from_resolver::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
-        finalization_from_resolver::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
-    }
-
-    /// Test that certificates received from the resolver are not sent back to it.
-    ///
-    /// This is a regression test for the "boomerang" bug where:
-    /// 1. Resolver sends a certificate to the voter
-    /// 2. Voter processes it and constructs the same certificate
-    /// 3. Voter sends it back to resolver (unnecessary)
-    fn no_resolver_boomerang<S, F, L>(mut fixture: F, elector: L)
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: elector::Config<S>,
-    {
-        let n = 5;
-        let quorum = quorum(n);
-        let namespace = b"no_resolver_boomerang".to_vec();
-        let executor = deterministic::Runner::timed(Duration::from_secs(10));
-        executor.start(|mut context| async move {
-            // Get participants
-            let Fixture {
-                participants,
-                schemes,
-                ..
-            } = fixture(&mut context, &namespace, n);
-
-            // Create simulated network
-            let oracle =
-                start_test_network_with_peers(context.child("network"), participants.clone(), true)
-                    .await;
-
-            // Setup application mock and voter
-            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, _, reporter) =
-                setup_voter(
-                    &context,
-                    &oracle,
-                    &participants,
-                    &schemes,
-                    elector,
-                    VoterOptions::default(),
-                )
-                .await;
-
-            // Wait for batcher to be notified
-            let message = batcher_receiver.recv().await.unwrap();
-            match message {
-                batcher::Message::Update {
-                    current,
-                    leader: _,
-                    finalized,
-                    ..
-                } => {
-                    assert_eq!(current, View::new(1));
-                    assert_eq!(finalized, View::new(0));
-                }
-                _ => panic!("unexpected batcher message"),
-            }
-
-            // Send a finalization from resolver (simulating resolver sending us a certificate)
-            let view = View::new(2);
-            let proposal = Proposal::new(
-                Round::new(Epoch::new(333), view),
-                view.previous().unwrap(),
-                Sha256::hash(&[b"no_resolver_boomerang"]),
-            );
-            let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Finalization(finalization.clone()));
-
-            // Wait for batcher to be notified of finalization
-            loop {
-                let message = batcher_receiver.recv().await.unwrap();
-                match message {
-                    batcher::Message::Update { finalized, .. } if finalized == view => {
-                        break;
-                    }
-                    batcher::Message::Update { .. } => {}
-                    _ => continue,
-                }
-            }
-
-            // Verify finalization was recorded
-            let finalizations = reporter.finalizations.lock();
-            let recorded = finalizations
-                .get(&view)
-                .expect("finalization should be recorded");
-            assert_eq!(recorded, &finalization);
-            drop(finalizations);
-
-            // Ensure resolver hasn't been sent any messages (no boomerang)
-            assert!(
-                resolver_receiver.recv().now_or_never().is_none(),
-                "resolver should not receive the certificate back"
-            );
-        });
-    }
-
-    #[test_traced]
-    fn test_no_resolver_boomerang() {
-        no_resolver_boomerang::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinPk, _>,
-            Random::new(RandomVersion::V1),
-        );
-        no_resolver_boomerang::<_, _, Random>(
-            bls12381_threshold_vrf::fixture::<MinSig, _>,
-            Random::new(RandomVersion::V1),
-        );
-        no_resolver_boomerang::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinPk, _>,
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
+            ed25519::fixture,
             RoundRobin::default(),
         );
-        no_resolver_boomerang::<_, _, RoundRobin>(
-            bls12381_multisig::fixture::<MinSig, _>,
+        recovered_finalization_is_reported::<_, _, RoundRobin>(
+            secp256r1::fixture,
             RoundRobin::default(),
         );
-        no_resolver_boomerang::<_, _, RoundRobin>(ed25519::fixture, RoundRobin::default());
-        no_resolver_boomerang::<_, _, RoundRobin>(secp256r1::fixture, RoundRobin::default());
     }
 
     /// Regression: a voter that misses one mid-term notarization must request
@@ -5717,7 +5733,7 @@ mod tests {
             mailbox.recovered(Certificate::Notarization(notarization_3));
             assert!(matches!(
                 resolver_receiver.recv().await.unwrap(),
-                MailboxMessage::Certificate {
+                MailboxMessage::Updated {
                     certificate: Certificate::Notarization(notarization),
                     ..
                 } if notarization.view() == View::new(3)
@@ -5755,13 +5771,17 @@ mod tests {
             loop {
                 select! {
                     message = resolver_receiver.recv() => match message.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == View::new(2) || view == View::new(3) =>
+                        MailboxMessage::Certified {
+                            notarization,
+                            success,
+                            ..
+                        } if notarization.view() == View::new(2)
+                            || notarization.view() == View::new(3) =>
                         {
                             assert!(success);
-                            certified.push(view);
+                            certified.push(notarization.view());
                         }
-                        MailboxMessage::Certificate { .. }
+                        MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
@@ -5915,7 +5935,7 @@ mod tests {
             let (target_view, leader) = loop {
                 // Send finalization to advance to next view
                 let (_, finalization) = build_finalization(&schemes, &prev_proposal, quorum);
-                mailbox.resolved(Certificate::Finalization(finalization));
+                mailbox.recovered(Certificate::Finalization(finalization));
 
                 // Wait for the view update
                 let (new_view, leader) = loop {
@@ -6128,7 +6148,7 @@ mod tests {
                     Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-                mailbox.resolved(Certificate::Finalization(finalization));
+                mailbox.recovered(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
@@ -6337,7 +6357,7 @@ mod tests {
                     Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-                mailbox.resolved(Certificate::Finalization(finalization));
+                mailbox.recovered(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
@@ -6499,7 +6519,7 @@ mod tests {
                     Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-                mailbox.resolved(Certificate::Finalization(finalization));
+                mailbox.recovered(Certificate::Finalization(finalization));
 
                 let (new_view, leader) = loop {
                     match batcher_receiver.recv().await.unwrap() {
@@ -6753,7 +6773,7 @@ mod tests {
                     Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-                mailbox.resolved(Certificate::Finalization(finalization));
+                mailbox.recovered(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
@@ -6976,7 +6996,7 @@ mod tests {
                     Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-                mailbox.resolved(Certificate::Finalization(finalization));
+                mailbox.recovered(Certificate::Finalization(finalization));
 
                 loop {
                     match batcher_receiver.recv().await.unwrap() {
@@ -7027,7 +7047,7 @@ mod tests {
                     Sha256::hash(&[&current_view.get().to_be_bytes()]),
                 );
                 let (_, finalization) = build_finalization(&schemes, &proposal, quorum);
-                mailbox.resolved(Certificate::Finalization(finalization));
+                mailbox.recovered(Certificate::Finalization(finalization));
 
                 let mut found = None;
                 loop {
@@ -8501,7 +8521,7 @@ mod tests {
             )
             .await;
 
-            // Capture the leader's local notarize so we can resolve the matching
+            // Capture the leader's local notarize so we can deliver the matching
             // notarization back into the voter to drive certification.
             let proposal = loop {
                 match batcher_receiver.recv().await.unwrap() {
@@ -8516,10 +8536,10 @@ mod tests {
             };
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization));
+                .recovered(Certificate::Notarization(notarization));
 
             // A finalize for the leader-owned view proves the voter certified its
-            // own proposal without consulting the automaton.
+            // own proposal.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
@@ -8532,7 +8552,7 @@ mod tests {
                         if nullify.view() == target_view =>
                     {
                         panic!(
-                            "leader-owned proposal should certify locally instead of nullifying view {target_view}"
+                            "leader-owned proposal should certify instead of nullifying view {target_view}"
                         );
                     }
                     batcher::Message::Update { .. } => {},
@@ -8774,11 +8794,11 @@ mod tests {
                 }
             }
 
-            // Resolve the matching notarization to drive certification on the
+            // Deliver the matching notarization to drive certification on the
             // restarted voter.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization));
+                .recovered(Certificate::Notarization(notarization));
 
             // A finalize for the leader-owned view proves replay restored the
             // local proposal state and the voter certified it through the automaton.
@@ -8794,7 +8814,7 @@ mod tests {
                         if nullify.view() == target_view =>
                     {
                         panic!(
-                            "leader-owned recovered proposal should certify locally instead of nullifying view {target_view}"
+                            "leader-owned recovered proposal should certify instead of nullifying view {target_view}"
                         );
                     }
                     batcher::Message::Update { .. } => {},
@@ -8965,7 +8985,7 @@ mod tests {
 
             // Deliver the foreign notarization. This seeds the voter's slot
             // with a proposal it never built.
-            mailbox.resolved(Certificate::Notarization(foreign_notarization));
+            mailbox.recovered(Certificate::Notarization(foreign_notarization));
 
             // Wait for a `Finalize` on the leader-owned view. Observing
             // finalize proves the certify callback both fired and resolved
@@ -9158,14 +9178,14 @@ mod tests {
                     .await
                     .expect("expected resolver msg");
                 match msg {
-                    MailboxMessage::Certificate {
+                    MailboxMessage::Updated {
                         certificate: Certificate::Finalization(f),
                         ..
                     } => {
                         assert_eq!(f.view(), view5);
                         break;
                     }
-                    MailboxMessage::Certificate { .. } => continue,
+                    MailboxMessage::Updated { .. } => continue,
                     MailboxMessage::Resolve { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
@@ -9293,13 +9313,16 @@ mod tests {
                         | batcher::Message::Constructed(_) => {}
                     },
                     message = resolver_receiver.recv() => match message.unwrap() {
-                        MailboxMessage::Certified { view: certified, success, .. }
-                            if certified == view =>
+                        MailboxMessage::Certified {
+                            notarization,
+                            success,
+                            ..
+                        } if notarization.view() == view =>
                         {
                             assert!(success);
                             break;
                         }
-                        MailboxMessage::Certificate { .. }
+                        MailboxMessage::Updated { .. }
                         | MailboxMessage::Certified { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
@@ -9437,13 +9460,13 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == view5 =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == view5 =>
                         {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. }
-                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Updated { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
@@ -9544,7 +9567,7 @@ mod tests {
             // Nullify current view first.
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(Epoch::new(333), target_view), quorum);
-            mailbox.resolved(Certificate::Nullification(nullification));
+            mailbox.recovered(Certificate::Nullification(nullification));
 
             // Then provide notarization for that same view.
             let proposal = Proposal::new(
@@ -9553,18 +9576,18 @@ mod tests {
                 Sha256::hash(&[b"late_notarization_after_nullification"]),
             );
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization));
+            mailbox.recovered(Certificate::Notarization(notarization));
 
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. }
-                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Updated { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
@@ -10086,7 +10109,7 @@ mod tests {
             // Build and send notarization so the voter tries to certify
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization));
+                .recovered(Certificate::Notarization(notarization));
 
             // Certification will be cancelled, so the voter should eventually timeout
             // and emit a nullify vote.
@@ -10269,7 +10292,7 @@ mod tests {
                             })
                             .is_ok()
                         && event
-                            .expect_span(|span| span.content == "simplex.voter.mailbox.resolved")
+                            .expect_span(|span| span.content == "simplex.voter.mailbox.recovered")
                             .is_ok()
                 })
                 .unwrap();
@@ -10406,7 +10429,7 @@ mod tests {
 
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization));
+                .recovered(Certificate::Notarization(notarization));
 
             // Give the canceled certification attempt time to run before restart.
             context.sleep(Duration::from_millis(200)).await;
@@ -10500,12 +10523,14 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
+                        {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
                         MailboxMessage::Certified { .. }
-                        | MailboxMessage::Certificate { .. }
+                        | MailboxMessage::Updated { .. }
                         | MailboxMessage::Resolve { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
@@ -10633,7 +10658,7 @@ mod tests {
             mailbox.proposal(proposal_4.clone());
 
             let (_, notarization_4) = build_notarization(&schemes, &proposal_4, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization_4));
+            mailbox.recovered(Certificate::Notarization(notarization_4));
 
             // Wait for the first nullify vote (confirms stuck state)
             loop {
@@ -10662,7 +10687,7 @@ mod tests {
             let (_, notarization_5) = build_notarization(&schemes, &proposal_5, quorum);
 
             // Send the view 5 notarization to the stuck validator
-            mailbox.resolved(Certificate::Notarization(notarization_5));
+            mailbox.recovered(Certificate::Notarization(notarization_5));
 
             // The stuck validator should still not advance.
             //
@@ -10714,7 +10739,7 @@ mod tests {
             //
             // Let's demonstrate this escape route works (if Byzantine cooperate):
             let (_, finalization_5) = build_finalization(&schemes, &proposal_5, quorum);
-            mailbox.resolved(Certificate::Finalization(finalization_5));
+            mailbox.recovered(Certificate::Finalization(finalization_5));
 
             // Now the validator SHOULD advance (finalization aborts stuck certification)
             let deadline = context.current() + Duration::from_secs(5);
@@ -10853,7 +10878,7 @@ mod tests {
             // Build and send notarization so the voter tries to certify
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
             mailbox
-                .resolved(Certificate::Notarization(notarization));
+                .recovered(Certificate::Notarization(notarization));
 
             // Certification will fail (returns false), so the voter should emit a nullify vote.
             // This must happen quickly (not after 100s timeout) to prove it's from cert failure.
@@ -10991,7 +11016,7 @@ mod tests {
 
             // Build and send notarization so the voter tries to certify.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization));
+            mailbox.recovered(Certificate::Notarization(notarization));
 
             // Certification hangs (sender held alive, receiver pending). The voter
             // must recover via the view timeout and emit a nullify vote.
@@ -11414,7 +11439,7 @@ mod tests {
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(Epoch::new(333), View::new(1)), quorum);
             mailbox
-                .resolved(Certificate::Nullification(nullification));
+                .recovered(Certificate::Nullification(nullification));
 
             loop {
                 select! {
@@ -11577,7 +11602,7 @@ mod tests {
 
             // Deliver quorum notarization and ensure we finalize + advance to view 2 without nullify.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization));
+            mailbox.recovered(Certificate::Notarization(notarization));
 
             let deadline = context.current() + Duration::from_secs(3);
             let reached_view2 = loop {
@@ -11834,7 +11859,7 @@ mod tests {
 
             // Send notarization to trigger certification.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization));
+            mailbox.recovered(Certificate::Notarization(notarization));
 
             // Wait until the first durability operation reaches the gate. Both artifacts must have
             // been appended by this point, but notify must still be waiting behind the sync.
@@ -11847,8 +11872,12 @@ mod tests {
 
             let mut certified_before_sync = false;
             while let Some(msg) = resolver_receiver.recv().now_or_never().flatten() {
-                if let MailboxMessage::Certified { view, success, .. } = msg
-                    && view == target_view {
+                if let MailboxMessage::Certified {
+                    notarization,
+                    success,
+                    ..
+                } = msg
+                    && notarization.view() == target_view {
                         assert!(success, "expected successful certification");
                         certified_before_sync = true;
                     }
@@ -11929,8 +11958,8 @@ mod tests {
             while !certified {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             assert!(success, "expected successful certification");
                             certified = true;
@@ -12053,7 +12082,9 @@ mod tests {
             while !(replayed_certified && advanced) {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
+                        {
                             assert!(success, "replayed certification should be successful");
                             replayed_certified = true;
                         }
@@ -12231,14 +12262,14 @@ mod tests {
 
             // Send notarization to trigger certification.
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization));
+            mailbox.recovered(Certificate::Notarization(notarization));
 
             // Wait for failed certification result to be reported to resolver.
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             assert!(!success, "expected failed certification");
                             break;
@@ -12328,8 +12359,8 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. }
-                            if view == target_view =>
+                        MailboxMessage::Certified { notarization, success, .. }
+                            if notarization.view() == target_view =>
                         {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;
@@ -12533,7 +12564,7 @@ mod tests {
             // Send a nullification certificate for this view.
             let (_, nullification) =
                 build_nullification(&schemes, Round::new(epoch, target_view), quorum);
-            mailbox.resolved(Certificate::Nullification(nullification));
+            mailbox.recovered(Certificate::Nullification(nullification));
 
             // Wait for the voter to process the nullification (advances to next view).
             loop {
@@ -12621,7 +12652,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certificate {
+                        MailboxMessage::Updated {
                             certificate: Certificate::Nullification(n),
                             ..
                         } if n.view() == target_view => {
@@ -12781,7 +12812,7 @@ mod tests {
             relay.broadcast(&leader, Recipients::All, (proposal.payload, contents));
             mailbox.proposal(proposal.clone());
             let (_, notarization) = build_notarization(&schemes, &proposal, quorum);
-            mailbox.resolved(Certificate::Notarization(notarization));
+            mailbox.recovered(Certificate::Notarization(notarization));
 
             // Wait for the Update for view 4 and simulate the batcher signaling that
             // the leader should be skipped.

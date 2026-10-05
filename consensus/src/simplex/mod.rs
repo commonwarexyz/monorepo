@@ -1329,7 +1329,7 @@ mod tests {
                     let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
-                        let Some(finalization) = finalizations.get(&view) else {
+                        let Some((finalization, _)) = finalizations.get(&view) else {
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
@@ -1517,7 +1517,7 @@ mod tests {
                     .iter()
                     .find(|(view, _)| !view.is_term_start(term_length))
                     .or_else(|| eligible.first())
-                    .map(|(view, finalization)| (**view, (*finalization).clone()))
+                    .map(|(view, (finalization, _))| (**view, finalization.clone()))
                     .expect("non-genesis floor finalization missing")
             };
             assert!(floor_view > View::zero());
@@ -2159,7 +2159,7 @@ mod tests {
                     .finalizations
                     .lock()
                     .get(&required_view)
-                    .cloned()
+                    .map(|(finalization, _)| finalization.clone())
                     .unwrap_or_else(|| panic!("reporter {idx} missing tip finalization"));
                 assert_eq!(
                     finalization.proposal.round.view(),
@@ -2539,8 +2539,8 @@ mod tests {
     /// while a higher same-term notarization survives in some journals. Nodes
     /// stuck below that view must be able to fetch the exact-view notarization
     /// (a higher-view floor cannot substitute for certification's per-view
-    /// parent requirement) or the cluster wedges permanently (see
-    /// [`resolver::State::get`]).
+    /// parent requirement) or the cluster wedges permanently (see the resolver's
+    /// `State::produce`).
     #[test_group("slow")]
     #[test_traced]
     fn test_unclean_shutdown_stable_leader_optimistic() {
@@ -8056,7 +8056,7 @@ mod tests {
                     let finalizations = reporter.finalizations.lock();
                     for view in View::range(View::new(1), latest_complete) {
                         // Ensure finalization matches digest from finalizes
-                        let Some(finalization) = finalizations.get(&view) else {
+                        let Some((finalization, _)) = finalizations.get(&view) else {
                             continue;
                         };
                         let Some(digest) = finalized.get(&view) else {
@@ -8574,7 +8574,7 @@ mod tests {
                 let mut finalized_at_view: BTreeMap<View, D> = BTreeMap::new();
                 for reporter in reporters.iter().skip(honest_start) {
                     let finalizations = reporter.finalizations.lock();
-                    for (view, finalization) in finalizations.iter() {
+                    for (view, (finalization, _)) in finalizations.iter() {
                         let digest = finalization.proposal.payload;
                         if let Some(existing) = finalized_at_view.get(view) {
                             assert_eq!(

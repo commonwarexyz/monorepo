@@ -154,10 +154,10 @@ commonware_macros::stability_scope!(BETA {
     }
 
     /// A [PublicKey], able to verify [Signature]s.
-    pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
+    pub trait PublicKey: Verifier + Sized + ReadExt + Array {}
 
     /// A [Signature] over a message.
-    pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
+    pub trait Signature: Sized + ReadExt + Array {}
 
     /// An extension of [Signature] that supports public key recovery.
     pub trait Recoverable: Signature {

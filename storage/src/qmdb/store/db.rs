@@ -134,12 +134,6 @@ pub struct Changeset<K: Key, V: CodecShared + Clone> {
     metadata: Option<V>,
 }
 
-impl<K: Key, V: CodecShared + Clone> Changeset<K, V> {
-    fn into_parts(self) -> (BTreeMap<K, Option<V>>, Option<V>) {
-        (self.diff, self.metadata)
-    }
-}
-
 impl<K: Key, V: CodecShared + Clone> FromIterator<(K, Option<V>)> for Changeset<K, V> {
     fn from_iter<TIter: IntoIterator<Item = (K, Option<V>)>>(iter: TIter) -> Self {
         Self {
@@ -481,7 +475,7 @@ where
         batch: Changeset<K, V>,
     ) -> Result<(Self, Range<Location>), Error> {
         let start_loc = self.size();
-        let (diff, metadata) = batch.into_parts();
+        let Changeset { diff, metadata } = batch;
 
         let mut steps = 0u64;
         for (key, value) in diff {

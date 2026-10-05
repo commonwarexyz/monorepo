@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title description">
   <title id="title">From Payments to a Certified Settlement</title>
-  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 34-of-100 certificate.</desc>
+  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the canonical batch of final payer states for a, b, c, and d, which the operator signs once with its receipt key. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 34-of-100 certificate.</desc>
   <rect width="1320" height="900" fill="#fff"/>
   <style>
     text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
@@ -30,10 +30,9 @@
       <path d="M1 1 L7 4 L1 7" fill="none" stroke="#087a32" stroke-width="1.2"/>
     </marker>
     <circle id="validator" r="7" stroke-width="1.5"/>
-    <g id="operator-ack">
+    <g id="final-state">
       <path d="M4 0 H44 L56 12 V44 Q56 48 52 48 H4 Q0 48 0 44 V4 Q0 0 4 0 Z" stroke-width="1.5"/>
       <path d="M44 0 V12 H56" fill="none" stroke-width="1.5"/>
-      <path d="M12 35 C22 14 7 54 29 31 C34 26 28 43 39 34 L44 34" fill="none" stroke="#2424d4" stroke-width="1.5" stroke-linecap="round"/>
     </g>
     <g id="validator-row">
       <use href="#validator" x="0"/>
@@ -147,24 +146,25 @@
   <path d="M116 758 C126 737 111 777 133 754 C138 749 132 766 143 757 L151 757" fill="none" stroke="#2424d4" stroke-width="2" stroke-linecap="round"/>
   <text class="note" x="169" y="765">c's signature binds both entries</text>
 
-  <text class="note" x="72" y="810">Operator acknowledgments</text>
+  <text class="note" x="72" y="810">Final payer states</text>
+  <text class="note right" x="592" y="810">Same receipt key</text>
   <g transform="translate(72 822)">
-    <use href="#operator-ack" fill="#fff" stroke="#b6b6eb"/>
-    <text class="label center" x="25" y="22">a</text>
+    <use href="#final-state" fill="#fff" stroke="#b6b6eb"/>
+    <text class="label center" x="25" y="32">a</text>
   </g>
   <g transform="translate(138 822)">
-    <use href="#operator-ack" fill="#fff" stroke="#b6b6eb"/>
-    <text class="label center" x="25" y="22">b</text>
+    <use href="#final-state" fill="#fff" stroke="#b6b6eb"/>
+    <text class="label center" x="25" y="32">b</text>
   </g>
   <g transform="translate(204 822)">
-    <use href="#operator-ack" fill="#e5e5fb" stroke="#2424d4"/>
-    <text class="heading center blue" x="25" y="22">c</text>
+    <use href="#final-state" fill="#e5e5fb" stroke="#2424d4"/>
+    <text class="heading center blue" x="25" y="32">c</text>
   </g>
   <g transform="translate(270 822)">
-    <use href="#operator-ack" fill="#fff" stroke="#b6b6eb"/>
-    <text class="label center" x="25" y="22">d</text>
+    <use href="#final-state" fill="#fff" stroke="#b6b6eb"/>
+    <text class="label center" x="25" y="32">d</text>
   </g>
-  <text class="note center" x="378" y="833">Aggregate</text>
+  <text class="note center" x="378" y="833">Sign batch</text>
   <path class="wire broadcast" d="M338 847 H420"/>
   <rect x="432" y="822" width="160" height="48" rx="5" fill="#2424d4"/>
   <text class="label center" x="512" y="853" style="fill:#fff;">1 signature</text>
