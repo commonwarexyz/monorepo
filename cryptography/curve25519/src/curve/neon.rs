@@ -788,75 +788,10 @@ impl Backend {
     pub(super) const fn new() -> Self {
         Self
     }
-
-    /// Returns lanes whose sum is the weighted sum of all bucket stripes.
-    ///
-    /// Let `B[k, lane]` sum the stripes at bucket index `k*LANES + lane`. The descending pass
-    /// builds `sum[lane] = sum_k B[k, lane]` and `rows[lane] = sum_k k*B[k, lane]`.
-    /// Final weighting gives `LANES*rows[lane] + (lane + 1)*sum[lane]`, assigning each bucket
-    /// its index-plus-one weight. The lane count is a power of two.
-    fn fold_buckets_lanes(self, buckets: &[G], nb: usize, used: usize) -> GVec {
-        // A single used bucket has weight one, so return the stripes without weighting.
-        if used == 1 {
-            return GVec::transpose(core::array::from_fn(|lane| {
-                if lane < <Self as msm::Backend>::STRIPES {
-                    buckets[lane * nb]
-                } else {
-                    G::IDENTITY
-                }
-            }));
-        }
-        let mut sum = GVec::identity();
-        let mut rows = GVec::identity();
-        for block in (0..used.div_ceil(LANES)).rev() {
-            let gather = |stripe: usize| {
-                GVec::transpose(core::array::from_fn(|lane| {
-                    let digit = block * LANES + lane;
-                    if digit < used {
-                        buckets[stripe * nb + digit]
-                    } else {
-                        G::IDENTITY
-                    }
-                }))
-            };
-            let mut combined = gather(0);
-            for stripe in 1..<Self as msm::Backend>::STRIPES {
-                combined = self.g_add(combined, gather(stripe));
-            }
-            rows = self.g_add(rows, sum);
-            sum = self.g_add(sum, combined);
-        }
-
-        // Seed the row weight and the high bit of lane + 1. Doubling shifts both together.
-        let lanes = sum.untranspose();
-        let mut weighted = self.g_add(
-            rows,
-            GVec::transpose(core::array::from_fn(|lane| {
-                if lane == LANES - 1 {
-                    lanes[lane]
-                } else {
-                    G::IDENTITY
-                }
-            })),
-        );
-        for bit in (0..LANES.ilog2()).rev() {
-            weighted = self.g_double(weighted);
-            let selected = core::array::from_fn(|lane| {
-                if (lane + 1) & (1 << bit) != 0 {
-                    lanes[lane]
-                } else {
-                    G::IDENTITY
-                }
-            });
-            weighted = self.g_add(weighted, GVec::transpose(selected));
-        }
-        weighted
-    }
 }
 
 impl msm::Backend for Backend {
-    // One stripe per physical mixed-addition lane keeps wave updates independent. Folds retain
-    // LANES independent bucket indices.
+    // One stripe per physical mixed-addition lane keeps wave updates independent.
     const STRIPES: usize = WIDTH;
 
     fn fill_buckets<T>(
@@ -867,11 +802,6 @@ impl msm::Backend for Backend {
         term: impl Fn(&T) -> (&GAffine, i16),
     ) {
         msm::fill_buckets(g_add_mixed_pair, buckets, nb, terms, term);
-    }
-
-    #[inline(always)]
-    fn fold_buckets(self, buckets: &[G], nb: usize, used: usize) -> G {
-        self.fold_buckets_lanes(buckets, nb, used).sum_lanes(self)
     }
 
     /// Scalar recombination computes each point once, avoiding duplicate SIMD lanes.
@@ -923,8 +853,23 @@ impl msm::Lanes<WIDTH> for Backend {
     }
 
     #[inline(always)]
+    fn load_extended(self, points: [&G; WIDTH]) -> Point {
+        [
+            pack_pair([points[0].x, points[1].x]),
+            pack_pair([points[0].y, points[1].y]),
+            pack_pair([points[0].t, points[1].t]),
+            pack_pair([points[0].z, points[1].z]),
+        ]
+    }
+
+    #[inline(always)]
     fn add_mixed(self, point: Point, affine: Self::Affine) -> Point {
         add_mixed_regs(point, affine)
+    }
+
+    #[inline(always)]
+    fn add(self, a: Point, b: Point) -> Point {
+        add_regs(a, b)
     }
 
     #[inline(always)]
@@ -956,6 +901,21 @@ impl msm::Lanes<WIDTH> for Backend {
         // SAFETY: AArch64 targets provide NEON, and the mask array has two lanes.
         let mask = unsafe { vld1q_u64(masks.as_ptr()) };
         add_regs(point, [neg_lanes(x, mask), y, neg_lanes(t, mask), z])
+    }
+
+    #[inline(always)]
+    fn select(self, point: Point, keep: [bool; WIDTH]) -> Point {
+        let masks = keep.map(|keep| 0u64.wrapping_sub(u64::from(keep)));
+        let identity = identity_regs();
+        // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.
+        unsafe {
+            let mask = vld1q_u64(masks.as_ptr());
+            core::array::from_fn(|coordinate| {
+                core::array::from_fn(|limb| {
+                    vbslq_u64(mask, point[coordinate][limb], identity[coordinate][limb])
+                })
+            })
+        }
     }
 
     #[inline(always)]
