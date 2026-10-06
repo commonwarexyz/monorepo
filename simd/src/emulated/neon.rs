@@ -1,4 +1,4 @@
-//! Emulation of the AArch64 NEON instruction profile.
+//! Emulation of the AArch64 NEON and SHA2 instruction profile.
 
 use crate::{Neon, Operation, Simd};
 
@@ -9,6 +9,69 @@ use crate::{Neon, Operation, Simd};
 pub struct EmulatedNeon;
 
 impl Simd for EmulatedNeon {
+    type U32x4 = [u32; 4];
+
+    #[inline]
+    fn u32x4_load(self, input: &[u32]) -> Self::U32x4 {
+        input[..4].try_into().unwrap()
+    }
+
+    #[inline]
+    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]) {
+        output[..4].copy_from_slice(&value);
+    }
+
+    #[inline]
+    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        core::array::from_fn(|i| a[i].wrapping_add(b[i]))
+    }
+
+    #[inline]
+    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4 {
+        assert!((0..256).contains(&MASK));
+        core::array::from_fn(|i| value[((MASK >> (2 * i)) & 3) as usize])
+    }
+
+    #[inline]
+    fn u32x4_load_be(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..16];
+        core::array::from_fn(|i| u32::from_be_bytes(input[4 * i..4 * i + 4].try_into().unwrap()))
+    }
+
+    #[inline]
+    fn u32x4_load_be2(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..8];
+        [
+            u32::from_be_bytes(input[..4].try_into().unwrap()),
+            u32::from_be_bytes(input[4..8].try_into().unwrap()),
+            0,
+            0,
+        ]
+    }
+
+    #[inline]
+    fn u32x4_store_be(self, value: Self::U32x4, output: &mut [u8]) {
+        let output = &mut output[..16];
+        for (word, bytes) in value.into_iter().zip(output.as_chunks_mut::<4>().0) {
+            bytes.copy_from_slice(&word.to_be_bytes());
+        }
+    }
+
+    #[inline]
+    fn u32x4_align<const N: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..=4).contains(&N));
+        core::array::from_fn(|i| {
+            let j = N as usize + i;
+            if j < 4 { a[j] } else { b[j - 4] }
+        })
+    }
+
+    #[inline]
+    fn u32x4_blend<const MASK: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..16).contains(&MASK));
+        core::array::from_fn(|i| if MASK & (1 << i) != 0 { b[i] } else { a[i] })
+    }
+
     type U8 = [u8; 16];
     const U8_LANES: usize = 16;
 
@@ -251,6 +314,35 @@ impl Simd for EmulatedNeon {
 }
 
 impl Neon for EmulatedNeon {
+    #[inline]
+    fn sha256_h(self, abcd: Self::U32x4, efgh: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
+        let state = rounds(abcd, efgh, wk);
+        [state[0], state[1], state[2], state[3]]
+    }
+
+    #[inline]
+    fn sha256_h2(self, efgh: Self::U32x4, abcd: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
+        let state = rounds(abcd, efgh, wk);
+        [state[4], state[5], state[6], state[7]]
+    }
+
+    #[inline]
+    fn sha256_su0(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        let next = [a[1], a[2], a[3], b[0]];
+        core::array::from_fn(|i| a[i].wrapping_add(sigma0(next[i])))
+    }
+
+    #[inline]
+    fn sha256_su1(self, a: Self::U32x4, b: Self::U32x4, c: Self::U32x4) -> Self::U32x4 {
+        let mut result = [0u32; 4];
+        let next = [b[1], b[2], b[3], c[0]];
+        for i in 0..4 {
+            let previous = if i < 2 { c[i + 2] } else { result[i - 2] };
+            result[i] = a[i].wrapping_add(next[i]).wrapping_add(sigma1(previous));
+        }
+        result
+    }
+
     type U16 = [u16; 8];
 
     #[inline]
@@ -350,5 +442,212 @@ mod tests {
     fn profile_contracts() {
         test_utils::neon(EmulatedNeon);
         test_utils::widening(EmulatedNeon);
+    }
+}
+
+#[inline]
+const fn sigma0(x: u32) -> u32 {
+    x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3)
+}
+
+#[inline]
+const fn sigma1(x: u32) -> u32 {
+    x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10)
+}
+
+#[inline]
+fn rounds(abcd: [u32; 4], efgh: [u32; 4], wk: [u32; 4]) -> [u32; 8] {
+    let [mut a, mut b, mut c, mut d] = abcd;
+    let [mut e, mut f, mut g, mut h] = efgh;
+    for word in wk {
+        let t1 = h
+            .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+            .wrapping_add((e & f) ^ (!e & g))
+            .wrapping_add(word);
+        let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+            .wrapping_add((a & b) ^ (a & c) ^ (b & c));
+        (a, b, c, d, e, f, g, h) = (t1.wrapping_add(t2), a, b, c, d.wrapping_add(t1), e, f, g);
+    }
+    [a, b, c, d, e, f, g, h]
+}
+
+#[cfg(test)]
+mod sha_tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    // Independently expands all 64 schedule words and updates one round at a time.
+    fn oracle(mut state: [u32; 8], block: [u32; 16]) -> [u32; 8] {
+        let initial = state;
+        let mut w = [0u32; 64];
+        w[..16].copy_from_slice(&block);
+        for t in 16..64 {
+            let x = w[t - 15];
+            let y = w[t - 2];
+            w[t] = w[t - 16]
+                .wrapping_add(x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3))
+                .wrapping_add(w[t - 7])
+                .wrapping_add(y.rotate_right(17) ^ y.rotate_right(19) ^ (y >> 10));
+        }
+        for t in 0..64 {
+            let [a, b, c, d, e, f, g, h] = state;
+            let choice = (e & f) | (!e & g);
+            let majority = (a & b) | ((a | b) & c);
+            let first = h
+                .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+                .wrapping_add(choice)
+                .wrapping_add(K[t])
+                .wrapping_add(w[t]);
+            let second = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+                .wrapping_add(majority);
+            state = [
+                first.wrapping_add(second),
+                a,
+                b,
+                c,
+                d.wrapping_add(first),
+                e,
+                f,
+                g,
+            ];
+        }
+        core::array::from_fn(|i| initial[i].wrapping_add(state[i]))
+    }
+
+    fn compression<S: Neon>(simd: S, state: [u32; 8], block: [u32; 16]) -> [u32; 8] {
+        let mut schedule = [simd.u32x4_load(&[0; 4]); 16];
+        for i in 0..4 {
+            schedule[i] = simd.u32x4_load(&block[4 * i..]);
+        }
+        for i in 4..16 {
+            schedule[i] = simd.sha256_su1(
+                simd.sha256_su0(schedule[i - 4], schedule[i - 3]),
+                schedule[i - 2],
+                schedule[i - 1],
+            );
+        }
+        let mut abcd = simd.u32x4_load(&state);
+        let mut efgh = simd.u32x4_load(&state[4..]);
+        for i in 0..16 {
+            let wk = simd.u32x4_add(schedule[i], simd.u32x4_load(&K[4 * i..]));
+            let next = simd.sha256_h(abcd, efgh, wk);
+            efgh = simd.sha256_h2(efgh, abcd, wk);
+            abcd = next;
+        }
+        let mut result = [0; 8];
+        simd.u32x4_store(simd.u32x4_add(abcd, simd.u32x4_load(&state)), &mut result);
+        simd.u32x4_store(
+            simd.u32x4_add(efgh, simd.u32x4_load(&state[4..])),
+            &mut result[4..],
+        );
+        result
+    }
+
+    #[test]
+    fn test_sha256_compression_oracle() {
+        let simd = EmulatedNeon;
+        for seed in [0u32, 1, 0x8000_0000, u32::MAX, 0x1234_5678] {
+            let state =
+                core::array::from_fn(|i| seed.wrapping_add((i as u32).wrapping_mul(0x9e37_79b9)));
+            for word in [0, 1, u32::MAX, 0x8000_0000, 0xdead_beef] {
+                let block =
+                    core::array::from_fn(|i| word.wrapping_add((i as u32).wrapping_mul(seed)));
+                assert_eq!(compression(simd, state, block), oracle(state, block));
+                assert_eq!(
+                    compression(crate::emulated::EmulatedArmV9, state, block),
+                    oracle(state, block)
+                );
+            }
+        }
+        let initial = [
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        let mut empty = [0; 16];
+        empty[0] = 0x8000_0000;
+        assert_eq!(
+            compression(simd, initial, empty),
+            [
+                0xe3b0c442, 0x98fc1c14, 0x9afbf4c8, 0x996fb924, 0x27ae41e4, 0x649b934c, 0xa495991b,
+                0x7852b855
+            ]
+        );
+    }
+
+    #[test]
+    fn test_sha_register_memory() {
+        let simd = EmulatedNeon;
+        let bytes: [u8; 33] = core::array::from_fn(|i| (i as u8).wrapping_mul(17));
+        for offset in 0..16 {
+            let value = simd.u32x4_load_be(&bytes[offset..]);
+            let mut output = [0xa5; 18];
+            simd.u32x4_store_be(value, &mut output[1..]);
+            assert_eq!(&output[1..17], &bytes[offset..offset + 16]);
+            assert_eq!((output[0], output[17]), (0xa5, 0xa5));
+            let half = simd.u32x4_load_be2(&bytes[offset..]);
+            assert_eq!(half, [value[0], value[1], 0, 0]);
+        }
+        let input = [0, u32::MAX, 0x8000_0000, 0x1234_5678, 1, 0];
+        let value = simd.u32x4_load(&input[1..]);
+        let mut output = [0xa5; 6];
+        simd.u32x4_store(value, &mut output[1..]);
+        assert_eq!(&output[1..5], &input[1..5]);
+        assert_eq!((output[0], output[5]), (0xa5, 0xa5));
+        for len in 0..4 {
+            assert!(catch_unwind(|| simd.u32x4_load(&input[..len])).is_err());
+            let mut output = [0xa5; 4];
+            assert!(
+                catch_unwind(AssertUnwindSafe(
+                    || simd.u32x4_store(value, &mut output[..len])
+                ))
+                .is_err()
+            );
+            assert_eq!(output, [0xa5; 4]);
+        }
+        for len in 0..16 {
+            assert!(catch_unwind(|| simd.u32x4_load_be(&bytes[..len])).is_err());
+            if len < 8 {
+                assert!(catch_unwind(|| simd.u32x4_load_be2(&bytes[..len])).is_err());
+            }
+            let mut output = [0xa5; 16];
+            assert!(
+                catch_unwind(AssertUnwindSafe(
+                    || simd.u32x4_store_be([u32::MAX; 4], &mut output[..len])
+                ))
+                .is_err()
+            );
+            assert_eq!(output, [0xa5; 16]);
+        }
+    }
+
+    #[test]
+    fn test_sha2_execution_path() {
+        struct Path;
+        impl<S: Simd> Operation<S> for Path {
+            type Output = bool;
+            fn portable(self, _: S) -> bool {
+                false
+            }
+            fn neon(self, _: S) -> bool
+            where
+                S: Neon,
+            {
+                true
+            }
+        }
+        assert!(EmulatedNeon.execute(Path));
     }
 }

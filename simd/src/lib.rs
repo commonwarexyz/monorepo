@@ -18,10 +18,10 @@
 //!   IFMA's 52-bit multiply-accumulates, and SHA-NI on separate 128-bit vectors. This is a crate-defined bundle; AVX-512F alone does not imply GFNI,
 //!   IFMA, or SHA support. Any additional AVX-512 subsets required by modeled operations must also
 //!   be documented and checked.
-//! - `ArmV9`: Baseline NEON plus SVE and SVE2 explicitly required. Logical vectors have
+//! - `ArmV9`: The NEON with SHA2 bundle plus SVE and SVE2 explicitly required. Logical vectors have
 //!   128 bits; native instructions use the low 128 bits of SVE registers. Optional SVE2
 //!   extensions must be documented and checked separately.
-//! - `Neon`: Baseline AArch64 NEON operations on 128-bit vectors.
+//! - `Neon`: NEON and SHA2 operations on 128-bit vectors, targeting Apple silicon.
 //!
 //! Profiles describe checked instruction bundles, not required CPU models or vendors. A backend
 //! can implement a profile whenever it satisfies that contract. CPU generations do not imply
@@ -122,7 +122,7 @@
 //! }
 //!
 //! pub trait Neon: Simd {
-//!     // NEON profile instructions.
+//!     // NEON and SHA2 profile instructions.
 //! }
 //!
 //! pub trait Operation<S: Simd>: Sized {

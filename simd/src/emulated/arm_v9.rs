@@ -12,13 +12,76 @@ use crate::{ArmV9, Neon, Operation, Simd};
 /// ```
 /// use commonware_simd::{emulated::EmulatedArmV9, Simd};
 ///
-/// let s = EmulatedArmV9;
-/// assert_eq!(s.u64_splat(7), [7; 2]);
+/// let simd = EmulatedArmV9;
+/// assert_eq!(simd.u64_splat(7), [7; 2]);
 /// ```
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedArmV9;
 
 impl Simd for EmulatedArmV9 {
+    type U32x4 = [u32; 4];
+
+    #[inline]
+    fn u32x4_load(self, input: &[u32]) -> Self::U32x4 {
+        input[..4].try_into().unwrap()
+    }
+
+    #[inline]
+    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]) {
+        output[..4].copy_from_slice(&value);
+    }
+
+    #[inline]
+    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        core::array::from_fn(|i| a[i].wrapping_add(b[i]))
+    }
+
+    #[inline]
+    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4 {
+        assert!((0..256).contains(&MASK));
+        core::array::from_fn(|i| value[((MASK >> (2 * i)) & 3) as usize])
+    }
+
+    #[inline]
+    fn u32x4_load_be(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..16];
+        core::array::from_fn(|i| u32::from_be_bytes(input[4 * i..4 * i + 4].try_into().unwrap()))
+    }
+
+    #[inline]
+    fn u32x4_load_be2(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..8];
+        [
+            u32::from_be_bytes(input[..4].try_into().unwrap()),
+            u32::from_be_bytes(input[4..8].try_into().unwrap()),
+            0,
+            0,
+        ]
+    }
+
+    #[inline]
+    fn u32x4_store_be(self, value: Self::U32x4, output: &mut [u8]) {
+        let output = &mut output[..16];
+        for (word, bytes) in value.into_iter().zip(output.as_chunks_mut::<4>().0) {
+            bytes.copy_from_slice(&word.to_be_bytes());
+        }
+    }
+
+    #[inline]
+    fn u32x4_align<const N: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..=4).contains(&N));
+        core::array::from_fn(|i| {
+            let j = N as usize + i;
+            if j < 4 { a[j] } else { b[j - 4] }
+        })
+    }
+
+    #[inline]
+    fn u32x4_blend<const MASK: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..16).contains(&MASK));
+        core::array::from_fn(|i| if MASK & (1 << i) != 0 { b[i] } else { a[i] })
+    }
+
     type U8 = [u8; 16];
     const U8_LANES: usize = 16;
 
@@ -269,6 +332,23 @@ impl ArmV9 for EmulatedArmV9 {
 }
 
 impl Neon for EmulatedArmV9 {
+    #[inline]
+    fn sha256_h(self, abcd: Self::U32x4, efgh: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
+        super::neon::EmulatedNeon.sha256_h(abcd, efgh, wk)
+    }
+    #[inline]
+    fn sha256_h2(self, efgh: Self::U32x4, abcd: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
+        super::neon::EmulatedNeon.sha256_h2(efgh, abcd, wk)
+    }
+    #[inline]
+    fn sha256_su0(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        super::neon::EmulatedNeon.sha256_su0(a, b)
+    }
+    #[inline]
+    fn sha256_su1(self, a: Self::U32x4, b: Self::U32x4, c: Self::U32x4) -> Self::U32x4 {
+        super::neon::EmulatedNeon.sha256_su1(a, b, c)
+    }
+
     type U16 = [u16; 8];
 
     #[inline]
@@ -363,28 +443,30 @@ mod tests {
         vec::Vec,
     };
 
-    fn arm<S: ArmV9>(s: S) {
+    fn arm<S: ArmV9>(simd: S) {
         let a: Vec<u32> = (0..S::U32_LANES)
             .map(|i| 0xf13a_75c9u32.rotate_left(i as u32 * 3))
             .collect();
         let b: Vec<u32> = (0..S::U32_LANES)
             .map(|i| 0x81fe_2390u32.wrapping_mul(i as u32 + 1))
             .collect();
-        let av = s.u32_load(&a);
-        let bv = s.u32_load(&b);
+        let av = simd.u32_load(&a);
+        let bv = simd.u32_load(&b);
         macro_rules! rotations { ($($n:literal),*) => { $(
-            assert_eq!(words(s,s.u32_xor_rotate_right::<$n>(av,bv)),a.iter().zip(&b).map(|(a,b)| (a ^ b).rotate_right($n)).collect::<Vec<_>>());
+            assert_eq!(words(simd,simd.u32_xor_rotate_right::<$n>(av,bv)),a.iter().zip(&b).map(|(a,b)| (a ^ b).rotate_right($n)).collect::<Vec<_>>());
         )* }; }
         rotations!(0, 1, 7, 8, 12, 16, 31);
-        assert!(catch_unwind(AssertUnwindSafe(|| s.u32_xor_rotate_right::<32>(av, bv))).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| simd.u32_xor_rotate_right::<32>(av, bv))).is_err()
+        );
         assert!(
             catch_unwind(AssertUnwindSafe(
-                || s.u32_xor_rotate_right::<{ u32::MAX }>(av, bv)
+                || simd.u32_xor_rotate_right::<{ u32::MAX }>(av, bv)
             ))
             .is_err()
         );
-        assert_eq!(words(s, av), a);
-        assert_eq!(words(s, bv), b);
+        assert_eq!(words(simd, av), a);
+        assert_eq!(words(simd, bv), b);
     }
 
     #[test]

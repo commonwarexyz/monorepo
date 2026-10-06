@@ -7,22 +7,22 @@ use crate::{ArmV9, IceLake, Neon};
 use arbitrary::Unstructured;
 
 #[cfg(not(miri))]
-fn bytes<S: Simd>(s: S, value: S::U8) -> [u8; 66] {
+fn bytes<S: Simd>(simd: S, value: S::U8) -> [u8; 66] {
     let mut output = [0xa5; 66];
-    s.u8_store(value, &mut output[1..]);
+    simd.u8_store(value, &mut output[1..]);
     output
 }
 
 #[cfg(not(miri))]
-fn words<S: Simd>(s: S, value: S::U32) -> [u32; 18] {
+fn words<S: Simd>(simd: S, value: S::U32) -> [u32; 18] {
     let mut output = [0xa5a5_a5a5; 18];
-    s.u32_store(value, &mut output[1..]);
+    simd.u32_store(value, &mut output[1..]);
     output
 }
 
-pub fn longs<S: Simd>(s: S, value: S::U64) -> [u64; 10] {
+pub fn longs<S: Simd>(simd: S, value: S::U64) -> [u64; 10] {
     let mut output = [0xa5a5_a5a5_a5a5_a5a5; 10];
-    s.u64_store(value, &mut output[1..]);
+    simd.u64_store(value, &mut output[1..]);
     output
 }
 
@@ -31,6 +31,45 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
     assert_eq!(N::U8_LANES, E::U8_LANES);
     assert_eq!(N::U32_LANES, E::U32_LANES);
     assert_eq!(N::U64_LANES, E::U64_LANES);
+    let a: [u32; 4] = u.arbitrary()?;
+    let b: [u32; 4] = u.arbitrary()?;
+    let input: [u8; 18] = u.arbitrary()?;
+    let na = n.u32x4_load(&a);
+    let nb = n.u32x4_load(&b);
+    let ea = e.u32x4_load(&a);
+    let eb = e.u32x4_load(&b);
+    fn fixed<S: Simd>(simd: S, value: S::U32x4) -> [u32; 4] {
+        let mut output = [0; 4];
+        simd.u32x4_store(value, &mut output);
+        output
+    }
+    assert_eq!(fixed(n, na), fixed(e, ea));
+    assert_eq!(fixed(n, n.u32x4_add(na, nb)), fixed(e, e.u32x4_add(ea, eb)));
+    assert_eq!(
+        fixed(n, n.u32x4_load_be(&input[1..])),
+        fixed(e, e.u32x4_load_be(&input[1..]))
+    );
+    assert_eq!(
+        fixed(n, n.u32x4_load_be2(&input[1..])),
+        fixed(e, e.u32x4_load_be2(&input[1..]))
+    );
+    let mut native = input;
+    let mut emulated = input;
+    n.u32x4_store_be(na, &mut native[1..]);
+    e.u32x4_store_be(ea, &mut emulated[1..]);
+    assert_eq!(native, emulated);
+    macro_rules! align {
+        ($($offset:literal),*) => { $(
+            assert_eq!(fixed(n, n.u32x4_align::<$offset>(na, nb)), fixed(e, e.u32x4_align::<$offset>(ea, eb)));
+        )* };
+    }
+    align!(0, 1, 2, 3, 4);
+    macro_rules! blend {
+        ($($mask:literal),*) => { $(
+            assert_eq!(fixed(n, n.u32x4_blend::<$mask>(na, nb)), fixed(e, e.u32x4_blend::<$mask>(ea, eb)));
+        )* };
+    }
+    blend!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     let a: [u8; 65] = u.arbitrary()?;
     let b: [u8; 65] = u.arbitrary()?;
     let na = n.u8_load(&a[1..]);
@@ -128,13 +167,13 @@ pub fn common<N: Simd, E: Simd>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitra
 }
 
 #[cfg(not(miri))]
-fn halves<S: Neon>(s: S, value: S::U32Half) -> [u64; 10] {
-    longs(s, s.u32_widen_mul(value, s.u32_half_splat(1)))
+fn halves<S: Neon>(simd: S, value: S::U32Half) -> [u64; 10] {
+    longs(simd, simd.u32_widen_mul(value, simd.u32_half_splat(1)))
 }
 
 #[cfg(not(miri))]
-fn shorts<S: Neon>(s: S, value: S::U16) -> [u8; 66] {
-    bytes(s, s.u16_narrow_pair(value, s.u16_shr::<8>(value)))
+fn shorts<S: Neon>(simd: S, value: S::U16) -> [u8; 66] {
+    bytes(simd, simd.u16_narrow_pair(value, simd.u16_shr::<8>(value)))
 }
 
 #[cfg(not(miri))]
@@ -208,13 +247,44 @@ pub fn neon<N: Neon, E: Neon>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary
         longs(n, n.u32_widen_madd(n.u64_load(&acc), na, nb)),
         longs(e, e.u32_widen_madd(e.u64_load(&acc), ea, eb))
     );
+    let a: [u32; 4] = u.arbitrary()?;
+    let b: [u32; 4] = u.arbitrary()?;
+    let c: [u32; 4] = u.arbitrary()?;
+    let na = n.u32x4_load(&a);
+    let nb = n.u32x4_load(&b);
+    let nc = n.u32x4_load(&c);
+    let ea = e.u32x4_load(&a);
+    let eb = e.u32x4_load(&b);
+    let ec = e.u32x4_load(&c);
+    fn fixed<S: Simd>(simd: S, value: S::U32x4) -> [u32; 4] {
+        let mut output = [0; 4];
+        simd.u32x4_store(value, &mut output);
+        output
+    }
+    assert_eq!(
+        fixed(n, n.sha256_h(na, nb, nc)),
+        fixed(e, e.sha256_h(ea, eb, ec))
+    );
+    assert_eq!(
+        fixed(n, n.sha256_h2(na, nb, nc)),
+        fixed(e, e.sha256_h2(ea, eb, ec))
+    );
+    assert_eq!(
+        fixed(n, n.sha256_su0(na, nb)),
+        fixed(e, e.sha256_su0(ea, eb))
+    );
+    assert_eq!(
+        fixed(n, n.sha256_su1(na, nb, nc)),
+        fixed(e, e.sha256_su1(ea, eb, ec))
+    );
+
     Ok(())
 }
 
 #[cfg(not(miri))]
-fn words128<S: IceLake>(s: S, value: S::U32x4) -> [u32; 6] {
+fn words128<S: IceLake>(simd: S, value: S::U32x4) -> [u32; 6] {
     let mut output = [0xa5a5_a5a5; 6];
-    s.u32x4_store(value, &mut output[1..]);
+    simd.u32x4_store(value, &mut output[1..]);
     output
 }
 
@@ -224,6 +294,11 @@ pub fn ice_lake<N: IceLake, E: IceLake>(
     e: E,
     u: &mut Unstructured<'_>,
 ) -> arbitrary::Result<()> {
+    let input: [u8; 66] = u.arbitrary()?;
+    assert_eq!(
+        words(n, n.u32_load_be(&input[1..])),
+        words(e, e.u32_load_be(&input[1..]))
+    );
     let a: [u8; 64] = u.arbitrary()?;
     let b: [u8; 64] = u.arbitrary()?;
     assert_eq!(
@@ -346,7 +421,10 @@ pub fn ice_lake<N: IceLake, E: IceLake>(
         words(n, n.u32_unpacklo64(na, nb)),
         words(e, e.u32_unpacklo64(ea, eb))
     );
-    assert_eq!(words(n, n.u32_unpackhi64(na, nb)), words(e, e.u32_unpackhi64(ea, eb)));
+    assert_eq!(
+        words(n, n.u32_unpackhi64(na, nb)),
+        words(e, e.u32_unpackhi64(ea, eb))
+    );
     let c: [u32; 16] = u.arbitrary()?;
     let nc = n.u32_load(&c);
     let ec = e.u32_load(&c);

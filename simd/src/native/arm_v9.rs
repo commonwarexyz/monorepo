@@ -6,10 +6,10 @@ use core::arch::asm;
 
 /// Native Armv9 execution token with 16 byte, four u32, and two u64 lanes.
 ///
-/// This profile includes baseline NEON with fixed 128-bit logical vectors.
+/// This profile includes NEON and SHA2 with fixed 128-bit logical vectors.
 /// It does not expose scalable SVE vectors.
 ///
-/// Construction checks NEON, SVE, SVE2, and the calling thread's SVE vector
+/// Construction checks NEON, SHA2, SVE, SVE2, and the calling thread's SVE vector
 /// length. Only the low 128 bits are modeled, independently of the full SVE
 /// width. All supported SVE vector lengths are at least 128 bits, so moving
 /// a token to another thread does not invalidate its fixed lane counts.
@@ -17,11 +17,12 @@ use core::arch::asm;
 pub struct NativeArmV9(NativeNeon);
 
 impl NativeArmV9 {
-    /// Returns a token if NEON, SVE, and SVE2 are available and this thread's
+    /// Returns a token if NEON, SHA2, SVE, and SVE2 are available and this thread's
     /// SVE vector length contains the modeled 128 bits.
     ///
     /// With `std`, detects features at runtime. Without `std`, requires them
     /// to be enabled at compile time.
+    #[inline]
     pub fn new() -> Option<Self> {
         let neon = NativeNeon::new()?;
         #[cfg(feature = "std")]
@@ -47,13 +48,60 @@ impl NativeArmV9 {
     }
 
     #[inline]
-    #[target_feature(enable = "neon,sve,sve2")]
+    #[target_feature(enable = "neon,sha2,sve,sve2")]
     unsafe fn execute_arm_v9<O: Operation<Self>>(self, operation: O) -> O::Output {
         operation.arm_v9(self)
     }
 }
 
 impl Simd for NativeArmV9 {
+    type U32x4 = <NativeNeon as Simd>::U32x4;
+
+    #[inline]
+    fn u32x4_load(self, input: &[u32]) -> Self::U32x4 {
+        self.0.u32x4_load(input)
+    }
+
+    #[inline]
+    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]) {
+        self.0.u32x4_store(value, output)
+    }
+
+    #[inline]
+    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        self.0.u32x4_add(a, b)
+    }
+
+    #[inline]
+    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4 {
+        self.0.u32x4_shuffle::<MASK>(value)
+    }
+
+    #[inline]
+    fn u32x4_load_be(self, input: &[u8]) -> Self::U32x4 {
+        self.0.u32x4_load_be(input)
+    }
+
+    #[inline]
+    fn u32x4_load_be2(self, input: &[u8]) -> Self::U32x4 {
+        self.0.u32x4_load_be2(input)
+    }
+
+    #[inline]
+    fn u32x4_store_be(self, value: Self::U32x4, output: &mut [u8]) {
+        self.0.u32x4_store_be(value, output)
+    }
+
+    #[inline]
+    fn u32x4_align<const N: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        self.0.u32x4_align::<N>(a, b)
+    }
+
+    #[inline]
+    fn u32x4_blend<const MASK: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        self.0.u32x4_blend::<MASK>(a, b)
+    }
+
     type U8 = <NativeNeon as Simd>::U8;
     const U8_LANES: usize = 16;
     type U32 = <NativeNeon as Simd>::U32;
@@ -248,13 +296,30 @@ impl Simd for NativeArmV9 {
 
     #[inline]
     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
-        // SAFETY: Construction checked all three enabled features. Passing
+        // SAFETY: Construction checked NEON, SHA2, SVE, and SVE2. Passing
         // this token preserves the Armv9 path for nested child operations.
         unsafe { self.execute_arm_v9(operation) }
     }
 }
 
 impl Neon for NativeArmV9 {
+    #[inline]
+    fn sha256_h(self, abcd: Self::U32x4, efgh: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
+        self.0.sha256_h(abcd, efgh, wk)
+    }
+    #[inline]
+    fn sha256_h2(self, efgh: Self::U32x4, abcd: Self::U32x4, wk: Self::U32x4) -> Self::U32x4 {
+        self.0.sha256_h2(efgh, abcd, wk)
+    }
+    #[inline]
+    fn sha256_su0(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        self.0.sha256_su0(a, b)
+    }
+    #[inline]
+    fn sha256_su1(self, a: Self::U32x4, b: Self::U32x4, c: Self::U32x4) -> Self::U32x4 {
+        self.0.sha256_su1(a, b, c)
+    }
+
     type U16 = <NativeNeon as Neon>::U16;
     type U32Half = <NativeNeon as Neon>::U32Half;
 
