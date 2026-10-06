@@ -78,6 +78,7 @@ use std::{
     ptr::NonNull,
     sync::{Arc, Weak},
     task::{Context, Poll, RawWaker, RawWakerVTable, Wake, Waker},
+    thread,
 };
 
 cfg_if::cfg_if! {
@@ -892,9 +893,10 @@ impl Drop for Runnable {
     fn drop(&mut self) {
         // A second panic while unwinding would abort, and the task field still
         // releases its reference after this returns or panics.
-        if !std::thread::panicking() {
-            panic!("runnable dropped without being scheduled, polled, or discarded");
+        if thread::panicking() {
+            return;
         }
+        panic!("runnable dropped without being scheduled, polled, or discarded");
     }
 }
 
