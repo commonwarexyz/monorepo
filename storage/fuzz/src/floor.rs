@@ -16,6 +16,10 @@
 //! ends where a correct walk could end, and it never checks that the floor lies at or below every
 //! live update.
 //!
+//! Without the tip of the batch's writes, the oracle also cannot tell where a walk that decided
+//! every live key should end, and it checks a [`Limits::Proportional`] walk only for a floor that
+//! does not decrease and stays below the commit.
+//!
 //! Reopening a database rebuilds its state by replaying the log from the floor, so a target that
 //! reopens and then compares every key with its model catches a floor that passed an update
 //! still live at reopen. The batch root targets do so after their last commit, and the Store
@@ -169,7 +173,7 @@ impl<F: Family, K: Clone + AsRef<[u8]>, V: Clone + AsRef<[u8]>> Policy<F, K, V> 
         }
     }
 
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
+    fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         let location = *entry.location();
         let key = entry.key().clone();
         let value = entry.value().clone();

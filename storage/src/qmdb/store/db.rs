@@ -99,9 +99,10 @@ use crate::{
             unordered::{Update, variable::Operation},
         },
         bitmap::fill_from,
-        build_snapshot_from_log,
+        build_snapshot_from_log, delete_known_loc,
         floor::{Action, Entry, Limits, Policy, Walk},
         operation::{Committable as _, Floored as _, Key, Operation as _},
+        update_known_loc,
     },
     translator::Translator,
 };
@@ -523,7 +524,8 @@ where
         let mut resolved = {
             // Read each bucket in rounds sized by its unresolved batch keys. A sparse write stops
             // at its matching update, while a batch covering the bucket reads all its updates
-            // together.
+            // together. A bucket leaves the rounds once its keys are resolved or its updates run
+            // out, which means its remaining keys are absent.
             let mut buckets = HashMap::<Location, usize>::new();
             let mut sources: Vec<(_, usize)> = Vec::new();
             for key in diff.keys() {
@@ -542,8 +544,13 @@ where
             let mut candidates = Vec::new();
             loop {
                 candidates.clear();
+                sources.retain(|(_, pending)| *pending > 0);
                 for (index, (locations, pending)) in sources.iter_mut().enumerate() {
+                    let before = candidates.len();
                     candidates.extend(locations.by_ref().take(*pending).map(|loc| (loc, index)));
+                    if candidates.len() == before {
+                        *pending = 0;
+                    }
                 }
                 if candidates.is_empty() {
                     break;
@@ -656,7 +663,7 @@ where
         // decides them all. Candidates in the batch's own region already have their operations
         // in memory.
         let start = self.log.size();
-        let mut candidates = Vec::<u64>::new();
+        let mut candidates = Vec::<u64>::with_capacity(walk.entries.min(self.active_keys));
         fill_from(
             &self.bitmap,
             *walk.floor,
@@ -665,6 +672,9 @@ where
             &mut candidates,
         );
         let reachable = walk.reachable(&candidates);
+
+        // Each reached update appends at most one operation, and the commit follows.
+        ops.reserve(reachable + 1);
         let logged = candidates[..reachable].partition_point(|&loc| loc < start);
         let mut reads = if logged == 0 {
             Vec::new()
@@ -683,11 +693,6 @@ where
             let Operation::Update(Update(key, value)) = op else {
                 unreachable!("active candidate must be an update");
             };
-
-            // The cursor stays on the active update's slot across the synchronous decision, so
-            // each action rewrites or removes it without a second snapshot lookup.
-            let mut cursor = self.snapshot.get_mut(&key).expect("active key in snapshot");
-            assert!(cursor.find(|active| **active == loc));
             let new_loc = Location::new(start + ops.len() as u64);
             let action = match limits {
                 Limits::Proportional => Action::Write(value),
@@ -697,12 +702,12 @@ where
             };
             let op = match action {
                 Action::Write(value) => {
-                    cursor.update(new_loc);
+                    update_known_loc(&mut self.snapshot, &key, Location::new(loc), new_loc);
                     self.bitmap.push(true);
                     Operation::Update(Update(key, value))
                 }
                 Action::Evict => {
-                    cursor.delete();
+                    delete_known_loc(&mut self.snapshot, &key, Location::new(loc));
                     self.active_keys -= 1;
                     self.bitmap.push(false);
                     Operation::Delete(key)
@@ -758,8 +763,8 @@ mod test {
             any::{
                 batch::tests::{CountedValue, Evict, Growing},
                 test::{
-                    Choice, Script, assert_bound, churn, colliding_digest, counter, keep,
-                    keys_after, randomized_churn, walk_model,
+                    Choice, Script, assert_bits, assert_bound, churn, colliding_digest, counter,
+                    keep, keys_after, randomized_churn, replay, walk_model,
                 },
             },
             floor::{Compact, Hold, Proportional},
@@ -2239,10 +2244,9 @@ mod test {
         });
     }
 
-    /// A proportional move probes the snapshot index once: classifying the update positions the
-    /// cursor that rewrites its slot.
+    /// A proportional move probes the snapshot index once, when it rewrites the update's slot.
     #[test_traced("WARN")]
-    fn test_store_proportional_reuses_snapshot_cursor() {
+    fn test_store_proportional_probes_snapshot_once() {
         // A translator that counts its key transforms, one per snapshot probe.
         #[derive(Clone)]
         struct CountingTranslator(Arc<AtomicUsize>);
@@ -2879,32 +2883,21 @@ mod test {
             db.bitmap.pruned_bits(),
             bounds.start / chunk_bits * chunk_bits
         );
+        let positions: Vec<u64> = (bounds.start..bounds.end).collect();
+        let ops = db.log.read_many(&positions).await.unwrap();
         let mut live = BTreeMap::new();
-        for loc in bounds.start..bounds.end {
-            match db.log.read(loc).await.unwrap() {
-                Operation::Update(Update(key, _)) => {
-                    live.insert(key, loc);
-                }
-                Operation::Delete(key) => {
-                    live.remove(&key);
-                }
-                Operation::CommitFloor(..) => {}
-            }
-        }
-        let floor = *db.inactivity_floor_loc();
+        replay(&mut live, Location::new(bounds.start), &ops);
+        let floor = db.inactivity_floor_loc();
         assert!(
             live.values().all(|loc| *loc >= floor),
             "a live update lies below the floor {floor}",
         );
-        let active: BTreeSet<u64> = live.values().copied().chain([bounds.end - 1]).collect();
-        for loc in db.bitmap.pruned_bits()..bounds.end {
-            assert_eq!(db.bitmap.get_bit(loc), active.contains(&loc), "bit {loc}");
-        }
+        assert_bits(&db.bitmap, &live);
         assert_eq!(db.active_keys, live.len());
         assert_eq!(db.snapshot.items(), live.len());
         for (key, loc) in &live {
             assert!(
-                db.snapshot.get(key).any(|entry| **entry == *loc),
+                db.snapshot.get(key).any(|entry| entry == loc),
                 "snapshot misses the live update at {loc}",
             );
         }
@@ -2930,10 +2923,10 @@ mod test {
                 }
             }
 
-            fn decide<'a>(
+            fn decide(
                 &mut self,
-                entry: Entry<'a, crate::mmr::Family, Digest, Vec<u8>>,
-            ) -> crate::qmdb::floor::Decision<'a, Vec<u8>> {
+                entry: Entry<'_, crate::mmr::Family, Digest, Vec<u8>>,
+            ) -> crate::qmdb::floor::Decision<Vec<u8>> {
                 self.decisions[self.action] += 1;
                 match self.action {
                     0 => entry.keep(),

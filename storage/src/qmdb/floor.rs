@@ -27,13 +27,12 @@
 //! it then passes or never reaches, but only below both the tip and the inherited floor plus
 //! `skips` plus `entries`. Relinking an ordered database past evicted keys also reads the applied
 //! updates in their translated-key buckets and the buckets before them, wherever those lie.
+//!
+//! A walk reads candidates in rounds and may hold the operations of up to `entries` reached
+//! candidates in memory at once.
 
 use crate::merkle::{Family, Location};
 use commonware_utils::Widen;
-use std::marker::PhantomData;
-
-/// An invariant lifetime that ties a [`Decision`] to the call of [`Policy::decide`] that made it.
-type Brand<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
 
 /// How far a policy advances the floor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,13 +64,13 @@ pub trait Policy<F: Family, K, V> {
     /// The decision must depend only on the entry and the policy's own state, so the same batch
     /// and policy state always produce the same operations and root. A decision takes effect only
     /// if its batch is applied, so state the policy records in `decide` is provisional until then.
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V>;
+    fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V>;
 }
 
 /// An active update at the floor that [`Policy::decide`] receives.
 ///
-/// The entry borrows the update's key for `'a` and owns its value. `'a` is unique to one call of
-/// [`Policy::decide`], so the [`Decision`] an entry makes can only be returned from that call.
+/// The entry borrows the update's key and owns its value. Only its methods construct a
+/// [`Decision`].
 ///
 /// # Examples
 ///
@@ -88,30 +87,8 @@ pub trait Policy<F: Family, K, V> {
 ///         Limits::Fixed { entries: 1, skips: 0 }
 ///     }
 ///
-///     fn decide<'a>(&mut self, entry: Entry<'a, F, u64, u64>) -> Decision<'a, u64> {
+///     fn decide(&mut self, entry: Entry<'_, F, u64, u64>) -> Decision<u64> {
 ///         entry.evict().0
-///     }
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use commonware_storage::{
-///     merkle::Family,
-///     qmdb::floor::{Decision, Entry, Limits, Policy},
-/// };
-///
-/// struct Stash(Option<Decision<'static, u64>>);
-///
-/// impl<F: Family> Policy<F, u64, u64> for Stash {
-///     fn limits(&self) -> Limits {
-///         Limits::Fixed { entries: 2, skips: 0 }
-///     }
-///
-///     fn decide<'a>(&mut self, entry: Entry<'a, F, u64, u64>) -> Decision<'a, u64> {
-///         match self.0.replace(entry.keep()) {
-///             Some(stashed) => stashed,
-///             None => unreachable!(),
-///         }
 ///     }
 /// }
 /// ```
@@ -147,41 +124,37 @@ impl<'a, F: Family, K, V> Entry<'a, F, K, V> {
     }
 
     /// Move the update to the tip.
-    pub fn keep(self) -> Decision<'a, V> {
+    pub fn keep(self) -> Decision<V> {
         Decision::new(Action::Write(self.value))
     }
 
     /// Decide nothing for the update and end the walk with the floor at its location. On an
     /// ordered database, evicting the key that follows it still rewrites its link.
-    pub fn stop(self) -> Decision<'a, V> {
+    pub fn stop(self) -> Decision<V> {
         Decision::new(Action::Stop)
     }
 
     /// Write `value` for the key at the tip.
-    pub fn replace(self, value: V) -> Decision<'a, V> {
+    pub fn replace(self, value: V) -> Decision<V> {
         Decision::new(Action::Write(value))
     }
 
     /// Delete the key and return the decision with the owned value. A policy that needs the key
     /// clones [`key`](Self::key) first.
-    pub fn evict(self) -> (Decision<'a, V>, V) {
+    pub fn evict(self) -> (Decision<V>, V) {
         (Decision::new(Action::Evict), self.value)
     }
 }
 
 /// What a policy does with an [`Entry`]. Only the entry's methods construct it.
 #[derive(Debug)]
-pub struct Decision<'a, V> {
+pub struct Decision<V> {
     action: Action<V>,
-    brand: Brand<'a>,
 }
 
-impl<V> Decision<'_, V> {
+impl<V> Decision<V> {
     const fn new(action: Action<V>) -> Self {
-        Self {
-            action,
-            brand: PhantomData,
-        }
+        Self { action }
     }
 
     pub(crate) fn into_action(self) -> Action<V> {
@@ -308,7 +281,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Proportional {
     }
 
     /// Not called under [`Limits::Proportional`].
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
+    fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         entry.keep()
     }
 }
@@ -327,7 +300,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Hold {
     }
 
     /// Not called with zero `entries`.
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
+    fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         entry.stop()
     }
 }
@@ -349,7 +322,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Compact {
         }
     }
 
-    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
+    fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         entry.keep()
     }
 }

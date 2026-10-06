@@ -1190,7 +1190,7 @@ where
     /// [`Limits::Fixed`], the decisions it collected in ascending location order.
     ///
     /// Under [`Limits::Proportional`], every active update the walk reaches moves to the tip: one
-    /// entry for each of the `made_inactive` operations and one for the previous commit. Under
+    /// entry for each operation the writes made inactive and one for the previous commit. Under
     /// [`Limits::Fixed`], `policy` decides each one and the decisions wait for the caller to
     /// emit them, so the diff the walk classifies against stays a snapshot of the state after the
     /// writes, which is what [a move](Move) resolves against. An empty state has no active
@@ -1209,7 +1209,6 @@ where
         &self,
         walked: &mut Walked<F, U>,
         mut superseded_locs: Vec<Location<F>>,
-        made_inactive: u64,
         policy: &mut P,
         limits: Limits,
         mut prefetched: Option<Prefetched<F, U>>,
@@ -1237,14 +1236,21 @@ where
             }));
         }
 
-        // A proportional walk spends one entry per operation the batch makes inactive, which
-        // `made_inactive` counts, and one for the previous commit. Its moves lie above the tip,
-        // which the walk never reaches, and each moves one of the active keys.
+        // A proportional walk spends one entry per operation the writes made inactive and one for
+        // the previous commit. Every write supersedes one update except a create, and a delete is
+        // itself inactive, so the writes made `ops.len() - active_keys_delta` operations inactive:
+        // one per superseded update and two per delete. The walk's moves lie above the tip, which
+        // it never reaches, and each moves one of the active keys.
         let active_keys =
             usize::try_from(self.base_active_keys as isize + walked.active_keys_delta)
                 .expect("active_keys underflow");
         let (entries, skips) = match limits {
-            Limits::Proportional => ((made_inactive + 1) as usize, u64::MAX),
+            Limits::Proportional => {
+                let made_inactive =
+                    usize::try_from(walked.ops.len() as isize - walked.active_keys_delta)
+                        .expect("a batch creates at most one key per write");
+                (made_inactive + 1, u64::MAX)
+            }
             Limits::Fixed { entries, skips } => (entries, skips),
         };
         let tip = self.base_state.size + walked.ops.len() as u64;
@@ -1324,9 +1330,16 @@ where
                 |(loc, op)| op.key().and_then(|key| self.classify(diff, *loc, key)),
             );
 
-            // The round decides at most its candidates and the remaining entries.
+            // The round decides at most its candidates, the remaining entries, and the active
+            // keys not yet decided.
             if matches!(limits, Limits::Fixed { .. }) {
-                decided.reserve(round.candidates.len().min(walk.entries));
+                decided.reserve(
+                    round
+                        .candidates
+                        .len()
+                        .min(walk.entries)
+                        .min(active_keys - decided.len()),
+                );
             }
 
             // Reach each active candidate in order, moving committed operations out of the read
@@ -2386,7 +2399,6 @@ where
         // ancestor diffs, so the walk usually skips sorting them.
         let mut superseded_locs: Vec<Location<F>> = Vec::with_capacity(diff.capacity());
         let mut active_keys_delta: isize = 0;
-        let mut made_inactive: u64 = 0;
 
         // Write a user mutation at the next batch location, preserving the previous committed
         // location of the key it supersedes.
@@ -2407,13 +2419,11 @@ where
                             base_old_loc,
                         },
                     ));
-                    made_inactive += 1;
                 }
                 None => {
                     ops.push(Operation::Delete(key.clone()));
                     diff.push((key, DiffEntry::Deleted { base_old_loc }));
                     active_keys_delta -= 1;
-                    made_inactive += 2;
                 }
             }
         };
@@ -2498,7 +2508,6 @@ where
             .walk(
                 &mut walked,
                 superseded_locs,
-                made_inactive,
                 policy,
                 limits,
                 prefetched,
@@ -2840,7 +2849,6 @@ where
         let mut diff: DiffVec<K, F, V::Value> =
             Vec::with_capacity(deleted.len() + updated.len() + created.len());
         let mut active_keys_delta: isize = 0;
-        let mut made_inactive: u64 = 0;
 
         // Process deletes.
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
@@ -2853,7 +2861,6 @@ where
 
             diff.push((key, DiffEntry::Deleted { base_old_loc }));
             active_keys_delta -= 1;
-            made_inactive += 2;
         }
         let deleted_range = 0..diff.len();
 
@@ -2882,7 +2889,6 @@ where
                     base_old_loc,
                 },
             ));
-            made_inactive += 1;
         }
 
         // Process creates.
@@ -2948,7 +2954,6 @@ where
                         base_old_loc: prev_base_old_loc,
                     },
                 ));
-                made_inactive += 1;
             }
         }
 
@@ -2968,7 +2973,6 @@ where
             .walk(
                 &mut walked,
                 superseded_locs,
-                made_inactive,
                 policy,
                 limits,
                 prefetched,
@@ -3986,10 +3990,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide<'a>(
+        fn decide(
             &mut self,
-            entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
-        ) -> Decision<'a, CountedValue> {
+            entry: Entry<'_, mmr::Family, sha256::Digest, CountedValue>,
+        ) -> Decision<CountedValue> {
             self.decided.push((*entry.key(), entry.value().clones()));
             entry.keep()
         }
@@ -4072,10 +4076,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide<'a>(
+        fn decide(
             &mut self,
-            entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
-        ) -> Decision<'a, CountedValue> {
+            entry: Entry<'_, mmr::Family, sha256::Digest, CountedValue>,
+        ) -> Decision<CountedValue> {
             let location = entry.location();
             let key = *entry.key();
             let before = entry.value().clones();
@@ -4349,10 +4353,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide<'a>(
+        fn decide(
             &mut self,
-            entry: Entry<'a, mmr::Family, sha256::Digest, sha256::Digest>,
-        ) -> Decision<'a, sha256::Digest> {
+            entry: Entry<'_, mmr::Family, sha256::Digest, sha256::Digest>,
+        ) -> Decision<sha256::Digest> {
             self.decided += 1;
             entry.keep()
         }
