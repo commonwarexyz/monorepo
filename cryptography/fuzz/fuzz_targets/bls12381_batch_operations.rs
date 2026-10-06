@@ -1,10 +1,7 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_cryptography::{
-    BatchEntry, BatchVerifier, Signer, Verifier,
-    bls12381::{self, Batch},
-};
+use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier, bls12381};
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
@@ -118,7 +115,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let result = Batch::verify(
+    let result = bls12381::PublicKey::verify_batch(
         &mut rng,
         &state.batch,
         |_, (namespace, message, public_key, signature)| BatchEntry {

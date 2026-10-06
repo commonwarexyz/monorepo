@@ -6,7 +6,7 @@
 #[cfg(feature = "mocks")]
 pub mod mocks;
 
-use super::{Batch, PrivateKey, PublicKey, Signature as Ed25519Signature};
+use super::{PrivateKey, PublicKey, Signature as Ed25519Signature};
 use crate::{
     BatchEntry, BatchVerifier as _, Digest, Signer as _, Verifier as _,
     certificate::{AssemblyError, Attestation, Namespace, Scheme, Signers, Subject, Verification},
@@ -149,7 +149,7 @@ impl<N: Namespace> Generic<N> {
         }
 
         if !candidates.is_empty()
-            && !Batch::verify(
+            && !PublicKey::verify_batch(
                 rng,
                 &candidates,
                 |_, (attestation, public_key)| BatchEntry {
@@ -256,7 +256,7 @@ impl<N: Namespace> Generic<N> {
 
         let namespace = subject.namespace(&self.namespace);
         let message = subject.message();
-        Batch::verify(
+        PublicKey::verify_batch(
             rng,
             &entries,
             |_, (public_key, signature)| BatchEntry {
@@ -299,7 +299,7 @@ impl<N: Namespace> Generic<N> {
             messages.push((subject.namespace(&self.namespace), subject.message()));
         }
 
-        Batch::verify(
+        PublicKey::verify_batch(
             rng,
             &entries,
             |_, (index, public_key, signature)| BatchEntry {

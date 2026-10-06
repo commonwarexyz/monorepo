@@ -177,6 +177,7 @@ commonware_macros::stability_scope!(BETA {
     ///
     /// All fields must remain available throughout batch verification. Messages are
     /// supplied unhashed, and namespaces must match those used during signing.
+    #[derive(Clone)]
     pub struct BatchEntry<'a, P: PublicKey> {
         /// The namespace used during signing.
         pub namespace: &'a [u8],
@@ -190,29 +191,24 @@ commonware_macros::stability_scope!(BETA {
 
     impl<P: PublicKey> Copy for BatchEntry<'_, P> {}
 
-    impl<P: PublicKey> Clone for BatchEntry<'_, P> {
-        fn clone(&self) -> Self {
-            *self
-        }
-    }
-
-    /// Verifies whether all [Signature]s are correct or some [Signature] is incorrect.
-    pub trait BatchVerifier {
-        /// The type of public keys that this verifier can accept.
-        type PublicKey: PublicKey;
-
-        /// Verify a slice of items through borrowed views of their signature data.
+    /// A [PublicKey] that supports batch verification of [Signature]s.
+    pub trait BatchVerifier: PublicKey {
+        /// Verify all signatures projected from a slice of items.
         ///
-        /// The projection receives the item's original index in the slice and a
-        /// reference to the item. It must return the same entry whenever called
-        /// for that index and item, even if verification reorders the batch.
-        /// It may be called more than once and concurrently. Its references must
-        /// point to data that remains available throughout this call. The message
-        /// must not be hashed before verification. Each namespace must match
-        /// the one used during signing, as in [Verifier::verify].
+        /// The projection receives each item's original slice index and a reference
+        /// to that item. It may be called repeatedly and concurrently, and must
+        /// return the same entry each time for a given index and item. Projections
+        /// that use only the index may use a slice of `()` values.
+        ///
+        /// Messages should not be hashed before calling this function. Any hashing
+        /// required by the signature scheme is performed internally.
+        ///
+        /// Each namespace must match the one used during signing exactly. Use distinct
+        /// namespaces for distinct signing contexts to prevent replay attacks. For
+        /// example, a signature on a message in the network layer must not authorize
+        /// spending funds in the execution layer.
         ///
         /// Returns `false` if the slice is empty or any signature is invalid.
-        /// Projections that use only the index may use a slice of `()` values.
         ///
         /// # Examples
         ///
@@ -226,7 +222,7 @@ commonware_macros::stability_scope!(BETA {
         /// let public_key = key.public_key();
         /// let namespace = b"example";
         /// let records = [(b"message".as_slice(), key.sign(namespace, b"message"))];
-        /// assert!(ed25519::Batch::verify(
+        /// assert!(ed25519::PublicKey::verify_batch(
         ///     &mut test_rng(),
         ///     &records,
         ///     |_, (message, signature)| BatchEntry {
@@ -241,10 +237,14 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// # Why Randomness?
         ///
-        /// Randomness prevents an attacker from constructing invalid signatures
-        /// whose errors cancel in the batch equation. See this
-        /// [discussion](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-        fn verify<'a, R, T, F>(
+        /// When performing batch verification, it is often important to add some randomness
+        /// to prevent an attacker from constructing a malicious batch of signatures that pass
+        /// batch verification but are invalid individually. Abstractly, think of this as
+        /// there existing two valid signatures (`c_1` and `c_2`) and an attacker proposing
+        /// (`c_1 + d` and `c_2 - d`).
+        ///
+        /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
+        fn verify_batch<'a, R, T, F>(
             rng: &mut R,
             items: &'a [T],
             project: F,
@@ -253,7 +253,7 @@ commonware_macros::stability_scope!(BETA {
         where
             R: CryptoRng,
             T: Sync,
-            F: Fn(usize, &'a T) -> BatchEntry<'a, Self::PublicKey> + Sync;
+            F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests

@@ -1,10 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{
-    BatchEntry, BatchVerifier, Signer, Verifier,
-    ed25519::{self, Batch as Ed25519Batch},
-};
+use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier, ed25519};
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
@@ -94,7 +91,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             BatchOperation::VerifyEd25519 => {
-                let result = Ed25519Batch::verify(
+                let result = ed25519::PublicKey::verify_batch(
                     &mut rng,
                     &ed25519_batch,
                     |_, (namespace, message, public_key, signature)| BatchEntry {
@@ -119,7 +116,7 @@ fn fuzz(input: FuzzInput) {
     }
 
     // Final verification of any remaining items
-    let ed25519_result = Ed25519Batch::verify(
+    let ed25519_result = ed25519::PublicKey::verify_batch(
         &mut rng,
         &ed25519_batch,
         |_, (namespace, message, public_key, signature)| BatchEntry {

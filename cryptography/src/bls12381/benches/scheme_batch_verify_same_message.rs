@@ -30,7 +30,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                         |batch| {
                             #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
-                                black_box(bls12381::Batch::verify(
+                                black_box(bls12381::PublicKey::verify_batch(
                                     &mut verify_rng,
                                     &batch,
                                     |_, (public_key, signature)| BatchEntry {
@@ -42,7 +42,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                                     rayon,
                                 ))
                             } else {
-                                black_box(bls12381::Batch::verify(
+                                black_box(bls12381::PublicKey::verify_batch(
                                     &mut verify_rng,
                                     &batch,
                                     |_, (public_key, signature)| BatchEntry {

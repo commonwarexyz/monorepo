@@ -848,13 +848,13 @@ mod test {
         }];
 
         // Both batches must verify the same transcript signature.
-        assert!(ed25519::Batch::verify(
+        assert!(ed25519::PublicKey::verify_batch(
             &mut test_rng(),
             &summary_batch,
             |_, entry| *entry,
             &Sequential,
         ));
-        assert!(ed25519::Batch::verify(
+        assert!(ed25519::PublicKey::verify_batch(
             &mut test_rng(),
             &transcript_batch,
             |_, entry| *entry,
@@ -996,7 +996,7 @@ mod test {
             }];
             log.extend(true.encode());
             log.extend(
-                ed25519::Batch::verify(
+                ed25519::PublicKey::verify_batch(
                     &mut transcript.noise(b"summary batch"),
                     &summary_batch,
                     |_, entry| *entry,
@@ -1015,7 +1015,7 @@ mod test {
             }];
             log.extend(true.encode());
             log.extend(
-                ed25519::Batch::verify(
+                ed25519::PublicKey::verify_batch(
                     &mut transcript.noise(b"transcript batch"),
                     &transcript_batch,
                     |_, entry| *entry,

@@ -150,6 +150,36 @@ impl crate::Verifier for PublicKey {
     }
 }
 
+impl BatchVerifier for PublicKey {
+    fn verify_batch<'a, R, T, F>(
+        rng: &mut R,
+        items: &'a [T],
+        project: F,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRng,
+        T: Sync,
+        F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
+    {
+        ed_core::batch::verify_projected(
+            rng,
+            items,
+            |i, item| {
+                let entry = project(i, item);
+                (
+                    &entry.public_key.key,
+                    ed_core::Signature::from(entry.signature.raw),
+                    Some(entry.namespace),
+                    entry.message,
+                )
+            },
+            strategy,
+        )
+        .is_ok()
+    }
+}
+
 impl PublicKey {
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
@@ -319,41 +349,6 @@ impl arbitrary::Arbitrary<'_> for Signature {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(private_key.sign(&[], &message))
-    }
-}
-
-/// Ed25519 batch verifier.
-pub struct Batch;
-
-impl BatchVerifier for Batch {
-    type PublicKey = PublicKey;
-
-    fn verify<'a, R, T, F>(
-        rng: &mut R,
-        items: &'a [T],
-        project: F,
-        strategy: &impl Strategy,
-    ) -> bool
-    where
-        R: CryptoRng,
-        T: Sync,
-        F: Fn(usize, &'a T) -> BatchEntry<'a, PublicKey> + Sync,
-    {
-        ed_core::batch::verify_projected(
-            rng,
-            items,
-            |i, item| {
-                let entry = project(i, item);
-                (
-                    &entry.public_key.key,
-                    ed_core::Signature::from(entry.signature.raw),
-                    Some(entry.namespace),
-                    entry.message,
-                )
-            },
-            strategy,
-        )
-        .is_ok()
     }
 }
 
@@ -721,7 +716,7 @@ mod tests {
     #[test]
     fn batch_verify_empty() {
         let entries: [BatchEntry<'_, PublicKey>; 0] = [];
-        assert!(!Batch::verify(
+        assert!(!PublicKey::verify_batch(
             &mut test_rng(),
             &entries,
             |_, entry| *entry,
@@ -747,7 +742,12 @@ mod tests {
                     signature: &signature,
                 }];
                 assert_eq!(
-                    Batch::verify(&mut test_rng(), &entries, |_, entry| *entry, &Sequential),
+                    PublicKey::verify_batch(
+                        &mut test_rng(),
+                        &entries,
+                        |_, entry| *entry,
+                        &Sequential
+                    ),
                     supplied_namespace == namespace,
                 );
             }
@@ -761,7 +761,7 @@ mod tests {
                     public_key: &public_key,
                     signature: &signature,
                 }];
-                assert!(!Batch::verify(
+                assert!(!PublicKey::verify_batch(
                     &mut test_rng(),
                     &entries,
                     |_, entry| *entry,
@@ -779,7 +779,7 @@ mod tests {
             publics: &[PublicKey; 2],
             strategy: &impl Strategy,
         ) -> bool {
-            Batch::verify(
+            PublicKey::verify_batch(
                 &mut test_rng(),
                 records,
                 |index, record| {
@@ -829,7 +829,7 @@ mod tests {
 
         // Empty input must fail verification.
         let empty: [BatchEntry<'_, PublicKey>; 0] = [];
-        assert!(!Batch::verify(
+        assert!(!PublicKey::verify_batch(
             &mut rng,
             &empty,
             |_, entry| *entry,
@@ -846,7 +846,7 @@ mod tests {
             strategy: &impl Strategy,
         ) -> bool {
             let items = vec![(); messages.len()];
-            Batch::verify(
+            PublicKey::verify_batch(
                 &mut test_rng(),
                 &items,
                 |index, ()| BatchEntry {

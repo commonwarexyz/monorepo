@@ -45,7 +45,7 @@ fn bench_batch_verify(c: &mut Criterion) {
             |b| {
                 b.iter(|| {
                     if concurrency == 1 {
-                        black_box(ed25519::Batch::verify(
+                        black_box(ed25519::PublicKey::verify_batch(
                             &mut verify_rng,
                             &items,
                             |_, (public_key, message, signature)| BatchEntry {
@@ -57,7 +57,7 @@ fn bench_batch_verify(c: &mut Criterion) {
                             &Sequential,
                         ))
                     } else {
-                        black_box(ed25519::Batch::verify(
+                        black_box(ed25519::PublicKey::verify_batch(
                             &mut verify_rng,
                             &items,
                             |_, (public_key, message, signature)| BatchEntry {

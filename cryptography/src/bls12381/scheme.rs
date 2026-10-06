@@ -151,6 +151,35 @@ impl crate::Verifier for PublicKey {
     }
 }
 
+impl BatchVerifier for PublicKey {
+    fn verify_batch<'a, R, T, F>(
+        rng: &mut R,
+        items: &'a [T],
+        project: F,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRng,
+        T: Sync,
+        F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
+    {
+        let mut publics = Vec::with_capacity(items.len());
+        let mut hms = Vec::with_capacity(items.len());
+        let mut signatures = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let entry = project(i, item);
+            publics.push(entry.public_key.key);
+            hms.push(ops::hash_with_namespace::<MinPk>(
+                MinPk::MESSAGE,
+                entry.namespace,
+                entry.message,
+            ));
+            signatures.push(entry.signature.signature);
+        }
+        MinPk::batch_verify(rng, &publics, &hms, &signatures, strategy).is_ok()
+    }
+}
+
 /// BLS12-381 public key.
 #[derive(Clone, Eq, FixedArray)]
 pub struct PublicKey {
@@ -371,40 +400,6 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
-/// BLS12-381 batch verifier.
-pub struct Batch;
-
-impl BatchVerifier for Batch {
-    type PublicKey = PublicKey;
-
-    fn verify<'a, R, T, F>(
-        rng: &mut R,
-        items: &'a [T],
-        project: F,
-        strategy: &impl Strategy,
-    ) -> bool
-    where
-        R: CryptoRng,
-        T: Sync,
-        F: Fn(usize, &'a T) -> BatchEntry<'a, Self::PublicKey> + Sync,
-    {
-        let mut publics = Vec::with_capacity(items.len());
-        let mut hms = Vec::with_capacity(items.len());
-        let mut signatures = Vec::with_capacity(items.len());
-        for (i, item) in items.iter().enumerate() {
-            let entry = project(i, item);
-            publics.push(entry.public_key.key);
-            hms.push(ops::hash_with_namespace::<MinPk>(
-                MinPk::MESSAGE,
-                entry.namespace,
-                entry.message,
-            ));
-            signatures.push(entry.signature.signature);
-        }
-        MinPk::batch_verify(rng, &publics, &hms, &signatures, strategy).is_ok()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,7 +478,7 @@ mod tests {
     #[test]
     fn batch_verify_empty() {
         let entries: [BatchEntry<'_, PublicKey>; 0] = [];
-        assert!(!Batch::verify(
+        assert!(!PublicKey::verify_batch(
             &mut test_rng(),
             &entries,
             |_, entry| *entry,
@@ -504,7 +499,7 @@ mod tests {
             public_key: &public_key,
             signature: &signature,
         }];
-        assert!(Batch::verify(
+        assert!(PublicKey::verify_batch(
             &mut rng,
             &entries,
             |_, entry| *entry,
@@ -513,7 +508,7 @@ mod tests {
 
         // Changing the message must invalidate the signature.
         entries[0].message = b"invalid";
-        assert!(!Batch::verify(
+        assert!(!PublicKey::verify_batch(
             &mut rng,
             &entries,
             |_, entry| *entry,
@@ -534,7 +529,7 @@ mod tests {
         // Verify the valid batch and reject a changed message at every index.
         for invalid in [None, Some(0), Some(1), Some(2)] {
             assert_eq!(
-                Batch::verify(
+                PublicKey::verify_batch(
                     &mut rng,
                     &items,
                     |index, ()| BatchEntry {
