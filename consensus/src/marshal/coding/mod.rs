@@ -823,7 +823,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_coding_verify_missing_candidate_fetches_exact_commitment() {
+    fn test_coding_verify_missing_candidate_waits_without_fetching() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture {
@@ -871,11 +871,11 @@ mod tests {
                 "missing candidate should register a local buffer wait"
             );
             assert!(
-                resolver
+                !resolver
                     .fetches()
                     .iter()
                     .any(|fetch| fetch.key == handler::Key::Block(commitment)),
-                "missing candidate verification must acquire the exact commitment"
+                "missing candidate verification must not fetch from peers"
             );
             drop(verify_rx);
         });
@@ -955,6 +955,8 @@ mod tests {
         });
     }
 
+    /// Certification fetches the exact commitment for a verification that waits only for
+    /// local reconstruction, and the verification completes once the block arrives.
     #[test_traced("WARN")]
     fn test_coding_certify_pending_verify_fetches_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -998,33 +1000,35 @@ mod tests {
                     Arc::from([candidate_ctx.parent.1]),
                 )
                 .await;
-
-            while resolver.fetches().is_empty() {
-                reschedule().await;
-            }
+            context.sleep(Duration::from_millis(100)).await;
             assert!(
-                resolver
-                    .deliver(resolver.fetches()[0].clone(), candidate.encode())
-                    .await
+                resolver.fetches().is_empty(),
+                "pending verification must wait for the candidate without fetching it"
             );
+
             let certify_rx = marshaled
                 .certify(round, commitment, Arc::from([candidate_ctx.parent.1]))
                 .await;
-
-            let result = certify_rx.await.expect("certify result missing");
+            while resolver.fetches().is_empty() {
+                reschedule().await;
+            }
+            let fetch = resolver.fetches()[0].clone();
             assert!(
-                result,
-                "pending verify should complete after certification recovery"
-            );
-            assert!(
-                resolver.fetches().iter().any(|fetch| matches!(
+                matches!(
                     (&fetch.key, &fetch.subscriber),
                     (
                         handler::Key::Block(requested),
                         handler::Annotation::Subscription,
                     ) if *requested == commitment
-                )),
-                "certify should recover a pending verify by exact commitment"
+                ),
+                "certification must fetch the exact commitment"
+            );
+            assert!(resolver.deliver(fetch, candidate.encode()).await);
+
+            let result = certify_rx.await.expect("certify result missing");
+            assert!(
+                result,
+                "pending verification should complete once certification fetches the block"
             );
         });
     }
