@@ -27,7 +27,8 @@
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-#[cfg(all(not(feature = "std"), target_arch = "x86_64"))]
+#[cfg(not(feature = "std"))]
+#[commonware_macros::stability(ALPHA)]
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{
@@ -45,8 +46,7 @@ use rand_core::CryptoRng;
 use sha2::{Digest as _, Sha256 as ISha256, block_api::compress256};
 use zeroize::Zeroize;
 
-#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-mod simd;
+commonware_macros::stability_mod!(ALPHA, mod simd);
 
 /// Re-export `sha2::Sha256` as `CoreSha256` for external use if needed.
 pub type CoreSha256 = ISha256;
@@ -79,6 +79,27 @@ fn digest_from_state(state: [u32; 8]) -> [u8; DIGEST_LENGTH] {
     out
 }
 
+/// Length of a fresh tail and its SHA-256 padding, in bytes.
+#[inline(always)]
+const fn padding_length(tail_len: usize) -> usize {
+    assert!(tail_len <= MAX_FIXED);
+    if tail_len < BLOCK_LENGTH - 8 {
+        BLOCK_LENGTH
+    } else {
+        2 * BLOCK_LENGTH
+    }
+}
+
+/// Pads a tail whose remaining bytes are zero, using the full message length.
+#[inline(always)]
+fn pad_fresh(scratch: &mut [u8; 2 * BLOCK_LENGTH], tail_len: usize, total_len: usize) -> usize {
+    let padded_len = padding_length(tail_len);
+    scratch[tail_len] = 0x80;
+    scratch[padded_len - 8..padded_len]
+        .copy_from_slice(&(total_len as u64).wrapping_mul(8).to_be_bytes());
+    padded_len
+}
+
 /// Pad and compress `scratch[..len]` (where `len <= MAX_FIXED`) directly from
 /// the IV, assuming `scratch[len..]` is already zeroed (i.e. fresh scratch).
 ///
@@ -86,18 +107,14 @@ fn digest_from_state(state: [u32; 8]) -> [u8; DIGEST_LENGTH] {
 /// the padding region, which is the bulk of the one-shot speedup.
 #[inline]
 fn finalize_fixed_fresh(scratch: &mut [u8; 2 * BLOCK_LENGTH], len: usize) -> [u8; DIGEST_LENGTH] {
-    assert!(len <= MAX_FIXED);
-    let bit_len = ((len as u64) * 8).to_be_bytes();
-    scratch[len] = 0x80;
+    let padded_len = pad_fresh(scratch, len, len);
     let mut state = IV;
-    if len < BLOCK_LENGTH - 8 {
+    if padded_len == BLOCK_LENGTH {
         // Message + padding fit in a single block.
-        scratch[BLOCK_LENGTH - 8..BLOCK_LENGTH].copy_from_slice(&bit_len);
         let (blocks, _) = scratch[..BLOCK_LENGTH].as_chunks::<BLOCK_LENGTH>();
         compress256(&mut state, blocks);
     } else {
         // Padding spills into a second block.
-        scratch[2 * BLOCK_LENGTH - 8..].copy_from_slice(&bit_len);
         let (blocks, _) = scratch.as_chunks::<BLOCK_LENGTH>();
         compress256(&mut state, blocks);
     }
@@ -139,7 +156,7 @@ fn hash_specialized(parts: &[&[u8]]) -> Digest {
     }
 }
 
-/// General-purpose assembly + streaming fallback for shapes that miss the
+/// General-purpose fixed-buffer and streaming fallback for shapes that miss the
 /// specialized arms (e.g. single-part messages and variable-length leaves).
 /// Outlined so it never bloats callers.
 #[inline(never)]
@@ -193,42 +210,22 @@ impl Hasher for Sha256 {
 
     #[inline]
     fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest) {
-        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        )))]
         if let Some(pair) = simd::hash_pair(left, right) {
             return pair;
         }
         (Self::hash(left), Self::hash(right))
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[commonware_macros::stability(ALPHA)]
     fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-        let Some(minimum) = simd::minimum_x16_batch_len() else {
-            return messages
-                .iter()
-                .map(|message| Self::hash(&[message.as_ref()]))
-                .collect();
-        };
-
-        // Adjacent equal-length runs satisfy the kernel's length requirement and
-        // keep the resulting digests in input order.
-        let mut digests = Vec::with_capacity(messages.len());
-        for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-            for batch in run.chunks(simd::X16_LANES) {
-                if batch.len() >= minimum {
-                    // Spare lanes borrow the first input; only active lanes contribute output.
-                    let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
-                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
-                        *input = message.as_ref();
-                    }
-                    if let Some(batch_digests) = simd::hash_x16(inputs) {
-                        digests.extend_from_slice(&batch_digests[..batch.len()]);
-                        continue;
-                    }
-                }
-                digests.extend(batch.iter().map(|message| Self::hash(&[message.as_ref()])));
-            }
-        }
-        digests
+        simd::hash_many(messages)
     }
 
     #[inline]
@@ -528,7 +525,13 @@ mod tests {
             .map(|&message| Sha256::hash(&[message]))
             .collect::<Vec<_>>();
         assert_eq!(Sha256::hash_many(&refs), expected);
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(not(any(
+            commonware_stability_BETA,
+            commonware_stability_GAMMA,
+            commonware_stability_DELTA,
+            commonware_stability_EPSILON,
+            commonware_stability_RESERVED
+        )))]
         assert!(simd::hash_x16(refs).is_none());
     }
 

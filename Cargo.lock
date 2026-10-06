@@ -1955,6 +1955,7 @@ dependencies = [
  "commonware-macros",
  "commonware-math",
  "commonware-parallel",
+ "commonware-simd",
  "commonware-utils",
  "cpufeatures 0.3.1",
  "crc",

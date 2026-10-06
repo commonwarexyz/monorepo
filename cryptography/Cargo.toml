@@ -26,6 +26,7 @@ commonware-formatting.workspace = true
 commonware-macros.workspace = true
 commonware-math.workspace = true
 commonware-parallel.workspace = true
+commonware-simd.workspace = true
 commonware-utils.workspace = true
 crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
@@ -110,6 +111,7 @@ std = [
 	"commonware-macros/std",
 	"commonware-math/std",
 	"commonware-parallel/std",
+	"commonware-simd/std",
 	"commonware-utils/std",
 	"crc-fast",
 	"crc-fast?/std",
