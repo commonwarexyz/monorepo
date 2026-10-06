@@ -23,9 +23,8 @@
 //! set panics instead of corrupting that set's lists.
 
 use super::{
-    cell::UnsafeCell,
     mailbox::Mailbox,
-    task::{Header, Task},
+    task::{Header, Task, UnsafeCell},
 };
 use commonware_utils::GOLDEN_RATIO;
 use crossbeam_utils::CachePadded;

@@ -62,7 +62,6 @@
 //! mailbox.
 
 use super::{
-    cell::UnsafeCell,
     mailbox::{Mailbox, Message},
     runtime::{Local, Panics},
     tasks::{Links, Tasks},
@@ -83,9 +82,33 @@ use std::{
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "loom")] {
+        pub use loom::cell::UnsafeCell;
         use loom::sync::atomic::{AtomicUsize, Ordering, fence};
     } else {
         use std::sync::atomic::{AtomicUsize, Ordering, fence};
+
+        /// Wrapper around [`std::cell::UnsafeCell`], replaced by loom's cell in
+        /// loom builds.
+        #[derive(Default)]
+        #[repr(transparent)]
+        pub struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
+
+        impl<T> UnsafeCell<T> {
+            /// Wrap `value`.
+            pub const fn new(value: T) -> Self {
+                Self(std::cell::UnsafeCell::new(value))
+            }
+
+            /// Run `f` with a pointer for reading the value.
+            pub fn with<R>(&self, f: impl FnOnce(*const T) -> R) -> R {
+                f(self.0.get())
+            }
+
+            /// Run `f` with a pointer for writing the value.
+            pub fn with_mut<R>(&self, f: impl FnOnce(*mut T) -> R) -> R {
+                f(self.0.get())
+            }
+        }
     }
 }
 
