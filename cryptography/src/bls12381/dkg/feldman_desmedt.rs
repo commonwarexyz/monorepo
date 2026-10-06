@@ -875,6 +875,8 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
         for (player, result) in results_iter {
             match result {
                 AckOrReveal::Ack(ack) => {
+                    // The summary already binds the namespace. Transcript::sign uses an empty
+                    // outer namespace, which verification must match.
                     ack_batch.push(BatchEntry {
                         namespace: b"",
                         message: ack_summary.as_ref(),

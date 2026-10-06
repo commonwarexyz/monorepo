@@ -17,7 +17,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Participant,
+    Participant, Widen,
     iter::NonEmpty,
     ordered::{Quorum, Set},
 };
@@ -221,7 +221,7 @@ impl<N: Namespace> Generic<N> {
     ) -> Option<()> {
         if certificate.signers.len() != self.participants.len()
             || certificate.signers.count() != certificate.signatures.len()
-            || certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize
+            || certificate.signers.count() < Widen::widen(self.participants.quorum::<S::Faults>())
         {
             return None;
         }
