@@ -13,7 +13,7 @@ use crate::{
 };
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
-use bytes::BufMut;
+use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -211,14 +211,15 @@ impl<N: Namespace> Generic<N> {
         })
     }
 
-    /// Stages validated key and signature references for batch verification.
+    /// Stages key and signature references and returns the subject's namespace and message.
     ///
-    /// Returns `None` if the certificate structure is invalid.
+    /// Returns `None` if the certificate structure or signature encodings are invalid.
     fn stage_certificate<'a, S: Scheme>(
         &'a self,
+        subject: impl Subject<Namespace = N>,
         certificate: &'a Certificate,
         mut stage: impl FnMut(&'a PublicKey, &'a Ed25519Signature),
-    ) -> Option<()> {
+    ) -> Option<(&'a [u8], Bytes)> {
         if certificate.signers.len() != self.participants.len()
             || certificate.signers.count() != certificate.signatures.len()
             || certificate.signers.count() < Widen::widen(self.participants.quorum::<S::Faults>())
@@ -230,7 +231,7 @@ impl<N: Namespace> Generic<N> {
             stage(self.participants.key(signer)?, signature.get()?);
         }
 
-        Some(())
+        Some((subject.namespace(&self.namespace), subject.message()))
     }
 
     /// Verifies a certificate using batch verification.
@@ -248,14 +249,14 @@ impl<N: Namespace> Generic<N> {
         D: Digest,
     {
         let mut entries = Vec::with_capacity(certificate.signatures.len());
-        let Some(()) = self.stage_certificate::<S>(certificate, |public_key, signature| {
-            entries.push((public_key, signature));
-        }) else {
+        let Some((namespace, message)) =
+            self.stage_certificate::<S>(subject, certificate, |public_key, signature| {
+                entries.push((public_key, signature));
+            })
+        else {
             return false;
         };
 
-        let namespace = subject.namespace(&self.namespace);
-        let message = subject.message();
         PublicKey::verify_batch(
             rng,
             &entries,
@@ -291,12 +292,14 @@ impl<N: Namespace> Generic<N> {
             Vec::with_capacity(certificates.size_hint().0.saturating_mul(per_certificate));
         for (subject, certificate) in certificates {
             let index = messages.len();
-            let Some(()) = self.stage_certificate::<S>(certificate, |public_key, signature| {
-                entries.push((index, public_key, signature));
-            }) else {
+            let Some(message) =
+                self.stage_certificate::<S>(subject, certificate, |public_key, signature| {
+                    entries.push((index, public_key, signature));
+                })
+            else {
                 return false;
             };
-            messages.push((subject.namespace(&self.namespace), subject.message()));
+            messages.push(message);
         }
 
         PublicKey::verify_batch(
