@@ -30,10 +30,11 @@ pub(crate) const ZIP215_POINTS: [[u8; 32]; 14] = vectors::ZIP215_POINTS;
 
 use crate::{
     key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
-    signing::{BatchEntry, Signature, SigningKey, VerifyingKey},
+    signing::{Signature, SigningKey, VerifyingKey},
 };
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Copying, DecodeExt as _};
+use commonware_cryptography::{BatchEntry, BatchVerifier as _};
 use commonware_formatting::hex;
 use commonware_math::algebra::Random as _;
 use commonware_parallel::{Sequential, Strategy};
@@ -520,7 +521,7 @@ impl Batch {
             |_, item| BatchEntry {
                 namespace: &item.namespace,
                 message: &item.message,
-                verifying_key: &item.verifying_key,
+                public_key: &item.verifying_key,
                 signature: &item.signature,
             },
             strategy,
@@ -607,11 +608,9 @@ mod tests {
             WYCHEPROOF_X25519, ZIP215_POINTS,
         },
     };
-    use crate::{
-        key_exchange::SecretKey,
-        signing::{BatchEntry, SigningKey},
-    };
+    use crate::{key_exchange::SecretKey, signing::SigningKey};
     use commonware_codec::{Copying, DecodeExt as _};
+    use commonware_cryptography::{BatchEntry, BatchVerifier as _};
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_utils::{NZUsize, test_rng};
 
@@ -723,7 +722,7 @@ mod tests {
                 |_, (verifying_key, signature)| BatchEntry {
                     namespace: NAMESPACE,
                     message: MESSAGE,
-                    verifying_key,
+                    public_key: verifying_key,
                     signature,
                 },
                 strategy,

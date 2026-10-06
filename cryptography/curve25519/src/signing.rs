@@ -27,15 +27,17 @@ use crate::curve::G;
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
+    ops::Deref,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
+use commonware_cryptography::{BatchEntry, BatchVerifier, Verifier};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::union_unique;
+use commonware_utils::{Array, Span, union_unique};
 use rand_core::CryptoRng;
 use sha2::{
     Digest,
@@ -265,6 +267,14 @@ impl AsRef<[u8]> for VerifyingKey {
     }
 }
 
+impl Deref for VerifyingKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.bytes.as_bytes()
+    }
+}
+
 impl Write for VerifyingKey {
     fn write(&self, buf: &mut impl BufMut) {
         self.bytes.as_bytes().write(buf);
@@ -285,6 +295,10 @@ impl Read for VerifyingKey {
         })
     }
 }
+
+impl Span for VerifyingKey {}
+
+impl Array for VerifyingKey {}
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for VerifyingKey {
@@ -324,6 +338,32 @@ impl VerifyingKey {
         self.verify_message(msg, sig)
     }
 
+    /// Batch-verifies unframed messages for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn verify_batch_raw(
+        rng: &mut impl CryptoRng,
+        items: &[(&Self, &Signature, &[u8])],
+        strategy: &impl Strategy,
+    ) -> bool {
+        let items: Vec<_> = items
+            .iter()
+            .map(|&(key, signature, message)| signature.batch_item(&key.bytes, None, message))
+            .collect();
+        core::verify_batch_bytes(rng, &items, strategy)
+    }
+}
+
+impl commonware_cryptography::PublicKey for VerifyingKey {}
+
+impl Verifier for VerifyingKey {
+    type Signature = Signature;
+
+    fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
+        Self::verify(self, namespace, msg, sig)
+    }
+}
+
+impl BatchVerifier for VerifyingKey {
     /// Checks all the signatures projected from `items`, per the [module's validation
     /// criteria](self). The projection receives each item's index in `items` and must return the
     /// same entry for a given index and item.
@@ -347,7 +387,8 @@ impl VerifyingKey {
     /// # Examples
     ///
     /// ```
-    /// use commonware_cryptography_curve25519::signing::{BatchEntry, SigningKey, VerifyingKey};
+    /// use commonware_cryptography::{BatchEntry, BatchVerifier as _};
+    /// use commonware_cryptography_curve25519::signing::{SigningKey, VerifyingKey};
     /// use commonware_math::algebra::Random;
     /// use commonware_parallel::Sequential;
     /// use commonware_utils::test_rng;
@@ -362,44 +403,34 @@ impl VerifyingKey {
     ///     |_, (message, signature)| BatchEntry {
     ///         namespace,
     ///         message,
-    ///         verifying_key: &verifying_key,
+    ///         public_key: &verifying_key,
     ///         signature,
     ///     },
     ///     &Sequential,
     /// ));
     /// ```
-    #[must_use]
-    pub fn verify_batch<'a, T>(
-        rng: &mut impl CryptoRng,
+    fn verify_batch<'a, R, T, F>(
+        rng: &mut R,
         items: &'a [T],
-        project: impl Fn(usize, &'a T) -> BatchEntry<'a>,
+        project: F,
         strategy: &impl Strategy,
-    ) -> bool {
+    ) -> bool
+    where
+        R: CryptoRng,
+        T: Sync,
+        F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
+    {
         let items: Vec<_> = items
             .iter()
             .enumerate()
             .map(|(i, item)| {
                 let entry = project(i, item);
                 entry.signature.batch_item(
-                    &entry.verifying_key.bytes,
+                    &entry.public_key.bytes,
                     Some(entry.namespace),
                     entry.message,
                 )
             })
-            .collect();
-        core::verify_batch_bytes(rng, &items, strategy)
-    }
-
-    /// Batch-verifies unframed messages for raw Ed25519 test-vector checks.
-    #[cfg(test)]
-    pub(crate) fn verify_batch_raw(
-        rng: &mut impl CryptoRng,
-        items: &[(&Self, &Signature, &[u8])],
-        strategy: &impl Strategy,
-    ) -> bool {
-        let items: Vec<_> = items
-            .iter()
-            .map(|&(key, signature, message)| signature.batch_item(&key.bytes, None, message))
             .collect();
         core::verify_batch_bytes(rng, &items, strategy)
     }
@@ -456,6 +487,14 @@ impl AsRef<[u8]> for Signature {
     }
 }
 
+impl Deref for Signature {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
         self.bytes.write(buf);
@@ -476,6 +515,12 @@ impl Read for Signature {
     }
 }
 
+impl Span for Signature {}
+
+impl Array for Signature {}
+
+impl commonware_cryptography::Signature for Signature {}
+
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -485,24 +530,11 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
-/// A borrowed view of one signature and the message it authenticates, for
-/// [`VerifyingKey::verify_batch`].
-#[derive(Clone, Copy)]
-pub struct BatchEntry<'a> {
-    /// The namespace used during signing.
-    pub namespace: &'a [u8],
-    /// The message used during signing.
-    pub message: &'a [u8],
-    /// The signer's verifying key.
-    pub verifying_key: &'a VerifyingKey,
-    /// The signature to verify.
-    pub signature: &'a Signature,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{BatchEntry, SigningKey, VerifyingKey};
+    use super::{SigningKey, VerifyingKey};
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_cryptography::{BatchEntry, BatchVerifier as _};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use core::cmp::Ordering;
@@ -530,7 +562,7 @@ mod tests {
                 |_, (namespace, message, signature)| BatchEntry {
                     namespace,
                     message,
-                    verifying_key: &key,
+                    public_key: &key,
                     signature,
                 },
                 &Sequential,

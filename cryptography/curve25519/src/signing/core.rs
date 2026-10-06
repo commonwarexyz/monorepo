@@ -56,8 +56,6 @@ pub(super) struct Item<'a> {
     pub(super) key: &'a VerifyingKeyBytes,
     pub(super) r: &'a [u8; 32],
     pub(super) s: &'a [u8; 32],
-    /// The namespace, framed before the message as in [`commonware_utils::union_unique`], or
-    /// `None` to hash the message as given.
     pub(super) namespace: Option<&'a [u8]>,
     pub(super) message: &'a [u8],
 }
@@ -662,11 +660,12 @@ pub(super) fn verify_batch_bytes(
 mod tests {
     use super::*;
     use crate::{
-        signing::{BatchEntry, SigningKey, VerifyingKey},
+        signing::{SigningKey, VerifyingKey},
         test::strategy::Recording,
     };
     use arbitrary::Unstructured;
     use commonware_codec::{Copying, DecodeExt};
+    use commonware_cryptography::{BatchEntry, BatchVerifier as _};
     use commonware_invariants::minifuzz::Builder;
     use commonware_parallel::Sequential;
     use commonware_utils::FuzzRng;
@@ -704,7 +703,7 @@ mod tests {
                     |_, _| BatchEntry {
                         namespace: b"resource",
                         message,
-                        verifying_key: key,
+                        public_key: key,
                         signature,
                     },
                     &strategy,

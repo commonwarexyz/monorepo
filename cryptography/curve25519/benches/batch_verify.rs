@@ -2,9 +2,8 @@
 //! independent key over an independent 32-byte message (no key/message reuse to amortize), the
 //! harder case for the underlying MSM. Fixture generation is not timed.
 
-use commonware_cryptography_curve25519::signing::{
-    BatchEntry, Signature, SigningKey, VerifyingKey,
-};
+use commonware_cryptography::{BatchEntry, BatchVerifier as _};
+use commonware_cryptography_curve25519::signing::{Signature, SigningKey, VerifyingKey};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_utils::{NZUsize, TestRng, test_rng};
@@ -42,7 +41,7 @@ fn verify_batch(
         |_, (verifying_key, signature, message)| BatchEntry {
             namespace: NAMESPACE,
             message,
-            verifying_key,
+            public_key: verifying_key,
             signature,
         },
         strategy,
