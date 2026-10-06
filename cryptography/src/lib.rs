@@ -176,37 +176,65 @@ commonware_macros::stability_scope!(BETA {
         fn recover_signer(&self, namespace: &[u8], msg: &[u8]) -> Option<Self::PublicKey>;
     }
 
-    /// Verifies whether all [Signature]s are correct or that some [Signature] is incorrect.
-    pub trait BatchVerifier {
-        /// The type of public keys that this verifier can accept.
-        type PublicKey: PublicKey;
+    /// A borrowed view of one signature and the message it authenticates.
+    #[derive(Clone)]
+    pub struct BatchEntry<'a, P: PublicKey> {
+        /// The namespace used during signing.
+        pub namespace: &'a [u8],
+        /// The message used during signing.
+        pub message: &'a [u8],
+        /// The signer's public key.
+        pub public_key: &'a P,
+        /// The signature to verify.
+        pub signature: &'a P::Signature,
+    }
 
-        /// Create a new batch verifier with capacity for at least `capacity` items.
-        ///
-        /// The capacity is a hint: more than `capacity` items may be added, and
-        /// implementations may ignore it.
-        fn new(capacity: usize) -> Self;
+    impl<P: PublicKey> Copy for BatchEntry<'_, P> {}
 
-        /// Append item to the batch.
+    /// A [PublicKey] that supports batch verification of [Signature]s.
+    pub trait BatchVerifier: PublicKey {
+        /// Verify all signatures projected from a slice of items.
         ///
-        /// The message should not be hashed prior to calling this function. If a particular scheme
-        /// requires a payload to be hashed before it is signed, it will be done internally.
+        /// The projection receives each item's original slice index. It must
+        /// return the same entry for a given index and item.
         ///
-        /// A namespace must be used to prevent replay attacks. It will be prepended to the message so
-        /// that a signature meant for one context cannot be used unexpectedly in another (i.e. signing
-        /// a message on the network layer can't accidentally spend funds on the execution layer). See
-        /// [commonware_utils::union_unique] for details.
-        fn add(
-            &mut self,
-            namespace: &[u8],
-            message: &[u8],
-            public_key: &Self::PublicKey,
-            signature: &<Self::PublicKey as Verifier>::Signature,
-        ) -> bool;
-
-        /// Verify all items added to the batch.
+        /// Messages should not be hashed before calling this function. Any hashing
+        /// required by the signature scheme is performed internally.
         ///
-        /// Returns `false` if no items were added or any item is invalid.
+        /// Each namespace must match the one used during signing exactly. Use distinct
+        /// namespaces for distinct signing contexts to prevent replay attacks. For
+        /// example, a signature on a message in the network layer must not authorize
+        /// spending funds in the execution layer.
+        ///
+        /// Returns `false` if the slice is empty or any signature is invalid.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_cryptography::{
+        ///     BatchEntry, BatchVerifier, Signer,
+        ///     ed25519::{PrivateKey, PublicKey},
+        /// };
+        /// use commonware_math::algebra::Random;
+        /// use commonware_parallel::Sequential;
+        /// use commonware_utils::test_rng;
+        ///
+        /// let key = PrivateKey::random(test_rng());
+        /// let public_key = key.public_key();
+        /// let namespace = b"example";
+        /// let records = [(b"message".as_slice(), key.sign(namespace, b"message"))];
+        /// assert!(PublicKey::verify_batch(
+        ///     &mut test_rng(),
+        ///     &records,
+        ///     |_, (message, signature)| BatchEntry {
+        ///         namespace,
+        ///         message,
+        ///         public_key: &public_key,
+        ///         signature,
+        ///     },
+        ///     &Sequential,
+        /// ));
+        /// ```
         ///
         /// # Why Randomness?
         ///
@@ -217,7 +245,16 @@ commonware_macros::stability_scope!(BETA {
         /// (`c_1 + d` and `c_2 - d`).
         ///
         /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-        fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
+        fn verify_batch<'a, R, T, F>(
+            rng: &mut R,
+            items: &'a [T],
+            project: F,
+            strategy: &impl Strategy,
+        ) -> bool
+        where
+            R: CryptoRng,
+            T: Sync,
+            F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
@@ -353,11 +390,40 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_utils::test_rng;
+    use std::collections::HashSet;
 
     fn test_validate<C: PrivateKey>() {
-        let private_key = C::random(test_rng());
+        let mut rng = test_rng();
+        let private_key = C::random(&mut rng);
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
+        let decoded = C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).unwrap();
+        assert_eq!(public_key, decoded);
+        assert_eq!(public_key.cmp(&decoded), core::cmp::Ordering::Equal);
+
+        let other = C::random(&mut rng).public_key();
+        assert_ne!(public_key, other);
+        let mut keys = HashSet::from([public_key]);
+        assert!(!keys.insert(decoded));
+        assert!(keys.insert(other));
+    }
+
+    fn test_public_key_order<C: PrivateKey>() {
+        let mut rng = test_rng();
+        let mut keys = Vec::new();
+        for _ in 0..16 {
+            let key = C::random(&mut rng).public_key();
+            let decoded = C::PublicKey::decode(commonware_codec::Copying(key.as_ref())).unwrap();
+            keys.extend([key, decoded]);
+        }
+
+        for a in &keys {
+            for b in &keys {
+                let expected = a.as_ref().cmp(b.as_ref());
+                assert_eq!(a.cmp(b), expected);
+                assert_eq!(a.partial_cmp(b), Some(expected));
+                assert_eq!(a == b, expected.is_eq());
+            }
+        }
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
@@ -531,6 +597,11 @@ mod tests {
     }
 
     #[test]
+    fn test_secp256r1_standard_public_key_order() {
+        test_public_key_order::<secp256r1::standard::PrivateKey>();
+    }
+
+    #[test]
     fn test_secp256r1_standard_validate_invalid_public_key() {
         test_validate_invalid_public_key::<secp256r1::standard::PrivateKey>();
     }
@@ -574,6 +645,11 @@ mod tests {
     #[test]
     fn test_secp256r1_recoverable_validate() {
         test_validate::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_public_key_order() {
+        test_public_key_order::<secp256r1::recoverable::PrivateKey>();
     }
 
     #[test]

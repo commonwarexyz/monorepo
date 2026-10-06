@@ -377,7 +377,7 @@ impl<
                 response,
             } => {
                 let span = info_span!(
-                    parent: span,
+                    parent: &span,
                     "simplex.resolver.deliver",
                     epoch = self.epoch.traced(),
                     view = view.traced()
@@ -475,10 +475,13 @@ mod tests {
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
     };
-    use commonware_macros::{select, test_async};
+    use commonware_macros::{select, test_async, test_collect_traces};
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
+    use commonware_resolver::{Consumer as _, Delivery};
+    use commonware_runtime::{
+        Quota, Runner, Supervisor, deterministic, telemetry::traces::collector::TraceStorage,
+    };
     use commonware_utils::{
         NZU32, NZUsize, channel::oneshot, non_empty, non_empty_vec, probability, sync::Mutex,
     };
@@ -1522,6 +1525,54 @@ mod tests {
             actor.certified(&mut resolver, notarization, true);
             assert_eq!(actor.state.produce(view), Some(encoded));
         });
+    }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5097.
+    ///
+    /// The resolver engine can release its handles to a fetch span after the
+    /// actor checks that a delivery is still wanted. The delivery then holds the
+    /// only handle, and processing must still run under that span.
+    #[test_collect_traces]
+    fn pr_5097_regression(traces: TraceStorage) {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let (handler_tx, mut handler_rx) = mailbox::new(context.child("handler"), NZUsize!(8));
+            let mut handler = Handler::new(handler_tx);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(3);
+            let notarization = build_notarization(&schemes, &verifier, EPOCH, view);
+
+            // The handler keeps only a clone of the first subscriber's span and
+            // drops the delivery, so the queued message holds the only handle.
+            let _outcome = handler.deliver(
+                Delivery {
+                    key: U64::from(view),
+                    subscribers: non_empty_vec![(
+                        Ask::ancestry(Kind::Notarization),
+                        tracing::info_span!("test.fetch"),
+                    )],
+                },
+                Certificate::Notarization(notarization).encode(),
+            );
+            let message = handler_rx.recv().await.unwrap();
+            actor.handle_resolver(message, &mut voter, &mut resolver);
+        });
+
+        // Processing runs under a delivery span whose parent is the fetch span.
+        traces
+            .get_all()
+            .expect_event(|event| {
+                event.spans.windows(2).any(|pair| {
+                    pair[0].content == "simplex.resolver.deliver" && pair[1].content == "test.fetch"
+                })
+            })
+            .unwrap();
     }
 
     #[test_async]
