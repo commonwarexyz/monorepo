@@ -55,8 +55,8 @@ pub use floor::{Floor, Processed};
 mod staged;
 mod stream;
 
-mod mailbox;
-pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
+pub(crate) mod mailbox;
+pub use mailbox::Mailbox;
 
 mod subscriptions;
 mod variant;
