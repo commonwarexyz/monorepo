@@ -141,7 +141,7 @@ where
         target,
         source,
         apply_batch_size: NZU64!(100),
-        max_outstanding_requests: 10,
+        max_outstanding_requests: NZUsize!(10),
     };
 
     if let Ok(synced) = sync::sync(sync_config).await {

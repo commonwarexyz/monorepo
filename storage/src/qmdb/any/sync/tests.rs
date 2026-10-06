@@ -25,7 +25,7 @@ use commonware_runtime::{
     BufferPooler, Clock, Metrics as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
-    NZU64,
+    NZU64, NZUsize,
     channel::{mpsc, oneshot},
     non_empty_range,
     sync::{AsyncRwLock, Mutex},
@@ -34,7 +34,7 @@ use futures::{FutureExt, pin_mut};
 use rand::Rng as _;
 use std::{
     collections::BTreeSet,
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -160,7 +160,7 @@ where
             context: context.child("client"),
             source: Arc::new(target_db),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -201,7 +201,7 @@ where
             },
             source,
             apply_batch_size: NZU64!(2),
-            max_outstanding_requests: 2,
+            max_outstanding_requests: NZUsize!(2),
             fetch_batch_size: NZU64!(2),
             db_config,
             update_rx: None,
@@ -251,7 +251,7 @@ where
             context: client_context.child("client"),
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -326,7 +326,7 @@ where
             context: context.child("client"),
             source: Arc::new(target_db),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -400,7 +400,7 @@ where
             context: client_context.child("sync"),
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -496,7 +496,7 @@ where
             context: client_context.child("sync"),
             source,
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -565,7 +565,7 @@ where
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 10,
+            max_outstanding_requests: NZUsize!(10),
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
@@ -630,7 +630,7 @@ where
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 10,
+            max_outstanding_requests: NZUsize!(10),
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
@@ -709,7 +709,7 @@ where
                 },
                 source: target_db.clone(),
                 apply_batch_size: NZU64!(1024),
-                max_outstanding_requests: 1,
+                max_outstanding_requests: NZUsize!(1),
                 update_rx: Some(update_receiver),
                 finish_rx: None,
                 reached_target_tx: None,
@@ -780,7 +780,7 @@ where
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 10,
+            max_outstanding_requests: NZUsize!(10),
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
@@ -846,7 +846,7 @@ where
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 10,
+            max_outstanding_requests: NZUsize!(10),
             update_rx: Some(update_receiver),
             finish_rx: None,
             reached_target_tx: None,
@@ -913,7 +913,7 @@ where
             target: initial_target.clone(),
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
@@ -1043,7 +1043,7 @@ where
             target: initial_target.clone(),
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
@@ -1148,7 +1148,7 @@ where
             target: target.clone(),
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
@@ -1204,7 +1204,7 @@ where
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: Some(finish_receiver),
             reached_target_tx: None,
@@ -1253,7 +1253,7 @@ where
             },
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: Some(reached_sender),
@@ -1313,7 +1313,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                 },
                 source: target_db.clone(),
                 fetch_batch_size: NZU64!(1), // Small batch size so we don't finish after one batch
-                max_outstanding_requests: 10,
+                max_outstanding_requests: NZUsize!(10),
                 apply_batch_size: NZU64!(1024),
                 update_rx: Some(update_receiver),
                 finish_rx: None,
@@ -1430,7 +1430,7 @@ where
             context: client_context.child("newer"),
             source: newer_source.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -1447,7 +1447,7 @@ where
             context: client_context.child("older"),
             source: older_source.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -1508,7 +1508,7 @@ where
             context: context.child("client"),
             source: target_db.clone(),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -1873,7 +1873,7 @@ where
             context: context.child("client"),
             source,
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -2038,7 +2038,7 @@ where
             target: old_target.clone(),
             source,
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 2,
+            max_outstanding_requests: NZUsize!(2),
             update_rx: Some(update_receiver),
             finish_rx: Some(finish_receiver),
             reached_target_tx: Some(reached_sender),
@@ -2211,7 +2211,7 @@ where
             },
             fetch_batch_size: NZU64!(32),
             apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: OUTSTANDING,
+            max_outstanding_requests: NZUsize!(OUTSTANDING),
             update_rx: Some(update_rx),
             finish_rx: None,
             reached_target_tx: None,
@@ -2388,7 +2388,7 @@ fn release_all_but_tip<F: merkle::Family>(
 /// database, the target, the gate log, and the sync future.
 async fn gated_sync<H: SyncTestHarness>(
     context: &mut deterministic::Context,
-    max_outstanding_requests: usize,
+    max_outstanding_requests: NonZeroUsize,
     fetch_batch_size: NonZeroU64,
 ) -> (
     Arc<AsyncRwLock<Option<DbOf<H>>>>,
@@ -2449,7 +2449,7 @@ where
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
         let (source_db, target, log, config) =
-            gated_sync::<H>(&mut context, OUTSTANDING, NZU64!(BATCH)).await;
+            gated_sync::<H>(&mut context, NZUsize!(OUTSTANDING), NZU64!(BATCH)).await;
         let floor = target.range.start();
         assert!(*target.range.end() > *floor + 4 * OUTSTANDING as u64 * BATCH);
 
@@ -2508,7 +2508,8 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let (source_db, _, log, config) = gated_sync::<H>(&mut context, 2, NZU64!(1)).await;
+        let (source_db, _, log, config) =
+            gated_sync::<H>(&mut context, NZUsize!(2), NZU64!(1)).await;
 
         let sync = async {
             sync::sync::<DbOf<H>, _>(config)

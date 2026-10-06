@@ -19,7 +19,12 @@ use commonware_runtime::Supervisor as _;
 use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 use futures::future::{Aborted, Either, pending};
 use mpsc::error::TryRecvError;
-use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+};
 
 /// Type alias for sync engine errors
 type Error<DB, S> =
@@ -156,11 +161,12 @@ where
     /// The engine only verifies source data against this commitment and does not select or
     /// authenticate the target.
     pub target: Target<DB::Family, DB::Digest>,
-    /// Maximum number of outstanding requests for operation batches
+    /// Maximum number of outstanding requests. The boundary request for the pinned nodes counts
+    /// toward it.
     ///
     /// Sync requests no operations starting `2 * max_outstanding_requests * fetch_batch_size` or
     /// more past the journal tip, which bounds how many fetched operations wait in memory.
-    pub max_outstanding_requests: usize,
+    pub max_outstanding_requests: NonZeroUsize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
     /// Number of operations to apply in a single batch
@@ -208,7 +214,7 @@ where
     target: Target<DB::Family, DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
-    max_outstanding_requests: usize,
+    max_outstanding_requests: NonZeroUsize,
 
     /// Maximum operations to fetch in a single batch
     fetch_batch_size: NonZeroU64,
@@ -389,9 +395,10 @@ where
         // Calculate the maximum number of requests to make
         let num_requests = self
             .max_outstanding_requests
+            .get()
             .saturating_sub(self.outstanding_requests.len());
 
-        let lookahead = (self.max_outstanding_requests as u64)
+        let lookahead = (self.max_outstanding_requests.get() as u64)
             .saturating_mul(2)
             .saturating_mul(self.fetch_batch_size.get());
         let log_size = self.journal.size();
@@ -791,7 +798,7 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, non_empty_range};
+    use commonware_utils::{NZU64, NZUsize, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
@@ -928,7 +935,7 @@ mod tests {
                 root: sha256::Digest::from([1u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(10)),
             },
-            max_outstanding_requests: 1,
+            max_outstanding_requests: NZUsize!(1),
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
             db_config: TestConfig {
@@ -971,8 +978,7 @@ mod tests {
     #[test]
     fn target_update_drops_queued_result_of_cancelled_request() {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
             let mut engine = Engine::new(config).await.unwrap();
 
             // Track the boundary request and an operation request below the next lower bound.
@@ -1017,8 +1023,7 @@ mod tests {
     #[test]
     fn target_updates_keep_old_size_request_beyond_floor() {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
             let mut engine = Engine::new(config).await.unwrap();
 
             // Track a pending boundary request and an operation request at the first target
@@ -1081,8 +1086,7 @@ mod tests {
     #[test]
     fn target_update_floor_move_cancels_operations_below_bound() {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
             let mut engine = Engine::new(config).await.unwrap();
 
             // Track operation requests below and beyond the next lower bound.
@@ -1119,8 +1123,7 @@ mod tests {
     #[test]
     fn moved_floor_schedules_boundary_without_waiting_for_old_operation() {
         deterministic::Runner::default().start(|context| async move {
-            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 0;
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
             let mut engine = Engine::new(config).await.unwrap();
 
             // Track the boundary request and an operation request at the next lower bound.
@@ -1228,7 +1231,7 @@ mod tests {
     fn new_schedules_operations_after_boundary_request() {
         deterministic::Runner::default().start(|context| async move {
             let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
-            config.max_outstanding_requests = 2;
+            config.max_outstanding_requests = NZUsize!(2);
             config.fetch_batch_size = NZU64!(5);
 
             let engine = Engine::new(config).await.unwrap();

@@ -583,13 +583,17 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 #[derive(Clone, Copy, Debug)]
 pub struct SyncEngineConfig {
     /// Maximum operations fetched per source request.
+    ///
+    /// Peers ignore requests larger than their `max_serve_ops` (see [`p2p::Config`]), so a larger
+    /// value stalls sync. Keep this at or below the `max_serve_ops` every peer uses.
     pub fetch_batch_size: NonZeroU64,
 
     /// Number of operations applied per local apply step.
     pub apply_batch_size: NonZeroU64,
 
-    /// Maximum number of outstanding source requests.
-    pub max_outstanding_requests: usize,
+    /// Maximum number of outstanding source requests. The request for the pinned nodes counts
+    /// toward it.
+    pub max_outstanding_requests: NonZeroUsize,
 
     /// Capacity of per-database target-update channels.
     pub update_channel_size: NonZeroUsize,
@@ -1989,7 +1993,7 @@ mod tests {
         deterministic, reschedule,
     };
     use commonware_utils::{
-        NZU64,
+        NZU64, NZUsize,
         channel::{mpsc, oneshot, ring},
     };
     use futures::{FutureExt, SinkExt, pin_mut};
@@ -4039,7 +4043,7 @@ mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                         },
                     )
@@ -4077,7 +4081,7 @@ mod tests {
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                 },
             )
@@ -4113,7 +4117,7 @@ mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                         },
                     )
@@ -4162,7 +4166,7 @@ mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                         },
                     )
@@ -4211,7 +4215,7 @@ mod tests {
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
                                 apply_batch_size: NZU64!(1),
-                                max_outstanding_requests: 1,
+                                max_outstanding_requests: NZUsize!(1),
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                             },
                         )
@@ -4261,7 +4265,7 @@ mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                         },
                     )
@@ -4319,7 +4323,7 @@ mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
                         },
                     )
@@ -4376,7 +4380,7 @@ mod tests {
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                 },
             )
@@ -4413,7 +4417,7 @@ mod tests {
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
+                        max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
                     },
                 )
@@ -4454,7 +4458,7 @@ mod tests {
                 SyncEngineConfig {
                     fetch_batch_size: NonZeroU64::new(1).unwrap(),
                     apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
+                    max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                 },
             )
@@ -4495,7 +4499,7 @@ mod tests {
                     SyncEngineConfig {
                         fetch_batch_size: NonZeroU64::new(1).unwrap(),
                         apply_batch_size: NZU64!(1),
-                        max_outstanding_requests: 1,
+                        max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NonZeroUsize::new(1).unwrap(),
                     },
                 )
@@ -4627,7 +4631,7 @@ mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                         },
                     )
@@ -4695,7 +4699,7 @@ mod tests {
                         SyncEngineConfig {
                             fetch_batch_size: NonZeroU64::new(1).unwrap(),
                             apply_batch_size: NZU64!(1),
-                            max_outstanding_requests: 1,
+                            max_outstanding_requests: NZUsize!(1),
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                         },
                     )
@@ -4757,7 +4761,7 @@ mod tests {
                             SyncEngineConfig {
                                 fetch_batch_size: NonZeroU64::new(1).unwrap(),
                                 apply_batch_size: NZU64!(1),
-                                max_outstanding_requests: 1,
+                                max_outstanding_requests: NZUsize!(1),
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                             },
                         )
