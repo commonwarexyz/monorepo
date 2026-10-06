@@ -48,7 +48,7 @@ impl NativeArmV9 {
 
     #[inline]
     #[target_feature(enable = "neon,sve,sve2")]
-    unsafe fn execute_arm_v9<O: Operation>(self, operation: O) -> O::Output {
+    unsafe fn execute_arm_v9<O: Operation<Self>>(self, operation: O) -> O::Output {
         operation.arm_v9(self)
     }
 }
@@ -247,7 +247,7 @@ impl Simd for NativeArmV9 {
     }
 
     #[inline]
-    fn execute<O: Operation>(self, operation: O) -> O::Output {
+    fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Construction checked all three enabled features. Passing
         // this token preserves the Armv9 path for nested child operations.
         unsafe { self.execute_arm_v9(operation) }
