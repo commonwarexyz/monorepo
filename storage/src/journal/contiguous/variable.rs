@@ -42,13 +42,14 @@ use commonware_runtime::{
 };
 use futures::{
     FutureExt as _, Stream,
-    future::try_join,
+    future::{try_join, try_join_all},
     stream::{FuturesUnordered, StreamExt as _},
 };
 #[cfg(test)]
 use std::future::pending;
 use std::{
     collections::BTreeMap,
+    iter::once,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -1162,7 +1163,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
 
             // The floor's blob is scanned from the front: offset rebuild replays it from its
             // start regardless, and a torn acknowledged page is clearer as corruption here.
-            let writer = pending.get_mut(&blob).expect("suspect blob is present");
+            let writer = pending.get(&blob).expect("suspect blob is present");
             let valid = writer
                 .recoverable_prefix_len(0, cfg.replay_buffer, ReadOptions::default())
                 .await?;
@@ -1193,7 +1194,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 continue;
             }
             warn!(blob, valid, size, "truncating to last well-formed page");
-            writer.truncate(valid).await?;
+            let writer = pending.remove(&blob).expect("suspect blob is present");
+            pending.insert(blob, writer.truncate(valid).await?);
         }
 
         Self {
@@ -1384,19 +1386,20 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             self.offsets = self.offsets.truncate(anchor).await?;
         }
         let mut end = anchor;
-        while let Some(writer) = self.pending.get_mut(&blob) {
+        while let Some(writer) = self.pending.remove(&blob) {
             // Scan one capacity-bounded blob from its retained start and rebuild every derived
             // offset at or above the recovery anchor.
             let first = blob_first_position(blob, per_blob)?.max(start);
             let limit = super::blob_end_position(blob, per_blob, ceiling);
             let physical_size = writer.size();
-            let replay = writer
+            let (writer, replay) = writer
                 .replay_prefix(
                     valid_lengths.get(&blob).copied().unwrap_or(u64::MAX),
                     self.cfg.replay_buffer,
                     ReadOptions::default(),
                 )
                 .await?;
+            self.pending.insert(blob, writer);
             let mut scanner = FrameScanner::<E::Blob, V>::new(
                 replay,
                 &self.cfg.codec_config,
@@ -1495,12 +1498,14 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // Data outside the selected offset prefix must be removed, including partial tails
         // and whole blobs excluded by inspection.
         let tail = position_to_blob(size, per_blob);
-        let retained_bytes = |blob| {
-            if blob == tail {
-                Some(terminal)
-            } else {
-                self.recovered_scans.get(&blob).map(|scan| scan.valid_size)
-            }
+
+        // Blobs below the tail keep their scanned prefix, and the tail keeps the selected
+        // terminal offset.
+        let retained = || {
+            self.recovered_scans
+                .range(..tail)
+                .map(|(&blob, scan)| (blob, scan.valid_size))
+                .chain(once((tail, terminal)))
         };
         let repair_data = !self.discarded.is_empty()
             || self
@@ -1508,12 +1513,13 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 .keys()
                 .next_back()
                 .is_some_and(|&blob| blob > tail)
-            || self.pending.iter().any(|(&blob, writer)| {
-                retained_bytes(blob).is_some_and(|bytes| bytes < writer.size())
+            || retained().any(|(blob, bytes)| {
+                self.pending
+                    .get(&blob)
+                    .is_some_and(|writer| bytes < writer.size())
             });
         if repair_data {
-            // Delete excluded blobs newest-first, then durably shorten each retained data blob to
-            // the frame boundary established by inspection.
+            // Delete excluded blobs newest-first so every crash leaves a contiguous prefix.
             for blob in self.discarded.into_iter().rev() {
                 self.partition.remove(blob).await?;
             }
@@ -1522,11 +1528,16 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             if self.halt_after_data_removal {
                 pending::<()>().await;
             }
-            for (&blob, writer) in &mut self.pending {
-                if let Some(bytes) = retained_bytes(blob)
-                    && bytes < writer.size()
+
+            // Shorten each retained blob to its prefix, oldest first.
+            for (blob, bytes) in retained() {
+                if self
+                    .pending
+                    .get(&blob)
+                    .is_some_and(|writer| bytes < writer.size())
                 {
-                    writer.truncate(bytes).await?;
+                    let writer = self.pending.remove(&blob).expect("blob is present");
+                    self.pending.insert(blob, writer.truncate(bytes).await?);
                 }
             }
         }
@@ -1636,7 +1647,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::append].
-    pub(crate) async fn append(&mut self, item: &V) -> Result<u64, Error> {
+    pub(crate) async fn append(self: Box<Self>, item: &V) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
         self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
@@ -1644,13 +1655,19 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::append_many].
-    pub(crate) async fn append_many<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
+    pub(crate) async fn append_many(
+        self: Box<Self>,
+        items: Many<'_, V>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_many_timer();
         self.metrics.append_many_calls.inc();
         self.append_many_inner(items).await
     }
 
-    async fn append_many_inner<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
+    async fn append_many_inner(
+        self: Box<Self>,
+        items: Many<'_, V>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let prepared = self.prepare_append::<false>(items)?;
         self.write_encoded(prepared).await
     }
@@ -1703,16 +1720,19 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
     /// See [Journal::append_prepared].
     pub(crate) async fn append_prepared(
-        &mut self,
+        self: Box<Self>,
         prepared: PreparedAppend<V>,
-    ) -> Result<u64, Error> {
+    ) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_prepared_timer();
         self.metrics.append_prepared_calls.inc();
         self.write_encoded(prepared).await
     }
 
     // Write pre-encoded items; shared by all append paths. Records no call metrics.
-    async fn write_encoded(&mut self, prepared: PreparedAppend<V>) -> Result<u64, Error> {
+    async fn write_encoded(
+        mut self: Box<Self>,
+        prepared: PreparedAppend<V>,
+    ) -> Result<(Box<Self>, u64), Error> {
         let PreparedAppend {
             encoded,
             item_starts,
@@ -1737,6 +1757,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             .checked_add(items_count as u64)
             .ok_or(Error::SizeOverflow)?;
 
+        // Split the batch at blob boundaries so data and its offsets rotate together.
         let items_per_blob = self.items_per_blob.get();
         let mut written = 0;
         while written < items_count {
@@ -1751,15 +1772,24 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 .copied()
                 .unwrap_or(encoded.len());
 
-            // Append pre-encoded data to the tail, then convert relative item starts into
-            // absolute offsets. A large batch is written whole-page-direct to the blob; the
-            // returned offset is where this batch's first byte was written.
-            let base_offset = self
+            // Buffer fitting batches in place and write large batches directly as whole pages.
+            // The returned offset locates this batch's first byte in the tail blob.
+            let base_offset = match self
                 .blobs
-                .tail_writer()
-                .append_owned(encoded.slice(batch_start..batch_end))
-                .await?;
+                .try_append(&encoded.as_ref()[batch_start..batch_end])
+            {
+                Some(offset) => offset,
+                None => {
+                    let (blobs, offset) = self
+                        .blobs
+                        .append_owned(encoded.slice(batch_start..batch_end))
+                        .await?;
+                    self.blobs = blobs;
+                    offset
+                }
+            };
 
+            // Convert batch-relative starts into absolute offsets within the data blob.
             let absolute_offsets = item_starts[written..written + batch_count]
                 .iter()
                 .map(|&start| {
@@ -1770,10 +1800,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 .collect::<Result<Vec<u64>, _>>()?;
 
             // Append the offsets for this blob batch to the offsets journal.
-            let last_offsets_pos = self
+            let (offsets, last_offsets_pos) = self
                 .offsets
                 .append_many(Many::Flat(&absolute_offsets))
                 .await?;
+            self.offsets = offsets;
             assert_eq!(last_offsets_pos, self.bounds.end + batch_count as u64 - 1);
 
             self.bounds.end += batch_count as u64;
@@ -1781,7 +1812,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
             // Seal the just-filled tail, start syncing it, and open the next blob as the new tail.
             if self.bounds.end.is_multiple_of(items_per_blob) {
-                self.blobs.seal_tail().await?;
+                self.blobs = self.blobs.seal_tail().await?;
             }
         }
 
@@ -1790,20 +1821,28 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             self.bounds.start,
             self.items_per_blob.get(),
         );
-        Ok(self.bounds.end - 1)
+        let position = self.bounds.end - 1;
+        Ok((self, position))
     }
 
     /// See [Journal::snapshot].
-    pub(crate) async fn snapshot(&mut self) -> Result<Reader<'static, E, V>, Error> {
-        Ok(Reader {
-            data: self.blobs.snapshot().await?,
+    pub(crate) async fn snapshot(
+        mut self: Box<Self>,
+    ) -> Result<(Box<Self>, Reader<'static, E, V>), Error> {
+        let (blobs, data) = self.blobs.snapshot().await?;
+        self.blobs = blobs;
+        let (offsets, offsets_reader) = self.offsets.snapshot().await?;
+        self.offsets = offsets;
+        let reader = Reader {
+            data,
             bounds: self.bounds.clone(),
-            offsets: self.offsets.snapshot().await?,
+            offsets: offsets_reader,
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
             compressed: self.compression.is_some(),
             metrics: self.metrics.clone(),
-        })
+        };
+        Ok((self, reader))
     }
 
     /// A reader borrowing the journal's live state.
@@ -1855,12 +1894,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // end behind its start are unrecoverable because the data needed to rebuild the missing
         // entries is about to be removed. Data is flushed first, matching the ordering every
         // other durability path maintains.
-        let data_sync = self.blobs.start_sync().await;
+        let (blobs, data_sync) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
         data_sync.await?;
         self.offsets = self.offsets.commit().await?;
         self.barrier.mark_durable(self.bounds.end);
 
-        self.blobs.prune(min_blob).await?;
+        self.blobs = self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
         #[cfg(test)]
@@ -1884,20 +1924,27 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Journal::start_sync].
     pub(crate) async fn start_sync(mut self: Box<Self>) -> Result<(Box<Self>, Handle<()>), Error> {
         self.metrics.start_sync_calls.inc();
-        let data = self.blobs.start_sync().await;
-        let (offsets_journal, offsets) = self.offsets.start_data_sync().await;
 
+        // Start independent durability barriers for the data and its offsets.
+        let (blobs, data) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
+        let (offsets_journal, offsets) = self.offsets.start_data_sync().await?;
+
+        // Publish only the watermark already proved by a completed combined barrier.
         let size = self.barrier.boundary();
         let (offsets_journal, watermark_handle) =
             offsets_journal.start_watermark_sync(size).await?;
         self.offsets = offsets_journal;
 
+        // Record this prefix so the barrier advances once both data and offsets are durable.
         let journal_completion: SyncCompletion =
             async move { try_join(data, offsets).await.map(|_| ()) }
                 .boxed()
                 .shared();
         self.barrier
             .record(self.bounds.end, journal_completion.clone());
+
+        // The caller observes both the new durability barrier and watermark publication.
         let handle = Handle::from_future(async move {
             journal_completion.await?;
             watermark_handle.await
@@ -1909,7 +1956,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) async fn commit(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.commit_calls.inc();
-        let handle = self.blobs.start_sync().await;
+        let (blobs, handle) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
         handle.await?;
         Ok(self)
     }
@@ -1918,8 +1966,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     pub(crate) async fn sync(mut self: Box<Self>) -> Result<Box<Self>, Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
+
+        // Make data durable before the offsets journal can acknowledge its prefix.
         let size = self.bounds.end;
-        let handle = self.blobs.start_sync().await;
+        let (blobs, handle) = self.blobs.start_sync().await?;
+        self.blobs = blobs;
         handle.await?;
         self.offsets = self.offsets.sync().await?;
         self.barrier.mark_durable(size);
@@ -1951,7 +2002,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         // Stage in offsets first so a crash mid-clear leaves an intent that recovery completes.
         // `clear_to_size` re-stages the same target idempotently before completing.
         self.offsets = self.offsets.stage_clear_intent(new_size).await?;
-        self.blobs
+        self.blobs = self
+            .blobs
             .clear(position_to_blob(new_size, self.items_per_blob.get()))
             .await?;
         self.offsets = self.offsets.clear_to_size(new_size).await?;
@@ -1966,25 +2018,26 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         Ok(self)
     }
 
-    /// Scan every frame in `writer`, returning the item count and valid prefix.
+    /// Scan every frame in `writer`, returning the writer with the item count and valid prefix.
     async fn scan_blob(
-        writer: &mut PagedRecovery<E::Blob>,
+        writer: PagedRecovery<E::Blob>,
         buffer: NonZeroUsize,
         codec_config: &V::Cfg,
         compressed: bool,
-    ) -> Result<BlobScan, Error> {
-        let replay = writer.replay(buffer, ReadOptions::default()).await?;
+    ) -> Result<(PagedRecovery<E::Blob>, BlobScan), Error> {
+        let (writer, replay) = writer.replay(buffer, ReadOptions::default()).await?;
         let mut scanner = FrameScanner::<E::Blob, V>::new(replay, codec_config, compressed);
         let mut items = 0u64;
         loop {
             match scanner.next().await? {
                 Frame::Item { .. } => items += 1,
                 Frame::End { valid_size, torn } => {
-                    return Ok(BlobScan {
+                    let scan = BlobScan {
                         items,
                         valid_size,
                         torn,
-                    });
+                    };
+                    return Ok((writer, scan));
                 }
             }
         }
@@ -2015,9 +2068,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let mut items_in_newest = 0;
         let mut newest_blob = None;
         for &blob in &scanned {
-            let writer = pending.get_mut(&blob).expect("blob came from pending");
-            let scan = match scans.get(&blob) {
-                Some(scan) => *scan,
+            let writer = pending.remove(&blob).expect("blob came from pending");
+            let (mut writer, scan) = match scans.get(&blob) {
+                Some(scan) => (writer, *scan),
                 None => Self::scan_blob(writer, buffer, codec_config, compressed).await?,
             };
             if scan.items > items_per_blob {
@@ -2032,8 +2085,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                     new_size = scan.valid_size,
                     "crash repair: truncating trailing bytes"
                 );
-                writer.truncate(scan.valid_size).await?;
+                writer = writer.truncate(scan.valid_size).await?;
             }
+            pending.insert(blob, writer);
             if scan.items > 0 {
                 items_in_newest = scan.items;
                 newest_blob = Some(blob);
@@ -2228,14 +2282,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             return Ok(());
         }
 
+        // Own writers with sync work and restore them only after every sync succeeds.
         let start_blob = position_to_blob(start_position, items_per_blob);
         let end_blob = position_to_blob(end_position - 1, items_per_blob);
-        futures::future::try_join_all(
-            pending
-                .range_mut(start_blob..=end_blob)
-                .map(|(_, writer)| writer.sync()),
-        )
-        .await?;
+        let futures: Vec<_> = pending
+            .extract_if(start_blob..=end_blob, |_, writer| writer.needs_sync())
+            .map(|(blob, writer)| async move { writer.sync().await.map(|writer| (blob, writer)) })
+            .collect();
+        let synced = try_join_all(futures).await?;
+        pending.extend(synced);
         Ok(())
     }
 
@@ -2375,7 +2430,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Returns an error if the underlying storage operation fails or if the item cannot
     /// be encoded.
     pub async fn append(mut self, item: &V) -> Result<(Self, u64), Error> {
-        let position = self.0.append(item).await?;
+        let (inner, position) = self.0.append(item).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -2383,7 +2439,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns [Error::EmptyAppend] if items is empty.
     pub async fn append_many(mut self, items: Many<'_, V>) -> Result<(Self, u64), Error> {
-        let position = self.0.append_many(items).await?;
+        let (inner, position) = self.0.append_many(items).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -2405,7 +2462,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         mut self,
         prepared: PreparedAppend<V>,
     ) -> Result<(Self, u64), Error> {
-        let position = self.0.append_prepared(prepared).await?;
+        let (inner, position) = self.0.append_prepared(prepared).await?;
+        self.0 = inner;
         Ok((self, position))
     }
 
@@ -2414,7 +2472,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// the journal's blobs open, so reopening a partition that still holds one of them fails
     /// while the snapshot is alive.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, V>), Error> {
-        let reader = self.0.snapshot().await?;
+        let (inner, reader) = self.0.snapshot().await?;
+        self.0 = inner;
         Ok((self, reader))
     }
 
@@ -2451,16 +2510,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// crash. Also tries to advance the recovery watermark to the previous proven durable
     /// size, bounding startup recovery. Only `sync()` guarantees a current watermark.
     ///
-    /// At most one data sync and one watermark sync are in flight at a time: this call waits
-    /// for the prior call's syncs before starting new ones. It does not wait for a pending
-    /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
-    /// pending when this call returns. Reads always proceed while the returned handle is
-    /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
-    /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
-    /// journal. A failed offsets or recovery-watermark sync is not observed by
-    /// commit and resurfaces on the next sync.
+    /// At most one data sync and one watermark sync are in flight at a time: this call waits for
+    /// the prior call's syncs before starting new ones. It does not wait for a pending rollover
+    /// fsync: the returned handle joins it, so an earlier call's handle may still be pending when
+    /// this call returns. Reads proceed while the returned handle is pending, and appends proceed
+    /// while they fit in the write buffer.
+    ///
+    /// Flush errors are returned directly. Dropping the handle does not cancel the sync or lose its
+    /// failure: a later operation reports it, no later than the next [Self::sync].
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -2654,13 +2711,13 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
 #[cfg(test)]
 impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Test helper: Prune the data blobs directly (simulates crash scenario).
-    pub(crate) async fn test_prune_data(&mut self, min_blob: u64) -> Result<bool, Error> {
+    pub(crate) async fn test_prune_data(mut self, min_blob: u64) -> Result<(Self, bool), Error> {
         let min_blob = min_blob.min(self.0.blobs.tail_blob_index());
         if min_blob <= self.0.blobs.oldest_blob_index() {
-            return Ok(false);
+            return Ok((self, false));
         }
-        self.0.blobs.prune(min_blob).await?;
-        Ok(true)
+        self.0.blobs = self.0.blobs.prune(min_blob).await?;
+        Ok((self, true))
     }
 
     /// Test helper: Prune the internal offsets journal directly (simulates crash scenario).
@@ -2691,32 +2748,31 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Test helper: Append directly to the data blobs without indexing (simulates crash
     /// scenario). The target must be the tail blob or a newer one (created as an orphan).
     pub(crate) async fn test_append_data(
-        &mut self,
+        mut self,
         blob: u64,
         item: V,
-    ) -> Result<(u64, u32), Error> {
+    ) -> Result<(Self, u64, u32), Error> {
         let mut encoded = Vec::new();
         encode_frame_into(self.0.compression, &item, &mut encoded)?;
         let item_len = encoded.len() as u32;
 
         let tail_blob = self.0.blobs.tail_blob_index();
         if blob == tail_blob {
-            let writer = self.0.blobs.tail_writer();
-            let offset = writer.size();
-            writer.append(&encoded).await?;
-            return Ok((offset, item_len));
+            let (blobs, offset) = self.0.blobs.append_owned(encoded.into()).await?;
+            self.0.blobs = blobs;
+            return Ok((self, offset, item_len));
         }
         assert!(blob > tail_blob, "cannot append to a sealed blob");
-        let mut writer = self.0.blobs.open_blob(blob).await?;
-        let offset = writer.size();
-        writer.append(&encoded).await?;
+        let writer = self.0.blobs.open_blob(blob).await?;
+        let (writer, offset) = writer.append(&encoded).await?;
         writer.sync().await?;
-        Ok((offset, item_len))
+        Ok((self, offset, item_len))
     }
 
     /// Test helper: Sync one data blob.
-    pub(crate) async fn test_sync_data_blob(&mut self, blob: u64) -> Result<(), Error> {
-        self.0.blobs.sync_blob(blob).await
+    pub(crate) async fn test_sync_data_blob(mut self, blob: u64) -> Result<Self, Error> {
+        self.0.blobs = self.0.blobs.sync_blob(blob).await?;
+        Ok(self)
     }
 
     /// Test helper: Reopen a shorter prefix through recovery, releasing the previous owner.
@@ -2736,13 +2792,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let offset = self.0.offsets.reader().read(position).await?;
         let blob = position_to_blob(position, self.0.items_per_blob.get());
         let (context, name, cache, buffer) = self.0.blobs.test_configuration();
-        self.0.blobs.start_sync().await.await?;
+        let (blobs, sync) = self.0.blobs.start_sync().await?;
+        self.0.blobs = blobs;
+        sync.await?;
         drop(self);
         let partition = Partition::new(context, name, cache, buffer);
         let mut pending = partition.open_all().await?;
         Inner::<E, V>::remove_blobs_after(&partition, &mut pending, blob).await?;
         pending
-            .get_mut(&blob)
+            .remove(&blob)
             .expect("retained data blob")
             .truncate(offset)
             .await?;
@@ -4075,7 +4133,7 @@ mod tests {
             };
             let mut journal = Box::new(Inner::<_, u64>::init(context, cfg).await.unwrap());
 
-            journal
+            (journal, _) = journal
                 .append_many(Many::Flat(&[1, 2, 3, 4]))
                 .await
                 .unwrap();
@@ -4117,7 +4175,7 @@ mod tests {
             let mut journal = Box::new(make(pending.clone()).await.unwrap());
 
             // Nothing proven while the first sync is parked: the anchor must not move.
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (mut journal, h1) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 0);
 
@@ -4126,7 +4184,7 @@ mod tests {
 
             // The first sync is jointly proven (data and offsets), so the next call advances
             // the offsets watermark to its size, one interval behind the tip.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 3);
             drive_pending_syncs(&pending, h2).await.unwrap();
@@ -4152,7 +4210,7 @@ mod tests {
             let pending = PendingSyncs::default();
             let cfg = Config {
                 partition: "variable-watermark-joint".into(),
-                items_per_section: NZU64!(100),
+                items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
@@ -4171,19 +4229,28 @@ mod tests {
                 .unwrap(),
             );
 
-            // Fail the data sync but let the offsets sync land: offsets durability alone must
-            // not advance the anchor, which would point recovery past the surviving data.
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
-            let (journal, h1) = journal.start_sync().await.unwrap();
-            let data = next_pending_sync(&pending);
-            release_pending_syncs(&pending);
-            data.release
+            // Filling the first section seals it in the offsets journal and then in the data
+            // blobs, starting each sealed blob's sync. The next start_sync syncs both fresh tails.
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
+
+            // Fail the sealed data blob's sync and let every other sync land.
+            let offsets_sealed = next_pending_sync(&pending);
+            let data_sealed = next_pending_sync(&pending);
+            offsets_sealed.release.send(Ok(())).unwrap();
+            data_sealed
+                .release
                 .send(Err(commonware_runtime::Error::Io(
                     std::io::Error::other("injected sync failure").into(),
                 )))
                 .unwrap();
+            release_pending_syncs(&pending);
             assert!(h1.await.is_err());
 
+            // Offsets durability alone proves nothing. The next call succeeds because both tail
+            // syncs landed, but it must not advance the anchor, which would point recovery past
+            // the surviving data.
+            assert_eq!(journal.barrier.boundary(), 0);
             let (journal, h2) = journal.start_sync().await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 0);
             assert!(h2.await.is_err());
@@ -4216,17 +4283,17 @@ mod tests {
                 .unwrap(),
             );
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 3);
 
             // Truncate discards the joint proof for position 2. Re-append it, then fail the data
-            // sync while the offsets sync lands. The advance must not trust the stale proof.
+            // sync while the offsets sync lands. The boundary must not trust the stale proof.
             let mut journal = drive_pending_syncs(&pending, journal.test_truncate(2))
                 .await
                 .unwrap();
-            journal.append(&9).await.unwrap();
-            let (journal, h1) = journal.start_sync().await.unwrap();
+            (journal, _) = journal.append(&9).await.unwrap();
+            let (mut journal, h1) = journal.start_sync().await.unwrap();
             let data = next_pending_sync(&pending);
             release_pending_syncs(&pending);
             data.release
@@ -4236,9 +4303,11 @@ mod tests {
                 .unwrap();
             assert!(h1.await.is_err());
 
-            let (journal, h2) = journal.start_sync().await.unwrap();
+            // The boundary stays at the truncate point, and the next call returns the retained
+            // failure.
+            assert_eq!(journal.barrier.boundary(), 2);
             assert_eq!(journal.offsets.recovery_watermark(), 2);
-            assert!(h2.await.is_err());
+            assert!(journal.start_sync().await.is_err());
         });
     }
 
@@ -4268,7 +4337,7 @@ mod tests {
                 .unwrap(),
             );
 
-            journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
+            (journal, _) = journal.append_many(Many::Flat(&[1, 2, 3])).await.unwrap();
             let (journal, h1) = journal.start_sync().await.unwrap();
             release_pending_syncs(&pending);
             h1.await.unwrap();
@@ -4281,7 +4350,7 @@ mod tests {
 
             // The checkpoint store retained the failure: commit (which does not write the
             // checkpoint) still succeeds, and the next operation that does fails.
-            journal.append(&4).await.unwrap();
+            (journal, _) = journal.append(&4).await.unwrap();
             let journal = drive_pending_syncs(&pending, journal.commit())
                 .await
                 .unwrap();
@@ -4289,15 +4358,13 @@ mod tests {
         });
     }
 
-    /// A flush failure inside `start_sync` is retained by the tail writer and by the tail sync
-    /// slot. A rollover must surface the retained failure, not discard it:
-    /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
+    /// A failed flush inside `start_sync` returns an error.
     #[test_traced]
-    fn test_variable_dropped_failed_start_sync_surfaces_after_rollover() {
+    fn test_variable_start_sync_flush_failure_returns_err() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "variable-dropped-failed-commit".into(),
+                partition: "variable-start-sync-flush-failure".into(),
                 items_per_section: NZU64!(3),
                 compression: None,
                 codec_config: (),
@@ -4311,9 +4378,10 @@ mod tests {
                     .unwrap(),
             );
 
-            // Buffer an item, then fail the flush inside start_sync, dropping the returned
-            // handle unobserved.
-            journal.append(&0).await.unwrap();
+            // Buffer an item so start_sync must flush it.
+            (journal, _) = journal.append(&0).await.unwrap();
+
+            // The flush inside start_sync fails.
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 write_rate: Some(deterministic::WriteConfig {
                     failure_rate: probability!(1.0),
@@ -4322,15 +4390,104 @@ mod tests {
                 }),
                 ..Default::default()
             };
-            let (mut journal, handle) = journal.start_sync().await.unwrap();
-            drop(handle);
-            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            assert!(matches!(journal.start_sync().await, Err(Error::Runtime(_))));
+        });
+    }
 
-            // Appending through the blob boundary must surface the retained failure.
+    /// A failed data tail sync whose handle was dropped surfaces at the next rollover.
+    #[test_traced]
+    fn test_variable_dropped_failed_start_sync_surfaces_after_rollover() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-dropped-failed-sync".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+
+            // Buffer an item and drop the started sync's handle unobserved. Fail the data tail
+            // sync and let the offsets sync land.
+            (journal, _) = journal.append(&0).await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            next_pending_sync(&pending)
+                .release
+                .send(Err(commonware_runtime::Error::Io(
+                    std::io::Error::other("injected sync failure").into(),
+                )))
+                .unwrap();
+            release_pending_syncs(&pending);
+
+            // Appending through the blob boundary must surface the failure.
             assert!(matches!(
                 journal.append_many(Many::Flat(&[1, 2, 3])).await,
                 Err(Error::Runtime(_))
             ));
+        });
+    }
+
+    /// A failed offsets sync whose handle was dropped is reported by the next start_sync.
+    #[test_traced]
+    fn test_variable_dropped_failed_offsets_sync_fails_next_start_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let cfg = Config {
+                partition: "variable-dropped-failed-offsets-sync".into(),
+                items_per_section: NZU64!(3),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Box::new(
+                Inner::<_, u64>::init(
+                    DelayedSyncContext {
+                        inner: context.child("journal"),
+                        pending: pending.clone(),
+                    },
+                    cfg,
+                )
+                .await
+                .unwrap(),
+            );
+
+            // Buffer an item and drop the started sync's handle unobserved. Let the data tail
+            // sync land and fail the offsets sync.
+            (journal, _) = journal.append(&0).await.unwrap();
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            drop(handle);
+            next_pending_sync(&pending).release.send(Ok(())).unwrap();
+            next_pending_sync(&pending)
+                .release
+                .send(Err(commonware_runtime::Error::Io(
+                    std::io::Error::other("injected sync failure").into(),
+                )))
+                .unwrap();
+            release_pending_syncs(&pending);
+
+            // The data sync landed, so commit succeeds.
+            let journal = journal.commit().await.unwrap();
+
+            // The next start_sync observes the failed offsets sync before starting new syncs.
+            assert!(matches!(journal.start_sync().await, Err(Error::Runtime(_))));
         });
     }
 
@@ -5894,14 +6051,11 @@ mod tests {
             let (mut variable, _) = variable.prune(10).await.unwrap();
             assert_eq!(variable.bounds().start, 10);
 
-            // === Simulate crash: Prune data blobs but not offsets journal ===
-            // Manually prune data blobs to blob 2 (position 20)
-            variable.test_prune_data(2).await.unwrap();
-            // Offsets journal still has data from position 10-19
-
+            // Persist data pruning to position 20 while offsets still retain positions 10-19.
+            (variable, _) = variable.test_prune_data(2).await.unwrap();
             variable.sync().await.unwrap();
 
-            // === Verify recovery ===
+            // Reopen to reconcile the offsets with the retained data.
             let (recovery_context, recordings) = RecordingContext::new(context.child("second"));
             let variable = Journal::<_, u64>::init(recovery_context, cfg.clone())
                 .await
@@ -6023,14 +6177,14 @@ mod tests {
                 (variable, _) = variable.append(&(i * 100)).await.unwrap();
             }
 
-            // Prune offsets journal ahead of data blobs (impossible state)
-            let (mut variable, _) = variable.test_prune_offsets(20).await.unwrap(); // Prune to position 20
-            variable.test_prune_data(1).await.unwrap(); // Only prune data blobs to blob 1 (position 10)
+            // Put offsets ahead of the data floor. Normal pruning cannot produce this state.
+            let (mut variable, _) = variable.test_prune_offsets(20).await.unwrap();
+            (variable, _) = variable.test_prune_data(1).await.unwrap();
 
             let variable = variable.sync().await.unwrap();
             drop(variable);
 
-            // === Verify corruption detected ===
+            // Recovery must reject the contradictory floors.
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -6098,7 +6252,7 @@ mod tests {
 
             // Prune data to blob 1 (position 10), but truncate offsets to 5. The offsets range
             // then ends before the oldest retained data position.
-            journal.test_prune_data(1).await.unwrap();
+            (journal, _) = journal.test_prune_data(1).await.unwrap();
             let journal = journal.test_truncate_offsets(5).await.unwrap();
             drop(journal);
 
@@ -6133,7 +6287,7 @@ mod tests {
 
             // Prune data to blob 1 (position 10) but rewind offsets to 5, so the retained start is
             // 10 while the offsets end at 5.
-            journal.test_prune_data(1).await.unwrap();
+            (journal, _) = journal.test_prune_data(1).await.unwrap();
             let journal = journal.test_truncate_offsets(5).await.unwrap();
             drop(journal);
 
@@ -6253,7 +6407,7 @@ mod tests {
 
             // Manually append 5 more items directly to data blobs only
             for i in 15..20u64 {
-                variable.test_append_data(1, i * 100).await.unwrap();
+                (variable, _, _) = variable.test_append_data(1, i * 100).await.unwrap();
             }
             // Offsets journal still has only 15 entries
 
@@ -6300,9 +6454,11 @@ mod tests {
                 .unwrap();
 
             for i in 0..11u64 {
-                journal.test_append_data(0, i * 100).await.unwrap();
+                (journal, _, _) = journal.test_append_data(0, i * 100).await.unwrap();
             }
-            journal.0.blobs.start_sync().await.await.unwrap();
+            let (blobs, sync) = journal.0.blobs.start_sync().await.unwrap();
+            journal.0.blobs = blobs;
+            sync.await.unwrap();
             drop(journal);
 
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
@@ -6334,12 +6490,14 @@ mod tests {
 
             // Overfill blob 0 with 11 items (capacity is 10).
             for i in 0..11u64 {
-                journal.test_append_data(0, i * 100).await.unwrap();
+                (journal, _, _) = journal.test_append_data(0, i * 100).await.unwrap();
             }
             // Sync blob 0 so the data survives reopen, then add one valid item in blob 1
             // (synced on creation) so blob 0 is not the newest.
-            journal.0.blobs.start_sync().await.await.unwrap();
-            journal.test_append_data(1, 9999).await.unwrap();
+            let (blobs, sync) = journal.0.blobs.start_sync().await.unwrap();
+            journal.0.blobs = blobs;
+            sync.await.unwrap();
+            (journal, _, _) = journal.test_append_data(1, 9999).await.unwrap();
             // Offsets is empty, so rebuild replays from blob 0.
             drop(journal);
 
@@ -6813,7 +6971,7 @@ mod tests {
             for i in 10..30u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
-            journal.test_sync_data_blob(2).await.unwrap();
+            journal = journal.test_sync_data_blob(2).await.unwrap();
             drop(journal);
             let data_partition = cfg.data_partition();
             let (blob, _) = context
@@ -7074,8 +7232,8 @@ mod tests {
 
             // Wait for blobs 0 and 1 to become durable, then drop without flushing
             // blob 2 or the offsets journal.
-            journal.test_sync_data_blob(0).await.unwrap();
-            journal.test_sync_data_blob(1).await.unwrap();
+            journal = journal.test_sync_data_blob(0).await.unwrap();
+            journal = journal.test_sync_data_blob(1).await.unwrap();
             drop(journal);
 
             // The durable data is exactly the contiguous prefix: blobs 0 and 1 hold items,
@@ -7149,14 +7307,11 @@ mod tests {
             let (mut variable, _) = variable.prune(10).await.unwrap();
             assert_eq!(variable.bounds().start, 10);
 
-            // === Simulate crash: Multiple prunes on data blobs, not on offsets journal ===
-            // Manually prune data blobs to blob 3 (position 30)
-            variable.test_prune_data(3).await.unwrap();
-            // Offsets journal still thinks oldest is position 10
-
+            // Persist data pruning to position 30 while offsets still start at position 10.
+            (variable, _) = variable.test_prune_data(3).await.unwrap();
             variable.sync().await.unwrap();
 
-            // === Verify recovery ===
+            // Reopen to reconcile the offsets with the retained data.
             let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -7325,8 +7480,8 @@ mod tests {
             let mut orphan = partition.open_recovery(2).await.unwrap();
             let mut encoded = Vec::new();
             encode_frame_into(None, &9999u64, &mut encoded).unwrap();
-            orphan.append(&encoded).await.unwrap();
-            orphan.sync().await.unwrap();
+            (orphan, _) = orphan.append(&encoded).await.unwrap();
+            orphan = orphan.sync().await.unwrap();
             drop(orphan);
 
             // Rebuilding from watermark 15 cannot skip five items in blob 1 because only
@@ -7551,14 +7706,11 @@ mod tests {
             // Simulate a crash after the previous recovery checkpoint where blob 1 was only
             // partly durable but blob 2 was present. Recovery should keep the contiguous prefix
             // and discard blob 2 rather than treating the blob jump as hard corruption.
-            let mut journal = journal
+            let journal = journal
                 .test_set_offsets_recovery_watermark(10)
                 .await
                 .unwrap();
-            let offset = {
-                let offsets = journal.0.offsets.snapshot().await.unwrap();
-                offsets.read(12).await.unwrap()
-            };
+            let offset = journal.0.offsets.reader().read(12).await.unwrap();
             drop(journal);
 
             // Truncate blob 1 in place (keeping blob 2) by reopening its blob directly.
@@ -7569,8 +7721,8 @@ mod tests {
             let mut writer = PagedRecovery::open(blob, size, 1024, cfg.page_cache.clone())
                 .await
                 .unwrap();
-            writer.truncate(offset).await.unwrap();
-            writer.sync().await.unwrap();
+            writer = writer.truncate(offset).await.unwrap();
+            writer = writer.sync().await.unwrap();
             drop(writer);
 
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
@@ -7628,8 +7780,8 @@ mod tests {
                 .await
                 .unwrap();
                 assert_eq!(append.size(), expected_size);
-                append.append(&[0]).await.unwrap();
-                append.sync().await.unwrap();
+                (append, _) = append.append(&[0]).await.unwrap();
+                append = append.sync().await.unwrap();
                 drop(append);
 
                 let journal = Journal::<_, u64>::init(context.child("second"), cfg)
@@ -7695,8 +7847,8 @@ mod tests {
                 .await
                 .unwrap();
                 let expected_size = append.size();
-                append.append(&[0xFF, 0xFF]).await.unwrap();
-                append.sync().await.unwrap();
+                (append, _) = append.append(&[0xFF, 0xFF]).await.unwrap();
+                append = append.sync().await.unwrap();
                 drop(append);
 
                 let journal = Journal::<_, u64>::init(context.child("second"), cfg)
@@ -7764,10 +7916,12 @@ mod tests {
             // Manually append to data blobs only (bypassing Variable's append logic)
             // This simulates the case where data was synced but offsets wasn't
             for i in 10..20u64 {
-                journal.test_append_data(1, i * 100).await.unwrap();
+                (journal, _, _) = journal.test_append_data(1, i * 100).await.unwrap();
             }
             // Sync the data blobs (blob 1)
-            journal.0.blobs.start_sync().await.await.unwrap();
+            let (blobs, sync) = journal.0.blobs.start_sync().await.unwrap();
+            journal.0.blobs = blobs;
+            sync.await.unwrap();
             // Do NOT sync offsets journal - simulates crash before offsets.sync()
 
             // Close without syncing offsets
@@ -8729,7 +8883,9 @@ mod tests {
             assert_eq!(journal.read(7).await.unwrap(), 777);
 
             // Sync only the data blobs to simulate a crash before offsets are synced.
-            journal.0.blobs.start_sync().await.await.unwrap();
+            let (blobs, sync) = journal.0.blobs.start_sync().await.unwrap();
+            journal.0.blobs = blobs;
+            sync.await.unwrap();
             drop(journal);
 
             // Phase 3: Reopen and verify we did not lose the appended item.
@@ -8773,7 +8929,7 @@ mod tests {
 
             // Sync only the data blobs, not offsets (simulate crash). The appended items
             // live in (sealed) blob 1.
-            journal.test_sync_data_blob(1).await.unwrap();
+            journal = journal.test_sync_data_blob(1).await.unwrap();
             // Don't sync offsets - simulates crash after data write but before offsets write
             drop(journal);
 
@@ -8854,7 +9010,7 @@ mod tests {
             let appended;
             (journal, appended) = journal.append(&7).await.unwrap();
             assert_eq!(appended, u64::MAX - 1);
-            journal
+            journal = journal
                 .test_sync_data_blob(position_to_blob(u64::MAX - 1, cfg.items_per_section.get()))
                 .await
                 .unwrap();

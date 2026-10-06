@@ -13,7 +13,7 @@ use crate::{
             types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -27,7 +27,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
-use commonware_coding::{CodecConfig, ReedSolomon};
+use commonware_coding::ReedSolomon;
 use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digestible, Hasher, Signer,
     bls12381::primitives::variant::MinPk,
@@ -151,6 +151,7 @@ pub const NUM_VALIDATORS: u32 = 4;
 pub const QUORUM: u32 = 3;
 pub const NUM_BLOCKS: u64 = 160;
 pub const BLOCKS_PER_EPOCH: NonZeroU64 = NZU64!(20);
+pub const RECORDS: NonZeroUsize = NZUsize!(16);
 pub const LINK: Link = Link {
     latency: Duration::from_millis(100),
     jitter: Duration::from_millis(1),
@@ -266,7 +267,7 @@ pub trait TestHarness: 'static + Sized {
     /// The application block type.
     /// Note: We require `Digestible<Digest = D>` so generic test functions can use
     /// `subscribe_by_digest` which expects the block's digest type.
-    type ApplicationBlock: crate::Block + Digestible<Digest = D> + Clone + Send + 'static;
+    type ApplicationBlock: crate::Block + Digestible<Digest = D>;
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<
@@ -2013,7 +2014,7 @@ impl TestHarness for StandardHarness {
             application,
             mailbox,
             extra: buffer,
-            height: floor.height(),
+            height: floor.processed().map(Processed::height),
             actor_handle,
         }
     }
@@ -2780,16 +2781,15 @@ impl TestHarness for CodingHarness {
         .expect("failed to initialize finalized blocks archive");
         info!(elapsed = ?start.elapsed(), "restored finalized blocks archive");
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
+            max_block_size: NZUsize!(1024 * 1024),
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
+            records: RECORDS,
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
@@ -2811,7 +2811,7 @@ impl TestHarness for CodingHarness {
             application,
             mailbox,
             extra: shard_mailbox,
-            height: floor.height(),
+            height: floor.processed().map(Processed::height),
             actor_handle,
         }
     }
@@ -2970,16 +2970,15 @@ impl TestHarness for CodingHarness {
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config: shards::Config<_, _, _, _, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
+            max_block_size: NZUsize!(1024 * 1024),
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
             peer_buffer_size: NZUsize!(64),
+            records: RECORDS,
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
@@ -3426,12 +3425,13 @@ pub fn genesis_emitted_once<H: TestHarness>() {
         )
         .await;
         assert_eq!(setup.height, None);
-        assert_eq!(setup.mailbox.get_processed_height().await, None);
+        assert_eq!(setup.mailbox.get_processed().await, None);
+        assert!(setup.mailbox.get_anchor().await.is_none());
         assert_eq!(setup.application.acknowledged().await, Height::zero());
         context.sleep(Duration::from_millis(10)).await;
         assert_eq!(
-            setup.mailbox.get_processed_height().await,
-            Some(Height::zero())
+            setup.mailbox.get_processed().await,
+            Some(Processed::Block(Height::zero()))
         );
         assert!(setup.application.blocks().contains_key(&Height::zero()));
 
@@ -3717,6 +3717,9 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         while application.tip().map(|(height, _)| height) != Some(Height::new(20)) {
             context.sleep(Duration::from_millis(10)).await;
         }
+        while mailbox.get_processed().await.map(Processed::height) != Some(Height::new(20)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
 
         for i in 1..=20u64 {
             assert!(
@@ -3729,6 +3732,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
+        // Requests above the processed height are ignored.
         mailbox.prune(Height::new(25));
         context.sleep(Duration::from_millis(50)).await;
         for i in 1..=20u64 {
@@ -3738,6 +3742,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
+        // Pruning keeps the requested height and removes older sections.
         mailbox.prune(Height::new(10));
         context.sleep(Duration::from_millis(100)).await;
         for i in 1..10u64 {
@@ -3762,6 +3767,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
+        // Pruning at the processed height keeps the processed block.
         mailbox.prune(Height::new(20));
         context.sleep(Duration::from_millis(100)).await;
         for i in 10..20u64 {
@@ -3788,6 +3794,12 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         drop(extra);
         let (mailbox, _extra, _application) = init_marshal(context.child("restart")).await;
 
+        // Startup classifies the stored processed block.
+        assert_eq!(
+            mailbox.get_processed().await,
+            Some(Processed::Block(Height::new(20)))
+        );
+
         for i in 1..20u64 {
             assert!(
                 mailbox.get_block(Height::new(i)).await.is_none(),
@@ -3810,10 +3822,109 @@ pub fn prune_finalized_archives<H: TestHarness>() {
     })
 }
 
+/// Installing a floor at a section boundary keeps its processed predecessor.
+pub fn floor_retains_processed_predecessor<H: TestHarness>() {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        // Prunable archives use ten-item sections, so a floor at 20 starts a new section.
+        let validator = participants[0].clone();
+        let (mut mailbox, extra, _application) = H::setup_prunable_validator(
+            context.child("validator"),
+            &oracle,
+            validator.clone(),
+            &schemes,
+            &format!("floor-predecessor-{validator}"),
+            CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        )
+        .await;
+
+        // Finalize blocks 1 through 19. Block 20 is only verified, so its floor lands above
+        // the processed height.
+        let mut parent = Sha256::hash(&[b""]);
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+        let mut floor = None;
+        for i in 1..=20u64 {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
+            let commitment = H::commitment(&block);
+            parent = H::digest(&block);
+            parent_commitment = commitment;
+            let bounds = epocher.containing(Height::new(i)).unwrap();
+            let round = Round::new(bounds.epoch(), View::new(i));
+
+            let mut handle = ValidatorHandle {
+                mailbox: mailbox.clone(),
+                extra: extra.clone(),
+            };
+            H::verify_for_prune(&mut handle, round, &block).await;
+            context.sleep(LINK.latency).await;
+
+            let proposal = Proposal {
+                round,
+                parent: View::new(i - 1),
+                payload: commitment,
+            };
+            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            if i < 20 {
+                H::report_finalization(&mut mailbox, finalization).await;
+            } else {
+                floor = Some(finalization);
+            }
+        }
+        while mailbox.get_processed().await.map(Processed::height) != Some(Height::new(19)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            mailbox.get_processed().await,
+            Some(Processed::Block(Height::new(19)))
+        );
+        assert_eq!(
+            mailbox
+                .get_anchor()
+                .await
+                .map(|(processed, block)| (processed, block.height())),
+            Some((Processed::Block(Height::new(19)), Height::new(19)))
+        );
+
+        // Installing the floor prunes before it dispatches block 20, so processing 20 means
+        // pruning finished.
+        mailbox.set_floor(floor.unwrap());
+        while mailbox.get_processed().await.map(Processed::height) != Some(Height::new(20)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+
+        // The section holding block 19 survives. Older sections are pruned.
+        assert!(mailbox.get_block(Height::new(19)).await.is_some());
+        assert!(mailbox.get_finalization(Height::new(19)).await.is_some());
+        assert!(mailbox.get_block(Height::new(9)).await.is_none());
+        assert!(mailbox.get_finalization(Height::new(9)).await.is_none());
+    })
+}
+
 /// Regression test: delayed block backfill delivered after floor advancement must not crash.
 ///
 /// This models a resolver peer that responds to `Key::Block` only after the
-/// victim has advanced its floor and pruned finalized storage. The stale delivery
+/// victim has advanced its floor past the requested height. The stale delivery
 /// must be rejected and must not be persisted.
 pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
     let runner = deterministic::Runner::new(
@@ -3898,7 +4009,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         // Let block requests get issued while responses are still blocked.
         context.sleep(Duration::from_millis(500)).await;
 
-        // Advance floor beyond the stale block and prune.
+        // Advance floor beyond the stale block.
         let floor = Height::new(10);
         let floor_parent = H::make_test_block(
             Sha256::hash(&[b"floor-grandparent"]),

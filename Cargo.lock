@@ -1469,9 +1469,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chacha20"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
 dependencies = [
  "cfg-if",
  "cipher",
@@ -1752,8 +1752,10 @@ dependencies = [
  "commonware-codec-macros",
  "commonware-conformance",
  "commonware-macros",
+ "criterion",
  "paste",
  "proptest",
+ "rand 0.10.2",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "thiserror 2.0.18",
@@ -1792,16 +1794,13 @@ dependencies = [
  "commonware-cryptography",
  "commonware-invariants",
  "commonware-macros",
- "commonware-math",
  "commonware-parallel",
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
  "criterion",
- "num-rational",
  "rand 0.10.2",
  "rand_chacha 0.10.0",
- "rayon",
  "thiserror 2.0.18",
 ]
 
@@ -2065,6 +2064,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-dkg"
+version = "2026.9.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "commonware-actor",
+ "commonware-broadcast",
+ "commonware-codec",
+ "commonware-consensus",
+ "commonware-cryptography",
+ "commonware-formatting",
+ "commonware-glue",
+ "commonware-macros",
+ "commonware-math",
+ "commonware-p2p",
+ "commonware-parallel",
+ "commonware-resolver",
+ "commonware-runtime",
+ "commonware-storage",
+ "commonware-stream",
+ "commonware-utils",
+ "futures",
+ "rand 0.10.2",
+ "rand_core 0.10.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "commonware-estimator"
 version = "2026.9.0"
 dependencies = [
@@ -2295,38 +2326,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-reshare"
-version = "2026.9.0"
-dependencies = [
- "anyhow",
- "clap",
- "commonware-actor",
- "commonware-broadcast",
- "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-formatting",
- "commonware-glue",
- "commonware-macros",
- "commonware-math",
- "commonware-p2p",
- "commonware-parallel",
- "commonware-resolver",
- "commonware-runtime",
- "commonware-storage",
- "commonware-stream",
- "commonware-utils",
- "futures",
- "rand 0.10.2",
- "rand_core 0.10.1",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "commonware-resolver"
 version = "2026.9.0"
 dependencies = [
@@ -2496,20 +2495,19 @@ dependencies = [
 name = "commonware-stream"
 version = "2026.9.0"
 dependencies = [
- "chacha20poly1305",
+ "arbitrary",
  "commonware-codec",
+ "commonware-conformance",
  "commonware-cryptography",
  "commonware-formatting",
  "commonware-macros",
+ "commonware-math",
  "commonware-runtime",
  "commonware-utils",
- "criterion",
  "futures",
  "rand 0.10.2",
  "rand_core 0.10.1",
  "thiserror 2.0.18",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
@@ -2517,7 +2515,6 @@ name = "commonware-stream-fuzz"
 version = "2026.9.0"
 dependencies = [
  "arbitrary",
- "chacha20poly1305",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-runtime",

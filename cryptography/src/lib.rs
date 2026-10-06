@@ -94,6 +94,11 @@ commonware_macros::stability_scope!(BETA {
     pub use crate::crc32::Crc32;
 
     #[cfg(feature = "std")]
+    pub mod chacha20_poly1305;
+    #[cfg(feature = "std")]
+    pub use crate::chacha20_poly1305::ChaCha20Poly1305;
+
+    #[cfg(feature = "std")]
     pub mod handshake;
 
     /// Produces [Signature]s over messages that can be verified with a corresponding [PublicKey].
@@ -149,10 +154,10 @@ commonware_macros::stability_scope!(BETA {
     }
 
     /// A [PublicKey], able to verify [Signature]s.
-    pub trait PublicKey: Verifier + Sized + ReadExt + Encode + PartialEq + Array {}
+    pub trait PublicKey: Verifier + Sized + ReadExt + Array {}
 
     /// A [Signature] over a message.
-    pub trait Signature: Sized + Clone + ReadExt + Encode + PartialEq + Array {}
+    pub trait Signature: Sized + ReadExt + Array {}
 
     /// An extension of [Signature] that supports public key recovery.
     pub trait Recoverable: Signature {
@@ -313,6 +318,31 @@ commonware_macros::stability_scope!(BETA {
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);
     }
+
+    /// Authenticated encryption of an ordered sequence of messages.
+    ///
+    /// Every message is encrypted and authenticated with its associated data. The nth call to
+    /// [Cipher::open] accepts only the nth message sealed under the same key, so replayed,
+    /// reordered, or modified messages fail to open. A failed call consumes the cipher. At most
+    /// one instance may seal under a given key.
+    pub trait Cipher: Random + Sized + Send + Sync + 'static {
+        /// Authentication tag produced for each message.
+        type Tag: Array;
+
+        /// Encrypts the next message in place, authenticated together with `aad`, and returns
+        /// the cipher with the tag.
+        ///
+        /// Returns `None` if sealing fails, in which case the contents of `data` are unspecified.
+        #[must_use = "the cipher is returned only if sealing succeeds"]
+        fn seal(self, aad: &[u8], data: &mut [u8]) -> Option<(Self, Self::Tag)>;
+
+        /// Decrypts the next message in place if `tag` authenticates it together with `aad`, and
+        /// returns the cipher.
+        ///
+        /// Returns `None` if opening fails, in which case the contents of `data` are unspecified.
+        #[must_use = "data is authentic only if opening succeeds"]
+        fn open(self, aad: &[u8], data: &mut [u8], tag: &Self::Tag) -> Option<Self>;
+    }
 });
 
 #[cfg(test)]
@@ -320,11 +350,40 @@ mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, FixedSize};
     use commonware_utils::test_rng;
+    use std::collections::HashSet;
 
     fn test_validate<C: PrivateKey>() {
-        let private_key = C::random(test_rng());
+        let mut rng = test_rng();
+        let private_key = C::random(&mut rng);
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
+        let decoded = C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).unwrap();
+        assert_eq!(public_key, decoded);
+        assert_eq!(public_key.cmp(&decoded), core::cmp::Ordering::Equal);
+
+        let other = C::random(&mut rng).public_key();
+        assert_ne!(public_key, other);
+        let mut keys = HashSet::from([public_key]);
+        assert!(!keys.insert(decoded));
+        assert!(keys.insert(other));
+    }
+
+    fn test_public_key_order<C: PrivateKey>() {
+        let mut rng = test_rng();
+        let mut keys = Vec::new();
+        for _ in 0..16 {
+            let key = C::random(&mut rng).public_key();
+            let decoded = C::PublicKey::decode(commonware_codec::Copying(key.as_ref())).unwrap();
+            keys.extend([key, decoded]);
+        }
+
+        for a in &keys {
+            for b in &keys {
+                let expected = a.as_ref().cmp(b.as_ref());
+                assert_eq!(a.cmp(b), expected);
+                assert_eq!(a.partial_cmp(b), Some(expected));
+                assert_eq!(a == b, expected.is_eq());
+            }
+        }
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
@@ -498,6 +557,11 @@ mod tests {
     }
 
     #[test]
+    fn test_secp256r1_standard_public_key_order() {
+        test_public_key_order::<secp256r1::standard::PrivateKey>();
+    }
+
+    #[test]
     fn test_secp256r1_standard_validate_invalid_public_key() {
         test_validate_invalid_public_key::<secp256r1::standard::PrivateKey>();
     }
@@ -541,6 +605,11 @@ mod tests {
     #[test]
     fn test_secp256r1_recoverable_validate() {
         test_validate::<secp256r1::recoverable::PrivateKey>();
+    }
+
+    #[test]
+    fn test_secp256r1_recoverable_public_key_order() {
+        test_public_key_order::<secp256r1::recoverable::PrivateKey>();
     }
 
     #[test]

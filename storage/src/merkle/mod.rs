@@ -32,7 +32,7 @@ use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 pub(crate) use proof::build_range_proof;
 pub use proof::{MAX_PROOF_DIGESTS_PER_ELEMENT, Proof};
 pub use read::Readable;
@@ -61,7 +61,7 @@ pub enum Bagging {
 /// Provides the per-family constants and conversion functions that differentiate
 /// MMR from MMB (or other future Merkle structures). Families capture structural topology
 /// only; bagging is owned by the [`hasher::Hasher`] instance and supplied by the consumer.
-pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
+pub trait Family: Copy + Debug + Default + Send + Sync + 'static {
     /// Maximum valid node count / size.
     const MAX_NODES: Position<Self>;
 
