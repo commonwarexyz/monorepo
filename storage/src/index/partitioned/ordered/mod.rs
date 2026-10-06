@@ -52,8 +52,6 @@ use crate::{
     },
     translator::Translator,
 };
-#[commonware_macros::stability(ALPHA)]
-use commonware_runtime::telemetry::metrics::{Registered, Registration};
 use commonware_runtime::{
     Metrics,
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
@@ -357,15 +355,9 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
     /// partition slots, so per-worker memory is the range rather than the full `2^(8*P)`, which
     /// is what makes a large `P` affordable.
     ///
-    /// The range counts its metrics on detached handles, which [Self::install_range] folds into
-    /// this index. Sharing this index's handles would make every insert by every worker update
-    /// the same atomics, and that cache-line contention dominates insert cost at high worker
-    /// counts.
+    /// The range counts its metrics on its own detached handles, which [Self::install_range] folds
+    /// into this index, so concurrent workers never contend on the same atomics.
     fn new_range(&self, offset: usize, count: usize) -> RangeIndex<T, V, P> {
-        fn detached<M: Default>() -> Registered<M> {
-            Registered::with_registration(M::default(), Registration::from(()))
-        }
-
         let partitions = (0..count)
             .map(|_| Partition::default())
             .collect::<Vec<_>>()
@@ -376,10 +368,10 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
                 partitions,
                 spilled: HashMap::new(),
                 threshold: self.threshold,
-                keys: detached(),
-                items: detached(),
-                pruned: detached(),
-                spills: detached(),
+                keys: Gauge::detached(Default::default()),
+                items: Gauge::detached(Default::default()),
+                pruned: Counter::detached(Default::default()),
+                spills: Counter::detached(Default::default()),
             },
             offset,
         }
@@ -411,7 +403,8 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
             self.spilled.insert(lo + local, inner);
         }
 
-        // The worker's range started empty, so its gauges hold exactly what it adds here.
+        // The worker's range started empty, so its gauges count exactly the keys and values
+        // installed here. Its counters hold every prune and spill from building the range.
         self.keys.inc_by(worker.index.keys.get());
         self.items.inc_by(worker.index.items.get());
         self.pruned.inc_by(worker.index.pruned.get());
