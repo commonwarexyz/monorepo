@@ -76,7 +76,7 @@ use std::{
     num::NonZeroU64,
     ops::Deref,
     pin::Pin,
-    ptr::{self, NonNull},
+    ptr::NonNull,
     sync::{Arc, Weak},
     task::{Context, Poll, RawWaker, RawWakerVTable, Wake, Waker},
 };
@@ -759,7 +759,6 @@ impl Task {
 /// only when its task is complete, or when another reference is obliged to
 /// clear the task: the closed task set's, which teardown drains, or the
 /// [`Task`] a refused registration returns to its caller.
-#[repr(transparent)]
 #[must_use = "a runnable must be scheduled, polled, or discarded"]
 pub struct Runnable(Task);
 
@@ -862,10 +861,7 @@ impl Runnable {
 
     /// The runnable's reference as a plain task, without the drop check.
     fn into_task(self) -> Task {
-        let this = ManuallyDrop::new(self);
-
-        // SAFETY: `this` is never dropped, so the task is read out once.
-        unsafe { ptr::read(&this.0) }
+        Task(ManuallyDrop::new(self).0.as_ptr())
     }
 }
 
@@ -1981,7 +1977,7 @@ mod loom_tests {
         for by_value in [false, true] {
             loom::model(move || {
                 let mailbox = mailbox();
-                let set = Tasks::with_shards(1);
+                let set = Tasks::new(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
                 let (task, runnable) = Task::new(
@@ -2032,7 +2028,7 @@ mod loom_tests {
     fn test_teardown_racing_a_foreign_wake_disposes_of_the_task_once() {
         loom::model(|| {
             let mailbox = mailbox();
-            let set = Tasks::with_shards(1);
+            let set = Tasks::new(1);
             let drops = Arc::new(AtomicUsize::new(0));
             let (task, runnable) =
                 Task::new(pending(&drops), &set, std::sync::Arc::downgrade(&mailbox));
@@ -2062,7 +2058,7 @@ mod loom_tests {
     fn test_registration_racing_teardown_disposes_of_the_task_once() {
         loom::model(|| {
             let mailbox = mailbox();
-            let set = Arc::new(Tasks::with_shards(1));
+            let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let registering = thread::spawn({
                 let set = set.clone();
@@ -2093,7 +2089,7 @@ mod loom_tests {
     fn test_teardown_racing_the_poll_path_drops_the_future_once() {
         loom::model(|| {
             let mailbox = mailbox();
-            let set = Arc::new(Tasks::with_shards(1));
+            let set = Arc::new(Tasks::new(1));
             let drops = Arc::new(AtomicUsize::new(0));
             let guard = DropCount(drops.clone());
             let mut woken = false;

@@ -185,13 +185,20 @@ impl Tasks {
     /// A set sized for `workers` workers, with four shards per worker rounded
     /// up to a power of two, as tokio sizes its own.
     pub fn new(workers: usize) -> Self {
+        // Loom requires every execution to make the same choices, but a task's
+        // shard hashes its heap address, which can change between executions,
+        // so loom builds use one shard.
+        if cfg!(feature = "loom") {
+            return Self::with_shards(1);
+        }
+
         // Clamped first, so rounding up cannot overflow.
         let workers = workers.min(MAX_SHARDS / SHARDS_PER_WORKER);
         Self::with_shards(workers.next_power_of_two() * SHARDS_PER_WORKER)
     }
 
     /// A set with `count` shards, a power of two.
-    pub(super) fn with_shards(count: usize) -> Self {
+    fn with_shards(count: usize) -> Self {
         assert!(
             count.is_power_of_two(),
             "shard count must be a power of two"
