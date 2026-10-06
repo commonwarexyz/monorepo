@@ -72,17 +72,40 @@ from `core::Actor::init`, the coding adapter and the shards engine compiles. The
 motivated it ran at the same commit: a test that uses `RetiringProvider` passes, and fails
 with only a creation-time provider lookup added to `Actor::init`.
 
-The knowledge base has not been exercised with a real agent: section 5.6, the `kb` row of
-5.4, and the knowledge-base part of the beacon step (7.4, prompt 13.9). AC-14 and AC-15
-cover it.
+Deriving a variant from every simplex target (D57) was checked at commit `3c7187e1d1`, in
+scratch worktrees the script materialized for the `simplex` profile, without an agent. The
+materialize step wrote the 21 variants and the four hooks of Appendix B.5, and the fuzz
+package, variants included, checks with no error or warning. Six variants were built with
+cargo-fuzz, and one temporary probe at the start of the batcher gave the guard a site:
 
-The audit pass has not been exercised with a real agent either: steps 6 and 7 of section
-7.3 and prompt 13.15. It was added after a review of a `simplex` campaign found a binding
-labelled `bound` whose action is committed in a handler the instrumentation never
-observed (section 11, D48). The `lint-plan` and `lint-prompts` commands of section 5.4 are
-covered by the script tests of section 5.9, and `lint-plan` was run against that campaign's
-plan, where it reports the missing ledger. The rest of the new campaign wiring, the plan
-lint of section 7.5 step 3 and the `plan` line of section 7.9, is unexercised too.
+- In the default mode, the ByzzFuzz, Chaos-Twins, audit and Mallory variants ran for one to
+  two minutes each (2,573, 588, 515 and 1,198 inputs) with no panic and no participant
+  index mismatch.
+- With `STATELENS_BYZANTINE=panic`, the ByzzFuzz and Chaos-Twins variants panicked with
+  `[statelens][BYZANTINE]` on their first input. The audit variant did so after 179 inputs
+  once `-len_control=0` made inputs long enough to draw the RejectView choice; it drew none
+  in 459 short ones. The Mallory variant did so after 86 inputs, and a replay of that input
+  logs `amnesia_restart(node=0)` before the panic.
+- In the same mode, the Standard and Chaos variants ran 503 and 127 inputs without it.
+
+The knowledge base and the audit pass were first exercised with a real agent on 2026-10-05,
+at commit `86eed8302c`, with Claude:
+
+- A `kb` extraction (section 6, prompt 13.19) read the qmdb findings through the `kb`
+  commands of section 5.6 and wrote the ten local invariants INV-0034 to INV-0043.
+- A `qmdb` campaign then bound them. Its six beacon runs had the `kb` commands (section 7.4,
+  prompt 13.9), and 17 of the 170 rows of its beacon table name a finding. Its two audit
+  batches (steps 6 and 7 of section 7.3, prompt 13.15) added 18 checks and changed no
+  status. The plan lint of section 7.5 step 3 and the `plan` line of section 7.9 reported no
+  problem, and the targets built without a repair.
+- Its test gate ran 2,289 tests. One failed for lack of file descriptors, with no
+  `[statelens]` line, and fails the same way without instrumentation (section 17.6), so the
+  campaign ended `PANIC (tests)` rather than `READY`.
+
+The audit pass was added after a review of a `simplex` campaign found a binding labelled
+`bound` whose action is committed in a handler the instrumentation never observed (section
+11, D48). The `lint-plan` and `lint-prompts` commands of section 5.4 are also covered by the
+script tests of section 5.9.
 
 ---
 
@@ -107,7 +130,7 @@ them; the last column names the PRD requirement.
 | D12 | Orchestration is one Python 3 script, `SL/scripts/statelens.py` (standard library only), wrapped by `SL/justfile`. | R-LAYOUT-1, R-AG-1 |
 | D13 | No `Cargo.toml` is committed under `SL/`. `SL/runtime/*.rs` MUST stay `rustfmt`-clean, because CI's `just check-fmt` formats every `*.rs` file in the tree. | R-LAYOUT-2, R-NF-4 |
 | D14 | Prompt files are named `analyst-<kind>.md`, one per source kind (`issue`, `design`, `comment`, `spec`, `paper`), plus a shared `analyst.md`. | R-LAYOUT-1, R-P1-2 |
-| D15 | StateLens fuzz targets use only the `cert_mock` certificate scheme (`consensus/src/simplex/mocks/scheme.rs`, imported as `cert_mock` in `consensus/fuzz/core`). Every `fuzz::<P, ...>` call in a target template names a `P` whose `impl Simplex` in `consensus/fuzz/core/src/simplex.rs` sets `type Scheme = cert_mock::Scheme<...>`. At the reference commit these are `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin` and `SimplexCertificateMockByzantineFirstLeader`; the committed target uses `SimplexCertificateMock`. No ed25519, BLS12-381 or secp256r1 scheme is used. The materialize step enforces this (section 7.2). The test gate is not affected. | R-P2-4 |
+| D15 | StateLens fuzz targets use only the `cert_mock` certificate scheme (`consensus/src/simplex/mocks/scheme.rs`, imported as `cert_mock` in `consensus/fuzz/core`). Every call of a fuzz entry point in a simplex target, `fuzz::<P, ...>` or one of the `fuzz_*::<P, ...>` audit entry points, names a `P` whose `impl Simplex` in `consensus/fuzz/core/src/simplex.rs` sets `type Scheme = cert_mock::Scheme<...>`. At the reference commit these are `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin` and `SimplexCertificateMockByzantineFirstLeader`; the simplex targets name `SimplexCertificateMock`, `SimplexCertificateMockByzantineFirstLeader` and `SimplexCertificateMockCustomRoundRobin`. No ed25519, BLS12-381 or secp256r1 scheme is used. The materialize step enforces this (section 7.2). The test gate is not affected. | R-P2-4 |
 | D16 | Ghost state lives for one run. The campaign patches the deterministic runtime so that `Runner::new` calls a hook that clears it; independent runs in one test thread (for example the seeds of one test) no longer share history, while a crash-restart from a checkpoint keeps it (Appendix B.4). | R-INS-5, PRD section 8.4 |
 | D17 | Registries are directories per subsystem: `invariants/simplex/`, `invariants/marshal/` and `invariants/qmdb/`, and likewise for false invariants. No invariant file lies directly under `invariants/` or `false-invariants/`. | R-REG-1, R-REG-8 |
 | D18 | Each ID prefix has one global counter across all registries, so the marshal false invariant is FALSE-0002 and the qmdb one FALSE-0003. The lint rejects an ID that two files use. | R-REG-1, R-REG-8, R-M-REG-2 |
@@ -128,6 +151,7 @@ them; the last column names the PRD requirement.
 | D47 | A name inside a macro body is reported as `macro`, not silently dropped and not guessed. Parsing does not expand macros, so the body is an unstructured token tree; dropping such sites would hide much of this crate's concurrency, which lives inside `select!`. | R-AG-5 |
 | D55 | Invariants derived from knowledge-base findings (`extract kb`) are written to a local registry, `SL/invariants.local/<subsystem>/`, which git ignores and campaigns bind like the tracked one. A finding is private and the repository is public, so nothing derived from one is committed (R-KB-6); an operator who wants such an invariant shared rewrites it without the finding's detail and moves it by hand. IDs stay global across both. | R-KB-6, R-P1-7 |
 | D56 | `extract --number N` bounds an extraction: the prompt asks for the N invariants the sources justify best and allows fewer, never more, and the script reports more than N as a problem. A quota would make the agent invent invariants to reach it. | R-P1-7 |
+| D57 | The simplex profile derives a variant from every `simplex_*` target, as the marshal and qmdb profiles do, rather than from a curated list. Every runner that runs a real engine under a Byzantine identity therefore publishes that identity: the Twins runner (edit 6), and the ByzzFuzz, Chaos-Twins, audited Standard and Mallory runners (edits 9 to 12, Appendix B.5). The other drivers run none: Standard and FaultyNet make their Byzantine nodes `Disrupter`s, Mallory's Byzantine roles are adversary actors, and Chaos has no Byzantine node. Mallory's Honest-role node becomes Byzantine only through an amnesia restart, which its hook publishes. | G4, G5, R-S-NF-2 |
 | D48 | The instrument step ends with an audit pass over its own bindings, after the beacon probes so that no agent edits the audited tree, by the same agent and under the same rules, and the plan carries a `Sites` ledger the pass and `lint-plan` both read. A first pass writes a binding and its own status in one go, and nothing there compares the two, so a binding that watches where an action is decided rather than where it is committed passes as `bound`. | R-INS-8, R-P2-2 |
 
 D24 to D30 concern marshal only; they are in section 8.2. D49 to D54 concern qmdb only; they
@@ -448,7 +472,8 @@ network access for `curl`. Phase 1 with PDF papers uses `pdftotext` or the Pytho
 `pypdf` module when available. Beacon extraction needs `STATELENS_KB` to name at least
 one readable corpus root. The code index (section 5.7) needs `rust-analyzer`; without it a
 campaign warns and continues. `just coverage` (section 7.13) needs the fuzz toolchain's
-`llvm-tools-preview` component.
+`llvm-tools-preview` component. The `qmdb` test gate needs an open-file soft limit well above
+256, the macOS default (section 17.6).
 
 ### 5.3 `justfile` (verbatim)
 
@@ -711,10 +736,10 @@ are data in `statelens.py`:
 | Editable roots (scope check) | `consensus/src/simplex/` | `consensus/src/simplex/`, `consensus/src/marshal/` | `storage/src/qmdb/` |
 | Warn-only paths | `consensus/src/simplex/mocks/`, `consensus/src/simplex/scheme/` | the same, and `consensus/src/marshal/mocks/` | `storage/src/qmdb/benches/` |
 | Beacon components, as `ACTOR`: `ACTOR_DIR` | `voter`, `batcher`, `resolver`: `consensus/src/simplex/actors/<actor>` | the three of `simplex`; `marshal.core`: `consensus/src/marshal/core`; `marshal.standard`: `consensus/src/marshal/standard`; `marshal.coding`: `consensus/src/marshal/coding` | `qmdb.any`, `qmdb.current`, `qmdb.immutable`, `qmdb.keyless`, `qmdb.store`, `qmdb.sync`: `storage/src/qmdb/<variant>` |
-| Materialize edits | Section 7.2, edits 1 to 8 | Section 7.2, edits 1 to 3 and 6 to 8, and edits M1 to M3 (section 8.3) | Section 7.2, edits 7 and 8, and edits Q1 to Q5 (section 17.3) |
+| Materialize edits | Section 7.2, edits 1 to 12 | Section 7.2, edits 1 to 3 and 6 to 8, and edits M1 to M3 (section 8.3) | Section 7.2, edits 7 and 8, and edits Q1 to Q5 (section 17.3) |
 | Cryptography check | D15 (section 7.2) | Section 8.4 | None: no target signs anything |
 | Fuzz package | `consensus/fuzz/simplex` | `consensus/fuzz/marshal` | `storage/fuzz` |
-| Fuzz targets it builds | One StateLens variant per target named in `SIMPLEX_VARIANTS`: `simplex_cert_mock`, `simplex_cert_mock_twins_campaign`, `simplex_cert_mock_twins_mutator` | One StateLens variant per `marshal_*` target in `consensus/fuzz/marshal/fuzz_targets/` | One StateLens variant per `qmdb_*` target in `storage/fuzz/fuzz_targets/` |
+| Fuzz targets it builds | One StateLens variant per `simplex_*` target in `consensus/fuzz/simplex/fuzz_targets/` | One StateLens variant per `marshal_*` target in `consensus/fuzz/marshal/fuzz_targets/` | One StateLens variant per `qmdb_*` target in `storage/fuzz/fuzz_targets/` |
 | Test filter | Section 7.7 | Section 8.3, step 6 | Section 17.3, step 6 |
 | Component tests after the gate | Section 7.7 | Section 7.7 | None: the gate runs every qmdb test |
 
@@ -1128,12 +1153,12 @@ This section gives the edits of the `simplex` profile. The `marshal` profile mak
 to 3 and 6 to 8, and edits M1 to M3 with its own cryptography check (sections 8.3 and
 8.4). The `qmdb` profile makes edits 7 and 8, and edits Q1 to Q5 (section 17.3).
 
-Before any edit, the script checks the cryptography rule (D15). For every target template
-in `SL/runtime/` (every `*.rs` file except `statelens.rs`) and every `fuzz::<P` or
-`fuzz_audit::<P` call in it, `consensus/fuzz/core/src/simplex.rs` MUST contain
+Before any edit, the script checks the cryptography rule (D15). For every simplex target the
+profile derives a variant from (section 5.5), and every call of a fuzz entry point in it,
+`fuzz::<P` or `fuzz_<name>::<P`, `consensus/fuzz/core/src/simplex.rs` MUST contain
 `impl Simplex for P {` with `type Scheme = cert_mock::Scheme<` inside that impl block. A
-template that fails the check, or that contains no such call, aborts the campaign with
-exit code 2 and a message that names the template and `P`.
+target that fails the check, or that contains no such call, aborts the campaign with exit
+code 2 and a message that names the target and `P`.
 
 Each edit that uses an anchor MUST find exactly one line equal to the anchor. A missing
 or repeated anchor aborts the campaign with exit code 2 and a message that names the
@@ -1149,6 +1174,10 @@ file and the anchor.
 | 6 | `consensus/fuzz/core/src/lib.rs` | After the line `let compromised = case.compromised.iter().copied().collect::<HashSet<_>>();` (with four leading spaces) insert the hook of Appendix B.3. |
 | 7 | `runtime/src/deterministic.rs` | Before the line `impl From<Config> for Runner {` insert the static of Appendix B.4. |
 | 8 | `runtime/src/deterministic.rs` | After the line `pub fn new(cfg: Config) -> Self {` (with four leading spaces) insert the call of Appendix B.4. |
+| 9 | `consensus/fuzz/simplex/src/byzzfuzz/runner.rs` | After the line `commonware_consensus_fuzz_core::setup_network::<P>(context, input).await;` (with eight leading spaces) insert the ByzzFuzz hook of Appendix B.5. |
+| 10 | `consensus/fuzz/simplex/src/chaos/twins.rs` | After the line `let crash = (0..n).find(\|&idx\| idx != byz).expect("an honest index exists");` (with eight leading spaces) insert the Chaos-Twins hook of Appendix B.5. |
+| 11 | `consensus/fuzz/simplex/src/lib.rs` | Before the line `// A Byzantine participant may behave correctly. For the audit` (with sixteen leading spaces) insert the audit hook of Appendix B.5. |
+| 12 | `consensus/fuzz/simplex/src/mallory/runner.rs` | After the line `lifecycle::abort_tasks(mv).await;` (with four leading spaces) insert the Mallory hook of Appendix B.5. |
 
 Anchors in the same file are applied from the bottom up, so earlier insertions do not
 move later anchors.
@@ -1408,13 +1437,13 @@ parallel batches or in tmux windows, and `just fuzz <target>` runs one.
 - The operator should not pass `-artifact_prefix` or `-exact_artifact_path`, which move the
   crash file elsewhere, or any `-handle_*` switch, which can stop libFuzzer from reporting
   a crash and saving its input.
-- PRD section 9.4 lists the marshal variants whose adversary runs Simplex or marshal
-  code; only they exercise the Byzantine guard.
+- PRD sections 8.4 and 9.4 list the simplex and marshal variants whose adversary runs
+  Simplex or marshal code; only they exercise the Byzantine guard.
 
 ### 7.11 Phase 3: crashes and replay
 
 - libFuzzer writes a crashing input to the artifact directory of the target's package:
-  `consensus/fuzz/simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/`,
+  `consensus/fuzz/simplex/artifacts/<variant>/` for a simplex variant,
   `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant, or
   `storage/fuzz/artifacts/<variant>/` for a qmdb one (R-ART-1).
 - The `replay` line of the summary, with the crash file put in, replays the input in the
@@ -1423,7 +1452,7 @@ parallel batches or in tmux windows, and `just fuzz <target>` runs one.
   guard-test crash exists only with `STATELENS_BYZANTINE=panic`, and `check` changes which
   replicas are checked; without the same value, the input may run cleanly. For example:
   `STATELENS_BYZANTINE=panic` followed by the `replay` line.
-- For the Simplex target, `CONSENSUS_FUZZ_LOG=1` also prints the decoded input; the
+- For a Simplex variant, `CONSENSUS_FUZZ_LOG=1` also prints the decoded input; the
   marshal harnesses do not read it.
 
 ### 7.12 Phase 3: investigation
@@ -1506,9 +1535,10 @@ invariants, 49 assertion sites, 146 probe sites), on 16 cores:
   Simplex sites.
 
 Not verified: the script changes, the generated variants, the wedge hook, marshal
-instrumentation, and AC-9 to AC-13. The knowledge base and beacons (section 5.6
-and 6.4) have not been exercised with a real agent, so AC-14 to AC-17 are unverified too
-(AC-16 and AC-17 cover the audit pass and this subproject's own checks).
+instrumentation, and AC-9 to AC-13. The knowledge base, the beacon step and the audit pass
+(sections 5.6, 7.4 and 7.3) were first exercised with a real agent by the qmdb campaign of
+section 1.2, not by a marshal campaign, and no run of the procedures of AC-14 to AC-17 is
+recorded (AC-16 and AC-17 cover the audit pass and this subproject's own checks).
 
 ### 8.2 Decisions
 
@@ -2704,7 +2734,9 @@ Last lines of its output:
 - Components: the voter, batcher and resolver actors in `consensus/src/simplex/actors/`,
   which exchange messages through mailboxes, and the journal replay path on restart.
 - Adversary: the fuzzer runs honest replicas next to Byzantine ones, which equivocate,
-  mutate messages and split the network.
+  mutate messages and split the network. Some targets of `consensus/fuzz/simplex` also
+  crash honest replicas and restart them from their journal (the Chaos, Chaos-Twins and
+  Mallory drivers), so journal replay runs while fuzzing.
 - Fuzz targets: every consensus target uses the `cert_mock` scheme, which hides the
   signer set.
 - Replica index, in `consensus/src/simplex/` only (marshal code has its own rule):
@@ -3218,7 +3250,7 @@ source proves, what the tools prove, what a finding explains, and what you are g
 | AC-4 | With at least one simplex invariant: `just campaign`, then the printed `run` command. | Materialize, instrument, plan, build and test gate complete, the result is `READY`, and the `run` command starts the fuzzer. |
 | AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_cert_mock_twins_mutator_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
 | AC-6 | `STATELENS_FALSE_INVARIANTS=1 just campaign`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
-| AC-7 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_cert_mock_twins_mutator_statelens -- -max_total_time=120`, then the same without the variable. The same for `simplex_cert_mock_statelens`, whose `Standard` driver compromises nobody, so it must not panic either way and is the negative control. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
+| AC-7 | In an instrumented checkout, for each simplex variant: `STATELENS_BYZANTINE=panic just run <variant> -- -max_total_time=120`, then the same without the variable. `simplex_cert_mock_statelens`, whose `Standard` driver runs no engine under a Byzantine identity, is the negative control. | With the variable, the variants whose adversary runs a real Simplex engine (PRD section 8.4) panic with `[statelens][BYZANTINE]`, `simplex_cert_mock_audit_statelens` only once an input draws the RejectView choice and `simplex_cert_mock_mallory_statelens` only after an amnesia restart, and no other variant does. Without it, none does. `[statelens] participant index mismatch` never appears. Verified for the Twins runner at the reference commit, and for the hooks of Appendix B.5 with a temporary probe (section 1.2). |
 | AC-8 | `just run simplex_cert_mock_twins_mutator_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
 | AC-14 | With `STATELENS_KB` set to a findings corpus, run the queries of section 5.6 by hand for each registry: `kb modules`, `kb find`, `kb cites <a component directory>`, `kb grep`, `kb show`. | Every command answers from the index; `find` and `cites` return only findings whose `module` is in that subsystem's filter; `cites` returns the findings that name files under the directory, with those files listed; `show` refuses a section that is not state-bearing and an identifier out of scope. |
 | AC-15 | `STATELENS_KB=` with a campaign. | The campaign warns that there is no knowledge base, renders the beacon step with no query commands, and still reaches `READY`. |
@@ -3293,6 +3325,9 @@ variants. Section 17.5 gives AC-18 to AC-20 for the qmdb profile.
   state, so ghost-based checks skip them.
 - The Twins tests are not part of the test gate (D2). The fuzz harness itself exercises
   Twins scenarios with the correct guard.
+- A target added to `consensus/fuzz/simplex` gets a variant in the next campaign (D57). If
+  its driver runs a real engine under a Byzantine identity, it needs a hook like those of
+  Appendix B.5; without one, the guard checks that replica as an honest one.
 - The runtime module relies on the deterministic runtime running tasks on the calling
   thread (`Runner::start` calls `start_and_recover` on the same thread).
 
@@ -3337,9 +3372,11 @@ script, without an agent and so without instrumentation:
   no `components` line. Every rendered prompt names `storage/src/qmdb/statelens.rs` and
   `crate::qmdb::statelens`, and none keeps a placeholder.
 
-Not verified: a campaign with a real agent (instrumentation, plan, audit and repair), AC-18
-to AC-20, the feedback of the StateLens table in a qmdb variant, and the throughput of the
-other variants.
+A campaign with a real agent ran on 2026-10-05, at commit `86eed8302c` (section 1.2): it
+instrumented, wrote the plan, audited and built, and its test gate failed only on the
+open-file limit of section 17.6. Not verified: a repair, a `READY` result, AC-18 to AC-20,
+the feedback of the StateLens table in a qmdb variant, and the throughput of the other
+variants.
 
 ### 17.2 Decisions
 
@@ -3445,6 +3482,12 @@ give them to the agent.
   journals and Merkle structures they fuzz.
 - The anchors of edits Q2 and Q3 and the target shapes of Appendix B.1 follow the code; a
   change stops the campaign with exit code 2.
+- The test gate fails at an open-file soft limit of 256, the macOS default:
+  `qmdb::any::unordered::fixed::test::test_merkleize_cancellation_leaves_db_usable` runs on
+  the tokio runtime, opens more blob files than that, and fails with `TooManyOpenFiles` and
+  no `[statelens]` line. It fails the same way without instrumentation. Raise the limit in
+  the shell that runs `just campaign`, `just fuzz` or `just test`, for example with
+  `ulimit -n 65536`.
 ---
 
 ---
@@ -4103,7 +4146,7 @@ variant calls `commonware_storage::qmdb::statelens`; nothing compromises a datab
 variant needs no `use` the original does not have. Which targets a profile derives from is
 section 5.5. A consensus target must use the `cert_mock` certificate scheme, the only scheme
 a StateLens fuzz target may use (D15), which is checked as the first type argument of its
-`fuzz::<...>` call.
+call of a fuzz entry point, `fuzz::<...>` or `fuzz_<name>::<...>`.
 
 ### B.2 The variant's `[[bin]]` block
 
@@ -4144,7 +4187,7 @@ Inserted after the anchor line of section 7.2, edit 6, with this indentation:
 
 In `TwinsMutator`, each compromised participant runs a real engine (the primary half),
 which the guard skips, and a `Disrupter` (the secondary half), which runs no Simplex
-actor code.
+actor code. In `TwinsCampaign` both halves are real engines, and the guard skips both.
 
 ### B.4 Fresh-run hook in `runtime/src/deterministic.rs` (verbatim)
 
@@ -4171,6 +4214,86 @@ it), while a crash-restart resumes through `From<Checkpoint>`. The first end-to-
 campaign showed why this is needed: without it, a history invariant fired in tests that
 run several seeds in one thread, because the ghost state of one seed leaked into the
 next.
+
+### B.5 Hooks in the other simplex runners (verbatim)
+
+Four simplex runners besides Twins run a real engine under a Byzantine identity, so the
+`simplex` profile patches each to publish it before that engine starts, with the index check
+of B.3 (D57). Without its hook, Chaos-Twins would also merge the histories of the twin's two
+engines, which share one participant index and so one `Ghost`, and Mallory's restarted node
+would be checked against the history of the incarnation it forgot.
+
+Edit 9, ByzzFuzz, inserted after its anchor in `setup_engines`, where `schemes` is in scope:
+
+~~~rust
+    // [statelens] ByzzFuzz runs a real engine at `BYZANTINE_IDX` and rewrites what it
+    // sends: publish it as compromised before any engine starts, and check that every
+    // scheme's own index matches its position in `participants`.
+    commonware_consensus::simplex::statelens::set_compromised([BYZANTINE_IDX]);
+    for (idx, scheme) in schemes.iter().enumerate() {
+        assert_eq!(
+            commonware_cryptography::certificate::Scheme::me(scheme),
+            Some(commonware_utils::Participant::from_usize(idx)),
+            "[statelens] participant index mismatch"
+        );
+    }
+~~~
+
+Edit 10, Chaos-Twins, inserted after the twin's index `byz` is chosen and before the twin's
+two engines start:
+
+~~~rust
+        // [statelens] The twin runs two real engines under `byz`: publish it as
+        // compromised before any engine starts, and check that every scheme's own
+        // index matches its position in `participants`.
+        commonware_consensus::simplex::statelens::set_compromised([byz]);
+        for (idx, scheme) in schemes.iter().enumerate() {
+            assert_eq!(
+                commonware_cryptography::certificate::Scheme::me(scheme),
+                Some(commonware_utils::Participant::from_usize(idx)),
+                "[statelens] participant index mismatch"
+            );
+        }
+~~~
+
+Edit 11, the audited Standard runner, inserted at the top of the branch where an input that
+drew the RejectView choice gives a Byzantine participant a real engine. Otherwise the
+Byzantine participants are `Disrupter`s and the hook does not run:
+
+~~~rust
+                // [statelens] Here a Byzantine participant runs a real engine: publish
+                // the Byzantine participants as compromised before it starts, and check
+                // that every scheme's own index matches its position in `participants`.
+                commonware_consensus::simplex::statelens::set_compromised(0..config.faults as usize);
+                for (idx, scheme) in schemes.iter().enumerate() {
+                    assert_eq!(
+                        commonware_cryptography::certificate::Scheme::me(scheme),
+                        Some(commonware_utils::Participant::from_usize(idx)),
+                        "[statelens] participant index mismatch"
+                    );
+                }
+~~~
+
+Edit 12, Mallory, inserted in `restart` after the old incarnation's tasks are aborted and
+before the new one starts. Only an amnesia restart, which rebuilds the node on empty
+storage, makes it Byzantine; a durable restart replays its journal and stays honest:
+
+~~~rust
+    // [statelens] An amnesia restart brings this node back on empty storage, where it
+    // may sign what it signed before, and Mallory counts it as Byzantine from here on:
+    // publish it as compromised before the new incarnation starts, and check that its
+    // scheme's own index is its position in `participants`.
+    if amnesia {
+        commonware_consensus::simplex::statelens::set_compromised([mv.idx()]);
+        assert_eq!(
+            commonware_cryptography::certificate::Scheme::me(mv.scheme()),
+            Some(commonware_utils::Participant::from_usize(mv.idx())),
+            "[statelens] participant index mismatch"
+        );
+    }
+~~~
+
+A variant clears the compromised set after its driver returns, as every variant does (D7).
 
 ---
 

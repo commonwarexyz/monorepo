@@ -3184,6 +3184,58 @@ class PlanProfile(unittest.TestCase):
         code, _output = self.lint(profile="nonsense")
         self.assertEqual(code, 1)
 
+class SimplexProfile(unittest.TestCase):
+    """The simplex profile derives a variant from every simplex target, as marshal and
+    qmdb do, so every runner that runs a real engine under a Byzantine identity must
+    publish it; and a target whose entry point names another scheme is refused."""
+
+    REPO = HERE.parents[1]
+
+    def test_the_sources_are_every_simplex_target(self):
+        directory = self.REPO / "consensus/fuzz/simplex/fuzz_targets"
+        expected = sorted(
+            path.stem for path in directory.glob("simplex_*.rs")
+            if not path.stem.endswith("_statelens")
+        )
+        self.assertGreater(len(expected), 3)
+        self.assertEqual(sl.profile_sources(self.REPO, "simplex"), expected)
+
+    def test_materialize_guards_every_runner_with_a_byzantine_engine(self):
+        edits = sl.materialize_edits(self.REPO, self.REPO / sl.SL, "simplex")
+        published = {
+            "consensus/fuzz/core/src/lib.rs": "set_compromised(compromised.iter().copied())",
+            "consensus/fuzz/simplex/src/byzzfuzz/runner.rs": "set_compromised([BYZANTINE_IDX])",
+            "consensus/fuzz/simplex/src/chaos/twins.rs": "set_compromised([byz])",
+            "consensus/fuzz/simplex/src/lib.rs": "set_compromised(0..config.faults as usize)",
+            "consensus/fuzz/simplex/src/mallory/runner.rs": "set_compromised([mv.idx()])",
+        }
+        for relative, call in published.items():
+            self.assertEqual(edits.modify[relative].count(call), 1, relative)
+            self.assertIn(relative, sl.EDITED_PATHS, "clean must restore it")
+        self.assertEqual(len(edits.targets), len(sl.profile_sources(self.REPO, "simplex")))
+        for target in edits.targets:
+            text = edits.create[f"consensus/fuzz/simplex/fuzz_targets/{target}.rs"]
+            self.assertEqual(text.count("commonware_consensus::simplex::statelens::reset();"), 1)
+
+    def test_every_fuzz_entry_point_is_checked_for_cert_mock(self):
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, repo, True)
+        core = repo / sl.CORE_SIMPLEX
+        core.parent.mkdir(parents=True)
+        core.write_text(
+            "impl Simplex for Mock {\n    type Scheme = cert_mock::Scheme<X>;\n}\n"
+            "impl Simplex for Real {\n    type Scheme = ed25519::Scheme;\n}\n"
+        )
+        targets = repo / sl.profile_fuzz_dir("simplex")
+        targets.mkdir(parents=True)
+        (targets / "simplex_a.rs").write_text("fuzz_twins_audit::<Mock, TwinsMutator>(input);\n")
+        (targets / "simplex_b.rs").write_text("fuzz_twins_audit::<Real, TwinsMutator>(input);\n")
+        sl.check_simplex_cert_mock(repo, ["simplex_a"])
+        with self.assertRaises(sl.Abort) as caught:
+            sl.check_simplex_cert_mock(repo, ["simplex_b"])
+        self.assertIn("Real does not use the cert_mock certificate scheme", str(caught.exception))
+
+
 class QmdbProfile(unittest.TestCase):
     """The qmdb profile instruments storage, not consensus: its own crate, runtime
     path, anchors, fuzz package and tests, with every target derived the same way."""

@@ -37,6 +37,10 @@ with network access.
   campaign warns and continues without an index.
 - For issues: `gh` (logged in) or network access for `curl`. For PDF papers: `pdftotext`
   or the Python `pypdf` module; without either, the agent gets the PDF as is.
+- For the `qmdb` profile, an open-file limit well above 256, the macOS default. One test of
+  its gate opens more files than that and fails with `Too many open files`, with or without
+  instrumentation. Raise the limit in the shell that runs `just campaign`, `just fuzz` or
+  `just test`, for example with `ulimit -n 65536`.
 
 Defaults live in [config.env](config.env), which git tracks; a `config.local.env` beside it,
 which git ignores, overrides them and is where a knowledge-base root or any other
@@ -191,7 +195,7 @@ development and ends the campaign with `STOPPED after <step>`.
 | Registries | `simplex` | `simplex`, then `marshal` | `qmdb` |
 | Instrumented code | `consensus/src/simplex` | the same, and `consensus/src/marshal` | `storage/src/qmdb` |
 | Beacon probes | voter, batcher, resolver | the same, and marshal core, standard, coding | `any`, `current`, `immutable`, `keyless`, `store`, `sync` |
-| Fuzz targets | `<target>_statelens` for `simplex_cert_mock`, `simplex_cert_mock_twins_campaign` and `simplex_cert_mock_twins_mutator` | `<target>_statelens` for each of the 12 marshal targets | `<target>_statelens` for each of the 17 `qmdb_*` targets of `storage/fuzz` |
+| Fuzz targets | `<target>_statelens` for each of the 21 `simplex_*` targets of `consensus/fuzz/simplex` | `<target>_statelens` for each of the 12 marshal targets | `<target>_statelens` for each of the 17 `qmdb_*` targets of `storage/fuzz` |
 | Test gate | `simplex::tests` without Twins, `simplex::statelens` | the same, and `marshal::` | every `qmdb::` test of `commonware-storage` |
 
 The simplex test gate is about 240 tests and 2 minutes on 16 cores; marshal adds 421 tests
@@ -265,9 +269,25 @@ second and 0.5 GB; size the other runs yourself.
 
 Do not pass `-artifact_prefix` or `-exact_artifact_path`, which move the crash file
 elsewhere, or any `-handle_*` switch, which can stop libFuzzer from reporting a crash and
-saving its input. Crashes land in `consensus/fuzz/simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/`,
-in `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant, or in
+saving its input. Crashes land in `consensus/fuzz/simplex/artifacts/<variant>/` for a
+simplex variant, in `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal one, or in
 `storage/fuzz/artifacts/<variant>/` for a qmdb one.
+
+A `simplex` campaign builds 21 variants, one per target in
+`consensus/fuzz/simplex/fuzz_targets/`, each named `<target>_statelens`. Only those whose
+adversary runs a real Simplex engine exercise the Byzantine guard:
+
+- the nine Twins variants: those of `simplex_cert_mock_twins_campaign` and
+  `simplex_cert_mock_twins_mutator` with their `_audit`, `_hb` and `_state_cov` forms,
+  and that of `simplex_cert_mock_shuffled_twins_mutator`;
+- `simplex_cert_mock_chaos_twins_statelens` and `simplex_cert_mock_byzzfuzz_statelens`;
+- `simplex_cert_mock_audit_statelens`, for an input that draws the RejectView
+  certification choice;
+- `simplex_cert_mock_mallory_statelens`, after an amnesia restart, which brings a node back
+  on empty storage.
+
+In the other eight (Standard, FaultyNet, the notarize-omission audit and Chaos), no
+adversary runs a Simplex engine, so every engine is checked.
 
 A `marshal` campaign builds 12 variants, one per target in
 `consensus/fuzz/marshal/fuzz_targets/`, each named `<target>_statelens`. Only five have an
@@ -393,7 +413,7 @@ an instrumented layer with no assertions at all is the shape that gap takes.
 | Variable | Use |
 |---|---|
 | `STATELENS_FALSE_INVARIANTS=1` | Set on `just campaign`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile, FALSE-0003 with the `qmdb` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. A `qmdb` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0003]` in `campaign/logs/test.log`. |
-| `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: `simplex_cert_mock_twins_campaign_statelens`, `simplex_cert_mock_twins_mutator_statelens`, the four marshal Twins variants and the wedge-scenario variant must panic with `[statelens][BYZANTINE]`, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
+| `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: the simplex and marshal variants whose adversary runs a real Simplex engine (see Phase 3) must panic with `[statelens][BYZANTINE]`, `simplex_cert_mock_audit_statelens` only for an input that draws the RejectView choice and `simplex_cert_mock_mallory_statelens` only after an amnesia restart, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
 | `STATELENS_CLAUDE_EFFORT`, `STATELENS_CODEX_EFFORT` | Set in `config.env` or the environment. The reasoning effort the agent CLI runs with: `low`, `medium`, `high`, `xhigh` or `max` for claude, codex's own `model_reasoning_effort` levels for codex. Empty means the CLI's default, which is what a campaign uses unless you pin it. `STATELENS_CLAUDE_MODEL` and `STATELENS_CODEX_MODEL` work the same way for the model. Both land in `campaign/meta.json`, so pin them when you want two campaigns to be comparable. |
 | `STATELENS_AUDIT=0` | Set on `just campaign`. Skips the audit pass over the bindings, which costs one agent run per batch of 8 invariants. The campaign then prints no `audit` line, a plan section keeps whatever `Status` the first pass gave it, and the summary's `coverage` line says `UNVALIDATED: no audit pass ran`. |
 | `STATELENS_FEEDBACK=0` | Set on a `run` command. Leaves the StateLens counters unregistered. Run a target for the same time on two empty corpora, with and without it: `ft:` on the `DONE` line should be higher with feedback. Compare `ft:`, not `cov:`, which libFuzzer stops printing once the counters are registered. |

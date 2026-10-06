@@ -126,16 +126,6 @@ BATCH_SIZE = 8
 REPAIR_ATTEMPTS = 3
 ERROR_LINES = 150
 
-# The existing simplex targets a campaign derives StateLens variants from. Only
-# `cert_mock` targets may be listed (R-P2-4), and the list is curated rather
-# than "every target in the directory" because simplex has twenty-one of them
-# and most drive inputs StateLens has no interest in. Marshal and qmdb derive
-# from every target their package names after them, so their entry is None.
-SIMPLEX_VARIANTS = (
-    "simplex_cert_mock",
-    "simplex_cert_mock_twins_campaign",
-    "simplex_cert_mock_twins_mutator",
-)
 # Where a campaign puts the runtime module (SPEC section 9): one per crate it instruments.
 STATELENS_RS = "consensus/src/simplex/statelens.rs"
 QMDB_RS = "storage/src/qmdb/statelens.rs"
@@ -172,6 +162,10 @@ EDITED_PATHS = (
     "consensus/Cargo.toml",
     "Cargo.lock",
     "consensus/fuzz/core/src/lib.rs",
+    "consensus/fuzz/simplex/src/byzzfuzz/runner.rs",
+    "consensus/fuzz/simplex/src/chaos/twins.rs",
+    "consensus/fuzz/simplex/src/lib.rs",
+    "consensus/fuzz/simplex/src/mallory/runner.rs",
     "runtime/src/deterministic.rs",
     FUZZ_MANIFEST,
     MARSHAL_MANIFEST,
@@ -255,6 +249,86 @@ WEDGE_ANCHOR = (
     "after",
     WEDGE_HOOK,
 )
+# SPEC Appendix B.5: the simplex runners besides Twins that run a real engine under a
+# Byzantine identity publish it, as the Twins runner does. Standard and FaultyNet make
+# their Byzantine nodes Disrupters, Mallory's Byzantine roles run no engine, and Chaos has
+# no Byzantine node; Mallory's amnesia restart makes its honest node Byzantine mid-run.
+BYZZFUZZ_HOOK = """\
+    // [statelens] ByzzFuzz runs a real engine at `BYZANTINE_IDX` and rewrites what it
+    // sends: publish it as compromised before any engine starts, and check that every
+    // scheme's own index matches its position in `participants`.
+    commonware_consensus::simplex::statelens::set_compromised([BYZANTINE_IDX]);
+    for (idx, scheme) in schemes.iter().enumerate() {
+        assert_eq!(
+            commonware_cryptography::certificate::Scheme::me(scheme),
+            Some(commonware_utils::Participant::from_usize(idx)),
+            "[statelens] participant index mismatch"
+        );
+    }"""
+CHAOS_TWINS_HOOK = """\
+        // [statelens] The twin runs two real engines under `byz`: publish it as
+        // compromised before any engine starts, and check that every scheme's own
+        // index matches its position in `participants`.
+        commonware_consensus::simplex::statelens::set_compromised([byz]);
+        for (idx, scheme) in schemes.iter().enumerate() {
+            assert_eq!(
+                commonware_cryptography::certificate::Scheme::me(scheme),
+                Some(commonware_utils::Participant::from_usize(idx)),
+                "[statelens] participant index mismatch"
+            );
+        }"""
+AUDIT_HOOK = """\
+                // [statelens] Here a Byzantine participant runs a real engine: publish
+                // the Byzantine participants as compromised before it starts, and check
+                // that every scheme's own index matches its position in `participants`.
+                commonware_consensus::simplex::statelens::set_compromised(0..config.faults as usize);
+                for (idx, scheme) in schemes.iter().enumerate() {
+                    assert_eq!(
+                        commonware_cryptography::certificate::Scheme::me(scheme),
+                        Some(commonware_utils::Participant::from_usize(idx)),
+                        "[statelens] participant index mismatch"
+                    );
+                }"""
+MALLORY_HOOK = """\
+    // [statelens] An amnesia restart brings this node back on empty storage, where it
+    // may sign what it signed before, and Mallory counts it as Byzantine from here on:
+    // publish it as compromised before the new incarnation starts, and check that its
+    // scheme's own index is its position in `participants`.
+    if amnesia {
+        commonware_consensus::simplex::statelens::set_compromised([mv.idx()]);
+        assert_eq!(
+            commonware_cryptography::certificate::Scheme::me(mv.scheme()),
+            Some(commonware_utils::Participant::from_usize(mv.idx())),
+            "[statelens] participant index mismatch"
+        );
+    }"""
+# SPEC section 7.2, edits 9 to 12, made by the simplex profile only.
+SIMPLEX_GUARD_ANCHORS = (
+    (
+        "consensus/fuzz/simplex/src/byzzfuzz/runner.rs",
+        "        commonware_consensus_fuzz_core::setup_network::<P>(context, input).await;",
+        "after",
+        BYZZFUZZ_HOOK,
+    ),
+    (
+        "consensus/fuzz/simplex/src/chaos/twins.rs",
+        '        let crash = (0..n).find(|&idx| idx != byz).expect("an honest index exists");',
+        "after",
+        CHAOS_TWINS_HOOK,
+    ),
+    (
+        "consensus/fuzz/simplex/src/lib.rs",
+        "                // A Byzantine participant may behave correctly. For the audit",
+        "before",
+        AUDIT_HOOK,
+    ),
+    (
+        "consensus/fuzz/simplex/src/mallory/runner.rs",
+        "    lifecycle::abort_tasks(mv).await;",
+        "after",
+        MALLORY_HOOK,
+    ),
+)
 # SPEC section 17.3, edits Q2 and Q3.
 QMDB_ANCHORS = (
     ("storage/src/qmdb/mod.rs", "pub mod verify;", "after", "pub mod statelens;"),
@@ -293,8 +367,7 @@ PROFILES = {
             ("resolver", "consensus/src/simplex/actors/resolver", "simplex"),
         ),
         "package": "consensus/fuzz/simplex",
-        "variants": SIMPLEX_VARIANTS,
-        "anchors": CONSENSUS_ANCHORS,
+        "anchors": CONSENSUS_ANCHORS + SIMPLEX_GUARD_ANCHORS,
         "test_filter": SIMPLEX_TEST_FILTER,
         "component_filter": COMPONENT_TEST_FILTER,
         "replay_env": "CONSENSUS_FUZZ_LOG=1",
@@ -319,7 +392,6 @@ PROFILES = {
             ("marshal.coding", "consensus/src/marshal/coding", "marshal"),
         ),
         "package": "consensus/fuzz/marshal",
-        "variants": None,
         "anchors": CONSENSUS_ANCHORS + (WEDGE_ANCHOR,),
         "test_filter": SIMPLEX_TEST_FILTER + " | test(/^marshal::/)",
         "component_filter": COMPONENT_TEST_FILTER,
@@ -341,7 +413,6 @@ PROFILES = {
             ("qmdb.sync", "storage/src/qmdb/sync", "qmdb"),
         ),
         "package": "storage/fuzz",
-        "variants": None,
         "anchors": QMDB_ANCHORS,
         "test_filter": "test(/^qmdb::/)",
         "component_filter": None,
@@ -4030,29 +4101,17 @@ def profile_manifest(profile):
 def profile_sources(repo, profile):
     """The existing targets `profile` derives StateLens variants from.
 
-    A profile's targets are the targets of its package named `<profile>_*`, which is
-    also how `just fuzz` and `coverage` tell a target's profile from its name. A
-    profile that names them takes them in that order; one that does not takes every
-    such target, in file name order, which is how marshal and qmdb pick up a target
-    someone adds. A StateLens variant is never a source.
+    A profile's targets are every target of its package named `<profile>_*`, in file
+    name order, which is also how `just fuzz` and `coverage` tell a target's profile
+    from its name, and how a profile picks up a target someone adds. A StateLens
+    variant is never a source.
     """
-    chosen = PROFILES[profile]["variants"]
     directory = repo / profile_fuzz_dir(profile)
-    present = sorted(
+    return sorted(
         path.name[: -len(".rs")]
         for path in directory.glob(f"{profile}_*.rs")
         if not path.name.endswith("_statelens.rs")
     )
-    if chosen is None:
-        return present
-    missing = [stem for stem in chosen if stem not in present]
-    if missing:
-        raise Abort(
-            2,
-            f"materialize: {profile} names fuzz target(s) that do not exist in "
-            f"{profile_fuzz_dir(profile)}: {', '.join(missing)}",
-        )
-    return [stem for stem in chosen]
 
 
 def profile_targets(repo, profile):
@@ -4096,14 +4155,14 @@ def turbofish_arguments(text):
 def check_simplex_cert_mock(repo, stems):
     """Only a `cert_mock` scheme may become a StateLens variant (D15).
 
-    The scheme is the first type argument of the target's `fuzz::<...>` call;
-    the others name its driver and its coverage mode, which this says nothing
-    about.
+    The scheme is the first type argument of the target's call of a fuzz entry
+    point, `fuzz::<...>` or one of the `fuzz_*::<...>` audit entry points; the
+    others name its driver and its coverage mode, which this says nothing about.
     """
     types = simplex_types(repo)
     for stem in stems:
         text = (repo / profile_fuzz_dir("simplex") / f"{stem}.rs").read_text()
-        names = re.findall(r"\bfuzz(?:_audit)?::<\s*(\w+)", text)
+        names = re.findall(r"\bfuzz\w*::<\s*(\w+)", text)
         if not names:
             raise Abort(2, f"{stem}: no fuzz::<P, ...> call to check (D15)")
         for name in names:

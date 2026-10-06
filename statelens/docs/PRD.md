@@ -26,7 +26,7 @@ The workflow has three phases:
    3. StateLens-style state probes for semantic beacons, which the agent discovers as it works: from the code (enums, state transitions, developer asserts and comments), and from a knowledge base of developer artifacts it queries while instrumenting (section 7.3).
 
    The campaign then builds the StateLens fuzz targets and runs the engine-level tests on the instrumented tree:
-   - for Simplex, a `TwinsMutator`-based target built on `consensus/fuzz/core`;
+   - for Simplex, a StateLens variant of every existing simplex fuzz target;
    - for marshal, a StateLens variant of every existing marshal fuzz target;
    - for qmdb, a StateLens variant of every existing qmdb fuzz target of `storage/fuzz`.
 
@@ -62,9 +62,9 @@ Sections 8.2, 9.2 and 10.2 describe where each subsystem stands today, with exam
 - G1. Persistent, maintained, and reused registries of English invariants in `statelens/invariants/`, one per subsystem (`simplex`, `marshal`, `qmdb`), each invariant with its source recorded and an ID unique across registries.
 - G2. A simple, agent-agnostic way to turn the specified set of sources (GitHub issues, design documents, code comments from specified files, crates, modules, formal specifications, papers) into invariant entries in a fixed format (as simple as possible), in the registry of the subsystem the operator names.
 - G3. A campaign workflow, with one profile per subsystem, in which an LLM agent (`claude code` or `codex`) instruments a fresh clone with assertions, invariant probes, beacon probes, and ghost variables in the state. The workflow builds the StateLens fuzz targets and runs the tests (Phase 2); the operator then runs the targets (Phase 3).
-- G4. StateLens fuzz targets, added during a campaign to the existing `consensus/fuzz/simplex` package and running on `consensus/fuzz/core`. Each is derived from an existing `cert_mock` target of that package rather than written by hand, so it inherits that target's driver and features: `simplex_cert_mock_statelens`, `simplex_cert_mock_twins_campaign_statelens` and `simplex_cert_mock_twins_mutator_statelens`. It uses only the `cert_mock` certificate scheme (R-P2-4) and adds the StateLens counter table to libFuzzer's normal edge coverage (chapter 8).
+- G4. Fuzz Simplex. The `simplex` profile binds the Simplex registry, instruments `consensus/src/simplex`, and builds a StateLens variant of every existing simplex fuzz target of `consensus/fuzz/simplex`, using only the `cert_mock` scheme (R-P2-4). Each variant is derived from its target rather than written by hand, so it inherits that target's driver, features and feedback, and adds the StateLens counter table to them (chapter 8).
 - G5. Byzantine replicas are never checked and never feed coverage, in either consensus subsystem.
-- G6. The committed subproject does not affect normal builds, lints, or CI of the workspace.
+- G6. The committed subproject does not affect normal builds, fuzzing, testing, deterministic runtime, lints, or CI of the workspace.
 - G7. Fuzz marshal. The `marshal` profile binds the Simplex and marshal registries, instruments both subsystems, and builds a StateLens variant of every existing marshal fuzz target, using only the `cert_mock` scheme (chapter 9).
 - G8. One runtime module serves both consensus subsystems: one compromised set, one counter table and one ghost store per run. The qmdb profile puts a copy of the same module in the storage crate.
 - G9. A knowledge base of developer artifacts, above all the findings reported against this workspace, that the campaign's beacon step queries while it instruments, so a probe can be aimed at a state that has gone wrong before and not only at one the code makes visible.
@@ -80,7 +80,7 @@ General:
 - Automated approval, review gates, or trust scoring for invariants. Approval is entirely a human responsibility, and invariant files carry no approval status.
 - Mining new invariants during a campaign. The campaign discovers beacons, which are probes, never invariants.
 - A vector-indexed knowledge base or embeddings. Retrieval is a structured index over the findings' claim fields plus full-text search of their prose (R-KB-4).
-- The paper's iterative state discovery: a call-graph and data-flow frontier with its own tooling. The instrumenter traces with search and reading, and a finding's own citations name the files and symbols it would otherwise have to rediscover.
+- A data-flow tool, and the paper's iterative state discovery as a stage of its own, with a frontier and a step budget. The instrumenter traces state with the code index and the syntax-tree queries (R-AG-4, R-AG-5), search and reading, and follows a value through a computation by its own reasoning, which those tools confirm or reject (R-AG-2). A finding's own citations name the files and symbols it would otherwise have to rediscover.
 - Committing any knowledge-base content to this repository (R-KB-6).
 - Assertions derived from the knowledge base during a campaign. There a finding is evidence, not a property: it drives probes only, and invariants stay the only source of oracles. Phase 1 may turn findings into invariants (R-P1-7), which a human reviews like any other.
 - Switching between edge-only and state-augmented feedback (StateLens' "dual feedback"). The state counters are always on.
@@ -89,8 +89,7 @@ General:
 - Automating Phase 3. A campaign builds the StateLens fuzz targets but does not run them; the operator runs them with `just run` or `just fuzz` and chooses which targets, for how long, and with which libFuzzer arguments.
 
 Simplex:
-- Fuzz modes other than `TwinsMutator` (Standard, FaultyNet, TwinsCampaign, ByzzFuzz, Mallory, Chaos).
-- Integration with the existing `state_cov.rs` or happens-before feedback.
+- Integrating the StateLens table with the `state_cov.rs` or happens-before feedback of some simplex targets. Their variants keep that feedback as it is, beside the StateLens table.
 
 Marshal:
 - Fuzz targets other than the existing ones, or changes to their harnesses beyond the edits a campaign makes.
@@ -384,7 +383,7 @@ R-P1-7. **Count and findings.** `--number N` bounds an extraction: the agent wri
 R-P2-1. A campaign runs in place in the operator's checkout: the operator clones the repository, where StateLens lives, and runs the campaign in that clone. StateLens does not make another clone. The checkout must have no tracked changes outside `statelens/` and no instrumentation from an earlier campaign. The campaign instruments the checkout in place and never commits; the operator fuzzes in the checkout and discards it afterwards. Uncommitted edits to the registries are used. It takes two parameters: the agent (`claude|codex`), from a config file (`config.env`), the environment or the CLI; and the profile (`simplex`, the default, `marshal` or `qmdb`), from the CLI. It also reads `STATELENS_KB` to find the knowledge base, and runs without one. There are no other campaign parameters and no seed corpus. The campaign passes no arguments to libFuzzer; the operator gives them in Phase 3.
 
 R-P2-2. Steps, in order; R-S-P2-1, R-M-P2-1 and R-Q-P2-1 say what each step does for their profile:
-1. **Materialize.** Copy `runtime/statelens.rs` into the profile's subsystem (`consensus/src/simplex/`, or `storage/src/qmdb/` for qmdb) and register it as a module. Add `sancov` to the dependencies of that crate. For the consensus profiles, patch the twins runner in `consensus/fuzz/core` so that it publishes the compromised set to the StateLens runtime before starting nodes and checks the participant index mapping (section 8.4). Patch the deterministic runtime so that a fresh runtime clears StateLens ghost state (R-INS-5). Add the profile's fuzz targets. Every edit is anchored on an exact line of the current code, and the campaign stops if an anchor has moved.
+1. **Materialize.** Copy `runtime/statelens.rs` into the profile's subsystem (`consensus/src/simplex/`, or `storage/src/qmdb/` for qmdb) and register it as a module. Add `sancov` to the dependencies of that crate. For the consensus profiles, patch the twins runner in `consensus/fuzz/core` so that it publishes the compromised set to the StateLens runtime before starting nodes and checks the participant index mapping; the `simplex` profile patches the other simplex runners that run a real engine under a Byzantine identity the same way (section 8.4). Patch the deterministic runtime so that a fresh runtime clears StateLens ghost state (R-INS-5). Add the profile's fuzz targets. Every edit is anchored on an exact line of the current code, and the campaign stops if an anchor has moved.
 2. **Instrument invariants.** Run the instrumenter agent with `prompts/instrument-invariants.md` over every invariant of the profile's registries, in batches of 8 within one registry. For each invariant it adds assertions, invariant probes, and any ghost state needed.
 3. **Instrument beacons.** Run the instrumenter agent with `prompts/instrument-beacons.md` once for each component of the profile. It adds beacon probes, discovered from the component's current code and from the knowledge base it queries while reading it. Without a knowledge base the step proceeds from the code alone. Then run the instrumenter once more over the batches of step 2 with `prompts/instrument-audit.md`, which re-reads each Statement against the sites that commit the actions it names, adds the checks that are missing and can be added, and corrects a plan section whose status claims more coverage than it has (R-INS-8). The audit is the last agent pass, so no agent edits the tree it reviewed before the plan is checked and the targets are built. `STATELENS_AUDIT=0` skips the audit.
 4. **Write the instrumentation plan.** The agents record, in `statelens/campaign/plan.md`, each invariant -> the sites and ghost fields used, and each beacon probe -> its site, what it observes, and where the agent found it. The operator uses it when investigating. If the agent could not bind an invariant, the plan says so and gives the reason. The script adds an `unbound` entry for any invariant the agent skipped, a summary, and a check that instrumentation changed no file outside the profile's subsystems. It also lints the plan against its own claims (R-INS-8) and reports the problems as warnings, because the plan is the agent's own account of what it bound.
@@ -446,11 +445,11 @@ R-INS-6. **Cost.** Probes and assertions are O(1) or bounded by what the code tr
 
 R-INS-7. **Scope.** The agent edits only non-test code of the profile's subsystems: `consensus/src/simplex/`, excluding `mocks/` and `scheme/`, and, for the `marshal` profile, `consensus/src/marshal/`, excluding `mocks/`; for the `qmdb` profile, `storage/src/qmdb/`, excluding `benches/`. Each invariant is bound only in the code of its own subsystem. The agent may also add initializers of new fields in struct literals anywhere. It does not edit `Cargo.toml` files or any fuzz package; the campaign script makes those edits. A campaign stops if instrumentation changed a file outside the profile's subsystems.
 
-R-INS-8. **Assertion sites and what a status claims.** An invariant about an action is checked where the action is committed: the point past which it is visible outside the replica or the database (a signature exists, a message reaches a mailbox or the broadcaster, a record is appended, a certificate is accepted, the view moves; a batch is applied, a commit becomes durable, a value or a proof is returned). Where the implementation splits the decision from the commit across an await, a mailbox, a reply handler or a later call, the check goes at the commit and reads the state there; a check at the decision site may be kept beside it, and never replaces it, because everything the replica learns while the work is outstanding is invisible at the decision. Every path that reaches a commit site is covered, including journal replay, retries and rebroadcasts. The plan records every commit site and whether it is checked, and the status says what that adds up to: `bound` when every commit site of every action the Statement names carries the check and the condition checked is the Statement itself, `partial` for anything less, `unbound` when nothing was added. The audit pass of R-P2-2 step 2 re-checks these claims with the agent, and `just check-plan` re-checks mechanically what it can: the ledger against the status, the status against the assertions present in the instrumented code, and every ledger entry marked as checked against the file and function it names, so that the pass which writes the ledger cannot also certify it and one assertion cannot cover every site of its file. A commit site the ledger never names is beyond any lint, so the campaign also reports how many commit sites are listed, how many are not checked, and how the assertion sites are distributed over the instrumented sources, where a layer nobody checked appears as a source with none.
+R-INS-8. **Assertion sites and what a status claims.** An invariant about an action is checked where the action is committed: the point past which it is visible outside the replica or the database (a signature exists, a message reaches a mailbox or the broadcaster, a record is appended, a certificate is accepted, the view moves; a batch is applied, a commit becomes durable, a value or a proof is returned). Where the implementation splits the decision from the commit across an await, a mailbox, a reply handler or a later call, the check goes at the commit and reads the state there; a check at the decision site may be kept beside it, and never replaces it, because everything the replica learns while the work is outstanding is invisible at the decision. Every path that reaches a commit site is covered, including journal replay, retries and rebroadcasts. The plan records every commit site and whether it is checked, and the status says what that adds up to: `bound` when every commit site of every action the Statement names carries the check and the condition checked is the Statement itself, `partial` for anything less, `unbound` when nothing was added. The audit pass of R-P2-2 step 3 re-checks these claims with the agent, and `just check-plan` re-checks mechanically what it can: the ledger against the status, the status against the assertions present in the instrumented code, and every ledger entry marked as checked against the file and function it names, so that the pass which writes the ledger cannot also certify it and one assertion cannot cover every site of its file. A commit site the ledger never names is beyond any lint, so the campaign also reports how many commit sites are listed, how many are not checked, and how the assertion sites are distributed over the instrumented sources, where a layer nobody checked appears as a source with none.
 
 ### 7.8 Feedback (StateLens adaptation)
 
-R-FB-1. **Counter table.** `statelens.rs` owns a `sancov::Counters<65536>` table. It is registered with libFuzzer once, under `cfg(fuzzing)` and unless `STATELENS_FEEDBACK=0`, and zeroed before every fuzz input. The mechanism is the same as `consensus/fuzz/simplex/src/state_cov.rs`, but the table is separate. `state_cov` and happens-before feedback are not enabled for the StateLens targets. Once the table is registered, libFuzzer stops printing `cov:`; runs are compared by `ft:`.
+R-FB-1. **Counter table.** `statelens.rs` owns a `sancov::Counters<65536>` table. It is registered with libFuzzer once, under `cfg(fuzzing)` and unless `STATELENS_FEEDBACK=0`, and zeroed before every fuzz input. The mechanism is the same as `consensus/fuzz/simplex/src/state_cov.rs`, but the table is separate. A variant keeps the feedback of the target it was derived from, so the variants of the simplex targets with `state_cov` or happens-before feedback run it beside this table. Once the table is registered, libFuzzer stops printing `cov:`; runs are compared by `ft:`.
 
 R-FB-2. **Probe primitive.** `sl_probe!(me, "label", a, b)` sets the counter at `hash(site, a, b) mod N` to 1 (presence only), so a state observed many times in one input yields a single feature. `site` is the label plus the call location, so every call site is distinct. `a` and `b` are small discrete values that convert into `u32` (`bool`, `u8`, `u16`, `u32`); raw `u64` values do not compile.
 
@@ -475,19 +474,19 @@ R-FB-6. **No mode switching.** libFuzzer's edge coverage stays on. The StateLens
 
 R-OR-1. **Oracles** are:
 1. the assertions of the invariants of the profile's registries (7.8);
-2. the existing checks of the fuzz harnesses, run exactly as the original harnesses run them today: `invariants.rs` and related modules for the Simplex target, the marshal harness checks for the marshal variants, and the model checks of the qmdb targets for the qmdb variants;
+2. the existing checks of the fuzz harnesses, run exactly as the original harnesses run them today: `invariants.rs` and related modules for the Simplex variants, the marshal harness checks for the marshal variants, and the model checks of the qmdb targets for the qmdb variants;
 3. any other panic in the process.
 
-R-OR-2. Every oracle failure is a panic. The panic propagates to libFuzzer as a crash. This already happens: the deterministic runtime defaults to `catch_panics: false`; the Simplex harness's `fuzz()` catches a panic with `catch_unwind` and re-raises it with `resume_unwind`, and the marshal and qmdb harnesses let it propagate.
+R-OR-2. Every oracle failure is a panic. The panic propagates to libFuzzer as a crash. This already happens: the deterministic runtime defaults to `catch_panics: false`; the Simplex harness's `fuzz()` and its audit entry points catch a panic with `catch_unwind` and re-raise it with `resume_unwind`, and the marshal and qmdb harnesses let it propagate.
 
 R-OR-3. Any test failure in step 6 stops the campaign, and any crash stops the fuzz run that found it (libFuzzer stops at the first crash). A human decides whether it is an implementation bug, a wrong invariant, or a wrong binding. Fixes to wrong invariants are made in the registry by hand.
 
 ### 7.10 Crash artifacts
 
 R-ART-1. Reuse the existing fuzz artifacts unchanged:
-- libFuzzer writes the crashing input to the artifact directory of the target's package: `consensus/fuzz/simplex/artifacts/simplex_cert_mock_twins_mutator_statelens/`, `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant, or `storage/fuzz/artifacts/<variant>/` for a qmdb one;
+- libFuzzer writes the crashing input to the artifact directory of the target's package: `consensus/fuzz/simplex/artifacts/<variant>/` for a simplex variant, `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant, or `storage/fuzz/artifacts/<variant>/` for a qmdb one;
 - `just run <target> <crash_file>` replays it, with the `STATELENS_BYZANTINE` value of the run that found it: a guard-test crash (`STATELENS_BYZANTINE=panic`) exists only in that mode;
-- for the Simplex target, `CONSENSUS_FUZZ_LOG=1` also prints the decoded `FuzzInput` (`print_fuzz_input`); the marshal harnesses print only their existing logs;
+- for a Simplex variant, `CONSENSUS_FUZZ_LOG=1` also prints the decoded `FuzzInput` (`print_fuzz_input`); the marshal harnesses print only their existing logs;
 - the panic message carries the `INV-NNNN` ID.
 
 R-ART-2. The operator investigates inside the instrumented checkout before discarding it. The checkout keeps the instrumentation plan, the campaign logs, the rendered prompts, and the instrumentation diff under `statelens/campaign/`. The campaign never commits. No extra bundle format is added.
@@ -545,7 +544,7 @@ subsystem. A `simplex` campaign:
 - binds the simplex registry;
 - adds beacon probes to the voter, batcher and resolver;
 - runs the engine-level Simplex tests;
-- builds one StateLens fuzz target per target named in R-S-P2-2 (G4), which the operator runs in Phase 3.
+- builds a StateLens variant of every existing simplex fuzz target (G4), which the operator runs in Phase 3.
 
 The runtime module lives in this subsystem, at `consensus/src/simplex/statelens.rs`, and
 serves marshal too (G8).
@@ -565,7 +564,7 @@ serves marshal too (G8).
 | O1: conditions cross implementation boundaries | Conditions set in one actor and used in another through mailboxes; conditions that must survive journal replay |
 | O2: side effects invalidate assumptions | Asynchrony: view advances while certification is outstanding; timeouts race certificates; equivocation detected after verification |
 | O3: developer artifacts reveal states | Enums (`CertifyState`, `slot::Status`, `TimeoutReason`), per-view flags, `debug_assert!`s, comments, GitHub issues, design docs, formal specs, papers |
-| Knowledge base + retrieval | Replaced by (a) the invariant registry, (b) the agent reading the code directly |
+| Knowledge base + retrieval | A knowledge base of findings and curated documents outside this repository, which the agent queries on demand while it adds beacon probes, through commands over a structured index and full-text search rather than a vector store, and judges each snippet before using it (section 7.3). The agent reads code comments in the code itself. The invariant registry has no counterpart in the paper: it holds the properties the assertions check. |
 | Probes: `(site, a, b)` into a shared-memory bitmap | Same, into an in-process `sancov` counter table (libFuzzer is in-process, so no IPC), presence only |
 | Validation: compile, test suite, LLM repair | `cargo check` and the fuzz build with up to 3 agent repairs, then the engine-level test gate |
 | Oracle: crashes / ASan | Invariant assertions plus existing protocol checks, all as panics |
@@ -578,8 +577,8 @@ serves marshal too (G8).
 #### Phase 2
 
 R-S-P2-1. For the `simplex` profile, the steps of R-P2-2 do the following:
-1. **Materialize.** Add one StateLens variant per simplex target of R-S-P2-2 to
-   the existing `consensus/fuzz/simplex` package.
+1. **Materialize.** Add one StateLens variant per existing simplex fuzz target to
+   `consensus/fuzz/simplex`, and the guard hooks of section 8.4 to its runners.
 2. **Instrument invariants.** Bind the simplex registry.
 3. **Instrument beacons.** Once for each of the voter, batcher and resolver; then audit
    the bindings.
@@ -616,23 +615,48 @@ Priority goes to:
 
 #### Non-functional
 
-R-S-NF-2. The simplex profile derives a StateLens variant from each of
-`simplex_cert_mock`, `simplex_cert_mock_twins_campaign` and
-`simplex_cert_mock_twins_mutator`. The list is curated rather than every target of the
-package, because simplex has twenty-one and most drive inputs StateLens has no interest in;
-adding a name to it is how a further one is covered.
-
 R-S-NF-1. The original target of a variant is the target it was derived from, against which
 R-NF-3 measures overhead. With minimal instrumentation
 `simplex_cert_mock_twins_mutator_statelens` and its original both run at about 13 executions
 per second per process, so the operator runs a variant with libFuzzer's `-fork=N`.
+
+R-S-NF-2. The simplex profile derives a StateLens variant from every `simplex_*` target of
+`consensus/fuzz/simplex`, as the marshal and qmdb profiles do for their packages, so a target
+added to the package is covered by the next campaign. A campaign builds all of them, 21 at
+the reference commit, and the operator chooses which to run (R-P3-1).
 
 ### 8.4 Fuzz harness
 
 The marshal variants (9.4) share the runtime module and the Twins runner hook described
 here.
 
-#### Shape
+#### Variants
+
+Every simplex target gets a variant `<target>_statelens` (R-S-NF-2), and its driver decides
+which states it can reach. Twins is the best available way to put an honest replica into
+states that only Byzantine peers can cause: equivocating proposals and votes, split network
+views, conflicting certificates. In the Twins drivers a compromised participant runs two
+halves under one identity: in TwinsCampaign both are real engines, and in TwinsMutator the
+secondary is a `Disrupter` that mutates content according to `input.strategy`. Honest
+replicas therefore face split network views and, under TwinsMutator, content mutations as
+well, which is where replica-local and cross-actor invariants are most likely to break. The
+other drivers reach other states: ByzzFuzz rewrites what a Byzantine engine sends, Mallory
+runs an adaptive Byzantine actor, Chaos crashes and restarts honest nodes, and FaultyNet
+partitions the network.
+
+Only the variants whose adversary runs a real Simplex engine exercise the Byzantine guard:
+
+| Existing targets (the variant appends `_statelens`) | Driver | Adversary runs a real Simplex engine | Guard |
+|---|---|---|---|
+| `simplex_cert_mock_twins_campaign`, `simplex_cert_mock_twins_campaign_audit`, `simplex_cert_mock_twins_campaign_hb`, `simplex_cert_mock_twins_campaign_state_cov`, `simplex_cert_mock_twins_mutator`, `simplex_cert_mock_twins_mutator_audit`, `simplex_cert_mock_twins_mutator_hb`, `simplex_cert_mock_twins_mutator_state_cov`, `simplex_cert_mock_shuffled_twins_mutator` | Twins | yes: the compromised primary, and under TwinsCampaign its secondary too | Twins runner hook |
+| `simplex_cert_mock_chaos_twins` | Chaos-Twins | yes: both engines of the twin | Chaos-Twins hook |
+| `simplex_cert_mock_byzzfuzz` | ByzzFuzz | yes: an engine whose messages are rewritten on the wire | ByzzFuzz hook |
+| `simplex_cert_mock_audit` | audited Standard | only for inputs that draw the RejectView choice: the Byzantine participants then run an engine whose application certifies what honest ones reject | audit hook |
+| `simplex_cert_mock`, `simplex_cert_mock_byzantine_first_leader`, `simplex_cert_mock_faulty_net`, `simplex_cert_mock_hb`, `simplex_cert_mock_hb_state_cov`, `simplex_cert_mock_state_cov`, `simplex_cert_mock_audit_notarize_omission` | Standard, FaultyNet, audited Standard | no: the Byzantine nodes are `Disrupter`s | none needed |
+| `simplex_cert_mock_mallory` | Mallory | only after an amnesia restart, which brings its Honest-role node back on empty storage and makes it Byzantine; its Byzantine roles run an adversary actor, not an engine | Mallory hook |
+| `simplex_cert_mock_chaos` | Chaos | no: every node is honest | none needed |
+
+#### Shape of a TwinsMutator variant
 
 ```
 libFuzzer   (started by the operator: just run simplex_cert_mock_twins_mutator_statelens)
@@ -665,39 +689,37 @@ statelens::clear_compromised()     (in the target, after fuzz() returns)
 libFuzzer reads edge coverage + StateLens counters -> keep input if new features
 ```
 
-#### Why `TwinsMutator`
-
-Twins is the best available way to put an honest replica into states that only Byzantine peers can cause: equivocating proposals and votes, split network views, conflicting certificates. In `TwinsMutator` a compromised participant runs a legitimate primary engine plus a `Disrupter` secondary that mutates content according to `input.strategy`. Honest replicas therefore face both network splits and content mutations, which is where replica-local and cross-actor invariants are most likely to break.
-
 #### Byzantine guard plumbing
 
 `commonware-consensus` cannot depend on the fuzz crates, so the guard state lives in `consensus/src/simplex/statelens.rs`, which the campaign materializes. Marshal code uses the same module. The campaign patches the twins runner (`consensus/fuzz/core/src/lib.rs`, where `compromised` is built from the sampled case) to:
 - call `statelens::set_compromised(...)` before any engine starts;
 - assert that every scheme's own index (`scheme.me()`) equals its position in the participant list.
 
+The `simplex` profile patches the four other runners of the table the same way: ByzzFuzz publishes its Byzantine index, Chaos-Twins the index of its twin, the audited Standard runner its Byzantine participants when they run an engine, and Mallory its node when an amnesia restart brings it back on empty storage. Without its hook, Chaos-Twins would also merge the histories of the twin's two engines, which share one participant index and so one `Ghost`, and Mallory's restarted node, which may sign what it signed before the restart, would be checked against its own earlier history. The marshal profile builds none of these variants and makes none of these edits.
+
 The fuzz target calls `statelens::reset()` before every input and `statelens::clear_compromised()` after `fuzz()` returns, not inside the runner, so compromised replicas stay guarded while the runtime shuts down.
 
 The campaign also patches the deterministic runtime: `Runner::new` calls a hook that StateLens registers, which clears ghost state. A fresh runtime therefore starts with no history (each fuzz input, each seed of a test), while a runtime resumed from a checkpoint keeps it.
 
-The guard is built into the StateLens macros and ghost-state accessors, which call `statelens::should_check(me)` with `me` from `scheme.me()`. The guard is keyed on participant identity, so it covers the compromised primary engine. The `Disrupter` secondary runs no Simplex actor code. The compromised set is thread-local, which is sound because the deterministic runtime runs every task on the thread that starts it.
+The guard is built into the StateLens macros and ghost-state accessors, which call `statelens::should_check(me)` with `me` from `scheme.me()`. The guard is keyed on participant identity, so it covers every engine that runs under a compromised identity: the Twins primary, the TwinsCampaign secondary and both engines of the Chaos-Twins twin. A `Disrupter` secondary runs no Simplex actor code. The compromised set is thread-local, which is sound because the deterministic runtime runs every task on the thread that starts it.
 
 ### 8.5 Acceptance Criteria
 
 AC-4. A `simplex` campaign on a fresh clone with at least one invariant in the simplex registry:
-- materializes the runtime and target;
+- materializes the runtime and one variant per simplex target;
 - instruments the code;
 - writes the instrumentation plan;
 - builds;
 - runs the test gate;
-- reports `READY` with the command that runs the fuzz target, and that command starts it.
+- reports `READY` with one run command per variant, and each command starts its variant.
 
 AC-5. On an instrumented checkout, the `ft:` value reported by libFuzzer after a fixed time is higher with StateLens feedback than with `STATELENS_FEEDBACK=0`, which shows the probes fire.
 
-AC-6. **False-invariant test.** A campaign run with `STATELENS_FALSE_INVARIANTS=1` includes the deliberately false invariant `false-invariants/simplex/FALSE-0001.md` ("the replica shall not accept a nullification certificate") and stops with `[statelens][FALSE-0001]` in the test gate. If the tests do not reach it, a short run of the printed command panics with it.
+AC-6. **False-invariant test.** A campaign run with `STATELENS_FALSE_INVARIANTS=1` includes the deliberately false invariant `false-invariants/simplex/FALSE-0001.md` ("the replica shall not accept a nullification certificate") and stops with `[statelens][FALSE-0001]` in the test gate. If the tests do not reach it, a short run of one of the printed `run` commands panics with it.
 
-AC-7. **Guard test.** With `STATELENS_BYZANTINE=panic`, a short run of the StateLens target panics with `[statelens][BYZANTINE]` as soon as a compromised replica reaches an instrumented site. With the default (`skip`), no such panic occurs, and the participant index check in the runner never fails.
+AC-7. **Guard test.** With `STATELENS_BYZANTINE=panic`, a short run of a variant whose adversary runs a real Simplex engine (8.4) panics with `[statelens][BYZANTINE]` as soon as that engine reaches an instrumented site; `simplex_cert_mock_audit_statelens` does so only for an input that draws the RejectView choice, and `simplex_cert_mock_mallory_statelens` only after an amnesia restart. The other variants never do. With the default (`skip`), no such panic occurs, and the participant index check of a runner hook never fails.
 
-AC-8. **Determinism test.** Replaying a crashing input with `just run simplex_cert_mock_twins_mutator_statelens <crash_file>` on the same instrumented tree, with the `STATELENS_BYZANTINE` value of the run that found it, reproduces the same panic.
+AC-8. **Determinism test.** Replaying a crashing input with `just run <variant> <crash_file>` on the same instrumented tree, with the `STATELENS_BYZANTINE` value of the run that found it, reproduces the same panic.
 
 ### 8.6 Risks and Open Points
 
@@ -705,6 +727,8 @@ AC-8. **Determinism test.** Replaying a crashing input with `just run simplex_ce
 |---|---|
 | Low throughput (about 13 executions per second per process). | libFuzzer's `-fork=N`; the existing `invariants.rs` checks may be adjusted later (section 3.2). |
 | The Twins tests are not part of the test gate. | The fuzz harness itself exercises Twins scenarios with the correct guard. |
+| A campaign builds every simplex variant, 21 at the reference commit, which lengthens its build step. | The operator chooses which variants to run (R-P3-1). |
+| A driver added to `consensus/fuzz/simplex` gets a variant at once, and may run a real engine under a Byzantine identity without publishing it, so the guard would check that replica. | Review a new driver against the table of 8.4, and give it a hook like the others when it runs such an engine. |
 
 ---
 
@@ -1092,7 +1116,7 @@ reproduces the same panic.
 | An instrumented checkout is reused for another campaign or committed by mistake. | The campaign refuses a checkout with tracked changes outside `statelens/` or earlier instrumentation, and never commits; operators discard the checkout after a campaign. |
 | Probes change scheduling or behavior. | R-INS-1 and R-INS-3; AC-8. |
 | A campaign's beacon probes depend on the knowledge base the operator configured, so two operators get different probes and a campaign is not reproducible from this repository alone. | Accepted. Beacons add feedback only, never oracles, so a missing one costs coverage, not correctness. The plan records what each probe watches and where it was found. |
-| Index and full-text retrieval misses a finding that a semantic search would have found. | Accepted (Non-Goals). The subject is a sweep by default (R-P1-6), so coverage does not depend on an operator's wording; the operator can also rerun with topics or other terms; the index exposes `module`, `tags` and `summary`, so a query can be narrowed or widened. |
+| Index and full-text retrieval misses a finding that a semantic search would have found. | Accepted (Non-Goals). Neither use of the knowledge base depends on an operator's wording: a `kb` extraction reads every finding in the registry's scope (R-P1-3), and the beacon step starts from `kb cites` on the directory it instruments (R-KB-4). Only the word queries an agent adds can miss such a finding; it can query again with other terms, and the index exposes `module`, `tags` and `summary`, so a query can be narrowed or widened. |
 | The knowledge base and the code drift apart: a finding cites a revision whose symbols have since moved or gone. | The instrumenter is reading the current code when it queries, so a citation that no longer resolves is visible to it immediately; nothing durable records the stale link. |
 | Too many probe features (corpus bloat) or hash collisions. | Presence-only probes (R-FB-2); discretization rules (R-FB-5); 64K table; exclude replica index. |
 | Cross-actor assertions fire only because of mailbox lag. | R-INS-5: assertions must allow for any legal delivery order. |
@@ -1115,7 +1139,7 @@ reproduces the same panic.
 5. the runtime module `statelens.rs` and the fuzz target, verbatim and tested;
 6. all prompts, verbatim, with the per-subsystem parts;
 7. the agent invocations for `claude` and `codex`;
-8. in chapter 7, StateLens for Simplex: the campaign of the `simplex` profile, and how the operator runs its target in Phase 3;
+8. in chapter 7, StateLens for Simplex: the campaign of the `simplex` profile, and how the operator runs its targets in Phase 3;
 9. in chapter 8, StateLens for Marshal: what is specific to the `marshal` profile;
 10. in chapter 17, StateLens for qmdb: what is specific to the `qmdb` profile;
 11. the acceptance procedures for AC-1 to AC-20.

@@ -5,7 +5,9 @@
 - Components: the voter, batcher and resolver actors in `consensus/src/simplex/actors/`,
   which exchange messages through mailboxes, and the journal replay path on restart.
 - Adversary: the fuzzer runs honest replicas next to Byzantine ones, which equivocate,
-  mutate messages and split the network.
+  mutate messages and split the network. Some targets of `consensus/fuzz/simplex` also
+  crash honest replicas and restart them from their journal (the Chaos, Chaos-Twins and
+  Mallory drivers), so journal replay runs while fuzzing.
 - Fuzz targets: every consensus target uses the `cert_mock` scheme, which hides the
   signer set.
 - Replica index, in `consensus/src/simplex/` only (marshal code has its own rule):

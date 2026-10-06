@@ -61,7 +61,7 @@ and leaves it for Phase 1.
 | Paper term used below | Here |
 |---|---|
 | Beacon Summary, State Report | no artifact: the instrumenter holds this in its own context and records the result as a row of the plan's beacon table |
-| Iterative State Discovery | not adopted. There is no call-graph, data-flow or AST tool; tracing is search and reading, and a finding's own citations name the files and symbols (`R-AG-2`) |
+| Iterative State Discovery | no separate stage. The code index gives the call graph (`code defs`, `code refs`, `code callers`, `code callees`), and the syntax tree says whether a site writes or reads a state and which item a comment documents (`ast sites`, `ast notes`). There is no data-flow tool: the agent follows a value itself, by the method of `prompts/discover-flow.md`, and a finding's own citations name the files and symbols (`R-AG-2`, `R-AG-4`, `R-AG-5`) |
 | Probe Synthesis, Probe Validation | step 3 of a campaign, then `cargo check`, the sanitizer build with up to three agent repairs, and the test gate |
 | `INV-A1`, `INV-B2`, and the other family labels | local labels for this document only. A registry invariant has a global `INV-NNNN` id that `just extract-invariants` assigns |
 | `STATE_PROBE!` with a struct of fields | `sl_probe!(me, "label", a, b)`, which records exactly one pair; section 27 shows how several values become a pair |
