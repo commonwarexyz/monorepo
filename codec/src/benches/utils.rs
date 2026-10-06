@@ -3,6 +3,7 @@
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt as _, Write};
 
+/// A fixed-size transaction fixture for codec benchmarks.
 #[derive(Clone)]
 pub struct Tx {
     pub nonce: u64,
