@@ -32,10 +32,10 @@
 //!
 //! Shutdown closes the task set before the inject queue, so a runnable the
 //! closed queue refuses belongs to a task the set still retains. Every pool
-//! worker then drains the set, and no worker closes its mailbox or its ring
-//! until all of them have drained it and finished their last poll, since a
-//! task polled on one worker can hold registrations on another, whose mailbox
-//! forwards their results.
+//! worker then drains the set, and no worker closes its mailbox, drops the
+//! messages it took from it, or closes its ring until all of them have
+//! drained it and finished their last poll, since a task polled on one worker
+//! can hold registrations on another, whose mailbox forwards their results.
 
 use super::{
     mailbox::Mailbox,

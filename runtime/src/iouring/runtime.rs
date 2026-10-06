@@ -1602,14 +1602,6 @@ impl Worker {
             shared.pool.wait_closed();
         }
 
-        // Closing the driver and timer table below subsumes queued cancellations.
-        // Discard queued forwarding messages so their receivers observe closure.
-        // Senders can run callbacks on drop, so destroy these messages outside
-        // the local borrow.
-        for message in self.inbox.drain(..) {
-            Panics::contain(|| drop(message));
-        }
-
         // Destroy tasks before closing I/O, letting their futures detach
         // observers. Every pool worker drains the closed set, each starting at
         // its own shards, and clears each task outside the local borrow and the
@@ -1627,19 +1619,23 @@ impl Worker {
 
             // A task polled on one worker can hold registrations on another,
             // whose mailbox forwards their results. No pool worker closes its
-            // mailbox until every pool worker has drained the set and finished
-            // its last poll, so no poll finds a registration's worker closed.
-            // An empty set is no such barrier: another worker may still be
-            // dropping a future.
+            // mailbox or drops the forwards it took from it until every pool
+            // worker has drained the set and finished its last poll, so no
+            // poll finds a registration's worker closed. An empty set is no
+            // such barrier: another worker may still be dropping a future.
             shared.pool.finish();
 
-            // No pool task runs any more. Close the mailbox and dispose of
-            // what it retained before the ring closes.
+            // No pool task runs any more.
             let mailbox = self.local.borrow().mailbox.clone();
             self.close_mailbox(&mailbox);
-            for message in self.inbox.drain(..) {
-                Panics::contain(|| drop(message));
-            }
+        }
+
+        // Closing the driver and timer table below subsumes queued cancellations.
+        // Discard queued forwarding messages so their receivers observe closure.
+        // Senders can run callbacks on drop, so destroy these messages outside
+        // the local borrow.
+        for message in self.inbox.drain(..) {
+            Panics::contain(|| drop(message));
         }
 
         // Detach local and forwarded observers before running callbacks.

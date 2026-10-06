@@ -2815,51 +2815,63 @@ fn test_tasks_spread_across_workers_and_complete() {
     }
 }
 
+/// A wake of an idle task queues it on the waker's worker, so a pair started
+/// on two workers converges onto the first waker's worker and stays there.
 #[test]
 fn test_chatty_pair_converges_onto_one_worker() {
     Runner::new(config().with_worker_threads(2)).start(|context| async move {
         let (request, mut requests) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
         let (response, mut responses) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
 
-        // The responder starts on the other worker, the requester here.
-        let (responder, responder_first) = spawn_elsewhere(&context, async move {
-            let mut seen = Vec::new();
-            while let Some(requester) = requests.recv().await {
-                seen.push((requester, thread::current().id()));
-                response.send(thread::current().id()).await.unwrap();
+        // The responder starts on worker one. That worker parks only after the
+        // responder's first poll returns, which leaves the responder idle. A
+        // wake that finds a task mid-poll leaves it on its poller instead.
+        let idle = Arc::new(AtomicBool::new(false));
+        let (responder, responder_first) = spawn_elsewhere(&context, {
+            let pool = context.shared.pool.clone();
+            let idle = idle.clone();
+            async move {
+                on_next_park(&pool, 1, ParkPoint::BeforeIdle, move || {
+                    idle.store(true, Ordering::Release);
+                });
+                let mut seen = Vec::new();
+                while let Some(requester) = requests.recv().await {
+                    seen.push((requester, thread::current().id()));
+                    response.send(thread::current().id()).await.unwrap();
+                }
+                seen
             }
-            seen
         });
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while !idle.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline, "responder never went idle");
+            std::hint::spin_loop();
+        }
+
+        // The requester starts here. Its first request moves the responder
+        // here, after which each task is woken only by the other on this
+        // worker while idle.
         let requester = context.child("requester").spawn(move |_| async move {
-            let first = thread::current().id();
             let mut seen = Vec::new();
             for _ in 0..200 {
-                // Record where the request was sent from. The reply may arrive
-                // after this task has moved to the responder's worker.
                 let sent_from = thread::current().id();
                 request.send(sent_from).await.unwrap();
                 let responder = responses.recv().await.unwrap();
                 seen.push((sent_from, responder));
             }
-            (first, seen)
+            seen
         });
 
-        let (requester_first, requester_seen) = requester.await.unwrap();
+        let requester_seen = requester.await.unwrap();
         let responder_seen = responder.await.unwrap();
-        assert_ne!(requester_first, responder_first);
-
-        // Each wake moves its task to the waker's worker, so after the first
-        // exchanges the pair runs on one thread and stays there.
-        let settled = &requester_seen[20..];
-        let home = settled[0].0;
+        let home = thread::current().id();
+        assert_ne!(responder_first, home);
         assert!(
-            settled.iter().all(|(a, b)| *a == home && *b == home),
-            "pair did not converge"
-        );
-        assert!(
-            responder_seen[20..]
+            requester_seen
                 .iter()
-                .all(|(a, b)| *a == home && *b == home)
+                .chain(&responder_seen)
+                .all(|(a, b)| *a == home && *b == home),
+            "pair did not converge"
         );
     });
 }
@@ -3117,6 +3129,10 @@ fn test_wake_from_another_runtime_stays_in_its_own_pool() {
                 waiter.await.unwrap();
                 (before, thread::current().id())
             });
+
+            // The waiter starts on this worker and waits before the root
+            // runs again, so runtime B's send has a waker to wake.
+            reschedule().await;
             to_b.send(wake).unwrap();
             report.send(task.await.unwrap()).unwrap();
             to_a.send(thread::current().id()).unwrap();
@@ -3604,6 +3620,87 @@ fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
         Some(poller),
         "future dropped off its poller"
     );
+}
+
+/// Shutdown while worker zero holds a forward it took from its mailbox but has
+/// not applied. A batch of root wakes ahead of the forward completes the root
+/// first. The task that sent the forward is still mid-poll on another worker,
+/// so its sleep stays pending until every pool worker has finished polling.
+#[test]
+fn test_shutdown_retains_a_taken_forward_until_polling_ends() {
+    let forwarded = Arc::new(Mutex::new(None::<String>));
+    Runner::new(config().with_worker_threads(2)).start(|context| {
+        let forwarded = forwarded.clone();
+        async move {
+            // Registered on worker zero by this first poll.
+            let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+            assert!(futures::poll!(&mut sleep).is_pending());
+            let root = poll_fn(|cx| Poll::Ready(cx.waker().clone())).await;
+
+            // Registered without a handle, so no abort ends the task: only
+            // teardown's clear can, while the poll runs.
+            let shared = context.shared.clone();
+            let this: Arc<OnceLock<Task>> = Arc::new(OnceLock::new());
+            let queued = Arc::new(AtomicBool::new(false));
+            let future = {
+                let this = this.clone();
+                let queued = queued.clone();
+                poll_fn(move |_| {
+                    let waker = futures::task::noop_waker();
+                    let mut cx = TaskContext::from_waker(&waker);
+
+                    // Queue a full batch of root wakes on worker zero, then
+                    // the sleep's forward behind them.
+                    for _ in 0..BATCH_SIZE {
+                        root.wake_by_ref();
+                    }
+                    assert!(sleep.as_mut().poll(&mut cx).is_pending());
+                    queued.store(true, Ordering::Release);
+
+                    // Teardown clears this task once worker zero has begun
+                    // its cleanup. Poll the sleep again while still mid-poll.
+                    let deadline = Instant::now() + TEST_TIMEOUT;
+                    while !cancelled(this.get().unwrap()) {
+                        assert!(Instant::now() < deadline, "teardown never cleared");
+                        std::hint::spin_loop();
+                    }
+                    let poll = catch_unwind(AssertUnwindSafe(|| sleep.as_mut().poll(&mut cx)));
+                    *forwarded.lock() = Some(match poll {
+                        Ok(Poll::Pending) => "pending".into(),
+                        Ok(Poll::Ready(())) => "ready".into(),
+                        Err(panic) => extract_panic_message(&*panic),
+                    });
+                    Poll::<()>::Pending
+                })
+            };
+            let (task, runnable) = Task::new(future, &shared.tasks, Arc::downgrade(&shared.pool));
+            assert!(this.set(task.clone()).is_ok());
+            assert!(shared.tasks.insert(task).is_ok());
+
+            // From outside the pool, so worker one starts it while the root
+            // holds this worker until every message is queued, and this worker
+            // takes the wakes and the forward in one batch.
+            thread::spawn(move || runnable.spawn()).join().unwrap();
+            let deadline = Instant::now() + TEST_TIMEOUT;
+            while !queued.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "messages never queued");
+                std::hint::spin_loop();
+            }
+
+            // Return pending once without waking, so the batch's root wakes
+            // poll the root again and it completes before the forward applies.
+            let mut yielded = false;
+            poll_fn(move |_| {
+                if mem::replace(&mut yielded, true) {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+        }
+    });
+    assert_eq!(forwarded.lock().as_deref(), Some("pending"));
 }
 
 /// Teardown clears two idle tasks whose destructors wake each other, so
