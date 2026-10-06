@@ -1,6 +1,7 @@
 //! Red team, lens "elaboration fidelity (model vs rustc)".
 //!
-//! A differential fuzzer over the exec subset. Every program is written once
+//! A differential fuzzer over the exec subset (the language of the
+//! structured reading of lifted Rust). Every program is written once
 //! (`program!`): it is compiled natively into this test binary (dev profile:
 //! overflow checks and debug assertions on) and verified by sandblaster with
 //! the build's prover chain. For thousands of random (edge-biased) inputs
@@ -9,11 +10,10 @@
 //! 1. the native result of the erased source (a panic is recorded as
 //!    `PANIC`: a verified program must never panic),
 //! 2. the kernel evaluation (`driver::stage::eval_in`, the reference semantics of
-//!    SEMANTICS.md §17),
-//! 3. the optimized, printed code the build ships (`verify_and_optimize`,
-//!    the output of `sandblaster::build::compile`) compiled by rustc in debug
-//!    (overflow checks + debug assertions: every `get_unchecked` precondition
-//!    is checked) and in release (`-C opt-level=3`).
+//!    SEMANTICS.md §17).
+//!
+//! (A third lens, the code the optimizer printed, went with the optimizer:
+//! nothing is printed any more.)
 //!
 //! Tests that expose a divergence are `#[ignore]`d with a comment naming the
 //! finding; run them with `--ignored`.
@@ -33,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sandblaster_front::driver::{self, ProverSet, VerifyOptions};
-use sandblaster_front::opt::OptOptions;
 use util::ToJ;
 
 // ---------------------------------------------------------------------------
@@ -129,7 +128,7 @@ impl<T: Gen> Gen for ByRef<T> {
     }
 }
 
-/// Rust source text of a value (for the emitted-code driver) and of its type.
+/// Rust source text of a value (for the source driver) and of its type.
 pub trait Rs {
     fn rs(&self) -> String;
     fn ty() -> String;
@@ -278,7 +277,7 @@ impl<A: ToJ, B: ToJ, C: ToJ, D: ToJ, E: ToJ> ToJ for (A, B, C, D, E) {
     }
 }
 
-/// The JSON printer of the emitted-code driver (same format as `util::ToJ`).
+/// The JSON printer of the source driver (same format as `util::ToJ`).
 const DRIVER_TOJ: &str = r#"
 trait ToJ { fn j(&self) -> String; }
 macro_rules! num_toj { ($($t:ty),*) => { $(impl ToJ for $t { fn j(&self) -> String { self.to_string() } })* }; }
@@ -365,7 +364,6 @@ pub struct Report {
     pub why_not: String,
     pub mismatches: Vec<String>,
     pub cases: usize,
-    pub emitted: String,
 }
 
 impl Report {
@@ -394,95 +392,20 @@ fn scratch(name: &str) -> PathBuf {
     d
 }
 
-/// Compiles the emitted code with a driver running every case; returns one
-/// output line per case (`PANIC` for a caught panic, `ABORT(..)` for the
-/// cases after a process abort).
-fn run_emitted(dir: &Path, code: &str, cases: &[Case], release: bool) -> Result<Vec<String>, String> {
-    std::fs::write(dir.join("sandblaster.rs"), code).unwrap();
-    let mut main = String::from("#![allow(unused)]\ninclude!(\"sandblaster.rs\");\n");
-    main.push_str(DRIVER_TOJ);
-    // one driver function per chunk of consecutive cases of one function
-    let mut chunks = 0usize;
-    let mut i = 0;
-    while i < cases.len() {
-        let f = &cases[i].f;
-        let mut j = i;
-        while j < cases.len() && j - i < 150 && &cases[j].f == f && cases[j].tys_rs == cases[i].tys_rs {
-            j += 1;
-        }
-        let call_args: Vec<String> = (0..cases[i].arity).map(|k| format!("c.{k}")).collect();
-        let _ = writeln!(main, "fn chunk{chunks}(out: &mut dyn std::io::Write) {{\n    let cases: &[{}] = &[", cases[i].tys_rs);
-        for c in &cases[i..j] {
-            let _ = writeln!(main, "        {},", c.args_rs);
-        }
-        let _ = writeln!(
-            main,
-            "    ];\n    for c in cases.iter() {{\n        let r = std::panic::catch_unwind(|| ToJ::j(&{f}({})));\n        let _ = writeln!(out, \"{{}}\", r.unwrap_or_else(|_| \"PANIC\".to_string()));\n        let _ = out.flush();\n    }}\n}}",
-            call_args.join(", ")
-        );
-        chunks += 1;
-        i = j;
-    }
-    main.push_str("fn main() {\n    std::panic::set_hook(Box::new(|_| {}));\n    let mut out = std::io::stdout().lock();\n");
-    for k in 0..chunks {
-        let _ = writeln!(main, "    chunk{k}(&mut out);");
-    }
-    main.push_str("}\n");
-    let main_path = dir.join(if release { "main_rel.rs" } else { "main_dbg.rs" });
-    std::fs::write(&main_path, &main).unwrap();
-    let bin = dir.join(if release { "gen_rel" } else { "gen_dbg" });
-    let mut cmd = Command::new("rustc");
-    cmd.args(["--edition", "2024", "--cap-lints", "allow", "-o"]).arg(&bin);
-    if release {
-        cmd.args(["-C", "opt-level=3", "-C", "overflow-checks=off", "-C", "debug-assertions=off"]);
-    } else {
-        cmd.args(["-C", "overflow-checks=on", "-C", "debug-assertions=on"]);
-    }
-    let st = cmd.arg(&main_path).output().expect("rustc");
-    if !st.status.success() {
-        return Err(format!("the emitted code does not compile ({}):\n{}", if release { "release" } else { "debug" }, String::from_utf8_lossy(&st.stderr)));
-    }
-    let run = Command::new(&bin).output().expect("run");
-    let mut lines: Vec<String> = String::from_utf8_lossy(&run.stdout).lines().map(|s| s.to_string()).collect();
-    if !run.status.success() {
-        let why = format!("ABORT({:?}: {})", run.status.code(), String::from_utf8_lossy(&run.stderr).lines().next().unwrap_or("").chars().take(160).collect::<String>());
-        while lines.len() < cases.len() {
-            lines.push(why.clone());
-        }
-    }
-    Ok(lines)
-}
-
-/// Verifies `src` (build pipeline: standard provers, optimizer, printer,
-/// round trip), evaluates every case with the kernel, runs the emitted code
-/// (debug and release) and compares with the native results.
+/// Verifies `src` (the standard provers), evaluates every case with the
+/// kernel and compares with the native results.
 pub fn run(name: &str, src: &str, cases: &[Case]) -> Report {
     let mut rep = Report { cases: cases.len(), ..Default::default() };
     let c = util::accepted(src);
     let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
     let t0 = std::time::Instant::now();
-    let built = driver::stage::verify_and_optimize(&c, &opts, &OptOptions::default(), "r/mod.rs");
-    eprintln!("[{name}] verify+optimize: {:?}", t0.elapsed());
+    let built = driver::stage::verify_checked(&c, &opts);
+    eprintln!("[{name}] verify: {:?}", t0.elapsed());
     if !built.v.proofs_ok {
         rep.why_not = util::explain(&c, &built.v);
         return rep;
     }
     rep.verified = true;
-    let em = match built.emit {
-        Some(Ok(em)) => em,
-        Some(Err(e)) => {
-            rep.mismatches.push(format!("optimizer failed: {e}"));
-            return rep;
-        }
-        None => {
-            rep.mismatches.push("no emission".into());
-            return rep;
-        }
-    };
-    if !em.opt.errors.is_empty() || !em.roundtrip.is_empty() {
-        rep.mismatches.push(format!("optimizer errors {:?} / round trip {:?}", em.opt.errors, em.roundtrip));
-    }
-    rep.emitted = em.code.clone();
     // kernel evaluation
     let t1 = std::time::Instant::now();
     let kernel: Vec<Result<String, String>> = util::with_elab(src, ProverSet::Standard, |c, out| {
@@ -492,27 +415,14 @@ pub fn run(name: &str, src: &str, cases: &[Case]) -> Report {
         eprintln!("[{name}] kernel eval of {} case(s): {:?}", cases.len(), t2.elapsed());
         r
     });
-    let t3 = std::time::Instant::now();
-    // emitted code
-    let dir = scratch(name);
-    let dbg = run_emitted(&dir, &em.code, cases, false);
-    let rel = run_emitted(&dir, &em.code, cases, true);
-    eprintln!("[{name}] emitted code (debug + release): {:?}", t3.elapsed());
-    for (e, which) in [(&dbg, "debug"), (&rel, "release")] {
-        if let Err(msg) = e {
-            rep.mismatches.push(format!("[{which}] {msg}"));
-        }
-    }
     for (i, cs) in cases.iter().enumerate() {
         let native = normalize(&cs.native);
         let k = match &kernel[i] {
             Ok(k) => normalize(k),
             Err(e) => format!("ERR({e})"),
         };
-        let d = dbg.as_ref().ok().and_then(|v| v.get(i)).map(|s| normalize(s)).unwrap_or_else(|| "<none>".into());
-        let r = rel.as_ref().ok().and_then(|v| v.get(i)).map(|s| normalize(s)).unwrap_or_else(|| "<none>".into());
-        if native == "PANIC" || k != native || (dbg.is_ok() && d != native) || (rel.is_ok() && r != native) {
-            rep.mismatches.push(format!("{}{}: native {} | kernel {} | emitted-debug {} | emitted-release {}", cs.f, cs.args_j, native, k, d, r));
+        if native == "PANIC" || k != native {
+            rep.mismatches.push(format!("{}{}: native {} | kernel {}", cs.f, cs.args_j, native, k));
         }
     }
     rep
@@ -628,10 +538,9 @@ fn arithmetic_differential() {
 }
 
 // ---------------------------------------------------------------------------
-// battery 1b: checked-arithmetic printing (E0, plan O2): every helper at
-// every width, shift amounts of every width, compound assignments on locals,
-// fields and elements — the emitted code (helpers wrapping without debug
-// assertions, checked with them) against native and kernel
+// battery 1b: checked arithmetic at every width, shift amounts of every
+// width, compound assignments on locals, fields and elements, against
+// native and kernel
 // ---------------------------------------------------------------------------
 
 program!(e0 {
@@ -729,45 +638,6 @@ fn e0_differential() {
     cases.extend(fuzz!(&mut r, iters(200), e0::order(a: u32)));
     let rep = run("e0", e0::SRC, &cases);
     rep.assert_clean();
-    // every checked operation went through a helper
-    let body = &rep.emitted[rep.emitted.find("mod __sandblaster {").unwrap()..rep.emitted.find("\nmod __rt {").expect("the `__rt` module")];
-    for op in [" + ", " - ", " * ", " << ", " >> ", "+=", "-=", "*=", "<<=", ">>="] {
-        assert!(!body.contains(op), "a checked `{op}` is printed as an operator:\n{}", rep.emitted);
-    }
-}
-
-/// The debug-profile oracle (DESIGN.md §10.3) is intact under E0 (plan
-/// O2): a caller that violates a `requires` injects an overflow into the
-/// emitted code. A debug build traps it (rustc's overflow check in the
-/// helper's debug template); without debug assertions — Commonware's
-/// release profile, `overflow-checks = true` included — the helper wraps:
-/// a wrong value, never undefined behaviour.
-#[test]
-fn e0_debug_build_traps_an_injected_overflow() {
-    let c = util::accepted("#[requires(a < 100 && b < 100)]\npub(crate) fn sum(a: u8, b: u8) -> u8 {\n    a + b\n}\npub fn api(a: u8) -> u8 {\n    if a < 50 { sum(a, a) } else { 0 }\n}\n");
-    let built = driver::stage::verify_and_optimize(&c, &VerifyOptions { provers: ProverSet::Standard, exec_only: false }, &OptOptions::default(), "r/mod.rs");
-    assert!(built.v.proofs_ok, "{}", util::explain(&c, &built.v));
-    let em = built.emit.unwrap().unwrap();
-    assert!(em.opt.errors.is_empty() && em.roundtrip.is_empty(), "{:?} {:?}", em.opt.errors, em.roundtrip);
-    assert!(em.code.contains("crate::__rt::chk::add_u8(l0_a, l1_b)"), "{}", em.code);
-    let dir = scratch("e0-trap");
-    std::fs::write(dir.join("sandblaster.rs"), &em.code).unwrap();
-    std::fs::write(dir.join("main.rs"), "include!(\"sandblaster.rs\");\nfn main() {\n    println!(\"{}\", api(20));\n    // the injected overflow: 200 + 100 > u8::MAX, against `requires(a < 100 && b < 100)`\n    println!(\"{}\", unsafe { crate::__sandblaster::sum(200, 100) });\n}\n").unwrap();
-    let run = |tag: &str, flags: &[&str]| {
-        let bin = dir.join(tag);
-        let st = Command::new("rustc").args(["--edition", "2024", "--cap-lints", "allow", "-o"]).arg(&bin).args(flags).arg(dir.join("main.rs")).output().expect("rustc");
-        assert!(st.status.success(), "{tag}: {}", String::from_utf8_lossy(&st.stderr));
-        Command::new(&bin).output().expect("run")
-    };
-    let dbg = run("dbg", &["-C", "debug-assertions=on", "-C", "overflow-checks=on"]);
-    let stderr = String::from_utf8_lossy(&dbg.stderr);
-    assert!(!dbg.status.success() && stderr.contains("attempt to add with overflow"), "the debug build must trap the injected overflow: {:?}, stdout {:?}, stderr {stderr}", dbg.status, String::from_utf8_lossy(&dbg.stdout));
-    assert_eq!(String::from_utf8_lossy(&dbg.stdout).lines().next(), Some("40"));
-    for (tag, flags) in [("rel", &["-C", "opt-level=3", "-C", "debug-assertions=off", "-C", "overflow-checks=off"]), ("rel-oc", &["-C", "opt-level=3", "-C", "debug-assertions=off", "-C", "overflow-checks=on"])] {
-        let o = run(tag, flags);
-        assert!(o.status.success(), "{tag}: {:?} {}", o.status, String::from_utf8_lossy(&o.stderr));
-        assert_eq!(String::from_utf8_lossy(&o.stdout).lines().collect::<Vec<_>>(), ["40", "44"], "{tag}: the helper wraps without debug assertions");
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1496,8 +1366,7 @@ fn tail_recursion_differential() {
 // the subset (SSA, shadowing, compound assignment, guarded partial ops,
 // integer/option/slice/array matches with guards, ranges and or-patterns,
 // early returns, let-else, for/while loops, calls between functions), and a
-// differential runner: native (source, debug) vs kernel vs emitted (debug and
-// release).
+// differential runner: native (source, debug) vs kernel.
 // ---------------------------------------------------------------------------
 
 pub mod rgen {
@@ -1628,8 +1497,7 @@ pub mod rgen {
         in_loop: u32,
         pub callees: Vec<Sig>,
         stmts_left: i32,
-        /// Straight-line mode (no branching on inputs: exercises the
-        /// optimizer's specialization and the residual printer).
+        /// Straight-line mode (no branching on inputs).
         pub straight: bool,
     }
 
@@ -2432,8 +2300,8 @@ pub mod rgen {
     }
 }
 
-/// Compiles and runs a driver over `module` (the emitted code, or the plain
-/// source with a no-op `proof!`), one output line per case.
+/// Compiles and runs a driver over `module` (the plain source with a no-op
+/// `proof!`), one output line per case.
 fn run_driver(dir: &Path, tag: &str, module: &str, cases: &[Case], release: bool) -> Result<Vec<String>, String> {
     let modfile = format!("{tag}_module.rs");
     std::fs::write(dir.join(&modfile), module).unwrap();
@@ -2498,7 +2366,6 @@ pub struct RandomReport {
     pub accepted: usize,
     pub front_rejected: Vec<String>,
     pub unproven: Vec<String>,
-    pub roundtrip_rejected: Vec<String>,
     pub cases: usize,
     pub mismatches: Vec<String>,
     pub dir: PathBuf,
@@ -2539,26 +2406,11 @@ pub fn random_programs(tag: &str, seed: u64, nprogs: usize, inputs: usize, strai
             let _ = std::fs::write(d.join(format!("p{p}.rs")), format!("{prog}\n/*\n{}\n*/\n", c.render()));
             continue;
         }
-        let built = driver::stage::verify_and_optimize(&c, &VerifyOptions { provers: ProverSet::Standard, exec_only: false }, &OptOptions::default(), "r/mod.rs");
+        let built = driver::stage::verify_checked(&c, &VerifyOptions { provers: ProverSet::Standard, exec_only: false });
         if !built.v.proofs_ok {
             let why = util::explain(&c, &built.v);
             rep.unproven.push(why.lines().find(|l| l.starts_with("unproven") || l.contains("error")).unwrap_or("").chars().take(200).collect());
             continue;
-        }
-        match &built.emit {
-            Some(Ok(em)) if em.roundtrip.is_empty() && em.opt.errors.is_empty() => {}
-            Some(Ok(em)) => {
-                // known: CPS-duplicated loop helpers (repro_cps_duplicated_loop_breaks_round_trip)
-                rep.roundtrip_rejected.push(format!("g{p}: {}", em.roundtrip.first().cloned().unwrap_or_default().lines().next().unwrap_or("")));
-                let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join("redteam-fidelity").join(format!("{tag}-roundtrip"));
-                let _ = std::fs::create_dir_all(&d);
-                let _ = std::fs::write(d.join(format!("p{p}.rs")), &prog);
-                continue;
-            }
-            _ => {
-                rep.roundtrip_rejected.push(format!("g{p}: optimizer failed"));
-                continue;
-            }
         }
         rep.accepted += 1;
         batch.push_str(&prog);
@@ -2570,24 +2422,13 @@ pub fn random_programs(tag: &str, seed: u64, nprogs: usize, inputs: usize, strai
     if sigs.is_empty() {
         return rep;
     }
-    // the build pipeline on the batch
+    // the proofs of the batch
     let c = util::accepted(&batch);
-    let built = driver::stage::verify_and_optimize(&c, &VerifyOptions { provers: ProverSet::Standard, exec_only: false }, &OptOptions::default(), "r/mod.rs");
+    let built = driver::stage::verify_checked(&c, &VerifyOptions { provers: ProverSet::Standard, exec_only: false });
     if !built.v.proofs_ok {
         rep.mismatches.push(format!("batch not verified:\n{}", util::explain(&c, &built.v)));
         return rep;
     }
-    let em = match built.emit {
-        Some(Ok(em)) => em,
-        other => {
-            rep.mismatches.push(format!("no emission: {:?}", other.map(|e| e.err())));
-            return rep;
-        }
-    };
-    if !em.opt.errors.is_empty() || !em.roundtrip.is_empty() {
-        rep.mismatches.push(format!("optimizer errors {:?} / round trip {:?}", em.opt.errors, em.roundtrip));
-    }
-    std::fs::write(dir.join("emitted.rs"), &em.code).unwrap();
     // inputs
     let mut cases = vec![];
     for sig in &sigs {
@@ -2612,12 +2453,8 @@ pub fn random_programs(tag: &str, seed: u64, nprogs: usize, inputs: usize, strai
     rep.cases = cases.len();
     let kernel: Vec<Result<String, String>> = util::with_elab(&batch, ProverSet::Standard, |c, out| cases.iter().map(|cs| driver::stage::eval_in(out, c.krate.as_ref().unwrap(), &cs.f, &cs.args_j)).collect());
     let native = run_driver(&dir, "src", &batch, &cases, false);
-    let dbg = run_driver(&dir, "gen", &em.code, &cases, false);
-    let rel = run_driver(&dir, "gen", &em.code, &cases, true);
-    for (e, which) in [(&native, "source-debug"), (&dbg, "emitted-debug"), (&rel, "emitted-release")] {
-        if let Err(msg) = e {
-            rep.mismatches.push(format!("[{which}] {msg}"));
-        }
+    if let Err(msg) = &native {
+        rep.mismatches.push(format!("[source-debug] {msg}"));
     }
     let get = |v: &Result<Vec<String>, String>, i: usize| v.as_ref().ok().and_then(|v| v.get(i)).map(|s| normalize(s)).unwrap_or_else(|| "<none>".into());
     for (i, cs) in cases.iter().enumerate() {
@@ -2626,17 +2463,15 @@ pub fn random_programs(tag: &str, seed: u64, nprogs: usize, inputs: usize, strai
             Ok(k) => normalize(k),
             Err(e) => format!("ERR({e})"),
         };
-        let d = get(&dbg, i);
-        let rl = get(&rel, i);
-        if n == "PANIC" || n.starts_with("ABORT") || k != n || d != n || rl != n {
-            rep.mismatches.push(format!("{}{}: source {} | kernel {} | emitted-debug {} | emitted-release {}", cs.f, cs.args_j, n, k, d, rl));
+        if n == "PANIC" || n.starts_with("ABORT") || k != n {
+            rep.mismatches.push(format!("{}{}: source {} | kernel {}", cs.f, cs.args_j, n, k));
         }
     }
     rep
 }
 
 fn summarize(rep: &RandomReport) -> String {
-    let mut s = format!("generated {} program(s), accepted {}, round-trip failures {}, {} case(s), {} mismatch(es); dir {}\n", rep.generated, rep.accepted, rep.roundtrip_rejected.len(), rep.cases, rep.mismatches.len(), rep.dir.display());
+    let mut s = format!("generated {} program(s), accepted {}, {} case(s), {} mismatch(es); dir {}\n", rep.generated, rep.accepted, rep.cases, rep.mismatches.len(), rep.dir.display());
     let mut fr = rep.front_rejected.clone();
     fr.sort();
     fr.dedup();
@@ -2671,44 +2506,12 @@ fn random_programs_differential() {
 // reproductions of findings
 // ---------------------------------------------------------------------------
 
-/// Runs the build pipeline (verify, optimize, print, round trip) on `body`.
-fn build_pipeline(body: &str) -> (bool, Vec<String>, Vec<String>, String) {
+/// Verifies `body` with the standard provers: whether it verified, and why
+/// not.
+fn verify_program(body: &str) -> (bool, String) {
     let c = util::accepted(body);
-    let built = driver::stage::verify_and_optimize(&c, &VerifyOptions { provers: ProverSet::Standard, exec_only: false }, &OptOptions::default(), "r/mod.rs");
-    let verified = built.v.proofs_ok;
-    match built.emit {
-        Some(Ok(em)) => (verified, em.opt.errors.clone(), em.roundtrip.clone(), em.code),
-        Some(Err(e)) => (verified, vec![e], vec![], String::new()),
-        None => (verified, vec!["not verified".into()], vec![], util::explain(&c, &built.v)),
-    }
-}
-
-/// FINDING (robustness): a loop in the continuation of a branching
-/// statement that assigns an outer local is elaborated once per branch (CPS
-/// duplication, SEMANTICS.md §6), creating one `f::loop#k` helper global per
-/// copy under the same name. The program verifies, but the round trip maps
-/// the printed loop by name to a single helper, so the build fails with
-/// "does not match its optimized core" and emits nothing.
-#[test]
-#[ignore = "finding: CPS-duplicated loop helpers break the round trip (verified program fails to build)"]
-fn repro_cps_duplicated_loop_breaks_round_trip() {
-    let src = r#"
-pub fn dup_loop(a: u32, b: u8) -> u32 {
-    let mut acc = 0u32;
-    if a > 5 { acc = 1; }
-    let mut w = b % 4;
-    while w > 0 {
-        proof! { decreases(w); }
-        w -= 1;
-        acc = acc.wrapping_add(a);
-    }
-    acc
-}
-"#;
-    let (verified, errs, rt, code) = build_pipeline(src);
-    assert!(verified, "{code}");
-    assert!(errs.is_empty(), "{errs:?}");
-    assert!(rt.is_empty(), "round trip failed on a verified program:\n{}", rt.join("\n"));
+    let built = driver::stage::verify_checked(&c, &VerifyOptions { provers: ProverSet::Standard, exec_only: false });
+    (built.v.proofs_ok, util::explain(&c, &built.v))
 }
 
 program!(cfg_stmts {
@@ -2762,22 +2565,22 @@ program!(cfg_stmts {
 /// FINDING (high, fidelity): `#[cfg(..)]` on statements, expression
 /// statements and match arms is silently ignored by the front end (only
 /// item-level cfgs are evaluated, loader.rs; `let` statements reject
-/// attributes, other statements and arms do not). The model and the shipped
-/// (printed) code keep every cfg'd-out statement/arm, while rustc compiling
-/// the source for the same target drops them: on aarch64 `attr_stmt(5)` is 5
-/// under rustc and 321005 in the kernel and in the emitted code;
-/// `attr_arm(0)` is 7 vs 100. `#[cfg(sandblaster)]` statements (the ghost
-/// marker for items) are elaborated as exec code and shipped: `guard` is
-/// verified only thanks to a `#[cfg(sandblaster)]` bounds guard, which rustc
-/// drops from the source (the erased source / baseline panics on
-/// `guard(&[1, 2], 5)`), while the emitted code keeps it. All these forms
+/// attributes, other statements and arms do not). The model keeps every
+/// cfg'd-out statement/arm, while rustc compiling the source for the same
+/// target drops them: on aarch64 `attr_stmt(5)` is 5 under rustc and 321005
+/// in the kernel; `attr_arm(0)` is 7 vs 100. `#[cfg(sandblaster)]`
+/// statements (the ghost marker for items) are elaborated as exec code:
+/// `guard` is verified only thanks to a `#[cfg(sandblaster)]` bounds guard,
+/// which rustc drops from the source (the erased source panics on
+/// `guard(&[1, 2], 5)`). (Lifted Rust is read from rustc's MIR, where cfgs
+/// are already applied.) All these forms
 /// (block, `if`, `match`, `while`, `for` statements and match arms) are
 /// accepted by stable rustc 1.98. The same holds for `#[cfg]` on struct
 /// fields (definitions and literals), array/tuple elements, enum variants
 /// and parameters: `cmp(1, 2)` is `true` under rustc (the `w` field does not
 /// exist) and `false` in the model; `arr(1)` is `(1, 0)` vs `(2, 2)`.
 #[test]
-#[ignore = "finding: statement/arm-level #[cfg] ignored; verified model and shipped code differ from rustc's reading of the source"]
+#[ignore = "finding: statement/arm-level #[cfg] ignored; the verified model differs from rustc's reading of the source"]
 fn repro_statement_cfg_ignored() {
     let cases = vec![
         fixed!(cfg_stmts::attr_stmt(a: u32 = 5)),
@@ -2828,7 +2631,7 @@ pub fn carried(a: u32, xs: &[u8]) -> u32 {
     m
 }
 "#;
-    let (verified, _errs, _rt, why) = build_pipeline(src);
+    let (verified, why) = verify_program(src);
     assert!(verified, "a correct program is rejected:\n{why}");
 }
 
@@ -2873,42 +2676,6 @@ pub fn f<T: Copy>(s: &[T], t: [u8; 4]) -> u8 {
     // the internal (non-boundary) generic helper is still fine
     let c = util::check_src("fn g<T: Copy>(s: &[T]) -> usize { s.len() }\npub fn f(s: &[u8]) -> usize { g(s) }\n");
     assert!(c.ok(), "{}", c.render());
-}
-
-/// Helper (not a finding by itself): prints the build pipeline's round-trip
-/// failures for a saved program (`REDTEAM_FILE=path`).
-#[test]
-#[ignore = "tool"]
-fn tool_roundtrip_of_file() {
-    let Ok(f) = std::env::var("REDTEAM_FILE") else { return };
-    let src = std::fs::read_to_string(f).unwrap();
-    let (verified, errs, rt, code) = build_pipeline(&src);
-    eprintln!("verified {verified}\nerrors {errs:?}\nround trip:\n{}\n--- emitted ---\n{code}", rt.join("\n"));
-}
-
-/// FINDING (medium, robustness): an array-element assignment whose index is
-/// proven in bounds is printed as `unsafe { *get_unchecked_mut(..) = v; }`.
-/// Inside a nested block statement (`{ .. }`) the round trip refuses that
-/// printed form ("`unsafe` block outside the generated-mode forms"), so the
-/// verified program below does not build (the same statement at function
-/// level is accepted).
-#[test]
-#[ignore = "finding: unchecked place assignment inside a nested block breaks the round trip"]
-fn repro_unchecked_assign_in_nested_block() {
-    let src = r#"
-pub fn nb(o: Option<u8>, i: u32) -> u8 {
-    {
-        let mut a = [0u8; 4];
-        a[(i % 4) as usize] = 5;
-    }
-    let Some(v) = o else { return 0; };
-    v
-}
-"#;
-    let (verified, errs, rt, code) = build_pipeline(src);
-    assert!(verified, "{code}");
-    assert!(errs.is_empty(), "{errs:?}");
-    assert!(rt.is_empty(), "round trip failed on a verified program:\n{}\n{code}", rt.join("\n"));
 }
 
 /// Helper: one random round with an explicit seed (`REDTEAM_RSEED`).

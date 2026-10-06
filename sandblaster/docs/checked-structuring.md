@@ -1,5 +1,11 @@
 # Checked structuring: taking the structurer out of the trusted base
 
+*2026-10-05: the shipped code's theorems (§5.13, `L::shipped`), the panic
+statement and the lifted round trip were removed with the optimizer
+(`Ledger::accept_shipped*`, `stmt::statement_panic`, `Prover::compose`,
+`prove_roundtrip`). The implementation log keeps them as history; the
+theorem gate of §3 and §4 is unchanged.*
+
 Status: **accepted (option A, shallow) with the coordinator's amendments
 (a)–(g) below; implemented (plan steps 1–9).** Stage "cs-literal" (plan steps 1–3) is
 done: the production literal reading, its library, the statement generator,
@@ -19,7 +25,7 @@ toy fixtures of `tests/lowered_use.rs` and `tests/lift_opt.rs`). The
 stage logs below that predate the fairness audit (2026-10-02) count the
 MMR at 76, with the 7 functions of the hand-written `opt.rs` alternatives
 (since removed), and report `to_nearest_size` rewritten through one of
-them: that was user code, never optimizer output (DESIGN.md principle 3). Stage "cs-assurance" (steps 7 and 9, the
+them: that was user code, never optimizer output (principle 3 of DESIGN.md v2, at `4a0e5a23fc`). Stage "cs-assurance" (steps 7 and 9, the
 review of the trusted generator, the final validation) is done: the
 conformance check runs L against rustc, fault injection shows the theorems
 catch a mutated construct of each kind and the two historical bugs, and
@@ -2110,7 +2116,7 @@ sufficient fuel. By A2, the MIR run terminates with that value.
   unchanged, and they are the same model functions S uses.
 * **A6. The kernel**, unchanged. No new prelude definitions beyond L's
   library, which is counted in A1.
-* **A7. The statement generator** (`mir/stmt.rs`, 234 code lines; 210 before the panic statement of DESIGN.md §8.2 item 12). The theorem text, `init` and `erase`,
+* **A7. The statement generator** (`mir/stmt.rs`, 213 code lines since the panic statement was removed with the optimizer on 2026-10-05; 234 with it, 210 before it). The theorem text, `init` and `erase`,
   about 0.2k lines, decide what the theorem says. They are small and
   regular, and a reader checks them against §3. Its preconditions are
   `S_f`'s; the elaborator makes them the declared contract's (checked,
@@ -2569,7 +2575,7 @@ type and a crate's own `Index` as negative twins).
   rustc directly, while S vs rustc becomes a consequence of the theorem.
 * **Optimizer.** Unaffected. It replaces S by its kernel-checked residuals
   (and, apart, by user-supplied alternatives under proven `#[rewrite]`
-  lemmas: user code, reported separately, DESIGN.md principle 3). The
+  lemmas: user code, reported separately, principle 3 of DESIGN.md v2). The
   theorem is about the source's S, and the optimized code's correctness is
   the optimizer's own theorem, composed by transitivity.
 * **Lowered round trip.** The round trip reads back a rewritten file's MIR

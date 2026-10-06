@@ -1,34 +1,28 @@
 //! Resource bounds of proof search (docs/fix1-reports.md, "prover resource
 //! safety"): every prover call must finish — succeed or fail — within its
 //! step budget (kernel and front-end work, `auto::meter`), its per-goal
-//! deadline and the memory soft limit, even on goals whose facts are the
-//! fully unfolded QMDB verifier; exhaustion is a failure, never a success.
+//! deadline and the memory soft limit, even on goals whose facts are a
+//! large unfolded verifier; exhaustion is a failure, never a success.
 //!
 //! The reproductions are the refutation goals of the first version of the
 //! non-vacuity audit (hypotheses evaluated with every function
-//! transparent), which took 56 s (`auto`, lightest configuration, lemma
-//! `inputs_accepted`) and 41 s (development prover, 50,000 steps, law
-//! `verify_acceptance`), one run growing to 4.2 GB; before this fix, on this
-//! machine: 8.2 s / 3 GiB and 19.4 s. The fully specified QMDB (§15 S5)
-//! replaced both items; their successors here have the same kind of
-//! hypotheses: [`LEMMA`] the unfolded decoder of the exec verifier
-//! (`verifier::parse`, which `inputs_accepted`'s `verify_inputs` called),
-//! [`LAW`] the unfolded verifier (the spec's `verify`, which the exec
-//! `verify` refines; `verify_acceptance` assumed the exec one).
+//! transparent), which took 56 s (`auto`, lightest configuration) and 41 s
+//! (development prover, 50,000 steps), one run growing to 4.2 GB, on the
+//! laws of the former QMDB fixture (removed 2026-10-05). Their successors
+//! here have the same kind of hypotheses, from commonware-storage's Merkle
+//! proof verifier (`storage/sandblaster/verifier`): [`LEMMA`]'s hypotheses
+//! hold an honest proof's elements and sibling digests and [`LAW`]'s
+//! state that the unfolded `rebuild` of a subtree accepts.
 //!
-//! The bounds asserted here are generous (the measured times are ~0.1 s and
-//! a few ms, the heap growth under 64 MiB) so that a loaded machine does not
-//! make the suite flaky. Two calls are the exception: `auto` and the chain
-//! at the build's 20M steps on [`LAW`] use every budget they are given (the
-//! search case splits the unfolded spec verifier, every step charged), and
-//! `auto` is given two (`auto::search::prove_goal`: the retry in the other
-//! order of plain search and simplifier has a fresh budget, which QMDB's
-//! own proofs need; the pass without casts shares the one before it): those
-//! calls are bounded by [`MAX_TIME`] per budget ([`per_budget`]; 6.5 s per
-//! budget here, 13 s in all; 21 s when each of `auto`'s three passes had a
-//! fresh budget), and the same configurations on a tenth of the budget by
-//! [`MAX_TIME`] (1.4 s here: the time follows the charged steps). The tests
-//! share process-wide state (the memory limits), so they are serialized.
+//! The bounds asserted here are generous so that a loaded machine does not
+//! make the suite flaky. Two calls may use every budget they are given:
+//! `auto` and the chain at the build's 20M steps on [`LAW`] (`auto` is
+//! given two: `auto::search::prove_goal`'s retry in the other order of
+//! plain search and simplifier has a fresh budget): those calls are bounded
+//! by [`MAX_TIME`] per budget ([`per_budget`]), and the same
+//! configurations on a tenth of the budget by [`MAX_TIME`] (the time
+//! follows the charged steps). The tests share process-wide state (the
+//! memory limits), so they are serialized.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -60,19 +54,20 @@ fn per_budget(n: u32) -> Duration {
     MAX_TIME * n
 }
 
-/// The lemma whose hypotheses are a refutation goal: the exec decoder's
-/// result, `crate::verifier::parse(proof) == r`.
-const LEMMA: &str = "crate::proof::parsed_split";
-/// The law whose hypothesis is a refutation goal: the verifier accepts,
-/// `verify(root, key, value, proof)`.
-const LAW: &str = "crate::laws::verified_proofs_are_small";
+/// The law whose hypotheses are the lighter refutation goal: a
+/// well-shaped subtree, and the elements and sibling digests of an honest
+/// proof of it.
+const LEMMA: &str = "crate::laws::honest_proofs_rebuild_the_subtree";
+/// The law whose hypothesis is the heavier refutation goal: the unfolded
+/// `rebuild` of a subtree accepts, `rebuild(..).3 == Ok(subtree_root(..))`.
+const LAW: &str = "crate::laws::rebuilding_binds_the_elements";
 
-fn qmdb_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/mod.rs")
+fn verifier_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../storage/sandblaster/verifier/mod.rs")
 }
 
-fn check_qmdb() -> Checked {
-    let c = driver::check(&qmdb_root(), &RealFs, &TargetInfo::aarch64_apple_darwin());
+fn check_verifier() -> Checked {
+    let c = driver::check(&verifier_root(), &RealFs, &TargetInfo::aarch64_apple_darwin());
     assert!(c.ok(), "{}", c.render());
     c
 }
@@ -136,16 +131,16 @@ fn assert_bounded_by(what: &str, r: &Run, max_time: Duration) {
 }
 
 /// Both reproductions, and the build's prover configurations, on one
-/// elaboration of what the two items need from QMDB: the items they reach
-/// (their statements, proofs and every lemma those use; the mutation
-/// gate's item filter, `elab::order::filter_closure`), which must all
-/// check. The whole of QMDB takes about ten minutes to elaborate, and its
-/// verification is `qmdb_gates`' subject, not this test's.
+/// elaboration of what the two items need from the verifier: the items
+/// they reach (their statements, proofs and every lemma those use; the
+/// mutation tool's item filter, `elab::order::filter_closure`), which must
+/// all check. (The verifier's verification is the storage build's subject,
+/// not this test's.)
 #[test]
-fn unfolded_qmdb_refutations_are_bounded() {
+fn unfolded_verifier_refutations_are_bounded() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     memguard::init_from_env();
-    let c = check_qmdb();
+    let c = check_verifier();
     let k = c.krate.as_ref().unwrap();
     let seeds = [LEMMA, LAW].map(|p| k.find(p).unwrap_or_else(|| panic!("no item {p}")));
     let items = elab::order::filter_closure(k, seeds);

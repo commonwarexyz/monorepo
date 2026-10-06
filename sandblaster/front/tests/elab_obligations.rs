@@ -115,7 +115,7 @@ pub fn pairs(xs: &[u8], acc: u32) -> u32 {
 /// driven residual's elaboration, a motive) never linearize them. QMDB:
 /// `merkle::reconstruct_checked`'s `path` obligations carried the unfolded
 /// `list_take`/`list_drop` slice facts; their clone lemma took 1.68 s, 19 ms
-/// without them (optimizer gate G9).
+/// without them.
 #[test]
 fn linarith_proofs_keep_only_the_hypotheses_they_use() {
     let src = r#"

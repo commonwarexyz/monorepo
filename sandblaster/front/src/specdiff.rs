@@ -757,7 +757,7 @@ pub fn equivalent_keys(changes: &[Change]) -> Vec<String> {
 }
 
 /// What a green build means (DESIGN.md §15), printed on the spec sheet.
-pub const GREEN_BUILD: &str = "for every boundary function, the dispatched code is equal, by a kernel-checked emission chain (§15.2), to a source definition that is obs_eq to the function the locked specification surface (§15.6) determines, relative to a well-founded chain of fully specified sections (§15.5), within the TCB below. It does not mean the specification says what its author intended; §15.7 checks that, and nothing else can. Every §15.8 gate — boundary, examples and coverage, sections, law rules, the lock and spec mutation — passed for the build that states it.";
+pub const GREEN_BUILD: &str = "for every boundary function, the function the proofs are about — for lifted Rust the structured reading of the crate's own source, tied to rustc's MIR of that source by a kernel-checked theorem per function (the theorem gate) — is obs_eq to the function the locked specification surface (§15.6) determines, relative to a well-founded chain of fully specified sections (§15.5), within the TCB below. It does not mean the specification says what its author intended: that is the reviewer's reading of the locked surface, which the known answers (§15.7) and the on-demand spec-mutation tool (`sandblaster mutate`, §15.7) help. Every §15.8 gate — boundary, examples and coverage, sections, law rules and the lock — passed for the build that states it.";
 
 /// The spec sheet (`sandblaster spec`): per kind, every item's source text,
 /// de-elaborated statement and kernel statement, its dependencies and its
@@ -781,7 +781,7 @@ pub fn sheet(root: &str, s: &Surface, status: &LockStatus, changes: &[Change]) -
     ));
     o.push_str(&format!("SPEC.lock ({}): {}\n", status.file, status.summary()));
     if !s.internal.is_empty() {
-        o.push_str(&format!("Proof internals (not locked and not mutated, checked by the other gates: helper spec functions, their examples, invariants and contracts no statement mentions): {}\n", s.internal.len()));
+        o.push_str(&format!("Proof internals (not locked, checked by the gates: helper spec functions, their examples, invariants and contracts no statement mentions): {}\n", s.internal.len()));
     }
     for h in &status.header {
         o.push_str(&format!("  toolchain differs: {h}\n"));

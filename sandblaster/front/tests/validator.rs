@@ -101,7 +101,9 @@ fn raw_pointers_rejected() {
         K::RawPointer,
         "takes raw pointers",
     );
-    accepts(
+    // the `sandblaster::arch` load/store helpers were native-dialect
+    // authoring glue, removed with the optimizer: refused
+    refused_hardware(
         "use core::arch::aarch64::*;\nuse sandblaster::arch::aarch64::{load_u8x16, store_u8x16};\n\
          #[target_feature(enable = \"neon\")]\n\
          fn f(a: &[u8; 16]) -> [u8; 16] { store_u8x16(vrev32q_u8(load_u8x16(a))) }",
@@ -344,33 +346,8 @@ fn depth_bounded_recursion_must_fit_the_stack_budget() {
     accepts("fn g(s: &[u8], acc: [u64; 512]) -> u64 { match s { [] => acc[0], [h, t @ ..] => g(t, acc) } }");
 }
 
-/// The QMDB port (non-tail recursion of depth ≤ 64 in `merkle::path`) fits.
-#[test]
-fn qmdb_fits_the_stack_budget() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/mod.rs");
-    if !root.exists() {
-        eprintln!("qmdb port not present; skipping");
-        return;
-    }
-    let c = check_dir(&root);
-    if std::env::var_os("SANDBLASTER_STACK_DUMP").is_some() {
-        let k = c.krate.as_ref().unwrap();
-        let mut v: Vec<(u64, String)> = k.items.iter().filter(|i| matches!(&i.kind, sandblaster_front::hir::ItemKind::Fn(f) if f.kind == sandblaster_front::hir::FnKind::Exec && f.generics.is_empty())).filter_map(|i| sandblaster_front::validate::stack_estimate(k, i.id).map(|s| (s, i.path.to_string()))).collect();
-        v.sort();
-        for (s, n) in v.iter().rev().take(25) {
-            eprintln!("{s:>9} {n}");
-        }
-    }
-    assert!(c.ok(), "{}", c.render());
-    let k = c.krate.as_ref().unwrap();
-    for p in ["crate::merkle::path", "crate::verifier::verify"] {
-        if let Some(id) = k.find(p) {
-            let s = sandblaster_front::validate::stack_estimate(k, id);
-            eprintln!("stack estimate of {p}: {s:?} bytes (budget {})", sandblaster_front::validate::STACK_BUDGET);
-            assert!(s.is_some_and(|s| s <= sandblaster_front::validate::STACK_BUDGET));
-        }
-    }
-}
+// (the three verified roots, with the verifier's depth-bounded non-tail
+// recursion: `tests/verified_roots.rs`)
 
 // ---------------------------------------------------------------- features (§9.3)
 
@@ -468,15 +445,20 @@ fn laws_and_proofs_pairing() {
     assert_eq!(k.fn_def(k.find("crate::laws::l").unwrap()).unwrap().law_proof, Some(sandblaster_front::hir::LawProof::Missing));
 }
 
+/// Hardware variants (`#[implements]`) were native-dialect authoring for the
+/// removed optimizer's dispatch: refused whatever their shape. Negative
+/// twin: the same `#[target_feature]` function without `#[implements]` is
+/// accepted.
 #[test]
-fn implements_checks() {
+fn implements_is_refused() {
     rejects(
         "fn compress(s: [u32; 8]) -> [u32; 8] { s }\n#[target_feature(enable = \"sha2\")]\n#[implements(compress)]\nfn compress_hw(s: [u32; 4]) -> [u32; 8] { [0; 8] }",
-        K::Contract,
-        "same signature",
+        K::Feature,
+        "`#[implements]` (a hardware variant) is not supported",
     );
-    rejects("fn compress(s: [u32; 8]) -> [u32; 8] { s }\n#[implements(compress)]\nfn c2(s: [u32; 8]) -> [u32; 8] { s }", K::Contract, "only allowed on `#[target_feature]` functions");
-    accepts("fn compress(s: [u32; 8]) -> [u32; 8] { s }\n#[target_feature(enable = \"sha2\")]\n#[implements(compress)]\nfn compress_hw(s: [u32; 8]) -> [u32; 8] { s }");
+    rejects("fn compress(s: [u32; 8]) -> [u32; 8] { s }\n#[implements(compress)]\nfn c2(s: [u32; 8]) -> [u32; 8] { s }", K::Feature, "`#[implements]` (a hardware variant) is not supported");
+    refused_hardware("fn compress(s: [u32; 8]) -> [u32; 8] { s }\n#[target_feature(enable = \"sha2\")]\n#[implements(compress)]\nfn compress_hw(s: [u32; 8]) -> [u32; 8] { s }");
+    accepts("fn compress(s: [u32; 8]) -> [u32; 8] { s }\n#[target_feature(enable = \"sha2\")]\nfn compress_hw(s: [u32; 8]) -> [u32; 8] { s }");
 }
 
 #[test]

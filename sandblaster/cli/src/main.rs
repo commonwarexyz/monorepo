@@ -1,21 +1,15 @@
 //! `sandblaster` command line (DESIGN.md §10.2).
 //!
 //! Every command that states a crate verdict runs the **crate path**
-//! (`driver::build_crate`, the same pipeline as `sandblaster::build::compile`):
-//! the proofs, every §15 gate (boundary, examples and coverage, sections,
-//! law rules, `SPEC.lock`, spec mutation), the optimizer, the printer, the
-//! round trip and the emission-chain check. Only a crate verdict prints
-//! `VERIFIED` or exits 0; there is no option that skips or weakens a proof
-//! or a gate.
+//! (`driver::build_crate`, the pipeline of the build entry points): the
+//! proofs and every §15 gate (boundary, examples and coverage, sections,
+//! law rules, `SPEC.lock`). Only a crate verdict prints `VERIFIED` or exits
+//! 0; there is no option that skips or weakens a proof or a gate. Spec
+//! mutation is not a gate: it is the on-demand tool `sandblaster mutate`.
 //!
 //! * `sandblaster check <crate-dir|root.rs> [--target <arch>]` — the crate
 //!   path; writes nothing. Prints diagnostics and a summary (proof counts,
-//!   each gate's outcome, the hash of the file the build would emit); exit
-//!   0 only with a verdict.
-//! * `sandblaster emit <crate-dir|root.rs> [--target <arch>]` — the crate
-//!   path; prints the generated Rust code (exactly what the build writes to
-//!   `OUT_DIR/sandblaster.rs`, `STATUS: VERIFIED + OPTIMIZED`) to stdout, and
-//!   nothing without a verdict.
+//!   each gate's outcome); exit 0 only with a verdict.
 //! * `sandblaster report <crate-dir|root.rs> [--target <arch>]` — the crate
 //!   path; prints the JSON report the build writes (also without a verdict:
 //!   it explains the failure); exit 0 only with a verdict.
@@ -57,33 +51,37 @@
 //!   outcome coverage, the law sensitivity table (LR8) and the spec sheet;
 //!   `--json` prints the same as JSON. The exploration options shape the
 //!   report only, never the gate. Exit 0 only with a verdict.
+//! * `sandblaster mutate <crate-dir|root.rs> [--json] [--target <arch>]` —
+//!   a review tool (DESIGN.md §15.7; never a verdict, and no build runs
+//!   it): elaborates the crate and mutates every spec function and spec
+//!   constant of its review surface (the vocabulary of the locked
+//!   statements). Prints a summary, each **surviving** spec mutant (the
+//!   input where it differs and the known answer that would kill it), each
+//!   law that kills none of the mutants in its scope (LR8) and an
+//!   incomplete run; `--json` prints the engine's report instead of the
+//!   summary. Exit 0 only when no mutant survives and the run is complete;
+//!   1 otherwise, or when the crate does not verify. Each mutant's verdict
+//!   is stored in the verdict cache (`SANDBLASTER_CACHE_DIR`, the build's
+//!   cache settings; `SANDBLASTER_CACHE=off` disables it) under a key
+//!   covering everything its re-check reads and this binary's toolchain
+//!   identity (`build.rs`), so a repeated run re-checks only the mutants an
+//!   edit can affect.
 //! * `sandblaster eval <crate-dir|root.rs> <fn> <args-json> [--target <arch>]`
 //!   — a stage tool: the reference semantics. Elaborates the crate's exec
 //!   code and evaluates `fn(args)` with the kernel evaluator; prints the
 //!   value as JSON, never a verdict.
-//! * `sandblaster profile <crate-dir|root.rs> --entry <fn> --fixtures <dir|manifest>
-//!   [--fixtures <dir|manifest>…] --args <field,…> [--out <file>] [--append]
-//!   [--target <arch>]` — the profile (optimizer design §10.4): evaluates
-//!   `fn` with the reference evaluator on every fixture of the directories or
-//!   split manifests (JSON objects; the named hex-string fields are the
-//!   arguments, in order; a manifest is a `.txt` file with one fixture path
-//!   per line, so the profile is recorded on a profile half and the benchmark
-//!   times the other, `Profile::check_timed`)
-//!   and records the argument values every loop head is entered with. A
-//!   stage tool: it states no verdict. Writes `PROFILE.json` next to the DSL
-//!   root's directory or `--out`; `--append` merges into the existing file
-//!   (one entry per root, e.g. QMDB's production and N = 1 roots). The
-//!   crate path reads that file as an input of the checked crate
-//!   (`driver::Checked::profile`): it changes which loop summaries the
-//!   optimizer tries, never what is admitted.
+//! * `sandblaster conform <crate-dir|root.rs> --manifest-dir <host-crate-dir>
+//!   --work-dir <dir> [--target <arch>]` — a stage tool: the lift
+//!   conformance check of the crate's in-place modules on its own (never a
+//!   verdict).
 //!
 //! Every prover call is bounded by its step budget, a per-goal deadline
 //! (`SANDBLASTER_GOAL_TIMEOUT_MS`, default 30 s) and the memory soft limit
 //! (`SANDBLASTER_MEM_LIMIT_GB`); a tripped safety net fails the command.
 //!
-//! A crate directory is resolved to its DSL root by, in order: the string
-//! literal passed to `sandblaster::build::compile(..)` in `build.rs`,
-//! `sandblaster/mod.rs`, `mod.rs`. `--target` accepts `aarch64`, `x86_64` or a
+//! A crate directory is resolved to its DSL root by, in order: the first
+//! string literal passed to `sandblaster::build::compile_lifted(..)` or
+//! `compile_module(..)` in `build.rs`, `sandblaster/mod.rs`, `mod.rs`. `--target` accepts `aarch64`, `x86_64` or a
 //! triple starting with one of them (default: the host).
 
 use std::path::{Path, PathBuf};
@@ -94,11 +92,11 @@ use sandblaster_front::loader::RealFs;
 use sandblaster_front::target::TargetInfo;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: sandblaster <check|emit|report> <crate-dir|root.rs> [--target aarch64|x86_64]");
+    eprintln!("usage: sandblaster <check|report> <crate-dir|root.rs> [--target aarch64|x86_64]");
     eprintln!("       sandblaster eval <crate-dir|root.rs> <fn> <args-json> [--target aarch64|x86_64]");
     eprintln!("       sandblaster spec <crate-dir|root.rs> [--accept [ITEM...] [--equivalent-only] | --diff <rev-or-path> | --preview <file>] [--target aarch64|x86_64]");
     eprintln!("       sandblaster coverage <crate-dir|root.rs> [--json] [--no-sheet] [--mutants-max N] [--time-budget SECS] [--only ITEM...] [--target aarch64|x86_64]");
-    eprintln!("       sandblaster profile <crate-dir|root.rs> --entry <fn> --fixtures <dir|manifest>... --args <field,...> [--out <file>] [--append] [--target aarch64|x86_64]");
+    eprintln!("       sandblaster mutate <crate-dir|root.rs> [--json] [--target aarch64|x86_64]");
     eprintln!("       sandblaster conform <crate-dir|root.rs> --manifest-dir <host-crate-dir> --work-dir <dir> [--target aarch64|x86_64]");
     ExitCode::from(2)
 }
@@ -112,9 +110,9 @@ pub fn find_root(arg: &Path) -> Result<PathBuf, String> {
         return Err(format!("`{}` is neither a file nor a directory", arg.display()));
     }
     if let Ok(b) = std::fs::read_to_string(arg.join("build.rs"))
-        && let Some(i) = b.find("compile(")
+        && let Some((i, pat)) = ["compile_lifted(", "compile_module("].iter().filter_map(|p| b.find(p).map(|i| (i, *p))).min()
     {
-        let rest = &b[i + "compile(".len()..];
+        let rest = &b[i + pat.len()..];
         if let Some(start) = rest.find('"')
             && let Some(end) = rest[start + 1..].find('"')
         {
@@ -131,7 +129,7 @@ pub fn find_root(arg: &Path) -> Result<PathBuf, String> {
             return Ok(p);
         }
     }
-    Err(format!("no DSL root found in `{}` (expected build.rs with sandblaster::build::compile(\"..\"), sandblaster/mod.rs or mod.rs)", arg.display()))
+    Err(format!("no DSL root found in `{}` (expected build.rs with sandblaster::build::compile_lifted(\"..\", ..) or compile_module(\"..\", ..), sandblaster/mod.rs or mod.rs)", arg.display()))
 }
 
 fn main() -> ExitCode {
@@ -143,7 +141,6 @@ fn main() -> ExitCode {
     let mut target = TargetInfo::host();
     let mut spec = SpecArgs::default();
     let mut cov = CoverageArgs::default();
-    let mut prof = ProfileArgs::default();
     let mut conform_dirs: (Option<PathBuf>, Option<PathBuf>) = (None, None);
     let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
@@ -163,16 +160,6 @@ fn main() -> ExitCode {
                     cov.only.push(item.clone());
                 }
             }
-            "--entry" | "--fixtures" | "--args" | "--out" => {
-                let Some(v) = it.next() else { return usage() };
-                match a.as_str() {
-                    "--entry" => prof.entry = Some(v.clone()),
-                    "--fixtures" => prof.fixtures.push(PathBuf::from(v)),
-                    "--args" => prof.fields = v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-                    _ => prof.out = Some(PathBuf::from(v)),
-                }
-            }
-            "--append" => prof.append = true,
             "--manifest-dir" | "--work-dir" => {
                 let Some(v) = it.next() else { return usage() };
                 if a == "--manifest-dir" {
@@ -220,23 +207,19 @@ fn main() -> ExitCode {
     if positional.len() == 1 && positional[0] == "coverage" && !cov.only.is_empty() {
         positional.push(cov.only.pop().expect("an item"));
     }
-    if !matches!(cmd.as_str(), "check" | "emit" | "report" | "eval" | "spec" | "coverage" | "profile" | "conform") || positional.len() != expected {
+    if !matches!(cmd.as_str(), "check" | "report" | "eval" | "spec" | "coverage" | "conform" | "mutate") || positional.len() != expected {
         return usage();
     }
     if (cmd == "conform") != (conform_dirs.0.is_some() && conform_dirs.1.is_some()) && (cmd == "conform" || conform_dirs.0.is_some() || conform_dirs.1.is_some()) {
         eprintln!("error: `sandblaster conform` needs --manifest-dir and --work-dir, and they belong to it alone");
         return usage();
     }
-    if cmd != "coverage" && cov.used() {
-        eprintln!("error: --json, --no-sheet, --mutants-max, --time-budget and --only belong to `sandblaster coverage`");
+    if cmd == "mutate" && (cov.no_sheet || cov.max.is_some() || cov.time_budget.is_some() || !cov.only.is_empty()) {
+        eprintln!("error: `sandblaster mutate` mutates the whole review surface with fixed options; --no-sheet, --mutants-max, --time-budget and --only belong to `sandblaster coverage` (its exploration run)");
         return usage();
     }
-    if cmd != "profile" && (prof.entry.is_some() || !prof.fixtures.is_empty() || !prof.fields.is_empty() || prof.out.is_some() || prof.append) {
-        eprintln!("error: --entry, --fixtures, --args, --out and --append belong to `sandblaster profile`");
-        return usage();
-    }
-    if cmd == "profile" && (prof.entry.is_none() || prof.fixtures.is_empty() || prof.fields.is_empty()) {
-        eprintln!("error: `sandblaster profile` needs --entry, --fixtures and --args");
+    if !matches!(cmd.as_str(), "coverage" | "mutate") && cov.used() {
+        eprintln!("error: --json belongs to `sandblaster coverage` and `sandblaster mutate`; --no-sheet, --mutants-max, --time-budget and --only to `sandblaster coverage`");
         return usage();
     }
     if cmd != "spec" && (spec.accept || spec.equivalent_only || spec.diff.is_some() || spec.preview.is_some()) {
@@ -258,7 +241,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let checked = driver::check(&root, &RealFs, &target);
+    let mut checked = driver::check(&root, &RealFs, &target);
     let rendered = checked.render();
     if !rendered.is_empty() {
         eprintln!("{rendered}");
@@ -271,15 +254,6 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     let root_display = root.display().to_string();
-    if let Some(p) = &checked.profile
-        && let Err(e) = &p.parsed
-    {
-        eprintln!("warning[profile]: `{}` ignored: {e}", p.path.display());
-    }
-    if cmd == "profile" {
-        // a stage tool: writes PROFILE.json, never a verdict
-        return profile_command(&checked, &root, &prof);
-    }
     if cmd == "eval" {
         // a stage tool: a value, never a verdict
         return match driver::stage::eval_json(&checked, &positional[2], &positional[3]) {
@@ -295,6 +269,10 @@ fn main() -> ExitCode {
     }
     if cmd == "spec" {
         return spec_command(&checked, &root, &root_display, &target, &spec);
+    }
+    if cmd == "mutate" {
+        checked.cache = mutant_cache().map(std::sync::Arc::new);
+        return mutate_command(&checked, &root_display, cov.json);
     }
     if cmd == "conform" {
         // a stage tool: the lift conformance check of the in-place modules, never a verdict
@@ -319,12 +297,9 @@ fn main() -> ExitCode {
             }
         };
     }
-    // the crate path: every gate, the optimizer, the round trip
+    // the crate path: the proofs and every gate
     let b = driver::build_crate(&checked, LockUse::Enforce, &root_display);
     print_diags(&checked, &b.diagnostics());
-    for w in b.optimizer_warnings() {
-        eprintln!("warning[optimizer]: {w}");
-    }
     if cmd == "coverage" {
         return coverage_command(&checked, &root_display, &cov, &b);
     }
@@ -337,21 +312,10 @@ fn main() -> ExitCode {
             print!("{}", b.summary(&checked));
             code(&b)
         }
-        "report" => {
+        _ => {
             print!("{}", b.report);
             code(&b)
         }
-        _ => match &b.verdict {
-            Some(v) => {
-                print!("{}", v.code());
-                ExitCode::SUCCESS
-            }
-            None => {
-                eprint!("{}", failure_line(&b, &checked, &root_display));
-                eprintln!("error: not emitting code: no crate verdict (see above)");
-                ExitCode::from(1)
-            }
-        },
     }
 }
 
@@ -428,6 +392,77 @@ fn coverage_command(checked: &driver::Checked, root_display: &str, a: &CoverageA
         None => {
             eprint!("{}", failure_line(b, checked, root_display));
             ExitCode::from(1)
+        }
+    }
+}
+
+/// `sandblaster mutate` (see the module docs): the spec-mutation tool. A
+/// review tool, never a verdict: its findings say which known answer or
+/// law is missing, and no build runs it.
+fn mutate_command(checked: &driver::Checked, root_display: &str, json: bool) -> ExitCode {
+    use sandblaster_front::mutate::Verdict;
+    let run = driver::stage::mutate(checked);
+    let Some(m) = &run.report else {
+        print_diags(checked, &run.v.diags);
+        eprintln!("error: sandblaster mutate: `{root_display}` does not verify (see above); spec mutation needs a verified baseline");
+        return ExitCode::from(1);
+    };
+    if json {
+        print!("{}", sandblaster_front::mutate::report_json(m).render());
+    } else {
+        let items: std::collections::BTreeSet<_> = m.mutants.iter().map(|(x, _)| x.item).collect();
+        let killed = m.count(Verdict::KilledBySpec) + m.count(Verdict::KilledBySafety);
+        let survived = m.count(Verdict::Counterexample);
+        println!("spec mutation of `{root_display}` (the review surface; a review tool, not a gate):");
+        println!(
+            "  {} mutant(s) of {} spec item(s): {killed} killed by the specification, {survived} survived with a distinguishing input, {} possibly equivalent, {} invalid, {} not decided; {} proof internal(s) not mutated; {:.1}s",
+            m.mutants.len(),
+            items.len(),
+            m.count(Verdict::PossiblyEquivalent),
+            m.count(Verdict::Invalid),
+            m.count(Verdict::NotRun) + m.count(Verdict::KilledByBudget),
+            m.internal.len(),
+            run.v.elapsed.as_secs_f64()
+        );
+        for (x, o) in m.mutants.iter().filter(|(_, o)| o.verdict == Verdict::Counterexample) {
+            let at = o.witness.as_ref().map(|w| format!(": `{}` on {} is {} in the specification and {} in the mutant", w.function, w.input, w.original, w.mutant)).unwrap_or_default();
+            println!("  survived: #{} of `{}` ({}, {}){at}", x.id, x.path, x.desc, x.location);
+        }
+        for l in &m.laws {
+            println!("  law `{}`: kills {} of the {} spec mutant(s) in its scope", l.path, l.killed.len(), l.in_scope.len());
+        }
+        if m.cache_hits + m.cache_misses > 0 {
+            println!("  verdict cache: {} hit(s), {} run", m.cache_hits, m.cache_misses);
+        }
+    }
+    let n = run.findings.list.len();
+    if n > 0 {
+        eprintln!("sandblaster mutate: {n} finding(s):");
+        print_diags(checked, &run.findings);
+    }
+    if run.findings.has_errors() { ExitCode::from(1) } else { ExitCode::SUCCESS }
+}
+
+/// This binary's toolchain identity (`build.rs`; empty when it could not be
+/// computed).
+const TOOLCHAIN_ID: &str = env!("SANDBLASTER_TOOLCHAIN_ID");
+
+/// The verdict cache of `sandblaster mutate` (module docs): the store the
+/// environment selects, keyed on the verifier context of this binary
+/// (its toolchain identity, overflow checks, `rustc -vV`, the
+/// result-relevant `SANDBLASTER_*` variables). `None` without an identity,
+/// with `SANDBLASTER_CACHE=off`, or when no store is usable (a warning).
+fn mutant_cache() -> Option<driver::cache::VerdictCache> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+    let vv = std::process::Command::new(&rustc).arg("-vV").output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let vars: Vec<(String, String)> = std::env::vars().collect();
+    let ctx = driver::cache::verifier_context(TOOLCHAIN_ID, vv.as_deref(), &vars)?;
+    match driver::cache::Store::from_env(&|k| std::env::var(k).ok()) {
+        Ok(Some(s)) => Some(driver::cache::VerdictCache::new(s, &ctx)),
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!("warning: sandblaster mutate: verdict cache disabled: {e}");
+            None
         }
     }
 }
@@ -722,76 +757,6 @@ fn preview_lock(checked: &driver::Checked, b: &driver::CrateBuild, old: Option<&
         sandblaster_front::surface::hex(&new_lock.compute_root()),
         file.display()
     );
-    ExitCode::SUCCESS
-}
-
-/// `sandblaster profile` arguments.
-#[derive(Default)]
-struct ProfileArgs {
-    entry: Option<String>,
-    fixtures: Vec<PathBuf>,
-    fields: Vec<String>,
-    out: Option<PathBuf>,
-    append: bool,
-}
-
-/// `sandblaster profile` (see the module docs).
-fn profile_command(checked: &driver::Checked, root: &Path, a: &ProfileArgs) -> ExitCode {
-    use sandblaster_front::opt::cost::profile::{self, Profile};
-    let entry = a.entry.as_deref().unwrap_or_default();
-    // paths in the file are relative to the file's directory when inside it
-    let out = match &a.out {
-        Some(o) => o.clone(),
-        None => match root.parent().and_then(|d| d.parent()) {
-            Some(d) => d.join("PROFILE.json"),
-            None => {
-                eprintln!("error: no directory for PROFILE.json (use --out)");
-                return ExitCode::from(2);
-            }
-        },
-    };
-    let base = out.parent().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
-    let rel = |p: &Path| -> String {
-        let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        let b = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
-        abs.strip_prefix(&b).map(|r| r.display().to_string()).unwrap_or_else(|_| p.display().to_string())
-    };
-    let t0 = std::time::Instant::now();
-    let mut p = match profile::profile_crate(checked, &rel(root), entry, &a.fixtures, &a.fields) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    for e in &mut p.entries {
-        e.corpora = a.fixtures.iter().map(|f| rel(f)).collect();
-    }
-    if a.append
-        && let Ok(text) = std::fs::read_to_string(&out)
-    {
-        match Profile::parse(&text) {
-            Ok(mut old) => {
-                // a re-run of the same root replaces its entry
-                old.merge(p);
-                p = old;
-            }
-            Err(e) => {
-                eprintln!("error: `{}`: {e}", out.display());
-                return ExitCode::from(1);
-            }
-        }
-    }
-    if let Err(e) = std::fs::write(&out, p.to_json()) {
-        eprintln!("error: cannot write `{}`: {e}", out.display());
-        return ExitCode::from(1);
-    }
-    for e in &p.entries {
-        for (l, (calls, samples)) in &e.loops {
-            eprintln!("profile: {} {l}: {calls} call(s), {} distinct argument vector(s)", e.root, samples.len());
-        }
-    }
-    eprintln!("profile: wrote `{}` ({:.1?})", out.display(), t0.elapsed());
     ExitCode::SUCCESS
 }
 

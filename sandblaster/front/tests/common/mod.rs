@@ -47,6 +47,26 @@ pub fn accepts(body: &str) -> Checked {
     c
 }
 
+/// Asserts a refused native-dialect hardware form (`#[implements]`, the
+/// `sandblaster::arch` helpers; removed with the optimizer,
+/// `sandblaster_front::target::{NO_VARIANTS, NO_ARCH_HELPERS}`): some error
+/// is a `... is not supported` refusal, and every other error is a resolve
+/// error that follows from it (a name the refused import would have
+/// brought).
+#[track_caller]
+pub fn refused_hardware(body: &str) -> Checked {
+    let c = check(body);
+    refused_hardware_checked(&c);
+    c
+}
+
+#[track_caller]
+pub fn refused_hardware_checked(c: &Checked) {
+    let errs = errors(c);
+    let refusal = |k: &DiagKind, m: &str| *k == DiagKind::Feature && m.ends_with("not supported");
+    assert!(errs.iter().any(|(k, m)| refusal(k, m)) && errs.iter().all(|(k, m)| refusal(k, m) || *k == DiagKind::Resolve), "expected the hardware refusal; got:\n{}", c.render());
+}
+
 /// Asserts some error of `kind` whose message contains `needle`.
 #[track_caller]
 pub fn rejects(body: &str, kind: DiagKind, needle: &str) -> Checked {
@@ -114,7 +134,6 @@ pub fn erase_copy(src: &Path, dst: &Path) {
                 || t.starts_with("#[ensures(")
                 || t.starts_with("#[decreases(")
                 || t.starts_with("#[implements(")
-                || t.starts_with("#[specialize]")
                 || t.starts_with("proof! {");
             if !erased {
                 out.push_str(line);

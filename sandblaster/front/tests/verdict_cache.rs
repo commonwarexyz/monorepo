@@ -6,15 +6,14 @@
 //!   cache's key (a forgery) are all rejected; an address that is not a
 //!   hash is refused; the size cap evicts the least recently used entries;
 //!   HMAC-SHA-256 matches RFC 4231;
-//! * module mode on an in-memory host crate: a warm build in a new target
-//!   directory (no `OUT_DIR` key) reuses the cached verdict byte for byte;
-//!   a tampered entry is rejected and the module re-verified to the same
-//!   bytes (and the entry repaired); another toolchain, `SANDBLASTER_CACHE=off`
-//!   and a changed source do not reuse; crate mode reuses too;
-//! * incremental spec mutation: a rebuild whose sources changed where no
-//!   mutant reads takes every spec mutant's verdict from the cache and
-//!   writes the same report; after an edit of one spec function only its
-//!   mutants run; a tampered mutant entry is re-run with the same verdict.
+//! * (whole verdicts of module mode and in place: `tests/build_loop.rs` on
+//!   a lifted module, `tests/in_place_cache.rs`);
+//! * incremental spec mutation (the on-demand tool `sandblaster mutate`,
+//!   `driver::stage::mutate`, with a cache): a re-run whose sources changed
+//!   where no mutant reads takes every spec mutant's verdict from the cache
+//!   and decides every mutant the same way; after an edit of one spec
+//!   function only its mutants run; a tampered mutant entry is re-run with
+//!   the same verdict. A build with the same cache runs no mutant.
 
 #[path = "elab_util.rs"]
 #[macro_use]
@@ -26,15 +25,14 @@ mod gated;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use sandblaster_front::driver::cache::{hmac, Lookup, Store};
-use sandblaster_front::driver::{build_module, build_verified_with, module_include_line, BuildOutcome, LIB_RS_LINE};
+use sandblaster_front::driver::cache::{hmac, Lookup, Store, VerdictCache};
+use sandblaster_front::driver::{self, LockUse};
 use sandblaster_front::loader::MemFs;
 use sandblaster_front::surface::{hex, sha256};
 use sandblaster_front::target::TargetInfo;
 use util::HEADER;
 
 const ROOT: &str = "sandblaster/prog/mod.rs";
-const MODULE: &str = "src/verified/prog.rs";
 
 program!(prog {
     pub fn clamp_add(a: u8, b: u8) -> u8 {
@@ -78,36 +76,6 @@ fn scratch(name: &str) -> PathBuf {
     d
 }
 
-fn env(out: &str, cache: Option<&Path>, extra: &[(&str, &str)]) -> HashMap<String, String> {
-    let mut m: HashMap<String, String> = [
-        ("CARGO_MANIFEST_DIR", "/host"),
-        ("OUT_DIR", out),
-        ("CARGO_CFG_TARGET_ARCH", "aarch64"),
-        ("CARGO_CFG_TARGET_FEATURE", "neon,sha2,sha3,aes"),
-        ("CARGO_CFG_TARGET_ENDIAN", "little"),
-        ("CARGO_CFG_TARGET_POINTER_WIDTH", "64"),
-    ]
-    .iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect();
-    if let Some(c) = cache {
-        m.insert("SANDBLASTER_CACHE_DIR".into(), c.display().to_string());
-        m.insert("SANDBLASTER_CACHE_KEY".into(), "test secret".into());
-    }
-    for (k, v) in extra {
-        m.insert(k.to_string(), v.to_string());
-    }
-    m
-}
-
-fn host_files() -> Vec<(String, String)> {
-    vec![
-        ("/host/src/lib.rs".into(), "//! A host crate.\nmod verified;\n".into()),
-        ("/host/src/verified/mod.rs".into(), "pub mod prog;\n".into()),
-        (format!("/host/{MODULE}"), format!("{}\n", module_include_line("prog"))),
-    ]
-}
-
 fn dsl_files(spec: &str) -> Vec<(String, String)> {
     let mut code = prog::SRC.replace("pub fn\n", "pub fn ");
     for (f, s) in [("clamp_add", "saturating_sum"), ("classify", "classify")] {
@@ -123,9 +91,7 @@ fn dsl_files(spec: &str) -> Vec<(String, String)> {
 }
 
 fn all_files(spec: &str) -> Vec<(String, String)> {
-    let mut v = host_files();
-    v.extend(dsl_files(spec));
-    v
+    dsl_files(spec)
 }
 
 fn with(files: &[(String, String)], path: &str, text: &str) -> Vec<(String, String)> {
@@ -134,17 +100,42 @@ fn with(files: &[(String, String)], path: &str, text: &str) -> Vec<(String, Stri
     v
 }
 
-fn build(files: &[(String, String)], context: Option<&str>, e: &HashMap<String, String>) -> BuildOutcome {
+/// The crate path's outcome: whether it issued a verdict, its report and
+/// its timing.
+struct Built {
+    ok: bool,
+    stderr: String,
+    report: String,
+    timing: String,
+}
+
+/// The front end on `files` with the verdict cache in `dir`.
+fn checked_with_cache(files: &[(String, String)], dir: &Path) -> driver::Checked {
     let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
-    build_module(ROOT, MODULE, context, &|k| e.get(k).cloned(), &fs)
+    let root = format!("/host/{ROOT}");
+    let mut c = driver::check(Path::new(&root), &fs, &TargetInfo::aarch64_apple_darwin());
+    assert!(c.ok(), "{}", c.render());
+    c.cache = Some(std::sync::Arc::new(VerdictCache::new(Store::open(dir.to_path_buf(), sha256(b"test secret")), "toolchain-1")));
+    c
 }
 
-fn output<'o>(o: &'o BuildOutcome, name: &str) -> Option<&'o str> {
-    o.outputs.iter().find(|(p, _)| p.file_name().is_some_and(|f| f == name)).map(|(_, c)| c.as_str())
+/// The crate path on `files` with the verdict cache in `dir`.
+fn build(files: &[(String, String)], dir: &Path) -> Built {
+    let c = checked_with_cache(files, dir);
+    let root = format!("/host/{ROOT}");
+    let b = driver::build_crate(&c, LockUse::Enforce, &root);
+    Built { ok: b.verdict.is_some(), stderr: b.render_failure(&c, &root), report: b.report.clone(), timing: b.timing.clone() }
 }
 
-fn reused(o: &BuildOutcome) -> bool {
-    o.cargo.iter().any(|l| l.contains("reusing the verdict cache entry"))
+/// The spec-mutation tool on `files` with the verdict cache in `dir` (it
+/// reuses the per-mutant verdicts stored there): `(hits, misses, every
+/// mutant's description and verdict)`.
+fn mutate_run(files: &[(String, String)], dir: &Path) -> (usize, usize, Vec<(String, &'static str)>) {
+    let c = checked_with_cache(files, dir);
+    let run = driver::stage::mutate(&c);
+    let m = run.report.unwrap_or_else(|| panic!("the crate does not verify: {}", run.v.diags.render(&c.sm)));
+    assert!(m.complete, "{:?}", m.incomplete_reasons);
+    (m.cache_hits, m.cache_misses, m.mutants.iter().map(|(x, o)| (format!("{} {}", x.path, x.desc), o.verdict.word())).collect())
 }
 
 fn entries(dir: &Path, ns: &str) -> Vec<PathBuf> {
@@ -159,13 +150,6 @@ fn entries(dir: &Path, ns: &str) -> Vec<PathBuf> {
     }
     out.sort();
     out
-}
-
-/// A `mutation_cache_*` count of the timing file.
-fn timing_num(o: &BuildOutcome, field: &str) -> i64 {
-    let t = output(o, "prog-timing.json").unwrap_or_else(|| panic!("no timing: {:?}", o.cargo));
-    let at = t.find(&format!("\"{field}\": ")).unwrap_or_else(|| panic!("no {field} in {t}"));
-    t[at + field.len() + 4..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap()
 }
 
 // ---------------------------------------------------------------------------
@@ -241,78 +225,6 @@ fn the_store_evicts_the_least_recently_used_entries_over_its_cap() {
 // the verdict cache in module mode and crate mode
 // ---------------------------------------------------------------------------
 
-#[test]
-fn a_warm_build_in_a_new_target_dir_reuses_the_cached_verdict() {
-    let dir = scratch("warm");
-    let files = all_files(SPEC);
-    let cold = build(&files, Some("toolchain-1"), &env("/out", Some(&dir), &[]));
-    assert!(cold.ok, "{}", cold.stderr);
-    assert!(!reused(&cold));
-    assert!(timing_num(&cold, "mutation_cache_misses") > 0 && timing_num(&cold, "mutation_cache_hits") == 0);
-    // a new target directory: no OUT_DIR key, the cache has the verdict
-    let warm = build(&files, Some("toolchain-1"), &env("/target2/out", Some(&dir), &[]));
-    assert!(warm.ok && reused(&warm), "{:?}\n{}", warm.cargo, warm.stderr);
-    for f in ["prog.rs", "prog-report.json", "prog-timing.json"] {
-        assert_eq!(output(&warm, f), output(&cold, f), "{f} is the cached one");
-    }
-    let key = output(&warm, "prog-verdict.key").expect("the OUT_DIR key is written on a cache hit");
-    assert!(key.contains(&hex(&sha256(output(&cold, "prog.rs").unwrap().as_bytes()))), "{key}");
-    assert!(warm.outputs.iter().all(|(p, _)| p.starts_with("/target2/out")), "{:?}", warm.outputs.iter().map(|x| &x.0).collect::<Vec<_>>());
-    // not reused: another toolchain, the cache off, a changed source
-    for (what, fs, ctx, extra) in [
-        ("toolchain", files.clone(), "toolchain-2", vec![]),
-        ("off", files.clone(), "toolchain-1", vec![("SANDBLASTER_CACHE", "off")]),
-        ("source", with(&files, "/host/sandblaster/prog/m.rs", &format!("{}\n// an edit\n", files.iter().find(|(p, _)| p.ends_with("m.rs")).unwrap().1)), "toolchain-1", vec![]),
-    ] {
-        let o = build(&fs, Some(ctx), &env("/target3/out", Some(&dir), &extra));
-        assert!(o.ok, "{what}: {}", o.stderr);
-        assert!(!reused(&o), "{what}: reused");
-    }
-    // crate mode reuses too
-    let crate_files = with(&files, "/host/src/lib.rs", LIB_RS_LINE);
-    let crate_build = |out: &str| {
-        let fs = MemFs::from_files(crate_files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
-        let e = env(out, Some(&dir), &[]);
-        build_verified_with(ROOT, Some("toolchain-1"), &|k| e.get(k).cloned(), &fs)
-    };
-    let c1 = crate_build("/c1");
-    assert!(c1.ok && !reused(&c1), "{}", c1.stderr);
-    let c2 = crate_build("/c2");
-    assert!(c2.ok && reused(&c2), "{:?}", c2.cargo);
-    assert_eq!(output(&c2, "sandblaster.rs"), output(&c1, "sandblaster.rs"));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn a_tampered_cache_entry_is_rejected_and_the_module_reverified() {
-    let dir = scratch("tamper");
-    let files = all_files(SPEC);
-    let e = env("/out", Some(&dir), &[]);
-    let cold = build(&files, Some("t"), &e);
-    assert!(cold.ok, "{}", cold.stderr);
-    let code = output(&cold, "prog.rs").unwrap().to_string();
-    let entry = entries(&dir, "verdict").pop().expect("the verdict was stored");
-    let good = std::fs::read_to_string(&entry).unwrap();
-    // an unverified body with a recomputed payload hash: the MAC rejects it
-    let evil = good.replacen("STATUS: VERIFIED", "STATUS: VERIFIEd", 1);
-    assert_ne!(evil, good);
-    std::fs::write(&entry, &evil).unwrap();
-    let o = build(&files, Some("t"), &env("/out2", Some(&dir), &[]));
-    assert!(o.ok && !reused(&o), "{:?}", o.cargo);
-    assert!(o.cargo.iter().any(|l| l.contains("rejected")), "{:?}", o.cargo);
-    assert_eq!(output(&o, "prog.rs"), Some(code.as_str()), "re-verified to the same bytes");
-    // the re-verification repaired the entry
-    let again = build(&files, Some("t"), &env("/out3", Some(&dir), &[]));
-    assert!(again.ok && reused(&again), "{:?}", again.cargo);
-    // a forged entry (another secret) is rejected the same way
-    let forged = Store::open(dir.clone(), sha256(b"not the key"));
-    let key_name = entry.file_name().unwrap().to_string_lossy().to_string();
-    forged.put("verdict", &key_name, &[("code", "pub fn clamp_add(a: u8, b: u8) -> u8 { a }\n"), ("report", "{}"), ("timing", "{}")]).unwrap();
-    let o = build(&files, Some("t"), &env("/out4", Some(&dir), &[]));
-    assert!(o.ok && !reused(&o) && output(&o, "prog.rs") == Some(code.as_str()), "{:?}", o.cargo);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 // ---------------------------------------------------------------------------
 // incremental spec mutation
 // ---------------------------------------------------------------------------
@@ -321,36 +233,34 @@ fn a_tampered_cache_entry_is_rejected_and_the_module_reverified() {
 fn spec_mutation_reruns_only_the_mutants_an_edit_can_affect() {
     let dir = scratch("mutants");
     let files = all_files(SPEC);
-    let cold = build(&files, Some("t"), &env("/out", Some(&dir), &[]));
-    assert!(cold.ok, "{}", cold.stderr);
-    let total = timing_num(&cold, "mutation_cache_misses");
-    assert!(total > 0 && timing_num(&cold, "mutation_cache_hits") == 0);
-    assert_eq!(entries(&dir, "mutant").len() as i64, total, "every decided verdict is stored");
-    // an edit no mutant reads (a comment at the end of the exec file): the
-    // crate is re-verified, every spec mutant comes from the cache, and the
-    // (deterministic) report is the cold one
+    // a build runs no spec mutant (mutation is the on-demand tool)
+    let b = build(&files, &dir);
+    assert!(b.ok, "{}", b.stderr);
+    assert!(!b.timing.contains("mutation") && !b.report.contains("\"mutation\""), "{}\n{}", b.timing, b.report);
+    assert!(entries(&dir, "mutant").is_empty(), "a build stored mutant verdicts");
+    // the tool: a cold run stores every decided verdict
+    let (hits, total, cold) = mutate_run(&files, &dir);
+    assert!(total > 0 && hits == 0, "hits {hits}, misses {total}");
+    assert_eq!(entries(&dir, "mutant").len(), total, "every decided verdict is stored");
+    // an edit no mutant reads (a comment at the end of the exec file): every
+    // spec mutant comes from the cache, decided the same way
     let m_rs = files.iter().find(|(p, _)| p.ends_with("m.rs")).unwrap().1.clone();
     let comment = with(&files, "/host/sandblaster/prog/m.rs", &format!("{m_rs}// a comment\n"));
-    let warm = build(&comment, Some("t"), &env("/out2", Some(&dir), &[]));
-    assert!(warm.ok && !reused(&warm), "{}", warm.stderr);
-    assert_eq!(timing_num(&warm, "mutation_cache_hits"), total);
-    assert_eq!(timing_num(&warm, "mutation_cache_misses"), 0);
-    assert_eq!(output(&warm, "prog-report.json"), output(&cold, "prog-report.json"), "cached verdicts reproduce the report");
+    let (hits, misses, warm) = mutate_run(&comment, &dir);
+    assert_eq!((hits, misses), (total, 0));
+    assert_eq!(warm, cold, "cached verdicts reproduce the run");
     // a tampered mutant entry is re-run, with the same result
     let victim = entries(&dir, "mutant").remove(0);
     let mut text = std::fs::read_to_string(&victim).unwrap();
     text.push('x');
     std::fs::write(&victim, text).unwrap();
-    let again = build(&with(&comment, "/host/sandblaster/prog/m.rs", &format!("{m_rs}// another comment\n")), Some("t"), &env("/out3", Some(&dir), &[]));
-    assert!(again.ok, "{}", again.stderr);
-    assert_eq!(timing_num(&again, "mutation_cache_misses"), 1, "the tampered entry is a miss");
-    assert_eq!(output(&again, "prog-report.json"), output(&cold, "prog-report.json"));
+    let (_, misses, again) = mutate_run(&with(&comment, "/host/sandblaster/prog/m.rs", &format!("{m_rs}// another comment\n")), &dir);
+    assert_eq!(misses, 1, "the tampered entry is a miss");
+    assert_eq!(again, cold);
     // an edit of one spec function: only the mutants that read it run
     let edited_spec = SPEC.replace("else if x < 10 { 1 }", "else if x <= 9 { 1 }");
     let edited = all_files(&edited_spec);
-    let o = build(&edited, Some("t"), &env("/out4", Some(&dir), &[]));
-    assert!(o.ok, "{}", o.stderr);
-    let (hits, misses) = (timing_num(&o, "mutation_cache_hits"), timing_num(&o, "mutation_cache_misses"));
+    let (hits, misses, _) = mutate_run(&edited, &dir);
     eprintln!("spec mutants: {total} in the cold run; after editing `classify`: {hits} from the cache, {misses} run");
     assert!(hits > 0 && misses > 0, "hits {hits}, misses {misses}");
     assert!(hits >= 5, "the `saturating_sum` mutants are unaffected: hits {hits}, misses {misses}");

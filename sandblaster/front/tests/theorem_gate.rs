@@ -25,10 +25,7 @@
 //!   reading whose names another extraction's reading took over is refused.
 //!
 //! On storage: every lifted function of the verifier's first set (69), and
-//! of the MMR (69, with the model lemma of core's `u64::div_ceil`; no
-//! optimization alternative, so no rewritten function).
-//! The shipped code's theorems of the lifted round trip (§20.7) are tested
-//! in `tests/lowered_use.rs`.
+//! of the MMR (69, with the model lemma of core's `u64::div_ceil`).
 
 use std::path::Path;
 use std::sync::Arc;

@@ -58,8 +58,8 @@ pub struct ViewInfo {
 /// examples, spec closure), kept on [`Elab`].
 #[derive(Default)]
 pub struct S1State {
-    /// The spec-level stages run (the main elaboration; off in the
-    /// optimizer's generated/resumed modes and for `exec_only` tests).
+    /// The spec-level stages run (the main elaboration; off for `exec_only`
+    /// tests).
     pub on: bool,
     pub views: HashMap<ItemId, ViewInfo>,
     /// `S::represents`, by struct.
@@ -208,9 +208,8 @@ impl<'a> Elab<'a> {
         Ok(mk::apps(mk::global(map), [(Rel::Rel, et), (Rel::Rel, e2t), (Rel::Rel, lam), (Rel::Rel, l)]))
     }
 
-    /// A view elaborated by the main pass, found by name (the optimizer's
-    /// resumed and generated modes run without the S1 state but in the same
-    /// environment).
+    /// A view elaborated by the main pass, found by name (an elaboration
+    /// without the S1 state, in the same environment).
     fn view_by_name(&self, id: ItemId) -> Option<ViewInfo> {
         let it = self.krate.item(id);
         let global = self.env.lookup_global(&format!("{}::view", it.path))?;

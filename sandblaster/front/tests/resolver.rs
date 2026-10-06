@@ -91,10 +91,9 @@ fn prelude_option_and_primitive_assoc() {
 #[test]
 fn arch_helpers_and_intrinsics_resolve_against_target_table() {
     let c = accepts(
-        "use core::arch::aarch64::{uint32x4_t, vaddq_u32, vgetq_lane_u32};\n\
-         use sandblaster::arch::aarch64 as arch;\n\
+        "use core::arch::aarch64::{uint32x4_t, vaddq_u32, vdupq_n_u32, vgetq_lane_u32};\n\
          #[target_feature(enable = \"neon\")]\n\
-         fn f(a: &[u32; 4]) -> u32 { let v = arch::load_u32x4(a); vgetq_lane_u32::<2>(vaddq_u32(v, v)) }",
+         fn f(a: u32) -> u32 { let v: uint32x4_t = vdupq_n_u32(a); vgetq_lane_u32::<2>(vaddq_u32(v, v)) }",
     );
     let k = c.krate.unwrap();
     let f = k.fn_def(k.find("crate::f").unwrap()).unwrap();
@@ -103,7 +102,11 @@ fn arch_helpers_and_intrinsics_resolve_against_target_table() {
     // as `vsha512hq_u64` joined it with the SHA3/SHA512 models)
     let c = rejects("use core::arch::aarch64::vsm4eq_u32;", K::Resolve, "unresolved import");
     assert!(c.render().contains("only intrinsics of sandblaster's target library"));
-    rejects("use sandblaster::arch::aarch64::load_u8x32;", K::Resolve, "unresolved import");
+    // the `sandblaster::arch` helpers were removed with the optimizer
+    let c = refused_hardware("use sandblaster::arch::aarch64 as arch;\nfn f(a: &[u32; 4]) -> u32 { a[0] }");
+    let r = c.render();
+    assert!(r.contains("`sandblaster::arch::aarch64` (hardware load/store helpers) is not supported") && r.contains("removed with the optimizer"), "{r}");
+    refused_hardware("use sandblaster::arch::aarch64::load_u8x32;");
 }
 
 #[test]

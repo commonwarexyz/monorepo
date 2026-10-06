@@ -3,8 +3,8 @@
 //!
 //! sandblaster sources are ordinary Rust files annotated with contracts
 //! (`#[requires]`, `#[ensures]`, `#[decreases]`), hardware-variant markers
-//! (`#[implements]`, `#[specialize]`), ghost items (`#[law]`, `#[lemma]`,
-//! `#[spec]`, `#[proof]`, `#[rewrite]`, `#[induction]`) and the §15
+//! (`#[implements]`), ghost items (`#[law]`, `#[lemma]`, `#[spec]`,
+//! `#[proof]`, `#[induction]`) and the §15
 //! specification annotations (`#[refines]`, `#[example]`, `#[examples]`,
 //! `#[invariant]`, `#[view]`, `#[represents]`, `#[ghost]`, `#[section]`,
 //! `#[mirrors_impl]`, `#[fuel_sufficient]`, `#[trusted_extern]`) and the
@@ -18,7 +18,7 @@
 //! every annotation is erased:
 //!
 //! * **Annotations of exec items** (`requires`, `ensures`, `decreases`,
-//!   `implements`, `specialize`, `refines`, `example`, `section`,
+//!   `implements`, `refines`, `example`, `section`,
 //!   `trusted_extern` on functions; `invariant`, `view`, `represents` on
 //!   types) return the annotated item unchanged. An attribute macro never
 //!   receives its own attribute in its input, so the item comes back minus
@@ -31,7 +31,7 @@
 //!   ghost type) does not exist in the compiled code. The checker requires a
 //!   function with ghost parameters to carry such an annotation. `#[ghost]`
 //!   anywhere else is an error.
-//! * **Ghost-item attributes** (`law`, `lemma`, `spec`, `proof`, `rewrite`)
+//! * **Ghost-item attributes** (`law`, `lemma`, `spec`, `proof`)
 //!   erase the whole item. Ghost items normally also sit behind
 //!   `#[cfg(sandblaster)]` (so `rustc` strips them before these macros run);
 //!   erasing them here as well keeps a stray ghost item out of the build even
@@ -47,8 +47,7 @@
 //! just as the checker rejects it.
 //!
 //! The macros perform only the light argument checks that are cheap to do
-//! without a parser (e.g. `#[requires]` needs a condition, `#[specialize]`
-//! takes none). The real validation is the front end's job (§3, §4.2, §15).
+//! without a parser (e.g. `#[requires]` needs a condition). The real validation is the front end's job (§3, §4.2, §15).
 //! The list of macros must match the checker's `resolve::Annot::ALL` (a
 //! front-end test compares them).
 //!
@@ -312,17 +311,6 @@ pub fn implements(attr: TokenStream, item: TokenStream) -> TokenStream {
     erase_with_args("implements", attr, item)
 }
 
-/// `#[specialize]`: failure to specialize this function is a build error
-/// (§8.2). Takes no arguments. Erased.
-#[proc_macro_attribute]
-pub fn specialize(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let item = strip_ghost_params(item);
-    if let Some(first) = attr.into_iter().next() {
-        return error(first.span(), "#[specialize] takes no arguments (DESIGN.md §8.2)", item);
-    }
-    item
-}
-
 /// `#[law]`: a claim in `LAWS.rs` (§4.5). Ghost: the item is erased.
 #[proc_macro_attribute]
 pub fn law(_attr: TokenStream, _item: TokenStream) -> TokenStream {
@@ -344,13 +332,6 @@ pub fn spec(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// `#[proof]`: the proof of a law in `PROOF.rs` (§4.5). Ghost: erased.
 #[proc_macro_attribute]
 pub fn proof(_attr: TokenStream, _item: TokenStream) -> TokenStream {
-    TokenStream::new()
-}
-
-/// `#[rewrite]`: lets the optimizer use an equational law (§4.5). Ghost:
-/// erased (it only ever annotates a `#[law]`).
-#[proc_macro_attribute]
-pub fn rewrite(_attr: TokenStream, _item: TokenStream) -> TokenStream {
     TokenStream::new()
 }
 

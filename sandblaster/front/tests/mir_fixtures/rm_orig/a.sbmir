@@ -1,0 +1,33 @@
+;; rustc's MIR of `fx_rm_orig::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_rm_orig")
+(module "fx_rm_orig::a")
+(overflow-checks on)
+(exclude)
+(source "src/a.rs" "70182b2510280cd8fec7e94619566f72127173c24db6b2666348e04ae5fb0afb")
+(root "fx_rm_orig::a::min_u64")
+(fn "fx_rm_orig::a::min_u64"
+  (kind root) (def "fx_rm_orig::a::min_u64") (args ())
+  (item fn "min_u64")
+  (span "src/a.rs" 2 1)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 u64 imm)
+    (2 u64 imm)
+    (3 bool mut))
+  (debug "a" (p 1) (arg 1))
+  (debug "b" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (bin lt (copy (p 1)) (copy (p 2))) (at "src/a.rs" 3 8))
+    (switch (move (p 3)) (0 2) (otherwise 1) (at "src/a.rs" 3 8)))
+  (bb 1
+    (assign (p 0) (use (copy (p 1))) (at "src/a.rs" 3 16))
+    (goto 3 (at "src/a.rs" 3 5)))
+  (bb 2
+    (assign (p 0) (use (copy (p 2))) (at "src/a.rs" 3 27))
+    (goto 3 (at "src/a.rs" 3 5)))
+  (bb 3
+    (return (at "src/a.rs" 4 2)))
+)

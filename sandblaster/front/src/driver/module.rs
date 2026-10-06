@@ -10,9 +10,9 @@
 //!   sandblaster/varint/     the DSL root, its laws, proofs and SPEC.lock
 //! ```
 //!
-//! [`build_module`] is [`super::build_verified`] with the `src/lib.rs` check
-//! replaced by the module-file checks, and the crate path run with
-//! [`Emission::Module`]:
+//! [`build_module`] verifies a DSL root whose exec code is one lifted Rust
+//! module (`#[lift] mod m;`, [`super::lifted`]) and emits that module's
+//! source as-is; the crate path runs with [`Emission::Module`]:
 //!
 //! 1. the module file (under `src/`, not `lib.rs`/`main.rs`) is exactly
 //!    `include!(concat!(env!("OUT_DIR"), "/<out>.rs"));` plus comments,
@@ -23,13 +23,13 @@
 //!    comments): the generated code is included by exactly one module file;
 //! 3. the DSL root is not under `src/` (rustc must never compile the DSL
 //!    sources as host code);
-//! 4. the crate path runs unchanged — proofs, law audit, **every §15 gate**
+//! 4. the DSL root lifts exactly one exec module (a crate written in
+//!    sandblaster's own dialect has no code to emit), and the module file's
+//!    `//!` lines are the source's;
+//! 5. the crate path runs unchanged — proofs, law audit, **every §15 gate**
 //!    (the boundary is the root's `pub use` list: monomorphic, no `Irr`
-//!    binders), optimizer, printer, round trip, emission-chain check — and
-//!    then relocates the file ([`crate::relocate`]): position-independent
-//!    paths, internals visible only inside the file, the relocation checked
-//!    token for token. Any failure emits no code and fails the host build;
-//!    there is no option.
+//!    binders), the theorem gate, the lift conformance check. Any failure
+//!    emits no code and fails the host build; there is no option.
 //!
 //! On success it writes `OUT_DIR/<out>.rs`, `OUT_DIR/<out>-report.json` and
 //! `OUT_DIR/<out>-timing.json`.
@@ -46,10 +46,9 @@
 //! the build-script binary), the target, the root, the module file, the
 //! host edition (the lift conformance check compiles with it) and the
 //! content of every file the front end read (sources, data files, the
-//! lock, the profile) — and `OUT_DIR/<out>.rs` still has the SHA-256
-//! recorded with the key. Checks 1–3 and the front
-//! end run on every build; the proofs, gates, optimizer, round trip and
-//! relocation are skipped only for a byte-identical input set. The key file
+//! lock) — and `OUT_DIR/<out>.rs` still has the SHA-256 recorded with the
+//! key. Checks 1–4 and the front end run on every build; the proofs and
+//! gates are skipped only for a byte-identical input set. The key file
 //! lives in `OUT_DIR`, which only the build script writes (the same trust
 //! as the generated file itself). Without a context (`None`) nothing is
 //! reused.
@@ -60,9 +59,8 @@
 //! cache shared by every target directory and build; a hit writes the
 //! cached file, report and timing (integrity-checked: a tampered entry is
 //! rejected and the module re-verified). A new verdict is stored there. On
-//! a miss the crate path also reuses the per-mutant verdicts of the
-//! spec-mutation gate whose inputs did not change (`crate::mutate`, *Gate
-//! mode*): a one-function edit re-runs only the mutants it can affect.
+//! a miss the crate path also reuses the theorem gate's verdicts and the
+//! conformance pass whose inputs did not change.
 
 use std::path::{Path, PathBuf};
 
@@ -88,8 +86,7 @@ pub fn module_file_ok(text: &str, out: &str) -> bool {
 /// The output name of the module file `module_file` (relative to the
 /// manifest directory): its stem, or its directory's name for `mod.rs`.
 /// It must be under `src/`, end in `.rs`, not be the crate root, and the
-/// name must be a lowercase identifier other than `sandblaster` (crate mode's
-/// file).
+/// name must be a lowercase identifier other than `sandblaster` (reserved).
 pub fn module_out_name(module_file: &str) -> Result<String, String> {
     let p = Path::new(module_file);
     let comps: Vec<String> = p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
@@ -100,7 +97,7 @@ pub fn module_out_name(module_file: &str) -> Result<String, String> {
         return Err(format!("the module file `{module_file}` must be a `.rs` file"));
     }
     if comps.len() == 2 && (comps[1] == "lib.rs" || comps[1] == "main.rs") {
-        return Err(format!("the module file `{module_file}` is the crate root: a whole verified crate uses `sandblaster::build::compile` (crate mode)"));
+        return Err(format!("the module file `{module_file}` is the crate root: a verified module is a module of the host crate"));
     }
     let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let name = if stem == "mod" {
@@ -116,15 +113,15 @@ pub fn module_out_name(module_file: &str) -> Result<String, String> {
         return Err(format!("the module file `{module_file}` gives the output name `{name}`, which is not a lowercase identifier"));
     }
     if name == "sandblaster" {
-        return Err(format!("the module file `{module_file}` gives the output name `sandblaster`, which is crate mode's `OUT_DIR/sandblaster.rs`"));
+        return Err(format!("the module file `{module_file}` gives the output name `sandblaster`, which is reserved"));
     }
     Ok(name)
 }
 
 /// The verdict key (module docs) of a build of `root` (`what` names the
-/// emission: `module <file>\nout <name>` in module mode, `crate` in crate
-/// mode).
-pub(crate) fn verdict_key(context: &str, env: &dyn Fn(&str) -> Option<String>, fs: &dyn FileProvider, root: &Path, what: &str, c: &super::Checked) -> String {
+/// emission: `module <file>\nout <name>` in module mode, the record and
+/// the host inputs in place).
+pub(crate) fn verdict_key(context: &str, env: &dyn Fn(&str) -> Option<String>, root: &Path, what: &str, c: &super::Checked) -> String {
     let mut t = String::from("sandblaster-module-verdict/2\n");
     t.push_str(&format!("context {}\n", hex(&sha256(context.as_bytes()))));
     for k in ["CARGO_CFG_TARGET_ARCH", "CARGO_CFG_TARGET_FEATURE", "CARGO_CFG_TARGET_ENDIAN", "CARGO_CFG_TARGET_POINTER_WIDTH"] {
@@ -134,11 +131,7 @@ pub(crate) fn verdict_key(context: &str, env: &dyn Fn(&str) -> Option<String>, f
     for (_, f) in c.sm.files() {
         t.push_str(&format!("file {} {}\n", f.path.display(), hex(&sha256(f.text.as_bytes()))));
     }
-    let digest = |p: &Path| fs.read(p).map(|s| hex(&sha256(s.as_bytes()))).unwrap_or_else(|_| "absent".into());
     t.push_str(&format!("lock {} {}\n", c.lock_path.display(), c.spec_lock.as_deref().map(|s| hex(&sha256(s.as_bytes()))).unwrap_or_else(|| "absent".into())));
-    if let Some(p) = &c.profile {
-        t.push_str(&format!("profile {} {}\n", p.path.display(), digest(&p.path)));
-    }
     hex(&sha256(t.as_bytes()))
 }
 
@@ -196,8 +189,8 @@ pub(super) fn key_text(key: &str, code_sha: &str) -> String {
 }
 
 /// The build logic of `sandblaster::build::compile_module` (module docs):
-/// verifies the DSL crate rooted at `root` and relocates its verdict for the
-/// host's module file `module_file` (both relative to `CARGO_MANIFEST_DIR`).
+/// verifies the DSL crate rooted at `root` and emits its lifted module for
+/// the host's module file `module_file` (both relative to `CARGO_MANIFEST_DIR`).
 /// `context` identifies the verifier for verdict reuse (`None`: never
 /// reuse).
 pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &dyn Fn(&str) -> Option<String>, fs: &dyn FileProvider) -> BuildOutcome {
@@ -271,7 +264,7 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
     if !rendered.is_empty() {
         o.stderr.push_str(&rendered);
     }
-    // 1b. a lifted module (`driver::lifted`): the module file's `//!` lines
+    // 4. the lifted module (`driver::lifted`): the module file's `//!` lines
     // are the source's leading `//!` lines, so module file + emitted body
     // is the source file
     match super::lifted::emitted_module(&checked.lifted) {
@@ -282,23 +275,15 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
                 return fail(o, format!("`{}` must carry exactly the leading `//!` lines of the lifted source `{}` (its module docs; an `include!`d file cannot hold them) before the include line: module file + emitted code is the source as-is (DESIGN.md §2.1)", mfile.display(), checked.sm.path(info.file).display()));
             }
         }
-        Ok(None) => {}
+        Ok(None) => return fail(o, format!("`{root}` lifts no Rust module (`#[lift] mod m;`): module mode emits a lifted module's source as-is, and a crate written in sandblaster's own dialect has no code to emit (check it with `sandblaster check`)")),
     }
-    if let Some(p) = &checked.profile {
-        super::watch_existing(&mut o, fs, [p.path.as_path()]);
-        if let Err(e) = &p.parsed {
-            o.cargo.push(format!("cargo::warning=sandblaster: profile `{}` ignored: {}", p.path.display(), e.replace('\n', " ")));
-        }
-    }
-    o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_STRICT_OPT".into());
-    o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_EVAL_EXCLUDE_USER_REWRITES".into());
     o.cargo.push("cargo::rerun-if-env-changed=SANDBLASTER_MEM_LIMIT_GB".into());
     o.cargo.push("cargo::rerun-if-env-changed=RUSTC".into());
     let code_path = out_dir.join(format!("{out}.rs"));
     let key_path = out_dir.join(format!("{out}-verdict.key"));
     let root_display = root_path.display().to_string();
     let conform = crate::conform::Config::for_build(env, fs, &manifest, &out_dir, &out, context);
-    let key = context.map(|ctx| verdict_key(ctx, env, fs, &root_path, &format!("module {module_file}\nout {out}\nedition {}", conform.edition), &checked));
+    let key = context.map(|ctx| verdict_key(ctx, env, &root_path, &format!("module {module_file}\nout {out}\nedition {}", conform.edition), &checked));
     // verdict reuse: the same inputs, and the emitted file unchanged
     if let Some(k) = &key
         && let (Ok(kt), Ok(code)) = (fs.read(&key_path), fs.read(&code_path))
@@ -322,20 +307,8 @@ pub fn build_module(root: &str, module_file: &str, context: Option<&str>, env: &
         }
     }
     let b = build_crate_emitting(&checked, LockUse::Enforce, &root_display, &Emission::Module { module_file: module_file.to_string(), out: format!("{out}.rs"), conform });
-    for w in b.optimizer_warnings() {
-        o.cargo.push(format!("cargo::warning=sandblaster optimizer: {}", w.replace('\n', " ")));
-    }
-    for w in b.api_differences() {
-        o.cargo.push(format!("cargo::warning=sandblaster: public API difference: {}", w.replace('\n', " ")));
-    }
     o.outputs.push((out_dir.join(format!("{out}-report.json")), b.report.clone()));
     o.outputs.push((out_dir.join(format!("{out}-timing.json")), b.timing.clone()));
-    // the lifted round trip's copy of a module read from MIR: the text whose
-    // MIR the round trip reads (`<stem>.roundtrip__<module>.sbmir`, extracted
-    // from this file; docs/mir-lift.md §20.1), as an in-place build writes it
-    if let Some((flat, text)) = b.lowered.as_ref().and_then(|l| l.roundtrip_copy.as_ref()) {
-        o.outputs.push((out_dir.join(format!("{out}-roundtrip__{flat}.rs")), text.clone()));
-    }
     let Some(verdict) = &b.verdict else {
         o.stderr.push_str(&b.render_failure(&checked, &root_display));
         // a failed build leaves no reusable verdict behind

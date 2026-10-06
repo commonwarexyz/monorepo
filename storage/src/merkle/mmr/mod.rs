@@ -68,21 +68,7 @@
 //! ```
 
 pub mod batch;
-// rustc compiles the lowered copy of `iterator.rs` that `build.rs` writes (sandblaster
-// DESIGN.md §2.1); while the optimizer finds nothing cheaper, as today, it is `iterator.rs`.
-// Edit `iterator.rs`; rust-analyzer reads it through the first declaration.
-#[cfg(rust_analyzer)]
 pub mod iterator;
-#[cfg(not(rust_analyzer))]
-pub mod iterator {
-    //! Iterators for traversing MMRs of a given size, and functions for computing various MMR
-    //! properties from their output. These are lower levels methods that are useful for implementing
-    //! new MMR variants or extensions.
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/mmr-lowered__merkle__mmr__iterator.rs"
-    ));
-}
 pub mod mem;
 pub mod proof;
 cfg_if::cfg_if! {

@@ -67,9 +67,9 @@
 //! set is closed under dependencies, so filtering changes no kept item's
 //! hash. Proof internals are still checked by the other gates (spec
 //! closure, examples and coverage): they are left out of the lock, not out
-//! of the build. Spec mutation mutates the review surface only
-//! (`crate::mutate::review_scope`; DESIGN.md §15.9): no locked statement
-//! depends on a proof internal's definition. The rule is deterministic: it reads only the
+//! of the build. The spec-mutation tool (`sandblaster mutate`) mutates the
+//! review surface only (`crate::mutate::review_scope`; DESIGN.md §15.9): no
+//! locked statement depends on a proof internal's definition. The rule is deterministic: it reads only the
 //! computed items, the boundary and the HIR's `#[refines]`/`#[assumption]`.
 //! (Behavior snapshots and the unconstrained-behavior report, when they
 //! exist, are roots too.)
@@ -306,10 +306,10 @@ pub const TCB: &[&str] = &[
     "1 sandblaster-kernel: checker, evaluator, conversion, termination, linear-arithmetic certificates, bvnorm, the fixed axiom list, bignum Int, the section abstraction and the closed evaluator",
     "2 the elaboration semantics of the canonical dialect (SEMANTICS.md)",
     "3 the prelude definitions (sandblaster/kernel/prelude/*.core)",
-    "4 the target semantics library (intrinsic models, load/store helpers) and the dispatch glue",
+    "4 the target semantics library: the intrinsic models (sandblaster/targets/core/*.core), validated natively against the hardware",
     "5 rustc/LLVM",
     "6 the elaboration of the ghost language (SEMANTICS.md §13): the kernel statement of a spec item, law, contract or invariant means what its source says; and Env::abstract_section",
-    "7 assumptions: num-bigint/num-integer; the rustc that compiled the kernel; syn agreeing with rustc on the canonical dialect; the §3.7 stack assumption; runtime feature detection; a process free of undefined behaviour",
+    "7 assumptions: num-bigint/num-integer; the rustc that compiled the kernel; syn agreeing with rustc on the canonical dialect; the §3.7 stack assumption; host code calls a `#[target_feature]` function only on a CPU with those features; a process free of undefined behaviour",
 ];
 
 /// What the toolchain contributes to the lock: the header hashes and the
@@ -534,8 +534,8 @@ pub struct Surface {
     /// The keys of the computed items that are **not** on the review
     /// surface (proof internals: helper spec functions and their examples,
     /// invariants of types no statement mentions, …; module docs, *What is
-    /// locked*), sorted. Never locked and never mutated; the other gates
-    /// check them all the same.
+    /// locked*), sorted. Never locked, and never mutated by the mutation
+    /// tool; the gates check them all the same.
     pub internal: Vec<String>,
 }
 
@@ -1448,21 +1448,13 @@ impl<'a> Builder<'a> {
     }
 }
 
-/// The models of the target-intrinsic calls in `f`'s body (`helper` calls
-/// by the intrinsic their fixed template calls).
+/// The models of the target-intrinsic calls in `f`'s body.
 fn models_of(f: &FnDef) -> Vec<String> {
     struct V(Vec<String>);
     impl crate::visit::Visitor for V {
         fn expr(&mut self, e: &Expr) {
-            match &e.kind {
-                ExprKind::Call { callee: Callee::Intrinsic(i, _), .. } => self.0.push(crate::intrinsics::get(*i).name.to_string()),
-                ExprKind::Call { callee: Callee::Helper(h), .. } => {
-                    let info = crate::intrinsics::helper(*h);
-                    let arch = info.arch.name();
-                    let via = info.template.split(&format!("::core::arch::{arch}::")).nth(1).map(|r| r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>());
-                    self.0.push(via.unwrap_or_else(|| info.name.to_string()));
-                }
-                _ => {}
+            if let ExprKind::Call { callee: Callee::Intrinsic(i, _), .. } = &e.kind {
+                self.0.push(crate::intrinsics::get(*i).name.to_string());
             }
             crate::visit::walk_expr(self, e);
         }

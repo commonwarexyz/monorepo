@@ -123,27 +123,16 @@ pub struct Prover<'a> {
     pub budget_secs: f64,
     pub max_steps: usize,
     callees: Vec<Callee>,
-    /// A callee lemma proven now replaces an earlier one of the same
-    /// structured definition (the round trip: a helper's own MIR).
-    replace_callees: bool,
-    /// The structured side is the call of the definition, not its body (a
-    /// copy whose body delegates to it: the round trip checked exactly that).
-    delegate: bool,
     helpers: Vec<Helper>,
     /// The `while` loops' helpers with their lemmas.
     whiles: Vec<WhileHelper>,
     /// Every declaration added since the last take (a verdict-cache entry).
     pub added: Vec<DefDecl>,
-    /// The panic statement (DESIGN.md §8.2 item 12, `stmt::statement_panic`):
-    /// every theorem proven is about a panic-explicit reading (result
-    /// `Option(R)`, `None` the panic outcome), named `L::pthm::<id>` (its
-    /// lemma `L::plem::<id>`), a composed one `L::pshipped::<id>`.
-    pub panic: bool,
 }
 
 impl<'a> Prover<'a> {
     pub fn new(env: &'a mut Env, m: &'a Sbmir, names: &'a ModuleNames, lit: &'a Literal, pre_commit: &'a std::collections::HashMap<GlobalId, crate::elab::PreCommit>, contracts: &'a [MirContract]) -> Self {
-        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), replace_callees: false, delegate: false, helpers: Vec::new(), whiles: Vec::new(), added: Vec::new(), panic: false }
+        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), helpers: Vec::new(), whiles: Vec::new(), added: Vec::new() }
     }
 
     /// Adds `d` to the environment (the kernel checks it) and to the log.
@@ -207,7 +196,6 @@ impl<'a> Prover<'a> {
             steps: 0,
             whiles: self.whiles.clone(),
             exit: None,
-            panic: None,
         }
     }
 
@@ -256,13 +244,12 @@ impl<'a> Prover<'a> {
         let k = KNames { names: self.names, env: self.env };
         let mut g = Gen::resume(self.m, &k, self.lit.state.clone());
         let f = self.m.fns.get(key).ok_or("no MIR")?;
-        if self.panic { stmt::statement_panic(self.env, &mut g, lf, f, s_global) } else { stmt::statement(self.env, &mut g, lf, f, s_global) }
+        stmt::statement(self.env, &mut g, lf, f, s_global)
     }
 
-    /// The names of a theorem and its lemma (`L::thm::`, `L::lem::`; for the
-    /// panic statement `L::pthm::`, `L::plem::`).
+    /// The names of a theorem and its lemma (`L::thm::`, `L::lem::`).
     fn names_of(&self, id: &str) -> (String, String) {
-        if self.panic { (format!("L::pthm::{id}"), format!("L::plem::{id}")) } else { (format!("L::thm::{id}"), format!("L::lem::{id}")) }
+        (format!("L::thm::{id}"), format!("L::lem::{id}"))
     }
 
     /// The theorem of a lifted function, from its (untrusted) function
@@ -302,19 +289,7 @@ impl<'a> Prover<'a> {
         let mut rn: Vec<&str> = st.params.iter().filter(|p| p.1 == Rel::Rel).map(|p| p.0.as_str()).collect();
         rn.push("n");
         let l_rel = self.env.parse_term(&rn, &st.l_of()).map_err(|e| format!("l_of: {e}"))?;
-        // (the panic statement: S's result `Option(R)`; no state passing)
-        let panic_r = if self.panic && !model {
-            if !lf.cells.is_empty() {
-                return Err(format!("`{s_global}`: a panic-explicit reading with `&mut` parameters (not read yet)"));
-            }
-            match &*r_ty0 {
-                Term::Ind { params, .. } if params.len() == 1 => Some(params[0].clone()),
-                _ => return Err(format!("`{s_global}` does not return an `Option`")),
-            }
-        } else {
-            None
-        };
-        let pres = if panic_r.is_some() { None } else { self.pres_of(&lf, &tele, &r_ty0)? };
+        let pres = self.pres_of(&lf, &tele, &r_ty0)?;
         let rel_idx: Vec<u32> = (0..arity).filter(|i| tele[*i as usize].1 == Rel::Rel).collect();
         // a measure-recursive S: its pre-commit body (self-calls `Rec` with
         // their decrease proofs) and measure
@@ -347,24 +322,9 @@ impl<'a> Prover<'a> {
             let Term::Lam { body, .. } = &*inner else { return Err("body".into()) };
             inner = body.clone();
         }
-        if self.delegate {
-            if pc.is_some() {
-                return Err(format!("a delegation to the recursive `{s_global}`"));
-            }
-            inner = mk::apps(mk::global(sg), (0..arity).map(|i| (tele[i as usize].1, mk::var(arity - 1 - i))).collect::<Vec<_>>());
-            // (the panic statement: the replacement's `Option` result matched
-            // on, `None` and `Some(y)` alike, so the walk splits on its
-            // outcome as on any callee's result; the literal side holds it in
-            // the callee lemma's `opt_erase`)
-            if let Some(r) = &panic_r {
-                inner = option_idiom(self.env, r, &inner)?;
-            }
-        }
         // (the lift prelude's exec helpers, `i16_neg` and the like, unfolded
-        // in place: their tests are then S's own splits; for the panic
-        // statement the prelude's checked arithmetic too, whose test is the
-        // MIR's overflow or zero test)
-        inner = inline_prelude(self.env, &inner, 4, panic_r.is_some());
+        // in place: their tests are then S's own splits)
+        inner = inline_prelude(self.env, &inner, 4);
         // (S's body shared once: the walk shifts and commits it at every step)
         if std::env::var("CS_NO_HASHCONS").is_err() {
             inner = super::simproof::hashcons(&inner);
@@ -374,7 +334,6 @@ impl<'a> Prover<'a> {
         let mut w = self.walker(out_tm.clone(), erase_tm.clone(), (0..arity).collect(), arity, None, s_self, opaque);
         w.fname = s_global.to_string();
         w.pres = pres.clone();
-        w.panic = panic_r.clone();
         w.rec_fn = rec_fn.clone();
         w.prem_in_ctx = rec_fn.is_some();
         let params_at = |depth: u32| -> Vec<Tm> { (0..arity).map(|l| mk::var(depth - 1 - l)).collect() };
@@ -427,12 +386,7 @@ impl<'a> Prover<'a> {
             let s_app_n = mk::apps(mk::global(sg), args_x(1));
             let r_ty_n = shift(&r_ty0, 1);
             let delta = Rc::new(Term::Delta { def: sg, args: args_x(1).iter().map(|a| a.1.clone()).collect() });
-            let sym = match (&panic_r, self.delegate) {
-                // the option idiom on the call is the call (by cases)
-                (Some(r), true) => option_idiom_eq(self.env, &shift(r, 1), &s_app_n)?,
-                (None, true) => mk::refl(r_ty_n.clone(), s_app_n.clone()),
-                _ => mk::apps(mk::global(self.env.lookup_global("eq::sym").ok_or("eq::sym")?), vec![(Rel::Rel, r_ty_n.clone()), (Rel::Rel, s_app_n.clone()), (Rel::Rel, inner_n.clone()), (Rel::Rel, delta)]),
-            };
+            let sym = mk::apps(mk::global(self.env.lookup_global("eq::sym").ok_or("eq::sym")?), vec![(Rel::Rel, r_ty_n.clone()), (Rel::Rel, s_app_n.clone()), (Rel::Rel, inner_n.clone()), (Rel::Rel, delta)]);
             let ctx_y = w.push(&nctx, "y", Rel::Rel, &r_ty_n, None)?;
             let motive = w.goal_p(&ctx_y, &Goal { l: shift(&l_tm, 1), s: mk::var(0), ins: ins_at(arity + 2), rhs: None, acc: None });
             let prem_y = le_int(self.env, shift(&need_tm, 2), len_at(self.env, 1));
@@ -472,7 +426,7 @@ impl<'a> Prover<'a> {
         let lem_g = self.add(decl, 40_000_000_000).map_err(|e| format!("the kernel rejected the lemma of `{s_global}`: {}", trunc(&e.to_string(), 3000)))?;
         if model {
             let check_secs = t4.elapsed().as_secs_f64();
-            self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres, panic: None });
+            self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres });
             return Ok(Proven { s_global: s_global.into(), kind: "model lemma", walk_secs, check_secs, nodes, stats });
         }
         // the trusted theorem from the lemma: pair(need, λ n .hle. lem x̄ n .hle)
@@ -498,89 +452,8 @@ impl<'a> Prover<'a> {
         self.add(decl, 4_000_000_000).map_err(|e| format!("the kernel rejected the theorem of `{s_global}`: {}", trunc(&e.to_string(), 2000)))?;
         let check_secs = t4.elapsed().as_secs_f64();
         // callers use the lemma: at any fuel, or at its need
-        if self.replace_callees {
-            self.callees.retain(|c| c.s_global != sg);
-        }
-        self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres, panic: panic_r });
+        self.callees.push(Callee { s_global: sg, lemma: lem_g, rels, l_of: l_rel, out_ty: out_tm, erase: erase_tm, need: (!fuel_free).then(|| need_tm.clone()), pres });
         Ok(Proven { s_global: s_global.into(), kind: "theorem", walk_secs, check_secs, nodes, stats })
-    }
-
-    /// The shipped code's theorem of a function the optimizer replaced
-    /// (step 8, the lifted round trip): from `L::thm::<id>` of the copy's
-    /// MIR instance `key` against the replacement `target`, the theorem
-    /// against the source function `source` — the trusted statement of
-    /// [`stmt::statement`] of `source` — by a
-    /// transport along the optimizer's kernel-checked link `equiv : Π x̄
-    /// h̄. Eq(R, source x̄ h̄, target x̄ h̄)` (`None`: the same definition).
-    /// Named `L::shipped::<id>`.
-    pub fn compose(&mut self, key: &str, source: &str, target: &str, equiv: Option<&str>) -> Result<Proven, String> {
-        let t0 = Instant::now();
-        let lf = self.lit.lfn(key).cloned().ok_or_else(|| format!("no literal reading of `{key}`"))?;
-        let st_f = self.statement(&lf, key, source)?;
-        let st_g = self.statement(&lf, key, target)?;
-        if st_f.params.iter().map(|p| p.1).collect::<Vec<_>>() != st_g.params.iter().map(|p| p.1).collect::<Vec<_>>() {
-            return Err(format!("`{source}` and `{target}` do not have the same parameters"));
-        }
-        let thm_g = self.env.lookup_global(&self.names_of(&lf.id).0).ok_or("the copy's theorem against the replacement is missing")?;
-        let names: Vec<&str> = st_f.params.iter().map(|p| p.0.as_str()).collect();
-        let parse = |env: &Env, ns: &[&str], t: &str, what: &str| env.parse_term(ns, t).map_err(|e| format!("{what}: {e}"));
-        let thm_ty = parse(self.env, &[], &st_f.theorem_ty(), "theorem type")?;
-        let r_ty = parse(self.env, &names, &st_f.s_full_ret(), "result type")?;
-        let f_app = parse(self.env, &names, &st_f.app(), "source call")?;
-        let g_app = parse(self.env, &names, &st_g.app(), "replacement call")?;
-        let mut ny = names.clone();
-        ny.push("yy");
-        let motive_txt = format!("Sigma (k : Int), ((n : List(Unit)) -> (.hle : Eq(Bool, #le_int(k, seq::len Unit n), true)) -> Eq(Option({out}), {}, {}))", st_f.l_of(), st_f.rhs_of("yy"), out = st_f.l_out);
-        let motive = parse(self.env, &ny, &motive_txt, "motive")?;
-        let arity = st_f.params.len() as u32;
-        let var_of = |i: usize| mk::var(arity - 1 - i as u32);
-        let eq = match equiv {
-            None => mk::refl(r_ty.clone(), g_app.clone()),
-            Some(e) => {
-                let eg = self.env.lookup_global(e).ok_or_else(|| format!("no link `{e}`"))?;
-                let erels = self.env.global_param_rels(eg).ok_or("the link's telescope")?;
-                // (the link binds the parameters, and the preconditions or not)
-                if erels.len() > st_f.params.len() {
-                    return Err(format!("the link `{e}` has {} parameters, the source function {}", erels.len(), st_f.params.len()));
-                }
-                // its direction: `Eq(R, f.., g..)` (a rewrite's) or `Eq(R, g.., f..)` (a residual's)
-                let mut lty = self.env.global_type(eg).ok_or("the link's type")?;
-                while let Term::Pi { cod, .. } = &*lty.clone() {
-                    lty = cod.clone();
-                }
-                let sg = self.env.lookup_global(source).ok_or("no source global")?;
-                let forward = match &*lty {
-                    Term::Eq { lhs, .. } => super::simproof::app_spine(lhs).is_some_and(|(h, _)| h == sg),
-                    _ => return Err(format!("the link `{e}` is no equation")),
-                };
-                let mut args = Vec::new();
-                for (i, (p, er)) in st_f.params.iter().zip(&erels).enumerate().take(erels.len()) {
-                    // (a precondition the link binds as relevant: promoted)
-                    let a = if p.1 == Rel::Irr && *er == Rel::Rel {
-                        let pty = parse(self.env, &names[..i], &p.2, "precondition")?;
-                        let Term::Eq { ty, lhs, rhs } = &*pty else { return Err(format!("the precondition `{}` is no equation", p.2)) };
-                        let sh = |t: &Tm| shift(t, (arity - i as u32) as i64);
-                        mk::apps(mk::global(self.env.lookup_global("eq::promote").ok_or("eq::promote")?), vec![(Rel::Rel, sh(ty)), (Rel::Rel, sh(lhs)), (Rel::Rel, sh(rhs)), (Rel::Irr, var_of(i))])
-                    } else {
-                        var_of(i)
-                    };
-                    args.push((*er, a));
-                }
-                let link = mk::apps(mk::global(eg), args);
-                if forward { mk::apps(mk::global(self.env.lookup_global("eq::sym").ok_or("eq::sym")?), vec![(Rel::Rel, r_ty.clone()), (Rel::Rel, f_app.clone()), (Rel::Rel, g_app.clone()), (Rel::Rel, link)]) } else { link }
-            }
-        };
-        let val = mk::apps(mk::global(thm_g), (0..st_f.params.len()).map(|i| (st_f.params[i].1, var_of(i))).collect::<Vec<_>>());
-        let mut proof: Tm = Rc::new(Term::Transport { ty: r_ty, lhs: g_app, rhs: f_app, eq, motive, val });
-        let tele: Vec<(String, Rel, Tm)> = st_f.params.iter().enumerate().map(|(i, p)| Ok((p.0.clone(), p.1, parse(self.env, &names[..i], &p.2, "parameter")?))).collect::<Result<_, String>>()?;
-        for (nm, r, d) in tele.iter().rev() {
-            proof = mk::lam(nm, *r, d.clone(), proof);
-        }
-        let nodes = crate::elab::tm::size(&proof);
-        let shipped = if self.panic { format!("L::pshipped::{}", lf.id) } else { format!("L::shipped::{}", lf.id) };
-        let decl = DefDecl { name: Rc::from(shipped.as_str()), kind: DefKind::Lemma, ty: thm_ty, body: proof, recursion: Recursion::None, arity, opaque: false };
-        self.add(decl, 4_000_000_000).map_err(|e| format!("the kernel rejected the shipped code's theorem of `{source}`: {}", trunc(&e.to_string(), 2000)))?;
-        Ok(Proven { s_global: source.into(), kind: "shipped theorem", walk_secs: 0.0, check_secs: t0.elapsed().as_secs_f64(), nodes, stats: format!("from `{}` along {}", self.names_of(&lf.id).0, equiv.unwrap_or("the same definition")) })
     }
 
     fn prove_helper(&mut self, key: &str, s_global: &str, header: usize, slotmap: &[(String, String)]) -> Result<Proven, String> {
@@ -894,7 +767,7 @@ impl Prover<'_> {
         // jumps to an outer loop's header, and the continuation's reserve)
         let fuel = if nested_loops(&f, &lf.headers) {
             let e = if lf.headers.contains(&x_blk) { 1 } else { 0 };
-            Some(self.fuel_fn(&lf, header, sg, &inline_prelude(self.env, &inner0, 4, false), e)?)
+            Some(self.fuel_fn(&lf, header, sg, &inline_prelude(self.env, &inner0, 4), e)?)
         } else {
             None
         };
@@ -1028,7 +901,7 @@ impl Prover<'_> {
         if fuel.is_some() {
             facts.push(Fact::eq(mk::var(e3 - 1 - (e0 + 4)), le_int(self.env, mk::lit(Width::Int, 0), mk::var(e3 - 1 - (e0 + 1)))));
         }
-        let inner = super::simproof::hashcons(&inline_prelude(self.env, &shift(&inner0, (e3 - arity) as i64), 4, false));
+        let inner = super::simproof::hashcons(&inline_prelude(self.env, &shift(&inner0, (e3 - arity) as i64), 4));
         let walked = wk.walk(&ctx, &Goal { l: l_tm.clone(), s: inner.clone(), ins: vec![], rhs: None, acc: None }, &facts).map_err(|e| format!("walk of `{h_global}` (the `while` loop's lemma): {e}"))?;
         let stats = format!("{:?}", wk.stats);
         // (with a fuel function: the premise `F(p̄) + R ≤ len n` moved to the
@@ -1268,16 +1141,10 @@ fn loop_assigned(f: &super::ir::Fn, header: usize, lf: &LFn) -> std::collections
 /// replaced by its body (definitionally equal: a delta step and beta), so
 /// that the walker splits on the tests inside it like on S's own; `let j =
 /// v; j` is `v` (zeta). `depth` bounds nested unfolding.
-fn inline_prelude(env: &Env, t: &Tm, depth: u32, checked: bool) -> Tm {
+fn inline_prelude(env: &Env, t: &Tm, depth: u32) -> Tm {
     if depth == 0 {
         return t.clone();
     }
-    // (a match on a checked call, the elaboration of `c?`: the call bound by
-    // a `let` first, so its test, once inlined, is a `let`'s value the walk
-    // splits on, not a test inside another match's scrutinee)
-    let t = &if checked { hoist_checked_scrutinees(env, t) } else { t.clone() };
-    // (the prelude's checked arithmetic, `u32::checked_add` and the like)
-    let is_checked = |n: &str| checked && n.split_once("::").is_some_and(|(w, op)| matches!(w, "u8" | "u16" | "u32" | "u64" | "usize") && crate::opt::drive::CHECKED_OPS.contains(&op));
     let mut changed = false;
     let r = crate::auto::util::map_term(t, 0, &mut |x, _| {
         let mut args: Vec<Tm> = Vec::new();
@@ -1288,8 +1155,7 @@ fn inline_prelude(env: &Env, t: &Tm, depth: u32, checked: bool) -> Tm {
         }
         let Term::Global(g) = &*cur else { return None };
         let lift = env.global_name(*g).is_some_and(|n| n.starts_with("crate::__lift::"));
-        let chk = env.global_name(*g).is_some_and(|n| is_checked(&n));
-        if args.is_empty() || !(lift || chk) || env.global_opaque(*g) != Some(false) || (lift && env.global_kind(*g) != Some(DefKind::Exec)) || env.global_arity(*g) != Some(args.len() as u32) {
+        if args.is_empty() || !lift || env.global_opaque(*g) != Some(false) || env.global_kind(*g) != Some(DefKind::Exec) || env.global_arity(*g) != Some(args.len() as u32) {
             return None;
         }
         let body = env.global_body(*g)?;
@@ -1339,105 +1205,7 @@ fn inline_prelude(env: &Env, t: &Tm, depth: u32, checked: bool) -> Tm {
         changed = true;
         Some(b)
     });
-    if changed { inline_prelude(env, &r, depth - 1, checked) } else { r }
-}
-
-/// `(match s as z return Π(.e : Eq(Option(R), s, z)). Option(R) with
-/// | None => λ.e. None[R] | Some(y) => λ.e. Some[R](y) end) .refl(Option(R), s)`:
-/// the value `s : Option(R)` as the elaborator's match idiom on it (equal to
-/// `s` by cases, [`option_idiom_eq`]).
-fn option_idiom(env: &Env, r: &Tm, s: &Tm) -> Result<Tm, String> {
-    let opt = env.lookup_ind("Option").ok_or("no `Option`")?;
-    let oty = |k: i64| mk::ind(opt, vec![shift(r, k)]);
-    let none = |k: i64| Rc::new(Term::Ctor { ind: opt, ctor: 0, params: vec![shift(r, k)], args: vec![] });
-    let some = |k: i64, v: Tm| Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![shift(r, k)], args: vec![v] });
-    // (under z) Π(.e : Eq(Option(R), s, z)). Option(R)
-    let motive = mk::pi("e", Rel::Irr, mk::eq(oty(1), shift(s, 1), mk::var(0)), oty(2));
-    let arms = vec![
-        sandblaster_kernel::term::Arm { names: vec![], body: mk::lam("e", Rel::Irr, mk::eq(oty(0), s.clone(), none(0)), none(1)) },
-        sandblaster_kernel::term::Arm { names: vec![Rc::from("y")], body: mk::lam("e", Rel::Irr, mk::eq(oty(1), shift(s, 1), some(1, mk::var(0))), some(2, mk::var(1))) },
-    ];
-    let m = Rc::new(Term::Match { ind: opt, params: vec![r.clone()], scrut: s.clone(), motive, arms });
-    Ok(Rc::new(Term::App { rel: Rel::Irr, fun: m, arg: mk::refl(oty(0), s.clone()) }))
-}
-
-/// A proof of `Eq(Option(R), option_idiom(R, s), s)`: by cases on `s`,
-/// each arm `refl` (the idiom reduces to the constructor).
-fn option_idiom_eq(env: &Env, r: &Tm, s: &Tm) -> Result<Tm, String> {
-    let opt = env.lookup_ind("Option").ok_or("no `Option`")?;
-    let oty = |k: i64| mk::ind(opt, vec![shift(r, k)]);
-    // (under z) Eq(Option(R), option_idiom(R, z), z)
-    let motive = mk::eq(oty(1), option_idiom(env, &shift(r, 1), &mk::var(0))?, mk::var(0));
-    let arms = vec![
-        sandblaster_kernel::term::Arm { names: vec![], body: mk::refl(oty(0), Rc::new(Term::Ctor { ind: opt, ctor: 0, params: vec![r.clone()], args: vec![] })) },
-        sandblaster_kernel::term::Arm { names: vec![Rc::from("y")], body: mk::refl(oty(1), Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![shift(r, 1)], args: vec![mk::var(0)] })) },
-    ];
-    Ok(Rc::new(Term::Match { ind: opt, params: vec![r.clone()], scrut: s.clone(), motive, arms }))
-}
-
-/// `t` with every dependent-match idiom on a call of the prelude's checked
-/// arithmetic, `(match g ā as z return Π(.e : Eq(D, g ā, z)). A with ..)
-/// .refl(D, g ā)` (the elaboration of `g(ā)?` in a panic-explicit reading),
-/// rewritten as `let c = g ā; (match c as z return Π(.e : Eq(D, c, z)). A
-/// with ..) .refl(D, c)`: definitionally equal (zeta), and once the call is
-/// inlined its test is the `let`'s value, where the walk splits on it like
-/// on any test of S (in a scrutinee, its abstraction would also have to
-/// reach the idiom's equation and `refl`, which mention the call). Repeated
-/// until no idiom is left on a call (the arms' own ones too).
-fn hoist_checked_scrutinees(env: &Env, t: &Tm) -> Tm {
-    let is_checked = |g: GlobalId| env.global_name(g).is_some_and(|n| n.split_once("::").is_some_and(|(w, op)| matches!(w, "u8" | "u16" | "u32" | "u64" | "usize") && crate::opt::drive::CHECKED_OPS.contains(&op)));
-    let call_head = |x: &Tm| -> Option<GlobalId> {
-        let mut h = x.clone();
-        let mut n = 0;
-        while let Term::App { fun, .. } = &*h.clone() {
-            h = fun.clone();
-            n += 1;
-        }
-        match &*h {
-            Term::Global(g) if n == 2 && is_checked(*g) => Some(*g),
-            _ => None,
-        }
-    };
-    let mut cur = t.clone();
-    for _ in 0..256 {
-        let mut changed = false;
-        cur = crate::auto::util::map_term(&cur, 0, &mut |x, _| {
-            let Term::App { rel: Rel::Irr, fun, arg } = &**x else { return None };
-            let Term::Match { ind, params, scrut, motive, arms } = &**fun else { return None };
-            call_head(scrut)?;
-            let Term::Pi { name: en, rel: er, dom, cod } = &**motive else { return None };
-            let Term::Eq { ty: d, rhs, .. } = &**dom else { return None };
-            let Term::Refl { ty: rd, .. } = &**arg else { return None };
-            changed = true;
-            let sh = |t: &Tm| shift(t, 1);
-            // under the `let` (c = Var 0); in the motive also under its binder z (c = Var 1)
-            let motive2 = Rc::new(Term::Pi { name: en.clone(), rel: *er, dom: Rc::new(Term::Eq { ty: sandblaster_kernel::util::shift_from(d, 1, 1), lhs: mk::var(1), rhs: sandblaster_kernel::util::shift_from(rhs, 1, 1) }), cod: sandblaster_kernel::util::shift_from(cod, 1, 2) });
-            // (each arm's path-equation binder names `c` too: under its
-            // fields, `c` is `Var(fields)`)
-            let arms2: Vec<sandblaster_kernel::term::Arm> = arms
-                .iter()
-                .map(|a| {
-                    let k = a.names.len() as u32;
-                    let b = sandblaster_kernel::util::shift_from(&a.body, 1, k);
-                    let b = match &*b {
-                        Term::Lam { name, rel, dom, body } => match &**dom {
-                            Term::Eq { ty, rhs, .. } => Rc::new(Term::Lam { name: name.clone(), rel: *rel, dom: Rc::new(Term::Eq { ty: ty.clone(), lhs: mk::var(k), rhs: rhs.clone() }), body: body.clone() }),
-                            _ => b.clone(),
-                        },
-                        _ => b.clone(),
-                    };
-                    sandblaster_kernel::term::Arm { names: a.names.clone(), body: b }
-                })
-                .collect();
-            let m2 = Rc::new(Term::Match { ind: *ind, params: params.iter().map(sh).collect(), scrut: mk::var(0), motive: motive2, arms: arms2 });
-            let body = Rc::new(Term::App { rel: Rel::Irr, fun: m2, arg: Rc::new(Term::Refl { ty: sh(rd), val: mk::var(0) }) });
-            Some(Rc::new(Term::Let { name: Rc::from("chk"), rel: Rel::Rel, ty: Rc::new(Term::Ind { ind: *ind, params: params.clone() }), val: scrut.clone(), body }))
-        });
-        if !changed {
-            break;
-        }
-    }
-    cur
+    if changed { inline_prelude(env, &r, depth - 1) } else { r }
 }
 
 fn trunc(s: &str, n: usize) -> String {
@@ -1728,12 +1496,6 @@ pub struct GateOptions<'a> {
     /// Prove only the planned entries whose global contains this text, and
     /// what their walks need (debugging; the others are reported as skipped).
     pub only: Option<String>,
-    /// MIR instances whose lemmas a later step needs (the lifted round
-    /// trip's copies call them): walked even when their theorem is cached.
-    pub keep_keys: Vec<String>,
-    /// Read and prove only these instances (the round trip's lemmas when no
-    /// gate ran before it; every other theorem is skipped, not proven).
-    pub restrict_keys: Option<Vec<String>>,
     /// Test hook: theorem cache keys leave out the MIR, so an entry stored
     /// for another MIR is served (a stale entry, which the kernel and the
     /// trusted check must refuse).
@@ -1742,7 +1504,7 @@ pub struct GateOptions<'a> {
 
 impl Default for GateOptions<'_> {
     fn default() -> Self {
-        GateOptions { budget_secs: 120.0, max_steps: 2_000_000, cache: None, trace: false, only: None, keep_keys: Vec::new(), restrict_keys: None, key_ignores_mir: false }
+        GateOptions { budget_secs: 120.0, max_steps: 2_000_000, cache: None, trace: false, only: None, key_ignores_mir: false }
     }
 }
 
@@ -1839,7 +1601,7 @@ fn cache_key(vc: &crate::driver::cache::VerdictCache, gen_id: &str, h: &mut Hash
 }
 
 /// The namespace of theorem entries in the verdict cache: each holds the
-/// declarations a proof added (`proof`, [`crate::opt::cache::encode_decls`]).
+/// declarations a proof added (`proof`, [`super::replay::encode_decls`]).
 pub const CACHE_NS: &str = "theorem";
 
 /// The stored declarations under `key`, if any.
@@ -1851,20 +1613,14 @@ fn cached_entry(cache: Option<&crate::driver::cache::VerdictCache>, key: Option<
 
 /// A cache entry of the declarations `decls`.
 fn cache_entry(env: &Env, key: &str, decls: &[DefDecl]) -> (String, Vec<(String, String)>) {
-    (key.to_string(), vec![("proof".to_string(), crate::surface::hex(&crate::opt::cache::encode_decls(env, decls)))])
+    (key.to_string(), vec![("proof".to_string(), crate::surface::hex(&super::replay::encode_decls(env, decls)))])
 }
 
 /// What the theorem gate read and proved in an environment: the trusted
-/// record of its literal readings ([`super::gate::Ledger`]) and, per MIR
-/// module (by its `.sbmir` name), the callee lemmas the lifted round trip's
-/// theorems continue from ([`prove_roundtrip`]).
+/// record of its literal readings ([`super::gate::Ledger`]).
 #[derive(Default)]
 pub struct GateMemory {
     pub ledger: Ledger,
-    pub callees: BTreeMap<String, Vec<Callee>>,
-    /// The lifted round trip's theorems of the shipped code, as notes
-    /// (`driver::lowered`).
-    pub shipped: Vec<String>,
 }
 
 /// [`prove_lifted`], then the trusted check ([`Ledger::verdicts`]) folded
@@ -1915,12 +1671,7 @@ pub fn prove_lifted(out: &mut crate::elab::Output, facts: &crate::lift::LiftFact
         if ours.is_empty() {
             continue;
         }
-        let keys: Vec<String> = ours.iter().map(|c| c.key.clone()).filter(|k| opts.restrict_keys.as_ref().is_none_or(|r| r.contains(k))).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-        // (restricted to nothing: nothing to read or prove here)
-        if keys.is_empty() {
-            out.mir_gate.callees.insert(m.module.clone(), Vec::new());
-            continue;
-        }
+        let keys: Vec<String> = ours.iter().map(|c| c.key.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
         let lit = match load_into(&mut out.mir_gate.ledger, &mut out.env, m, names, &keys, None) {
             Ok(l) => l,
             Err(e) => {
@@ -1944,13 +1695,12 @@ pub fn prove_lifted(out: &mut crate::elab::Output, facts: &crate::lift::LiftFact
             None => vec![None; plan.len()],
         };
         let stored: Vec<Option<Vec<u8>>> = keys_c.iter().map(|k| cached_entry(opts.cache, k.as_deref())).collect();
-        let (mut outcomes, mut callees, rejected) = prove_module(out, (m, names, &lit, facts), opts, &plan, &stored, &keys_c);
+        let (mut outcomes, rejected) = prove_module(out, (m, names, &lit, facts), opts, &plan, &stored, &keys_c);
         // (a stored entry the kernel did not accept: the module again, walked)
         if rejected {
             rep.rejected = outcomes.iter().filter_map(|o| o.result.as_ref().err().filter(|e| e.starts_with("its verdict-cache entry")).map(|e| (o.global.clone(), e.clone()))).collect();
-            (outcomes, callees, _) = prove_module(out, (m, names, &lit, facts), opts, &plan, &vec![None; plan.len()], &keys_c);
+            (outcomes, _) = prove_module(out, (m, names, &lit, facts), opts, &plan, &vec![None; plan.len()], &keys_c);
         }
-        out.mir_gate.callees.insert(m.module.clone(), callees);
         rep.missing.extend(errors.into_iter().map(|(g, _, why)| (g, why)));
         rep.missing.extend(outcomes.iter().filter(|o| o.is_fn).filter_map(|o| o.result.as_ref().err().map(|e| (o.global.clone(), e.clone()))));
         rep.outcomes = outcomes;
@@ -1960,22 +1710,20 @@ pub fn prove_lifted(out: &mut crate::elab::Output, facts: &crate::lift::LiftFact
     reports
 }
 
-/// One pass over a module's plan: an entry selected (by `opts.only` and
-/// `opts.restrict_keys`) is replayed from `stored` unless a walk needs its
-/// lemma (the walker's own record of it), else walked; the others are
-/// skipped. The outcomes, the callee lemmas, and whether a stored entry
-/// was not accepted.
-fn prove_module(out: &mut crate::elab::Output, (m, names, lit, facts): (&Sbmir, &ModuleNames, &Literal, &crate::lift::LiftFacts), opts: &GateOptions<'_>, plan: &[Planned], stored: &[Option<Vec<u8>>], keys_c: &[Option<String>]) -> (Vec<Outcome>, Vec<Callee>, bool) {
+/// One pass over a module's plan: an entry selected (by `opts.only`) is
+/// replayed from `stored` unless a walk needs its lemma (the walker's own
+/// record of it), else walked; the others are skipped. The outcomes, and
+/// whether a stored entry was not accepted.
+fn prove_module(out: &mut crate::elab::Output, (m, names, lit, facts): (&Sbmir, &ModuleNames, &Literal, &crate::lift::LiftFacts), opts: &GateOptions<'_>, plan: &[Planned], stored: &[Option<Vec<u8>>], keys_c: &[Option<String>]) -> (Vec<Outcome>, bool) {
     let n = plan.len();
     let selected: Vec<bool> = plan
         .iter()
-        .map(|p| match (&opts.only, &opts.restrict_keys) {
-            (Some(o), _) => p.global.contains(o.as_str()),
-            (None, Some(r)) => r.contains(&p.key),
-            (None, None) => true,
+        .map(|p| match &opts.only {
+            Some(o) => p.global.contains(o.as_str()),
+            None => true,
         })
         .collect();
-    let mut walk: Vec<bool> = (0..n).map(|i| (selected[i] && stored[i].is_none()) || opts.keep_keys.contains(&plan[i].key)).collect();
+    let mut walk: Vec<bool> = (0..n).map(|i| selected[i] && stored[i].is_none()).collect();
     for i in (0..n).rev() {
         if walk[i] {
             for &j in &plan[i].needs {
@@ -1999,7 +1747,7 @@ fn prove_module(out: &mut crate::elab::Output, (m, names, lit, facts): (&Sbmir, 
         // the library function's literal run as it is)
         let result = match p.needs.iter().find(|&&j| failed[j] && !matches!(plan[j].entry, Entry::Model { .. })) {
             Some(&j) => Err(format!("not attempted: its walk needs the {} of `{}`, which was not proven", plan[j].kind(), plan[j].global)),
-            None if replay => match crate::opt::cache::replay_decls(pv.env, stored[i].as_deref().unwrap_or_default()) {
+            None if replay => match super::replay::replay_decls(pv.env, stored[i].as_deref().unwrap_or_default()) {
                 Ok(()) => Ok(Proven { s_global: p.global.clone(), kind: p.kind(), walk_secs: 0.0, check_secs: t.elapsed().as_secs_f64(), nodes: 0, stats: "cached".into() }),
                 Err(e) => {
                     rejected = true;
@@ -2016,302 +1764,10 @@ fn prove_module(out: &mut crate::elab::Output, (m, names, lit, facts): (&Sbmir, 
         }
         outcomes.push(Outcome { global: p.global.clone(), key: p.key.clone(), is_fn: p.is_fn, kind: p.kind(), result, cached: replay });
     }
-    let callees = pv.callees.clone();
     if let Some(vc) = opts.cache
         && !stores.is_empty()
     {
         let _ = vc.store.put_many(CACHE_NS, &stores);
     }
-    (outcomes, callees, rejected)
-}
-
-/// One function the optimizer replaced in a lifted file whose MIR the
-/// build ships (the lifted round trip's copy, step 8 of
-/// `docs/checked-structuring.md`).
-#[derive(Clone, Debug)]
-pub struct RoundTripFn {
-    /// The source function and its replacement (kernel names).
-    pub source: String,
-    pub target: String,
-    /// The check copy's MIR instance in the round trip's extraction (its
-    /// text is what the emitted file holds under the source's name).
-    pub copy_key: String,
-    /// A per-type dispatch: the MIR instance of the dispatch impl method at
-    /// this instance's type, which the copy calls and which delegates to
-    /// the replacement.
-    pub dispatch_key: Option<String>,
-    /// The helpers' MIR instances and the verified definitions the round
-    /// trip compared them with.
-    pub helpers: Vec<(String, String)>,
-    /// The optimizer's link `Π x̄ h̄. Eq(R, source x̄ h̄, target x̄ h̄)`
-    /// (`None`: the replacement is the source function's own definition).
-    pub equiv: Option<String>,
-    /// A function replaced through its panic-explicit reading (DESIGN.md
-    /// §8.2 item 12): the source function's kernel name (`source` is then
-    /// the reading). Its theorems are panic statements, and the source
-    /// function's own MIR instance gets its panic theorem against the
-    /// reading too (`L::pthm::<id>`).
-    pub panic: Option<String>,
-}
-
-/// The theorems of one replaced function: its helpers', its copy's, and the
-/// shipped code's theorem against the source function.
-#[derive(Clone, Debug)]
-pub struct RoundTripOutcome {
-    pub source: String,
-    pub result: Result<Vec<(String, Proven)>, String>,
-}
-
-/// The theorems of the shipped code of the replaced functions `fns`
-/// (step 8): the literal reading of the round trip's MIR `rt` continues the
-/// gate's reading of `main_module` (through the trusted loader), every
-/// helper gets its theorem against the definition the round trip compared
-/// it with, each copy its theorem against the replacement, and from it,
-/// along the optimizer's link, the theorem against the source function
-/// ([`Prover::compose`]). A function whose declarations the verdict cache
-/// holds is replayed (the kernel checks them again). Whether the shipped
-/// theorem holds is decided by [`Ledger::accept_shipped`]
-/// (`driver::lowered`).
-pub fn prove_roundtrip(out: &mut crate::elab::Output, facts: &crate::lift::LiftFacts, main_module: &str, rt: &Sbmir, fns: &[RoundTripFn], opts: &GateOptions<'_>) -> Vec<RoundTripOutcome> {
-    let fail_all = |e: String| fns.iter().map(|f| RoundTripOutcome { source: f.source.clone(), result: Err(e.clone()) }).collect::<Vec<_>>();
-    let Some(mm) = facts.mir_loaded.iter().find(|mm| mm.loaded.m.module == main_module) else { return fail_all(format!("no MIR module `{main_module}` was loaded")) };
-    // (the gate runs before the lowering in every build; a lowering on its
-    // own runs it here first)
-    let mut why_not = String::new();
-    if !out.mir_gate.callees.contains_key(main_module) {
-        let keep: Vec<String> = fns.iter().flat_map(|f| mir_closure(rt, &f.copy_key)).collect();
-        let reps = prove_lifted(out, facts, &GateOptions { keep_keys: keep.clone(), restrict_keys: Some(keep), ..GateOptions::default() });
-        why_not = match reps.iter().find_map(|r| r.missing.first()) {
-            Some((g, e)) => format!(" (`{g}`: {})", trunc(e, 300)),
-            None if reps.is_empty() => " (no lifted function of the module is read from MIR)".into(),
-            None => String::new(),
-        };
-    }
-    let Some(callees) = out.mir_gate.callees.get(main_module).cloned() else { return fail_all(format!("the theorem gate did not read this module's MIR{why_not}")) };
-    let mut keys: Vec<String> = fns.iter().flat_map(|f| f.helpers.iter().map(|h| h.0.clone()).chain(f.dispatch_key.clone()).chain(std::iter::once(f.copy_key.clone()))).collect();
-    keys.sort();
-    keys.dedup();
-    // a function replaced through its panic-explicit reading: the panic
-    // theorem of the source function's own MIR instance against the
-    // reading, over the main extraction (its literal reading continued)
-    let mut source_err: BTreeMap<String, String> = BTreeMap::new();
-    let panic_fns: Vec<&RoundTripFn> = fns.iter().filter(|f| f.panic.is_some()).collect();
-    if !panic_fns.is_empty() {
-        let contract = |f: &RoundTripFn| facts.mir_contracts.iter().find(|c| Some(&c.global) == f.panic.as_ref()).cloned();
-        let main_keys: Vec<String> = panic_fns.iter().filter_map(|f| contract(f).map(|c| c.key)).collect();
-        match load_into(&mut out.mir_gate.ledger, &mut out.env, &mm.loaded.m, &mm.loaded.names, &main_keys, None) {
-            Err(e) => {
-                for f in &panic_fns {
-                    source_err.insert(f.source.clone(), format!("the literal reading of the source function: {e}"));
-                }
-            }
-            Ok(lit_main) => {
-                let mut contracts: Vec<MirContract> = facts.mir_contracts.clone();
-                contracts.extend(panic_fns.iter().filter_map(|f| contract(f).map(|c| MirContract { global: f.source.clone(), ..c })));
-                let mut pv = Prover::new(&mut out.env, &mm.loaded.m, &mm.loaded.names, &lit_main, &out.pre_commit, &contracts);
-                pv.budget_secs = opts.budget_secs;
-                pv.max_steps = opts.max_steps;
-                pv.trace = opts.trace;
-                pv.callees = callees.clone();
-                pv.panic = true;
-                for f in &panic_fns {
-                    let r = match contract(f) {
-                        Some(c) if lit_main.lfn(&c.key).is_some() => pv.prove(&Entry::Fn { key: c.key.clone(), s_global: f.source.clone() }).map(|_| ()),
-                        Some(c) => Err(format!("no literal reading of `{}`", c.key)),
-                        None => Err(format!("`{}` has no declared contract", f.panic.as_deref().unwrap_or(""))),
-                    };
-                    if let Err(e) = r {
-                        source_err.insert(f.source.clone(), format!("the source function's panic theorem: {e}"));
-                    }
-                }
-            }
-        }
-    }
-    let lit = match load_into(&mut out.mir_gate.ledger, &mut out.env, rt, &mm.loaded.names, &keys, None) {
-        Ok(l) => l,
-        Err(e) => return fail_all(format!("the literal reading of the round trip's MIR: {e}")),
-    };
-    // (a panic function's theorems are not cached: its source's theorem is
-    // proven on the main extraction, outside the entry)
-    let keys_c: Vec<Option<String>> = match opts.cache {
-        Some(vc) => {
-            let mut h = Hasher { env: &out.env, memo: Default::default() };
-            fns.iter().map(|f| if f.panic.is_some() { None } else { roundtrip_key(vc, &generator_hash(), &mut h, rt, f) }).collect()
-        }
-        None => vec![None; fns.len()],
-    };
-    let mut outs: Vec<Option<RoundTripOutcome>> = vec![None; fns.len()];
-    for (i, f) in fns.iter().enumerate() {
-        if let Some(b) = cached_entry(opts.cache, keys_c[i].as_deref())
-            && crate::opt::cache::replay_decls(&mut out.env, &b).is_ok()
-        {
-            outs[i] = Some(RoundTripOutcome { source: f.source.clone(), result: Ok(vec![(f.copy_key.clone(), Proven { s_global: f.source.clone(), kind: "shipped theorem", walk_secs: 0.0, check_secs: 0.0, nodes: 0, stats: "cached".into() })]) });
-        }
-    }
-    let todo: Vec<RoundTripFn> = fns.iter().zip(&outs).filter(|(_, o)| o.is_none()).map(|(f, _)| f.clone()).collect();
-    let mut proven = if todo.is_empty() { Vec::new() } else { prove_roundtrip_now(out, facts, &mm.loaded.names, rt, &lit, callees, &todo, opts) }.into_iter();
-    let mut stores = Vec::new();
-    for (i, f) in fns.iter().enumerate() {
-        if outs[i].is_some() {
-            continue;
-        }
-        let (mut o, decls) = proven.next().unwrap_or_else(|| (RoundTripOutcome { source: f.source.clone(), result: Err("not proven".into()) }, Vec::new()));
-        if let Some(e) = source_err.get(&f.source) {
-            o.result = Err(e.clone());
-        }
-        if let (Ok(_), Some(k)) = (&o.result, &keys_c[i]) {
-            stores.push(cache_entry(&out.env, k, &decls));
-        }
-        outs[i] = Some(o);
-    }
-    if let Some(vc) = opts.cache
-        && !stores.is_empty()
-    {
-        let _ = vc.store.put_many(CACHE_NS, &stores);
-    }
-    outs.into_iter().flatten().collect()
-}
-
-/// The verdict-cache key of a function's shipped theorems: the generator,
-/// the structured readings of the source, the replacement and the helpers'
-/// definitions (their types carry the declared contracts), the link, and the round trip's MIR
-/// of every instance the copy's, the dispatch method's and the helpers'
-/// literal readings run.
-fn roundtrip_key(vc: &crate::driver::cache::VerdictCache, gen_id: &str, h: &mut Hasher<'_>, rt: &Sbmir, f: &RoundTripFn) -> Option<String> {
-    let mut t = format!("sandblaster-shipped-theorem/1\ntoolchain {}\ngenerator {gen_id}\n{f:?}\n", vc.toolchain);
-    let mut globals: Vec<&str> = vec![f.source.as_str(), f.target.as_str()];
-    globals.extend(f.helpers.iter().map(|x| x.1.as_str()));
-    globals.extend(f.equiv.iter().map(|x| x.as_str()));
-    for g in globals {
-        let gid = h.env.lookup_global(g)?;
-        t.push_str(&format!("structured {g} {}\n", h.closure(gid)));
-    }
-    let mut keys: Vec<String> = f.helpers.iter().map(|x| x.0.clone()).chain(f.dispatch_key.clone()).chain(std::iter::once(f.copy_key.clone())).flat_map(|k| mir_closure(rt, &k)).collect();
-    keys.sort();
-    keys.dedup();
-    for k in keys {
-        let text = rt.fns.get(&k).map(|x| format!("{x:?}")).unwrap_or_else(|| "absent".into());
-        t.push_str(&format!("mir {k} {}\n", crate::surface::hex(&crate::surface::sha256(text.as_bytes()))));
-    }
-    t.push_str(&format!("adts {}\n", crate::surface::hex(&crate::surface::sha256(format!("{:?}", rt.adts).as_bytes()))));
-    Some(crate::surface::hex(&crate::surface::sha256(t.as_bytes())))
-}
-
-
-/// [`prove_roundtrip`] without the cache, on the loaded reading `lit`: per
-/// function its outcome and the declarations its theorems added.
-#[allow(clippy::too_many_arguments)]
-fn prove_roundtrip_now(out: &mut crate::elab::Output, facts: &crate::lift::LiftFacts, names: &ModuleNames, rt: &Sbmir, lit: &Literal, callees: Vec<Callee>, fns: &[RoundTripFn], opts: &GateOptions<'_>) -> Vec<(RoundTripOutcome, Vec<DefDecl>)> {
-    // the instances each definition is read against: a helper's and a
-    // copy's instance is listed under the definition it is read against
-    // (a replacement that is the optimizer's residual under the source's)
-    let mut contracts: Vec<MirContract> = facts.mir_contracts.clone();
-    let contract_of = |g: &str| facts.mir_contracts.iter().find(|c| c.global == g).cloned();
-    for f in fns {
-        // (a panic-explicit reading has the source function's contract)
-        let src_c = match &f.panic {
-            Some(fname) => contract_of(fname).map(|c| MirContract { global: f.source.clone(), ..c }),
-            None => contract_of(&f.source),
-        };
-        for (k, g) in &f.helpers {
-            if let Some(c) = contract_of(g).or_else(|| src_c.clone().map(|c| MirContract { global: g.clone(), ..c })) {
-                contracts.push(MirContract { key: k.clone(), ..c });
-            }
-        }
-        let tgt_c = contract_of(&f.target).or_else(|| src_c.clone().map(|c| MirContract { global: f.target.clone(), ..c }));
-        for k in f.dispatch_key.iter().chain(std::iter::once(&f.copy_key)) {
-            for c in [&tgt_c, &src_c].into_iter().flatten() {
-                contracts.push(MirContract { key: k.clone(), ..c.clone() });
-            }
-        }
-    }
-    let mut pv = Prover::new(&mut out.env, rt, names, lit, &out.pre_commit, &contracts);
-    pv.budget_secs = opts.budget_secs;
-    pv.max_steps = opts.max_steps;
-    pv.trace = opts.trace;
-    pv.callees = callees;
-    pv.replace_callees = true;
-    // the helpers callee-first (by the round trip's MIR), once each
-    let helpers: Vec<(String, String)> = {
-        let mut all: Vec<(String, String)> = Vec::new();
-        for f in fns {
-            for h in &f.helpers {
-                if !all.contains(h) {
-                    all.push(h.clone());
-                }
-            }
-        }
-        let mut order: Vec<(String, String)> = Vec::new();
-        fn visit(k: &str, all: &[(String, String)], rt: &Sbmir, seen: &mut std::collections::BTreeSet<String>, order: &mut Vec<(String, String)>) {
-            if !seen.insert(k.to_string()) {
-                return;
-            }
-            for k2 in mir_closure(rt, k) {
-                if k2 != k && all.iter().any(|h| h.0 == k2) {
-                    visit(&k2, all, rt, seen, order);
-                }
-            }
-            if let Some(h) = all.iter().find(|h| h.0 == k) {
-                order.push(h.clone());
-            }
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for h in &all {
-            visit(&h.0, &all, rt, &mut seen, &mut order);
-        }
-        order
-    };
-    let panic_helpers: std::collections::BTreeSet<String> = fns.iter().filter(|f| f.panic.is_some()).flat_map(|f| f.helpers.iter().map(|h| h.0.clone())).collect();
-    let mut done: BTreeMap<String, (Result<Proven, String>, Vec<DefDecl>)> = BTreeMap::new();
-    for (k, g) in &helpers {
-        pv.panic = panic_helpers.contains(k);
-        let r = if lit.lfn(k).is_none() { Err(format!("no literal reading of `{k}`")) } else { pv.prove(&Entry::Fn { key: k.clone(), s_global: g.clone() }) };
-        done.insert(k.clone(), (r, std::mem::take(&mut pv.added)));
-    }
-    let mut outs = Vec::new();
-    for f in fns {
-        let mut got: Vec<(String, Proven)> = Vec::new();
-        let mut decls: Vec<DefDecl> = Vec::new();
-        let mut err = None;
-        for (k, g) in &f.helpers {
-            match done.get(k) {
-                Some((Ok(p), ds)) => {
-                    got.push((k.clone(), p.clone()));
-                    decls.extend(ds.iter().cloned());
-                }
-                Some((Err(e), _)) => {
-                    err = Some(format!("the helper `{k}` against `{g}`: {e}"));
-                    break;
-                }
-                None => {
-                    err = Some(format!("the helper `{k}` was not proven"));
-                    break;
-                }
-            }
-        }
-        pv.panic = f.panic.is_some();
-        // (a dispatch impl method, then the copy, each against the
-        // replacement's call: the delegation the round trip checked)
-        for k in f.dispatch_key.iter().chain(std::iter::once(&f.copy_key)) {
-            if err.is_some() {
-                break;
-            }
-            pv.delegate = true;
-            let r = if lit.lfn(k).is_none() { Err(format!("no literal reading of `{k}`")) } else { pv.prove(&Entry::Fn { key: k.clone(), s_global: f.target.clone() }) };
-            pv.delegate = false;
-            match r {
-                Ok(p) => got.push((k.clone(), p)),
-                Err(e) => err = Some(format!("`{k}` against `{}`: {e}", f.target)),
-            }
-        }
-        if err.is_none() {
-            match pv.compose(&f.copy_key, &f.source, &f.target, f.equiv.as_deref()) {
-                Ok(p) => got.push((f.copy_key.clone(), p)),
-                Err(e) => err = Some(e),
-            }
-        }
-        decls.append(&mut pv.added);
-        outs.push((RoundTripOutcome { source: f.source.clone(), result: match err { Some(e) => Err(e), None => Ok(got) } }, decls));
-    }
-    outs
+    (outcomes, rejected)
 }

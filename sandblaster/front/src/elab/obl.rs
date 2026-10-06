@@ -408,9 +408,9 @@ impl<'a> Elab<'a> {
             self.resource_failure(id, kind, span, target, failure, hinted);
             return Ok(Rc::new(Term::Erased));
         }
-        // an optimizer residual: a counterexample tells a false obligation
-        // from one not re-proven (`opt::refute`; inert otherwise)
-        let failure = crate::opt::refute::annotate(&self.env, &self.f.scope.ctx, target, self.f.scope.hint_facts.is_empty(), failure);
+        // a counterexample tells a false obligation from one not proven
+        // (`crate::refute`; inert unless enabled)
+        let failure = crate::refute::annotate(&self.env, &self.f.scope.ctx, target, self.f.scope.hint_facts.is_empty(), failure);
         self.fail_obligation(id, kind, span, target, failure, hinted);
         Ok(Rc::new(Term::Erased))
     }

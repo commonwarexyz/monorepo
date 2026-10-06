@@ -4,10 +4,10 @@
 # the specification: `sandblaster spec` prints the spec sheet, `sandblaster spec
 # --diff <rev>` classifies changes (strengthened / weakened / equivalent / unrelated).
 format sandblaster-spec-lock/1
-root 3e969a794ce11bf2fb4fedc1aa6844680c8a3b6bfa9aaadc1bc7ffa8591cde6b
+root 120158760b49110ae954c27d651e03c4b4468be25fe9163d3a117ca92ffcfa9b
 kernel fb3054eb8fa8c0a71e03d0ca1c1dabdfe3e402ad0c07d6f5c3dc35b19e1aee6a
 prelude 8187a4d7eda2b3787b11ed71204eb97f2f156d68fcd62d52e103888081c4f0a0
-semantics 42a99780ae3ca1f3e387f70addef4b360342332f4a767fc7fd06914bf9d591af
+semantics 222a4ccad0dd3b251121f2d2880643c16a05e10ef76a2f09f5b932d8bb95e874
 builtins c324380a064b82998bf2234d322f9922d5c235b8ae2de7f6ae3b67e10f878346
 lift 84a5e0dda5e9d790d7ce71ea9746b93b749fb698a2c2209b5ebc1fdcea079013
 target aarch64 aae2dae42dce95ef0c2d4f0c348c08b293b28bb3f22d4e2d5fb5d0afce5dfee0
@@ -85,10 +85,10 @@ section section:crate::merkle::proof::Subtree::reconstruct_digest R {crate::merk
 tcb 1 sandblaster-kernel: checker, evaluator, conversion, termination, linear-arithmetic certificates, bvnorm, the fixed axiom list, bignum Int, the section abstraction and the closed evaluator
 tcb 2 the elaboration semantics of the canonical dialect (SEMANTICS.md)
 tcb 3 the prelude definitions (sandblaster/kernel/prelude/*.core)
-tcb 4 the target semantics library (intrinsic models, load/store helpers) and the dispatch glue
+tcb 4 the target semantics library: the intrinsic models (sandblaster/targets/core/*.core), validated natively against the hardware
 tcb 5 rustc/LLVM
 tcb 6 the elaboration of the ghost language (SEMANTICS.md §13): the kernel statement of a spec item, law, contract or invariant means what its source says; and Env::abstract_section
-tcb 7 assumptions: num-bigint/num-integer; the rustc that compiled the kernel; syn agreeing with rustc on the canonical dialect; the §3.7 stack assumption; runtime feature detection; a process free of undefined behaviour
+tcb 7 assumptions: num-bigint/num-integer; the rustc that compiled the kernel; syn agreeing with rustc on the canonical dialect; the §3.7 stack assumption; host code calls a `#[target_feature]` function only on a CPU with those features; a process free of undefined behaviour
 
 item boundary-fn:crate::merkle::hasher::Standard::digest
   hash 2bb8d7690266eaa8042e67c1edb3025ba21a5a486fe495961b90f95aaaba1cbd

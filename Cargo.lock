@@ -6401,7 +6401,6 @@ dependencies = [
  "num-traits",
  "proc-macro2",
  "quote",
- "sandblaster-front",
  "sandblaster-kernel",
  "sandblaster-memguard",
  "sandblaster-targets",
@@ -6425,15 +6424,6 @@ version = "2026.9.0"
 [[package]]
 name = "sandblaster-memguard"
 version = "2026.9.0"
-
-[[package]]
-name = "sandblaster-rulegen"
-version = "2026.9.0"
-dependencies = [
- "num-bigint",
- "sandblaster-front",
- "sandblaster-kernel",
-]
 
 [[package]]
 name = "sandblaster-targets"

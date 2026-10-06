@@ -1,25 +1,19 @@
-# The shipped-code harness (finish-A, task 4): the code commonware-codec and
-# commonware-storage compile from sandblaster's emitted and lowered copies,
-# against the original Commonware functions, in one binary (README.md).
+# The measurement harness (README.md): the original crates at a given commit
+# against the worktree's own crates, in one binary, for pilots.
 #
-# Every subject is the SAME crate source (subject/lib.rs) over its own copies
-# of the two crates (gen/<subject>/, written by prepare.py, not committed):
-# `subj_orig` and `subj_aa` the original code (the merge base of the
-# sandblaster branch; `aa` is the A/A control), `subj_shipped` the shipped
-# code. One workspace profile compiles all of them alike. A standalone
-# workspace; run it with ./run.sh.
+# Every subject is the SAME crate source (subject/lib.rs with the probe's
+# probe.rs) over its own copies of the probe's crates (gen/, written by
+# prepare.py, not committed): `subj_orig` and `subj_aa` the code at the base
+# commit (`aa` is the A/A control), `subj_wt` the worktree's. One workspace
+# profile compiles all of them alike. A standalone workspace; run it with
+# ./run.sh.
 [workspace]
 members = [
     ".",
-    "subj_orig",
-    "subj_aa",
-    "subj_shipped",
-    "gen/orig/codec",
-    "gen/orig/storage",
-    "gen/aa/codec",
-    "gen/aa/storage",
-    "gen/shipped/codec",
-    "gen/shipped/storage",
+    "gen/subj_orig",
+    "gen/subj_aa",
+    "gen/subj_wt",
+    "gen/copies/*/*",
 ]
 resolver = "2"
 
@@ -58,16 +52,21 @@ hashbrown = { version = "0.17.1", default-features = false, features = ["default
 tracing = "0.1.44"
 zstd = "0.13.3"
 
+# the monorepo's `cfg` names (the copies' `[lints] workspace = true`); none
+# of the monorepo's deny levels: a copy's warning is not this tool's error
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
+
 [package]
-name = "shipped-bench"
+name = "bench-harness"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [dependencies]
-subj_orig = { path = "subj_orig" }
-subj_aa = { path = "subj_aa" }
-subj_shipped = { path = "subj_shipped" }
+subj_orig = { path = "gen/subj_orig" }
+subj_aa = { path = "gen/subj_aa" }
+subj_wt = { path = "gen/subj_wt" }
 
 # Commonware's production profile: overflow checks on (the monorepo's
 # [profile.release]); everything else cargo's release default (opt-level 3,
@@ -76,7 +75,7 @@ subj_shipped = { path = "subj_shipped" }
 overflow-checks = true
 debug = 1
 
-# The same without overflow checks (a second binary, reported separately).
+# The same without overflow checks (a third binary, reported separately).
 [profile.release-nooc]
 inherits = "release"
 overflow-checks = false

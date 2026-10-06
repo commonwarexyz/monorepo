@@ -1,7 +1,7 @@
 //! The build loop in a real workspace (DESIGN.md §2.1 *Re-runs*):
 //!
-//! * **watched paths**: a module-mode (lifted) or crate-mode build asks
-//!   cargo to watch only paths that exist — never the lift prelude's
+//! * **watched paths**: a module-mode (lifted) build asks cargo to watch
+//!   only paths that exist — never the lift prelude's
 //!   virtual source-map paths, never a lock that does not exist yet — so an
 //!   unchanged host crate does not re-run its build script on every cargo
 //!   invocation (twin: the source map does hold such paths);
@@ -16,13 +16,14 @@
 //!   `rustc`, or a result-relevant `SANDBLASTER_*` variable (twins); the
 //!   toolchain never branches on `debug_assertions` (why the profile is not
 //!   part of it);
-//! * **the optimizer's summary** states why each kept function kept its
-//!   source text.
+//! * **the shared verdict cache**: a tampered or forged entry is rejected
+//!   and the module re-verified to the same bytes (and the entry repaired);
+//!   with the cache off nothing is reused;
+//! * **refusals**: a lifted module whose proof is left open, or which has
+//!   no lock, fails the host build and emits no module.
 //!
-//! The lifted bodies are rustc's MIR (the fixtures `mir_fixtures/opt_mbits`,
-//! shared with tests/lift_opt.rs, and `bl_mbits_edited`), and so are those
-//! the lifted round trip reads back (`rt.sbmir`, extracted from the copy a
-//! build writes, `OUT_DIR/bits-roundtrip__bits.rs`).
+//! The lifted bodies are rustc's MIR (the fixtures `mir_fixtures/opt_mbits`
+//! and `bl_mbits_edited`).
 //!
 //! `cargo test --release -p sandblaster-front --test build_loop -- --test-threads=1`
 
@@ -32,8 +33,7 @@ mod gated;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use sandblaster_front::driver::cache::{verifier_context, NOT_IDENTITY};
-use sandblaster_front::driver::lowered::{LowerOrigin, LowerOutcome, LowerRecord, LoweredModule};
+use sandblaster_front::driver::cache::{verifier_context, Store, NOT_IDENTITY};
 use sandblaster_front::driver::{self, BuildOutcome};
 use sandblaster_front::loader::{FileProvider, MemFs};
 use sandblaster_front::target::TargetInfo;
@@ -137,20 +137,16 @@ fn fixture(path: &str) -> Option<String> {
 }
 
 fn m_files(bits: &str) -> Vec<(String, String)> {
-    // rustc's MIR of `bits.rs` and of the round trip's copy (the fixture
-    // whose source it is)
+    // rustc's MIR of `bits.rs` (the fixture whose source it is)
     let dir = if bits == M_BITS { "opt_mbits" } else { "bl_mbits_edited" };
     assert_eq!(fixture(&format!("{dir}/bits.rs")).as_deref(), Some(bits), "a fixture of this `bits.rs`");
-    let mut dsl = vec![
+    let dsl = vec![
         (format!("/host/{M_ROOT}"), M_DSL_ROOT.to_string()),
         ("/host/sandblaster/bits/bits.rs".to_string(), bits.to_string()),
         ("/host/sandblaster/bits/LAWS.rs".to_string(), M_LAWS.to_string()),
         ("/host/sandblaster/bits/PROOF.rs".to_string(), M_PROOF.to_string()),
         ("/host/sandblaster/bits/bits.sbmir".to_string(), fixture(&format!("{dir}/bits.sbmir")).expect("the fixture's MIR")),
     ];
-    if let Some(rt) = fixture(&format!("{dir}/rt.sbmir")) {
-        dsl.push(("/host/sandblaster/bits/bits.roundtrip__bits.sbmir".to_string(), rt));
-    }
     let mut files = gated::with_accepted_lock(&dsl, &format!("/host/{M_ROOT}"), &TargetInfo::aarch64_apple_darwin()).unwrap_or_else(|e| panic!("the gates reject the test crate:\n{e}"));
     let (docs, _) = driver::lifted::split_docs(bits);
     files.push(("/host/src/lib.rs".into(), "//! A host crate.\nmod bits;\npub fn both(x: u32) -> u8 { bits::clamp7(bits::low_byte(x)) }\n".into()));
@@ -197,7 +193,7 @@ fn reused_cache(o: &BuildOutcome) -> bool {
 /// for `cargo build` / `cargo test` / `--release` / a dependent crate
 /// differs only in variables the verifier context ignores.
 fn process_vars(extra: &[(&str, &str)]) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = [("SANDBLASTER_MEM_LIMIT_GB", "6"), ("SANDBLASTER_STRICT_OPT", "0")].iter().map(|(k, x)| (k.to_string(), x.to_string())).collect();
+    let mut v: Vec<(String, String)> = [("SANDBLASTER_MEM_LIMIT_GB", "6"), ("SANDBLASTER_GOAL_TIMEOUT_MS", "30000")].iter().map(|(k, x)| (k.to_string(), x.to_string())).collect();
     for (k, x) in extra {
         v.retain(|(kk, _)| kk != k);
         v.push((k.to_string(), x.to_string()));
@@ -242,37 +238,15 @@ fn a_lifted_module_build_watches_only_paths_that_exist() {
     let _ = std::fs::remove_dir_all(&out);
 }
 
-/// Crate mode: a lock that does not exist yet is not watched (its
-/// creation changes the watched root directory); once it exists it is.
-#[test]
-fn crate_mode_watches_the_lock_only_once_it_exists() {
-    let root = "sandblaster/prog/mod.rs";
-    let src = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n\n/// Doubles, wrapping.\npub fn twice(x: u8) -> u8 {\n    x.wrapping_mul(2)\n}\n";
-    let files = vec![("/host/src/lib.rs".to_string(), format!("{}\n", driver::LIB_RS_LINE)), (format!("/host/{root}"), src.to_string())];
-    let out = scratch("crate-watch");
-    let e = env(&out, None);
-    let lock = "/host/sandblaster/prog/SPEC.lock".to_string();
-    let o = driver::build_verified_with(root, None, &|k| e.get(k).cloned(), &memfs(&files));
-    let w = watched(&o);
-    assert!(w.contains(&format!("/host/{root}")) && w.contains(&"/host/sandblaster/prog".to_string()), "{w:?}");
-    assert!(!w.contains(&lock), "a missing lock is not watched: {w:?}");
-    // twin: with the lock present it is watched
-    let mut with_lock = files.clone();
-    with_lock.push((lock.clone(), "sandblaster-spec-lock/1\n".into()));
-    let o = driver::build_verified_with(root, None, &|k| e.get(k).cloned(), &memfs(&with_lock));
-    assert!(watched(&o).contains(&lock), "{:?}", watched(&o));
-    let _ = std::fs::remove_dir_all(&out);
-}
-
 // ---------------------------------------------------------------------------
 // determinism and verdict sharing
 // ---------------------------------------------------------------------------
 
 /// Two verifications of the same lifted module in different `OUT_DIR`s,
-/// without any cache (every proof, gate, the lift conformance check, the
-/// optimizer and the lowering run twice): the emitted file, the report and
-/// the conformance key are byte-identical, and stay so when the lift
-/// conformance check's recorded pass is replayed. Twin: a source edit
+/// without any cache (every proof, gate and the lift conformance check run
+/// twice): the emitted file, the report and the conformance key are
+/// byte-identical, and stay so when the lift conformance check's recorded
+/// pass is replayed. Twin: a source edit
 /// changes the emitted file and the key, so the comparison is not vacuous.
 #[test]
 fn verification_output_is_deterministic() {
@@ -307,11 +281,6 @@ fn verification_output_is_deterministic() {
     // twin: an edited source
     let edited = m_files(&M_BITS.replace("/// The low byte of `x`.", "/// The low byte of `x` (edited)."));
     let c = m_build(&edited, Some(&ctx), &env(&d3.join("out"), None));
-    if std::env::var_os("SANDBLASTER_DUMP_ROUNDTRIP_COPIES").is_some()
-        && let Some((_, t)) = c.outputs.iter().find(|(p, _)| p.ends_with("bits-roundtrip__bits.rs"))
-    {
-        std::fs::write(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/mir_fixtures/bl_mbits_edited/rt.rs"), t).unwrap();
-    }
     assert!(c.ok, "{}", c.stderr);
     assert_ne!(output(&c, "bits.rs"), output(&a, "bits.rs"));
     assert_ne!(conformance_key(output(&c, "bits-report.json")), key);
@@ -359,13 +328,92 @@ fn one_verdict_serves_every_build_context() {
     let _ = std::fs::remove_dir_all(&cache);
 }
 
+/// The verdict entries of the shared cache in `dir`.
+fn verdict_entries(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let root = dir.join("sandblaster-cache-1").join("verdict");
+    for sub in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        for f in std::fs::read_dir(sub.path()).into_iter().flatten().flatten() {
+            if !f.file_name().to_string_lossy().starts_with('.') {
+                out.push(f.path());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A tampered or forged whole-verdict entry is rejected and the module
+/// re-verified to the same bytes (and the entry repaired); with the cache
+/// off nothing is reused.
+#[test]
+fn a_tampered_cache_entry_is_rejected_and_the_module_reverified() {
+    let files = m_files(M_BITS);
+    let cache = scratch("tamper-cache");
+    let ctx = verifier_context("toolchain-a", Some(RUSTC_VV), &process_vars(&[])).unwrap();
+    let cold = m_build(&files, Some(&ctx), &env(&cache.join("a/out"), Some(&cache)));
+    assert!(cold.ok && !reused_cache(&cold), "{}", cold.stderr);
+    let code = output(&cold, "bits.rs").to_string();
+    let entry = verdict_entries(&cache).pop().expect("the verdict was stored");
+    let good = std::fs::read_to_string(&entry).unwrap();
+    // an unverified body with a recomputed payload hash: the MAC rejects it
+    let evil = good.replacen("STATUS: VERIFIED", "STATUS: VERIFIEd", 1);
+    assert_ne!(evil, good);
+    std::fs::write(&entry, &evil).unwrap();
+    let o = m_build(&files, Some(&ctx), &env(&cache.join("b/out"), Some(&cache)));
+    assert!(o.ok && !reused_cache(&o), "{:?}", o.cargo);
+    assert!(o.cargo.iter().any(|l| l.contains("rejected")), "{:?}", o.cargo);
+    assert_eq!(output(&o, "bits.rs"), code, "re-verified to the same bytes");
+    // the re-verification repaired the entry
+    let again = m_build(&files, Some(&ctx), &env(&cache.join("c/out"), Some(&cache)));
+    assert!(again.ok && reused_cache(&again), "{:?}", again.cargo);
+    // a forged entry (another secret) is rejected the same way
+    let forged = Store::open(cache.clone(), sandblaster_front::surface::sha256(b"not the key"));
+    let key_name = entry.file_name().unwrap().to_string_lossy().to_string();
+    forged.put("verdict", &key_name, &[("code", "pub fn clamp7(x: u8) -> u8 { x }\n"), ("report", "{}"), ("timing", "{}")]).unwrap();
+    let o = m_build(&files, Some(&ctx), &env(&cache.join("d/out"), Some(&cache)));
+    assert!(o.ok && !reused_cache(&o) && output(&o, "bits.rs") == code, "{:?}", o.cargo);
+    // the cache off: nothing is reused
+    let mut off = env(&cache.join("e/out"), Some(&cache));
+    off.insert("SANDBLASTER_CACHE".into(), "off".into());
+    let o = m_build(&files, Some(&ctx), &off);
+    assert!(o.ok && !reused_cache(&o), "{:?}", o.cargo);
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+// ---------------------------------------------------------------------------
+// refusals
+// ---------------------------------------------------------------------------
+
+/// Module mode's negative twins on a lifted module (the positive twins are
+/// the other tests here): a law whose proof is left open, and a missing
+/// lock, each fail the host build, and no module is emitted.
+#[test]
+fn a_failing_proof_or_gate_emits_no_module() {
+    let files = m_files(M_BITS);
+    let out = scratch("refuse");
+    let no_module = |o: &BuildOutcome| !o.ok && !o.outputs.iter().any(|(p, _)| p.file_name().is_some_and(|f| f == "bits.rs"));
+    // a proof left open (the lock still matches: only the proof fails)
+    let open: Vec<(String, String)> = files.iter().map(|(p, t)| (p.clone(), if p.ends_with("PROOF.rs") { t.replace("    by_cases(x, 0..=255);\n", "    todo();\n") } else { t.clone() })).collect();
+    assert_ne!(open, files);
+    let o = m_build(&open, None, &env(&out, None));
+    assert!(no_module(&o), "an open proof emitted the module: {:?}", o.cargo);
+    assert!(o.stderr.contains("clamp7_low_bits"), "the refusal names the law:\n{}", o.stderr);
+    // no lock
+    let unlocked: Vec<(String, String)> = files.iter().filter(|(p, _)| !p.ends_with("SPEC.lock")).cloned().collect();
+    let o = m_build(&unlocked, None, &env(&out, None));
+    assert!(no_module(&o), "a crate without a lock emitted the module: {:?}", o.cargo);
+    assert!(o.stderr.contains("error[spec-lock]"), "{}", o.stderr);
+    let _ = std::fs::remove_dir_all(&out);
+}
+
 /// What enters the verifier context and what does not.
 #[test]
 fn the_verifier_context_names_what_determines_a_result() {
     let base = verifier_context("tc", Some(RUSTC_VV), &process_vars(&[])).unwrap();
     assert!(base.starts_with("sandblaster-verifier/2\ntoolchain tc\n"), "{base}");
     assert!(base.contains("overflow-checks on\n"), "this test build has overflow checks: {base}");
-    assert!(base.contains("SANDBLASTER_STRICT_OPT=0\n") && !base.contains("SANDBLASTER_MEM_LIMIT_GB"), "{base}");
+    assert!(base.contains("SANDBLASTER_GOAL_TIMEOUT_MS=30000\n") && !base.contains("SANDBLASTER_MEM_LIMIT_GB"), "{base}");
     // the same: resource and cache settings, cargo's per-context variables,
     // the order of the environment
     let mut same = process_vars(&[("CARGO_FEATURE_ARBITRARY", "1"), ("OUT_DIR", "/x"), ("PROFILE", "release"), ("DEBUG", "false")]);
@@ -378,7 +426,7 @@ fn the_verifier_context_names_what_determines_a_result() {
     assert_ne!(verifier_context("tc2", Some(RUSTC_VV), &process_vars(&[])).unwrap(), base);
     assert_ne!(verifier_context("tc", Some("rustc 1.96.0\n"), &process_vars(&[])).unwrap(), base);
     assert_ne!(verifier_context("tc", None, &process_vars(&[])).unwrap(), base);
-    assert_ne!(verifier_context("tc", Some(RUSTC_VV), &process_vars(&[("SANDBLASTER_STRICT_OPT", "1")])).unwrap(), base);
+    assert_ne!(verifier_context("tc", Some(RUSTC_VV), &process_vars(&[("SANDBLASTER_GOAL_TIMEOUT_MS", "1")])).unwrap(), base);
     assert_ne!(verifier_context("tc", Some(RUSTC_VV), &process_vars(&[("SANDBLASTER_X_SIGMA", "1")])).unwrap(), base);
     // no toolchain identity: nothing is reused
     assert_eq!(verifier_context("", Some(RUSTC_VV), &process_vars(&[])), None);
@@ -415,82 +463,4 @@ fn the_toolchain_never_branches_on_debug_assertions() {
     assert!(hits.is_empty(), "the toolchain branches on debug_assertions (make the profile part of the verifier context): {hits:?}");
     assert!(branches("if cfg!( debug_assertions ) { 1 } else { 2 }") && branches("#[cfg(not(debug_assertions))]\nfn f() {}"));
     assert!(!branches("let _ = format!(\"#[cfg({})]\", \"debug_assertions\");\n/// never `cfg(debug_assertions)`\n"));
-}
-
-// ---------------------------------------------------------------------------
-// the optimizer's summary
-// ---------------------------------------------------------------------------
-
-fn kept(f: &str, why: &str) -> LowerRecord {
-    LowerRecord { function: f.into(), outcome: LowerOutcome::Kept(why.into()), optimizer_residual: None }
-}
-
-/// The summary counts the kept functions by their real reason, most
-/// frequent first; a rewritten module says how many were rewritten.
-#[test]
-fn the_optimizer_summary_states_why_functions_were_kept() {
-    // the reasons exactly as `driver::lowered` states them
-    let generic = "a generic function with buffer state (the dispatch call does not thread the state yet; FRICTION)";
-    let reader = "a parameter with state other than one `&mut impl Buf`, or one `&mut impl BufMut` of a function without a result: lowering of that state passing is not built yet";
-    let low = LoweredModule {
-        records: vec![
-            kept("crate::v::a", generic),
-            kept("crate::v::b", generic),
-            kept("crate::v::c", generic),
-            kept("crate::v::d", reader),
-            kept("crate::v::e", "the residual is not 3% cheaper than the source (portable model: 10 vs 10 milli-cycles)"),
-            kept("crate::v::f", "the residual is not 3% cheaper than the source (portable model: 7 vs 7 milli-cycles)"),
-            kept("crate::v::g", "not specialized: symbolic execution failed: a loop"),
-            kept("crate::v::h", "a method"),
-        ],
-        ..Default::default()
-    };
-    let s = driver::gates::lowering_note(&low);
-    assert_eq!(
-        s,
-        "optimized: none of the 8 source function(s) rewritten, the source is emitted as-is; source kept: 3 generic with buffer state (the per-type dispatch does not thread the state yet), 2 residual not 3% cheaper, 1 methods (receivers are not lowered yet), 1 not specialized (symbolic execution failed), 1 other state passing (`&mut` or `dyn` parameters, two buffers, a `BufMut` writer with a result; lowering not built yet)"
-    );
-    // twins: the old wording blamed every kept function on its residual,
-    // and later called generic and `Buf` reader lowering unbuilt (both are
-    // built: per-type dispatch, reader lowering)
-    assert!(!s.contains("is cheaper and printable"));
-    assert!(!s.contains("needs a per-type dispatch the lift reads") && !s.contains("`impl Buf` readers"), "{s}");
-    // every generic refusal of `driver::lowered` has its class
-    assert_eq!(
-        driver::gates::kept_reason_class("a generic function without a by-value parameter of type `T` (the dispatch needs one as its receiver; FRICTION)"),
-        "generic without a by-value parameter of its type (the per-type dispatch needs one as its receiver)"
-    );
-    for why in ["a generic function whose parameter is not bounded by one trait", "a generic function with other than one type parameter bounded by one trait"] {
-        assert_eq!(driver::gates::kept_reason_class(why), "generic beyond one type parameter bounded by one trait (no per-type dispatch)");
-    }
-    // a generic function's failed instance is classed by the instance's reason, not per type
-    assert_eq!(
-        driver::gates::kept_reason_class("instance `u16`: the residual is not 3% cheaper than the source (portable model: 9 vs 9 milli-cycles)"),
-        "generic instance: residual not 3% cheaper"
-    );
-    assert_eq!(driver::gates::kept_reason_class("instance `u8`: not specialized: a loop"), "generic instance: not specialized (a loop)");
-    // a rewritten module
-    let mut low2 = low.clone();
-    low2.records.push(LowerRecord { function: "crate::v::z".into(), outcome: LowerOutcome::Lowered { origin: LowerOrigin::Optimizer, rung: "Driven".into(), cost_source: 10, cost_residual: 5, helpers: vec![], via: String::new() }, optimizer_residual: None });
-    low2.compared = 2;
-    let s2 = driver::gates::lowering_note(&low2);
-    assert!(s2.starts_with("optimized: 1 of 9 source function(s) rewritten to optimizer residuals (lifted round trip: 2 definition(s) compared); source kept: 3 generic with buffer state"), "{s2}");
-    // a user-supplied `#[rewrite]` alternative is counted and named apart,
-    // never as an optimizer residual (DESIGN.md principle 3)
-    let mut low4 = low.clone();
-    low4.records.push(LowerRecord { function: "crate::v::u".into(), outcome: LowerOutcome::Lowered { origin: LowerOrigin::UserRewrite, rung: "Rewrite".into(), cost_source: 10, cost_residual: 5, helpers: vec![], via: String::new() }, optimizer_residual: Some("not used: the residual is not 3% cheaper".into()) });
-    low4.compared = 2;
-    let s4 = driver::gates::lowering_note(&low4);
-    assert!(s4.starts_with("optimized: none of 9 source function(s) rewritten to optimizer residuals; 1 rewritten to user-supplied `#[rewrite]` alternatives (user code, not optimizer output: `crate::v::u`) (lifted round trip: 2 definition(s) compared)"), "{s4}");
-    assert_eq!((low4.lowered_by(LowerOrigin::Optimizer), low4.lowered_by(LowerOrigin::UserRewrite)), (0, 1));
-    let j = low4.json().render();
-    assert!(j.contains("\"rewritten_by_optimizer\": 0") && j.contains("\"rewritten_by_user_rewrite\": 1") && j.contains("\"origin\": \"user_rewrite\"") && j.contains("\"optimizer_residual\": \"not used: the residual is not 3% cheaper\""), "{j}");
-    low4.user_rewrites_excluded = true;
-    assert!(driver::gates::lowering_note(&low4).contains("; user `#[rewrite]` alternatives excluded (evaluation-only build)"));
-    // an unknown reason is shown up to its details
-    assert_eq!(driver::gates::kept_reason_class("the source already uses the name `x`"), "the source already uses the name `x`");
-    assert_eq!(driver::gates::kept_reason_class("the residual cannot be printed as Rust: a loop"), "residual not printable as Rust");
-    // a whole-step failure is named
-    let low3 = LoweredModule { note: Some("no crate".into()), ..Default::default() };
-    assert_eq!(driver::gates::lowering_note(&low3), "optimized: none of the 0 source function(s) rewritten, the source is emitted as-is; nothing lowered: no crate");
 }

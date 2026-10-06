@@ -1,5 +1,10 @@
 # Lifting from rustc's MIR
 
+*2026-10-05: the optimizer, the lifted round trip (`--replace`, round-trip
+MIR, `L::shipped`), the lowered copies and `#[lift(opt)]` were removed; the
+sections below that describe them are history. Lifted code ships as
+written.*
+
 Status: prototype; every exec module of the repository reads its bodies
 through it: commonware-codec's varint with its laws and proofs unchanged,
 commonware-storage's MMR position and peak arithmetic (in place) with its
@@ -147,22 +152,12 @@ and lifted names, exactly as before.
   `mir::read`. What the source still reads besides the skeleton: the ghost
   language, constant initializers (their lifted form is in every
   `SPEC.lock`) and the functions of host models (§20).
-* **In place and the lifted round trip** (DESIGN.md §2.1). An in-place crate
-  is extracted as a whole (`merkle::position,merkle::location,merkle::mmr`,
-  its lowered copies stubbed by the sources, the dependencies' verifying
-  build scripts stubbed; a crate's `#[lift(opt)]` alternatives, when it has
-  any, compiled in the crate's context by `--inject` — storage's MMR has
-  none). The lifted round trip reads back a copy of
-  a rewritten file (the source, the rewritten functions' copies, the
-  helpers); its bodies must be rustc's too, so the round trip of a MIR
-  module reads `<stem>.roundtrip__<module>.sbmir`, the extraction of the
-  crate with that file replaced by the copy (`--replace`; the build writes
-  the copy to `OUT_DIR/<name>-roundtrip__<module>.rs`). The load checks the
-  copy's SHA-256 like any source, so a stale round-trip MIR fails the round
-  trip, and a host that compiles the file's lowered copy fails its build
-  (fail closed); re-extract and build again. A file with no rewritten
-  function has no round-trip copy and needs no round-trip MIR (storage's
-  MMR today).
+* **In place** (DESIGN.md §2.1). An in-place crate is extracted as a
+  whole (`merkle::position,merkle::location,merkle::mmr`, its own build
+  script stubbed, the dependencies' verifying build scripts stubbed).
+  (The lifted round trip, which read back the MIR of a file with
+  optimizer-rewritten functions, was removed with the optimizer on
+  2026-10-05.)
 
 ## 4. What works
 
@@ -183,25 +178,15 @@ and lifted names, exactly as before.
 * commonware-storage's MMR (`storage/sandblaster/mmr`, in place): all
   lifted exec functions of `position.rs`, `location.rs`, `mmr/mod.rs` and
   `mmr/iterator.rs`, read from `mmr.sbmir`, with every obligation and the
-  laws proven. **No MMR function is rewritten**: the optimizer finds no
-  cheaper residual for any of them (the build report's `lifted_optimizer`
-  gives each function's reason), so the lowered copy of `mmr/iterator.rs`
-  that rustc compiles (the host declares it by its lowered declaration) is
-  `mmr/iterator.rs` byte for byte after its leading `//!` lines, and there
-  is no round-trip copy to extract. (A hand-written proven alternative of
-  `PeakIterator::to_nearest_size`, `opt.rs`, used to replace it through a
-  `#[rewrite]` lemma; it was user code, not optimizer output, and is
-  removed: DESIGN.md principle 3. It measured about 40× faster than the
-  original binary search on uniform-bit-length sizes, in a harness without
-  an A/A control; that is not an optimizer result and is not reproducible
-  from the current tree.) LAWS.rs is unchanged; PROOF.rs changes in one
-  place (below). The lift conformance check of the in-place modules passes
-  on the MIR-read bodies (§5). Its harness compiles a copy of the host crate
-  without a build script, so a lowered declaration (`mod m {
-  include!(concat!(env!("OUT_DIR"), ..)); }`) is compiled there as the lift
-  reads it, `mod m;` (`conform::in_place::read_lowered_as_plain`): the
-  harness compares the source the lift verified, and the copy rustc builds is
-  the lifted round trip's to check.
+  laws proven; rustc compiles the four files as written (`mmr/mod.rs`
+  declares `pub mod iterator;`). (A hand-written proven alternative of
+  `PeakIterator::to_nearest_size`, `opt.rs`, once replaced it through a
+  `#[rewrite]` lemma and measured about 40× faster than the original
+  binary search on uniform-bit-length sizes, in a harness without an A/A
+  control; that shipping path was removed on 2026-10-05, and such code is
+  now simply written as the implementation and proven.) LAWS.rs is
+  unchanged; PROOF.rs changes in one place (below). The lift conformance
+  check of the in-place modules passes on the MIR-read bodies (§5).
 * commonware-storage's Merkle proof verifier, first set
   (`storage/sandblaster/verifier`, in place): every lifted function of
   `hasher.rs` (`Standard`'s methods and the `Hasher` trait's provided ones at
@@ -384,8 +369,8 @@ does not declare (the lift reads them).
    and 11 definitions per root): the verifier 1,643 (1,647), the MMR
    5,598 (5,602), varint 21,237 (21,241), every law proven. The front end's
    tests that lifted hand-written sources moved to MIR fixtures (§4); the
-   lowering tests whose fixtures do not lower from MIR are open (DESIGN.md
-   §2.1, "The optimizer on lifted modules").
+   lowering tests whose fixtures do not lower from MIR were open (moot
+   since the optimizer's removal, DESIGN.md §8.2).
 4. **Skeleton from MIR**: generate the lifted items (struct and enum
    declarations from the `adt-def`s, signatures from the instances' MIR
    signatures with state passing from `&mut`, the sealed families from the
@@ -430,8 +415,9 @@ does not declare (the lift reads them).
 ## Appendix: `docs/mir-lift.md` §20 (text pending the next lock acceptance)
 
 `SEMANTICS.md` is part of every `SPEC.lock`'s `semantics` hash, so this
-section joins it when the locks are next accepted (as DESIGN.md §2.1 does
-for `#[lift(opt)]`); until then it is normative from here.
+section joins it when the locks are next accepted (DESIGN.md §19 lists
+what else in SEMANTICS.md waits for that acceptance); until then it is
+normative from here.
 
 #### 20. Bodies read from rustc's MIR (`#[lift(mir = "m.sbmir", ..)]`)
 
@@ -527,7 +513,7 @@ not an item), and for
 every variant of an ADT whether dropping it runs code (`(no-glue)`: no
 `Drop` impl, no field with drop glue).
 
-The lifted round trip of a MIR module (DESIGN.md §2.1) reads the copy of a
+The lifted round trip of a MIR module (removed 2026-10-05, DESIGN.md §8.3) read the copy of a
 rewritten file from `<stem>.roundtrip__<module>.sbmir`, extracted with that
 file replaced by the copy the build writes (`OUT_DIR/<name>-roundtrip__<module>.rs`);
 it is checked like the module's own file (every source's SHA-256), so a
@@ -882,22 +868,8 @@ laws and proofs are about.
   S's result (its states in parameter order, then its return value) is
   erased component by component into `Out`.
 
-**The panic statement** (DESIGN.md §8.2 item 12; `stmt::statement_panic`;
-exec-only builds only, never a theorem of a verified build). A function of
-unverified code whose panics no precondition rules out has no `S_f`; the
-optimizer works on its panic-explicit reading `P = f__panics : Π x̄ (.h̄ :
-pre). Option(R)` (`opt::panics`, `None` the panic outcome), and the
-structured side is `P`:
-
-```text
-L::pthm::<f> : Π x̄ (.h̄ : pre). Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
-    Eq(Option(Out), L::<f>::run n b0 (Some(init(x̄))),
-       match P x̄ .h̄ with None => None | Some(y) => Some(erase(y)))
-```
-
-Where `P` returns a value, it says what the plain statement says. Where `P`
-is `None`, it says only that the literal reading returns no value; the gate
-accepts it only where that means a panic (§20.6).
+(The panic statement, a variant of the theorem for the optimizer's
+panic-explicit readings, was removed with the optimizer on 2026-10-05.)
 
 #### 20.6 The gate
 
@@ -945,103 +917,12 @@ pending-gates development build is deleted).
   refusal.
 * The report's `mir_theorems` section lists, per module, every theorem and
   loop lemma, proven or not and why.
-* **The panic statement** is accepted (`gate::Ledger::accept_shipped_panic`,
-  only for a function the lifted round trip replaces through its
-  panic-explicit reading, §20.7) under two more checks, which make "returns
-  no value" mean "panics": (5) `P` has exactly the source function's
-  parameters and preconditions (its kernel type is the source's with the
-  result wrapped in `Option`); (6) every instance either side's literal
-  reading runs is read with no fault (no construct read as `None` but a
-  panic: no undefined behaviour, nothing unmodeled), no loop header and no
-  self-call (no fuel is consumed, so no run is cut short), and each block L
-  reads as panicking panics: every path from it ends in a diverging call,
-  `unreachable`, an abort or an unwind, checked on the MIR (not taken from
-  `cfg.rs`).
+#### 20.7 The shipped code (removed)
 
-#### 20.7 The shipped code: the lifted round trip's theorems
-
-The lifted round trip (DESIGN.md §2.1) of a module read from MIR reads its
-copy's bodies from the copy's MIR (`<stem>.roundtrip__<module>.sbmir`),
-which the load checks against the copy's text like any extraction (every
-source's SHA-256); the emitted file is the copy's text, so that MIR is the
-code rustc builds. Its theorems decide every rewrite of such a module (no
-structural comparison runs; below). For every rewritten function `f` and
-each of its verified instances (replacement `g`, the optimizer's link:
-`<f>::rewrite_equiv : Π x̄ h̄. Eq(R, f x̄ h̄, g x̄ h̄)` of a `#[rewrite]`, a
-residual's `..::equiv : Π x̄. Eq(R, g x̄, f x̄)`, or conversion):
-
-* L is read for the copy's new instances, continuing the gate's reading
-  of the module (through the trusted loader); an instance both extractions
-  hold must be the same MIR in both, else the trusted check refuses the
-  shipped theorem.
-* Each helper `__sandblaster_opt_<h>` gets `L::thm::<id>` of §20.5
-  against the verified definition it replaces (the residual's helper, or
-  the verified alternative), under that definition's declared contract; the
-  check copy `__sandblaster_check__<f>` (per instance type, and before it
-  the dispatch impl method it calls, for a function lowered through a
-  per-type dispatch) gets `L::thm::<id>` against `g`, its structured side the
-  call of `g`. A replacement without a declared contract (the optimizer's
-  residual) is stated under the source function's.
-* From it, by a transport along `equiv`, the **shipped theorem**
-  `L::shipped::<id>`: §20.5's statement of the copy's MIR instance against
-  `f`, with `f`'s declared contract. The code rustc compiles returns, at
-  sufficient fuel, exactly the value of the function the laws are about.
-
-A function is lowered only when the trusted check finds `L::shipped::<id>`
-in the kernel with that statement; else it keeps its source text (the
-round trip rejects it; a host compiling the lowered copy fails its
-build).
-
-**No structural comparison** (stage finish-A). Until then a rewrite of a
-module read from MIR also needed the copy's structured reading to equal its
-replacement in all relevant positions (`alpha_eq_relevant` modulo `let x =
-v; x` ≡ `v` and the reader normal form), every copy to be the delegation
-`λ x̄. g x̄`, and only then were the theorems proven. The comparison is
-dropped for these modules: the structured reading of the copy is an
-untrusted proposal (§20.2), and the theorems above are about the literal
-reading of the copy's MIR, the code rustc compiles, against the very
-definitions the comparison compared with (a helper against its residual,
-the copy against the call of `g`); with the optimizer's kernel-checked
-link they say what the laws need of the shipped code, so a syntactic
-equality between two readings adds nothing they do not decide. It refused
-correct code: rustc's MIR of a printed residual binds temporaries by `let`,
-tests a checked operation's `Option` with `is_none` and reaches sub-slices
-through core's `Index`, so the reading of the copy differed from the
-residual it computes (held-out v1, now development: `next_power_of_two`,
-`read_u32_le`, `mix64`, cheaper and refused with "relevant structure
-differs"; `tests/lift_opt.rs`, fixture `opt_shipped`, where a test hook runs
-the comparison beside the theorems and it refuses all three rewrites the
-theorems accept). The theorems fix the shipped code's meaning, not its cost:
-that the copy performs the residual's operations rests on the (untrusted)
-printer printing the residual the cost model priced, a performance claim
-that the held-out harness measures on the lowered copies, never a
-correctness one. The comparison remains only for a lifted module without
-MIR (`driver::lowered::compare_read_back`), which the lift no longer
-accepts. Stage finish-A also made the walker see through the sharing of an
-S-split's committed scrutinee (`simproof.rs`: refutation by evaluation
-evaluates a `let`-headed side and abstracts inside `let` bodies), and L read
-a slice's sub-slices (§20.4, `leaf::slice_index_*`), both of which these
-helpers' theorems needed.
-
-A function of unverified code that can panic (§20.5's panic statement) is
-replaced through its panic-explicit reading `P`: the residual `r` of `P`
-is printed in its Rust form (`Some(v)` is `v`, a kept checked operation
-whose `None` is the panic is Rust's operator, any other `None` an explicit
-`panic!`), and its theorems are two panic statements, both against `P`
-under the source function's declared contract: `L::pthm::<id>` of the
-source function's own MIR instance, and `L::pshipped::<id>` of the copy's
-(from the helpers' theorems against `r`, along the link `Π x̄. Eq(Option(R),
-r x̄, P x̄)`). The function is lowered only when the trusted check accepts
-both (§20.6, checks 5 and 6): on every input the shipped code and the
-source return the same value, or both panic. The panic message and location
-are not part of the meaning. The lowering record lists the theorems
-(`shipped_theorems`). Their declarations are replayed from the verdict
-cache under a key of the generator, the structured readings of `f`, `g`, the
-helpers' definitions and the link, the declared contracts, and the round
-trip's MIR of every instance the copy's, the dispatch method's and the
-helpers' readings run. A lowering run without a preceding gate (a stage
-tool) reads and proves the module's instances the copy needs first.
-
+The lifted round trip's theorems of optimizer-rewritten functions
+(`L::shipped::<f>`, `Ledger::accept_shipped`) were removed with the
+optimizer on 2026-10-05: lifted code ships as written, so §20.6's theorems
+are about exactly what rustc compiles.
 
 #### 20.8 Checks of L itself: conformance and fault injection
 

@@ -1,227 +1,111 @@
 # sandblaster
 
-**Bend 2's "everything is proven" discipline, as fast as Rust (faster is the goal: not yet shown on held-out code).**
+**Write very complex, very optimized Rust and know it is right.**
 
-sandblaster is a DSL embedded in Rust. You write ordinary-looking Rust — a
-restricted, provable subset — plus Bend-style laws and Verus-style inline
-proofs. `cargo build` elaborates every function into a small dependently typed
-kernel, which must check that
+Humans review short laws. Agents write the code and the proofs. A small
+dependently typed kernel checks them, on the code rustc compiles.
+sandblaster reads existing Rust as it is: the item skeleton from the
+source, every function body from rustc's own MIR. Nothing is generated,
+rewritten or printed for rustc. `cargo build` fails unless
 
-* every function terminates and never panics (no overflow, division by zero,
-  out-of-bounds access or bad shift is reachable),
-* every contract (`#[requires]` / `#[ensures]`) and every law in `LAWS.rs` is
-  proven, and
-* every optimization the compiler performed — symbolic-execution
-  specialization, proven hardware variants (e.g. ARMv8 SHA-256 instructions),
-  proven removal of bounds checks — is equal to the original code,
+* every verified function terminates and never panics within its stated
+  preconditions (no overflow, division by zero, out-of-bounds access or bad
+  shift is reachable),
+* every contract and every law in `LAWS.rs` is proven,
+* every function's kernel theorem ties rustc's MIR of it to the reading the
+  laws are about, and that reading agrees with rustc on generated inputs,
+  and
+* the §15 gates pass: the laws pin the behavior down (determinacy, known
+  answers, law rules) and the specification equals the accepted
+  `SPEC.lock`.
 
-and only then emits Rust for `rustc`. If anything is unproven, the build
-fails. There is no flag to skip proofs and no flag to skip optimization.
+There is no flag to skip a proof or a gate. Spec mutation (does every
+vocabulary function have known answers that pin it down?) is a review tool
+an author or reviewer runs on demand, `sandblaster mutate <root>`, not part
+of the build.
 
 ```text
-sandblaster source (Rust syntax) ──syn──▶ front end ──▶ elaborator ──▶ kernel (TRUSTED)
-                                                          │               ▲
-                                   automation (untrusted) ┘   optimizer ──┘ (every result checked)
-                                                                   │
-                        canonical Rust ◀── round-trip check ◀── codegen
+Rust source + rustc's MIR ──lift──▶ front end ──▶ elaborator ──▶ kernel (TRUSTED)
+LAWS.rs, PROOF.rs ──syn──┘                          │              ▲
+                               automation (untrusted) ┘  theorem gate (L = S per function)
+                                                        │
+                       §15 gates, SPEC.lock, lift conformance ──▶ verdict
 ```
 
-## Results: the QMDB verifier
+**Optimized code is the crate's own Rust.** An agent writes the fast
+version in the host crate and proves it meets the same laws, or equals a
+short reference stated in the laws file. If the lock diff is empty, there is
+nothing to review for correctness; the reviewer reads the benchmark.
+sandblaster used to include a proven auto-optimizer. On code it was not
+built for it changed nothing (about 1.00× against rustc, held-out and on
+real Commonware code), so it was removed along with the code printer and
+the QMDB fixture (2026-10-05; DESIGN.md, North star and §19). The hardware
+instruction semantics stay first-class: the intrinsic models
+(`sandblaster/targets`: NEON, SHA-2/3, SSE to AVX-512, SHA-NI, GFNI), each
+validated natively against the hardware, are what proofs over SIMD code
+are about (DESIGN.md §9); reading `core::arch` calls from MIR is the next
+step (C8).
 
-The first program ported is [`qmdb-bend2`](https://github.com/patrick-ogrady/qmdb-bend2),
-a Bend 2 verifier for Commonware QMDB current-membership proofs (MMR, SHA-256,
-activity bitmap). Its DSL sources, laws, proofs and fixtures are kept here as a
-test fixture of the toolchain ([`fixtures/qmdb/`](fixtures/qmdb/)); the
-numbers below were measured on the full port (with its baseline, oracle and
-benchmark crates) before the toolchain moved into the monorepo:
+## Verified Commonware code in this tree
 
-* The verified build of the port is **VERIFIED + OPTIMIZED**: 747 obligations and all
-  **9 laws** (one-to-one with the Bend `LAWS.bend`) proven, 123 kernel-checked
-  definitions, `compress_sha2 ≡ compress` (ARMv8 SHA2 intrinsics vs FIPS 180-4)
-  proven by the kernel's word-algebra rule in 18 ms, 48 functions specialized,
-  every emitted definition round-tripped against the verified core — in about
-  6 s.
-* The generated crate passes every test of the reference port (all fixtures,
-  the 27 `tests.ts` mutation cases, prefixes/extensions/bit flips, robustness
-  runs, 4500 Bend-oracle differential cases, SHA-256 known answers).
+Three modules are verified by their crate's `build.rs`, each with an
+accepted specification lock and every §15 gate enforced:
 
-Per-`verify` time, geometric mean over the 29 accepting fixtures (Apple M5 Pro;
-N = 1; a development-set measurement, on the program the optimizer was
-developed against; taken before the fairness audit split the QMDB fixtures,
-when the optimizer's profile was recorded on the same fixtures that were
-timed, and not re-timed since):
-
-| implementation | ns / verify |
-| --- | ---: |
-| **sandblaster (generated, verified, optimized)** | **289** |
-| **the same sources compiled by rustc**, hand-multiversioned on `compress_sha2` (the fair rustc baseline) | 318–325 |
-| Commonware native verifier (verify only) — a different program: the generic verifier | 430 |
-| Commonware native verifier (decode + verify) — a different program: the generic verifier | 463 |
-| Bend 2, native C | 21,630 |
-| Bend 2, JavaScript | 248,056 |
-
-Both sandblaster rows use `compress_sha2`, a **hand-written** ARMv8 SHA-2
-kernel proven equal to the portable FIPS 180-4 `compress`; its speed is not
-the optimizer's. The optimizer's own share is the first row against the
-second (289 vs 318–325 ns; at N = 32, 0.88–1.00× of the same baseline). The
-Commonware rows compare a different program: the port is fixed-shape, with
-one hand-made hash function per message length. Without hardware SHA (the
-sources compiled by rustc with the portable `compress`) a verify takes
-1,932 ns: that gap is the hand-written kernel's, not the optimizer's.
-"Faster than rustc" is a goal with development-set evidence only.
-
-**Held-out evaluation** (`bench/heldout-v2/REPORT.md`; held-out v2, frozen
-before the reader and optimizer work it judges): on 30 functions written
-blind from an idiom list, timed against rustc on the unmodified source in
-one binary with an A/A control, the optimizer-only geomean is **1.007**
-(default layout; **1.002** aligned; 0.999 without overflow checks), with
-**0 of 30 functions changed**: the optimized subject is the source compiled
-again, so the numbers are placement noise (the A/A control spreads
-0.87–1.19). 9 functions are refused by the MIR reader, 11 by exec-only
-elaboration, and of the 10 that reach the optimizer none yields a cheaper
-printable residual. The monorepo half, H2-v2, is empty: the frozen sampling
-rule probed all 869 candidates and accepted none (most are too small for
-its size criterion). On code it was not built for, the optimizer does
-nothing yet; the numbers above are the development set (DESIGN.md, North
-star). Held-out v1 (`bench/heldout/REPORT.md`) is development data now: the
-three rewrites stage finish-A lets through there are not faster: one
-compiles to rustc's own machine code, one measures 1.00, and `read_u32_le`,
-for which the cost model predicted 0.70, measures 1.07–1.12.
-
-**The shipped verified code** (`bench/shipped-harness/REPORT.md`): what
-commonware-codec and commonware-storage compile from sandblaster's emitted
-and lowered copies (codec's varint, storage's MMR and the verifier's first
-set), timed against the original Commonware functions in one binary, is the
-original code: 28 of 33 functions compile to identical machine code and the
-other 5 differ only in the addresses of each copy's constant data, exactly
-as the A/A pair does; geomean 1.003 (default) / 1.002 (aligned).
-
-**Verified Commonware code in this tree.** Three modules are verified by
-their crate's `build.rs`, each with an accepted specification lock and
-every §15 gate enforced (a failed proof or gate fails the crate's build):
-
-| module | mode | lifted functions with a kernel-checked MIR theorem | lock root |
+| module | mode | MIR theorems | lock root |
 | --- | --- | ---: | --- |
-| commonware-codec's varint (`codec/sandblaster/varint`) | module (`compile_module`) | 63 of 63 | `f0021c19…` |
-| commonware-storage's MMR position and peak arithmetic (`storage/sandblaster/mmr`) | in place (`compile_lifted`) | 69 of 69 | `1d8d5969…` |
-| the first set of storage's Merkle proof verifier (`storage/sandblaster/verifier`: `hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree reconstruction): 8 laws, 2,642 obligations | in place (`compile_lifted`) | 69 of 69 | `3e969a79…` |
-
-## What the code looks like
-
-Exec code is plain Rust with contracts where needed (`fixtures/qmdb/sandblaster/merkle.rs`):
+| commonware-codec's varint (`codec/sandblaster/varint`): 16 laws | module (`compile_module`) | 63 of 63 | `9532b20c…` |
+| commonware-storage's MMR position and peak arithmetic (`storage/sandblaster/mmr`): 11 laws | in place (`compile_lifted`) | 69 of 69 | `0c1fbaeb…` |
+| storage's Merkle proof verifier, set 1 (`storage/sandblaster/verifier`: `hasher.rs` at `Standard<Sha256>`, `proof.rs`'s subtree reconstruction): 8 laws | in place (`compile_lifted`) | 69 of 69 | `12015876…` |
 
 ```rust
-pub fn bag_prefix(n: usize, xs: &[Digest], acc: Digest) -> Option<Digest> {
-    if n == 0 {
-        return fold_back_join(&acc, fold_back(xs));
-    }
-    match xs {
-        [] => None,
-        [head, tail @ ..] => bag_prefix(n - 1, tail, fold(&acc, head)),
-    }
+// storage/build.rs
+fn main() {
+    sandblaster::build::compile_lifted("sandblaster/mmr/mod.rs", "mmr");
+    sandblaster::build::compile_lifted("sandblaster/verifier/mod.rs", "verifier");
 }
-```
-
-Laws are human-owned claims (`fixtures/qmdb/sandblaster/LAWS.rs`, like Bend's `LAWS.bend`):
-
-```rust
-/// The production peak bagger composes across any partition of its
-/// left-folded prefix.
-#[law]
-fn bag_prefix_partition(xs: &[Digest], ys: &[Digest], n: usize, acc: Digest) {
-    requires((xs.len() as Int) + (ys.len() as Int) <= ISIZE_MAX);
-    requires((xs.len() as Int) + (n as Int) <= (usize::MAX as Int));
-    ensures(
-        merkle::bag_prefix(xs.len() + n, seq::append(xs, ys), acc)
-            == match merkle::bag_prefix(xs.len(), xs, acc) {
-                None => None,
-                Some(next) => merkle::bag_prefix(n, ys, next),
-            }
-    );
-}
-```
-
-Proofs are scripts checked by the kernel (`fixtures/qmdb/sandblaster/PROOF.rs`, like
-Bend's `PROOF.bend`) — induction is a recursive call, `auto` closes the rest:
-
-```rust
-#[proof]
-fn bag_prefix_partition(xs: &[Digest], ys: &[Digest], n: usize, acc: Digest) {
-    match xs {
-        [] => {}
-        [head, tail @ ..] => {
-            bag_prefix_order(tail.len() + n, *head, seq::append(tail, ys), acc);
-            bag_prefix_order(tail.len(), *head, tail, acc);
-            bag_prefix_partition(tail, ys, n, merkle::fold(&acc, head));
-            // ... two `assert`s that auto proves
-        }
-    }
-}
-```
-
-Hardware kernels are written with `core::arch` intrinsics and marked
-`#[implements(crate::sha256::compress)]`; the kernel proves them equal to the
-portable function against formal instruction models that were themselves
-validated against the real instructions (10⁷ random cases per model on this
-machine). Only proven, evidence-backed variants are dispatched.
-
-## Layout
-
-| Path | What |
-| --- | --- |
-| [`DESIGN.md`](DESIGN.md) | the normative design (subset, ghost language, core calculus, elaboration, automation, optimizer, hardware, storage/networking/concurrency stretch goal) |
-| [`SEMANTICS.md`](SEMANTICS.md) | the elaboration semantics of the subset (part of the trusted base) |
-| [`kernel/`](kernel) | `sandblaster-kernel`, the trusted kernel ([`AUDIT.md`](kernel/AUDIT.md) walks through every rule) |
-| [`front/`](front) | `sandblaster-front`: loader, resolver, typechecker, subset validator, elaborator, `auto`, optimizer, codegen, round trip |
-| [`targets/`](targets) | `sandblaster-targets`: intrinsic models (Rust + kernel core text) with hardware-validation evidence |
-| [`sandblaster/`](sandblaster) | `sandblaster`, the facade: erasing macros, `proof!`, `sandblaster::build::compile` |
-| [`cli/`](cli) | `sandblaster-cli`, binary `sandblaster`: `sandblaster check \| emit \| report \| spec \| coverage \| eval` (every verdict command runs the §15 gates) |
-| [`macros/`](macros), [`memguard/`](memguard), [`rulegen/`](rulegen) | erasing proc macros; the allocation cap; offline rule discovery for the optimizer |
-| [`fixtures/qmdb/`](fixtures/qmdb) | the QMDB port's DSL sources, laws, proofs, locks and fixtures (a test fixture of the toolchain's suites) |
-| [`bench/opt-corpus/`](bench/opt-corpus) | the optimizer corpus harness |
-| [`bench/heldout-v2/`](bench/heldout-v2), [`bench/heldout/`](bench/heldout) | the held-out evaluation (v2, frozen) and its retired predecessor (v1, development data now) |
-| [`bench/heldout-harness/`](bench/heldout-harness), [`bench/shipped-harness/`](bench/shipped-harness) | the fair harnesses: the optimizer against rustc on held-out code; the shipped verified code against the original Commonware functions |
-| [`tools/gates/`](tools/gates) | the optimizer fairness gates (G6 frozen inputs, fair baseline) |
-| [`mirx/`](mirx) | the MIR extractor (a rustc driver on a pinned nightly) |
-| [`docs/`](docs) | the proof guide, the optimizer design and plan, the QMDB specification design |
-
-## Using it
-
-A sandblaster crate keeps its DSL sources in `sandblaster/` and lets `build.rs`
-verify and generate the shipped code:
-
-```toml
-# Cargo.toml
-[build-dependencies]
-sandblaster = { workspace = true, features = ["build"] }
-```
-
-```rust
-// build.rs
-fn main() { sandblaster::build::compile("sandblaster/mod.rs"); }
-
-// src/lib.rs  (nothing else is allowed here)
-include!(concat!(env!("OUT_DIR"), "/sandblaster.rs"));
 ```
 
 ```sh
-cargo check -p commonware-codec                                            # codec's build.rs verifies varint
-cargo run -p sandblaster-cli -- check sandblaster/fixtures/qmdb/sandblaster  # verification summary
-cargo run -p sandblaster-cli -- emit  sandblaster/fixtures/qmdb/sandblaster  # print the generated Rust
+cargo test -p commonware-codec                       # verifies the varint (about 5.5 min)
+cargo test -p commonware-storage --lib               # verifies the MMR and the verifier (about 19 min cold)
+cargo run -p sandblaster-cli -- spec storage/sandblaster/mmr     # the spec sheet and the lock status
+cargo run -p sandblaster-cli -- mutate storage/sandblaster/mmr   # on demand: vocabulary the known answers miss
 ```
+
+## Layout
+
+| path | what |
+| --- | --- |
+| [`DESIGN.md`](DESIGN.md) | the design: the model (laws, references, implementation), the trusted base, the §15 gates, proof techniques, roadmap, what was removed |
+| [`SEMANTICS.md`](SEMANTICS.md) | the elaboration semantics (trusted; hashed into every lock) |
+| [`kernel/`](kernel) | `sandblaster-kernel`, the trusted kernel; [`AUDIT.md`](kernel/AUDIT.md) walks through every rule |
+| [`front/`](front) | `sandblaster-front`: front end, elaborator, `auto`, the lift and the MIR reading, the §15 gates, the lock, the counterexample engine, conformance |
+| [`sandblaster/`](sandblaster) | the facade: erasing macros, `proof!`, `sandblaster::build::{compile_module, compile_lifted}` |
+| [`cli/`](cli) | binary `sandblaster`: `check \| report \| spec \| coverage \| mutate \| eval \| conform` |
+| [`mirx/`](mirx) | the MIR extractor (a rustc driver on a pinned nightly) |
+| [`macros/`](macros), [`memguard/`](memguard) | erasing proc macros; the allocation cap |
+
+Documents in [`docs/`](docs):
+
+| document | what |
+| --- | --- |
+| [`PROOF-GUIDE.md`](docs/PROOF-GUIDE.md) | how to write laws and proofs that check |
+| [`mir-lift.md`](docs/mir-lift.md) | reading bodies from rustc's MIR (its §20 is normative until it joins SEMANTICS.md) |
+| [`checked-structuring.md`](docs/checked-structuring.md) | the literal reading L, the structured reading S and the theorem between them |
 
 ## Trusted computing base
 
-The kernel (with its word normalizer, linear-arithmetic certificate checker and
-fixed axiom list), the elaboration semantics of the canonical dialect
-(SEMANTICS.md), the kernel prelude definitions, the intrinsic models and the
-generated dispatch/load glue, and `rustc`/LLVM. Automation, the optimizer and
-the printer are untrusted: everything they produce is checked. See DESIGN.md
-§1.1 and the kernel's AUDIT.md.
+The kernel (with its word normalizer, linear-arithmetic certificate checker
+and fixed axiom list), the elaboration semantics (SEMANTICS.md), the kernel
+prelude definitions, the lift (the literal reading of rustc's MIR, each
+function's theorem statement and its check, the item skeleton, the buffer
+and host models), and rustc/LLVM. Automation, the structured MIR reading and
+its proof walker are untrusted: everything they produce is checked. See
+DESIGN.md §1.1 and the kernel's AUDIT.md.
 
 ## Status
 
-See DESIGN.md §12 for the phase log. The storage / networking / concurrency
-extension (journal → QMDB, p2p → Simplex, with zero overhead versus
-Commonware) is designed in DESIGN.md §13; its first milestone (E0) is
-Commonware's metadata store end to end.
+The work now is proof techniques and laws for complex optimized code:
+panic contracts, lockstep and coupled-loop proofs between an implementation
+and its reference, bit-trick automation, and per-function checking, driven
+by pilots on real Commonware hot paths (DESIGN.md §16–§18).

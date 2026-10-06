@@ -39,7 +39,7 @@ abstraction (DESIGN §15.1, §15.5) · 20 closed evaluation (DESIGN §15.7) ·
 | `src/inductive.rs` | 136/108 | inductive declarations, positivity, propositional `Irr` fields |
 | `src/env.rs`, `src/api.rs`, `src/util.rs` | 112/64, 511/311, 574/435 | environment, entry points, helpers (budget, stack guard, traversals) |
 | `src/quote.rs` | 970/785 | read-back; trusted where the checker uses it (`infer` of `λ`, §3), in `eval_closed` (§20) and in `obs_eq` statements (§19); its memo: §7.5 |
-| `src/alpha.rs` | 285/231 | `alpha_eq_relevant`, `check_residual_equal` (trusted for the codegen round trip, DESIGN §8.3) |
+| `src/alpha.rs` | 285/231 | `alpha_eq_relevant` (trusted for the theorem gate's statement comparison, DESIGN §1.1 item 8), `check_residual_equal` (no caller since the code printer's removal, DESIGN §8.3) |
 | `src/prelude.rs` + `prelude/*.core` | 121/92 + 748 | the prelude definitions (TCB item 3) and their loader |
 | `src/syntax/*` | 1709/1554 | parser/printer; trusted only as the reader of the embedded prelude text |
 | `src/section.rs` | 585/457 | `Refs*` (`Env::refs_closure`) and `complete_p(R)` (`Env::abstract_section`), §19 |
@@ -54,7 +54,7 @@ typed quoting for automation.
 fix of 2026-09-25, §7.5: +44 / +31 in `quote.rs`; the read-back
 memo of §7.5: +84 / +54 in `quote.rs`; before it: 12,600 / 9,847; the
 2026-09-24 `bvnorm` fixes of §10 — `lows` and one width per class: +56 /
-+24; O3, the K1 bit-count definitions of the optimizer design §11.4: +21 /
++24; O3, the K1 bit-count definitions of the (removed) optimizer design §11.4: +21 /
 +15 in `axioms.rs`; before O3: 12,523 / 9,808; phase 4:
 11,684 / 9,184; the §15 APIs of §19–§20 added 839 / 624: `section.rs`
 457, `closed.rs` 125, `api.rs` 40, `lib.rs` 2 — of which 67 / 44 are the
@@ -767,7 +767,7 @@ exact Rust semantics:
 | *retired* `leading_zeros_le/lt`, `trailing_zeros_le/lt` (phase 3) | — | O3: valid at no width (ids kept, names no longer parse); now the checked lemmas `bits::{leading,trailing}_zeros_{le,lt}_<w>` derived from K1 |
 
 K1 here is the optimizer design's kernel delta (§11.4 of
-`docs/optimizer-design.md`), not the phase-3 issue K1 of §5/§8. Notation:
+`docs/optimizer-design.md`, in git history at `4a0e5a23fc`), not the phase-3 issue K1 of §5/§8. Notation:
 `[b]` is `match b : Bool return Int with | false => 0int |
 true => 1int end`, `Σ` is a left-nested `iadd`, `to_int` the cast to
 `Int`, all literals are in range at width `w`. The statements are in `Int`
@@ -831,14 +831,17 @@ elements, DESIGN §3.2).
 
 * `add_def`, `add_inductive`, `check`, `infer`: §3–§6. Each public entry
   point installs the stack guard (§14).
-* `check_residual_equal` (`alpha.rs:270`, codegen): the candidate must be
+* `check_residual_equal` (`alpha.rs:270`; its only caller, the code
+  printer, was removed on 2026-10-05, DESIGN §8.3): the candidate must be
   straight-line (no relevant `match`, `rec`, `absurd`, no relevant reference
   to the reference or a later global — it is emitted as the reference's
   body), well-typed at the reference's type with `Erased` allowed only in
   irrelevant positions, and convertible with the reference in the
   transparent mode (unfolding is sound). *Pinned by:* kernel
   `residual_candidates`, opaque `residuals_are_compared_transparently`.
-* `alpha_eq_relevant` (`alpha.rs:196`, codegen round trip DESIGN §8.3):
+* `alpha_eq_relevant` (`alpha.rs:196`; the theorem gate compares each
+  `L::thm::f`'s type with the generated statement by it, DESIGN §1.1 item 8,
+  and the elaborator uses it; formerly also the codegen round trip):
   syntactic α-equivalence ignoring names and every irrelevant position
   (never evaluates, except to find the Σ of a pair whose type is not
   syntactically a Σ); shared node pairs found equal are memoized. *Pinned
@@ -888,7 +891,8 @@ elements, DESIGN §3.2).
 
 ## 15. What is not trusted
 
-The front end, elaborator, automation, optimizer and printer (DESIGN §1.1);
+The front end, elaborator and automation (DESIGN §1.1; the optimizer and
+the printer were removed on 2026-10-05);
 in this crate: `lincert` (search output re-checked), `abstract_occurrences`
 and typed quoting for automation (outputs re-checked), diagnostics
 (size-bounded rendering), the printer (except as the round-trip guard of
@@ -985,14 +989,17 @@ of < 8k. Candidates, in order of TCB reduction per effort:
    that compute exactly what plain evaluation computes; they could be
    dropped at a cost in speed (measured: phase-2 perf table).
 5. **`bvnorm` by reflection** (−2k): the long-term plan (§10).
-6. `alpha.rs` (0.23k) is only trusted for the codegen round trip claim; it
-   could move next to the round trip if that claim's TCB is accounted there.
+6. `alpha.rs` (0.23k): `alpha_eq_relevant` is trusted by the theorem gate;
+   `check_residual_equal` has no caller since the printer's removal and
+   could leave the kernel at its next interface change.
 7. Smaller: `garbage()` placeholders for non-dependent codomains could be
    replaced by always evaluating arguments (simpler, slower); the typed
    quote's field-type recomputation duplicates `arm_fields`.
 
-Nothing in the crate is dead code; `Env::conv_opaque`, `eval_opaque` and
-`check_residual_equal` are used by the optimizer.
+`eval_opaque` is used by the reference evaluator, the counterexample
+engine and the MIR walker. `Env::conv_opaque` and `check_residual_equal`
+lost their only caller with the optimizer and printer (2026-10-05); they
+stay because the kernel's interface is frozen.
 
 ---------------------------------------------------------------------------
 
@@ -1387,19 +1394,19 @@ are about is checked against it by a kernel theorem per lifted function.
 | --- | --- | --- | --- |
 | `front/src/mir/literal.rs` | 1,297 (1,287 before stage finish-A's slice leaves, 1,217 before stage reader-widen) | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally. The post-order, the loop headers, the panicking blocks and type-occurrence pruning come from the untrusted `cfg.rs` as numbers and booleans: they only place fuel (every decrease is kernel-checked) or read a block or path as `None` | the MIR reference (each construct's meaning); `literal.core`; the names of `mod.rs`; the lift's models in the leaves (A5); `cfg.rs` for nothing but fuel placement and `None` |
 | `front/src/mir/literal.core` | 186 (170 before stage finish-A's slice leaves, 139 before stage reader-widen) | L's library: the option monad, checked/unchecked/division operators per width, signed comparisons and sign extension of bits, `bswap`, array get/set under the bound test, the leaves' models | the kernel's primitives and prelude; the lift's models (`crate::__lift_model`, host models) in the leaves |
-| `front/src/mir/stmt.rs` | 234 (210 before stage optimizer-generic) | the statement `L::thm::f`: `S_f`'s telescope, `init`, `erase` (its preconditions are `S_f`'s, which the elaborator's check below makes the declared contract's); the panic statement of a panic-explicit reading `P` (`docs/mir-lift.md` §20.5: `run = match P x̄ with None => None \| Some(y) => Some(erase(y))`, exec-only builds only) | `S_f`'s telescope (the elaborator and its precondition check); L's `LFn` record |
+| `front/src/mir/stmt.rs` | 213 (234 with the optimizer's panic statement, removed 2026-10-05; 210 before stage optimizer-generic) | the statement `L::thm::f`: `S_f`'s telescope, `init`, `erase` (its preconditions are `S_f`'s, which the elaborator's check below makes the declared contract's) | `S_f`'s telescope (the elaborator and its precondition check); L's `LFn` record |
 | `front/src/mir/ir.rs`, `sexp.rs` | 482, 131 | the parse L reads; malformed input is an error, never a default | the printer's format |
 | `front/src/mir/mod.rs` | 531 (491 before stage reader-widen) | names (`kernel_adt`, `is_transparent`, `host_model_method`, `instance_global`: the lifted function a module instance is) and the load checks (format version, module, compiler release, overflow checks, the sources' SHA-256) | the lift's names (`ModuleNames`: DSL modules, sealed traits, host models) |
-| `sandblaster/mirx` | 1,131 | the printer (rustc's data, transcribed) | rustc (A4: the build compiles the MIR it printed) |
-| `front/src/mir/gate.rs` and its call sites | 232 + ≈ 29 (164 + ≈ 25 before stage optimizer-generic) | the gate's trusted check: the literal reading enters the kernel only through its loader (which records, per extraction, the globals and inductives it loaded and the MIR of each instance it read); a listed function is accepted only when its MIR instance is that function (the lift finds instances by unqualified lifted names), the kernel holds `L::thm::<f>` whose type is α-equal (up to proofs) to `stmt`'s statement generated afresh, read from this MIR, reaching only definitions of the elaboration, of L's library or of its own extraction's literal reading, with no inductive added otherwise, and every module type its MIR instances reach is declared alike by the MIR and the subset (variants and fields by name and in order, discriminants `0, 1, ..`); the same for the round trip's `L::shipped::<f>`; for a function replaced through its panic-explicit reading `P` (exec-only builds), `L::pthm::<f>` (the source's own MIR instance) and `L::pshipped::<f>` (the copy's) of the panic statement against `P`, accepted only when `P` has the source's parameters and preconditions with the result in `Option` (check 5) and every instance either reading runs has no fault, no loop header and no self-call, and each block read as panicking is checked on the MIR to panic (check 6), so that `None` means a panic. Call sites: the gate's errors (`driver::gates::theorem_gate`), the shipped copy's instance and its requirement (`driver::lowered`) | the kernel (`alpha_eq_relevant`, `refs_closure`); the files above; the lift's list of the functions read from MIR; the elaborator |
+| `sandblaster/mirx` | 1,122 (1,131 before `--replace` was removed, 2026-10-05) | the printer (rustc's data, transcribed) | rustc (A4: the build compiles the MIR it printed) |
+| `front/src/mir/gate.rs` and its call site | 159 + ≈ 27 (232 + ≈ 29 with the optimizer's shipped and panic acceptance, removed 2026-10-05) | the gate's trusted check: the literal reading enters the kernel only through its loader (which records, per extraction, the globals and inductives it loaded and the MIR of each instance it read); a listed function is accepted only when its MIR instance is that function (the lift finds instances by unqualified lifted names), the kernel holds `L::thm::<f>` whose type is α-equal (up to proofs) to `stmt`'s statement generated afresh, read from this MIR, reaching only definitions of the elaboration, of L's library or of its own extraction's literal reading, with no inductive added otherwise, and every module type its MIR instances reach is declared alike by the MIR and the subset (variants and fields by name and in order, discriminants `0, 1, ..`). Call site: the gate's errors (`driver::gates::theorem_gate`) | the kernel (`alpha_eq_relevant`, `refs_closure`); the files above; the lift's list of the functions read from MIR; the elaborator |
 | the precondition check: `front/src/elab/items.rs` (`fn_requires`, `as_declared`, `depth_prop`), `typeck` (`#[mir_contract]`), `hir::FnDef::declared` | 22 + 16 + 1 | a function read from MIR is elaborated only when it has as many `requires` clauses as its declared contract, each precondition α-equal to the elaboration of the declared clause at the same depth, and the depth bound exactly when declared, α-equal to the declared one; the lift carries the declared contract apart from the function's own attributes (`#[mir_contract(..)]`, copied from the skeleton's and the attachments' attributes). Otherwise the function has no definition, so no theorem | typeck and the elaborator (TCB items 2, 6) |
 | the lift glue | ≈ 260 | loading, signature checks, the declared contracts (the skeleton's attributes before the body is read and the attachments' after, carried as `#[mir_contract(..)]`; the body reader sees the signature only), the list of functions read from MIR (`lift::MirContract`) | the lift's skeleton (TCB item 8) |
-| **total** | **≈ 4,552** (≈ 3,939 without the parse; ≈ 4,289 before stage reader-widen, ≈ 4,430 before stage optimizer-generic, ≈ 4,526 before stage finish-A) | the literal reading, its statement, parse, names and printer (3,992), the gate's trusted check with its call sites (≈ 261), the precondition check (39), the lift glue (≈ 260); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
+| **total** | **≈ 4,447** (re-counted after the removal of 2026-10-05: ≈ 4,552 before it; ≈ 4,289 before stage reader-widen, ≈ 4,430 before stage optimizer-generic, ≈ 4,526 before stage finish-A) | the literal reading, its statement, parse, names and printer (3,962), the gate's trusted check with its call site (≈ 186), the precondition check (39), the lift glue (≈ 260); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
 
 **Untrusted** (code lines, counted as above): `front/src/mir/read.rs`
 (2,975, the structurer), `cfg.rs` (298, with the literal reading's shape
-facts), the walker `simproof.rs` (5,014) and its driver `checked.rs`
-(1,889: planning, dependency order, loop and model lemmas, the verdict cache —
+facts), the walker `simproof.rs` (4,999; 5,014 before the removal of
+2026-10-05) and its driver `checked.rs` (1,468; 1,889 before it: planning, dependency order, loop and model lemmas, the verdict cache —
 whose entries are declarations the kernel re-checks on replay — and the
 reports). A bug there makes a theorem missing or refused and the build
 fail.
@@ -1508,5 +1515,5 @@ elaborator), `tests/theorem_gate.rs`
 `a_function_listed_with_another_functions_instance_is_refused` and
 `a_reading_whose_names_a_later_extraction_took_over_is_refused`,
 `tests/lift_conformance.rs` (L compared with rustc in the conformance
-check, module mode and in place), `tests/walker.rs`, `tests/lowered_use.rs`
-(the shipped theorems of the lifted round trip).
+check, module mode and in place), `tests/walker.rs`. (`tests/lowered_use.rs`, the shipped
+theorems of the lifted round trip, went with the round trip on 2026-10-05.)

@@ -25,7 +25,7 @@
 //!   ([`DEFAULT_GOAL_HEAP`]). The cap measures the goal's own thread
 //!   (memguard's per-thread count, [`sandblaster_memguard::thread_growth`]):
 //!   a goal runs on one thread, and what other threads allocate meanwhile
-//!   (the mutation gate's batches run on several) is not its growth.
+//!   (the mutation tool's batches run on several) is not its growth.
 //!
 //! When a limit is hit, the current goal's [`Exhaustion`] is recorded and
 //! the next [`settle`] zeroes the budget, so every later kernel call fails

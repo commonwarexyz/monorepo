@@ -1,8 +1,10 @@
 # Writing sandblaster proofs — a guide for engineers
 
-This guide explains how the QMDB laws are proven (`sandblaster/fixtures/qmdb/sandblaster/LAWS.rs`,
-`sandblaster/fixtures/qmdb/sandblaster/PROOF.rs`) and how to write or fix a proof. The reference is
-DESIGN.md §4 (ghost language) and §8.1 (automation).
+This guide explains how laws are proven and how to write or fix a proof. Its worked examples come
+from the QMDB fixture's `LAWS.rs` and `PROOF.rs` (`sandblaster/fixtures/qmdb/sandblaster/`, removed
+2026-10-05 and kept in the git history); the verified roots (`storage/sandblaster/mmr`,
+`storage/sandblaster/verifier`, `codec/sandblaster/varint`) are today's examples of the same
+techniques. The reference is DESIGN.md §4 (ghost language) and §8.1 (automation).
 
 ## 0. What laws are for
 
@@ -746,7 +748,7 @@ equations use them without being named.
 
 ## 4. Reading the QMDB proofs
 
-`sandblaster/fixtures/qmdb/sandblaster/PROOF.rs` opens with a table of its parts. Two kinds of
+The QMDB fixture's `PROOF.rs` (in the git history) opened with a table of its parts. Two kinds of
 proof live there:
 
 * **Refinements (R1–R12)** tie each piece of code to a spec function:
@@ -837,7 +839,7 @@ How to debug:
 
 ### Reading the gate errors
 
-A crate whose proofs check still has no verdict until it passes the six
+A crate whose proofs check still has no verdict until it passes the five
 §15 gates (DESIGN.md §15.8). `sandblaster check` prints one line per gate:
 
 ```text
@@ -846,7 +848,6 @@ gate examples: passed (20 example(s) and vector record(s) checked)
 gate sections: passed (0 section(s))
 gate law-rules: passed
 gate lock: 1 error(s), 0 warning(s) (missing (31 surface item(s) not locked))
-gate mutation: not run (the crate already failed the lock gate(s); spec mutation runs once they pass)
 status: NOT VERIFIED
 ```
 
@@ -859,32 +860,32 @@ Fix them in that order; the errors above the summary say what each wants.
 | sections | `… is not determined by the specification: complete_p(R) is unproven for the section {…}` with the stuck goal | a `#[refines]` that determines the function, or the missing law (§6), or a `#[proof(complete = f)]` item |
 | law-rules | `error[law-mentions-internal]`, `error[law-restates-impl]`, `error[law-undocumented]` … | laws speak about spec functions and exported functions only, state something the definitions do not already say, and start with a sentence that states the guarantee (§0) |
 | lock | `error[spec-lock]: no SPEC.lock`, `` `law:…` changed (weakened) `` | review the spec sheet (`sandblaster spec`), then `sandblaster spec --accept` (it runs every other gate first and writes the root's lock only if they pass) |
-| mutation | `error[spec-mutant-survived]`, `error[mutation-incomplete]` | §6: add the known answer or the law that kills the mutant |
 
-The spec-mutation gate is the slow one (about a minute for the SHA-256
-sample's 1526 spec mutants): it runs only after the other gates pass, and
-`spec --accept` runs it too, so a crate that has just been accepted builds
-without surprises. Set `SANDBLASTER_TRACE_MUTATION=1` to see its progress.
+Spec mutation is not a gate (2026-10-05): run `sandblaster mutate <crate>`
+when writing or reviewing laws (§6). It is the slow check (about a minute
+for the SHA-256 sample's 1526 spec mutants, hours for a library-sized
+vocabulary such as the verifier's SHA-256); its per-mutant verdicts are
+cached, so a re-run after an edit is quick. Set
+`SANDBLASTER_TRACE_MUTATION=1` to see its progress.
 
-### Stage output and crate verdicts (for toolchain authors)
+### Stage runs and crate verdicts (for toolchain authors)
 
 Only the crate path, `driver::build_crate`, makes a crate verdict. The
-toolchain's own steps — `driver::stage::verify`, `verify_and_optimize`,
-`optimize_emit`, `emit_stage`, `eval_json`, `spec_run`, and the
-`stage_emit` example — skip the gates. Their output says
-`STATUS: STAGE OUTPUT (not a crate verdict: the §15 gates did not run)` and
-their reports `PROOFS CHECKED (stage run, …)`; nothing that consumes crate
-output accepts them. Use them in toolchain tests of the elaborator, the
-optimizer and the printer; any test of what a *crate* gets must go through
-`build_crate` (or `build_verified`, or the CLI) with a fully specified test
-crate and the lock its own gates accepted (`tests/gated_util.rs`).
+toolchain's own steps — `driver::stage::verify`, `verify_checked`,
+`eval_json`, `spec_run`, `conform_in_place` — skip the gates. Their
+reports say `PROOFS CHECKED (stage run, …)`, never `VERIFIED`. Use them in
+toolchain tests of the elaborator; any test of what a *crate* gets must go
+through `build_crate` (or the build entry points `build_module` and
+`build_lifted`, or the CLI) with a fully specified test crate and the lock
+its own gates accepted (`tests/gated_util.rs`).
 
 ## 6. When the specification does not pin the code down
 
-The spec-mutation gate of every build (DESIGN.md §15.8) mutates the
-specification — the spec functions of the review surface, what the laws
-file's statements use — and fails the build when a spec mutant survives
-every example and law with a distinguishing input. A proof helper (a spec
+The spec-mutation tool, `sandblaster mutate <crate>` (DESIGN.md §15.7; on
+demand, never part of a build), mutates the specification — the spec
+functions of the review surface, what the laws file's statements use — and
+reports each spec mutant that survives every example and law with a
+distinguishing input (exit 1). A proof helper (a spec
 function only proofs use, such as one of `PROOF.rs`) is not mutated: no
 locked statement depends on its definition (DESIGN.md §15.9), and the
 report lists it. `sandblaster coverage <crate>`

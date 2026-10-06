@@ -1,8 +1,0 @@
-# h1v2 blind held-out set manifest
-date = "2026-10-02"
-idioms_sha256 = "72b586b2f091d5bc0e0cf5db6599aba4ab5358700265a22b682ef2b76cea4d5d"
-
-[files]
-"Cargo.toml" = "d35f69a487b33cdd9e2feec9e1dd1b8c8ba0b68f87b0bca30cbe586322d3a681"
-"idioms.md" = "72b586b2f091d5bc0e0cf5db6599aba4ab5358700265a22b682ef2b76cea4d5d"
-"src/lib.rs" = "fb0f5707c01b6afd90628ef1736edeb97d7fc33026c5daf8ab68eb06fe0bad49"

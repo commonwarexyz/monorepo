@@ -18,7 +18,6 @@ mod util;
 
 use sandblaster_front::driver::{self, ProverSet, VerifyOptions};
 use sandblaster_front::elab::DefStatus;
-use sandblaster_front::opt::OptOptions;
 use util::{assert_verified, explain, kinds_of, status_of, unproven, verify_src};
 
 /// Verifies `src` and asserts it verified.
@@ -285,12 +284,10 @@ pub fn xor_all(xs: &[u8]) -> u8 {
     assert!(v.defs.iter().all(|d| !d.name.ends_with("::ensures")), "{:?}", v.defs.iter().map(|d| &d.name).collect::<Vec<_>>());
 }
 
-/// The whole pipeline: the helpers' exec bodies are unchanged, so the
-/// optimizer (strict) and the round trip (the printed code read back and
-/// compared with the optimized core, DESIGN.md §8.3) are unaffected; the
-/// lemmas are never printed and are recorded unchanged in generated mode.
+/// The whole pipeline with the standard provers: every function and its
+/// loop's `ensures` lemma checks.
 #[test]
-fn optimizer_and_round_trip_are_unaffected() {
+fn the_whole_pipeline_checks_the_loop_lemmas() {
     let src = r#"
 pub fn count(n: u32) -> u32 {
     let mut c: u32 = 0;
@@ -347,15 +344,11 @@ pub fn to_max(a: u8) -> u32 {
 "#;
     let c = util::accepted(src);
     let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
-    let built = driver::stage::verify_and_optimize(&c, &opts, &OptOptions { strict: true, ..Default::default() }, "r/mod.rs");
+    let built = driver::stage::verify_checked(&c, &opts);
     assert!(built.v.proofs_ok, "not verified:\n{}", util::explain(&c, &built.v));
     for f in ["count", "sum4", "drain", "grid", "to_max"] {
         assert_eq!(status_of(&built.v, &format!("crate::{f}::loop#0::ensures")), &DefStatus::Checked, "{f}");
     }
-    let em = built.emit.expect("optimized").expect("optimizer ran");
-    assert!(em.opt.errors.is_empty(), "optimizer errors: {:?}", em.opt.errors);
-    assert!(em.roundtrip.is_empty(), "round trip failed:\n{}\n{}", em.roundtrip.join("\n"), em.code);
-    assert!(!em.code.contains("ensures"), "lemmas are never printed:\n{}", em.code);
 }
 
 // ---------------------------------------------------------------------

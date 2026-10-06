@@ -86,7 +86,7 @@ pub fn refs(krate: &Crate, id: ItemId) -> BTreeSet<ItemId> {
 /// The items the *statement* of `id` refers to: for a law, lemma or proof
 /// item its parameters, `requires`, `ensures`, `decreases` and §15
 /// annotations — not its proof (the body or the `#[proof]` item of a law);
-/// for any other item [`refs`]. The incremental spec-mutation gate
+/// for any other item [`refs`]. The incremental spec-mutation tool
 /// (`crate::mutate::cache`) keys a mutant's verdict on what it reaches this
 /// way: proofs are irrelevant to every decided verdict.
 pub fn statement_refs(krate: &Crate, id: ItemId) -> BTreeSet<ItemId> {
@@ -220,7 +220,7 @@ fn type_spec_refs(r: &mut Refs, kind: &ItemKind) {
 }
 
 /// The item filter of a partial elaboration that must elaborate `seeds`
-/// ([`super::Options::items`]; the mutation gate's batches): the seeds and
+/// ([`super::Options::items`]; the mutation tool's batches): the seeds and
 /// what the full build elaborates for every proof without any reference
 /// reaching it, closed under [`refs`]:
 ///
@@ -234,7 +234,7 @@ fn type_spec_refs(r: &mut Refs, kind: &ItemKind) {
 /// A filter closed under [`refs`] from the seeds alone drops both: a proof
 /// that `auto` closed with a bridge fails without it, and a type whose
 /// invariant calls a spec function no seed reaches is blocked (the
-/// mutation gate then found the unchanged crate not re-verifying, and ran
+/// mutation tool then found the unchanged crate not re-verifying, and ran
 /// none of the batch's mutants).
 pub fn filter_closure(krate: &Crate, seeds: impl IntoIterator<Item = ItemId>) -> BTreeSet<ItemId> {
     let mut work: Vec<ItemId> = seeds.into_iter().collect();
@@ -276,15 +276,15 @@ pub fn dependency_order(krate: &Crate) -> Vec<ItemId> {
     out
 }
 
-/// Exec functions that are hardware code: `#[target_feature]`,
-/// `#[implements]`, intrinsic or load/store-helper calls (§9.2, §9.3),
+/// Exec functions that are hardware code: `#[target_feature]`, intrinsic
+/// calls or vector types (§9.2, §9.3),
 /// transitively over callers (not over §15 edges: an `#[example]` that
 /// mentions a hardware function does not make its item hardware code).
 pub fn hardware_items(krate: &Crate, _sem: &super::semantics::Semantics) -> HashSet<ItemId> {
     struct Hw(bool);
     impl Visitor for Hw {
         fn expr(&mut self, e: &Expr) {
-            if matches!(&e.kind, ExprKind::Call { callee: Callee::Intrinsic(..) | Callee::Helper(_), .. }) || matches!(&e.ty, Ty::Vector(_)) {
+            if matches!(&e.kind, ExprKind::Call { callee: Callee::Intrinsic(..), .. }) || matches!(&e.ty, Ty::Vector(_)) {
                 self.0 = true;
             }
             visit::walk_expr(self, e);
@@ -295,7 +295,7 @@ pub fn hardware_items(krate: &Crate, _sem: &super::semantics::Semantics) -> Hash
         if let ItemKind::Fn(f) = &it.kind
             && f.kind == FnKind::Exec
         {
-            let mut v = Hw(!f.target_features.is_empty() || f.implements.is_some());
+            let mut v = Hw(!f.target_features.is_empty());
             visit::walk_fn(&mut v, f);
             if v.0 {
                 hw.insert(it.id);

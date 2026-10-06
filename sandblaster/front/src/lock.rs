@@ -16,7 +16,8 @@
 //! kernel <hash>           prelude <hash>      (one per line)
 //! semantics <hash>        builtins <hash>
 //! lift <hash>             (a lifted crate only: the lift prelude)
-//! target aarch64 <hash>   (one line per accepted target)
+//! target aarch64 <hash>   (one line per accepted target: the hash of that
+//!                         architecture's target-model core files)
 //! sections 1
 //! section section:crate::f R {crate::f} P {crate::f} Deps {} H <H(i)…> (one per section)
 //! tcb <item of DESIGN.md §1.1> (one line each)
@@ -59,8 +60,9 @@
 //!
 //! Each DSL root has its own lock in its directory ([`lock_path`]):
 //! `SPEC.lock` for a root named `mod.rs` or `lib.rs`, `SPEC.<stem>.lock`
-//! otherwise (`sandblaster/fixtures/qmdb/sandblaster/mod.rs` → `SPEC.lock`, `sandblaster/fixtures/qmdb/sandblaster/n1.rs`
-//! → `SPEC.n1.lock`), so two roots in one directory never share a lock.
+//! otherwise (`storage/sandblaster/mmr/mod.rs` → `SPEC.lock`; a second root
+//! `n1.rs` beside it → `SPEC.n1.lock`), so two roots in one directory never
+//! share a lock.
 
 use std::collections::{BTreeMap, BTreeSet};
 

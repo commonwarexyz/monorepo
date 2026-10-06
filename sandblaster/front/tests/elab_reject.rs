@@ -104,7 +104,7 @@ fn a_failure_blocks_nothing_it_does_not_reach_but_never_verifies() {
     assert_eq!(status_of(&v, "crate::bad"), &DefStatus::Unproven);
     let v2 = driver::stage::verify(c.krate.as_ref().unwrap(), &VerifyOptions { provers: ProverSet::Basic, exec_only: false });
     assert!(!v2.proofs_ok, "one unproven obligation fails the whole crate");
-    assert!(driver::stage::emit_stage(&c, &v2, "r/mod.rs").is_none(), "nothing is emitted");
+    assert!(driver::stage::summary(&c, &v2).contains("status: NOT VERIFIED"), "{}", driver::stage::summary(&c, &v2));
 }
 
 #[test]

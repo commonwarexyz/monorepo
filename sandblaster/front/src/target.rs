@@ -12,8 +12,21 @@
 //!   (`sha2 → neon`, `sha3 → sha2`, `aes → neon`, `sha → sse2`,
 //!   `avx2 → avx → sse4.2 → sse4.1 → ssse3 → sse3 → sse2 → sse`, ...).
 //!   Static target features do **not** count (§9.3).
+//!
+//! Hardware code is first-class: intrinsics, vector types and
+//! `#[target_feature]` elaborate onto the target models
+//! (`sandblaster/targets`, DESIGN.md §9.2). Two native-dialect authoring
+//! forms were removed with the optimizer and are refused:
+//! `#[implements]` ([`NO_VARIANTS`]) and the `sandblaster::arch` load/store
+//! helpers ([`NO_ARCH_HELPERS`]).
 
 use std::collections::BTreeSet;
+
+/// Why `#[implements]` is refused.
+pub const NO_VARIANTS: &str = "hardware variants and their dispatch were removed with the optimizer: give the `#[target_feature]` function its own contract, or relate it to the portable function by a law";
+
+/// Why `sandblaster::arch` is refused.
+pub const NO_ARCH_HELPERS: &str = "the `sandblaster::arch` load/store helpers were native-dialect authoring glue, removed with the optimizer: take and return vector values, or build them with the modeled intrinsics";
 
 /// Target architectures the target library knows.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]

@@ -1,6 +1,6 @@
 //! `proofs_only <root.rs> [--dump-lift DIR]`: the front end and the proofs
 //! of a DSL root (`driver::check` + `driver::stage::verify_audited`), no
-//! optimizer and no §15 gate: a development tool for iterating on proofs
+//! §15 gate: a development tool for iterating on proofs
 //! (the build and the CLI always run everything). Prints the counts and
 //! every diagnostic; exit status 1 when a proof fails.
 

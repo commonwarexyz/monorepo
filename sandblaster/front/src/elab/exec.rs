@@ -29,7 +29,7 @@
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use sandblaster_kernel::term::{Arm, Idx, IndId, PrimOp, Rel, Term, Tm, Width};
+use sandblaster_kernel::term::{Arm, IndId, PrimOp, Rel, Term, Tm, Width};
 use sandblaster_kernel::util::{mk, shift};
 use sandblaster_kernel::value::{EnvEntry, VEnv};
 
@@ -700,10 +700,6 @@ impl<'a> Elab<'a> {
                 let t = self.intrinsic_call(*i, imms, args, span)?;
                 self.cont(k, t)
             }
-            Callee::Helper(h) => {
-                let t = self.helper_call(*h, args, span)?;
-                self.cont(k, t)
-            }
             Callee::Ghost(g, targs) => {
                 let t = self.ghost_call(*g, targs, args, span)?;
                 self.cont(k, t)
@@ -768,9 +764,8 @@ impl<'a> Elab<'a> {
             _ => vec![],
         };
         // the values of the callee's `#[ghost]` parameters go into its ghost
-        // bundle (§15.3). The round trip's lowered code does not print ghost
-        // arguments: with exactly the other arguments given, the bundle is
-        // left to the prover, which gives `Erased` in generated mode.
+        // bundle (§15.3). With exactly the other arguments given, the bundle
+        // is left to the prover.
         let nghost = ghosts.iter().filter(|g| **g).count();
         let omitted = nghost > 0 && args.len() + nghost == ghosts.len();
         let mut ghost_vals = Vec::new();
@@ -1079,78 +1074,13 @@ impl<'a> Elab<'a> {
             }
             let eqt = mk::eq(shift(&dty, n as i64), shift(&scrut, n as i64), cval);
             self.push_fact_rel("e", eq_rel, &eqt, None, FactOrigin::PathCond, span)?;
-            // plan O6: the exported facts of the scrutinee's call (a function
-            // whose loop summary exports facts, `opt::facts`) on its payload
-            let facts = self.exported_facts_at(&scrut, d, ind, ci as u32, n);
-            let rel = self.fact_rel();
-            let mut lets = Vec::new();
-            for (ty, pf, g) in facts {
-                let k = lets.len() as i64;
-                let (ty, pf) = (shift(&ty, k), shift(&pf, k));
-                self.push_fact("h_fact", &ty, Some(&pf), FactOrigin::CalleeEnsures(g), span)?;
-                lets.push((ty, pf));
-            }
             let body = arm(self, ci as u32, lvls);
             self.f.scope = saved;
             self.f.branch_goal = saved_goal;
-            let mut body = body?;
-            for (ty, pf) in lets.into_iter().rev() {
-                body = mk::let_("h_fact", rel, ty, pf, body);
-            }
-            arms.push(Arm { names: c.fields.iter().map(|f| f.0.clone()).collect(), body: mk::lam("e", eq_rel, eqt, body) });
+            arms.push(Arm { names: c.fields.iter().map(|f| f.0.clone()).collect(), body: mk::lam("e", eq_rel, eqt, body?) });
         }
         let m = Rc::new(Term::Match { ind, params, scrut: scrut.clone(), motive, arms });
         Ok(Rc::new(Term::App { rel: eq_rel, fun: m, arg: mk::refl(dty, scrut) }))
-    }
-
-    /// The exported facts (`opt::facts`) of the call a match scrutinee is
-    /// (itself or a `let`'s value), in the arm of constructor `ci` with `n`
-    /// fields just entered (its path equation the last binder): `(type,
-    /// proof, lemma)` at the current depth. Empty outside the optimizer.
-    fn exported_facts_at(&self, scrut: &Tm, d: u32, ind: IndId, ci: u32, n: u32) -> Vec<(Tm, Tm, sandblaster_kernel::term::GlobalId)> {
-        if !crate::opt::facts::any() || n != 1 {
-            return Vec::new();
-        }
-        let (mut call, mut cd) = (scrut.clone(), d);
-        for _ in 0..4 {
-            let Term::Var(Idx(i)) = &*call else { break };
-            let Some(lvl) = cd.checked_sub(1 + i) else { return Vec::new() };
-            match self.f.scope.let_tms.get(&lvl) {
-                Some((_, v, _)) => {
-                    call = v.clone();
-                    cd = lvl;
-                }
-                None => break,
-            }
-        }
-        let depth = self.depth();
-        let call = shift(&call, (depth - cd) as i64);
-        let mut args = Vec::new();
-        let mut h = &call;
-        while let Term::App { rel, fun, arg } = &**h {
-            if *rel != Rel::Rel {
-                return Vec::new();
-            }
-            args.push(arg.clone());
-            h = fun;
-        }
-        let Term::Global(g) = &**h else { return Vec::new() };
-        args.reverse();
-        let mut out = Vec::new();
-        for fx in crate::opt::facts::of(*g) {
-            if fx.opt != ind || fx.some != ci {
-                continue;
-            }
-            // fact#k ā v .e (v the field, .e the path equation)
-            let mut targs: Vec<(Rel, Tm)> = args.iter().map(|a| (Rel::Rel, a.clone())).collect();
-            targs.push((Rel::Rel, mk::var(1)));
-            targs.push((Rel::Irr, mk::var(0)));
-            let pf = mk::apps(mk::global(fx.lemma), targs);
-            let mut b = sandblaster_kernel::value::Budget { steps: self.opts.goal_budget };
-            let Ok(tv) = self.env.infer(&self.f.scope.ctx, &pf, &mut b) else { continue };
-            out.push((self.quote(&tv, None), pf, fx.lemma));
-        }
-        out
     }
 
     /// `if c { T } else { F }` as a dependent bool match; `branch` gets
@@ -1780,7 +1710,7 @@ impl<'a> Elab<'a> {
         let info = crate::intrinsics::get(i);
         let name = format!("{}::{}", info.arch.name(), info.name);
         let Some(g) = self.sem.intrinsics.get(&name).copied() else {
-            return Err(ElabError { span, msg: format!("intrinsic `{}` has no core model yet (phase 3)", info.name), kind: ErrKind::Deferred });
+            return Err(ElabError { span, msg: format!("intrinsic `{}` has no core model in the target semantics library (`sandblaster/targets/core`)", info.name), kind: ErrKind::Deferred });
         };
         // immediates first (relevant `U32`), each with its range proofs
         // (`lo ≤ N` when `lo > 0`, then `N ≤ hi`; by evaluation for literals)
@@ -1795,20 +1725,6 @@ impl<'a> Elab<'a> {
         }
         all.extend(args.into_iter().map(|a| (Rel::Rel, a)));
         Ok(mk::apps(mk::global(g), all))
-    }
-
-    /// A `sandblaster::arch` load/store helper: its core model (`<arch>::<helper>`
-    /// or the intrinsic its template calls).
-    fn helper_call(&mut self, h: crate::intrinsics::HelperId, args: Vec<Tm>, span: Span) -> R<Tm> {
-        let info = crate::intrinsics::helper(h);
-        let arch = info.arch.name();
-        let direct = format!("{arch}::{}", info.name);
-        let via = info.template.split(&format!("::core::arch::{arch}::")).nth(1).map(|r| r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>()).map(|n| format!("{arch}::{n}"));
-        let g = self.sem.intrinsics.get(&direct).copied().or_else(|| via.and_then(|v| self.sem.intrinsics.get(&v).copied()));
-        let Some(g) = g else {
-            return Err(ElabError { span, msg: format!("load/store helper `{}` has no core model yet (phase 3)", info.name), kind: ErrKind::Deferred });
-        };
-        Ok(mk::apps(mk::global(g), args.into_iter().map(|a| (Rel::Rel, a))))
     }
 
     /// Index of the unit-typed local-free check: `peel_coerce` is used by

@@ -594,12 +594,6 @@ fn variant_markers_parse_and_unknown_ones_are_refused() {
     assert!(load(&bad).unwrap_err().contains("variant"));
 }
 
-#[test]
-fn the_round_trip_mir_sits_next_to_the_module_mir() {
-    let p = sandblaster_front::lift::roundtrip_mir_path(Path::new("/x/mmr.sbmir"), "crate::merkle::mmr::iterator");
-    assert_eq!(p, Path::new("/x/mmr.roundtrip__merkle__mmr__iterator.sbmir"));
-}
-
 // ---------------------------------------------------------------------------
 // The Merkle proof verifier's constructs (storage's `merkle::{hasher, proof}`
 // in place: `Standard<Sha256>`, `Subtree::reconstruct_digest`)

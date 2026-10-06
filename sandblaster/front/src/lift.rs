@@ -141,33 +141,8 @@ pub struct LiftedInfo {
     /// `#[lift(in_place)]`: the host's own file, verified where rustc
     /// compiles it (never emitted).
     pub in_place: bool,
-    /// `#[lift(opt)]`: user-supplied alternatives (hand-written code, never
-    /// emitted as a module; their functions replace source functions only
-    /// through `#[rewrite]` lemmas and the lifted round trip,
-    /// `driver::lowered`, which reports them apart from the optimizer's
-    /// output).
-    pub opt: bool,
-    /// A lifted child the host's source declares by its **lowered
-    /// declaration** (`mod a { include!(concat!(env!("OUT_DIR"), "/F")); }`,
-    /// [`open::lowered_include`]): the copy's file name `F`. The lift reads
-    /// the declaration as `mod a;`; the build checks `F` and writes the copy
-    /// (`driver::in_place`).
-    pub lowered_include: Option<String>,
     /// `#[lift(mir = ..)]`: the `.sbmir` file (absolute).
     pub mir: Option<std::path::PathBuf>,
-    /// The MIR of the lifted round trip's copy of this file (the source with
-    /// its rewritten functions' copies and helpers, DESIGN.md §2.1):
-    /// `<stem>.roundtrip__<module path>.sbmir` next to `mir`, when present.
-    pub mir_roundtrip: Option<std::path::PathBuf>,
-}
-
-/// The file name of the round-trip MIR of the lifted module `module_path`
-/// (`crate::merkle::mmr::iterator`) next to the `.sbmir` file `mir`:
-/// `mmr.roundtrip__merkle__mmr__iterator.sbmir`.
-pub fn roundtrip_mir_path(mir: &std::path::Path, module_path: &str) -> std::path::PathBuf {
-    let stem = mir.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let flat = module_path.trim_start_matches("crate::").replace("::", "__");
-    mir.with_file_name(format!("{stem}.roundtrip__{flat}.sbmir"))
 }
 
 /// Host facts the lift's reading assumed and what it left out, for the
@@ -189,11 +164,6 @@ pub struct LiftFacts {
     /// arguments as the source writes them): `Decoder__u16` →
     /// (`Decoder`, [`u16`]).
     pub instances: BTreeMap<String, (String, Vec<String>)>,
-    /// Trait → every primitive type implementing it in the lifted source,
-    /// in source order, `#[lift(unverified = ..)]` types included (the
-    /// lowering's per-type dispatch implements its trait for exactly these,
-    /// `driver::lowered`). Recorded only: it changes no lifted meaning.
-    pub sealed_impls: BTreeMap<String, Vec<String>>,
     /// The test hook that was active while lifting (never set outside
     /// the toolchain's own tests; [`test_hook`]).
     pub test_hook: Option<test_hook::WrongRule>,
@@ -727,7 +697,6 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     facts.mir_contracts = std::mem::take(&mut cx.mir_contracts);
     facts.mir_helpers = std::mem::take(&mut cx.mir_helpers);
     facts.instances = std::mem::take(&mut cx.instances);
-    facts.sealed_impls = std::mem::take(&mut cx.sealed_impl_types);
     facts.test_hook = test_hook::get();
     facts.conform_skipped = std::mem::take(&mut cx.conform_skipped);
     facts.host_obligations = std::mem::take(&mut cx.open.host_obligations);
@@ -886,9 +855,6 @@ struct Ctx {
     file: FileId,
     /// Impl types declared unverified (`#[lift(unverified = ..)]`).
     unverified: HashSet<String>,
-    /// Every impl type of each trait implemented on primitives, unverified
-    /// ones included ([`LiftFacts::sealed_impls`]).
-    sealed_impl_types: BTreeMap<String, Vec<String>>,
     traits: HashMap<String, TraitInfo>,
     impls: Vec<ImplInfo>,
     structs: HashMap<String, StructInfo>,
@@ -1158,13 +1124,6 @@ impl Ctx {
                         continue;
                     };
                     let tname = tpath.segments.last().unwrap().ident.to_string();
-                    if im.generics.params.is_empty() && type_name(&im.self_ty).is_some_and(|n| is_prim(&n)) {
-                        let v = self.sealed_impl_types.entry(tname.clone()).or_default();
-                        let k = ty_key(&im.self_ty);
-                        if !v.contains(&k) {
-                            v.push(k);
-                        }
-                    }
                     if self.unverified.contains(&ty_key(&im.self_ty)) {
                         continue;
                     }

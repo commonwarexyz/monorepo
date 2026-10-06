@@ -1,15 +1,15 @@
 //! §15.1 law rules (DESIGN.md §15.1 "Laws state guarantees, not code",
 //! LR1–LR10 but LR8): every rule on crates built for it, the law table
 //! (LR9), the gate that turns the recorded findings into diagnostics
-//! (`law_rules::spec15_gate_laws`, a gate of the crate path), the draft
-//! `LAWS.rs` of docs/qmdb-spec-design.md §2.2 over stub spec items, which
-//! passes every rule, and QMDB's own `LAWS.rs` (the draft over the real
-//! spec, proven), which does too.
+//! (`law_rules::spec15_gate_laws`, a gate of the crate path), and the
+//! draft QMDB `LAWS.rs` (`samples/qmdb_laws_draft/LAWS.rs`, the design's
+//! §2.2 block) over stub spec items, which passes every rule. (The real
+//! roots' laws pass every rule on the crate path: `tests/verified_roots.rs`
+//! and the module builds.)
 //!
 //! The rules are errors (or warnings) for every crate; the build records
 //! them (`Output::law_rules`) and the gate reports them; these tests run
-//! the proofs (a stage run) and call the gate directly. Run with
-//! `--test-threads=1` (one test elaborates QMDB).
+//! the proofs (a stage run) and call the gate directly.
 
 use std::path::Path;
 
@@ -964,17 +964,13 @@ fn misused_law_rule_annotations_are_errors_now() {
 }
 
 // ---------------------------------------------------------------------
-// the draft QMDB laws (docs/qmdb-spec-design.md §2.2)
+// the draft QMDB laws (the §2.2 block of the former
+// docs/qmdb-spec-design.md, kept as `samples/qmdb_laws_draft/LAWS.rs`)
 // ---------------------------------------------------------------------
 
-/// The ```rust block of §2.2 of the design document, verbatim.
+/// The draft `LAWS.rs`, verbatim.
 fn draft_laws() -> String {
-    let doc = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/docs/qmdb-spec-design.md")).expect("docs/qmdb-spec-design.md");
-    let start = doc.find("### 2.2 `LAWS.rs`").expect("§2.2");
-    let block = &doc[start..];
-    let open = block.find("```rust\n").expect("a rust block") + "```rust\n".len();
-    let close = block[open..].find("```").expect("end of the block");
-    block[open..open + close].to_string()
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/samples/qmdb_laws_draft/LAWS.rs")).expect("samples/qmdb_laws_draft/LAWS.rs")
 }
 
 /// The fixture crate with `laws` as its `LAWS.rs`, as in-memory files.
@@ -1043,51 +1039,6 @@ fn draft_qmdb_laws_rules_bite_on_mutations() {
 }
 
 // ---------------------------------------------------------------------
-// QMDB's LAWS.rs: the fully specified QMDB passes every rule, its proofs check
-// ---------------------------------------------------------------------
-
-#[path = "common/qmdb.rs"]
-mod qmdb;
-
-/// QMDB's own `LAWS.rs` (the production root `mod.rs`, N = 32, with every
-/// file it mounts: `qmdb::crate_files`). Until 2026-09 the fixture had the
-/// legacy laws (13 laws restating the code, docs/qmdb-spec-design.md §1),
-/// which this test showed failing the rules only through the gate; §15 S5
-/// replaced them with the five laws of the design's §2.2 (the draft above,
-/// over the real `spec/` and proven by `PROOF.rs`). The fixture's proofs
-/// check and the gate reports no error; what the rules record are LR6 (b)
-/// resemblance warnings only (a subterm of the real spec's statements of
-/// 15 or 17 kernel nodes also occurs in `merkle::path_node` and
-/// `sha256::equal`; the draft over stub spec items has none), and the
-/// table is the draft's with the two laws of `spec/tree.rs`. (Elaborates
-/// all of QMDB: about twelve minutes.)
-#[test]
-fn qmdb_laws_pass_every_rule() {
-    let r = run_owned(qmdb::crate_files("mod.rs"));
-    r.front();
-    // the build itself: no error at all (the laws and refinements verify)
-    assert!(r.errors.is_empty(), "{}", r.explain());
-    // no error-level finding of any rule: not on the laws, the spec items,
-    // or `verify`; the resemblance warnings name the two exec functions
-    assert!(!r.gate.iter().any(|(e, _, _)| *e), "{:?}", r.gate);
-    for f in &r.findings {
-        assert!(f.rule == LawRule::Lr6Resemblance && (f.msg.contains("`crate::merkle::path_node`") || f.msg.contains("`crate::sha256::equal`")), "QMDB's laws fail a rule:\n{}", r.explain());
-    }
-    // the table: the draft's five guarantees, two of them assuming collision
-    // resistance, and the two laws of `spec/tree.rs` (why one root binds,
-    // docs/qmdb-spec-design.md §2.4)
-    assert_eq!(r.table.len(), 7, "{}", r.explain());
-    for (path, guarantee, assumes, heading) in &r.table {
-        assert_eq!(*heading, LawHeading::Guarantee, "{path}");
-        let name = path.rsplit("::").next().unwrap();
-        assert!(DRAFT_LAWS.contains(&name) || ["agreeing_trees_have_one_root", "equal_roots_agree"].contains(&name), "{path}");
-        assert!(guarantee.as_deref().is_some_and(|g| law_rules::states_guarantee(g, name)), "{path}: {guarantee:?}");
-        let reduced = name == "verified_updates_are_current" || name == "one_proof_per_location";
-        assert_eq!(assumes.clone(), if reduced { vec!["crate::spec::sha256::collision_resistance".to_string()] } else { vec![] }, "{path}");
-    }
-}
-
-// ---------------------------------------------------------------------
 // the spec sheet, the lock entries and the report
 // ---------------------------------------------------------------------
 
@@ -1131,7 +1082,7 @@ fn internal(x: u32) {
         let statements: Vec<(String, Vec<String>)> = surface.items.iter().map(|i| (i.key.clone(), i.statement.clone())).collect();
         let s15 = driver::spec15_report(&out, kr);
         let v = driver::Verification { defs: out.defs.clone(), obligations: out.obligations.clone(), laws: out.laws.clone(), diags: out.diags.clone(), deferred: out.deferred.clone(), proofs_ok: false, elapsed: std::time::Duration::ZERO, provers: vec![], exec_only: false };
-        let report = driver::stage::report_json(cr, &v, &[], "r", None, None, Some(&s15));
+        let report = driver::stage::report_json(cr, &v, &[], "r", None, Some(&s15));
         (sheet, sources, statements, report)
     });
     // the sheet prints the law table, the definitional law under its own heading

@@ -6,8 +6,9 @@
 //! not required), the kill rates against the proofs and the specification
 //! alone, examples and outcome coverage; sequential batches (re-elaborated
 //! from scratch) that give the same verdicts whatever their size; the
-//! memguard-aware limit; bounded QMDB (legacy laws: survivors expected —
-//! recorded, never failed on).
+//! memguard-aware limit; the review run of the spec-mutation tool on the
+//! MMR (`sandblaster mutate`; recorded, never failed on, ignored by
+//! default).
 
 use std::path::Path;
 
@@ -155,36 +156,36 @@ fn memory_limit_stops_batches_as_incomplete() {
     assert!(!r.complete && r.incomplete_reasons.iter().any(|x| x.contains("memory")), "{:?}", r.incomplete_reasons);
 }
 
-/// QMDB (production N = 32, `sandblaster/fixtures/qmdb/sandblaster/mod.rs`), bounded: the kill rates are recorded, not asserted.
-/// (Until §15 S5 the fixture had the legacy laws, soundness-only and naming
-/// internal functions, so survivors were expected.) Run with
-/// `--test-threads=1`; `SANDBLASTER_QMDB_MUTANTS` sets the cap (default 24:
-/// three batches). Each batch is an elaboration of about 1,200–1,500 items
-/// of the S5 crate, 9 to 14 minutes after the 10-minute baseline (about 45
-/// minutes in all); a smaller cap (8: one batch) gives a shorter record.
+/// The spec-mutation tool's review run (`driver::stage::mutate`,
+/// `sandblaster mutate`) on commonware-storage's MMR
+/// (`storage/sandblaster/mmr`): the verdicts, findings and batches are
+/// recorded in `$CARGO_TARGET_TMPDIR/mmr-mutants.{txt,json}`, not asserted
+/// (it replaced the bounded run on the former QMDB fixture, removed
+/// 2026-10-05). Only that the engine ran on a verified baseline is
+/// checked. Run with `--ignored --test-threads=1`.
 #[test]
-fn legacy_qmdb_bounded_run_is_recorded() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/mod.rs");
+#[ignore = "slow: the review run of the spec-mutation tool on the MMR (an elaboration of the root, then every spec mutant of its review surface); a measurement"]
+fn the_mmr_review_run_is_recorded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../storage/sandblaster/mmr/mod.rs");
     let c = driver::check(&root, &RealFs, &TargetInfo::aarch64_apple_darwin());
     assert!(c.ok(), "{}", c.render());
-    let k = c.krate.clone().unwrap();
-    let cap = std::env::var("SANDBLASTER_QMDB_MUTANTS").ok().and_then(|v| v.parse().ok()).unwrap_or(24usize);
-    let o = MutateOptions { max_mutants: cap, batch: 8, inputs: 64, max_closure: 120, ..MutateOptions::default() };
-    let r = mutate::run(&k, &c.sm, &o);
-    let mut s = format!("QMDB: baseline verified {}, {} mutants enumerated, {} run, complete {}, {:.1} s, {} batch(es)\n", r.baseline_verified, r.enumerated, r.mutants.iter().filter(|(_, o)| o.verdict != Verdict::NotRun).count(), r.complete, r.elapsed.as_secs_f64(), r.batches.len());
+    let run = driver::stage::mutate(&c);
+    let r = run.report.as_ref().unwrap_or_else(|| panic!("the MMR does not verify:\n{}", run.v.diags.render(&c.sm)));
+    let mut s = format!("MMR: baseline verified {}, {} mutants enumerated, {} run, complete {}, {:.1} s, {} batch(es), {} finding(s)\n", r.baseline_verified, r.enumerated, r.mutants.iter().filter(|(_, o)| o.verdict != Verdict::NotRun).count(), r.complete, r.elapsed.as_secs_f64(), r.batches.len(), run.findings.list.len());
     for v in Verdict::ALL {
         s.push_str(&format!("  {}: {}\n", v.word(), r.count(v)));
     }
     for (m, o) in &r.mutants {
-        s.push_str(&format!("  #{} {} [{}] {} -> {} ({} items) {}\n", m.id, m.path, m.family, m.desc, o.verdict.word(), o.closure, o.by.first().cloned().or_else(|| o.witness.as_ref().map(|w| format!("at `{}` on {}: {} vs {}{}", w.function, w.input, w.original, w.mutant, match &w.refutation { Some(Ok(_)) => " (refutation kernel-checked)", _ => "" }))).or_else(|| o.notes.first().cloned()).unwrap_or_default()));
+        s.push_str(&format!("  #{} {} [{}] {} -> {} ({} items) {}\n", m.id, m.path, m.family, m.desc, o.verdict.word(), o.closure, o.by.first().cloned().or_else(|| o.witness.as_ref().map(|w| format!("at `{}` on {}: {} vs {}", w.function, w.input, w.original, w.mutant))).or_else(|| o.notes.first().cloned()).unwrap_or_default()));
     }
     for b in &r.batches {
         s.push_str(&format!("  batch: {} mutant(s), {} items, {:.1} s, heap {} MiB\n", b.mutants, b.items, b.elapsed.as_secs_f64(), b.heap >> 20));
     }
+    s.push_str(&run.findings.render(&c.sm));
     eprintln!("{s}");
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
-    let _ = std::fs::write(dir.join("qmdb-mutants.txt"), &s);
-    let _ = std::fs::write(dir.join("qmdb-mutants.json"), mutate::report_json(&r).render());
+    let _ = std::fs::write(dir.join("mmr-mutants.txt"), &s);
+    let _ = std::fs::write(dir.join("mmr-mutants.json"), mutate::report_json(r).render());
     // recorded, not asserted: only that the engine ran on a verified baseline
     assert!(r.baseline_verified, "{s}");
 }

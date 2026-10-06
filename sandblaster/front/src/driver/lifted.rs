@@ -27,56 +27,17 @@
 //! Exactly one lifted exec module may be emitted (the others must be
 //! `#[lift(host)]` models); a source whose text after its docs holds an
 //! inner attribute (`#![..]`) is refused (an `include!`d file cannot carry
-//! one). Crate mode (`sandblaster::build::compile`) refuses a lifted crate:
-//! the source names host items through `crate::`.
+//! one).
 
 use crate::lift::{LiftFacts, LiftedInfo};
 
 /// The status line of an emitted lifted module.
 pub const LIFTED: &str = "VERIFIED + LIFTED AS-IS (module mode)";
-/// The status line of an emitted lifted module with functions rewritten to
-/// their optimized residuals ([`super::lowered`]).
-pub const LIFTED_OPTIMIZED: &str = "VERIFIED + LIFTED + OPTIMIZED (module mode)";
-/// The status line of an emitted lifted module whose only rewritten
-/// functions use user-supplied `#[rewrite]` alternatives (user code, not
-/// optimizer output).
-pub const LIFTED_USER_REWRITES: &str = "VERIFIED + LIFTED + USER REWRITES (module mode)";
-/// The status line with both: optimizer residuals and user alternatives.
-pub const LIFTED_OPTIMIZED_USER_REWRITES: &str = "VERIFIED + LIFTED + OPTIMIZED + USER REWRITES (module mode)";
-
-/// The status line of an emitted lifted module by the origins of its
-/// rewritten functions: `OPTIMIZED` only for the optimizer's residuals.
-pub fn lifted_status(lowered: Option<&super::lowered::LoweredModule>) -> &'static str {
-    use super::lowered::LowerOrigin;
-    let (o, u) = lowered.map(|l| (l.lowered_by(LowerOrigin::Optimizer), l.lowered_by(LowerOrigin::UserRewrite))).unwrap_or((0, 0));
-    match (o > 0, u > 0) {
-        (false, false) => LIFTED,
-        (true, false) => LIFTED_OPTIMIZED,
-        (false, true) => LIFTED_USER_REWRITES,
-        (true, true) => LIFTED_OPTIMIZED_USER_REWRITES,
-    }
-}
-
-/// The header line of one rewritten function (the emitted module's header,
-/// the in-place copies and their index): optimizer residuals as
-/// `rewritten: ..`, user alternatives as `rewritten by user code: ..`.
-pub fn rewritten_line(function: &str, outcome: &super::lowered::LowerOutcome, with_helpers: bool) -> Option<String> {
-    use super::lowered::{LowerOrigin, LowerOutcome};
-    let LowerOutcome::Lowered { origin, rung, cost_source, cost_residual, helpers, via } = outcome else { return None };
-    let helpers = if with_helpers && !helpers.is_empty() { format!("; {}", helpers.join(", ")) } else { String::new() };
-    let via = if via.is_empty() { String::new() } else { format!("; {via}") };
-    Some(match origin {
-        LowerOrigin::Optimizer => format!("rewritten: `{function}` (rung {rung}; portable cost {cost_source} -> {cost_residual} milli-cycles{helpers}{via})"),
-        LowerOrigin::UserRewrite => format!("rewritten by user code: `{function}` (not optimizer output; portable cost {cost_source} -> {cost_residual} milli-cycles{helpers}{via})"),
-    })
-}
-
 /// The lifted exec module to emit: `Ok(None)` for a crate without lifted
 /// exec modules, an error for more than one that is not `#[lift(host)]` or
 /// for lifted exec modules that are all host models.
 pub fn emitted_module(lifted: &[LiftedInfo]) -> Result<Option<&LiftedInfo>, String> {
-    // user-supplied alternatives (`#[lift(opt)]`) are never emitted
-    let exec: Vec<&LiftedInfo> = lifted.iter().filter(|l| !l.ghost && !l.opt).collect();
+    let exec: Vec<&LiftedInfo> = lifted.iter().filter(|l| !l.ghost).collect();
     if exec.is_empty() {
         return Ok(None);
     }
@@ -169,20 +130,7 @@ pub struct HeaderInfo<'a> {
 /// The emitted file of a lifted module (module docs), or why none is
 /// emitted.
 pub fn module_code(source_text: &str, info: &LiftedInfo, facts: &LiftFacts, h: &HeaderInfo<'_>) -> Result<String, Vec<String>> {
-    module_code_with(source_text, info, facts, h, None)
-}
-
-/// [`module_code`] with the optimizer's lowering ([`super::lowered`]): when
-/// functions were rewritten, the body is the lowered source (the source
-/// with those bodies replaced and the checked helpers appended) and the
-/// header lists them; otherwise the source as-is.
-pub fn module_code_with(source_text: &str, info: &LiftedInfo, facts: &LiftFacts, h: &HeaderInfo<'_>, lowered: Option<&super::lowered::LoweredModule>) -> Result<String, Vec<String>> {
-    let (_, src_body) = split_docs(source_text);
-    let rewritten = lowered.filter(|l| l.lowered() > 0);
-    let body: &str = match rewritten {
-        Some(l) => &l.body,
-        None => src_body,
-    };
+    let (_, body) = split_docs(source_text);
     if has_inner_attribute(body) {
         return Err(vec![format!(
             "lifted module `{}`: the source has an inner attribute or inner doc comment after its leading `//!` lines; an `include!`d file cannot carry one (move it to the module file `{}`)",
@@ -191,27 +139,14 @@ pub fn module_code_with(source_text: &str, info: &LiftedInfo, facts: &LiftFacts,
     }
     let mut s = String::new();
     s.push_str(&format!("// @generated by sandblaster from `{}`. Do not edit.\n", h.root_display));
-    s.push_str(&format!("// STATUS: {}:\n", lifted_status(rewritten)));
+    s.push_str(&format!("// STATUS: {LIFTED}:\n"));
     s.push_str(&format!("//   {}\n", h.summary));
-    match rewritten {
-        None => s.push_str(&format!(
-            "// The code below is `{}` byte for byte after its leading `//!` lines, which are the docs of the host's\n// module file `{}` (checked equal). The proofs are about {}.\n",
-            h.source_display,
-            h.module_file,
-            if facts.mir_read.is_empty() { "the lift's reading of it (SEMANTICS.md §19)" } else { "rustc's MIR of it, read as `docs/mir-lift.md` §20 says" }
-        )),
-        Some(l) => {
-            s.push_str(&format!(
-                "// The code below is `{}` after its leading `//!` lines (the docs of the host's module file `{}`, checked\n// equal), except the bodies of the functions listed here: each calls its replacement (the optimizer's residual, or a\n// user-supplied `#[rewrite]` alternative where marked: user code), appended at the end, kernel-checked equal to the\n// function and read back by the lift (the lifted round trip, DESIGN.md §2.1).\n",
-                h.source_display, h.module_file
-            ));
-            for r in &l.records {
-                if let Some(line) = rewritten_line(&r.function, &r.outcome, true) {
-                    s.push_str(&format!("//   {line}\n"));
-                }
-            }
-        }
-    }
+    s.push_str(&format!(
+        "// The code below is `{}` byte for byte after its leading `//!` lines, which are the docs of the host's\n// module file `{}` (checked equal). The proofs are about {}.\n",
+        h.source_display,
+        h.module_file,
+        if facts.mir_read.is_empty() { "the lift's reading of it (SEMANTICS.md §19)" } else { "rustc's MIR of it, read as `docs/mir-lift.md` §20 says" }
+    ));
     if !facts.mir_read.is_empty() {
         s.push_str(&format!(
             "// Its function bodies were read from rustc's MIR (`docs/mir-lift.md` §20: {} instances, extracted by {}), not from the surface syntax.\n",
@@ -321,7 +256,7 @@ mod tests {
     use crate::span::FileId;
 
     fn info(name: &str, ghost: bool, host: bool) -> LiftedInfo {
-        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false, opt: false, lowered_include: None, mir: None, mir_roundtrip: None }
+        LiftedInfo { name: name.into(), file: FileId::default(), ghost, host, unverified: vec![], in_place: false, mir: None }
     }
 
     #[test]

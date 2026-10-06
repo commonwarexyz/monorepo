@@ -1,8 +1,8 @@
-//! Incremental spec mutation (North star principle 5; DESIGN.md §15.8
-//! *Gate mode*): the per-mutant verdict cache of the spec-mutation gate.
+//! Incremental spec mutation (North star principle 5; DESIGN.md §15.7
+//! *Review mode*): the per-mutant verdict cache of the spec-mutation tool.
 //!
 //! A spec mutant's gate verdict is a deterministic function of what its
-//! re-check reads (module docs of [`super`], *Gate mode*): the mutant
+//! re-check reads (module docs of [`super`], *Review mode*): the mutant
 //! (item, operator, site, diff), its plan (the gate part of its closure,
 //! its known answers in order, its observation points and suggestions),
 //! the HIR of every item the batch's elaboration of it can reach — the
@@ -22,7 +22,7 @@
 //! replaced by paths), so an edit elsewhere in a file does not invalidate
 //! the mutants below it.
 //!
-//! [`super::run_from`] (gate mode, with a cache) looks every spec mutant up
+//! [`super::run_from`] (review mode, with a cache) looks every spec mutant up
 //! before planning its batches, runs only the misses, and stores every
 //! decided verdict: killed by the specification, by safety or by proofs,
 //! invalid, a counterexample, possibly equivalent. A mutant not run or

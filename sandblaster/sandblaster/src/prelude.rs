@@ -6,8 +6,8 @@
 //! | Name | Kind | Meaning (checker) | Baseline `rustc` build |
 //! | --- | --- | --- | --- |
 //! | `requires`, `ensures`, `decreases` | attribute | contracts, measure, stack-depth bound (§4.2, §3.7) | attribute erased |
-//! | `implements`, `specialize` | attribute | hardware variant (§9.3), mandatory specialization (§8.2) | attribute erased |
-//! | `law`, `lemma`, `spec`, `rewrite` | attribute | ghost items (§4.5); `#[spec]` also on `#[cfg(sandblaster)] #[spec] mod m;` (§15.1) | item erased |
+//! | `implements` | attribute | hardware variant (§9.3) | attribute erased |
+//! | `law`, `lemma`, `spec` | attribute | ghost items (§4.5); `#[spec]` also on `#[cfg(sandblaster)] #[spec] mod m;` (§15.1) | item erased |
 //! | `induction` | attribute | proof by induction on a ghost item (§4.4) | attribute erased |
 //! | `refines` | attribute | functional spec of an exec function (§15.2) | attribute erased |
 //! | `example`, `examples` | attribute | known-answer examples and vector files (§15.7) | attribute erased |
@@ -37,7 +37,7 @@
 pub use sandblaster_macros::{
     assumption, corollary, decreases, definitional, ensures, example, examples, fuel_sufficient,
     ghost, implements, induction, invariant, law, lemma, mirrors_impl, opaque, reduces_to, refines,
-    represents, requires, rewrite, section, specialize, spec, trusted_extern, view,
+    represents, requires, section, spec, trusted_extern, view,
 };
 
 pub use crate::proof;

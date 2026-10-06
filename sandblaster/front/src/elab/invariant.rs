@@ -49,9 +49,7 @@
 //! invariant can be broken only in unpacked locals), the structural view
 //! of a type onto a spec struct, and `sandblaster eval` inputs (checked by
 //! evaluation). The obligation's target is the field type instantiated by
-//! substitution from the kernel declaration — never from the HIR — so the
-//! round trip's generated mode (where the printed struct has no attribute)
-//! builds the same constructor with `Erased` proofs. Pattern rebuilds
+//! substitution from the kernel declaration — never from the HIR. Pattern rebuilds
 //! (script refinements, the body walk) reuse the matched `Irr` fields.
 //!
 //! # Free facts (`FactOrigin::TypeBound`)
@@ -557,8 +555,7 @@ impl<'a> Elab<'a> {
     /// conjunct; `Type` for a proposition) — the conjunct at the value's
     /// projections — and the lemma `S::inv#k : Π(T..)(s : S T..).
     /// Eq(Bool, S::holds#k T.. s, true)` (or `S::holds#k T.. s`). Facts are
-    /// stated with the predicate, so their types contain no `match` (the
-    /// optimizer's straight-line residuals keep them).
+    /// stated with the predicate, so their types contain no `match`.
     pub fn invariant_lemmas(&mut self, id: ItemId, ind: IndId) -> R<()> {
         let it = self.krate.item(id);
         let span = it.span;
@@ -657,8 +654,7 @@ impl<'a> Elab<'a> {
     // ------------------------------------------------------------------
 
     /// The `S::inv#k` lemmas of a struct (empty for types without `Irr`
-    /// fields; looked up by name, so the optimizer's resumed elaborations
-    /// find them too).
+    /// fields; looked up by name).
     pub fn inv_lemmas(&self, id: ItemId) -> Vec<GlobalId> {
         let it = self.krate.item(id);
         let ItemKind::Struct(s) = &it.kind else { return vec![] };

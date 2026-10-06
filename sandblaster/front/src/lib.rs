@@ -11,18 +11,19 @@
 //!    with explicit binding modes, exhaustiveness ([`exhaust`]), ghost
 //!    propositions and scripts (§4), producing the typed [`hir`];
 //! 4. [`validate`] — the global subset rules (boundary, recursion, ZST
-//!    slices, `#![forbid(unsafe_code)]`, laws/proofs, variants);
-//! 5. [`canon`] — the canonical printer (§2, §8.3), phase-1 flavour.
+//!    slices, `#![forbid(unsafe_code)]`, laws/proofs, variants).
 //!
-//! Verified pipeline ([`driver::verify`], `driver::build_verified`,
-//! phase 2):
+//! Verified pipeline ([`driver::build_crate`], phase 2):
 //!
-//! 6. [`elab`] — elaboration of the HIR to kernel definitions (the normative
+//! 5. [`elab`] — elaboration of the HIR to kernel definitions (the normative
 //!    semantics, `SEMANTICS.md`), every obligation handed to a
 //!    [`prover::Prover`] ([`elab::ProverChain`]: the development prover,
 //!    then [`auto`]) and every definition checked by the kernel;
-//! 7. [`driver`] — the report, the canonical emission of verified crates,
-//!    the build-script logic and the reference evaluator (`sandblaster eval`).
+//! 6. [`lift`] and [`mir`] — existing Rust verified as written: the item
+//!    skeleton from the source, the bodies from rustc's MIR, each function's
+//!    theorem relating the literal and the structured reading;
+//! 7. [`driver`] — the §15 gates, the lock, the report, the build-script
+//!    logic and the reference evaluator (`sandblaster eval`).
 //!
 //! Supporting tables: [`builtins`] (§3.4 methods, operators, conversions),
 //! [`intrinsics`] (the target intrinsic table, §9.2), [`target`] (target
@@ -36,7 +37,6 @@ pub use sandblaster_memguard as memguard;
 
 pub mod auto;
 pub mod builtins;
-pub mod canon;
 pub mod conform;
 pub mod const_eval;
 pub mod deelab;
@@ -50,14 +50,11 @@ pub mod json;
 pub mod lift;
 pub mod loader;
 pub mod mir;
-pub mod lower;
 pub mod lock;
 pub mod mutate;
-pub mod opt;
 pub mod prover;
-pub mod relocate;
+pub mod refute;
 pub mod resolve;
-pub mod roundtrip;
 pub mod span;
 pub mod specdiff;
 pub mod surface;

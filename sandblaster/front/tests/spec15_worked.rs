@@ -70,13 +70,14 @@ fn the_worked_example_verifies() {
     assert!(r.closure.is_empty(), "{:?}", r.closure);
 }
 
-/// The sample on the crate path: every §15 gate passes — the spec-mutation
-/// gate kills every non-equivalent spec mutant with the known answers
-/// (FIPS examples, the independent `compress` answer, the CAVP records) —
-/// and the verdict is deterministic: a second run decides every mutant the
-/// same way and emits the same file.
+/// The sample on the crate path: every §15 gate passes and the verdict is
+/// deterministic; the spec-mutation tool (`sandblaster mutate`, no longer a
+/// gate) kills every non-equivalent spec mutant with the known answers
+/// (FIPS examples, the independent `compress` answer, the CAVP records),
+/// and a second run decides every mutant the same way and the build emits
+/// the same file.
 #[test]
-#[ignore = "slow: the spec-mutation gate on the SHA-256 sample (1526 mutants, about a minute on 4 threads) runs three times; the DESIGN.md §15.8 measurement"]
+#[ignore = "slow: the spec-mutation tool on the SHA-256 sample (1526 mutants, about a minute on 4 threads) runs twice; the DESIGN.md §15.7 measurement"]
 fn the_worked_example_passes_every_gate_deterministically() {
     use sandblaster_front::driver::{self, LockUse};
     use sandblaster_front::loader::MemFs;
@@ -102,8 +103,10 @@ fn the_worked_example_passes_every_gate_deterministically() {
         let c = driver::check(&root(), &fs, &target);
         let b = driver::build_crate(&c, LockUse::Enforce, "spec15_sha256/mod.rs");
         let v = b.verdict.as_ref().unwrap_or_else(|| panic!("no verdict:\n{}", b.render_failure(&c, "spec15_sha256/mod.rs")));
-        let m = b.gates.mutation.as_ref().expect("the spec-mutation gate ran");
+        let t = driver::stage::mutate(&c);
+        let m = t.report.as_ref().expect("the crate verifies");
         assert!(m.complete, "{:?}", m.incomplete_reasons);
+        assert!(!t.findings.has_errors(), "{}", t.findings.render(&c.sm));
         let verdicts: Vec<(String, String)> = m.mutants.iter().map(|(x, o)| (format!("{} {}", x.path, x.desc), o.verdict.word().to_string())).collect();
         (v.code_sha256(), verdicts, m.elapsed)
     };
@@ -111,7 +114,7 @@ fn the_worked_example_passes_every_gate_deterministically() {
     let (h2, v2, t2) = run();
     assert_eq!(h1, h2, "the emitted file");
     assert_eq!(v1, v2, "every mutant is decided the same way");
-    eprintln!("spec-mutation gate: {} mutants, {:.0} s and {:.0} s", v1.len(), t1.as_secs_f64(), t2.as_secs_f64());
+    eprintln!("spec-mutation tool: {} mutants, {:.0} s and {:.0} s", v1.len(), t1.as_secs_f64(), t2.as_secs_f64());
 }
 
 // ---------------------------------------------------------------------

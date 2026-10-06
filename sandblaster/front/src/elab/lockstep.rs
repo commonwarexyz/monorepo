@@ -1177,8 +1177,8 @@ impl<'a> Elab<'a> {
         use sandblaster_kernel::value::{Arg, Value};
         // syntactically (the fields keep their `let`-bound choices): both
         // sides head-reduced, through `let`s at the head
-        let l = crate::opt::proof::steps::head_reduce(&self.zeta_head(lhs));
-        let r = crate::opt::proof::steps::head_reduce(&self.zeta_head(rhs));
+        let l = crate::elab::tm::head_reduce(&self.zeta_head(lhs));
+        let r = crate::elab::tm::head_reduce(&self.zeta_head(rhs));
         if let (Term::Ctor { ind: li, ctor: lc, params: lp, args: la }, Term::Ctor { ind: ri, ctor: rc, args: ra, .. }) = (&*l, &*r)
             && li == ri
             && lc == rc

@@ -833,39 +833,6 @@ fn newtype_code(g: &Gen<'_>) -> String {
 }
 
 /// Every file under `dir` (relative path, bytes), sorted.
-/// The host file `text` with each **lowered declaration** (`mod m {
-/// include!(concat!(env!("OUT_DIR"), "/<copy>")); }`,
-/// `lift::open::lowered_include`) made `mod m;` (`None`: it has none). The
-/// lift reads that declaration as `mod m;` and verifies `m`'s own file; the
-/// harness compiles what the lift read (the copy is the build's, checked by
-/// the lifted round trip, and the harness has no build script).
-fn read_lowered_as_plain(text: &str) -> Option<String> {
-    fn walk(items: &[syn::Item], out: &mut Vec<std::ops::Range<usize>>) {
-        for it in items {
-            if let syn::Item::Mod(m) = it
-                && let Some((brace, inner)) = &m.content
-            {
-                if matches!(crate::lift::open::lowered_include(m), Some(Ok(_))) {
-                    out.push(brace.span.join().byte_range());
-                } else {
-                    walk(inner, out);
-                }
-            }
-        }
-    }
-    let f = syn::parse_file(text).ok()?;
-    let mut ranges = Vec::new();
-    walk(&f.items, &mut ranges);
-    if ranges.is_empty() {
-        return None;
-    }
-    let mut t = text.to_string();
-    for r in ranges.into_iter().rev() {
-        t.replace_range(r, ";");
-    }
-    Some(t)
-}
-
 fn walk(root: &Path, dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) -> Result<(), String> {
     let mut ents: Vec<_> = std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?.filter_map(Result::ok).collect();
     ents.sort_by_key(|e| e.file_name());
@@ -1152,11 +1119,6 @@ pub use self::{COMMON}::run as {RUN};
         let parent = &ip.lca[..i];
         append(parent, &format!("\n#[doc(hidden)]\n#[allow(warnings, missing_docs, clippy::all)]\npub use self::{}::{RUN};\n", ip.lca[i]))?;
     }
-    for (_, bytes) in &mut texts {
-        if let Some(t) = std::str::from_utf8(bytes).ok().and_then(read_lowered_as_plain) {
-            *bytes = t.into_bytes();
-        }
-    }
     for (rel, bytes) in &texts {
         let p = src.join(rel);
         if let Some(d) = p.parent() {
@@ -1225,16 +1187,6 @@ pub use self::{COMMON}::run as {RUN};
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_lowered_declaration_is_compiled_as_the_file_the_lift_read() {
-        let text = "pub mod a;\n#[cfg(rust_analyzer)]\npub mod it;\n#[cfg(not(rust_analyzer))]\npub mod it {\n    //! docs\n    include!(concat!(env!(\"OUT_DIR\"), \"/m-lowered__x__it.rs\"));\n}\npub fn f() {}\n";
-        assert_eq!(read_lowered_as_plain(text).as_deref(), Some("pub mod a;\n#[cfg(rust_analyzer)]\npub mod it;\n#[cfg(not(rust_analyzer))]\npub mod it ;\npub fn f() {}\n"));
-        // negative twins: a file without one is left alone, and so is an
-        // inline module that includes anything but a lowered copy
-        assert_eq!(read_lowered_as_plain("pub mod a;\nmod b { fn g() {} }\n"), None);
-        assert_eq!(read_lowered_as_plain("mod b { include!(\"x.rs\"); }\n"), None);
-    }
 
     #[test]
     fn module_paths_of_host_files() {

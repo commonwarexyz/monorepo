@@ -2,15 +2,14 @@
 //! evidence records (DESIGN.md §9.2 "Validation") name the exact toolchain
 //! whose code was compared against the hardware.
 //!
-//! It also makes the committed evidence records (`evidence/`: the model
-//! records `<arch>.json` and, later, the tuning files) inputs of the build.
-//! The optimizer reads them at run time through `evidence::validation`
-//! (`std::fs`, not the front end's tracked file system), so without this a
-//! crate whose build script runs the verified pipeline (QMDB's) would keep a
-//! cached `sandblaster.rs` whose dispatch decisions were made against an older
-//! record: fail open for §9.2 in incremental builds. With the directory
-//! listed, changing any file in it re-runs this script, which rebuilds this
-//! crate and everything that depends on it, including those build scripts.
+//! It also makes the committed evidence records (`evidence/<arch>.json`)
+//! inputs of the build. The front end reads them at run time through
+//! `evidence::validation` (`std::fs`, not its tracked file system) for the
+//! `target-model:` lock items, so without this a crate whose build script
+//! runs the verified pipeline could keep a result computed against an older
+//! record. With the directory listed, changing any file in it re-runs this
+//! script, which rebuilds this crate and everything that depends on it,
+//! including those build scripts.
 
 use std::process::Command;
 

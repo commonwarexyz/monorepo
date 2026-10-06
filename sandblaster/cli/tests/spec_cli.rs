@@ -154,11 +154,9 @@ fn the_sheet_then_accept_then_a_named_change() {
     assert!(so.contains("SPEC.lock: missing"), "{so}");
     assert!(se.contains("error[spec-lock]: no SPEC.lock at"), "{se}");
     assert!(!d.join("SPEC.lock").exists(), "`spec` writes nothing");
-    // without a lock there is no verdict: `emit` prints nothing and never
-    // writes the lock
-    let (o, code, _) = run(&["emit"], &d);
+    // without a lock there is no verdict, and `check` never writes the lock
+    let (o, _, _) = run(&["check"], &d);
     assert_eq!(o.status.code(), Some(1));
-    assert!(code.is_empty());
     assert!(!d.join("SPEC.lock").exists());
     // accept: the lock is written, and then matches
     let (o, so, se) = run(&["spec", "--accept"], &d);
@@ -170,11 +168,9 @@ fn the_sheet_then_accept_then_a_named_change() {
     let (o, so, _) = run(&["spec"], &d);
     assert!(o.status.success(), "{so}");
     assert!(so.contains("SPEC.lock: matches (") && so.contains(&format!("root {root})")), "{so}");
-    // the emitted crate exports the lock's root
-    let (o, code, se) = run(&["emit"], &d);
-    assert!(o.status.success(), "{se}");
-    let bytes: Vec<String> = (0..32).map(|i| format!("0x{}u8", &root[2 * i..2 * i + 2])).collect();
-    assert!(code.contains(&format!("pub const SANDBLASTER_SPEC_ROOT: [u8; 32] = [{}];", bytes.join(", "))), "{}", &code[code.len().saturating_sub(500)..]);
+    // with the lock the crate path issues a verdict
+    let (o, so, se) = run(&["check"], &d);
+    assert!(o.status.success(), "{so}{se}");
     // an implementation change needs no review
     edit(&d, "m.rs", "if x > LIMIT { LIMIT } else { x }", "if x >= LIMIT { LIMIT } else { x }");
     let (o, so, _) = run(&["spec"], &d);

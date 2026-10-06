@@ -1,44 +1,32 @@
-//! **Stage APIs** of the pipeline: the toolchain's own steps (verify,
-//! optimize, print, evaluate a module), used by its unit tests, the
-//! optimizer corpus and `sandblaster eval`.
+//! **Stage APIs** of the pipeline: the toolchain's own steps (verify, the
+//! specification surface, the lift conformance check, evaluate a module,
+//! spec mutation), used by its unit tests and the CLI's stage tools
+//! (`sandblaster spec`, `conform`, `eval`, `mutate`).
 //!
 //! Nothing here is a crate verdict (DESIGN.md §15.8, stage boundary). No
-//! function of this module runs the §15 gates, prints or returns
-//! `VERIFIED`, writes `OUT_DIR` files or `SPEC.lock`, or produces a
-//! [`super::gates::CrateVerdict`]: stage output carries the header
-//! `STATUS: STAGE OUTPUT (not a crate verdict: the §15 gates did not run)`
-//! ([`canon::STAGE`]), and every consumer of crate output (the `include!`
-//! glue, the bench and oracle `build.rs` files, `cgen`) rejects it. The
-//! crate paths — `sandblaster::build::compile`, every CLI command that prints
-//! a crate verdict — go through [`super::gates::build_crate`], the only
-//! constructor of a verdict.
+//! function of this module runs the §15 gates, returns `VERIFIED`, writes
+//! `OUT_DIR` files or `SPEC.lock`, or produces a
+//! [`super::gates::CrateVerdict`]: a stage report's status is
+//! [`super::STAGE_RUN`] or `NOT VERIFIED`. The crate paths — the build
+//! entry points, every CLI command that prints a crate verdict — go through
+//! [`super::gates::build_crate`], the only constructor of a verdict.
 
 use std::time::Instant;
 
-use crate::canon;
 use crate::diag::Severity;
 use crate::elab::{self, DefStatus};
 use crate::hir::{Crate, ItemId, ItemKind, LawProof, Recursion};
 use crate::json::Json;
 use crate::span::SourceMap;
 
-use super::{apply_law_audit, count_loops, def_status_str, kind_name, optimize_emit_rooted, reexports_json, resource_gate, spec15_report, spec_status, Checked, LawAudit, OptimizedEmit, Spec15Report, Verification, VerifyOptions};
-
-/// Prints the canonical code of an error-free crate, front end only
-/// (header `UNVERIFIED (phase 1)`): a toolchain test of the printer.
-pub fn emit(c: &Checked, root_display: &str) -> Option<String> {
-    if !c.ok() {
-        return None;
-    }
-    Some(canon::print_crate(c.krate.as_ref()?, &c.sm, root_display, &c.reexports))
-}
+use super::{apply_law_audit, count_loops, def_status_str, kind_name, resource_gate, spec15_report, spec_status, Checked, LawAudit, Spec15Report, Verification, VerifyOptions};
 
 /// The front-end report (status `UNVERIFIED (phase 1)`): a toolchain
 /// test of the report's shape, never a crate report.
 pub fn front_end_report_json(c: &Checked, root_display: &str) -> String {
     let mut j = Json::obj();
     j.str("sandblaster", env!("CARGO_PKG_VERSION"));
-    j.str("status", canon::UNVERIFIED);
+    j.str("status", super::UNVERIFIED);
     j.num("phase", 1);
     j.str("root", root_display);
     let files: Vec<Json> = c.sm.files().map(|(_, f)| Json::string(&f.path.display().to_string())).collect();
@@ -59,7 +47,6 @@ pub fn front_end_report_json(c: &Checked, root_display: &str) -> String {
         let reach: std::collections::HashSet<ItemId> = k.reachable.iter().copied().collect();
         let mut defs = Vec::new();
         let mut laws = Vec::new();
-        let mut variants = Vec::new();
         for it in &k.items {
             let mut d = Json::obj();
             d.str("path", &it.path.to_string());
@@ -86,17 +73,6 @@ pub fn front_end_report_json(c: &Checked, root_display: &str) -> String {
                 });
                 d.num("loops", count_loops(f) as i64);
                 d.put("target_features", Json::Arr(f.target_features.iter().map(|x| Json::string(x)).collect()));
-                d.put("implements", f.implements.map(|i| Json::string(&k.item(i).path.to_string())).unwrap_or(Json::Null));
-                d.bool("specialize", f.specialize);
-                if let Some(target) = f.implements {
-                    let mut v = Json::obj();
-                    v.str("variant", &it.path.to_string());
-                    v.str("implements", &k.item(target).path.to_string());
-                    v.put("features", Json::Arr(f.feature_set.iter().map(|x| Json::string(x)).collect()));
-                    v.str("equivalence", "not proven (phase 1)");
-                    v.str("model_validation", "not checked (phase 1)");
-                    variants.push(v);
-                }
                 if let Some(lp) = f.law_proof {
                     let mut l = Json::obj();
                     l.str("law", &it.path.to_string());
@@ -114,17 +90,15 @@ pub fn front_end_report_json(c: &Checked, root_display: &str) -> String {
         j.put("definitions", Json::Arr(defs));
         j.put("laws", Json::Arr(laws));
         j.put("boundary", Json::Arr(k.boundary.iter().map(|e| Json::string(&e.name)).collect()));
-        j.put("reexports", reexports_json(k, &c.reexports));
         let mut ob = Json::obj();
         ob.str("note", "obligations are generated by the elaborator (phase 2); none were checked");
         j.put("obligations", ob);
         j.put("specializations", Json::Arr(vec![]));
-        j.put("variants", Json::Arr(variants));
     }
     j.put(
         "tcb",
         Json::Arr(
-            ["sandblaster-kernel (checker, evaluator, linarith, bvnorm, axioms)", "elaboration semantics of the canonical dialect", "prelude definitions (sandblaster/kernel/prelude/*.core)", "target semantics library and dispatch glue", "rustc/LLVM"]
+            ["sandblaster-kernel (checker, evaluator, linarith, bvnorm, axioms)", "elaboration semantics of the canonical dialect", "prelude definitions (sandblaster/kernel/prelude/*.core)", "rustc/LLVM"]
                 .iter()
                 .map(|s| Json::string(s))
                 .collect(),
@@ -198,17 +172,6 @@ pub fn verify_audited(krate: &Crate, opts: &VerifyOptions, sm: &SourceMap) -> (V
     v.0.elapsed = t.elapsed();
     v.0.provers = provers;
     v
-}
-
-/// Prints the (unoptimized) canonical code of a crate whose proofs
-/// checked, with the stage header (`None` unless
-/// [`Verification::proofs_ok`]).
-pub fn emit_stage(c: &Checked, v: &Verification, root_display: &str) -> Option<String> {
-    if !c.ok() || !v.proofs_ok {
-        return None;
-    }
-    let k = c.krate.as_ref()?;
-    Some(canon::print_crate_stage(k, &c.sm, root_display, &super::deferred_note(k, v), &c.reexports))
 }
 
 /// Evaluates `f(args)` with the kernel evaluator on an elaboration (the
@@ -426,12 +389,10 @@ pub fn eval_json(c: &Checked, fn_path: &str, args: &str) -> Result<String, Strin
 /// every definition.
 const EVAL_NOT_CHECKED: &str = "eval needs every definition checked";
 
-/// The result of [`verify_and_optimize`]: proofs and, when they checked,
-/// the optimized stage output (header [`canon::STAGE`]).
+/// The result of [`verify_checked`]: the proofs, the law audit, the lock
+/// status and the §15 records of a stage run.
 pub struct StageBuild {
     pub v: Verification,
-    /// `None` when the proofs did not check.
-    pub emit: Option<Result<OptimizedEmit, String>>,
     /// Law statements and their non-vacuity check ([`super::audit_laws`]).
     pub law_audit: Vec<LawAudit>,
     /// `SPEC.lock` against the computed specification surface (DESIGN.md
@@ -442,42 +403,30 @@ pub struct StageBuild {
     pub spec15: Spec15Report,
 }
 
-/// Elaborates and checks the crate ([`verify`]) and, if every definition,
-/// obligation and law is proven, optimizes, prints (stage header) and
-/// round-trips it ([`optimize_emit`]). The §15 gates do not run.
-pub fn verify_and_optimize(c: &Checked, opts: &VerifyOptions, oopts: &crate::opt::OptOptions, root_display: &str) -> StageBuild {
+/// Elaborates and checks the crate ([`verify`]): the proofs, the law
+/// audit, the resource gate, the lock status (reported only) and the §15
+/// records. The §15 gates do not run.
+pub fn verify_checked(c: &Checked, opts: &VerifyOptions) -> StageBuild {
     let t = Instant::now();
     let Some(krate) = c.krate.as_ref() else {
         let spec = crate::lock::LockStatus::not_computed(&c.lock_path.display().to_string(), "", "front-end errors");
-        return StageBuild { v: Verification::empty(opts.exec_only), emit: None, law_audit: vec![], spec, spec15: Spec15Report::default() };
+        return StageBuild { v: Verification::empty(opts.exec_only), law_audit: vec![], spec, spec15: Spec15Report::default() };
     };
     let provers: Vec<String> = opts.chain().provers.iter().map(|(n, _)| n.clone()).collect();
     let exec_only = opts.exec_only;
-    let (mut v, emit, law_audit, spec, spec15) = elab::with_big_stack(|| {
+    let (mut v, law_audit, spec, spec15) = elab::with_big_stack(|| {
         let mut chain = opts.chain();
-        let mut out = elab::elaborate(krate, &mut chain, &opts.elab_options());
+        let out = elab::elaborate(krate, &mut chain, &opts.elab_options());
         let spec15 = spec15_report(&out, krate);
         let mut v = Verification::of(&out, exec_only);
         let audit = apply_law_audit(&mut v, &out, krate, &c.sm);
         resource_gate(&mut v);
         let spec = spec_status(c, &out, krate, v.proofs_ok && !exec_only);
-        // the test-only exec-only path still optimizes (its proofs never
-        // count: `proofs_ok` stays false)
-        if !out.verified() || (!exec_only && !v.proofs_ok) {
-            return (v, None, audit, spec, spec15);
-        }
-        let mut em = optimize_emit_rooted(c, &mut out, root_display, "", oopts, exec_only, spec.root, None);
-        resource_gate(&mut v);
-        if let Ok(em) = &mut em
-            && em.roundtrip_stats.spec_root.is_some_and(|r| r != spec.root)
-        {
-            em.roundtrip.push(format!("the printed `{}` is not the root of the matching SPEC.lock (or zero)", canon::SPEC_ROOT_NAME));
-        }
-        (v, Some(em), audit, spec, spec15)
+        (v, audit, spec, spec15)
     });
     v.elapsed = t.elapsed();
     v.provers = provers;
-    StageBuild { v, emit, law_audit, spec, spec15 }
+    StageBuild { v, law_audit, spec, spec15 }
 }
 
 /// What [`spec_run`] classifies the computed surface against.
@@ -545,17 +494,58 @@ pub fn spec_run(c: &Checked, baseline: &SpecBaseline, classify: bool) -> SpecRun
     run
 }
 
-/// Optimizes an elaboration whose proofs checked (`out`, of `c`'s crate),
-/// prints the optimized crate with the stage header and checks the round
-/// trip (DESIGN.md §8.2, §8.3).
-pub fn optimize_emit(c: &Checked, out: &mut crate::elab::Output, root_display: &str, note: &str, opts: &crate::opt::OptOptions) -> Result<OptimizedEmit, String> {
-    optimize_emit_mode(c, out, root_display, note, opts, false)
+/// The result of [`mutate`].
+pub struct MutateRun {
+    /// The proofs of the baseline elaboration.
+    pub v: Verification,
+    /// The engine's run; `None` when the proofs did not check (spec
+    /// mutation needs a verified baseline).
+    pub report: Option<crate::mutate::MutationReport>,
+    /// Its findings ([`crate::mutate::spec15_gate_mutants`]): surviving spec
+    /// mutants (`error[spec-mutant-survived]`), definite counterexamples to
+    /// determinacy (`error[spec-incomplete]`), laws that kill no mutant
+    /// (`warning[law-insensitive]`, LR8) and a run that did not finish
+    /// (`error[mutation-incomplete]`).
+    pub findings: crate::diag::Diagnostics,
 }
 
-/// [`optimize_emit`]; `exec_only` marks output of the test-only exec-only
-/// elaboration in the header.
-pub fn optimize_emit_mode(c: &Checked, out: &mut crate::elab::Output, root_display: &str, note: &str, opts: &crate::opt::OptOptions, exec_only: bool) -> Result<OptimizedEmit, String> {
-    optimize_emit_rooted(c, out, root_display, note, opts, exec_only, [0; 32], None)
+/// Spec mutation of the review surface (DESIGN.md §15.7, §15.1 LR8): the
+/// on-demand tool `sandblaster mutate`, for law authors and reviewers. It
+/// is **not a gate**: no build runs it, and its findings never decide a
+/// verdict or a lock. Elaborates the crate (the baseline), then runs the
+/// engine's review mode ([`crate::mutate::run_gate_cached`]): every spec
+/// function and spec constant a locked statement depends on is mutated,
+/// and a mutant survives unless a known answer or a definite
+/// counterexample to a law kills it. With the crate's verdict cache
+/// ([`Checked::cache`]) a mutant whose inputs did not change keeps its
+/// stored verdict. Writes nothing else.
+pub fn mutate(c: &Checked) -> MutateRun {
+    let t = Instant::now();
+    let opts = VerifyOptions::default();
+    let provers: Vec<String> = opts.chain().provers.iter().map(|(n, _)| n.clone()).collect();
+    let Some(krate) = c.krate.as_ref().filter(|_| c.ok()) else {
+        let mut v = Verification::empty(false);
+        v.provers = provers;
+        return MutateRun { v, report: None, findings: Default::default() };
+    };
+    let mut run = elab::with_big_stack(|| {
+        let mut chain = opts.chain();
+        let out = elab::elaborate(krate, &mut chain, &opts.elab_options());
+        let mut v = Verification::of(&out, false);
+        let _ = apply_law_audit(&mut v, &out, krate, &c.sm);
+        resource_gate(&mut v);
+        if !v.proofs_ok {
+            return MutateRun { v, report: None, findings: Default::default() };
+        }
+        let surface = crate::surface::compute(&out, krate, &c.sm, &crate::surface::SurfaceOptions { kernel_text: false, ..Default::default() });
+        let m = crate::mutate::run_gate_cached(krate, &c.sm, &out, c.cache.as_deref(), &surface);
+        let mut findings = crate::diag::Diagnostics::new();
+        crate::mutate::spec15_gate_mutants(&m, krate, &mut findings);
+        MutateRun { v, report: Some(m), findings }
+    });
+    run.v.elapsed = t.elapsed();
+    run.v.provers = provers;
+    run
 }
 
 /// A human summary of a stage verification: the front-end summary plus
@@ -567,70 +557,6 @@ pub fn summary(c: &Checked, v: &Verification) -> String {
 /// The report of a stage verification (the shape of
 /// `sandblaster-report.json`, status [`super::status_str`]: never a crate
 /// verdict).
-pub fn report_json(c: &Checked, v: &Verification, law_audit: &[LawAudit], root_display: &str, em: Option<&OptimizedEmit>, spec: Option<&crate::lock::LockStatus>, s15: Option<&Spec15Report>) -> String {
-    super::render_report(c, v, law_audit, root_display, em, spec, s15, &super::status_str(v), None)
-}
-
-/// Stage API of the optimizer on a lifted module (`driver::lowered`):
-/// elaborates (`opts.exec_only` for tests), optimizes and lowers the
-/// cheaper residuals of the crate's emitted lifted module into its source
-/// text, with the lifted round trip. `root` is the DSL root `c` was read
-/// from. Not a verdict: no §15 gate runs. Returns the proofs, the
-/// optimizer's per-function reports and the lowering.
-pub fn lower_lifted(c: &Checked, root: &std::path::Path, opts: &VerifyOptions, oopts: &crate::opt::OptOptions) -> Result<(Verification, Vec<crate::opt::FnReport>, super::lowered::LoweredModule), String> {
-    lower_lifted_stage(c, root, opts, oopts, &|c, root, out, o, oopts, info| super::lowered::lower_lifted(c, root, out, o, oopts, info))
-}
-
-/// [`lower_lifted`] with a simulated lowering-printer fault (the
-/// must-reject suite; test builds only).
-#[cfg(any(test, feature = "opt-test-hooks"))]
-pub fn lower_lifted_with_fault(c: &Checked, root: &std::path::Path, opts: &VerifyOptions, oopts: &crate::opt::OptOptions, fault: super::lowered::LowerFault) -> Result<(Verification, Vec<crate::opt::FnReport>, super::lowered::LoweredModule), String> {
-    lower_lifted_stage(c, root, opts, oopts, &|c, root, out, o, oopts, info| super::lowered::lower_lifted_with_fault(c, root, out, o, oopts, info, fault))
-}
-
-/// [`lower_lifted`] for a crate verified in place (`#[lift(in_place)]`):
-/// every in-place file lowered and round-tripped (DESIGN.md §2.1). Not a
-/// verdict: no §15 gate runs.
-pub fn lower_in_place(c: &Checked, root: &std::path::Path, opts: &VerifyOptions, oopts: &crate::opt::OptOptions) -> Result<(Verification, Vec<super::lowered::LoweredModule>), String> {
-    let krate = c.krate.as_ref().ok_or("front-end errors")?;
-    let exec_only = opts.exec_only;
-    elab::with_big_stack(|| {
-        let mut chain = opts.chain();
-        let mut out = elab::elaborate(krate, &mut chain, &opts.elab_options());
-        let v = Verification::of(&out, exec_only);
-        if !out.verified() && !exec_only {
-            let failed: Vec<String> = out.obligations.iter().filter(|o| !o.proven()).take(12).map(|o| format!("{} [{:?}] {}:{:?}: {:?}\n    goal: {}", o.def, o.kind, c.sm.path(o.span.file).display(), o.span.lo, o.status, o.goal.chars().take(1500).collect::<String>())).collect();
-            let defs: Vec<String> = out.defs.iter().filter(|d| !matches!(d.status, elab::DefStatus::Checked)).take(12).map(|d| format!("{}: {:?}", d.name, d.status)).collect();
-            let diags: Vec<String> = out.diags.list.iter().filter(|d| d.severity == Severity::Error).take(12).map(|d| d.render(&c.sm)).collect();
-            return Err(format!("the crate did not verify: {}\n{}\n{}\n{}", super::status_str(&v), failed.join("\n"), defs.join("\n"), diags.join("\n")));
-        }
-        let o = crate::opt::optimize(&mut out, krate, oopts);
-        if !o.errors.is_empty() {
-            return Err(format!("optimizer errors: {:?}", o.errors));
-        }
-        let low = super::lowered::lower_in_place(c, root, &mut out, &o, oopts);
-        Ok((v, low))
-    })
-}
-
-type LowerStep<'a> = dyn Fn(&Checked, &std::path::Path, &mut elab::Output, &crate::opt::Optimized, &crate::opt::OptOptions, &crate::lift::LiftedInfo) -> super::lowered::LoweredModule + Sync + 'a;
-
-fn lower_lifted_stage(c: &Checked, root: &std::path::Path, opts: &VerifyOptions, oopts: &crate::opt::OptOptions, step: &LowerStep<'_>) -> Result<(Verification, Vec<crate::opt::FnReport>, super::lowered::LoweredModule), String> {
-    let krate = c.krate.as_ref().ok_or("front-end errors")?;
-    let info = super::lifted::emitted_module(&c.lifted)?.ok_or("no lifted module")?.clone();
-    let exec_only = opts.exec_only;
-    elab::with_big_stack(|| {
-        let mut chain = opts.chain();
-        let mut out = elab::elaborate(krate, &mut chain, &opts.elab_options());
-        let v = Verification::of(&out, exec_only);
-        if !out.verified() && !exec_only {
-            return Err(format!("the crate did not verify: {}", super::status_str(&v)));
-        }
-        let o = crate::opt::optimize(&mut out, krate, oopts);
-        if !o.errors.is_empty() {
-            return Err(format!("optimizer errors: {:?}", o.errors));
-        }
-        let low = step(c, root, &mut out, &o, oopts, &info);
-        Ok((v, o.fns.clone(), low))
-    })
+pub fn report_json(c: &Checked, v: &Verification, law_audit: &[LawAudit], root_display: &str, spec: Option<&crate::lock::LockStatus>, s15: Option<&Spec15Report>) -> String {
+    super::render_report(c, v, law_audit, root_display, spec, s15, &super::status_str(v), None)
 }

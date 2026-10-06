@@ -7,16 +7,17 @@
 //!
 //! * an unchanged rerun takes the cached verdict: in the same `OUT_DIR` by
 //!   its key file, in a new one from the shared cache (every output byte for
-//!   byte), and neither spec mutation nor the lift conformance check runs;
+//!   byte), and the lift conformance check does not run (no build runs
+//!   spec mutation: it is the on-demand tool `sandblaster mutate`);
 //! * each edit invalidates what it must, and only that (every edited build
 //!   in a new `OUT_DIR`, the shared cache kept):
 //!   - a law's statement: refused without a re-accepted lock (never the
-//!     cached verdict); with it, the verdict is recomputed, only the edited
-//!     law's spec mutants run, and the conformance pass is reused; a
+//!     cached verdict); with it, the verdict is recomputed and the
+//!     conformance pass is reused; a
 //!     precondition re-runs the conformance check (it filters its inputs);
 //!   - the host source: a host file that is not lifted, or a file of the path
-//!     dependency, re-runs the conformance check (it compiles them) and no
-//!     spec mutant; the lifted file without a new MIR extraction is refused;
+//!     dependency, re-runs the conformance check (it compiles them); the
+//!     lifted file without a new MIR extraction is refused;
 //!   - the `.sbmir`: a text edit that keeps its meaning recomputes the
 //!     verdict and nothing else; a different body fails the build;
 //!   - the proof file: a new proven lemma recomputes the verdict and nothing
@@ -224,7 +225,7 @@ fn shared_hit(o: &BuildOutcome) -> bool {
 
 /// Reused by the `OUT_DIR` key file.
 fn local_hit(o: &BuildOutcome) -> bool {
-    o.cargo.iter().any(|l| l.contains("and its lowered copies"))
+    o.cargo.iter().any(|l| l.contains("verified in place, unchanged") && !l.contains("verdict cache entry"))
 }
 
 /// Whether the lift conformance check ran (it writes its harness, a copy of
@@ -233,11 +234,11 @@ fn conformance_ran(out: &Path) -> bool {
     out.join("m-conformance/crate/Cargo.toml").exists()
 }
 
-/// A `mutation_cache_*` count of the timing file.
-fn timing_num(o: &BuildOutcome, field: &str) -> i64 {
+/// No spec mutant ran: the timing file has no mutation entry (spec
+/// mutation is the on-demand tool, never part of a build).
+fn no_mutation(o: &BuildOutcome) {
     let t = output(o, "m-timing.json").unwrap_or_else(|| panic!("no timing: {:?}", o.cargo));
-    let at = t.find(&format!("\"{field}\": ")).unwrap_or_else(|| panic!("no {field} in {t}"));
-    t[at + field.len() + 4..].chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap()
+    assert!(!t.contains("mutation"), "a build ran spec mutation: {t}");
 }
 
 fn verified(o: &BuildOutcome) -> bool {
@@ -245,12 +246,12 @@ fn verified(o: &BuildOutcome) -> bool {
 }
 
 /// A recomputed verdict (no reuse) that passed: the conformance check ran
-/// or not as `conformance`; the spec mutants that ran.
-fn recomputed(what: &str, o: &BuildOutcome, out: &Path, conformance: bool) -> i64 {
+/// or not as `conformance`; no spec mutant ran.
+fn recomputed(what: &str, o: &BuildOutcome, out: &Path, conformance: bool) {
     assert!(verified(o), "{what}: the build failed:\n{}\n{:?}", o.stderr, o.cargo);
     assert!(!shared_hit(o) && !local_hit(o), "{what}: the verdict was reused: {:?}", o.cargo);
     assert_eq!(conformance_ran(out), conformance, "{what}: the conformance check ran: {}, expected {conformance}", conformance_ran(out));
-    timing_num(o, "mutation_cache_misses")
+    no_mutation(o);
 }
 
 /// A refused build, for the reason `why`: no verdict, nothing reused.
@@ -266,12 +267,12 @@ fn an_in_place_verdict_is_cached_and_each_edit_invalidates_what_it_must() {
     let mut s = Scratch::new("main");
     let base = s.accepted(&base_files());
 
-    // the cold build: every gate, every mutant and the conformance check run
+    // the cold build: every gate and the conformance check run (no spec
+    // mutant: mutation is the on-demand tool)
     let (cold, out1) = s.build(&base, None);
     assert!(verified(&cold), "{}\n{:?}", cold.stderr, cold.cargo);
     assert!(!shared_hit(&cold) && !local_hit(&cold) && conformance_ran(&out1));
-    let mutants = timing_num(&cold, "mutation_cache_misses");
-    assert!(mutants > 0 && timing_num(&cold, "mutation_cache_hits") == 0, "{mutants}");
+    no_mutation(&cold);
 
     // an unchanged rerun in the same target directory: its key file
     let (again, _) = s.build(&base, Some(&out1));
@@ -288,8 +289,8 @@ fn an_in_place_verdict_is_cached_and_each_edit_invalidates_what_it_must() {
         }
         assert_eq!(output(&warm, &name), Some(t.as_str()), "{name} is not the cached one");
     }
-    // the key file: the same verdict key (its output digest names the
-    // copies' paths, in this OUT_DIR)
+    // the key file: the same verdict key (its output digest is the
+    // record's)
     let key_line = |o: &BuildOutcome| output(o, "m-verdict.key").and_then(|k| k.lines().find(|l| l.starts_with("key ")).map(str::to_string));
     assert!(key_line(&warm).is_some() && key_line(&warm) == key_line(&cold), "the key file");
     assert!(warm.outputs.iter().all(|(p, _)| p.starts_with(&out2)), "outputs go to the new OUT_DIR");
@@ -305,10 +306,7 @@ fn an_in_place_verdict_is_cached_and_each_edit_invalidates_what_it_must() {
     refused("a law edited, the lock not re-accepted", &o, "error[spec-lock]: SPEC.lock: `law:crate::laws::inc_is_after` changed");
     let relocked = s.accepted(&with(&base_files(), "host/sandblaster/m/LAWS.rs", &laws2));
     let (o, out) = s.build(&relocked, None);
-    let ran = recomputed("a law edited, the lock re-accepted", &o, &out, false);
-    let hits = timing_num(&o, "mutation_cache_hits");
-    eprintln!("spec mutants: {mutants} cold; after editing `inc_is_after`: {hits} from the cache, {ran} run");
-    assert!(ran > 0 && hits > 0 && hits + ran >= mutants, "only the edited law's mutants run: {hits} hits, {ran} run, {mutants} cold");
+    recomputed("a law edited, the lock re-accepted", &o, &out, false);
     // a precondition in the laws file (and the law that needs it): the
     // conformance check decides which inputs it compares by it, so it runs
     let laws3 = LAWS.replace("(x as Int) + 1 < pow2(64)", "(x as Int) + 2 < pow2(64)");
@@ -322,9 +320,9 @@ fn an_in_place_verdict_is_cached_and_each_edit_invalidates_what_it_must() {
     // file without a new extraction of its MIR
     let lib2 = format!("{}/// Host code.\npub fn host_only() -> u8 {{\n    ic_dep_seven()\n}}\nfn ic_dep_seven() -> u8 {{\n    7\n}}\n", text(&base, "host/src/lib.rs"));
     let (o, out) = s.build(&with(&base, "host/src/lib.rs", &lib2), None);
-    assert_eq!(recomputed("a host file edited", &o, &out, true), 0, "no spec mutant reads host code");
+    recomputed("a host file edited", &o, &out, true);
     let (o, out) = s.build(&with(&base, "dep/src/lib.rs", &DEP.replace("    7\n", "    8\n")), None);
-    assert_eq!(recomputed("a path dependency edited", &o, &out, true), 0);
+    recomputed("a path dependency edited", &o, &out, true);
     let (o, _) = s.build(&with(&base, "host/src/a.rs", &A.replace("x / 2", "x >> 1")), None);
     refused("the lifted file edited, its MIR stale", &o, "changed since the MIR was extracted");
     // (the dependency's tests are not compiled into the copy: not an input)
@@ -333,7 +331,7 @@ fn an_in_place_verdict_is_cached_and_each_edit_invalidates_what_it_must() {
 
     // the MIR: a text edit that keeps its meaning, and another body
     let (o, out) = s.build(&with(&base, "host/sandblaster/m/a.sbmir", &format!("{MIR};; a comment\n")), None);
-    assert_eq!(recomputed("the .sbmir edited (a comment)", &o, &out, false), 0);
+    recomputed("the .sbmir edited (a comment)", &o, &out, false);
     let quarter = MIR.replace("(bin div (copy (p 1)) (int u64 2))", "(bin div (copy (p 1)) (int u64 4))");
     assert_ne!(quarter, MIR, "the fixture divides by the constant 2");
     let (o, _) = s.build(&with(&base, "host/sandblaster/m/a.sbmir", &quarter), None);
@@ -342,7 +340,7 @@ fn an_in_place_verdict_is_cached_and_each_edit_invalidates_what_it_must() {
     // the proof file: a new proven lemma, a false one
     let lemma = format!("{PROOF}\n/// Half of nothing.\n#[lemma]\nfn halved_zero() {{\n    ensures(halved(0) == 0);\n    follows();\n}}\n");
     let (o, out) = s.build(&with(&base, "host/sandblaster/m/PROOF.rs", &lemma), None);
-    assert_eq!(recomputed("a lemma added to the proof file", &o, &out, false), 0);
+    recomputed("a lemma added to the proof file", &o, &out, false);
     let wrong = lemma.replace("ensures(halved(0) == 0);", "ensures(halved(1) == 1);");
     let (o, _) = s.build(&with(&base, "host/sandblaster/m/PROOF.rs", &wrong), None);
     refused("a false lemma in the proof file", &o, "unproven obligation [ensures] in `crate::proof::halved_zero`");
@@ -350,7 +348,7 @@ fn an_in_place_verdict_is_cached_and_each_edit_invalidates_what_it_must() {
     // the lock: a comment, a tampered root
     let lock = text(&base, LOCK).to_string();
     let (o, out) = s.build(&with(&base, LOCK, &format!("{lock}# a reviewer's note\n")), None);
-    assert_eq!(recomputed("a comment in the lock", &o, &out, false), 0);
+    recomputed("a comment in the lock", &o, &out, false);
     let root_line = lock.lines().find(|l| l.starts_with("root ")).expect("the lock's root").to_string();
     let flipped = format!("root {}{}", if root_line.as_bytes()[5] == b'0' { '1' } else { '0' }, &root_line[6..]);
     let (o, _) = s.build(&with(&base, LOCK, &lock.replace(&root_line, &flipped)), None);
@@ -380,8 +378,8 @@ fn a_tampered_in_place_entry_is_rejected_and_the_crate_verified_again() {
     assert!(verified(&o) && !shared_hit(&o), "{:?}", o.cargo);
     assert!(o.cargo.iter().any(|l| l.contains("rejected")), "{:?}", o.cargo);
     assert_eq!(output(&o, "m-verified.txt"), Some(record.as_str()), "verified again to the same bytes");
-    // (the per-mutant verdicts and the conformance pass were reused)
-    assert_eq!(timing_num(&o, "mutation_cache_misses"), 0);
+    // (the conformance pass was reused; no spec mutant ran)
+    no_mutation(&o);
     // the entry was repaired
     let (o, _) = s.build(&base, None);
     assert!(o.ok && shared_hit(&o), "{:?}", o.cargo);

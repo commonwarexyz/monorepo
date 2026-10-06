@@ -1,7 +1,8 @@
 //! The counterexample engine (DESIGN.md §15.9, §15.7 spec mutation, §15.1
 //! LR8 law sensitivity; stage **S4**). Untrusted and diagnostic: it
 //! explains why a specification does not pin code down, and it never makes
-//! anything pass.
+//! anything pass. It is an **on-demand tool**, not a gate: no build runs
+//! it (`sandblaster mutate` and `sandblaster coverage` do).
 //!
 //! # What it does
 //!
@@ -90,21 +91,26 @@
 //!
 //! # Enforcement
 //!
+//! # Findings
+//!
 //! [`spec15_gate_mutants`] turns a report into diagnostics:
 //! `error[spec-incomplete]`, `error[spec-mutant-survived]`,
 //! `warning[law-insensitive]` and `error[mutation-incomplete]` (a run that
 //! did not finish: capped, not run for memory or time, or mutants killed
-//! only by budget). The crate path (`driver::gates`) runs the engine in
-//! **gate mode** ([`run_gate`]) and applies it to every build;
-//! `sandblaster coverage` also runs the full engine for exploration and
-//! prints its report ([`coverage`]).
+//! only by budget). They are the tool's report, never a build's: the crate
+//! path (`driver::gates`) does not run the engine (DESIGN.md §15.7, §15.8;
+//! until 2026-10 it was a §15.8 gate, whence the names `run_gate`,
+//! `spec15_gate_mutants`, `MutateOptions::gate`). `sandblaster mutate`
+//! (`driver::stage::mutate`) runs the engine in **review mode**
+//! ([`run_gate`]) and prints the findings; `sandblaster coverage` runs the
+//! full engine for exploration and prints its report ([`coverage`]).
 //!
-//! # Gate mode
+//! # Review mode
 //!
-//! [`run_gate`] is what the crate gate runs, with fixed options
+//! [`run_gate`] is what `sandblaster mutate` runs, with fixed options
 //! ([`MutateOptions::gate`]): no cap, no deadline, no environment variable
 //! (the `SANDBLASTER_MUTANTS_*` variables only shape `sandblaster coverage`'s
-//! exploration run). It reuses the build's own elaboration as the
+//! exploration run). It reuses the tool's own elaboration as the
 //! baseline and runs:
 //!
 //! * **every spec mutant of the review surface** ([`review_scope`]): the
@@ -138,8 +144,8 @@
 //! * **implementation mutants only when some section is not fully
 //!   specified**: when every `complete_p` is proven no implementation
 //!   mutant has an observation point (item 4), so none can produce a
-//!   finding. (The crate gate runs spec mutation after the section gate
-//!   passed, so there it runs spec mutants only.)
+//!   finding. (On a crate that passes the section gate it runs spec
+//!   mutants only.)
 
 pub mod cache;
 pub mod clone;
@@ -199,7 +205,7 @@ pub struct MutateOptions {
     pub deadline: Option<Duration>,
     /// A progress line on stderr after each batch.
     pub progress: bool,
-    /// Gate mode (see the module docs): spec mutants re-check only their
+    /// Review mode (see the module docs): spec mutants re-check only their
     /// spec closure, examples and law checkers.
     pub gate: bool,
 }
@@ -228,8 +234,9 @@ impl Default for MutateOptions {
 }
 
 impl MutateOptions {
-    /// The options of the crate gate ([`run_gate`]): every mutant, no
-    /// deadline, spec mutants in gate mode. Reads no environment variable.
+    /// The options of the review run ([`run_gate`], `sandblaster mutate`):
+    /// every mutant, no deadline, spec mutants in review mode. Reads no
+    /// environment variable.
     pub fn gate() -> MutateOptions {
         MutateOptions { max_mutants: usize::MAX, max_per_item: usize::MAX, batch: 32, max_closure: usize::MAX, gate: true, ..MutateOptions::default() }
     }
@@ -239,7 +246,7 @@ impl MutateOptions {
     /// `SANDBLASTER_MUTANTS_TIME_BUDGET` (seconds): the exploration run of
     /// `sandblaster coverage` only (caps only: none of them can turn a
     /// finding into a pass — a cap that leaves a mutant out makes the run
-    /// incomplete). The crate gate uses [`MutateOptions::gate`] and reads
+    /// incomplete). The review run uses [`MutateOptions::gate`] and reads
     /// none of them.
     pub fn from_env() -> MutateOptions {
         let mut o = MutateOptions::default();
@@ -472,7 +479,7 @@ pub struct MutationReport {
     pub tests_note: String,
     /// Items not mutated, with why (constants used at type level).
     pub excluded: Vec<(String, String)>,
-    /// Gate mode: the spec functions and spec constants not mutated because
+    /// Review mode: the spec functions and spec constants not mutated because
     /// they are proof internals — not on the review surface (DESIGN.md
     /// §15.6), so no locked statement depends on their definitions (§15.9,
     /// *Which spec functions the gate mutates*). By path; empty for the
@@ -484,7 +491,7 @@ pub struct MutationReport {
     pub capped: Vec<(String, usize, usize)>,
     /// `only` entries that name no item, with the closest item paths.
     pub unknown_only: Vec<(String, Vec<String>)>,
-    /// Gate mode with the verdict cache ([`cache`]): spec mutants whose
+    /// Review mode with the verdict cache ([`cache`]): spec mutants whose
     /// stored verdict was reused, and those run (timing and report notes
     /// only; the verdicts are the same either way).
     pub cache_hits: usize,
@@ -514,9 +521,9 @@ pub fn run(krate: &Crate, sm: &SourceMap, opts: &MutateOptions) -> MutationRepor
     elab::with_big_stack(|| run_here(krate, sm, opts))
 }
 
-/// The crate gate's run (see *Gate mode* in the module docs): `out` is the
-/// build's own elaboration of `krate` (the baseline), and the call must
-/// run on its elaboration thread. The options are fixed
+/// The review run of `sandblaster mutate` (see *Review mode* in the module
+/// docs): `out` is an elaboration of `krate` (the baseline), and the call
+/// must run on its elaboration thread. The options are fixed
 /// ([`MutateOptions::gate`]); the spec items mutated are those of the
 /// review surface ([`review_scope`]), computed here from `out`.
 pub fn run_gate(krate: &Crate, sm: &SourceMap, out: &elab::Output) -> MutationReport {
@@ -772,14 +779,14 @@ pub fn mutated_item(krate: &Crate, m: &Mutant) -> Item {
     it
 }
 
-/// Hardware code (target features, `#[implements]`, intrinsics, vector
-/// types; callers included): not mutated (the portable function it is
-/// proven equal to is).
+/// Hardware code (target features, intrinsics, vector types; callers
+/// included): no implementation mutants (the mutation operators do not
+/// cover intrinsic calls and vector values).
 fn hardware(krate: &Crate) -> HashSet<ItemId> {
     struct Hw(bool);
     impl crate::visit::Visitor for Hw {
         fn expr(&mut self, e: &Expr) {
-            if matches!(&e.kind, ExprKind::Call { callee: Callee::Intrinsic(..) | Callee::Helper(_), .. }) || matches!(&e.ty, Ty::Vector(_)) {
+            if matches!(&e.kind, ExprKind::Call { callee: Callee::Intrinsic(..), .. }) || matches!(&e.ty, Ty::Vector(_)) {
                 self.0 = true;
             }
             crate::visit::walk_expr(self, e);
@@ -790,7 +797,7 @@ fn hardware(krate: &Crate) -> HashSet<ItemId> {
         if let ItemKind::Fn(f) = &it.kind
             && f.kind == FnKind::Exec
         {
-            let mut v = Hw(!f.target_features.is_empty() || f.implements.is_some());
+            let mut v = Hw(!f.target_features.is_empty());
             crate::visit::walk_fn(&mut v, f);
             if v.0 {
                 hw.insert(it.id);
@@ -917,7 +924,7 @@ fn mutation_target(krate: &Crate, it: &Item, hw: &HashSet<ItemId>) -> Option<Tar
     match &it.kind {
         ItemKind::Fn(f) => match f.kind {
             // plain `fn`s of ghost modules are proof helpers, not code
-            FnKind::Exec if !it.ghost && !hw.contains(&it.id) && f.implements.is_none() && f.spec.trusted_extern.is_none() => Some(Target::Impl),
+            FnKind::Exec if !it.ghost && !hw.contains(&it.id) && f.spec.trusted_extern.is_none() => Some(Target::Impl),
             // `#[assumption]` functions have no logical content
             FnKind::Spec if f.spec.assumption.is_none() => Some(Target::Spec),
             _ => None,
@@ -1038,7 +1045,7 @@ struct Enumeration {
 }
 
 /// Every mutant of the crate, in item and node order (the per-item cap
-/// applied; see the module docs). With a `scope` (gate mode: the review
+/// applied; see the module docs). With a `scope` (review mode: the review
 /// surface, [`review_scope`]) only the spec items in it are mutated; the
 /// others are listed in [`Enumeration::internal`].
 fn enumerate(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, rev: &HashMap<ItemId, BTreeSet<ItemId>>, scope: Option<&BTreeSet<ItemId>>) -> Enumeration {
@@ -1159,7 +1166,7 @@ struct Plan {
     suggest: Vec<ItemId>,
     /// Every function that may be compared (requires checkers are built).
     compared: BTreeSet<ItemId>,
-    /// Gate mode, spec mutants: the known answers that may kill it, in the
+    /// Review mode, spec mutants: the known answers that may kill it, in the
     /// order they are tried (see [`example_slots`]).
     slots: Vec<ExSlot>,
 }
@@ -1173,7 +1180,7 @@ struct ExSlot {
     index: usize,
 }
 
-/// Gate mode: the slot after which the distinguishing search runs — the
+/// Review mode: the slot after which the distinguishing search runs — the
 /// first vector file (the smallest), or the last `#[example]` when there
 /// is no vector file. A survivor without a distinguishing input passes the
 /// gate whether or not a known answer would also kill it, so the larger
@@ -1186,7 +1193,7 @@ fn search_slot(slots: &[ExSlot]) -> usize {
 
 /// The known answers a spec mutant of `root` can be killed by (the
 /// examples and vector files of the spec functions of its closure), in the
-/// order gate mode tries them, one per elaboration, stopping at the first
+/// order review mode tries them, one per elaboration, stopping at the first
 /// kill: `#[example]`s before vector files; `#[example]`s nearer the
 /// mutated item (in the call graph of the closure) first; vector files by
 /// size (smallest first); then item and position order.
@@ -1943,7 +1950,7 @@ fn refute_complete(out: &elab::Output, bk: &Crate, bm: &BatchMutant, x: ItemId, 
     Ok(format!("the kernel checked `λ(c : complete_{}(R)). {} (c {} …)` : `complete_{}(R) → Empty`", w.function, env.global_name(ne).map(|n| n.to_string()).unwrap_or_default(), w.input, w.function))
 }
 
-const TESTS_NOTE: &str = "not run: `cargo test` against the emitted code of each mutant needs one optimized emission and one rustc build per mutant (minutes each); the proof kill rates above are the mandatory measure (DESIGN.md §15.10 lists tests as optional)";
+const TESTS_NOTE: &str = "not run: `cargo test` against the emitted code of each mutant needs one rustc build per mutant (minutes each); the proof kill rates above are the mandatory measure (DESIGN.md §15.10 lists tests as optional)";
 
 fn run_here(krate: &Crate, sm: &SourceMap, opts: &MutateOptions) -> MutationReport {
     let t0 = Instant::now();
@@ -1964,7 +1971,7 @@ fn run_here(krate: &Crate, sm: &SourceMap, opts: &MutateOptions) -> MutationRepo
 }
 
 /// The engine after the baseline (shared by [`run`] and [`run_gate`]);
-/// `scope`: the spec items mutated (gate mode, [`review_scope`]), or every
+/// `scope`: the spec items mutated (review mode, [`review_scope`]), or every
 /// spec item.
 #[allow(clippy::too_many_arguments)]
 fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool, problems: Vec<String>, base: Baseline, base_growth: usize, mut rep: MutationReport, t0: Instant, vc: Option<&crate::driver::cache::VerdictCache>, scope: Option<&BTreeSet<ItemId>>) -> MutationReport {
@@ -2023,7 +2030,7 @@ fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool,
     plans.sort_by_key(|p| (mutants[p.mutant].target == Target::Spec, p.mutant));
     // law scopes for LR8
     let mut laws: BTreeMap<ItemId, LawSensitivity> = BTreeMap::new();
-    // incremental spec mutation (gate mode, with a cache): the spec mutants
+    // incremental spec mutation (review mode, with a cache): the spec mutants
     // whose inputs did not change take their stored verdicts ([`cache`])
     let mut keys: HashMap<usize, String> = HashMap::new();
     let mut hits: Vec<(usize, Vec<(ItemId, cache::LawRecord)>)> = Vec::new();
@@ -2067,7 +2074,7 @@ fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool,
     let mem_cap = (soft as f64 * opts.mem_fraction) as usize;
     let mut next = 0usize;
     let mut size = opts.batch.max(1);
-    // gate mode: batches of fixed size on a few worker threads (each batch
+    // review mode: batches of fixed size on a few worker threads (each batch
     // is its own elaboration; verdicts are per mutant, so the result does
     // not depend on the scheduling)
     if opts.gate {
@@ -2099,7 +2106,7 @@ fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool,
         let mut pending: Vec<usize> = Vec::new();
         let mut carry: HashMap<usize, GateCarry> = HashMap::new();
         let (mut items, heap, mut tripped) = run_batch(krate, &plans, &idx, &mutants, opts, &base, &mut laws, &mut outcomes, phase, &mut pending, &mut carry);
-        // gate mode: the next known answer, for the mutants still alive
+        // review mode: the next known answer, for the mutants still alive
         let mut slot = 0;
         while !pending.is_empty() {
             slot += 1;
@@ -2109,7 +2116,7 @@ fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool,
             tripped.extend(t2);
         }
         if opts.progress && opts.gate {
-            eprintln!("sandblaster mutation gate: batch of {} ({:?}): {} item(s) in {} elaboration(s), {:.2} s", idx.len(), target, items, slot + 1, tb.elapsed().as_secs_f64());
+            eprintln!("sandblaster mutate: batch of {} ({:?}): {} item(s) in {} elaboration(s), {:.2} s", idx.len(), target, items, slot + 1, tb.elapsed().as_secs_f64());
         }
         rep.batches.push(BatchStat { mutants: idx.len(), items, elapsed: tb.elapsed(), heap });
         if !tripped.is_empty() {
@@ -2197,7 +2204,7 @@ fn run_from(krate: &Crate, sm: &SourceMap, opts: &MutateOptions, verified: bool,
 /// Goal-budget factor of [`rerun_alone`].
 const RERUN_BUDGET_FACTOR: u64 = 8;
 
-/// Gate mode: re-runs, one at a time and with [`RERUN_BUDGET_FACTOR`] times
+/// Review mode: re-runs, one at a time and with [`RERUN_BUDGET_FACTOR`] times
 /// the goal budget, the mutants that were killed only by budget. Such a
 /// mutant has no verdict yet (nothing is claimed about it); more steps can
 /// only decide it — a definite failure or kill found with more steps is as
@@ -2243,7 +2250,7 @@ fn rerun_alone(krate: &Crate, plans: &[Plan], mutants: &[Mutant], opts: &MutateO
             rep.incomplete_reasons.push(format!("a resource safety net tripped in a batch ({})", tripped.iter().map(|t| t.note.clone()).take(2).collect::<Vec<_>>().join("; ")));
         }
         if opts.progress {
-            eprintln!("sandblaster mutation gate: mutant #{} alone with {}x the goal budget (it was killed only by budget): {:?}, {} item(s) in {} elaboration(s), {:.2} s", mutants[m].id, RERUN_BUDGET_FACTOR, outcomes[m].as_ref().map(|o| o.verdict), items, slot + 1, tb.elapsed().as_secs_f64());
+            eprintln!("sandblaster mutate: mutant #{} alone with {}x the goal budget (it was killed only by budget): {:?}, {} item(s) in {} elaboration(s), {:.2} s", mutants[m].id, RERUN_BUDGET_FACTOR, outcomes[m].as_ref().map(|o| o.verdict), items, slot + 1, tb.elapsed().as_secs_f64());
         }
         rep.batches.push(BatchStat { mutants: 1, items, elapsed: tb.elapsed(), heap });
     }
@@ -2331,7 +2338,7 @@ fn run_parallel(krate: &Crate, plans: &[Plan], mutants: &[Mutant], opts: &Mutate
                     }
                     active.fetch_sub(1, Ordering::SeqCst);
                     if opts.progress {
-                        eprintln!("sandblaster mutation gate: batch {g} of {} ({} mutant(s), {:?}): {} item(s) in {} elaboration(s), {:.2} s; {:.0} s elapsed", groups.len(), idx.len(), target, items, slot + 1, tb.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64());
+                        eprintln!("sandblaster mutate: batch {g} of {} ({} mutant(s), {:?}): {} item(s) in {} elaboration(s), {:.2} s; {:.0} s elapsed", groups.len(), idx.len(), target, items, slot + 1, tb.elapsed().as_secs_f64(), t0.elapsed().as_secs_f64());
                     }
                     let outs = local.into_iter().enumerate().filter_map(|(i, o)| o.map(|o| (i, o))).collect();
                     done.lock().unwrap().push(Done { group: g, outcomes: outs, laws: local_laws, stat: BatchStat { mutants: idx.len(), items, elapsed: tb.elapsed(), heap }, tripped: tripped.into_iter().map(|t| t.note).collect(), memory: false });
@@ -2372,7 +2379,7 @@ fn run_parallel(krate: &Crate, plans: &[Plan], mutants: &[Mutant], opts: &Mutate
 enum Phase {
     /// Every item of each mutant's closure (the full engine).
     Full,
-    /// Gate mode, spec mutants: the spec closure with its `k`-th known
+    /// Review mode, spec mutants: the spec closure with its `k`-th known
     /// answer ([`Plan::slots`]); slot 0 also evaluates the law checkers.
     Slot(usize),
 }
@@ -2426,7 +2433,7 @@ fn run_batch(krate: &Crate, plans: &[Plan], idx: &[usize], mutants: &[Mutant], o
     (items, heap, tripped)
 }
 
-/// The spec items of a closure that a gate-mode batch clones: spec
+/// The spec items of a closure that a review-mode batch clones: spec
 /// functions and spec constants (laws become checkers; lemmas, proofs and
 /// exec leaves are not re-checked: their failure never kills a spec
 /// mutant).
@@ -2438,7 +2445,7 @@ fn gate_cloned(krate: &Crate, id: ItemId) -> bool {
     }
 }
 
-/// The extended crate of a gate-mode batch of spec mutants (see *Gate
+/// The extended crate of a review-mode batch of spec mutants (see *Gate
 /// mode* in the module docs) and the item filter of its elaboration: the
 /// clones, the law checkers, the `requires` checkers and the compared
 /// originals, closed under references with the `#[bridges]` lemmas and
@@ -2560,7 +2567,7 @@ fn build_batch_gate(krate: &Crate, plans: &[Plan], idx: &[usize], mutants: &[Mut
     (k, bms, Some(filter))
 }
 
-/// The gate-mode verdict of a spec mutant in slot `k` ([`Phase::Slot`]):
+/// The review-mode verdict of a spec mutant in slot `k` ([`Phase::Slot`]):
 /// killed by safety (the mutated spec, or a spec function using it, is
 /// ill-formed), killed by the specification (a definite failure of the
 /// slot's known answer, or a law counterexample in slot 0); at
@@ -2677,7 +2684,7 @@ fn judge_spec_gate(ev: &Ev<'_>, bm: &BatchMutant, p: &Plan, m: &Mutant, clone_of
     Some(o)
 }
 
-/// What a gate-mode spec mutant carries from one known answer's batch to
+/// What a review-mode spec mutant carries from one known answer's batch to
 /// the next ([`judge_spec_gate`]).
 #[derive(Default)]
 struct GateCarry {
@@ -2909,11 +2916,11 @@ fn outputs_note(w: &Witness) -> String {
     if w.differs_at.is_empty() { String::new() } else { format!("; they differ at {}", w.differs_at.join(", ")) }
 }
 
-/// The §15.8 gate of the engine (see the module docs): errors for definite
+/// The findings of a run (see the module docs): errors for definite
 /// counterexamples and surviving spec mutants, a warning per insensitive
-/// law, and an error for an incomplete run. The crate path applies it to the
-/// gate-mode run ([`run_gate`]); `sandblaster coverage` also to its
-/// exploration run.
+/// law, and an error for an incomplete run. `sandblaster mutate` applies it
+/// to the review run ([`run_gate`]), `sandblaster coverage` to its
+/// exploration run; no build does.
 pub fn spec15_gate_mutants(rep: &MutationReport, krate: &Crate, diags: &mut Diagnostics) {
     if !rep.baseline_verified {
         diags.push(Diagnostic::error(DiagKind::MutationIncomplete, Span::DUMMY, "the counterexample engine did not run: the crate does not verify".to_string()));

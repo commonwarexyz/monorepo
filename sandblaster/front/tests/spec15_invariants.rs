@@ -3,10 +3,8 @@
 //! path, free facts at parameters, bindings, projections and call results),
 //! the readable `is_prop` pre-check and the `¬¬∃` encoding, the visibility
 //! rule, evidence types, `Abstract(T)` and `ViewInjective` in determinacy,
-//! ghost parameters (the `Irr` ghost bundle, `ghost!(e)` arguments, erased
-//! by codegen), the bounds of `Nat` fields, `sandblaster eval` inputs, and the
-//! optimizer, round trip and multiversioning on functions over invariant
-//! types.
+//! ghost parameters (the `Irr` ghost bundle, `ghost!(e)` arguments), the
+//! bounds of `Nat` fields and `sandblaster eval` inputs.
 
 #[path = "spec15_util.rs"]
 mod util;
@@ -16,7 +14,6 @@ use std::path::Path;
 use sandblaster_front::diag::DiagKind as K;
 use sandblaster_front::driver::{self, Checked, ProverSet, VerifyOptions};
 use sandblaster_front::loader::MemFs;
-use sandblaster_front::opt::{OptOptions, Outcome};
 use sandblaster_front::target::TargetInfo;
 use util::*;
 
@@ -49,11 +46,11 @@ fn check(files: &[(&str, &str)]) -> Checked {
     c
 }
 
-/// Verification, the strict optimizer and the round trip.
+/// Verification with the standard provers.
 fn pipeline(files: &[(&str, &str)]) -> (Checked, driver::stage::StageBuild) {
     let c = check(files);
     let opts = VerifyOptions { provers: ProverSet::Standard, exec_only: false };
-    let built = driver::stage::verify_and_optimize(&c, &opts, &OptOptions { strict: true, ..Default::default() }, "r/mod.rs");
+    let built = driver::stage::verify_checked(&c, &opts);
     assert!(built.v.proofs_ok, "not verified:\n{}", built.v.diags.render(&c.sm));
     (c, built)
 }
@@ -85,8 +82,7 @@ fn a_location_with_a_hand_written_constructor() {
 
 #[test]
 fn indexing_by_the_field_needs_no_requires() {
-    // the invariant is a fact at the parameter: the index is in bounds, and
-    // codegen emits an unchecked read (zero-cost, §15.3)
+    // the invariant is a fact at the parameter: the index is in bounds
     let body = loc(
         r#"
 pub fn read(xs: [u8; 100], l: Location) -> u8 { xs[l.0 as usize] }
@@ -101,10 +97,7 @@ pub fn read_next(xs: [u8; 100], l: Location) -> u8 {
 "#,
     );
     let (_, built) = pipeline(&[("r/mod.rs", &body)]);
-    let em = built.emit.expect("optimized").expect("optimizer ran");
-    assert!(em.opt.errors.is_empty() && em.roundtrip.is_empty(), "{:?} {:?}", em.opt.errors, em.roundtrip);
-    assert!(em.code.contains("get_unchecked("), "unchecked indexing:\n{}", em.code);
-    assert!(!em.code.contains("unsafe fn read"), "no precondition:\n{}", em.code);
+    assert!(built.v.proofs_ok);
 }
 
 #[test]
@@ -456,14 +449,9 @@ pub fn api() -> u8 { bump2(10, ghost!(0)) }
 "#;
 
 #[test]
-fn ghost_parameters_are_irrelevant_binders_erased_by_codegen() {
+fn ghost_parameters_are_irrelevant_binders() {
     let (_, built) = pipeline(&[("r/mod.rs", GHOST)]);
-    let em = built.emit.expect("optimized").expect("optimizer ran");
-    assert!(em.opt.errors.is_empty() && em.roundtrip.is_empty(), "{:?} {:?}", em.opt.errors, em.roundtrip);
-    // neither the parameter nor the argument is printed
-    assert!(em.code.contains("unsafe fn bump(l0_x: u8) -> u8"), "{}", em.code);
-    assert!(em.code.contains("unsafe fn bump2(l0_x: u8) -> u8"), "{}", em.code);
-    assert!(!em.code.contains("ghost!(") && !em.code.contains(": Int"), "{}", em.code);
+    assert!(built.v.proofs_ok);
 }
 
 #[test]
@@ -516,67 +504,6 @@ fn the_bounds_of_nat_fields_are_facts() {
         ),
         ("r/LEMMAS.rs", "#[lemma]\nfn dec_le(c: super::spec::Counter) {\n    ensures(super::spec::dec(c) <= c.n);\n    follows();\n}\n"),
     ]);
-}
-
-// ---------------------------------------------------------------------
-// optimizer, round trip, multiversioning
-// ---------------------------------------------------------------------
-
-#[test]
-fn specialization_round_trip_and_multiversioning_of_functions_over_invariant_types() {
-    const SRC: &str = r#"
-pub const MAX_LOCATION: u64 = 100;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[invariant(self.0 < MAX_LOCATION)]
-pub struct Location(u64);
-
-impl Location {
-    pub fn new(x: u64) -> Option<Location> {
-        if x < MAX_LOCATION { Some(Location(x)) } else { None }
-    }
-    pub fn get(self) -> u64 { self.0 }
-}
-
-/// straight-line over an invariant type: specialized (its residual
-/// re-proves the invariant's facts)
-pub fn double(l: Location) -> u64 { l.0 + l.0 + 1 }
-
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-use core::arch::aarch64::vaddq_u32;
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-use sandblaster::arch::aarch64::{load_u32x4, store_u32x4};
-
-pub fn add4(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
-    [a[0].wrapping_add(b[0]), a[1].wrapping_add(b[1]), a[2].wrapping_add(b[2]), a[3].wrapping_add(b[3])]
-}
-
-#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
-#[target_feature(enable = "neon")]
-#[implements(crate::add4)]
-fn add4_neon(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
-    store_u32x4(vaddq_u32(load_u32x4(&a), load_u32x4(&b)))
-}
-
-/// a caller of the variant taking an invariant type: cloned into the
-/// variant set with its `clone_equiv` lemma
-pub fn top(l: Location, x: [u32; 4]) -> [u32; 4] {
-    let k = l.0 as u32;
-    add4(add4(x, [k, k, k, k]), x)
-}
-"#;
-    let (_, built) = pipeline(&[("r/mod.rs", SRC)]);
-    let em = built.emit.expect("optimized").expect("optimizer ran");
-    assert!(em.opt.errors.is_empty(), "{:?}", em.opt.errors);
-    assert!(em.roundtrip.is_empty(), "round trip failed:\n{}\n{}", em.roundtrip.join("\n"), em.code);
-    let spec = |n: &str| em.opt.fns.iter().find(|f| f.name == n).map(|f| matches!(f.outcome, Outcome::Specialized { .. }));
-    assert_eq!(spec("crate::double"), Some(true), "{:?}", em.opt.fns);
-    assert_eq!(em.opt.sets.len(), 1, "one variant set: {:?}", em.opt.sets.iter().map(|s| s.name.clone()).collect::<Vec<_>>());
-    let cl = em.opt.clones.iter().find(|r| r.clone == "crate::top__neon").expect("clone of top");
-    assert_eq!(cl.lemma.as_deref(), Some("crate::top__neon::clone_equiv"));
-    assert!(em.code.contains("top__neon"), "{}", em.code);
-    // the struct is printed as written: no invariant slot
-    assert!(em.code.contains("pub struct Location(u64);"), "{}", em.code);
 }
 
 // ---------------------------------------------------------------------
@@ -806,10 +733,7 @@ impl Buf {
 }
 "#,
     )]);
-    // the optimizer and the round trip agree on the facts bound before
-    // statements and the hints of pure contexts
-    let em = built.emit.expect("optimized").expect("optimizer ran");
-    assert!(em.opt.errors.is_empty() && em.roundtrip.is_empty(), "{:?} {:?}", em.opt.errors, em.roundtrip);
+    assert!(built.v.proofs_ok);
     verifies(&loc(
         r#"
 /// Sum of the first `end` entries.
@@ -921,14 +845,12 @@ fn dependent_conjuncts_are_split_with_their_hypotheses() {
         assert!(r.checked_defs.iter().any(|d| d == &format!("crate::Span::inv#{k}")), "{:?}", r.checked_defs);
     }
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
-    // eval checks each conjunct; the optimizer, round trip and emission work
-    // with the dependent `Irr` fields
+    // eval checks each conjunct
     let e = eval(SPAN, "g", "[[5, 9, 3]]").unwrap_err();
     assert!(e.contains("violates the invariant of `crate::Span`"), "{e}");
     assert_eq!(eval(SPAN, "g", "[[5, 9, 4]]").unwrap(), "4");
     let (_, built) = pipeline(&[("r/mod.rs", SPAN)]);
-    let em = built.emit.expect("optimized").expect("optimizer ran");
-    assert!(em.opt.errors.is_empty() && em.roundtrip.is_empty(), "{:?} {:?}", em.opt.errors, em.roundtrip);
+    assert!(built.v.proofs_ok);
 }
 
 #[test]

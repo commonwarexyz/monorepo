@@ -1,5 +1,5 @@
 -- VariantEquiv fixture (DESIGN.md §9.3): SHA-256 compression in the shapes
--- the elaborator produces for sandblaster/fixtures/qmdb/sandblaster/sha256.rs (see
+-- the elaborator produced for the former QMDB fixture's sha256.rs (removed 2026-10-05; see
 -- tests/phase3.rs, `variant_equiv_*`).
 --
 -- * `ve::compress` is the portable reference: opaque (it contains loops, so

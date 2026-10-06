@@ -1,6 +1,6 @@
 [package]
 name = "sandblaster-front"
-description = "sandblaster front end: parsing, resolution, elaboration, automation, optimizer, codegen."
+description = "sandblaster front end: parsing, resolution, elaboration, automation, the MIR lift, the §15 gates."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,8 +11,9 @@ publish = false
 [dependencies]
 sandblaster-kernel.workspace = true
 sandblaster-memguard.workspace = true
-# hardware evidence of the intrinsic models: the dispatcher never selects a
-# variant whose models lack it (DESIGN.md §9.2, §9.3); dependency-free crate
+# the target semantics library (DESIGN.md §1.1 item 4, §9.2): the core-text
+# models' hashes (the lock header's `target <arch>` line) and their hardware
+# evidence (the `target-model:` lock items); dependency-free crate
 sandblaster-targets.workspace = true
 syn = { workspace = true, features = ["full", "extra-traits", "visit", "visit-mut", "parsing", "printing"] }
 quote.workspace = true
@@ -21,16 +22,10 @@ num-bigint = { workspace = true, features = ["std"] }
 num-traits = { workspace = true, features = ["std"] }
 
 [features]
-# The optimizer's test hooks (`opt::hooks`, docs/optimizer-plan.md O1): inject
-# unsound candidates, proofs and cache entries for the must-reject suite
-# (`tests/opt_reject.rs`). Integration tests cannot see `cfg(test)` items, so
-# the dev-dependency below enables this feature for this crate's tests only.
-# Nothing else may enable it: `sandblaster`, `sandblaster-cli` and build scripts
-# link the front end without hooks (checked by tools/gates/g4.sh).
+# Declared only because `src/intrinsics.rs` (hashed into every SPEC.lock, so
+# kept byte-identical) names it in a `cfg`; nothing enables it (the
+# optimizer's test hooks were removed with the optimizer).
 opt-test-hooks = []
-
-[dev-dependencies]
-sandblaster-front = { path = ".", features = ["opt-test-hooks"] }
 
 [lints.rust]
 # `cfg(sandblaster)` is the ghost marker of DSL sources (DESIGN.md §2; the

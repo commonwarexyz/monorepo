@@ -15,9 +15,6 @@
 
 mod common;
 
-#[path = "common/qmdb.rs"]
-mod qmdb;
-
 use common::*;
 use sandblaster_front::diag::{DiagKind as K, Diagnostics, Severity};
 use sandblaster_front::driver::Checked;
@@ -173,7 +170,7 @@ fn internal_depth_bounded_helper() {
 #[test]
 fn generic_fns_without_slices_of_their_parameters() {
     accepts("pub fn pick<T: Copy>(s: &[u8], a: T, b: T) -> T { if s.is_empty() { a } else { b } }");
-    // QMDB's `codec::exact`
+    // (the shape of the former QMDB port's `codec::exact`)
     accepts("pub fn exact<A: Copy>(got: Option<(A, &[u8])>) -> Option<A> { match got { Some((a, rest)) if rest.is_empty() => Some(a), _ => None } }");
     // generic with `&[T]` but not pub, or pub but not reachable
     accepts("fn len<T: Copy>(s: &[T]) -> usize { s.len() }\npub fn api(s: &[u8]) -> usize { len(s) }");
@@ -229,33 +226,8 @@ fn gate_accepts_a_pub_use_boundary() {
     assert_eq!(gate(&c), Vec::<String>::new());
 }
 
-#[test]
-fn gate_on_todays_qmdb_root() {
-    // the fully specified QMDB (sandblaster/fixtures/qmdb/sandblaster/mod.rs)
-    // made its modules private: its boundary is its `pub use` list, and the
-    // gate passes
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sandblaster/fixtures/qmdb/sandblaster/mod.rs");
-    let c = check_dir(&root);
-    assert!(c.ok(), "{}", c.render());
-    assert_eq!(gate(&c), Vec::<String>::new());
-    // the same root with its modules `pub` again (its layout before the
-    // rewrite): each `pub mod` is refused by the gate (and the live rules
-    // refuse what it exposes: public functions with a `requires` or a
-    // recursion depth bound)
-    let mut files = qmdb::crate_files("mod.rs");
-    let text = qmdb::entry(&mut files, "mod.rs");
-    for m in ["codec", "merkle", "sha256", "verifier"] {
-        let decl = format!("\nmod {m};\n");
-        assert!(text.contains(&decl), "{decl:?}");
-        *text = text.replacen(&decl, &format!("\npub mod {m};\n"), 1);
-    }
-    let c = check_files(&files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect::<Vec<_>>());
-    assert!(c.krate.is_some() && errors(&c).iter().all(|(k, m)| *k == K::Boundary && m.starts_with("public function `") && m.contains("is reachable from the DSL root")), "{}", c.render());
-    let g = gate(&c);
-    for m in ["codec", "merkle", "sha256", "verifier"] {
-        assert!(g.iter().any(|x| x.contains(&format!("`pub mod {m}` is not allowed"))), "{g:?}");
-    }
-}
+// (the gate on the three verified roots, and a `pub mod` at one of them:
+// `tests/verified_roots.rs`)
 
 #[test]
 fn gate_types_reaching_the_boundary_are_in_the_pub_use_list() {

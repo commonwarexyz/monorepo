@@ -40,7 +40,6 @@ members = [
     "sandblaster/kernel",
     "sandblaster/macros",
     "sandblaster/memguard",
-    "sandblaster/rulegen",
     "sandblaster/sandblaster",
     "sandblaster/targets",
 
@@ -61,8 +60,6 @@ members = [
     "utils/fuzz"
 ]
 exclude = [
-    # sandblaster's optimizer corpus harness: a standalone workspace
-    "sandblaster/bench/opt-corpus",
     # sandblaster's MIR extractor: a rustc driver on a pinned nightly
     # (rustc-dev), a standalone workspace (sandblaster/mirx/README.md)
     "sandblaster/mirx",

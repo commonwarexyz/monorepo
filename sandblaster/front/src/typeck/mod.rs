@@ -8,9 +8,10 @@
 //!    function signatures normalized to [`FnSig`] (kind from
 //!    `#[spec]/#[lemma]/#[law]/#[proof]`, receivers `self`/`&self`, target
 //!    features and their implication closure, `#[inline]`, `#[must_use]`,
-//!    `#[specialize]`, `#[implements]`, contract attributes). Attributes are
+//!    contract attributes). Attributes are
 //!    validated here (§3.1 whitelist, `#[allow]` whitelist,
-//!    `#[inline(always)]` + `#[target_feature]`).
+//!    `#[inline(always)]` + `#[target_feature]`; `#[implements]` is
+//!    refused, [`crate::target::NO_VARIANTS`]).
 //! 2. **Bodies** ([`Checker::check_bodies`]): constants and functions are
 //!    type checked bidirectionally by [`expr`](self::expr) (expressions and
 //!    statements), [`pat`](self::pat) (patterns, default binding modes,
@@ -60,7 +61,6 @@ pub struct Contracts {
     /// only, put there by the lift): [`hir::SpecAnnots::contract_ensures`].
     pub contract_ensures: Option<Option<syn::Expr>>,
     pub decreases: Option<DecreasesAttr>,
-    pub implements: Option<syn::Path>,
     /// `#[mir_contract(requires(..).., decreases(..))]` (`hir::FnDef::declared`).
     pub declared: Option<(Vec<syn::Expr>, Option<DecreasesAttr>)>,
     /// `#[lift_src(..)]` (lifted functions only, put there by the lift): the
@@ -93,7 +93,6 @@ pub struct FnSig {
     pub feature_set: Vec<String>,
     pub inline: Option<Inline>,
     pub must_use: bool,
-    pub specialize: bool,
     pub contracts: Contracts,
     pub sig_span: Span,
     /// The signature's text as the front end read it ([`hir::FnDef::sig_text`]).
@@ -259,7 +258,7 @@ impl<'a> Checker<'a> {
                     self.diags.push(d.note(spec15::placement_note(an, site)));
                     continue;
                 }
-                if !qualified && !ghost && !matches!(an, Annot::Spec | Annot::Lemma | Annot::Law | Annot::Proof | Annot::Rewrite) && !self.res.annotation_in_scope(m, name) {
+                if !qualified && !ghost && !matches!(an, Annot::Spec | Annot::Lemma | Annot::Law | Annot::Proof) && !self.res.annotation_in_scope(m, name) {
                     self.diags.push(
                         Diagnostic::error(DiagKind::Resolve, span, format!("attribute `{name}` is not in scope"))
                             .note("add `use sandblaster::prelude::*;` so the baseline build (rustc with the erasing macros) resolves it"),
@@ -1085,14 +1084,11 @@ impl<'a> Checker<'a> {
         // lift puts it for an attachment's `opaque();` (crate::lift)
         let lifted_mod = self.res.mods[m.0 as usize].lifted;
         let allowed: &[&str] = match kind {
-            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract", "contract_ensures", "lift_src"],
-            FnKind::Exec => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "specialize", "refines", "example", "section", "trusted_extern"],
+            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract", "contract_ensures", "lift_src"],
+            FnKind::Exec => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "refines", "example", "section", "trusted_extern"],
             FnKind::Spec => &["spec", "requires", "decreases", "inline", "must_use", "example", "examples", "mirrors_impl", "assumption", "opaque"],
-            // `#[rewrite]` on a lemma: `f(x̄) == g(x̄)` naming a user-supplied
-            // alternative `g` (`driver::lowered`); proven, so it needs no
-            // correctness review, but it is user code, not optimizer output
-            FnKind::Lemma => &["lemma", "decreases", "induction", "fuel_sufficient", "rewrite"],
-            FnKind::Law => &["law", "rewrite", "induction", "reduces_to", "definitional", "corollary"],
+            FnKind::Lemma => &["lemma", "decreases", "induction", "fuel_sufficient"],
+            FnKind::Law => &["law", "induction", "reduces_to", "definitional", "corollary"],
             FnKind::Proof => &["proof", "decreases", "induction"],
         };
         let (docs, allow) = self.common_attrs(m, attrs, allowed, it.ghost, spec15::Site::Fn(kind));
@@ -1106,7 +1102,7 @@ impl<'a> Checker<'a> {
             self.err(DiagKind::Unsupported, self.sp(m, a.span()), "`async fn` is not supported");
         }
         if let Some(u) = &sig.unsafety {
-            self.diags.push(Diagnostic::error(DiagKind::Unsupported, self.sp(m, u.span()), "`unsafe fn` is not supported").note("functions with preconditions use `#[requires]`; codegen emits them as `unsafe fn` (DESIGN.md §3.1)"));
+            self.diags.push(Diagnostic::error(DiagKind::Unsupported, self.sp(m, u.span()), "`unsafe fn` is not supported").note("functions with preconditions use `#[requires]` (DESIGN.md §3.1)"));
         }
         if let Some(abi) = &sig.abi {
             self.err(DiagKind::Unsupported, self.sp(m, abi.span()), "`extern` functions are not supported");
@@ -1207,7 +1203,6 @@ impl<'a> Checker<'a> {
         let mut target_features = Vec::new();
         let mut inline = None;
         let mut must_use = false;
-        let mut specialize = false;
         let mut contracts = Contracts::default();
         for a in attrs {
             let span = self.sp(m, a.span());
@@ -1293,11 +1288,7 @@ impl<'a> Checker<'a> {
                         }
                         Err(e) => self.err(DiagKind::Contract, span, e),
                     },
-                    Annot::Implements => match a.parse_args::<syn::Path>() {
-                        Ok(p) => contracts.implements = Some(p),
-                        Err(e) => self.err(DiagKind::Contract, span, format!("malformed `#[implements]`: {e}")),
-                    },
-                    Annot::Specialize => specialize = true,
+                    Annot::Implements => self.diags.push(Diagnostic::error(DiagKind::Feature, span, "`#[implements]` (a hardware variant) is not supported").note(crate::target::NO_VARIANTS)),
                     _ => {}
                 }
             }
@@ -1306,7 +1297,7 @@ impl<'a> Checker<'a> {
             self.diags.push(Diagnostic::error(DiagKind::Attribute, sig_span, "`#[inline(always)]` cannot be combined with `#[target_feature]`").note("rustc rejects this combination (DESIGN.md §3.1)"));
         }
         let feature_set = feature_closure(&self.res.target.arch, &target_features);
-        FnSig { kind, ghost, owner, receiver, generics, lifetimes, params, param_lts, ret, ret_lts, target_features, feature_set, inline, must_use, specialize, contracts, sig_span, sig_text, docs, allow, gen_scope: g, impl_block: None, impl_lifetimes: vec![], impl_self_lts: vec![], spec, ghost_params }
+        FnSig { kind, ghost, owner, receiver, generics, lifetimes, params, param_lts, ret, ret_lts, target_features, feature_set, inline, must_use, contracts, sig_span, sig_text, docs, allow, gen_scope: g, impl_block: None, impl_lifetimes: vec![], impl_self_lts: vec![], spec, ghost_params }
     }
 
     // ------------------------------------------------------------------

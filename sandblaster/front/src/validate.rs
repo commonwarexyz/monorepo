@@ -28,9 +28,9 @@
 //! | mutual recursion (§5.6, §7.1) | here (reference graph SCCs) | `recursion` |
 //! | non-tail recursion without `decreases(.., max = C)`, `C ≤ 4096` (§3.7) | here | `recursion` |
 //! | stack budget: `C × frame` of depth-bounded recursion ≤ [`STACK_BUDGET`] (§3.7) | here ([`check_stack`]) | `recursion` |
-//! | intrinsic feature rule (§9.3) | typeck | `feature` |
+//! | intrinsic feature rule (§9.3); `#[implements]` and `sandblaster::arch` refused ([`crate::target::NO_VARIANTS`], [`crate::target::NO_ARCH_HELPERS`]) | typeck, resolve | `feature` |
 //! | exec code referring to ghost items (§2) | typeck | `ghost` |
-//! | laws and proofs pairing (§4.5), `#[implements]` signatures (§9.3) | here | `law`, `contract` |
+//! | laws and proofs pairing (§4.5) | here | `law` |
 //! | a struct with an invariant, a representation relation or a view has only private fields, and at least one (§15.3) | here ([`check_spec15_types`]) | `invariant` |
 //! | `Abstract(T)` (§15.3): private fields, no exported constructor, no derived `Debug`, no derived `PartialEq` unless the view is injective, no boundary function exchanging a type that contains `T`, every boundary function over `T` refines through `α_T` | here ([`abstract_reasons`]; used by the elaborator's determinacy verdicts) | — |
 //! | `#[proof(view_inj = T)]`: `T` has a closure view, the item takes `(a: T, b: T)`, one per type (§15.2) | here | `law` |
@@ -177,7 +177,6 @@ pub fn validate(krate: &mut Crate, res: &Resolver, diags: &mut Diagnostics) {
     pair_spec15_proofs(krate, diags);
     redirect_proof_apps(krate);
     warn_open_goals(krate, diags);
-    check_implements(krate, diags);
     check_spec15_types(krate, diags);
 }
 
@@ -1911,34 +1910,5 @@ fn param_name(f: &FnDef, p: &Param) -> String {
     match &p.pat.kind {
         PatKind::Binding { local, .. } => f.local(*local).name.clone(),
         _ => "_".into(),
-    }
-}
-
-// ----------------------------------------------------------------------
-// implements
-// ----------------------------------------------------------------------
-
-fn check_implements(krate: &Crate, diags: &mut Diagnostics) {
-    for it in &krate.items {
-        let ItemKind::Fn(f) = &it.kind else { continue };
-        let Some(target) = f.implements else { continue };
-        let Some(t) = krate.fn_def(target) else { continue };
-        if f.target_features.is_empty() {
-            diags.push(Diagnostic::error(DiagKind::Contract, f.sig_span, "`#[implements]` is only allowed on `#[target_feature]` functions").note("variants implement a portable function with hardware features (DESIGN.md §9.3)"));
-        }
-        if t.kind != FnKind::Exec || krate.item(target).ghost {
-            diags.error(DiagKind::Contract, f.sig_span, "`#[implements]` must name an exec function");
-        }
-        if t.implements.is_some() {
-            diags.error(DiagKind::Contract, f.sig_span, "`#[implements]` must name the portable function, not another variant");
-        }
-        if !t.target_features.is_empty() {
-            diags.error(DiagKind::Contract, f.sig_span, "the implemented function must be portable (no `#[target_feature]`)");
-        }
-        let a: Vec<&Ty> = f.params.iter().map(|p| &p.ty).collect();
-        let b: Vec<&Ty> = t.params.iter().map(|p| &p.ty).collect();
-        if a != b || f.ret != t.ret || !f.generics.is_empty() || !t.generics.is_empty() {
-            diags.push(Diagnostic::error(DiagKind::Contract, f.sig_span, format!("`{}` must have the same signature as `{}`", it.name, krate.item(target).name)).note_at(t.sig_span, "implemented function"));
-        }
     }
 }

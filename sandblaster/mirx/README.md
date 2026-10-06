@@ -20,14 +20,13 @@ sandblaster/mirx/extract.sh commonware-codec varint codec/sandblaster/varint/var
   `OUT_DIR/out.rs` (what `compile_module` emits in module mode); spans in
   that file are mapped back to `src.rs`.
 
-An in-place crate (storage's MMR) is extracted as a whole, with its
-lowered copies stubbed by the sources, the verifying build scripts of its
+An in-place crate (storage's MMR) is extracted as a whole (its own build
+script is always stubbed), with the verifying build scripts of its
 dependencies stubbed and its open traits at their instance:
 
 ```text
 sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr \
     storage/sandblaster/mmr/mmr.sbmir \
-    --stub mmr-lowered__merkle__mmr__iterator.rs=storage/src/merkle/mmr/iterator.rs \
     --stubs 'commonware_codec:varint.rs=codec/sandblaster/varint/varint.rs' \
     --instance Family=merkle::mmr::Family,Graftable=merkle::mmr::Family \
     --skip-traits Debug,Display,Hash
@@ -39,11 +38,7 @@ sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location
 * `--skip-traits T,..` leaves out the impls of these traits (default
   `Debug,Display,Hash,PartialOrd,Ord`);
 * `--inject name=file.rs` compiles a DSL file as `mod name;` of the crate root
-  (the verifier's `instances.rs` below; a crate's `#[lift(opt)]` module of
-  user alternatives, when it has one, is compiled the same way and its name
-  added to the modules);
-* `--replace src.rs=text.rs` compiles `src.rs` as if its text were
-  `text.rs`'s (its recorded SHA-256 is that text's).
+  (the verifier's `instances.rs` below).
 
 Storage's Merkle proof verifier (set 1, `storage/sandblaster/verifier`) is
 extracted at the instances `merkle.rs` declares, named by the type aliases
@@ -53,7 +48,6 @@ the extraction only), with only the lifted items:
 ```text
 sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,merkle::hasher,merkle::proof \
     storage/sandblaster/verifier/verifier.sbmir \
-    --stub mmr-lowered__merkle__mmr__iterator.rs=storage/src/merkle/mmr/iterator.rs \
     --stubs 'commonware_codec:varint.rs=codec/sandblaster/varint/varint.rs' \
     --instance 'Family=merkle::mmr::Family,Graftable=merkle::mmr::Family,merkle::hasher::Hasher=instances::Hasher,commonware_cryptography::Hasher=instances::Sha256,Digest=instances::Digest,Iterator=instances::Elements' \
     --skip-traits Debug,Display,Hash --inject instances=storage/sandblaster/verifier/instances.rs \
@@ -74,21 +68,10 @@ sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location
   named items (the lift's `items`); `--skip-fns T::m,..`: functions left to
   the host (the lift's `unverified_fns`).
 
-**The lifted round trip** of a rewritten in-place file reads the MIR of its
-copy (DESIGN.md §2.1): when the build says `no MIR of the round trip's copy`
-(or the round-trip MIR is stale), extract it with the same command plus
-`--replace <the source file>=<OUT_DIR>/<name>-roundtrip__<module>.rs` into
-`<stem>.roundtrip__<module>.sbmir` next to the module's `.sbmir`, and build
-again. (When the source changes, extract the source first, build, then the
-round trip's copy.) A file with no rewritten function has no round-trip
-copy; storage's MMR has none today (the optimizer finds no cheaper
-replacement), and the toolchain's fixtures exercise the round trip
-(`mir_fixtures/extract.py`).
-
 The toolchain's own test fixtures (`sandblaster/front/tests/mir_fixtures`)
 are crates of another workspace: `--manifest <their Cargo.toml>` extracts a
 package of it, and `mir_fixtures/extract.py` runs every fixture's
-extraction (and that of the round-trip copies the lowering tests write).
+extraction.
 
 Re-run it whenever the module's source changes (the build refuses a stale
 extraction by the sources' SHA-256) or when the workspace moves to another

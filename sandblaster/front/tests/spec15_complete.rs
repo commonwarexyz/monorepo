@@ -871,26 +871,23 @@ fn sections_are_recorded_in_the_report_the_sheet_and_the_lock() {
 }
 
 /// The build's pipeline with proven sections: the completeness lemmas are
-/// ordinary checked lemmas of the environment; the optimizer, the printer
-/// and the round trip are unaffected, and the report lists the sections.
+/// ordinary checked lemmas of the environment, and the report lists the
+/// sections.
 #[test]
-fn a_crate_with_proven_sections_builds_optimized() {
+fn a_crate_with_proven_sections_verifies() {
     let files = laws_files(IS_EVEN, "is_even, even", IS_EVEN_LAWS);
     let mut owned = files.clone();
     owned[0].1 = format!("{HEADER}{}", owned[0].1);
     let fs = MemFs::from_files(owned.iter().map(|(p, c)| (p.as_str(), c.as_str())));
     let c = driver::check(Path::new("r/mod.rs"), &fs, &TargetInfo::aarch64_apple_darwin());
     assert!(c.ok(), "{}", c.render());
-    let built = driver::stage::verify_and_optimize(&c, &driver::VerifyOptions::default(), &sandblaster_front::opt::OptOptions::default(), "r");
+    let built = driver::stage::verify_checked(&c, &driver::VerifyOptions::default());
     assert!(built.v.proofs_ok, "{}", built.v.diags.render(&c.sm));
-    let em = built.emit.expect("optimized").expect("emitted");
-    assert!(em.roundtrip.is_empty(), "{:?}", em.roundtrip);
-    assert!(em.opt.errors.is_empty(), "{:?}", em.opt.errors);
     assert!(built.v.defs.iter().any(|d| d.name == "crate::is_even::complete"));
     assert!(built.v.obligations.iter().any(|o| o.def == "crate::is_even::complete" && o.proven()));
     assert_eq!(built.spec15.sections.len(), 1);
     assert!(built.spec15.sections[0].fully_specified);
-    let json = driver::stage::report_json(&c, &built.v, &built.law_audit, "r", Some(&em), Some(&built.spec), Some(&built.spec15));
+    let json = driver::stage::report_json(&c, &built.v, &built.law_audit, "r", Some(&built.spec), Some(&built.spec15));
     assert!(json.contains("\"sections\"") && json.contains("\"fully_specified\": true"), "{json}");
 }
 

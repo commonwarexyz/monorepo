@@ -3,7 +3,7 @@
 //! validation → HIR", §3, §4).
 //!
 //! This is the interface between the phase-1 front end and the phase-2
-//! elaborator, the canonical printer (§8.3) and the report. Everything in it
+//! elaborator and the report. Everything in it
 //! is **fully resolved and fully typed**:
 //!
 //! * every name is resolved: items by [`ItemId`], locals by [`LocalId`],
@@ -20,8 +20,7 @@
 //!   [`BindingMode::ByRef`] (rustc's default binding modes), so a pattern's
 //!   [`Pat::ty`] is always the type of the value it is matched against;
 //! * every function-like item is normalized to [`FnDef`] (§4.2):
-//!   `requires`, `ensures`, `decreases (+ max)`, body, target features,
-//!   `implements`, `specialize`;
+//!   `requires`, `ensures`, `decreases (+ max)`, body, target features;
 //! * loops carry [`LoopInfo`] (mutated/read variables, invariants,
 //!   decreases) as needed by the normative desugaring (§7.4).
 //!
@@ -55,7 +54,7 @@
 //! * [`ExprKind::Match`] arms keep their source order; or-patterns
 //!   ([`PatKind::Or`]) and guards are kept as written — the or-pattern/guard
 //!   expansion of §7.3 is a separate, normative step
-//!   ([`crate::canon::expand_or_arms`] implements it for printing).
+//!   ([`crate::elab::pat::expand_or_arms`]).
 //! * [`ExprKind::Index`] and [`ExprKind::SliceRange`] have as `base` a place of
 //!   type `[T; N]` or `[T]` (reference bases are auto-dereferenced by an
 //!   explicit `Coerce(AutoDeref)`); `SliceRange` has type `&[T]`.
@@ -130,7 +129,7 @@
 use std::fmt;
 
 use crate::builtins::{Builtin, GhostFn};
-use crate::intrinsics::{HelperId, IntrinsicId, VecTy};
+use crate::intrinsics::{IntrinsicId, VecTy};
 use crate::span::Span;
 use crate::target::TargetInfo;
 
@@ -903,8 +902,8 @@ pub enum Inline {
 pub enum Recursion {
     #[default]
     None,
-    /// Self-recursive and every recursive call is in tail position: codegen
-    /// emits a loop.
+    /// Self-recursive and every recursive call is in tail position
+    /// (elaborated as a loop).
     Tail,
     /// Self-recursive with at least one non-tail call: needs
     /// `#[decreases(e, max = C)]` for exec functions.
@@ -1014,10 +1013,6 @@ pub struct FnDef {
     pub target_features: Vec<String>,
     /// Implication closure of `target_features` (§9.3), sorted.
     pub feature_set: Vec<String>,
-    /// `#[implements(path)]` (§9.3).
-    pub implements: Option<ItemId>,
-    /// `#[specialize]` (§8.2).
-    pub specialize: bool,
     pub inline: Option<Inline>,
     pub must_use: bool,
     pub recursion: Recursion,
@@ -1025,13 +1020,6 @@ pub struct FnDef {
     pub law_proof: Option<LawProof>,
     /// For `#[proof]` items: the law they prove.
     pub proves: Option<ItemId>,
-    /// `#[rewrite]` on a law or lemma (§4.5): on a lemma `f(x̄) == g(x̄)`
-    /// with `f` a lifted source function and `g` a user-supplied
-    /// alternative (`#[lift(opt)]`), the lowering may replace `f`'s body
-    /// by a call of `g` (`driver::lowered`, kernel-checked link; user code,
-    /// reported apart from the optimizer's output); elsewhere recorded
-    /// only.
-    pub rewrite: bool,
     /// `#[induction(x)]` on a lemma/proof/inline law: the parameter `x`
     /// (§4.4).
     pub induction: Option<LocalId>,
@@ -1098,8 +1086,6 @@ impl FnDef {
     /// laws file's part when a proof file attached summaries
     /// ([`SpecAnnots::contract_ensures`]), else the `ensures`.
     pub fn contract_ensures(&self) -> Option<&Ensures> {
-        // (a copy the optimizer made drops the `ensures`, and with it the
-        // contract)
         self.ensures.as_ref()?;
         match &self.spec.contract_ensures {
             Some(c) => c.as_ref(),
@@ -1414,8 +1400,6 @@ pub enum Callee {
     Builtin(Builtin, Vec<Ty>),
     /// A target intrinsic with its literal `i32` immediates (§9.2).
     Intrinsic(IntrinsicId, Vec<i64>),
-    /// A `sandblaster::arch` load/store helper (§9.2, trusted glue).
-    Helper(HelperId),
     /// A ghost prelude function (`seq::*`, `eqb`) with type arguments.
     Ghost(GhostFn, Vec<Ty>),
 }

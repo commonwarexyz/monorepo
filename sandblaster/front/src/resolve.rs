@@ -54,7 +54,7 @@ use syn::spanned::Spanned;
 use crate::builtins::GhostFn;
 use crate::diag::{DiagKind, Diagnostic, Diagnostics};
 use crate::hir::{DefPath, ItemId, ModId, Shape, Ty, Vis};
-use crate::intrinsics::{self, HelperId, IntrinsicId, VecTy};
+use crate::intrinsics::{self, IntrinsicId, VecTy};
 use crate::loader::Loaded;
 use crate::span::{FileId, Span};
 use crate::target::{Arch, TargetInfo};
@@ -71,15 +71,12 @@ pub enum Annot {
     Ensures,
     Decreases,
     Implements,
-    Specialize,
     /// `#[spec]` on a function, or on a module declaration (§15.1).
     Spec,
     Lemma,
     Law,
     /// `#[proof]`, `#[proof(refines = f)]`, `#[proof(complete = f)]`.
     Proof,
-    /// `#[rewrite]` on a law (optimizer rewrite, later milestone, §4.5).
-    Rewrite,
     /// `#[induction(x)]` on a `#[lemma]`/`#[proof]`/inline `#[law]`: the
     /// proof recurses on `x` (its `ih(..)` steps, §4.4).
     Induction,
@@ -134,12 +131,10 @@ impl Annot {
         Annot::Ensures,
         Annot::Decreases,
         Annot::Implements,
-        Annot::Specialize,
         Annot::Spec,
         Annot::Lemma,
         Annot::Law,
         Annot::Proof,
-        Annot::Rewrite,
         Annot::Induction,
         Annot::Refines,
         Annot::Example,
@@ -166,12 +161,10 @@ impl Annot {
             Annot::Ensures => "ensures",
             Annot::Decreases => "decreases",
             Annot::Implements => "implements",
-            Annot::Specialize => "specialize",
             Annot::Spec => "spec",
             Annot::Lemma => "lemma",
             Annot::Law => "law",
             Annot::Proof | Annot::ProofMacro => "proof",
-            Annot::Rewrite => "rewrite",
             Annot::Induction => "induction",
             Annot::Refines => "refines",
             Annot::Example => "example",
@@ -277,11 +270,10 @@ pub enum Ext {
     SandblasterPrelude,
     /// `sandblaster::ghost` (ghost-item attributes, including `#[proof]`)
     SandblasterGhost,
-    /// `sandblaster::arch`
+    /// `sandblaster::arch`: nothing below it resolves (the load/store
+    /// helpers were native-dialect authoring glue, removed with the
+    /// optimizer; [`crate::target::NO_ARCH_HELPERS`]).
     SandblasterArch,
-    /// `sandblaster::arch::aarch64` / `x86_64`
-    HelperMod(ArchTag),
-    Helper(HelperId),
     Annotation(Annot),
     /// Ghost type `Int`.
     IntTy,
@@ -925,8 +917,13 @@ impl Resolver {
                 break;
             }
         }
+        // (one error per span and message: the names of one `use` group
+        // share a refused prefix, e.g. `sandblaster::arch::aarch64::{a, b}`)
+        let mut seen = HashSet::new();
         for d in pending {
-            if let Err(e) = self.try_import(&d, true) {
+            if let Err(e) = self.try_import(&d, true)
+                && seen.insert((e.span, e.msg.clone()))
+            {
                 diags.push(e);
             }
         }
@@ -965,6 +962,10 @@ impl Resolver {
                 found
             };
             if found.is_empty() {
+                // `use sandblaster::arch::x86_64 as a;`: the removed helpers
+                if let Some(c @ Def::Ext(Ext::SandblasterArch)) = d.segs.len().checked_sub(2).and_then(|_| self.resolve_use_prefix(d.module, &d.segs[..n - 1], d.span).ok()) {
+                    return Err(self.missing_segment(c, &last, lspan));
+                }
                 let e = Diagnostic::error(DiagKind::Resolve, lspan, format!("unresolved import `{}`", d.segs.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join("::")));
                 return Err(if final_try { self.explain_missing(e, d) } else { e });
             }
@@ -1037,7 +1038,7 @@ impl Resolver {
     fn missing_segment(&self, container: Def, seg: &str, span: Span) -> Diagnostic {
         match container {
             Def::Ext(Ext::CoreArch) => Diagnostic::error(DiagKind::Feature, span, format!("`core::arch::{seg}` is not available for target architecture `{}`", self.target.arch.name())).note("gate the item with `#[cfg(target_arch = \"..\")]`"),
-            Def::Ext(Ext::SandblasterArch) => Diagnostic::error(DiagKind::Feature, span, format!("`sandblaster::arch::{seg}` is not available for target architecture `{}`", self.target.arch.name())),
+            Def::Ext(Ext::SandblasterArch) => Diagnostic::error(DiagKind::Feature, span, format!("`sandblaster::arch::{seg}` (hardware load/store helpers) is not supported")).note(crate::target::NO_ARCH_HELPERS),
             Def::Ext(Ext::ArchMod(a)) => Diagnostic::error(DiagKind::Feature, span, format!("`{seg}` is not in sandblaster's target library for {}", a.arch().name())).note("DESIGN.md §9.2 lists the modeled intrinsics"),
             _ => Diagnostic::error(DiagKind::Resolve, span, format!("cannot find `{seg}` in this path")),
         }
@@ -1144,11 +1145,6 @@ impl Resolver {
                 self.lemma_lookup(&prefix, name, ns)
             }
             (Ext::Sandblaster | Ext::SandblasterPrelude | Ext::SandblasterGhost, _) => self.prelude_name(name, ns).map(Def::Ext),
-            (Ext::SandblasterArch, Ns::Type) => {
-                let a = ArchTag::from_name(name)?;
-                (a.arch() == self.target.arch).then_some(Def::Ext(Ext::HelperMod(a)))
-            }
-            (Ext::HelperMod(a), Ns::Value) => intrinsics::lookup_helper(&a.arch(), name).map(|h| Def::Ext(Ext::Helper(h))),
             (Ext::SeqMod, Ns::Value) => GhostFn::seq(name).map(|g| Def::Ext(Ext::GhostFn(g))),
             (Ext::SeqTy, Ns::Value) => GhostFn::seq_assoc(name).map(|g| Def::Ext(Ext::GhostFn(g))),
             _ => None,
@@ -1419,8 +1415,8 @@ pub struct PublicName {
     pub import: bool,
 }
 
-/// Rejects user items named like primitive types (the canonical printer
-/// relies on primitive names never being shadowed).
+/// Rejects user items named like primitive types (the elaboration relies on
+/// primitive names never being shadowed).
 fn check_item_name(name: &str, span: Span, diags: &mut Diagnostics) {
     const PRIMS: &[&str] = &["bool", "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "char", "str", "f32", "f64", "Option", "Some", "None", "Int", "Prop", "Nat", "Seq"];
     if PRIMS.contains(&name) {

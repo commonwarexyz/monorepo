@@ -811,7 +811,7 @@ impl<'a> Elab<'a> {
                 let mut all = vec![format!("{}: {}", at(*line, k), if fields.is_empty() { "(no fields bound)".to_string() } else { fields.join(", ") })];
                 all.append(&mut notes);
                 failures.push((*line, line_span(*line), why, all));
-                // the mutation gate's filtered elaboration (`Options::items`)
+                // the mutation tool's filtered elaboration (`Options::items`)
                 // needs one definite failure (it kills the mutant); a build
                 // reports up to ten
                 let enough = if self.opts.items.is_some() { failures.last().is_some_and(|x| x.2 == "is false") } else { failures.len() >= 10 };

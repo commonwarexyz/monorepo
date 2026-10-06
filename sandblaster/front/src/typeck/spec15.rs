@@ -10,7 +10,7 @@
 //! | Annotation | Placement | Typed as |
 //! | --- | --- | --- |
 //! | `#[spec]` on `mod m;` | ghost module declaration, `cfg` first | every `fn` inside defaults to `#[spec]` |
-//! | `#[refines(s)]`, `#[refines(s(e..))]`, `#[refines(s, domain = P)]` | exec fn (not a `#[implements]` variant) | `s` a spec fn; `eᵢ` ghost expressions over the parameters (expected: the spec's parameter types, not coerced); `P` a proposition |
+//! | `#[refines(s)]`, `#[refines(s(e..))]`, `#[refines(s, domain = P)]` | exec fn | `s` a spec fn; `eᵢ` ghost expressions over the parameters (expected: the spec's parameter types, not coerced); `P` a proposition |
 //! | `#[proof(refines = f)]`, `#[proof(complete = f)]` | `#[proof]` item | `f` an exec fn (pairing: [`crate::validate`]) |
 //! | `#[example(e)]` | spec or exec fn | a closed `bool` spec expression |
 //! | `#[examples(file = "..", format = "cavp" \| "json", provenance = independent \| production \| self)]` | spec fn returning `bool` (a checker) | the file is a build input (read by the loader) |
@@ -96,8 +96,6 @@ pub struct FnSpecSyn {
     pub opaque: Option<Span>,
     /// `#[induction(x)]` (validated by the script checker).
     pub induction: Option<(String, Span)>,
-    /// `#[rewrite]`.
-    pub rewrite: bool,
 }
 
 /// Where an attribute is written (for placement diagnostics).
@@ -330,7 +328,6 @@ impl<'a> Checker<'a> {
                         out.induction = Some((id.to_string(), span));
                     }
                 }
-                Annot::Rewrite => out.rewrite = true,
                 _ => {}
             }
         }
@@ -1099,12 +1096,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let syn = sig.spec.clone();
         let mut out = SpecAnnots::default();
         if let Some(r) = &syn.refines {
-            if sig.contracts.implements.is_some() {
-                self.push(
-                    Diagnostic::error(DiagKind::Attribute, r.span, "`#[refines]` is not allowed on a hardware variant (`#[implements]`)")
-                        .note("a variant inherits the refinement of its portable function through `VariantEquiv` (DESIGN.md §15.2)"),
-                );
-            } else if let Some(spec) = self.spec_fn_path(&r.target, "`#[refines]`", r.span) {
+            if let Some(spec) = self.spec_fn_path(&r.target, "`#[refines]`", r.span) {
                 let spec_sig = self.ck.sigs.get(&spec).cloned();
                 let args = r.args.as_ref().map(|args| {
                     let params: Vec<Ty> = spec_sig.as_ref().map(|s| s.params.clone()).unwrap_or_default();
@@ -1244,7 +1236,7 @@ pub fn ghost_macro(e: &syn::Expr) -> Option<&syn::Macro> {
 pub fn has_fn_annotation(sig: &super::FnSig) -> bool {
     let c = &sig.contracts;
     let s = &sig.spec;
-    !c.requires.is_empty() || c.ensures.is_some() || c.decreases.is_some() || c.implements.is_some() || sig.specialize || s.refines.is_some() || !s.examples.is_empty() || s.section.is_some() || s.trusted_extern.is_some()
+    !c.requires.is_empty() || c.ensures.is_some() || c.decreases.is_some() || s.refines.is_some() || !s.examples.is_empty() || s.section.is_some() || s.trusted_extern.is_some()
 }
 
 impl<'c, 'a> Cx<'c, 'a> {
@@ -1260,8 +1252,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub fn call_with_ghosts(&mut self, callee: ItemId, sig: &super::FnSig, offset: usize, n: usize, explicit: Vec<Option<Ty>>, args: &[syn::Expr], exp: &super::expr::Exp, span: Span) -> (Vec<Expr>, Vec<Ty>, Ty) {
         let ghost_at = |i: usize| sig.ghost_params.get(offset + i).copied().unwrap_or(false);
         // a forgotten `ghost!(..)` argument (the `#[ghost]` parameters come
-        // last): only the round trip's lowered code omits them, and it is
-        // not typechecked here
+        // last)
         let np = sig.params.len().saturating_sub(offset);
         if args.len() < np && (args.len()..np).all(ghost_at) {
             self.missing_ghost_args(callee, sig, offset + args.len(), span);

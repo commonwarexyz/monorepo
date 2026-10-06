@@ -9,7 +9,6 @@ use sandblaster::prelude::*;
 #[requires(off <= msg.len() && msg.len() - off >= 4)]
 #[ensures(|ret: u32| true)]
 #[decreases(msg.len(), max = 64)]
-#[specialize]
 fn read4(msg: &[u8], off: usize) -> u32 {
     proof! { assert(off + 4 <= msg.len()); }
     u32::from_be_bytes([msg[off], msg[off + 1], msg[off + 2], msg[off + 3]])
@@ -53,12 +52,6 @@ fn helper(a: bool) {
     requires(a);
     ensures(a);
     todo();
-}
-
-#[rewrite]
-#[law]
-fn rewritten(x: u32) {
-    ensures(x == x);
 }
 
 /// `refines` is erased like a contract: the repr type itself stays.

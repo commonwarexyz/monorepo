@@ -63,8 +63,7 @@
 //!   context states it about the destructured locals ([`Elab::post_fact`]).
 //!   The premise is left out when `a` is the literal `0` or `a ≤ b` holds
 //!   by evaluation.
-//! * A `for` loop without invariants has no lemma. Generated mode (the
-//!   round trip) records the checked lemma unchanged and binds no fact.
+//! * A `for` loop without invariants has no lemma.
 //! * Nothing comes for free: the lemma is kernel-checked and applied to the
 //!   entry proofs, so an invariant that fails at entry, preservation or
 //!   exit fails the build, and a helper or lemma that does not check binds
@@ -1015,7 +1014,7 @@ fn lift_conjuncts(raw: Vec<(Tm, Span)>, j: u32, z_lvl: u32, w: Width) -> Option<
 impl<'a> Elab<'a> {
     /// Builds and adds `f::loop#k::ensures` (see the module docs). `None`
     /// when the loop states nothing after it (a `for` loop without
-    /// invariants), in generated mode, or when the helper or the lemma did
+    /// invariants), or when the helper or the lemma did
     /// not check (their failed obligations fail the build, and no fact is
     /// bound at the call site).
     fn post_lemma(&mut self, l: &'a Loop, helper: GlobalId, hi: &HelperInfo, mutated: &[LocalId], read: &[LocalId], jt: &Ty) -> Option<PostLemma> {
@@ -1029,19 +1028,6 @@ impl<'a> Elab<'a> {
         let incl = matches!(&l.kind, LoopKind::ForRange { inclusive: true, .. });
         let name = format!("{}::ensures", hi.name);
         let span = l.span;
-        // generated mode (the round trip, §8.3): lemmas are never printed;
-        // the checked one is recorded unchanged (so its comparison is
-        // trivial) and no fact is bound (facts are irrelevant, erased by the
-        // comparison, and every proof slot is `Erased` in this mode anyway)
-        let record = self.generated.as_ref().filter(|s| s.mode == super::generated::SinkMode::Record).map(|s| s.targets.get(&name).copied());
-        if let Some(target) = record {
-            if let Some((_, c)) = target
-                && let (Some(ty), Some(body), Some(arity)) = (self.env.global_type(c), self.env.global_body(c), self.env.global_arity(c))
-            {
-                let _ = self.add_definition(&name, DefKind::Ensures, self.f.item, ty, body, Recursion::None, arity, false, false, span);
-            }
-            return None;
-        }
         if !hi.checked {
             return None;
         }
@@ -1984,9 +1970,7 @@ impl<'a> Elab<'a> {
     /// `a` is the literal `0` or it holds by evaluation.
     ///
     /// The committed `let` states the fact about `J` (so the fact's proof
-    /// stays valid where the join variable is abstracted: the clone
-    /// equality proofs of the optimizer, `opt::mirror`, relate the facts of
-    /// a clone and of its original modulo the renaming). The elaboration
+    /// stays valid where the join variable is abstracted). The elaboration
     /// context sees the same fact stated about the destructured locals,
     /// `Post((x₁, …, xₙ))`, which is convertible to it (the locals are
     /// projections of the join variable, which is `J` by definition) and

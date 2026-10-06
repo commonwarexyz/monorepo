@@ -146,13 +146,9 @@ fn refines_targets_and_placement() {
     rejects(&format!("{SPEC}#[refines(1 + 2)]\nfn f(a: u8) -> u8 {{ a }}"), K::Attribute, "malformed `#[refines]`");
     rejects(&format!("{SPEC}#[refines(add_spec, foo = 1)]\nfn f(a: u8) -> u8 {{ a }}"), K::Attribute, "expected `domain = P`");
     rejects(&format!("{SPEC}#[refines]\nfn f(a: u8) -> u8 {{ a }}"), K::Attribute, "malformed `#[refines]`");
-    // not on a hardware variant
-    rejects_with_note(
-        &format!("{SPEC}fn f(x: u8) -> u8 {{ x }}\n#[target_feature(enable = \"neon\")]\n#[implements(f)]\n#[refines(add_spec)]\nfn fv(x: u8) -> u8 {{ x }}"),
-        K::Attribute,
-        "not allowed on a hardware variant",
-        "VariantEquiv",
-    );
+    // a hardware variant (`#[implements]`, removed with the optimizer's
+    // dispatch) is refused, with or without `#[refines]`
+    rejects(&format!("{SPEC}fn f(x: u8) -> u8 {{ x }}\n#[implements(f)]\n#[refines(add_spec)]\nfn fv(x: u8) -> u8 {{ x }}"), K::Feature, "`#[implements]` (a hardware variant) is not supported");
 }
 
 // ---------------------------------------------------------------- #[proof(refines | complete = f)] (§15.2, §15.5)
@@ -559,13 +555,11 @@ fn samples() -> Vec<Sample> {
         (Annot::Ensures, "#[allow(dead_code)]\n#[ensures(|r: u8| r == x)]\nfn f(x: u8) -> u8 { x }\n", "#[ensures(|r: u8| r == x)]", vec![]),
         (Annot::Decreases, "#[allow(dead_code)]\n#[decreases(n)]\nfn f(n: u32) -> u32 { if n == 0 { 0 } else { f(n - 1) } }\n", "#[decreases(n)]", vec![]),
         (Annot::Implements, "fn f(x: u8) -> u8 { x }\n#[target_feature(enable = \"neon\")]\n#[implements(f)]\nfn g(x: u8) -> u8 { x }\n", "#[implements(f)]", vec![]),
-        (Annot::Specialize, "#[allow(dead_code)]\n#[specialize]\nfn f(x: u8) -> u8 { x }\n", "#[specialize]", vec![]),
         (Annot::Spec, "#[cfg(sandblaster)]\n#[spec]\nfn s(x: u8) -> Int { x as Int }\n", "#[spec]", vec![]),
         (Annot::Spec, "#[cfg(sandblaster)]\n#[spec]\nmod s;\n", "#[spec]", vec![("r/s.rs", "fn t(x: u8) -> u8 { x }\n")]),
         (Annot::Lemma, "#[cfg(sandblaster)]\n#[lemma]\nfn l(x: u8) { ensures(x == x); }\n", "#[lemma]", vec![]),
         (Annot::Law, "#[cfg(sandblaster)]\n#[law]\nfn l(x: u8) { ensures(x == x); }\n", "#[law]", vec![]),
         (Annot::Proof, "#[cfg(sandblaster)]\n#[law]\nfn l(x: u8) { ensures(x == x); }\n#[cfg(sandblaster)]\n#[path = \"P.rs\"]\nmod p;\n", "", vec![("r/P.rs", "#[proof]\nfn l(x: u8) { follows(); }\n")]),
-        (Annot::Rewrite, "#[cfg(sandblaster)]\n#[law]\n#[rewrite]\nfn l(x: u8) { ensures(x == x); }\n", "#[rewrite]", vec![]),
         (Annot::Induction, "#[cfg(sandblaster)]\n#[lemma]\n#[induction(n)]\nfn l(n: u32) { ensures(n == n); if n == 0 { follows(); } else { ih(n - 1); follows(); } }\n", "#[induction(n)]", vec![]),
         (Annot::Refines, "#[cfg(sandblaster)] #[spec] fn s(x: u8) -> u8 { x }\n#[allow(dead_code)]\n#[refines(s)]\nfn f(x: u8) -> u8 { x }\n", "#[refines(s)]", vec![]),
         (Annot::Example, "#[allow(dead_code)]\n#[example(f(1) == 1)]\nfn f(x: u8) -> u8 { x }\n", "#[example(f(1) == 1)]", vec![]),
@@ -608,6 +602,12 @@ fn every_accepted_annotation_changes_the_hir() {
             assert!(body.contains(annot), "{annot} not in sample");
             (build(body, &extra), build(&body.replace(annot, &" ".repeat(annot.len())), &extra))
         };
+        // hardware variants were removed with the optimizer's dispatch:
+        // `#[implements]` is recognized, and refused
+        if a == Annot::Implements {
+            assert!(!with.ok() && with.render().contains("`#[implements]` (a hardware variant) is not supported"), "{}", with.render());
+            continue;
+        }
         assert!(with.ok(), "sample for `#[{}]` rejected:\n{}", a.name(), with.render());
         assert_ne!(hir_text(&with), hir_text(&without), "`#[{}]` is accepted but does not change the HIR", a.name());
     }

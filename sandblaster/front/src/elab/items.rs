@@ -49,8 +49,8 @@ pub struct TBinder {
 
 /// Whether an exec function is opaque in proofs (DESIGN.md §5.6: "hashes,
 /// CRC, codecs and large step functions are opaque in proofs by default and
-/// used through their ensures"; `unfold(f)` reveals the definition, and the
-/// optimizer evaluates transparently): functions with loops, functions
+/// used through their ensures"; `unfold(f)` reveals the definition):
+/// functions with loops, functions
 /// that **build buffers** — assign array elements or `copy_from_slice` into
 /// a local array (hash preimages, byte encodings, stack buffers) — and
 /// **codec readers** ([`is_reader`]). Their symbolic values are large,
@@ -135,7 +135,7 @@ impl<'a> Elab<'a> {
             ItemKind::Fn(f) => match f.kind {
                 FnKind::Exec => {
                     if self.hw_items.contains(&id) && self.sem.intrinsics.is_empty() {
-                        let why = "hardware function (intrinsics / target features): the core models and the equivalence proof are phase 3 (§9.2, §9.3); not emitted".to_string();
+                        let why = "hardware function (intrinsics / target features): the target models (`sandblaster/targets/core/<arch>.core`) are not loaded for this architecture (DESIGN.md §9); deferred, never trusted".to_string();
                         self.deferred.push((id, why.clone()));
                         self.defs.push(DefRecord { name: it.path.to_string(), kind: DefKind::Exec, item: Some(id), global: None, status: DefStatus::Deferred(why), span: it.span });
                         return;
@@ -217,10 +217,6 @@ impl<'a> Elab<'a> {
     /// failed or the kernel rejects it. Records the definition.
     #[allow(clippy::too_many_arguments)]
     pub fn add_definition(&mut self, name: &str, kind: DefKind, item: Option<ItemId>, ty: Tm, body: Tm, recursion: Recursion, arity: u32, opaque: bool, failed: bool, span: Span) -> R<GlobalId> {
-        if self.generated.is_some() {
-            // optimizer-produced items (DESIGN.md §8.2, §8.3): `elab::generated`
-            return self.generated_define(name, kind, item, ty, body, recursion, arity, opaque, failed, span);
-        }
         if failed {
             let g = self.placeholder(name, kind, &ty, arity, span);
             self.defs.push(DefRecord { name: name.to_string(), kind, item, global: g, status: DefStatus::Unproven, span });
@@ -766,7 +762,7 @@ impl<'a> Elab<'a> {
         // spec closure (DESIGN.md §15.1)
         self.spec_item_closure(id, g);
         // the implicit `0 <= result` facts of a `Nat`-valued result
-        if !failed && !prop && self.generated.is_none() {
+        if !failed && !prop {
             self.nat_range_def(id, f, g);
         }
         Ok(())

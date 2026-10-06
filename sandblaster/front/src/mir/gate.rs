@@ -49,28 +49,6 @@
 //! check (`elab::items`: each α-equal to the elaboration of the declared
 //! clause, which the lift carries apart, `hir::FnDef::declared`).
 //!
-//! The lifted round trip's shipped theorem `L::shipped::<id>` is checked the
-//! same way ([`Ledger::accept_shipped`]): the copy's MIR instance against the
-//! source function, under the source function's declared contract.
-//!
-//! **Panic theorems** ([`Ledger::accept_shipped_panic`], DESIGN.md §8.2
-//! item 12; exec-only builds only, never a verified build's): a function
-//! that can panic is replaced only through its panic-explicit reading `P`
-//! (`opt::panics`, result `Option(R)`, `None` the panic outcome), with two
-//! theorems of the panic statement (`stmt::statement_panic`), checks 1–4
-//! for each: `L::pthm::<id>` of the source function's own MIR instance
-//! (check 0) against `P`, and `L::pshipped::<id>` of the copy's instance
-//! against `P`. Together: on every input both MIR runs return the same
-//! value, or neither returns one. Two more checks make "returns none" mean
-//! "panics": (5) `P` has exactly the source function's parameters and
-//! preconditions (its kernel type is the source's with the result wrapped
-//! in `Option`), and (6) every instance either reading runs is read with no
-//! fault (no construct read as `None` but a panic), no loop and no
-//! self-call (no fuel is ever consumed, so no run is cut short), and each
-//! block read as panicking does panic: every path from it ends in a
-//! diverging call, `unreachable`, an abort or an unwind (checked here on
-//! the MIR, not taken from `cfg.rs`).
-//!
 //! # What it trusts
 //!
 //! The kernel; the generator `literal.rs` and `literal.core`; the statement
@@ -177,46 +155,16 @@ impl Ledger {
             if is.as_deref() != Some(c.global.as_str()) {
                 return Err(format!("its MIR instance `{}` is {}, not this function", c.key, is.map_or("no lifted function".into(), |g| format!("`{g}`"))));
             }
-            self.accept(env, krate, &mm.loaded.m, &mm.loaded.names, c, &c.key, "L::thm::", &c.global, false)
+            self.accept(env, krate, &mm.loaded.m, &mm.loaded.names, c, &c.key, "L::thm::", &c.global)
         };
         facts.mir_contracts.iter().map(|c| Verdict { global: c.global.clone(), key: c.key.clone(), result: accept(c) }).collect()
     }
 
-    /// The shipped code's theorem of `source`, the copy `copy_key` of the
-    /// round trip's MIR `rt` against it under its declared contract.
-    pub fn accept_shipped(&self, env: &Env, krate: &Crate, rt: &Sbmir, facts: &LiftFacts, copy_key: &str, source: &str) -> Result<(), String> {
-        self.inductives_trusted(env)?;
-        let c = facts.mir_contracts.iter().find(|c| c.global == source).ok_or_else(|| format!("`{source}` has no declared contract"))?;
-        let mm = facts.mir_loaded.iter().find(|mm| mm.loaded.m.module == rt.module).ok_or("no names for the round trip's module")?;
-        self.accept(env, krate, rt, &mm.loaded.names, c, copy_key, "L::shipped::", &c.global, false)
-    }
-
-    /// The panic theorems (module docs) of `source`, replaced through its
-    /// panic-explicit reading `reading`: the source function's own MIR
-    /// instance and the copy `copy_key` of the round trip's MIR `rt`, each
-    /// against the reading under the source function's declared contract.
-    #[allow(clippy::too_many_arguments)]
-    pub fn accept_shipped_panic(&self, env: &Env, krate: &Crate, rt: &Sbmir, facts: &LiftFacts, copy_key: &str, source: &str, reading: &str) -> Result<(), String> {
-        self.inductives_trusted(env)?;
-        let c = facts.mir_contracts.iter().find(|c| c.global == source).ok_or_else(|| format!("`{source}` has no declared contract"))?;
-        // (0) the source's instance is the listed function
-        let mm = facts.mir_loaded.iter().find(|mm| mm.loaded.m.fns.contains_key(&c.key)).ok_or("its MIR instance is in no loaded extraction")?;
-        let is = mm.loaded.names.instance_global(&mm.loaded.m, &mm.loaded.m.fns[&c.key]);
-        if is.as_deref() != Some(c.global.as_str()) {
-            return Err(format!("its MIR instance `{}` is {}, not this function", c.key, is.map_or("no lifted function".into(), |g| format!("`{g}`"))));
-        }
-        // (5) the reading has the source's parameters and preconditions
-        same_telescope_option(env, source, reading)?;
-        self.accept(env, krate, &mm.loaded.m, &mm.loaded.names, c, &c.key, "L::pthm::", reading, true)?;
-        let rm = facts.mir_loaded.iter().find(|mm| mm.loaded.m.module == rt.module).ok_or("no names for the round trip's module")?;
-        self.accept(env, krate, rt, &rm.loaded.names, c, copy_key, "L::pshipped::", reading, true)
-    }
-
     /// `<prefix><id>`, `id` the literal reading of `m`'s instance `key`, is
-    /// a kernel declaration of the statement of `subject` (`c.global`, or
-    /// for the panic statement a panic-explicit reading) under `c`.
+    /// a kernel declaration of the statement of `subject` (`c.global`) under
+    /// `c`.
     #[allow(clippy::too_many_arguments)]
-    fn accept(&self, env: &Env, krate: &Crate, m: &Sbmir, names: &ModuleNames, _c: &MirContract, key: &str, prefix: &str, subject: &str, panic: bool) -> Result<(), String> {
+    fn accept(&self, env: &Env, krate: &Crate, m: &Sbmir, names: &ModuleNames, _c: &MirContract, key: &str, prefix: &str, subject: &str) -> Result<(), String> {
         let (state, read) = self.readings.get(&m.module).ok_or("the literal reading of its module was not loaded")?;
         let lf = state.fns.get(key).ok_or_else(|| format!("no literal reading of `{key}`"))?;
         let f = m.fns.get(key).ok_or_else(|| format!("no MIR of `{key}`"))?;
@@ -226,18 +174,13 @@ impl Ledger {
                 return Err(format!("the literal reading of `{k}` was generated from another MIR than this extraction's"));
             }
             m.fns.get(&k).into_iter().flat_map(|g| &g.locals).for_each(|(t, _)| adts_in(m, t, &mut adts));
-            // (6) for the panic statement: `None` is a panic
-            if panic {
-                let (Some(g), Some(l)) = (m.fns.get(&k), state.fns.get(&k)) else { return Err(format!("`{k}`, which `{key}` runs, has no literal reading")) };
-                panic_exact(g, l).map_err(|e| format!("`{k}`, which `{key}` runs: {e}"))?;
-            }
         }
         for (d, name) in adts.iter().filter_map(|k| m.adts.get(k)).filter(|d| names.local(&d.path)).filter_map(|d| Some((d, names.kernel_adt(m, &d.key)?))) {
             same_declaration(krate, d, &name)?;
         }
         let kn = KNames { names, env };
         let mut g = Gen::resume(m, &kn, state.clone());
-        let st = if panic { stmt::statement_panic(env, &mut g, lf, f, subject)? } else { stmt::statement(env, &mut g, lf, f, subject)? };
+        let st = stmt::statement(env, &mut g, lf, f, subject)?;
         let want = env.parse_term(&[], &st.theorem_ty()).map_err(|e| format!("its statement: {e}"))?;
         let name = format!("{prefix}{}", lf.id);
         let got = env.lookup_global(&name).and_then(|g| env.global_type(g)).ok_or_else(|| format!("the kernel holds no `{name}`"))?;
@@ -325,63 +268,4 @@ pub(crate) fn closure(m: &Sbmir, key: &str) -> Vec<String> {
         }
     }
     seen.into_iter().collect()
-}
-
-/// Check (6) on one instance `f` and its literal reading `l`: no fault, no
-/// loop header, no self-call, and every block read as panicking panics.
-fn panic_exact(f: &super::ir::Fn, l: &literal::LFn) -> Result<(), String> {
-    if let Some(x) = l.faults.first() {
-        return Err(format!("its literal reading reads a construct as `None` that is not a panic ({x})"));
-    }
-    if !l.headers.is_empty() {
-        return Err("it has a loop (the panic statement is checked only on code that consumes no fuel)".into());
-    }
-    if f.blocks.iter().any(|b| matches!(&b.term, Term::Call(Callee::Fn(k), ..) if *k == f.key)) {
-        return Err("it calls itself (the panic statement is checked only on code that consumes no fuel)".into());
-    }
-    if let Some(b) = l.panics.iter().find(|b| !must_diverge(f, **b, &mut Vec::new())) {
-        return Err(format!("its block {b} is read as panicking, but a path from it returns"));
-    }
-    Ok(())
-}
-
-/// Whether every path from block `b` of `f` ends in a diverging call,
-/// `unreachable`, an abort or an unwind, never returning or looping.
-fn must_diverge(f: &super::ir::Fn, b: usize, visiting: &mut Vec<usize>) -> bool {
-    let Some(bl) = f.blocks.get(b) else { return false };
-    if visiting.contains(&b) {
-        return false;
-    }
-    let next: Vec<usize> = match &bl.term {
-        Term::Unreachable | Term::Abort | Term::Resume | Term::Call(Callee::Diverge(_), ..) | Term::Call(_, _, _, None) => return true,
-        Term::Return | Term::Unsupported(_) => return false,
-        Term::Goto(t) | Term::Drop(_, _, t) | Term::Assert(_, _, _, t) | Term::Call(_, _, _, Some(t)) => vec![*t],
-        Term::Switch(_, arms, o) => arms.iter().map(|a| a.1).chain(std::iter::once(*o)).collect(),
-    };
-    visiting.push(b);
-    let r = next.iter().all(|t| must_diverge(f, *t, visiting));
-    visiting.pop();
-    r
-}
-
-/// Check (5): `reading`'s kernel type is `source`'s (the placeholder of an
-/// unproven function has the function's type) with the result `R` wrapped
-/// in `Option(R)`: the same binders, in order, with α-equal domains.
-fn same_telescope_option(env: &Env, source: &str, reading: &str) -> Result<(), String> {
-    let ty = |n: &str| env.lookup_global(n).and_then(|g| env.global_type(g)).ok_or_else(|| format!("the kernel holds no `{n}`"));
-    let (mut a, mut b) = (ty(source)?, ty(reading)?);
-    let eq = |x: &sandblaster_kernel::term::Tm, y: &sandblaster_kernel::term::Tm| env.alpha_eq_relevant(x, y, &|p: GlobalId, q: GlobalId| p == q);
-    loop {
-        match (&*a.clone(), &*b.clone()) {
-            (sandblaster_kernel::term::Term::Pi { rel: r1, dom: d1, cod: c1, .. }, sandblaster_kernel::term::Term::Pi { rel: r2, dom: d2, cod: c2, .. }) => {
-                if r1 != r2 || !eq(d1, d2) {
-                    return Err(format!("`{reading}` does not have the parameters and preconditions of `{source}`"));
-                }
-                a = c1.clone();
-                b = c2.clone();
-            }
-            (_, sandblaster_kernel::term::Term::Ind { ind, params }) if Some(*ind) == env.lookup_ind("Option") && params.len() == 1 && eq(&a, &params[0]) => return Ok(()),
-            _ => return Err(format!("`{reading}` does not return `Option` of what `{source}` returns, over its parameters")),
-        }
-    }
 }

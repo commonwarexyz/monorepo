@@ -1,12 +1,13 @@
 [package]
 name = "sandblaster-cli"
-description = "sandblaster command line: check, eval, emit, report."
+description = "sandblaster command line: check, spec, coverage, mutate, eval, conform, report."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 # Not published yet: the toolchain lives in the monorepo as a build tool.
 publish = false
+build = "build.rs"
 
 [[bin]]
 name = "sandblaster"

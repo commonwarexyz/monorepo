@@ -1,58 +1,50 @@
 //! RED TEAM — proof-gate integrity (lens: PROOF-GATE INTEGRITY).
 //!
-//! Goal of these probes: make `sandblaster::build::compile` (via
-//! `driver::build_verified`) accept a crate that ships unverified code or a
-//! false/vacuous law, without the build failing, or emit a verification
-//! report that overstates what was proven.
+//! Goal of these probes: make the crate path (`driver::build_crate`, the
+//! pipeline of every build entry point) issue a verdict for a crate with
+//! unverified code or a false/vacuous law, or emit a verification report
+//! that overstates what was proven.
 //!
 //! The two findings (RG-1 vacuous laws, RG-2 stack overflow) are regression
-//! tests now; the remaining `#[ignore]`d probes only print emitted code.
+//! tests now; the remaining `#[ignore]`d probes only print diagnostics.
 //!
-//! Each probe drives `build_verified` with an in-memory file system, exactly
-//! as `sandblaster/sandblaster/src/build.rs` drives it with the real one. `outcome.ok`
-//! is what decides whether the crate compiles; `sandblaster-report.json` is what
-//! an auditor reads.
+//! Each probe checks an in-memory crate and runs the crate path on it.
+//! `ok` (a verdict) is what decides whether a build passes;
+//! `sandblaster-report.json` is what an auditor reads.
 
-use std::collections::HashMap;
+use std::path::Path;
 
 const HEADER: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n";
-const LIB: &str = "include!(concat!(env!(\"OUT_DIR\"), \"/sandblaster.rs\"));";
 
-use sandblaster_front::driver::{build_verified, BuildOutcome};
+use sandblaster_front::driver::{self, LockUse};
 use sandblaster_front::loader::MemFs;
+use sandblaster_front::target::TargetInfo;
 
-fn env() -> HashMap<String, String> {
-    [
-        ("CARGO_MANIFEST_DIR", "/crate"),
-        ("OUT_DIR", "/out"),
-        ("CARGO_CFG_TARGET_ARCH", "aarch64"),
-        ("CARGO_CFG_TARGET_FEATURE", "neon,sha2,sha3,aes"),
-        ("CARGO_CFG_TARGET_ENDIAN", "little"),
-        ("CARGO_CFG_TARGET_POINTER_WIDTH", "64"),
-    ]
-    .iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect()
+/// What the crate path made of a probe.
+struct Outcome {
+    /// A verdict.
+    ok: bool,
+    /// The diagnostics and the failure's closing line.
+    stderr: String,
+    report: Option<String>,
 }
 
-/// Builds a crate whose DSL files are given relative to `sandblaster/`
-/// (`files[0]` is `mod.rs`). `src/lib.rs` is the mandated include line.
-fn build(files: &[(&str, &str)]) -> BuildOutcome {
-    let mut all: Vec<(String, String)> = vec![("/crate/src/lib.rs".into(), LIB.into())];
-    for (p, c) in files {
-        all.push((format!("/crate/sandblaster/{p}"), (*c).to_string()));
-    }
+/// Runs the crate path on a crate whose DSL files are given relative to
+/// `sandblaster/` (`files[0]` is `mod.rs`).
+fn build(files: &[(&str, &str)]) -> Outcome {
+    let all: Vec<(String, String)> = files.iter().map(|(p, c)| (format!("/crate/sandblaster/{p}"), (*c).to_string())).collect();
     let fs = MemFs::from_files(all.iter().map(|(p, c)| (p.as_str(), c.as_str())));
-    let e = env();
-    build_verified("sandblaster/mod.rs", &|k| e.get(k).cloned(), &fs)
+    let root = "/crate/sandblaster/mod.rs";
+    let c = driver::check(Path::new(root), &fs, &TargetInfo::aarch64_apple_darwin());
+    if !c.ok() {
+        return Outcome { ok: false, stderr: c.render(), report: None };
+    }
+    let b = driver::build_crate(&c, LockUse::Enforce, root);
+    Outcome { ok: b.verdict.is_some(), stderr: b.render_failure(&c, root), report: Some(b.report.clone()) }
 }
 
-#[allow(dead_code)]
-fn code<'o>(o: &'o BuildOutcome) -> Option<&'o str> {
-    o.outputs.iter().find(|(p, _)| p.ends_with("sandblaster.rs")).map(|(_, c)| c.as_str())
-}
-fn report<'o>(o: &'o BuildOutcome) -> Option<&'o str> {
-    o.outputs.iter().find(|(p, _)| p.ends_with("sandblaster-report.json")).map(|(_, c)| c.as_str())
+fn report(o: &Outcome) -> Option<&str> {
+    o.report.as_deref()
 }
 
 // ===========================================================================
@@ -62,7 +54,7 @@ fn report<'o>(o: &'o BuildOutcome) -> Option<&'o str> {
 // appears to say. The gate now refutes contradictory hypotheses (bounded
 // prover attempt, kernel-checked) and fails the build with "vacuous law".
 // ===========================================================================
-fn vacuous_law_crate(requires: &str) -> BuildOutcome {
+fn vacuous_law_crate(requires: &str) -> Outcome {
     // A BROKEN verifier that accepts everything.
     let root = format!(
         "{HEADER}\
@@ -95,9 +87,8 @@ fn finding1_vacuous_law_masquerades_as_soundness() {
     eprintln!("stderr:\n{}", o.stderr);
     assert!(!o.ok, "a vacuous law must fail the build");
     assert!(o.stderr.contains("vacuous law"), "{}", o.stderr);
-    assert!(code(&o).is_none(), "nothing is emitted");
     let r = report(&o).expect("the report of the failed build");
-    assert!(r.contains("\"status\": \"NOT VERIFIED\"") && !r.contains("VERIFIED +") && !r.contains("VERIFIED (phase"), "the report must not claim verification:\n{r}");
+    assert!(r.contains("\"status\": \"NOT VERIFIED\"") && !r.contains("\"status\": \"VERIFIED"), "the report must not claim verification:\n{r}");
     assert!(r.contains("vacuous: its hypotheses are contradictory"), "{r}");
     // the law's statement is in the report for auditors
     assert!(r.contains("requires(root.len() < 3) requires(root.len() > 5) ensures(verify(root, key, value, &[]) == false)"), "{r}");
@@ -156,9 +147,6 @@ fn inspect_guard_orpat() {
     let o = build(&[("mod.rs", &root)]);
     eprintln!("ok = {}", o.ok);
     eprintln!("stderr:\n{}", o.stderr);
-    if let Some(c) = code(&o) {
-        eprintln!("=== emitted ===\n{}", c);
-    }
 }
 
 // ===========================================================================
@@ -167,7 +155,7 @@ fn inspect_guard_orpat() {
 // aborted with a stack overflow on ordinary input from its total boundary.
 // Stack safety is now an obligation (`validate::check_stack`).
 // ===========================================================================
-fn deep_recursion_crate(max: u32, clamp: u32) -> BuildOutcome {
+fn deep_recursion_crate(max: u32, clamp: u32) -> Outcome {
     let body = format!(
         "pub fn deep(n: u32) -> u64 {{\n\
         helper(if n > {clamp}u32 {{ {clamp}u32 }} else {{ n }})\n\
@@ -196,7 +184,6 @@ fn finding2_deep_recursion_is_rejected() {
     let o = deep_recursion_crate(4096, 4000);
     assert!(!o.ok, "must be rejected");
     assert!(o.stderr.contains("may overflow the stack"), "{}", o.stderr);
-    assert!(code(&o).is_none());
 }
 
 // ===========================================================================
@@ -217,7 +204,6 @@ fn probe_loop_post_leak() {
     let o = build(&[("mod.rs", &root)]);
     eprintln!("ok = {}", o.ok);
     eprintln!("stderr:\n{}", o.stderr);
-    if let Some(c) = code(&o) { eprintln!("=== emitted ===\n{}", c); }
     // `off <= s.len()` must not leak out of an empty loop
     assert!(!o.ok, "the unproven subtraction must fail the build");
 }

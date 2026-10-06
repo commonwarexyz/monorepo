@@ -4,7 +4,7 @@
 #
 #   sandblaster/mirx/extract.sh <package> <module>[,<module>..] <out.sbmir> [--exclude T,..] [--stub out.rs=src.rs,..]
 #       [--stubs crate:out.rs=src.rs;crate2:..] [--instance Trait=path::Type,..] [--skip-traits T,..]
-#       [--inject name=file.rs,..] [--replace src.rs=text.rs,..] [--items 'mod=Item,..;mod2=..'] [--skip-fns T::m,..]
+#       [--inject name=file.rs,..] [--items 'mod=Item,..;mod2=..'] [--skip-fns T::m,..]
 #       [--manifest path/Cargo.toml]
 #
 #   sandblaster/mirx/extract.sh commonware-codec varint codec/sandblaster/varint/varint.sbmir \
@@ -24,11 +24,7 @@
 # * --instance: open traits read at one instance (SEMANTICS.md §19.6);
 # * --skip-traits: impls of these traits are not extracted (host code);
 # * --inject: a DSL module compiled as `mod name;` of the crate root (the
-#   verifier's `instances.rs`; a crate's `#[lift(opt)]` module of user
-#   alternatives, when it has one, in the crate's context);
-# * --replace: compile a source as if it had another file's text (the lifted
-#   round trip's copy of a rewritten file, DESIGN.md §2.1); its SHA-256 is
-#   that text's;
+#   verifier's `instances.rs`);
 # * --items: in the named modules, only the functions of these items (the
 #   lift's `items = ..`); --skip-fns: these functions are not extracted (the
 #   lift's `unverified_fns = ..`);
@@ -37,7 +33,6 @@
 #
 #   sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,merkle::hasher,merkle::proof \
 #       storage/sandblaster/verifier/verifier.sbmir \
-#       --stub mmr-lowered__merkle__mmr__iterator.rs=storage/src/merkle/mmr/iterator.rs \
 #       --stubs 'commonware_codec:varint.rs=codec/sandblaster/varint/varint.rs' \
 #       --instance 'Family=merkle::mmr::Family,..' --skip-traits Debug,Display,Hash \
 #       --inject instances=storage/sandblaster/verifier/instances.rs --items '..' --skip-fns '..'
@@ -45,7 +40,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 pkg="$1"; module="$2"; out="$3"; shift 3
-exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; replace=""; items=""; skipfns=""; manifest="$root/Cargo.toml"
+exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; items=""; skipfns=""; manifest="$root/Cargo.toml"
 while [ $# -gt 0 ]; do
   case "$1" in
     --exclude) exclude="$2"; shift 2 ;;
@@ -54,7 +49,6 @@ while [ $# -gt 0 ]; do
     --instance) instance="$2"; shift 2 ;;
     --skip-traits) skip="$2"; shift 2 ;;
     --inject) inject="$2"; shift 2 ;;
-    --replace) replace="$2"; shift 2 ;;
     --items) items="$2"; shift 2 ;;
     --skip-fns) skipfns="$2"; shift 2 ;;
     --manifest) manifest="$2"; case "$manifest" in /*) ;; *) manifest="$root/$manifest" ;; esac; shift 2 ;;
@@ -72,7 +66,7 @@ for p in "${pairs[@]:-}"; do
   case "$s" in /*) ;; *) s="$root/$s" ;; esac
   abs_stub="${abs_stub:+$abs_stub,}$o=$s"
 done
-# `a=b,..` pairs with the right-hand paths made absolute (both, with `both`)
+# `a=b,..` pairs with the right-hand paths made absolute
 absify() {
   local res="" p o s
   IFS=',' read -ra ps <<< "$1"
@@ -80,7 +74,6 @@ absify() {
     [ -z "$p" ] && continue
     o="${p%%=*}"; s="${p#*=}"
     case "$s" in /*) ;; *) s="$root/$s" ;; esac
-    if [ "${2:-}" = both ]; then case "$o" in /*) ;; *) o="$root/$o" ;; esac; fi
     res="${res:+$res,}$o=$s"
   done
   echo "$res"
@@ -92,7 +85,6 @@ for e in "${centries[@]:-}"; do
   abs_stubs="${abs_stubs:+$abs_stubs;}${e%%:*}:$(absify "${e#*:}")"
 done
 abs_inject="$(absify "$inject")"
-abs_replace="$(absify "$replace" both)"
 case "$out" in /*) ;; *) out="$root/$out" ;; esac
 crate="${pkg//-/_}"
 # the crate's library is re-checked each time (its MIR is what is printed)
@@ -101,7 +93,7 @@ cd "$root"
 if [ -n "$skip" ]; then export SBMIR_SKIP_TRAITS="$skip"; fi
 RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER="$tdir/driver/release/sandblaster-mirx" \
 SBMIR_CRATE="$crate" SBMIR_MODULE="$module" SBMIR_OUT="$out" SBMIR_EXCLUDE="$exclude" SBMIR_STUB="$abs_stub" \
-SBMIR_STUBS="$abs_stubs" SBMIR_INSTANCE="$instance" SBMIR_INJECT="$abs_inject" SBMIR_REPLACE="$abs_replace" \
+SBMIR_STUBS="$abs_stubs" SBMIR_INSTANCE="$instance" SBMIR_INJECT="$abs_inject" \
 SBMIR_ITEMS="$items" SBMIR_SKIP_FNS="$skipfns" \
 CARGO_TARGET_DIR="$tdir/check" cargo +"$toolchain" check -q --manifest-path "$manifest" -p "$pkg"
 echo "wrote $out"

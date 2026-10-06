@@ -205,10 +205,6 @@ pub struct Callee {
     pub need: Option<Tm>,
     /// The callee's presence conjunct (its optional cells).
     pub pres: Option<Pres>,
-    /// A panic-explicit reading's lemma (the panic statement, DESIGN.md
-    /// §8.2 item 12): the callee's result is `Option(R)` (this `R`), its
-    /// lemma's right side `match g x̄ with None => None | Some(y) => Some(erase_g y)`.
-    pub panic: Option<Tm>,
 }
 
 /// A loop helper of the structured reading with its lemma.
@@ -290,7 +286,7 @@ pub struct WhileHelper {
 
 impl WhileHelper {
     pub fn mu_int(&self, args: &[Tm]) -> Tm {
-        let mu = crate::opt::proof::steps::subst_n(&self.measure, args);
+        let mu = crate::elab::tm::subst_n(&self.measure, args);
         if self.width == Width::Int { mu } else { mk::prim(PrimOp::Cast { from: self.width, to: Width::Int }, vec![mu], vec![]) }
     }
 
@@ -350,7 +346,7 @@ impl Helper {
 
     /// The measure at `args` as an `Int` (a machine-width measure cast).
     pub fn mu_int(&self, args: &[Tm]) -> Tm {
-        let mu = crate::opt::proof::steps::subst_n(&self.measure, args);
+        let mu = crate::elab::tm::subst_n(&self.measure, args);
         if self.width == Width::Int { mu } else { mk::prim(PrimOp::Cast { from: self.width, to: Width::Int }, vec![mu], vec![]) }
     }
 
@@ -372,7 +368,7 @@ pub struct RecCtx {
 impl RecFn {
     /// The measure at `args` as an `Int` (a machine-width measure cast).
     pub fn mu_int(&self, args: &[Tm]) -> Tm {
-        let mu = crate::opt::proof::steps::subst_n(&self.measure, args);
+        let mu = crate::elab::tm::subst_n(&self.measure, args);
         if self.width == Width::Int { mu } else { mk::prim(PrimOp::Cast { from: self.width, to: Width::Int }, vec![mu], vec![]) }
     }
     /// The fuel need at `args`: `mult · μ(args)`.
@@ -431,10 +427,6 @@ pub struct Walker<'e> {
     pub whiles: Vec<WhileHelper>,
     /// A `while` lemma's walk.
     pub exit: Option<ExitMode>,
-    /// The panic statement (DESIGN.md §8.2 item 12): the structured term is
-    /// a panic-explicit reading's (`Option(R)`, this `R`), the equation's
-    /// right side `match s with None => None | Some(y) => Some(erase(y))`.
-    pub panic: Option<Tm>,
 }
 
 fn name(s: &str) -> Name {
@@ -831,7 +823,7 @@ impl<'e> Walker<'e> {
             let Some(ci) = self.callees.iter().find(|c| c.s_global == g) else { continue };
             let Some(w) = &ci.need else { continue };
             let all: Vec<Tm> = args.iter().map(|(_, a)| self.commit(a)).collect();
-            let wa = crate::opt::proof::steps::subst_n(w, &all);
+            let wa = crate::elab::tm::subst_n(w, &all);
             sum = Some(match sum {
                 None => wa,
                 Some(s0) => mk::prim(PrimOp::IAdd, vec![s0, wa], vec![]),
@@ -919,24 +911,9 @@ impl<'e> Walker<'e> {
         mk::eq(self.opt_out(), g.l.clone(), self.goal_rhs(g))
     }
 
-    /// The equation's right side: `Some(erase(s))` (for the panic statement
-    /// `opt_erase(s)`, [`Self::opt_erase`]), or the abstracted one.
+    /// The equation's right side: `Some(erase(s))`, or the abstracted one.
     fn goal_rhs(&self, g: &Goal) -> Tm {
-        g.rhs.clone().unwrap_or_else(|| match &self.panic {
-            Some(r) => self.opt_erase(r, &self.erase, &self.out_ty, &self.commit(&g.s)),
-            None => self.some_out(mk::app(self.erase.clone(), self.commit(&g.s))),
-        })
-    }
-
-    /// `match s : Option(r) with None => None[out] | Some(y) => Some[out](erase y)`:
-    /// the panic statement's right side of a structured value `s` (`None` is
-    /// the panic outcome, which the literal reading returns as `None`).
-    pub fn opt_erase(&self, r: &Tm, erase: &Tm, out: &Tm, s: &Tm) -> Tm {
-        let opt = self.ind("Option");
-        let out_opt = mk::ind(opt, vec![out.clone()]);
-        let none = Rc::new(Term::Ctor { ind: opt, ctor: 0, params: vec![out.clone()], args: vec![] });
-        let some = Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![shift(out, 1)], args: vec![mk::app(shift(erase, 1), mk::var(0))] });
-        Rc::new(Term::Match { ind: opt, params: vec![r.clone()], scrut: s.clone(), motive: out_opt, arms: vec![Arm { names: vec![], body: none }, Arm { names: vec![name("yy")], body: some }] })
+        g.rhs.clone().unwrap_or_else(|| self.some_out(mk::app(self.erase.clone(), self.commit(&g.s))))
     }
 
     /// The conclusion: [`Self::goal_e`], with the presence conjunct
@@ -1559,7 +1536,7 @@ impl<'e> Walker<'e> {
         let ni = ctx.depth().0 - 1 - self.n_level;
         let mut sub: Vec<Tm> = args.iter().filter(|(r, _)| *r == Rel::Rel).map(|(_, a)| a.clone()).collect();
         sub.push(mk::var(ni));
-        Ok(crate::opt::proof::steps::subst_n(&rf.l_of, &sub))
+        Ok(crate::elab::tm::subst_n(&rf.l_of, &sub))
     }
 
     /// One split the literal side waits for before it can go on: the fuel
@@ -1766,7 +1743,7 @@ impl<'e> Walker<'e> {
         if args.iter().any(|x| matches!(x, Arg::Irr(_))) {
             return Ok(None);
         }
-        let inst = crate::opt::proof::steps::subst_n(&a.body, &fields);
+        let inst = crate::elab::tm::subst_n(&a.body, &fields);
         let Term::Lam { rel: Rel::Irr, body, .. } = &*inst else { return Ok(None) };
         Ok(Some(crate::elab::tm::subst0(body, arg)))
     }
@@ -2389,7 +2366,7 @@ impl<'e> Walker<'e> {
                     c.fields.get(j).and_then(|(_, _, fty)| {
                         let mut sub: Vec<Tm> = params.clone();
                         sub.extend(args[..j].iter().cloned());
-                        let ft = crate::opt::proof::steps::subst_n(fty, &sub);
+                        let ft = crate::elab::tm::subst_n(fty, &sub);
                         let Term::Ind { ind: i2, params: p2 } = &*ft else { return None };
                         let d2 = self.env.inductive_decl(*i2)?;
                         (d2.ctors.len() == 1 && d2.ctors[0].fields.is_empty()).then(|| Rc::new(Term::Ctor { ind: *i2, ctor: 0, params: p2.clone(), args: vec![] }))
@@ -2456,11 +2433,8 @@ impl<'e> Walker<'e> {
                 let rel_args: Vec<Tm> = args.iter().filter(|(r, _)| *r == Rel::Rel).map(|(_, a)| a.clone()).collect();
                 let mut sub = rel_args.clone();
                 sub.push(mk::var(ni));
-                let lcall = crate::opt::proof::steps::subst_n(&ci.l_of, &sub);
-                let sval = match &ci.panic {
-                    Some(r) => self.opt_erase(r, &ci.erase, &ci.out_ty, &mk::apps(mk::global(*cg), args.clone())),
-                    None => Rc::new(Term::Ctor { ind: self.ind("Option"), ctor: 1, params: vec![ci.out_ty.clone()], args: vec![mk::app(ci.erase.clone(), mk::apps(mk::global(*cg), args.clone()))] }),
-                };
+                let lcall = crate::elab::tm::subst_n(&ci.l_of, &sub);
+                let sval = Rc::new(Term::Ctor { ind: self.ind("Option"), ctor: 1, params: vec![ci.out_ty.clone()], args: vec![mk::app(ci.erase.clone(), mk::apps(mk::global(*cg), args.clone()))] });
                 // the lemma's fuel premise: at every fuel, or the callee's need
                 // from the premise (a hypothesis: inside a terminal, or before
                 // the walk); otherwise the call waits for the terminal
@@ -2469,7 +2443,7 @@ impl<'e> Walker<'e> {
                     None => Some(Rc::new(Term::Linarith { hyps: vec![], goal: self.le_int(self.int_lit(0), self.len_n(d)), cert: vec![] })),
                     Some(_) if with_prem && !self.prem_in_ctx => None,
                     Some(w) => {
-                        let goal = self.le_int(crate::opt::proof::steps::subst_n(w, &all_args), self.len_n(d));
+                        let goal = self.le_int(crate::elab::tm::subst_n(w, &all_args), self.len_n(d));
                         self.linarith_fuel(ctx, facts, &goal).ok()
                     }
                 };
@@ -2737,8 +2711,8 @@ impl<'e> Walker<'e> {
             rty = cod.clone();
         }
         let vals: Vec<Tm> = args.iter().map(|(_, a)| a.clone()).collect();
-        let body_t = crate::opt::proof::steps::subst_n(&body, &vals);
-        let opt_g = crate::opt::proof::steps::subst_n(&rty, &vals);
+        let body_t = crate::elab::tm::subst_n(&body, &vals);
+        let opt_g = crate::elab::tm::subst_n(&rty, &vals);
         let delta = Rc::new(Term::Delta { def: run_g, args: vals.clone() });
         let sym = mk::apps(mk::global(self.g("eq::sym")?), vec![(Rel::Rel, opt_g.clone()), (Rel::Rel, rt.clone()), (Rel::Rel, body_t.clone()), (Rel::Rel, delta)]);
         let ctx_y = self.push(ctx, "y", Rel::Rel, &opt_g, None)?;
@@ -2858,7 +2832,7 @@ impl<'e> Walker<'e> {
         for (i, (_, _, fty)) in c.fields.iter().enumerate() {
             let mut sub: Vec<Tm> = params1.clone();
             sub.extend(projs.iter().cloned());
-            let fty_i = crate::opt::proof::steps::subst_n(fty, &sub); // (ctx, y)
+            let fty_i = crate::elab::tm::subst_n(fty, &sub); // (ctx, y)
             projs.push(Rc::new(Term::Match { ind, params: params1.clone(), scrut: mk::var(0), motive: shift(&fty_i, 1), arms: vec![Arm { names: names.clone(), body: mk::var(nf - 1 - i as u32) }] }));
         }
         let cy = Rc::new(Term::Ctor { ind, ctor: 0, params: params1.clone(), args: projs });
@@ -2886,7 +2860,7 @@ impl<'e> Walker<'e> {
         for (j, (fname, frel, fty)) in c.fields.iter().enumerate() {
             let mut args: Vec<Tm> = params.iter().map(|p| shift(p, j as i64)).collect();
             args.extend(fvars.iter().cloned());
-            let fty2 = crate::opt::proof::steps::subst_n(fty, &args);
+            let fty2 = crate::elab::tm::subst_n(fty, &args);
             let nm = names.get(j).map(|n| n.to_string()).unwrap_or_else(|| fname.to_string());
             actx = self.push(&actx, &nm, *frel, &fty2, None)?;
             fvars = fvars.iter().map(|x| shift(x, 1)).collect();
@@ -4229,8 +4203,8 @@ impl<'e> Walker<'e> {
             let lt_ty = mk::eq_bool(self.env.bool_ind(), mk::prim(PrimOp::Lt(Width::Int), vec![hi.mu_int(cargs), hi.mu_int(&params)], vec![]), true);
             Fact::eq(Rc::new(Term::Snd(dproof.clone())), lt_ty)
         } else {
-            let a = crate::opt::proof::steps::subst_n(&hi.measure, cargs);
-            let b = crate::opt::proof::steps::subst_n(&hi.measure, &params);
+            let a = crate::elab::tm::subst_n(&hi.measure, cargs);
+            let b = crate::elab::tm::subst_n(&hi.measure, &params);
             let lt_ty = mk::eq_bool(self.env.bool_ind(), mk::prim(PrimOp::Lt(hi.width), vec![a, b], vec![]), true);
             Fact::eq(dproof.clone(), lt_ty)
         }
@@ -4257,7 +4231,7 @@ impl<'e> Walker<'e> {
         let rf = self.rec_fn.as_ref().ok_or("no recursion")?;
         let d = ctx.depth().0;
         let params: Vec<Tm> = (0..rf.nparams).map(|l| mk::var(d - 1 - l)).collect();
-        let mu = crate::opt::proof::steps::subst_n(&rf.measure, &params);
+        let mu = crate::elab::tm::subst_n(&rf.measure, &params);
         let wty = mk::int_ty(rf.width);
         let (eqs, _) = self.path_eqs(ctx, facts)?;
         let mut cur_t = mu.clone();
@@ -4291,8 +4265,8 @@ impl<'e> Walker<'e> {
         if let Some(c) = self.measure_cong(ctx, facts)? {
             fs.push(c);
         }
-        let a = crate::opt::proof::steps::subst_n(&rf.measure, cargs);
-        let b = crate::opt::proof::steps::subst_n(&rf.measure, &params);
+        let a = crate::elab::tm::subst_n(&rf.measure, cargs);
+        let b = crate::elab::tm::subst_n(&rf.measure, &params);
         let bi = self.env.bool_ind();
         let lt = mk::eq_bool(bi, mk::prim(PrimOp::Lt(rf.width), vec![a.clone(), b], vec![]), true);
         let lt_pf = self.linarith_fuel(ctx, &fs, &lt)?;
@@ -4627,7 +4601,7 @@ impl<'e> Walker<'e> {
                 // motive projects field k (`match z with C(..) => x_k | _ => w`)
                 let mut sub: Vec<Tm> = params.clone();
                 sub.extend(args[..k].iter().cloned());
-                let tk = crate::opt::proof::steps::subst_n(&c.fields[k].2, &sub);
+                let tk = crate::elab::tm::subst_n(&c.fields[k].2, &sub);
                 let mut marms = Vec::new();
                 for (j, cj) in decl.ctors.iter().enumerate() {
                     let nf = cj.fields.len() as u32;
@@ -5121,7 +5095,7 @@ fn unfold_call(env: &Env, t: &Tm) -> Option<Tm> {
         b = bb.clone();
     }
     let vals: Vec<Tm> = args.iter().map(|(_, a)| a.clone()).collect();
-    Some(crate::opt::proof::steps::subst_n(&b, &vals))
+    Some(crate::elab::tm::subst_n(&b, &vals))
 }
 
 /// `t` with its redexes on constructors reduced syntactically: a match on a
@@ -5138,7 +5112,7 @@ fn iota_syn(t: &Tm) -> Tm {
                 let Term::Match { scrut, arms, .. } = &**m else { return None };
                 let Term::Ctor { ctor, args, .. } = &**scrut else { return None };
                 let a = arms.get(*ctor as usize)?;
-                Some(crate::opt::proof::steps::subst_n(&a.body, args))
+                Some(crate::elab::tm::subst_n(&a.body, args))
             };
             match &**x {
                 // (proofs are left as they are: a `linarith` certificate is
@@ -5766,7 +5740,7 @@ fn collect_prims_d(env: &Env, t: &Tm, out: &mut Vec<PrimFact>, depth: u32) {
         }
         if ok {
             let vals: Vec<Tm> = args.iter().map(|(_, a)| a.clone()).collect();
-            let inst = crate::opt::proof::steps::subst_n(&b, &vals);
+            let inst = crate::elab::tm::subst_n(&b, &vals);
             collect_prims_d(env, &inst, out, depth - 1);
         }
     }
@@ -5879,7 +5853,7 @@ fn collect_call_proofs(env: &Env, t: &Tm, out: &mut Vec<(Tm, Tm)>) {
         for (r, a) in &args {
             let Term::Pi { dom, cod, .. } = &*cur else { break };
             if *r == Rel::Irr {
-                out.push((a.clone(), crate::opt::proof::steps::subst_n(dom, &prev)));
+                out.push((a.clone(), crate::elab::tm::subst_n(dom, &prev)));
             }
             prev.push(a.clone());
             cur = cod.clone();

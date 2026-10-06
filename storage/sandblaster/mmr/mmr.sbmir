@@ -7,7 +7,7 @@
 (exclude)
 (source "src/merkle/location.rs" "722a22c87c77d481838a27ec23444605faedc4b3ea3fca4d69a46e6031efa450")
 (source "src/merkle/mmr/iterator.rs" "6330eaf101252b2245871d2316d7df35d8d4c995fabe892ad70c77f0c0d55731")
-(source "src/merkle/mmr/mod.rs" "f73d8b77929db3874ebe1e94c7032947a7a29c583150330ce1814938726cd9cc")
+(source "src/merkle/mmr/mod.rs" "9db43ce53fa2444ef7725ed67e04b6e189f24e809bfd6889ea7161c4f6f9d10e")
 (source "src/merkle/position.rs" "52263a115bb688134cc3b8470eb5d9d28f5f77c82c785d2a8e638a1a7faf96de")
 (root "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new")
 (root "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::as_u64")
@@ -41,6 +41,10 @@
 (root "<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family> as std::ops::AddAssign<u64>>::add_assign")
 (root "<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family> as std::ops::SubAssign<u64>>::sub_assign")
 (root "<std::ops::Range<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>> as commonware_storage::merkle::location::LocationRangeExt>::to_usize_range")
+(root "commonware_storage::merkle::mmr::iterator::PeakIterator::new")
+(root "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size")
+(root "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::iter::Iterator>::next")
+(root "commonware_storage::merkle::mmr::iterator::pos_to_height")
 (root "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::location_to_position")
 (root "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location")
 (root "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::to_nearest_size")
@@ -85,10 +89,6 @@
 (root "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as commonware_codec::Write>::write::<&mut [u8]>")
 (root "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as commonware_codec::EncodeSize>::encode_size")
 (root "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as commonware_codec::Read>::read_cfg::<&[u8]>")
-(root "commonware_storage::merkle::mmr::iterator::PeakIterator::new")
-(root "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size")
-(root "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::iter::Iterator>::next")
-(root "commonware_storage::merkle::mmr::iterator::pos_to_height")
 (root "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::default::Default>::default")
 (root "<commonware_storage::merkle::mmr::Family as std::clone::Clone>::clone")
 (root "<commonware_storage::merkle::mmr::Family as std::default::Default>::default")
@@ -192,9 +192,9 @@
   (variant 0 "None" 0 (no-glue))
   (variant 1 "Some" 1 (field "0" u64) (no-glue)))
 (adt-def "std::ptr::NonNull<core::fmt::rt::Argument<'_>>" (path "std::ptr::NonNull") (kind struct) (args ((adt "core::fmt::rt::Argument<'_>")))
-  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 240, kind: RigidTy(RawPtr(Ty { id: 222, kind: RigidTy(Adt(AdtDef(DefId { id: 2798, name: \"core::fmt::rt::Argument\" }), GenericArgs([Lifetime(Region { kind: ReErased })]))) }, Not)) }, NotNull)")) (no-glue)))
+  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 240, kind: RigidTy(RawPtr(Ty { id: 207, kind: RigidTy(Adt(AdtDef(DefId { id: 2798, name: \"core::fmt::rt::Argument\" }), GenericArgs([Lifetime(Region { kind: ReErased })]))) }, Not)) }, NotNull)")) (no-glue)))
 (adt-def "std::ptr::NonNull<u8>" (path "std::ptr::NonNull") (kind struct) (args (u8))
-  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 218, kind: RigidTy(RawPtr(Ty { id: 34, kind: RigidTy(Uint(U8)) }, Not)) }, NotNull)")) (no-glue)))
+  (variant 0 "NonNull" 0 (field "pointer" (unsupported "type Pat(Ty { id: 203, kind: RigidTy(RawPtr(Ty { id: 34, kind: RigidTy(Uint(U8)) }, Not)) }, NotNull)")) (no-glue)))
 (adt-def "std::result::Result<commonware_codec::varint::UInt<u64>, commonware_codec::Error>" (path "std::result::Result") (kind enum) (args ((adt "commonware_codec::varint::UInt<u64>") (adt "commonware_codec::Error")))
   (variant 0 "Ok" 0 (field "0" (adt "commonware_codec::varint::UInt<u64>")) (no-glue))
   (variant 1 "Err" 1 (field "0" (adt "commonware_codec::Error"))))
@@ -277,7 +277,7 @@
   (variant 26 "Io" 26 (field "0" (adt "std::sync::Arc<std::io::Error>")))
   (variant 27 "Pool" 27 (field "0" (adt "commonware_runtime::iobuf::PoolError")) (no-glue)))
 (adt-def "core::fmt::rt::ArgumentType<'_>" (path "core::fmt::rt::ArgumentType") (kind enum) (args ())
-  (variant 0 "Placeholder" 0 (field "value" (adt "std::ptr::NonNull<()>")) (field "formatter" (unsupported "type FnPtr(Binder { value: FnSig { inputs_and_output: [Ty { id: 256, kind: RigidTy(Adt(AdtDef(DefId { id: 2739, name: \"std::ptr::NonNull\" }), GenericArgs([Type(Ty { id: 36, kind: RigidTy(Tuple([])) })]))) }, Ty { id: 258, kind: RigidTy(Ref(Region { kind: ReBound(0, BoundRegion { var: 0, kind: BrAnon }) }, Ty { id: 260, kind: RigidTy(Adt(AdtDef(DefId { id: 2873, name: \"std::fmt::Formatter\" }), GenericArgs([Lifetime(Region { kind: ReBound(0, BoundRegion { var: 1, kind: BrAnon }) })]))) }, Mut)) }, Ty { id: 259, kind: RigidTy(Adt(AdtDef(DefId { id: 2648, name: \"std::result::Result\" }), GenericArgs([Type(Ty { id: 36, kind: RigidTy(Tuple([])) }), Type(Ty { id: 261, kind: RigidTy(Adt(AdtDef(DefId { id: 2874, name: \"std::fmt::Error\" }), GenericArgs([]))) })]))) }], c_variadic: false, safety: Unsafe, abi: Rust }, bound_vars: [Region(BrAnon), Region(BrAnon)] })")) (field "_lifetime" (adt "std::marker::PhantomData<&()>")) (no-glue))
+  (variant 0 "Placeholder" 0 (field "value" (adt "std::ptr::NonNull<()>")) (field "formatter" (unsupported "type FnPtr(Binder { value: FnSig { inputs_and_output: [Ty { id: 256, kind: RigidTy(Adt(AdtDef(DefId { id: 2729, name: \"std::ptr::NonNull\" }), GenericArgs([Type(Ty { id: 36, kind: RigidTy(Tuple([])) })]))) }, Ty { id: 258, kind: RigidTy(Ref(Region { kind: ReBound(0, BoundRegion { var: 0, kind: BrAnon }) }, Ty { id: 260, kind: RigidTy(Adt(AdtDef(DefId { id: 2873, name: \"std::fmt::Formatter\" }), GenericArgs([Lifetime(Region { kind: ReBound(0, BoundRegion { var: 1, kind: BrAnon }) })]))) }, Mut)) }, Ty { id: 259, kind: RigidTy(Adt(AdtDef(DefId { id: 2648, name: \"std::result::Result\" }), GenericArgs([Type(Ty { id: 36, kind: RigidTy(Tuple([])) }), Type(Ty { id: 261, kind: RigidTy(Adt(AdtDef(DefId { id: 2874, name: \"std::fmt::Error\" }), GenericArgs([]))) })]))) }], c_variadic: false, safety: Unsafe, abi: Rust }, bound_vars: [Region(BrAnon), Region(BrAnon)] })")) (field "_lifetime" (adt "std::marker::PhantomData<&()>")) (no-glue))
   (variant 1 "Count" 1 (field "0" u16) (no-glue)))
 (adt-def "std::alloc::Global" (path "std::alloc::Global") (kind struct) (args ())
   (variant 0 "Global" 0 (no-glue)))
@@ -1191,10 +1191,398 @@
     (assign (p 0) (agg (adt (adt "std::ops::Range<usize>") 0) (move (p 2)) (move (p 6))) (at "src/merkle/location.rs" 354 9))
     (return (at "src/merkle/location.rs" 355 6)))
 )
+(fn "commonware_storage::merkle::mmr::iterator::PeakIterator::new"
+  (kind root) (def "commonware_storage::merkle::mmr::iterator::PeakIterator::new") (args ())
+  (item inherent (adt "merkle::mmr::iterator::PeakIterator") "new")
+  (span "src/merkle/mmr/iterator.rs" 31 5)
+  (argc 1)
+  (locals
+    (0 (adt "merkle::mmr::iterator::PeakIterator") mut)
+    (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
+    (2 bool mut)
+    (3 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (4 (ref shared u64) mut)
+    (5 u64 imm)
+    (6 u32 mut)
+    (7 u64 mut)
+    (8 (ref shared u64) mut)
+    (9 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (10 bool mut)
+    (11 (tuple (ref shared u64) (ref shared u64)) mut)
+    (12 (ref shared u64) mut)
+    (13 (ref shared u64) mut)
+    (14 (ref shared u64) imm)
+    (15 (ref shared u64) imm)
+    (16 bool mut)
+    (17 u64 mut)
+    (18 u64 mut)
+    (19 (adt "core::panicking::AssertKind") imm)
+    (20 never imm)
+    (21 (adt "std::option::Option<std::fmt::Arguments<'_>>") mut)
+    (22 (adt "std::fmt::Arguments<'_>") mut)
+    (23 u64 imm)
+    (24 u32 mut)
+    (25 bool mut)
+    (26 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
+    (27 u64 mut)
+    (28 (tuple u64 bool) mut))
+  (debug "size" (p 1) (arg 1))
+  (debug "start" (p 5))
+  (debug "left_val" (p 14))
+  (debug "right_val" (p 15))
+  (debug "kind" (p 19))
+  (debug "two_h" (p 23))
+  (bb 0
+    (assign (p 3) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 32 12))
+    (assign (p 4) (use (const-ref (int u64 0))) (at "src/merkle/mmr/iterator.rs" 32 20))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialEq<u64>>::eq") (args (move (p 3)) (move (p 4))) (p 2) 1 (at "src/merkle/mmr/iterator.rs" 32 12)))
+  (bb 1
+    (switch (move (p 2)) (0 3) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 32 12)))
+  (bb 2
+    (call (fn "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::default::Default>::default") (args) (p 0) 14 (at "src/merkle/mmr/iterator.rs" 33 20)))
+  (bb 3
+    (assign (p 9) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 38 33))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 9))) (p 8) 4 (at "src/merkle/mmr/iterator.rs" 38 33)))
+  (bb 4
+    (assign (p 7) (use (copy (p 8 deref))) (at "src/merkle/mmr/iterator.rs" 38 33))
+    (call (fn "core::num::<impl u64>::leading_zeros") (args (move (p 7))) (p 6) 5 (at "src/merkle/mmr/iterator.rs" 38 33)))
+  (bb 5
+    (assign (p 10) (bin lt (copy (p 6)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 38 21))
+    (assert (move (p 10)) true overflow 6 (at "src/merkle/mmr/iterator.rs" 38 21)))
+  (bb 6
+    (assign (p 5) (bin shr (const-item u64 "MAX" (int u64 18446744073709551615)) (move (p 6))) (at "src/merkle/mmr/iterator.rs" 38 21))
+    (assign (p 12) (ref shared (p 5)))
+    (assign (p 13) (use (const-ref (const-item u64 "MAX" (int u64 18446744073709551615)))))
+    (assign (p 11) (agg (tuple) (move (p 12)) (move (p 13))))
+    (assign (p 14) (use (copy (p 11 (field 0 (ref shared u64))))))
+    (assign (p 15) (use (copy (p 11 (field 1 (ref shared u64))))))
+    (assign (p 17) (use (copy (p 14 deref))))
+    (assign (p 18) (use (copy (p 15 deref))))
+    (assign (p 16) (bin eq (move (p 17)) (move (p 18))))
+    (switch (move (p 16)) (0 9) (otherwise 7)))
+  (bb 7
+    (assign (p 19) (agg (adt (adt "core::panicking::AssertKind") 1)))
+    (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 22) 8))
+  (bb 8
+    (assign (p 21) (agg (adt (adt "std::option::Option<std::fmt::Arguments<'_>>") 1) (move (p 22))))
+    (call (diverge "core::panicking::assert_failed::<u64, u64>") (args (copy (p 19)) (copy (p 14)) (copy (p 15)) (move (p 21))) (p 20) none))
+  (bb 9
+    (call (fn "core::num::<impl u64>::trailing_ones") (args (copy (p 5))) (p 24) 10 (at "src/merkle/mmr/iterator.rs" 40 26)))
+  (bb 10
+    (assign (p 25) (bin lt (copy (p 24)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 40 21))
+    (assert (move (p 25)) true overflow 11 (at "src/merkle/mmr/iterator.rs" 40 21)))
+  (bb 11
+    (assign (p 23) (bin shl (int u64 1) (move (p 24))) (at "src/merkle/mmr/iterator.rs" 40 21))
+    (assign (p 28) (checked sub (copy (p 5)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 43 37))
+    (assert (move (p 28 (field 1 bool))) false overflow 12 (at "src/merkle/mmr/iterator.rs" 43 37)))
+  (bb 12
+    (assign (p 27) (use (move (p 28 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 43 37))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 27))) (p 26) 13 (at "src/merkle/mmr/iterator.rs" 43 23)))
+  (bb 13
+    (assign (p 0) (agg (adt (adt "merkle::mmr::iterator::PeakIterator") 0) (copy (p 1)) (move (p 26)) (copy (p 23))) (at "src/merkle/mmr/iterator.rs" 41 9))
+    (goto 14 (at "src/merkle/mmr/iterator.rs" 46 6)))
+  (bb 14
+    (return (at "src/merkle/mmr/iterator.rs" 46 6)))
+)
+(fn "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size"
+  (kind root) (def "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size") (args ())
+  (item inherent (adt "merkle::mmr::iterator::PeakIterator") "to_nearest_size")
+  (span "src/merkle/mmr/iterator.rs" 55 5)
+  (argc 1)
+  (locals
+    (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
+    (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
+    (2 bool mut)
+    (3 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (4 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (5 never imm)
+    (6 (adt "std::fmt::Arguments<'_>") mut)
+    (7 bool mut)
+    (8 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (9 (ref shared u64) mut)
+    (10 u64 imm)
+    (11 u64 mut)
+    (12 u64 mut)
+    (13 bool mut)
+    (14 u64 mut)
+    (15 u64 mut)
+    (16 u64 imm)
+    (17 u64 mut)
+    (18 u64 mut)
+    (19 u64 mut)
+    (20 (tuple u64 bool) mut)
+    (21 u64 imm)
+    (22 u64 mut)
+    (23 (tuple u64 bool) mut)
+    (24 u64 mut)
+    (25 u32 mut)
+    (26 (tuple u64 bool) mut)
+    (27 bool mut)
+    (28 (tuple u64 bool) mut)
+    (29 u64 imm)
+    (30 u64 mut)
+    (31 u64 mut)
+    (32 (tuple u64 bool) mut)
+    (33 u64 mut)
+    (34 u32 mut)
+    (35 u64 mut)
+    (36 (tuple u64 bool) mut))
+  (debug "size" (p 1) (arg 1))
+  (debug "size_val" (p 10))
+  (debug "low" (p 11))
+  (debug "high" (p 12))
+  (debug "mid" (p 16))
+  (debug "mmr_size" (p 21))
+  (debug "result" (p 29))
+  (bb 0
+    (assign (p 3) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 56 17))
+    (assign (p 4) (use (const-ref (const-item (adt "merkle::mmr::Family") "MAX_NODES" (const-agg (adt "merkle::position::Position<merkle::mmr::Family>") 0 (int u64 9223372036854775807) (zst (adt "std::marker::PhantomData<merkle::mmr::Family>")))))) (at "src/merkle/mmr/iterator.rs" 56 25))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::le") (args (move (p 3)) (move (p 4))) (p 2) 1 (at "src/merkle/mmr/iterator.rs" 56 17)))
+  (bb 1
+    (switch (move (p 2)) (0 3) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 56 17)))
+  (bb 2
+    (assign (p 8) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 64 12))
+    (assign (p 9) (use (const-ref (int u64 0))) (at "src/merkle/mmr/iterator.rs" 64 20))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialEq<u64>>::eq") (args (move (p 8)) (move (p 9))) (p 7) 5 (at "src/merkle/mmr/iterator.rs" 64 12)))
+  (bb 3
+    (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 6) 4))
+  (bb 4
+    (call (diverge "core::panicking::panic_fmt") (args (move (p 6))) (p 5) none))
+  (bb 5
+    (switch (move (p 7)) (0 7) (otherwise 6) (at "src/merkle/mmr/iterator.rs" 64 12)))
+  (bb 6
+    (assign (p 0) (use (copy (p 1))) (at "src/merkle/mmr/iterator.rs" 65 20))
+    (goto 23 (at "src/merkle/mmr/iterator.rs" 89 6)))
+  (bb 7
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::as_u64") (args (copy (p 1))) (p 10) 8 (at "src/merkle/mmr/iterator.rs" 70 24)))
+  (bb 8
+    (assign (p 11) (use (int u64 0)) (at "src/merkle/mmr/iterator.rs" 71 23))
+    (assign (p 12) (use (copy (p 10))) (at "src/merkle/mmr/iterator.rs" 72 24))
+    (goto 9 (at "src/merkle/mmr/iterator.rs" 74 9)))
+  (bb 9
+    (assign (p 14) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 74 15))
+    (assign (p 15) (use (copy (p 12))) (at "src/merkle/mmr/iterator.rs" 74 21))
+    (assign (p 13) (bin lt (move (p 14)) (move (p 15))) (at "src/merkle/mmr/iterator.rs" 74 15))
+    (switch (move (p 13)) (0 19) (otherwise 10) (at "src/merkle/mmr/iterator.rs" 74 15)))
+  (bb 10
+    (assign (p 18) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 76 24))
+    (assign (p 19) (use (copy (p 12))) (at "src/merkle/mmr/iterator.rs" 76 30))
+    (assign (p 20) (checked add (copy (p 18)) (copy (p 19))) (at "src/merkle/mmr/iterator.rs" 76 23))
+    (assert (move (p 20 (field 1 bool))) false overflow 11 (at "src/merkle/mmr/iterator.rs" 76 23)))
+  (bb 11
+    (assign (p 17) (use (move (p 20 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 76 23))
+    (call (fn "core::num::<impl u64>::div_ceil") (args (move (p 17)) (int u64 2)) (p 16) 12 (at "src/merkle/mmr/iterator.rs" 76 23)))
+  (bb 12
+    (assign (p 23) (checked mul (int u64 2) (copy (p 16))) (at "src/merkle/mmr/iterator.rs" 77 28))
+    (assert (move (p 23 (field 1 bool))) false overflow 13 (at "src/merkle/mmr/iterator.rs" 77 28)))
+  (bb 13
+    (assign (p 22) (use (move (p 23 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 77 28))
+    (call (fn "core::num::<impl u64>::count_ones") (args (copy (p 16))) (p 25) 14 (at "src/merkle/mmr/iterator.rs" 77 38)))
+  (bb 14
+    (assign (p 24) (cast int-to-int (move (p 25)) u64) (at "src/merkle/mmr/iterator.rs" 77 38))
+    (assign (p 26) (checked sub (copy (p 22)) (copy (p 24))) (at "src/merkle/mmr/iterator.rs" 77 28))
+    (assert (move (p 26 (field 1 bool))) false overflow 15 (at "src/merkle/mmr/iterator.rs" 77 28)))
+  (bb 15
+    (assign (p 21) (use (move (p 26 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 77 28))
+    (assign (p 27) (bin le (copy (p 21)) (copy (p 10))) (at "src/merkle/mmr/iterator.rs" 79 16))
+    (switch (move (p 27)) (0 17) (otherwise 16) (at "src/merkle/mmr/iterator.rs" 79 16)))
+  (bb 16
+    (assign (p 11) (use (copy (p 16))) (at "src/merkle/mmr/iterator.rs" 80 17))
+    (goto 9 (at "src/merkle/mmr/iterator.rs" 79 13)))
+  (bb 17
+    (assign (p 28) (checked sub (copy (p 16)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 82 24))
+    (assert (move (p 28 (field 1 bool))) false overflow 18 (at "src/merkle/mmr/iterator.rs" 82 24)))
+  (bb 18
+    (assign (p 12) (use (move (p 28 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 82 17))
+    (goto 9 (at "src/merkle/mmr/iterator.rs" 79 13)))
+  (bb 19
+    (assign (p 31) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 87 26))
+    (assign (p 32) (checked mul (int u64 2) (copy (p 31))) (at "src/merkle/mmr/iterator.rs" 87 22))
+    (assert (move (p 32 (field 1 bool))) false overflow 20 (at "src/merkle/mmr/iterator.rs" 87 22)))
+  (bb 20
+    (assign (p 30) (use (move (p 32 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 87 22))
+    (assign (p 35) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 87 32))
+    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 35))) (p 34) 21 (at "src/merkle/mmr/iterator.rs" 87 32)))
+  (bb 21
+    (assign (p 33) (cast int-to-int (move (p 34)) u64) (at "src/merkle/mmr/iterator.rs" 87 32))
+    (assign (p 36) (checked sub (copy (p 30)) (copy (p 33))) (at "src/merkle/mmr/iterator.rs" 87 22))
+    (assert (move (p 36 (field 1 bool))) false overflow 22 (at "src/merkle/mmr/iterator.rs" 87 22)))
+  (bb 22
+    (assign (p 29) (use (move (p 36 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 87 22))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (copy (p 29))) (p 0) 23 (at "src/merkle/mmr/iterator.rs" 88 9)))
+  (bb 23
+    (return (at "src/merkle/mmr/iterator.rs" 89 6)))
+)
+(fn "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::iter::Iterator>::next"
+  (kind root) (def "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::iter::Iterator>::next") (args ())
+  (item impl (adt "merkle::mmr::iterator::PeakIterator") "Iterator" () "next")
+  (span "src/merkle/mmr/iterator.rs" 95 5)
+  (argc 1)
+  (locals
+    (0 (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
+    (1 (ref mut (adt "merkle::mmr::iterator::PeakIterator")) imm)
+    (2 bool mut)
+    (3 u64 mut)
+    (4 bool mut)
+    (5 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (6 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (7 (tuple (adt "merkle::position::Position<merkle::mmr::Family>") u32) imm)
+    (8 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
+    (9 u32 mut)
+    (10 u32 mut)
+    (11 u64 mut)
+    (12 (tuple u32 bool) mut)
+    (13 unit imm)
+    (14 (ref mut (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (15 u64 mut)
+    (16 u64 mut)
+    (17 (tuple u64 bool) mut)
+    (18 bool mut)
+    (19 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (20 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (21 never mut)
+    (22 u32 mut)
+    (23 bool mut)
+    (24 unit imm)
+    (25 (ref mut (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
+    (26 u64 mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "peak_item" (p 7))
+  (bb 0
+    (goto 1 (at "src/merkle/mmr/iterator.rs" 96 9)))
+  (bb 1
+    (assign (p 3) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 96 15))
+    (assign (p 2) (bin gt (move (p 3)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 96 15))
+    (switch (move (p 2)) (0 14) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 96 15)))
+  (bb 2
+    (assign (p 5) (ref shared (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 97 16))
+    (assign (p 6) (ref shared (p 1 deref (field 0 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 97 32))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::lt") (args (move (p 5)) (move (p 6))) (p 4) 3 (at "src/merkle/mmr/iterator.rs" 97 16)))
+  (bb 3
+    (switch (move (p 4)) (0 12) (otherwise 4) (at "src/merkle/mmr/iterator.rs" 97 16)))
+  (bb 4
+    (assign (p 8) (use (copy (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>"))))) (at "src/merkle/mmr/iterator.rs" 99 34))
+    (assign (p 11) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 99 49))
+    (call (fn "core::num::<impl u64>::trailing_zeros") (args (move (p 11))) (p 10) 5 (at "src/merkle/mmr/iterator.rs" 99 49)))
+  (bb 5
+    (assign (p 12) (checked sub (copy (p 10)) (int u32 1)) (at "src/merkle/mmr/iterator.rs" 99 49))
+    (assert (move (p 12 (field 1 bool))) false overflow 6 (at "src/merkle/mmr/iterator.rs" 99 49)))
+  (bb 6
+    (assign (p 9) (use (move (p 12 (field 0 u32)))) (at "src/merkle/mmr/iterator.rs" 99 49))
+    (assign (p 7) (agg (tuple) (move (p 8)) (move (p 9))) (at "src/merkle/mmr/iterator.rs" 99 33))
+    (assign (p 14) (ref mut (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 101 17))
+    (assign (p 16) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 101 34))
+    (assign (p 17) (checked sub (copy (p 16)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 101 34))
+    (assert (move (p 17 (field 1 bool))) false overflow 7 (at "src/merkle/mmr/iterator.rs" 101 34)))
+  (bb 7
+    (assign (p 15) (use (move (p 17 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 101 34))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::AddAssign<u64>>::add_assign") (args (move (p 14)) (move (p 15))) (p 13) 8 (at "src/merkle/mmr/iterator.rs" 101 17)))
+  (bb 8
+    (assign (p 19) (ref shared (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 102 25))
+    (assign (p 20) (ref shared (p 1 deref (field 0 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 102 42))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::ge") (args (move (p 19)) (move (p 20))) (p 18) 9 (at "src/merkle/mmr/iterator.rs" 102 25)))
+  (bb 9
+    (switch (move (p 18)) (0 11) (otherwise 10) (at "src/merkle/mmr/iterator.rs" 102 25)))
+  (bb 10
+    (assign (p 0) (agg (adt (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") 1) (copy (p 7))) (at "src/merkle/mmr/iterator.rs" 103 24))
+    (goto 15 (at "src/merkle/mmr/iterator.rs" 110 6)))
+  (bb 11
+    (call (diverge "core::panicking::panic") (args (unsupported "constant of type (ref shared str)")) (p 21) none (at "src/merkle/mmr/iterator.rs" 102 17)))
+  (bb 12
+    (assign (p 22) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/iterator.rs" 106 13))
+    (assign (p 23) (bin lt (move (p 22)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 106 13))
+    (assert (move (p 23)) true overflow 13 (at "src/merkle/mmr/iterator.rs" 106 13)))
+  (bb 13
+    (assign (p 1 deref (field 2 u64)) (bin shr (copy (p 1 deref (field 2 u64))) (int i32 1)) (at "src/merkle/mmr/iterator.rs" 106 13))
+    (assign (p 25) (ref mut (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 107 13))
+    (assign (p 26) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 107 30))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::SubAssign<u64>>::sub_assign") (args (move (p 25)) (move (p 26))) (p 24) 1 (at "src/merkle/mmr/iterator.rs" 107 13)))
+  (bb 14
+    (assign (p 0) (agg (adt (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0)) (at "src/merkle/mmr/iterator.rs" 109 9))
+    (goto 15 (at "src/merkle/mmr/iterator.rs" 110 6)))
+  (bb 15
+    (return (at "src/merkle/mmr/iterator.rs" 110 6)))
+)
+(fn "commonware_storage::merkle::mmr::iterator::pos_to_height"
+  (kind root) (def "commonware_storage::merkle::mmr::iterator::pos_to_height") (args ())
+  (item fn "pos_to_height")
+  (span "src/merkle/mmr/iterator.rs" 114 1)
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
+    (2 u64 mut)
+    (3 bool mut)
+    (4 u64 mut)
+    (5 u64 mut)
+    (6 u32 mut)
+    (7 u64 mut)
+    (8 bool mut)
+    (9 bool mut)
+    (10 u64 mut)
+    (11 bool mut)
+    (12 u64 mut)
+    (13 u64 mut)
+    (14 u64 mut)
+    (15 (tuple u64 bool) mut)
+    (16 u32 mut)
+    (17 bool mut)
+    (18 u64 mut))
+  (debug "pos" (p 1) (arg 1))
+  (debug "pos" (p 2))
+  (debug "size" (p 5))
+  (bb 0
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::as_u64") (args (copy (p 1))) (p 2) 1 (at "src/merkle/mmr/iterator.rs" 115 19)))
+  (bb 1
+    (assign (p 4) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 117 8))
+    (assign (p 3) (bin eq (move (p 4)) (int u64 0)) (at "src/merkle/mmr/iterator.rs" 117 8))
+    (switch (move (p 3)) (0 3) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 117 8)))
+  (bb 2
+    (assign (p 0) (use (int u32 0)) (at "src/merkle/mmr/iterator.rs" 118 16))
+    (goto 13 (at "src/merkle/mmr/iterator.rs" 130 2)))
+  (bb 3
+    (assign (p 7) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 121 32))
+    (call (fn "core::num::<impl u64>::leading_zeros") (args (move (p 7))) (p 6) 4 (at "src/merkle/mmr/iterator.rs" 121 32)))
+  (bb 4
+    (assign (p 8) (bin lt (copy (p 6)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 121 20))
+    (assert (move (p 8)) true overflow 5 (at "src/merkle/mmr/iterator.rs" 121 20)))
+  (bb 5
+    (assign (p 5) (bin shr (const-item u64 "MAX" (int u64 18446744073709551615)) (move (p 6))) (at "src/merkle/mmr/iterator.rs" 121 20))
+    (goto 6 (at "src/merkle/mmr/iterator.rs" 122 5)))
+  (bb 6
+    (assign (p 10) (use (copy (p 5))) (at "src/merkle/mmr/iterator.rs" 122 11))
+    (assign (p 9) (bin ne (move (p 10)) (int u64 0)) (at "src/merkle/mmr/iterator.rs" 122 11))
+    (switch (move (p 9)) (0 12) (otherwise 7) (at "src/merkle/mmr/iterator.rs" 122 11)))
+  (bb 7
+    (assign (p 12) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 123 12))
+    (assign (p 13) (use (copy (p 5))) (at "src/merkle/mmr/iterator.rs" 123 19))
+    (assign (p 11) (bin ge (move (p 12)) (move (p 13))) (at "src/merkle/mmr/iterator.rs" 123 12))
+    (switch (move (p 11)) (0 10) (otherwise 8) (at "src/merkle/mmr/iterator.rs" 123 12)))
+  (bb 8
+    (assign (p 14) (use (copy (p 5))) (at "src/merkle/mmr/iterator.rs" 124 20))
+    (assign (p 15) (checked sub (copy (p 2)) (copy (p 14))) (at "src/merkle/mmr/iterator.rs" 124 13))
+    (assert (move (p 15 (field 1 bool))) false overflow 9 (at "src/merkle/mmr/iterator.rs" 124 13)))
+  (bb 9
+    (assign (p 2) (use (move (p 15 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 124 13))
+    (goto 10 (at "src/merkle/mmr/iterator.rs" 123 9)))
+  (bb 10
+    (assign (p 16) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/iterator.rs" 126 9))
+    (assign (p 17) (bin lt (move (p 16)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 126 9))
+    (assert (move (p 17)) true overflow 11 (at "src/merkle/mmr/iterator.rs" 126 9)))
+  (bb 11
+    (assign (p 5) (bin shr (copy (p 5)) (int i32 1)) (at "src/merkle/mmr/iterator.rs" 126 9))
+    (goto 6 (at "src/merkle/mmr/iterator.rs" 122 5)))
+  (bb 12
+    (assign (p 18) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 129 5))
+    (assign (p 0) (cast int-to-int (move (p 18)) u32) (at "src/merkle/mmr/iterator.rs" 129 5))
+    (goto 13 (at "src/merkle/mmr/iterator.rs" 130 2)))
+  (bb 13
+    (return (at "src/merkle/mmr/iterator.rs" 130 2)))
+)
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::location_to_position"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::location_to_position") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "location_to_position")
-  (span "src/merkle/mmr/mod.rs" 126 5)
+  (span "src/merkle/mmr/mod.rs" 112 5)
   (argc 1)
   (locals
     (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
@@ -1212,30 +1600,30 @@
   (debug "loc" (p 1) (arg 1))
   (debug "loc" (p 2))
   (bb 0
-    (assign (p 4) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 127 20))
-    (call (fn "<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 127 19)))
+    (assign (p 4) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 113 20))
+    (call (fn "<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 113 19)))
   (bb 1
-    (assign (p 2) (use (copy (p 3 deref))) (at "src/merkle/mmr/mod.rs" 127 19))
-    (call (fn "core::num::<impl u64>::checked_mul") (args (copy (p 2)) (int u64 2)) (p 7) 2 (at "src/merkle/mmr/mod.rs" 130 13)))
+    (assign (p 2) (use (copy (p 3 deref))) (at "src/merkle/mmr/mod.rs" 113 19))
+    (call (fn "core::num::<impl u64>::checked_mul") (args (copy (p 2)) (int u64 2)) (p 7) 2 (at "src/merkle/mmr/mod.rs" 116 13)))
   (bb 2
-    (assign (p 8) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 131 25))
-    (call (fn "std::option::Option::<u64>::expect") (args (move (p 7)) (move (p 8))) (p 6) 3 (at "src/merkle/mmr/mod.rs" 130 13)))
+    (assign (p 8) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 117 25))
+    (call (fn "std::option::Option::<u64>::expect") (args (move (p 7)) (move (p 8))) (p 6) 3 (at "src/merkle/mmr/mod.rs" 116 13)))
   (bb 3
-    (call (fn "core::num::<impl u64>::count_ones") (args (copy (p 2))) (p 10) 4 (at "src/merkle/mmr/mod.rs" 132 19)))
+    (call (fn "core::num::<impl u64>::count_ones") (args (copy (p 2))) (p 10) 4 (at "src/merkle/mmr/mod.rs" 118 19)))
   (bb 4
-    (assign (p 9) (cast int-to-int (move (p 10)) u64) (at "src/merkle/mmr/mod.rs" 132 19))
-    (assign (p 11) (checked sub (copy (p 6)) (copy (p 9))) (at "src/merkle/mmr/mod.rs" 130 13))
-    (assert (move (p 11 (field 1 bool))) false overflow 5 (at "src/merkle/mmr/mod.rs" 130 13)))
+    (assign (p 9) (cast int-to-int (move (p 10)) u64) (at "src/merkle/mmr/mod.rs" 118 19))
+    (assign (p 11) (checked sub (copy (p 6)) (copy (p 9))) (at "src/merkle/mmr/mod.rs" 116 13))
+    (assert (move (p 11 (field 1 bool))) false overflow 5 (at "src/merkle/mmr/mod.rs" 116 13)))
   (bb 5
-    (assign (p 5) (use (move (p 11 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 130 13))
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 5))) (p 0) 6 (at "src/merkle/mmr/mod.rs" 129 9)))
+    (assign (p 5) (use (move (p 11 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 116 13))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 5))) (p 0) 6 (at "src/merkle/mmr/mod.rs" 115 9)))
   (bb 6
-    (return (at "src/merkle/mmr/mod.rs" 134 6)))
+    (return (at "src/merkle/mmr/mod.rs" 120 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "position_to_location")
-  (span "src/merkle/mmr/mod.rs" 136 5)
+  (span "src/merkle/mmr/mod.rs" 122 5)
   (argc 1)
   (locals
     (0 (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") mut)
@@ -1304,153 +1692,153 @@
   (debug "n" (p 5))
   (debug-other "f")
   (bb 0
-    (assign (p 4) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 137 20))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 137 19)))
+    (assign (p 4) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 123 20))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 123 19)))
   (bb 1
-    (assign (p 2) (use (copy (p 3 deref))) (at "src/merkle/mmr/mod.rs" 137 19))
-    (assign (p 6) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 162 21))
-    (assign (p 7) (bin lt (move (p 6)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 162 21))
-    (assert (move (p 7)) true overflow 2 (at "src/merkle/mmr/mod.rs" 162 21)))
+    (assign (p 2) (use (copy (p 3 deref))) (at "src/merkle/mmr/mod.rs" 123 19))
+    (assign (p 6) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 148 21))
+    (assign (p 7) (bin lt (move (p 6)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 148 21))
+    (assert (move (p 7)) true overflow 2 (at "src/merkle/mmr/mod.rs" 148 21)))
   (bb 2
-    (assign (p 5) (bin shr (copy (p 2)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 162 21))
-    (assign (p 11) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 163 20))
-    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 11))) (p 10) 3 (at "src/merkle/mmr/mod.rs" 163 20)))
+    (assign (p 5) (bin shr (copy (p 2)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 148 21))
+    (assign (p 11) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 149 20))
+    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 11))) (p 10) 3 (at "src/merkle/mmr/mod.rs" 149 20)))
   (bb 3
-    (assign (p 9) (cast int-to-int (move (p 10)) u64) (at "src/merkle/mmr/mod.rs" 163 20))
-    (assign (p 12) (checked add (copy (p 2)) (copy (p 9))) (at "src/merkle/mmr/mod.rs" 163 13))
-    (assert (move (p 12 (field 1 bool))) false overflow 4 (at "src/merkle/mmr/mod.rs" 163 13)))
+    (assign (p 9) (cast int-to-int (move (p 10)) u64) (at "src/merkle/mmr/mod.rs" 149 20))
+    (assign (p 12) (checked add (copy (p 2)) (copy (p 9))) (at "src/merkle/mmr/mod.rs" 149 13))
+    (assert (move (p 12 (field 1 bool))) false overflow 4 (at "src/merkle/mmr/mod.rs" 149 13)))
   (bb 4
-    (assign (p 8) (use (move (p 12 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 163 13))
-    (assign (p 13) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 163 13))
-    (assign (p 14) (bin lt (move (p 13)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 163 13))
-    (assert (move (p 14)) true overflow 5 (at "src/merkle/mmr/mod.rs" 163 13)))
+    (assign (p 8) (use (move (p 12 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 149 13))
+    (assign (p 13) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 149 13))
+    (assign (p 14) (bin lt (move (p 13)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 149 13))
+    (assert (move (p 14)) true overflow 5 (at "src/merkle/mmr/mod.rs" 149 13)))
   (bb 5
-    (assign (p 5) (bin shr (move (p 8)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 163 9))
-    (assign (p 18) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 164 20))
-    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 18))) (p 17) 6 (at "src/merkle/mmr/mod.rs" 164 20)))
+    (assign (p 5) (bin shr (move (p 8)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 149 9))
+    (assign (p 18) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 150 20))
+    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 18))) (p 17) 6 (at "src/merkle/mmr/mod.rs" 150 20)))
   (bb 6
-    (assign (p 16) (cast int-to-int (move (p 17)) u64) (at "src/merkle/mmr/mod.rs" 164 20))
-    (assign (p 19) (checked add (copy (p 2)) (copy (p 16))) (at "src/merkle/mmr/mod.rs" 164 13))
-    (assert (move (p 19 (field 1 bool))) false overflow 7 (at "src/merkle/mmr/mod.rs" 164 13)))
+    (assign (p 16) (cast int-to-int (move (p 17)) u64) (at "src/merkle/mmr/mod.rs" 150 20))
+    (assign (p 19) (checked add (copy (p 2)) (copy (p 16))) (at "src/merkle/mmr/mod.rs" 150 13))
+    (assert (move (p 19 (field 1 bool))) false overflow 7 (at "src/merkle/mmr/mod.rs" 150 13)))
   (bb 7
-    (assign (p 15) (use (move (p 19 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 164 13))
-    (assign (p 20) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 164 13))
-    (assign (p 21) (bin lt (move (p 20)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 164 13))
-    (assert (move (p 21)) true overflow 8 (at "src/merkle/mmr/mod.rs" 164 13)))
+    (assign (p 15) (use (move (p 19 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 150 13))
+    (assign (p 20) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 150 13))
+    (assign (p 21) (bin lt (move (p 20)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 150 13))
+    (assert (move (p 21)) true overflow 8 (at "src/merkle/mmr/mod.rs" 150 13)))
   (bb 8
-    (assign (p 5) (bin shr (move (p 15)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 164 9))
-    (assign (p 25) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 165 20))
-    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 25))) (p 24) 9 (at "src/merkle/mmr/mod.rs" 165 20)))
+    (assign (p 5) (bin shr (move (p 15)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 150 9))
+    (assign (p 25) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 151 20))
+    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 25))) (p 24) 9 (at "src/merkle/mmr/mod.rs" 151 20)))
   (bb 9
-    (assign (p 23) (cast int-to-int (move (p 24)) u64) (at "src/merkle/mmr/mod.rs" 165 20))
-    (assign (p 26) (checked add (copy (p 2)) (copy (p 23))) (at "src/merkle/mmr/mod.rs" 165 13))
-    (assert (move (p 26 (field 1 bool))) false overflow 10 (at "src/merkle/mmr/mod.rs" 165 13)))
+    (assign (p 23) (cast int-to-int (move (p 24)) u64) (at "src/merkle/mmr/mod.rs" 151 20))
+    (assign (p 26) (checked add (copy (p 2)) (copy (p 23))) (at "src/merkle/mmr/mod.rs" 151 13))
+    (assert (move (p 26 (field 1 bool))) false overflow 10 (at "src/merkle/mmr/mod.rs" 151 13)))
   (bb 10
-    (assign (p 22) (use (move (p 26 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 165 13))
-    (assign (p 27) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 165 13))
-    (assign (p 28) (bin lt (move (p 27)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 165 13))
-    (assert (move (p 28)) true overflow 11 (at "src/merkle/mmr/mod.rs" 165 13)))
+    (assign (p 22) (use (move (p 26 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 151 13))
+    (assign (p 27) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 151 13))
+    (assign (p 28) (bin lt (move (p 27)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 151 13))
+    (assert (move (p 28)) true overflow 11 (at "src/merkle/mmr/mod.rs" 151 13)))
   (bb 11
-    (assign (p 5) (bin shr (move (p 22)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 165 9))
-    (assign (p 32) (ref shared (p 29)) (at "src/merkle/mmr/mod.rs" 168 12))
-    (assign (p 34) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 168 14))
-    (assign (p 33) (agg (tuple) (move (p 34))) (at "src/merkle/mmr/mod.rs" 168 12))
-    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args (move (p 32)) (move (p 33))) (p 31) 12 (at "src/merkle/mmr/mod.rs" 168 12)))
+    (assign (p 5) (bin shr (move (p 22)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 151 9))
+    (assign (p 32) (ref shared (p 29)) (at "src/merkle/mmr/mod.rs" 154 12))
+    (assign (p 34) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 154 14))
+    (assign (p 33) (agg (tuple) (move (p 34))) (at "src/merkle/mmr/mod.rs" 154 12))
+    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args (move (p 32)) (move (p 33))) (p 31) 12 (at "src/merkle/mmr/mod.rs" 154 12)))
   (bb 12
-    (assign (p 30) (bin eq (move (p 31)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 168 12))
-    (switch (move (p 30)) (0 15) (otherwise 13) (at "src/merkle/mmr/mod.rs" 168 12)))
+    (assign (p 30) (bin eq (move (p 31)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 154 12))
+    (switch (move (p 30)) (0 15) (otherwise 13) (at "src/merkle/mmr/mod.rs" 154 12)))
   (bb 13
-    (assign (p 36) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 169 39))
-    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 36))) (p 35) 14 (at "src/merkle/mmr/mod.rs" 169 25)))
+    (assign (p 36) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 155 39))
+    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 36))) (p 35) 14 (at "src/merkle/mmr/mod.rs" 155 25)))
   (bb 14
-    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 1) (move (p 35))) (at "src/merkle/mmr/mod.rs" 169 20))
+    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 1) (move (p 35))) (at "src/merkle/mmr/mod.rs" 155 20))
     (goto 29))
   (bb 15
-    (assign (p 38) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 171 12))
-    (assign (p 37) (bin gt (move (p 38)) (int u64 0)) (at "src/merkle/mmr/mod.rs" 171 12))
-    (switch (move (p 37)) (0 22) (otherwise 16) (at "src/merkle/mmr/mod.rs" 171 12)))
+    (assign (p 38) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 157 12))
+    (assign (p 37) (bin gt (move (p 38)) (int u64 0)) (at "src/merkle/mmr/mod.rs" 157 12))
+    (switch (move (p 37)) (0 22) (otherwise 16) (at "src/merkle/mmr/mod.rs" 157 12)))
   (bb 16
-    (assign (p 41) (ref shared (p 29)) (at "src/merkle/mmr/mod.rs" 171 21))
-    (assign (p 44) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 171 23))
-    (assign (p 45) (checked sub (copy (p 44)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 171 23))
-    (assert (move (p 45 (field 1 bool))) false overflow 17 (at "src/merkle/mmr/mod.rs" 171 23)))
+    (assign (p 41) (ref shared (p 29)) (at "src/merkle/mmr/mod.rs" 157 21))
+    (assign (p 44) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 157 23))
+    (assign (p 45) (checked sub (copy (p 44)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 157 23))
+    (assert (move (p 45 (field 1 bool))) false overflow 17 (at "src/merkle/mmr/mod.rs" 157 23)))
   (bb 17
-    (assign (p 43) (use (move (p 45 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 171 23))
-    (assign (p 42) (agg (tuple) (move (p 43))) (at "src/merkle/mmr/mod.rs" 171 21))
-    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args (move (p 41)) (move (p 42))) (p 40) 18 (at "src/merkle/mmr/mod.rs" 171 21)))
+    (assign (p 43) (use (move (p 45 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 157 23))
+    (assign (p 42) (agg (tuple) (move (p 43))) (at "src/merkle/mmr/mod.rs" 157 21))
+    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args (move (p 41)) (move (p 42))) (p 40) 18 (at "src/merkle/mmr/mod.rs" 157 21)))
   (bb 18
-    (assign (p 39) (bin eq (move (p 40)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 171 21))
-    (switch (move (p 39)) (0 22) (otherwise 19) (at "src/merkle/mmr/mod.rs" 171 21)))
+    (assign (p 39) (bin eq (move (p 40)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 157 21))
+    (switch (move (p 39)) (0 22) (otherwise 19) (at "src/merkle/mmr/mod.rs" 157 21)))
   (bb 19
-    (assign (p 48) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 172 39))
-    (assign (p 49) (checked sub (copy (p 48)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 172 39))
-    (assert (move (p 49 (field 1 bool))) false overflow 20 (at "src/merkle/mmr/mod.rs" 172 39)))
+    (assign (p 48) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 158 39))
+    (assign (p 49) (checked sub (copy (p 48)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 158 39))
+    (assert (move (p 49 (field 1 bool))) false overflow 20 (at "src/merkle/mmr/mod.rs" 158 39)))
   (bb 20
-    (assign (p 47) (use (move (p 49 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 172 39))
-    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 47))) (p 46) 21 (at "src/merkle/mmr/mod.rs" 172 25)))
+    (assign (p 47) (use (move (p 49 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 158 39))
+    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 47))) (p 46) 21 (at "src/merkle/mmr/mod.rs" 158 25)))
   (bb 21
-    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 1) (move (p 46))) (at "src/merkle/mmr/mod.rs" 172 20))
+    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 1) (move (p 46))) (at "src/merkle/mmr/mod.rs" 158 20))
     (goto 29))
   (bb 22
-    (assign (p 52) (ref shared (p 29)) (at "src/merkle/mmr/mod.rs" 174 12))
-    (assign (p 55) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 174 14))
-    (assign (p 56) (checked add (copy (p 55)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 174 14))
-    (assert (move (p 56 (field 1 bool))) false overflow 23 (at "src/merkle/mmr/mod.rs" 174 14)))
+    (assign (p 52) (ref shared (p 29)) (at "src/merkle/mmr/mod.rs" 160 12))
+    (assign (p 55) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 160 14))
+    (assign (p 56) (checked add (copy (p 55)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 160 14))
+    (assert (move (p 56 (field 1 bool))) false overflow 23 (at "src/merkle/mmr/mod.rs" 160 14)))
   (bb 23
-    (assign (p 54) (use (move (p 56 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 174 14))
-    (assign (p 53) (agg (tuple) (move (p 54))) (at "src/merkle/mmr/mod.rs" 174 12))
-    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args (move (p 52)) (move (p 53))) (p 51) 24 (at "src/merkle/mmr/mod.rs" 174 12)))
+    (assign (p 54) (use (move (p 56 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 160 14))
+    (assign (p 53) (agg (tuple) (move (p 54))) (at "src/merkle/mmr/mod.rs" 160 12))
+    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args (move (p 52)) (move (p 53))) (p 51) 24 (at "src/merkle/mmr/mod.rs" 160 12)))
   (bb 24
-    (assign (p 50) (bin eq (move (p 51)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 174 12))
-    (switch (move (p 50)) (0 28) (otherwise 25) (at "src/merkle/mmr/mod.rs" 174 12)))
+    (assign (p 50) (bin eq (move (p 51)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 160 12))
+    (switch (move (p 50)) (0 28) (otherwise 25) (at "src/merkle/mmr/mod.rs" 160 12)))
   (bb 25
-    (assign (p 59) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 175 39))
-    (assign (p 60) (checked add (copy (p 59)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 175 39))
-    (assert (move (p 60 (field 1 bool))) false overflow 26 (at "src/merkle/mmr/mod.rs" 175 39)))
+    (assign (p 59) (use (copy (p 5))) (at "src/merkle/mmr/mod.rs" 161 39))
+    (assign (p 60) (checked add (copy (p 59)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 161 39))
+    (assert (move (p 60 (field 1 bool))) false overflow 26 (at "src/merkle/mmr/mod.rs" 161 39)))
   (bb 26
-    (assign (p 58) (use (move (p 60 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 175 39))
-    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 58))) (p 57) 27 (at "src/merkle/mmr/mod.rs" 175 25)))
+    (assign (p 58) (use (move (p 60 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 161 39))
+    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 58))) (p 57) 27 (at "src/merkle/mmr/mod.rs" 161 25)))
   (bb 27
-    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 1) (move (p 57))) (at "src/merkle/mmr/mod.rs" 175 20))
+    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 1) (move (p 57))) (at "src/merkle/mmr/mod.rs" 161 20))
     (goto 29))
   (bb 28
-    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 0)) (at "src/merkle/mmr/mod.rs" 177 9))
-    (goto 29 (at "src/merkle/mmr/mod.rs" 178 6)))
+    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") 0)) (at "src/merkle/mmr/mod.rs" 163 9))
+    (goto 29 (at "src/merkle/mmr/mod.rs" 164 6)))
   (bb 29
-    (return (at "src/merkle/mmr/mod.rs" 178 6)))
+    (return (at "src/merkle/mmr/mod.rs" 164 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::to_nearest_size"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::to_nearest_size") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "to_nearest_size")
-  (span "src/merkle/mmr/mod.rs" 180 5)
+  (span "src/merkle/mmr/mod.rs" 166 5)
   (argc 1)
   (locals
     (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
     (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm))
   (debug "size" (p 1) (arg 1))
   (bb 0
-    (call (fn "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size") (args (copy (p 1))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 181 9)))
+    (call (fn "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size") (args (copy (p 1))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 167 9)))
   (bb 1
-    (return (at "src/merkle/mmr/mod.rs" 182 6)))
+    (return (at "src/merkle/mmr/mod.rs" 168 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::peaks"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::peaks") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "peaks")
-  (span "src/merkle/mmr/mod.rs" 184 5)
+  (span "src/merkle/mmr/mod.rs" 170 5)
   (argc 1)
   (locals
     (0 (adt "merkle::mmr::iterator::PeakIterator") mut)
     (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm))
   (debug "size" (p 1) (arg 1))
   (bb 0
-    (call (fn "commonware_storage::merkle::mmr::iterator::PeakIterator::new") (args (copy (p 1))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 185 9)))
+    (call (fn "commonware_storage::merkle::mmr::iterator::PeakIterator::new") (args (copy (p 1))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 171 9)))
   (bb 1
-    (return (at "src/merkle/mmr/mod.rs" 186 6)))
+    (return (at "src/merkle/mmr/mod.rs" 172 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::children"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::children") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "children")
-  (span "src/merkle/mmr/mod.rs" 188 5)
+  (span "src/merkle/mmr/mod.rs" 174 5)
   (argc 2)
   (locals
     (0 (tuple (adt "merkle::position::Position<merkle::mmr::Family>") (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
@@ -1463,21 +1851,21 @@
   (debug "pos" (p 1) (arg 1))
   (debug "height" (p 2) (arg 2))
   (bb 0
-    (assign (p 5) (bin lt (copy (p 2)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 189 16))
-    (assert (move (p 5)) true overflow 1 (at "src/merkle/mmr/mod.rs" 189 16)))
+    (assign (p 5) (bin lt (copy (p 2)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 175 16))
+    (assert (move (p 5)) true overflow 1 (at "src/merkle/mmr/mod.rs" 175 16)))
   (bb 1
-    (assign (p 4) (bin shl (int u64 1) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 189 16))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Sub<u64>>::sub") (args (copy (p 1)) (move (p 4))) (p 3) 2 (at "src/merkle/mmr/mod.rs" 189 10)))
+    (assign (p 4) (bin shl (int u64 1) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 175 16))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Sub<u64>>::sub") (args (copy (p 1)) (move (p 4))) (p 3) 2 (at "src/merkle/mmr/mod.rs" 175 10)))
   (bb 2
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Sub<u64>>::sub") (args (copy (p 1)) (int u64 1)) (p 6) 3 (at "src/merkle/mmr/mod.rs" 189 31)))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Sub<u64>>::sub") (args (copy (p 1)) (int u64 1)) (p 6) 3 (at "src/merkle/mmr/mod.rs" 175 31)))
   (bb 3
-    (assign (p 0) (agg (tuple) (move (p 3)) (move (p 6))) (at "src/merkle/mmr/mod.rs" 189 9))
-    (return (at "src/merkle/mmr/mod.rs" 190 6)))
+    (assign (p 0) (agg (tuple) (move (p 3)) (move (p 6))) (at "src/merkle/mmr/mod.rs" 175 9))
+    (return (at "src/merkle/mmr/mod.rs" 176 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::parent_heights"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::parent_heights") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "parent_heights")
-  (span "src/merkle/mmr/mod.rs" 192 5)
+  (span "src/merkle/mmr/mod.rs" 178 5)
   (argc 1)
   (locals
     (0 (adt "std::ops::RangeInclusive<u32>") mut)
@@ -1489,34 +1877,34 @@
   (debug "leaves" (p 1) (arg 1))
   (debug "count" (p 2))
   (bb 0
-    (assign (p 5) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 193 23))
-    (call (fn "<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 5))) (p 4) 1 (at "src/merkle/mmr/mod.rs" 193 21)))
+    (assign (p 5) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 179 23))
+    (call (fn "<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 5))) (p 4) 1 (at "src/merkle/mmr/mod.rs" 179 21)))
   (bb 1
-    (assign (p 3) (use (copy (p 4 deref))) (at "src/merkle/mmr/mod.rs" 193 21))
-    (call (fn "core::num::<impl u64>::trailing_ones") (args (move (p 3))) (p 2) 2 (at "src/merkle/mmr/mod.rs" 193 21)))
+    (assign (p 3) (use (copy (p 4 deref))) (at "src/merkle/mmr/mod.rs" 179 21))
+    (call (fn "core::num::<impl u64>::trailing_ones") (args (move (p 3))) (p 2) 2 (at "src/merkle/mmr/mod.rs" 179 21)))
   (bb 2
-    (call (fn "std::ops::RangeInclusive::<u32>::new") (args (int u32 1) (copy (p 2))) (p 0) 3 (at "src/merkle/mmr/mod.rs" 194 9)))
+    (call (fn "std::ops::RangeInclusive::<u32>::new") (args (int u32 1) (copy (p 2))) (p 0) 3 (at "src/merkle/mmr/mod.rs" 180 9)))
   (bb 3
-    (return (at "src/merkle/mmr/mod.rs" 195 6)))
+    (return (at "src/merkle/mmr/mod.rs" 181 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::pos_to_height"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::pos_to_height") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "pos_to_height")
-  (span "src/merkle/mmr/mod.rs" 197 5)
+  (span "src/merkle/mmr/mod.rs" 183 5)
   (argc 1)
   (locals
     (0 u32 mut)
     (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm))
   (debug "pos" (p 1) (arg 1))
   (bb 0
-    (call (fn "commonware_storage::merkle::mmr::iterator::pos_to_height") (args (copy (p 1))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 198 9)))
+    (call (fn "commonware_storage::merkle::mmr::iterator::pos_to_height") (args (copy (p 1))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 184 9)))
   (bb 1
-    (return (at "src/merkle/mmr/mod.rs" 199 6)))
+    (return (at "src/merkle/mmr/mod.rs" 185 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::is_valid_size"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::is_valid_size") (args ())
   (item impl (adt "merkle::mmr::Family") "Family" () "is_valid_size")
-  (span "src/merkle/mmr/mod.rs" 201 5)
+  (span "src/merkle/mmr/mod.rs" 187 5)
   (argc 1)
   (locals
     (0 bool mut)
@@ -1561,96 +1949,96 @@
   (debug "two_h" (p 10))
   (debug "node_pos" (p 13))
   (bb 0
-    (assign (p 4) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 202 21))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 202 20)))
+    (assign (p 4) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 188 21))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 4))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 188 20)))
   (bb 1
-    (assign (p 2) (use (copy (p 3 deref))) (at "src/merkle/mmr/mod.rs" 202 20))
-    (assign (p 5) (bin eq (copy (p 2)) (int u64 0)) (at "src/merkle/mmr/mod.rs" 203 12))
-    (switch (move (p 5)) (0 3) (otherwise 2) (at "src/merkle/mmr/mod.rs" 203 12)))
+    (assign (p 2) (use (copy (p 3 deref))) (at "src/merkle/mmr/mod.rs" 188 20))
+    (assign (p 5) (bin eq (copy (p 2)) (int u64 0)) (at "src/merkle/mmr/mod.rs" 189 12))
+    (switch (move (p 5)) (0 3) (otherwise 2) (at "src/merkle/mmr/mod.rs" 189 12)))
   (bb 2
-    (assign (p 0) (use (int bool 1)) (at "src/merkle/mmr/mod.rs" 204 20))
+    (assign (p 0) (use (int bool 1)) (at "src/merkle/mmr/mod.rs" 190 20))
     (goto 24))
   (bb 3
-    (call (fn "core::num::<impl u64>::leading_zeros") (args (copy (p 2))) (p 6) 4 (at "src/merkle/mmr/mod.rs" 206 29)))
+    (call (fn "core::num::<impl u64>::leading_zeros") (args (copy (p 2))) (p 6) 4 (at "src/merkle/mmr/mod.rs" 192 29)))
   (bb 4
-    (assign (p 7) (bin eq (copy (p 6)) (int u32 0)) (at "src/merkle/mmr/mod.rs" 207 12))
-    (switch (move (p 7)) (0 6) (otherwise 5) (at "src/merkle/mmr/mod.rs" 207 12)))
+    (assign (p 7) (bin eq (copy (p 6)) (int u32 0)) (at "src/merkle/mmr/mod.rs" 193 12))
+    (switch (move (p 7)) (0 6) (otherwise 5) (at "src/merkle/mmr/mod.rs" 193 12)))
   (bb 5
-    (assign (p 0) (use (int bool 0)) (at "src/merkle/mmr/mod.rs" 209 20))
+    (assign (p 0) (use (int bool 0)) (at "src/merkle/mmr/mod.rs" 195 20))
     (goto 24))
   (bb 6
-    (assign (p 9) (bin lt (copy (p 6)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 211 21))
-    (assert (move (p 9)) true overflow 7 (at "src/merkle/mmr/mod.rs" 211 21)))
+    (assign (p 9) (bin lt (copy (p 6)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 197 21))
+    (assert (move (p 9)) true overflow 7 (at "src/merkle/mmr/mod.rs" 197 21)))
   (bb 7
-    (assign (p 8) (bin shr (const-item u64 "MAX" (int u64 18446744073709551615)) (copy (p 6))) (at "src/merkle/mmr/mod.rs" 211 21))
-    (call (fn "core::num::<impl u64>::trailing_ones") (args (copy (p 8))) (p 11) 8 (at "src/merkle/mmr/mod.rs" 212 30)))
+    (assign (p 8) (bin shr (const-item u64 "MAX" (int u64 18446744073709551615)) (copy (p 6))) (at "src/merkle/mmr/mod.rs" 197 21))
+    (call (fn "core::num::<impl u64>::trailing_ones") (args (copy (p 8))) (p 11) 8 (at "src/merkle/mmr/mod.rs" 198 30)))
   (bb 8
-    (assign (p 12) (bin lt (copy (p 11)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 212 25))
-    (assert (move (p 12)) true overflow 9 (at "src/merkle/mmr/mod.rs" 212 25)))
+    (assign (p 12) (bin lt (copy (p 11)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 198 25))
+    (assert (move (p 12)) true overflow 9 (at "src/merkle/mmr/mod.rs" 198 25)))
   (bb 9
-    (assign (p 10) (bin shl (int u64 1) (move (p 11))) (at "src/merkle/mmr/mod.rs" 212 25))
-    (call (fn "core::num::<impl u64>::checked_sub") (args (copy (p 8)) (int u64 1)) (p 14) 10 (at "src/merkle/mmr/mod.rs" 213 28)))
+    (assign (p 10) (bin shl (int u64 1) (move (p 11))) (at "src/merkle/mmr/mod.rs" 198 25))
+    (call (fn "core::num::<impl u64>::checked_sub") (args (copy (p 8)) (int u64 1)) (p 14) 10 (at "src/merkle/mmr/mod.rs" 199 28)))
   (bb 10
-    (assign (p 15) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 213 56))
-    (call (fn "std::option::Option::<u64>::expect") (args (move (p 14)) (move (p 15))) (p 13) 11 (at "src/merkle/mmr/mod.rs" 213 28)))
+    (assign (p 15) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 199 56))
+    (call (fn "std::option::Option::<u64>::expect") (args (move (p 14)) (move (p 15))) (p 13) 11 (at "src/merkle/mmr/mod.rs" 199 28)))
   (bb 11
-    (assign (p 17) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 214 15))
-    (assign (p 16) (bin gt (move (p 17)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 214 15))
-    (switch (move (p 16)) (0 23) (otherwise 12) (at "src/merkle/mmr/mod.rs" 214 15)))
+    (assign (p 17) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 200 15))
+    (assign (p 16) (bin gt (move (p 17)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 200 15))
+    (switch (move (p 16)) (0 23) (otherwise 12) (at "src/merkle/mmr/mod.rs" 200 15)))
   (bb 12
-    (assign (p 19) (use (copy (p 13))) (at "src/merkle/mmr/mod.rs" 215 16))
-    (assign (p 18) (bin lt (move (p 19)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 215 16))
-    (switch (move (p 18)) (0 20) (otherwise 13) (at "src/merkle/mmr/mod.rs" 215 16)))
+    (assign (p 19) (use (copy (p 13))) (at "src/merkle/mmr/mod.rs" 201 16))
+    (assign (p 18) (bin lt (move (p 19)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 201 16))
+    (switch (move (p 18)) (0 20) (otherwise 13) (at "src/merkle/mmr/mod.rs" 201 16)))
   (bb 13
-    (assign (p 21) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 216 20))
-    (assign (p 20) (bin eq (move (p 21)) (int u64 2)) (at "src/merkle/mmr/mod.rs" 216 20))
-    (switch (move (p 20)) (0 16) (otherwise 14) (at "src/merkle/mmr/mod.rs" 216 20)))
+    (assign (p 21) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 202 20))
+    (assign (p 20) (bin eq (move (p 21)) (int u64 2)) (at "src/merkle/mmr/mod.rs" 202 20))
+    (switch (move (p 20)) (0 16) (otherwise 14) (at "src/merkle/mmr/mod.rs" 202 20)))
   (bb 14
-    (assign (p 22) (use (copy (p 13))) (at "src/merkle/mmr/mod.rs" 219 28))
-    (assign (p 24) (checked sub (copy (p 2)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 219 40))
-    (assert (move (p 24 (field 1 bool))) false overflow 15 (at "src/merkle/mmr/mod.rs" 219 40)))
+    (assign (p 22) (use (copy (p 13))) (at "src/merkle/mmr/mod.rs" 205 28))
+    (assign (p 24) (checked sub (copy (p 2)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 205 40))
+    (assert (move (p 24 (field 1 bool))) false overflow 15 (at "src/merkle/mmr/mod.rs" 205 40)))
   (bb 15
-    (assign (p 23) (use (move (p 24 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 219 40))
-    (assign (p 0) (bin eq (move (p 22)) (move (p 23))) (at "src/merkle/mmr/mod.rs" 219 28))
+    (assign (p 23) (use (move (p 24 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 205 40))
+    (assign (p 0) (bin eq (move (p 22)) (move (p 23))) (at "src/merkle/mmr/mod.rs" 205 28))
     (goto 24))
   (bb 16
-    (assign (p 26) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 222 29))
-    (assign (p 27) (checked sub (copy (p 26)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 222 29))
-    (assert (move (p 27 (field 1 bool))) false overflow 17 (at "src/merkle/mmr/mod.rs" 222 29)))
+    (assign (p 26) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 208 29))
+    (assign (p 27) (checked sub (copy (p 26)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 208 29))
+    (assert (move (p 27 (field 1 bool))) false overflow 17 (at "src/merkle/mmr/mod.rs" 208 29)))
   (bb 17
-    (assign (p 25) (use (move (p 27 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 222 29))
-    (assign (p 28) (checked add (copy (p 13)) (copy (p 25))) (at "src/merkle/mmr/mod.rs" 222 17))
-    (assert (move (p 28 (field 1 bool))) false overflow 18 (at "src/merkle/mmr/mod.rs" 222 17)))
+    (assign (p 25) (use (move (p 27 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 208 29))
+    (assign (p 28) (checked add (copy (p 13)) (copy (p 25))) (at "src/merkle/mmr/mod.rs" 208 17))
+    (assert (move (p 28 (field 1 bool))) false overflow 18 (at "src/merkle/mmr/mod.rs" 208 17)))
   (bb 18
-    (assign (p 13) (use (move (p 28 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 222 17))
-    (assign (p 30) (use (copy (p 13))) (at "src/merkle/mmr/mod.rs" 223 20))
-    (assign (p 29) (bin lt (move (p 30)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 223 20))
-    (switch (move (p 29)) (0 11) (otherwise 19) (at "src/merkle/mmr/mod.rs" 223 20)))
+    (assign (p 13) (use (move (p 28 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 208 17))
+    (assign (p 30) (use (copy (p 13))) (at "src/merkle/mmr/mod.rs" 209 20))
+    (assign (p 29) (bin lt (move (p 30)) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 209 20))
+    (switch (move (p 29)) (0 11) (otherwise 19) (at "src/merkle/mmr/mod.rs" 209 20)))
   (bb 19
-    (assign (p 0) (use (int bool 0)) (at "src/merkle/mmr/mod.rs" 225 28))
+    (assign (p 0) (use (int bool 0)) (at "src/merkle/mmr/mod.rs" 211 28))
     (goto 24))
   (bb 20
-    (assign (p 31) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 230 13))
-    (assign (p 32) (bin lt (move (p 31)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 230 13))
-    (assert (move (p 32)) true overflow 21 (at "src/merkle/mmr/mod.rs" 230 13)))
+    (assign (p 31) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/mod.rs" 216 13))
+    (assign (p 32) (bin lt (move (p 31)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 216 13))
+    (assert (move (p 32)) true overflow 21 (at "src/merkle/mmr/mod.rs" 216 13)))
   (bb 21
-    (assign (p 10) (bin shr (copy (p 10)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 230 13))
-    (assign (p 33) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 231 25))
-    (assign (p 34) (checked sub (copy (p 13)) (copy (p 33))) (at "src/merkle/mmr/mod.rs" 231 13))
-    (assert (move (p 34 (field 1 bool))) false overflow 22 (at "src/merkle/mmr/mod.rs" 231 13)))
+    (assign (p 10) (bin shr (copy (p 10)) (int i32 1)) (at "src/merkle/mmr/mod.rs" 216 13))
+    (assign (p 33) (use (copy (p 10))) (at "src/merkle/mmr/mod.rs" 217 25))
+    (assign (p 34) (checked sub (copy (p 13)) (copy (p 33))) (at "src/merkle/mmr/mod.rs" 217 13))
+    (assert (move (p 34 (field 1 bool))) false overflow 22 (at "src/merkle/mmr/mod.rs" 217 13)))
   (bb 22
-    (assign (p 13) (use (move (p 34 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 231 13))
-    (goto 11 (at "src/merkle/mmr/mod.rs" 214 9)))
+    (assign (p 13) (use (move (p 34 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 217 13))
+    (goto 11 (at "src/merkle/mmr/mod.rs" 200 9)))
   (bb 23
-    (assign (p 0) (use (int bool 1)) (at "src/merkle/mmr/mod.rs" 233 9))
-    (goto 24 (at "src/merkle/mmr/mod.rs" 234 6)))
+    (assign (p 0) (use (int bool 1)) (at "src/merkle/mmr/mod.rs" 219 9))
+    (goto 24 (at "src/merkle/mmr/mod.rs" 220 6)))
   (bb 24
-    (return (at "src/merkle/mmr/mod.rs" 234 6)))
+    (return (at "src/merkle/mmr/mod.rs" 220 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::chunk_peaks"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::chunk_peaks") (args ())
   (item impl (adt "merkle::mmr::Family") "Graftable" () "chunk_peaks")
-  (span "src/merkle/mmr/mod.rs" 240 5)
+  (span "src/merkle/mmr/mod.rs" 226 5)
   (argc 3)
   (locals
     (0 (adt "std::iter::Once<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
@@ -1698,73 +2086,73 @@
   (debug "first_leaf_pos" (p 20))
   (debug "root_pos" (p 23))
   (bb 0
-    (assign (p 7) (checked add (copy (p 2)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 245 43))
-    (assert (move (p 7 (field 1 bool))) false overflow 1 (at "src/merkle/mmr/mod.rs" 245 43)))
+    (assign (p 7) (checked add (copy (p 2)) (int u64 1)) (at "src/merkle/mmr/mod.rs" 231 43))
+    (assert (move (p 7 (field 1 bool))) false overflow 1 (at "src/merkle/mmr/mod.rs" 231 43)))
   (bb 1
-    (assign (p 6) (use (move (p 7 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 245 43))
-    (assign (p 8) (bin lt (copy (p 3)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 245 43))
-    (assert (move (p 8)) true overflow 2 (at "src/merkle/mmr/mod.rs" 245 43)))
+    (assign (p 6) (use (move (p 7 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 231 43))
+    (assign (p 8) (bin lt (copy (p 3)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 231 43))
+    (assert (move (p 8)) true overflow 2 (at "src/merkle/mmr/mod.rs" 231 43)))
   (bb 2
-    (assign (p 5) (bin shl (move (p 6)) (copy (p 3))) (at "src/merkle/mmr/mod.rs" 245 43))
-    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 5))) (p 4) 3 (at "src/merkle/mmr/mod.rs" 245 29)))
+    (assign (p 5) (bin shl (move (p 6)) (copy (p 3))) (at "src/merkle/mmr/mod.rs" 231 43))
+    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 5))) (p 4) 3 (at "src/merkle/mmr/mod.rs" 231 29)))
   (bb 3
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::convert::TryFrom<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>>::try_from") (args (copy (p 4))) (p 10) 4 (at "src/merkle/mmr/mod.rs" 246 29)))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::convert::TryFrom<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>>::try_from") (args (copy (p 4))) (p 10) 4 (at "src/merkle/mmr/mod.rs" 232 29)))
   (bb 4
-    (assign (p 11) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 246 70))
-    (call (fn "std::result::Result::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_storage::merkle::Error<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 10)) (move (p 11))) (p 9) 5 (at "src/merkle/mmr/mod.rs" 246 29)))
+    (assign (p 11) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 232 70))
+    (call (fn "std::result::Result::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_storage::merkle::Error<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 10)) (move (p 11))) (p 9) 5 (at "src/merkle/mmr/mod.rs" 232 29)))
   (bb 5
-    (assign (p 13) (ref shared (p 9)) (at "src/merkle/mmr/mod.rs" 248 13))
-    (assign (p 14) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 248 30))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::le") (args (move (p 13)) (move (p 14))) (p 12) 6 (at "src/merkle/mmr/mod.rs" 248 13)))
+    (assign (p 13) (ref shared (p 9)) (at "src/merkle/mmr/mod.rs" 234 13))
+    (assign (p 14) (ref shared (p 1)) (at "src/merkle/mmr/mod.rs" 234 30))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::le") (args (move (p 13)) (move (p 14))) (p 12) 6 (at "src/merkle/mmr/mod.rs" 234 13)))
   (bb 6
-    (switch (move (p 12)) (0 8) (otherwise 7) (at "src/merkle/mmr/mod.rs" 248 13)))
+    (switch (move (p 12)) (0 8) (otherwise 7) (at "src/merkle/mmr/mod.rs" 234 13)))
   (bb 7
-    (assign (p 19) (bin lt (copy (p 3)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 253 44))
-    (assert (move (p 19)) true overflow 10 (at "src/merkle/mmr/mod.rs" 253 44)))
+    (assign (p 19) (bin lt (copy (p 3)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 239 44))
+    (assert (move (p 19)) true overflow 10 (at "src/merkle/mmr/mod.rs" 239 44)))
   (bb 8
     (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 16) 9))
   (bb 9
     (call (diverge "core::panicking::panic_fmt") (args (move (p 16))) (p 15) none))
   (bb 10
-    (assign (p 18) (bin shl (copy (p 2)) (copy (p 3))) (at "src/merkle/mmr/mod.rs" 253 44))
-    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 18))) (p 17) 11 (at "src/merkle/mmr/mod.rs" 253 30)))
+    (assign (p 18) (bin shl (copy (p 2)) (copy (p 3))) (at "src/merkle/mmr/mod.rs" 239 44))
+    (call (fn "commonware_storage::merkle::location::Location::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 18))) (p 17) 11 (at "src/merkle/mmr/mod.rs" 239 30)))
   (bb 11
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::convert::TryFrom<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>>::try_from") (args (copy (p 17))) (p 21) 12 (at "src/merkle/mmr/mod.rs" 255 13)))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::convert::TryFrom<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>>::try_from") (args (copy (p 17))) (p 21) 12 (at "src/merkle/mmr/mod.rs" 241 13)))
   (bb 12
-    (assign (p 22) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 255 55))
-    (call (fn "std::result::Result::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_storage::merkle::Error<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 21)) (move (p 22))) (p 20) 13 (at "src/merkle/mmr/mod.rs" 255 13)))
+    (assign (p 22) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 241 55))
+    (call (fn "std::result::Result::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_storage::merkle::Error<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 21)) (move (p 22))) (p 20) 13 (at "src/merkle/mmr/mod.rs" 241 13)))
   (bb 13
-    (assign (p 28) (ref shared (p 20)) (at "src/merkle/mmr/mod.rs" 256 39))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 28))) (p 27) 14 (at "src/merkle/mmr/mod.rs" 256 38)))
+    (assign (p 28) (ref shared (p 20)) (at "src/merkle/mmr/mod.rs" 242 39))
+    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 28))) (p 27) 14 (at "src/merkle/mmr/mod.rs" 242 38)))
   (bb 14
-    (assign (p 26) (use (copy (p 27 deref))) (at "src/merkle/mmr/mod.rs" 256 38))
-    (assign (p 31) (checked add (copy (p 3)) (int u32 1)) (at "src/merkle/mmr/mod.rs" 256 65))
-    (assert (move (p 31 (field 1 bool))) false overflow 15 (at "src/merkle/mmr/mod.rs" 256 65)))
+    (assign (p 26) (use (copy (p 27 deref))) (at "src/merkle/mmr/mod.rs" 242 38))
+    (assign (p 31) (checked add (copy (p 3)) (int u32 1)) (at "src/merkle/mmr/mod.rs" 242 65))
+    (assert (move (p 31 (field 1 bool))) false overflow 15 (at "src/merkle/mmr/mod.rs" 242 65)))
   (bb 15
-    (assign (p 30) (use (move (p 31 (field 0 u32)))) (at "src/merkle/mmr/mod.rs" 256 65))
-    (assign (p 32) (bin lt (copy (p 30)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 256 56))
-    (assert (move (p 32)) true overflow 16 (at "src/merkle/mmr/mod.rs" 256 56)))
+    (assign (p 30) (use (move (p 31 (field 0 u32)))) (at "src/merkle/mmr/mod.rs" 242 65))
+    (assign (p 32) (bin lt (copy (p 30)) (int u32 64)) (at "src/merkle/mmr/mod.rs" 242 56))
+    (assert (move (p 32)) true overflow 16 (at "src/merkle/mmr/mod.rs" 242 56)))
   (bb 16
-    (assign (p 29) (bin shl (int u64 1) (move (p 30))) (at "src/merkle/mmr/mod.rs" 256 56))
-    (assign (p 33) (checked add (copy (p 26)) (copy (p 29))) (at "src/merkle/mmr/mod.rs" 256 38))
-    (assert (move (p 33 (field 1 bool))) false overflow 17 (at "src/merkle/mmr/mod.rs" 256 38)))
+    (assign (p 29) (bin shl (int u64 1) (move (p 30))) (at "src/merkle/mmr/mod.rs" 242 56))
+    (assign (p 33) (checked add (copy (p 26)) (copy (p 29))) (at "src/merkle/mmr/mod.rs" 242 38))
+    (assert (move (p 33 (field 1 bool))) false overflow 17 (at "src/merkle/mmr/mod.rs" 242 38)))
   (bb 17
-    (assign (p 25) (use (move (p 33 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 256 38))
-    (assign (p 34) (checked sub (copy (p 25)) (int u64 2)) (at "src/merkle/mmr/mod.rs" 256 38))
-    (assert (move (p 34 (field 1 bool))) false overflow 18 (at "src/merkle/mmr/mod.rs" 256 38)))
+    (assign (p 25) (use (move (p 33 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 242 38))
+    (assign (p 34) (checked sub (copy (p 25)) (int u64 2)) (at "src/merkle/mmr/mod.rs" 242 38))
+    (assert (move (p 34 (field 1 bool))) false overflow 18 (at "src/merkle/mmr/mod.rs" 242 38)))
   (bb 18
-    (assign (p 24) (use (move (p 34 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 256 38))
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 24))) (p 23) 19 (at "src/merkle/mmr/mod.rs" 256 24)))
+    (assign (p 24) (use (move (p 34 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 242 38))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 24))) (p 23) 19 (at "src/merkle/mmr/mod.rs" 242 24)))
   (bb 19
-    (assign (p 35) (agg (tuple) (copy (p 23)) (copy (p 3))) (at "src/merkle/mmr/mod.rs" 258 26))
-    (call (fn "std::iter::once::<(commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, u32)>") (args (move (p 35))) (p 0) 20 (at "src/merkle/mmr/mod.rs" 258 9)))
+    (assign (p 35) (agg (tuple) (copy (p 23)) (copy (p 3))) (at "src/merkle/mmr/mod.rs" 244 26))
+    (call (fn "std::iter::once::<(commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, u32)>") (args (move (p 35))) (p 0) 20 (at "src/merkle/mmr/mod.rs" 244 9)))
   (bb 20
-    (return (at "src/merkle/mmr/mod.rs" 259 6)))
+    (return (at "src/merkle/mmr/mod.rs" 245 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position") (args ())
   (item impl (adt "merkle::mmr::Family") "Graftable" () "subtree_root_position")
-  (span "src/merkle/mmr/mod.rs" 261 5)
+  (span "src/merkle/mmr/mod.rs" 247 5)
   (argc 2)
   (locals
     (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
@@ -1784,30 +2172,30 @@
   (debug "leaf_pos" (p 3))
   (debug "shift" (p 4))
   (bb 0
-    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::location_to_position") (args (copy (p 1))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 262 24)))
+    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::location_to_position") (args (copy (p 1))) (p 3) 1 (at "src/merkle/mmr/mod.rs" 248 24)))
   (bb 1
-    (assign (p 7) (checked add (copy (p 2)) (int u32 1)) (at "src/merkle/mmr/mod.rs" 264 26))
-    (assert (move (p 7 (field 1 bool))) false overflow 2 (at "src/merkle/mmr/mod.rs" 264 26)))
+    (assign (p 7) (checked add (copy (p 2)) (int u32 1)) (at "src/merkle/mmr/mod.rs" 250 26))
+    (assert (move (p 7 (field 1 bool))) false overflow 2 (at "src/merkle/mmr/mod.rs" 250 26)))
   (bb 2
-    (assign (p 6) (use (move (p 7 (field 0 u32)))) (at "src/merkle/mmr/mod.rs" 264 26))
-    (call (fn "core::num::<impl u64>::checked_shl") (args (int u64 1) (move (p 6))) (p 5) 3 (at "src/merkle/mmr/mod.rs" 263 21)))
+    (assign (p 6) (use (move (p 7 (field 0 u32)))) (at "src/merkle/mmr/mod.rs" 250 26))
+    (call (fn "core::num::<impl u64>::checked_shl") (args (int u64 1) (move (p 6))) (p 5) 3 (at "src/merkle/mmr/mod.rs" 249 21)))
   (bb 3
-    (assign (p 8) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 265 21))
-    (call (fn "std::option::Option::<u64>::expect") (args (move (p 5)) (move (p 8))) (p 4) 4 (at "src/merkle/mmr/mod.rs" 263 21)))
+    (assign (p 8) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 251 21))
+    (call (fn "std::option::Option::<u64>::expect") (args (move (p 5)) (move (p 8))) (p 4) 4 (at "src/merkle/mmr/mod.rs" 249 21)))
   (bb 4
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_add") (args (copy (p 3)) (copy (p 4))) (p 10) 5 (at "src/merkle/mmr/mod.rs" 267 9)))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_add") (args (copy (p 3)) (copy (p 4))) (p 10) 5 (at "src/merkle/mmr/mod.rs" 253 9)))
   (bb 5
-    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:269:23: 269:26}>") (args (move (p 10)) (zst (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}" unit))) (p 9) 6 (at "src/merkle/mmr/mod.rs" 267 9)))
+    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:255:23: 255:26}>") (args (move (p 10)) (zst (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}" unit))) (p 9) 6 (at "src/merkle/mmr/mod.rs" 253 9)))
   (bb 6
-    (assign (p 11) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 270 21))
-    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 9)) (move (p 11))) (p 0) 7 (at "src/merkle/mmr/mod.rs" 267 9)))
+    (assign (p 11) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 256 21))
+    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 9)) (move (p 11))) (p 0) 7 (at "src/merkle/mmr/mod.rs" 253 9)))
   (bb 7
-    (return (at "src/merkle/mmr/mod.rs" 271 6)))
+    (return (at "src/merkle/mmr/mod.rs" 257 6)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf") (args ())
   (item impl (adt "merkle::mmr::Family") "Graftable" () "leftmost_leaf")
-  (span "src/merkle/mmr/mod.rs" 273 5)
+  (span "src/merkle/mmr/mod.rs" 259 5)
   (argc 2)
   (locals
     (0 (adt "merkle::location::Location<merkle::mmr::Family>") mut)
@@ -1831,30 +2219,30 @@
   (debug "shift" (p 3))
   (debug "leftmost_pos" (p 8))
   (bb 0
-    (assign (p 6) (checked add (copy (p 2)) (int u32 1)) (at "src/merkle/mmr/mod.rs" 275 26))
-    (assert (move (p 6 (field 1 bool))) false overflow 1 (at "src/merkle/mmr/mod.rs" 275 26)))
+    (assign (p 6) (checked add (copy (p 2)) (int u32 1)) (at "src/merkle/mmr/mod.rs" 261 26))
+    (assert (move (p 6 (field 1 bool))) false overflow 1 (at "src/merkle/mmr/mod.rs" 261 26)))
   (bb 1
-    (assign (p 5) (use (move (p 6 (field 0 u32)))) (at "src/merkle/mmr/mod.rs" 275 26))
-    (call (fn "core::num::<impl u64>::checked_shl") (args (int u64 1) (move (p 5))) (p 4) 2 (at "src/merkle/mmr/mod.rs" 274 21)))
+    (assign (p 5) (use (move (p 6 (field 0 u32)))) (at "src/merkle/mmr/mod.rs" 261 26))
+    (call (fn "core::num::<impl u64>::checked_shl") (args (int u64 1) (move (p 5))) (p 4) 2 (at "src/merkle/mmr/mod.rs" 260 21)))
   (bb 2
-    (assign (p 7) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 276 21))
-    (call (fn "std::option::Option::<u64>::expect") (args (move (p 4)) (move (p 7))) (p 3) 3 (at "src/merkle/mmr/mod.rs" 274 21)))
+    (assign (p 7) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 262 21))
+    (call (fn "std::option::Option::<u64>::expect") (args (move (p 4)) (move (p 7))) (p 3) 3 (at "src/merkle/mmr/mod.rs" 260 21)))
   (bb 3
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_add") (args (copy (p 1)) (int u64 2)) (p 10) 4 (at "src/merkle/mmr/mod.rs" 277 28)))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_add") (args (copy (p 1)) (int u64 2)) (p 10) 4 (at "src/merkle/mmr/mod.rs" 263 28)))
   (bb 4
-    (assign (p 12) (ref shared (p 3)) (at "src/merkle/mmr/mod.rs" 279 23))
-    (assign (p 11) (agg (closure (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}" (tuple (ref shared u64)))) (move (p 12))) (at "src/merkle/mmr/mod.rs" 279 23))
-    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:279:23: 279:26}>") (args (move (p 10)) (move (p 11))) (p 9) 5 (at "src/merkle/mmr/mod.rs" 277 28)))
+    (assign (p 12) (ref shared (p 3)) (at "src/merkle/mmr/mod.rs" 265 23))
+    (assign (p 11) (agg (closure (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}" (tuple (ref shared u64)))) (move (p 12))) (at "src/merkle/mmr/mod.rs" 265 23))
+    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:265:23: 265:26}>") (args (move (p 10)) (move (p 11))) (p 9) 5 (at "src/merkle/mmr/mod.rs" 263 28)))
   (bb 5
-    (assign (p 13) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 280 21))
-    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 9)) (move (p 13))) (p 8) 6 (at "src/merkle/mmr/mod.rs" 277 28)))
+    (assign (p 13) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 266 21))
+    (call (fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 9)) (move (p 13))) (p 8) 6 (at "src/merkle/mmr/mod.rs" 263 28)))
   (bb 6
-    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location") (args (copy (p 8))) (p 14) 7 (at "src/merkle/mmr/mod.rs" 282 9)))
+    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location") (args (copy (p 8))) (p 14) 7 (at "src/merkle/mmr/mod.rs" 268 9)))
   (bb 7
-    (assign (p 15) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 282 57))
-    (call (fn "std::option::Option::<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 14)) (move (p 15))) (p 0) 8 (at "src/merkle/mmr/mod.rs" 282 9)))
+    (assign (p 15) (use (unsupported "constant of type (ref shared str)")) (at "src/merkle/mmr/mod.rs" 268 57))
+    (call (fn "std::option::Option::<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>::expect") (args (move (p 14)) (move (p 15))) (p 0) 8 (at "src/merkle/mmr/mod.rs" 268 9)))
   (bb 8
-    (return (at "src/merkle/mmr/mod.rs" 283 6)))
+    (return (at "src/merkle/mmr/mod.rs" 269 6)))
 )
 (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new"
   (kind root) (def "commonware_storage::merkle::position::Position::<F>::new") (args ((adt "merkle::mmr::Family")))
@@ -2566,394 +2954,6 @@
   (bb 11
     (return (at "src/merkle/position.rs" 353 6)))
 )
-(fn "commonware_storage::merkle::mmr::iterator::PeakIterator::new"
-  (kind root) (def "commonware_storage::merkle::mmr::iterator::PeakIterator::new") (args ())
-  (item inherent (adt "merkle::mmr::iterator::PeakIterator") "new")
-  (span "src/merkle/mmr/iterator.rs" 31 5)
-  (argc 1)
-  (locals
-    (0 (adt "merkle::mmr::iterator::PeakIterator") mut)
-    (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
-    (2 bool mut)
-    (3 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (4 (ref shared u64) mut)
-    (5 u64 imm)
-    (6 u32 mut)
-    (7 u64 mut)
-    (8 (ref shared u64) mut)
-    (9 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (10 bool mut)
-    (11 (tuple (ref shared u64) (ref shared u64)) mut)
-    (12 (ref shared u64) mut)
-    (13 (ref shared u64) mut)
-    (14 (ref shared u64) imm)
-    (15 (ref shared u64) imm)
-    (16 bool mut)
-    (17 u64 mut)
-    (18 u64 mut)
-    (19 (adt "core::panicking::AssertKind") imm)
-    (20 never imm)
-    (21 (adt "std::option::Option<std::fmt::Arguments<'_>>") mut)
-    (22 (adt "std::fmt::Arguments<'_>") mut)
-    (23 u64 imm)
-    (24 u32 mut)
-    (25 bool mut)
-    (26 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
-    (27 u64 mut)
-    (28 (tuple u64 bool) mut))
-  (debug "size" (p 1) (arg 1))
-  (debug "start" (p 5))
-  (debug "left_val" (p 14))
-  (debug "right_val" (p 15))
-  (debug "kind" (p 19))
-  (debug "two_h" (p 23))
-  (bb 0
-    (assign (p 3) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 32 12))
-    (assign (p 4) (use (const-ref (int u64 0))) (at "src/merkle/mmr/iterator.rs" 32 20))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialEq<u64>>::eq") (args (move (p 3)) (move (p 4))) (p 2) 1 (at "src/merkle/mmr/iterator.rs" 32 12)))
-  (bb 1
-    (switch (move (p 2)) (0 3) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 32 12)))
-  (bb 2
-    (call (fn "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::default::Default>::default") (args) (p 0) 14 (at "src/merkle/mmr/iterator.rs" 33 20)))
-  (bb 3
-    (assign (p 9) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 38 33))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::Deref>::deref") (args (move (p 9))) (p 8) 4 (at "src/merkle/mmr/iterator.rs" 38 33)))
-  (bb 4
-    (assign (p 7) (use (copy (p 8 deref))) (at "src/merkle/mmr/iterator.rs" 38 33))
-    (call (fn "core::num::<impl u64>::leading_zeros") (args (move (p 7))) (p 6) 5 (at "src/merkle/mmr/iterator.rs" 38 33)))
-  (bb 5
-    (assign (p 10) (bin lt (copy (p 6)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 38 21))
-    (assert (move (p 10)) true overflow 6 (at "src/merkle/mmr/iterator.rs" 38 21)))
-  (bb 6
-    (assign (p 5) (bin shr (const-item u64 "MAX" (int u64 18446744073709551615)) (move (p 6))) (at "src/merkle/mmr/iterator.rs" 38 21))
-    (assign (p 12) (ref shared (p 5)))
-    (assign (p 13) (use (const-ref (const-item u64 "MAX" (int u64 18446744073709551615)))))
-    (assign (p 11) (agg (tuple) (move (p 12)) (move (p 13))))
-    (assign (p 14) (use (copy (p 11 (field 0 (ref shared u64))))))
-    (assign (p 15) (use (copy (p 11 (field 1 (ref shared u64))))))
-    (assign (p 17) (use (copy (p 14 deref))))
-    (assign (p 18) (use (copy (p 15 deref))))
-    (assign (p 16) (bin eq (move (p 17)) (move (p 18))))
-    (switch (move (p 16)) (0 9) (otherwise 7)))
-  (bb 7
-    (assign (p 19) (agg (adt (adt "core::panicking::AssertKind") 1)))
-    (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 22) 8))
-  (bb 8
-    (assign (p 21) (agg (adt (adt "std::option::Option<std::fmt::Arguments<'_>>") 1) (move (p 22))))
-    (call (diverge "core::panicking::assert_failed::<u64, u64>") (args (copy (p 19)) (copy (p 14)) (copy (p 15)) (move (p 21))) (p 20) none))
-  (bb 9
-    (call (fn "core::num::<impl u64>::trailing_ones") (args (copy (p 5))) (p 24) 10 (at "src/merkle/mmr/iterator.rs" 40 26)))
-  (bb 10
-    (assign (p 25) (bin lt (copy (p 24)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 40 21))
-    (assert (move (p 25)) true overflow 11 (at "src/merkle/mmr/iterator.rs" 40 21)))
-  (bb 11
-    (assign (p 23) (bin shl (int u64 1) (move (p 24))) (at "src/merkle/mmr/iterator.rs" 40 21))
-    (assign (p 28) (checked sub (copy (p 5)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 43 37))
-    (assert (move (p 28 (field 1 bool))) false overflow 12 (at "src/merkle/mmr/iterator.rs" 43 37)))
-  (bb 12
-    (assign (p 27) (use (move (p 28 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 43 37))
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (move (p 27))) (p 26) 13 (at "src/merkle/mmr/iterator.rs" 43 23)))
-  (bb 13
-    (assign (p 0) (agg (adt (adt "merkle::mmr::iterator::PeakIterator") 0) (copy (p 1)) (move (p 26)) (copy (p 23))) (at "src/merkle/mmr/iterator.rs" 41 9))
-    (goto 14 (at "src/merkle/mmr/iterator.rs" 46 6)))
-  (bb 14
-    (return (at "src/merkle/mmr/iterator.rs" 46 6)))
-)
-(fn "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size"
-  (kind root) (def "commonware_storage::merkle::mmr::iterator::PeakIterator::to_nearest_size") (args ())
-  (item inherent (adt "merkle::mmr::iterator::PeakIterator") "to_nearest_size")
-  (span "src/merkle/mmr/iterator.rs" 55 5)
-  (argc 1)
-  (locals
-    (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
-    (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
-    (2 bool mut)
-    (3 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (4 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (5 never imm)
-    (6 (adt "std::fmt::Arguments<'_>") mut)
-    (7 bool mut)
-    (8 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (9 (ref shared u64) mut)
-    (10 u64 imm)
-    (11 u64 mut)
-    (12 u64 mut)
-    (13 bool mut)
-    (14 u64 mut)
-    (15 u64 mut)
-    (16 u64 imm)
-    (17 u64 mut)
-    (18 u64 mut)
-    (19 u64 mut)
-    (20 (tuple u64 bool) mut)
-    (21 u64 imm)
-    (22 u64 mut)
-    (23 (tuple u64 bool) mut)
-    (24 u64 mut)
-    (25 u32 mut)
-    (26 (tuple u64 bool) mut)
-    (27 bool mut)
-    (28 (tuple u64 bool) mut)
-    (29 u64 imm)
-    (30 u64 mut)
-    (31 u64 mut)
-    (32 (tuple u64 bool) mut)
-    (33 u64 mut)
-    (34 u32 mut)
-    (35 u64 mut)
-    (36 (tuple u64 bool) mut))
-  (debug "size" (p 1) (arg 1))
-  (debug "size_val" (p 10))
-  (debug "low" (p 11))
-  (debug "high" (p 12))
-  (debug "mid" (p 16))
-  (debug "mmr_size" (p 21))
-  (debug "result" (p 29))
-  (bb 0
-    (assign (p 3) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 56 17))
-    (assign (p 4) (use (const-ref (const-item (adt "merkle::mmr::Family") "MAX_NODES" (const-agg (adt "merkle::position::Position<merkle::mmr::Family>") 0 (int u64 9223372036854775807) (zst (adt "std::marker::PhantomData<merkle::mmr::Family>")))))) (at "src/merkle/mmr/iterator.rs" 56 25))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::le") (args (move (p 3)) (move (p 4))) (p 2) 1 (at "src/merkle/mmr/iterator.rs" 56 17)))
-  (bb 1
-    (switch (move (p 2)) (0 3) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 56 17)))
-  (bb 2
-    (assign (p 8) (ref shared (p 1)) (at "src/merkle/mmr/iterator.rs" 64 12))
-    (assign (p 9) (use (const-ref (int u64 0))) (at "src/merkle/mmr/iterator.rs" 64 20))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialEq<u64>>::eq") (args (move (p 8)) (move (p 9))) (p 7) 5 (at "src/merkle/mmr/iterator.rs" 64 12)))
-  (bb 3
-    (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 6) 4))
-  (bb 4
-    (call (diverge "core::panicking::panic_fmt") (args (move (p 6))) (p 5) none))
-  (bb 5
-    (switch (move (p 7)) (0 7) (otherwise 6) (at "src/merkle/mmr/iterator.rs" 64 12)))
-  (bb 6
-    (assign (p 0) (use (copy (p 1))) (at "src/merkle/mmr/iterator.rs" 65 20))
-    (goto 23 (at "src/merkle/mmr/iterator.rs" 89 6)))
-  (bb 7
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::as_u64") (args (copy (p 1))) (p 10) 8 (at "src/merkle/mmr/iterator.rs" 70 24)))
-  (bb 8
-    (assign (p 11) (use (int u64 0)) (at "src/merkle/mmr/iterator.rs" 71 23))
-    (assign (p 12) (use (copy (p 10))) (at "src/merkle/mmr/iterator.rs" 72 24))
-    (goto 9 (at "src/merkle/mmr/iterator.rs" 74 9)))
-  (bb 9
-    (assign (p 14) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 74 15))
-    (assign (p 15) (use (copy (p 12))) (at "src/merkle/mmr/iterator.rs" 74 21))
-    (assign (p 13) (bin lt (move (p 14)) (move (p 15))) (at "src/merkle/mmr/iterator.rs" 74 15))
-    (switch (move (p 13)) (0 19) (otherwise 10) (at "src/merkle/mmr/iterator.rs" 74 15)))
-  (bb 10
-    (assign (p 18) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 76 24))
-    (assign (p 19) (use (copy (p 12))) (at "src/merkle/mmr/iterator.rs" 76 30))
-    (assign (p 20) (checked add (copy (p 18)) (copy (p 19))) (at "src/merkle/mmr/iterator.rs" 76 23))
-    (assert (move (p 20 (field 1 bool))) false overflow 11 (at "src/merkle/mmr/iterator.rs" 76 23)))
-  (bb 11
-    (assign (p 17) (use (move (p 20 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 76 23))
-    (call (fn "core::num::<impl u64>::div_ceil") (args (move (p 17)) (int u64 2)) (p 16) 12 (at "src/merkle/mmr/iterator.rs" 76 23)))
-  (bb 12
-    (assign (p 23) (checked mul (int u64 2) (copy (p 16))) (at "src/merkle/mmr/iterator.rs" 77 28))
-    (assert (move (p 23 (field 1 bool))) false overflow 13 (at "src/merkle/mmr/iterator.rs" 77 28)))
-  (bb 13
-    (assign (p 22) (use (move (p 23 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 77 28))
-    (call (fn "core::num::<impl u64>::count_ones") (args (copy (p 16))) (p 25) 14 (at "src/merkle/mmr/iterator.rs" 77 38)))
-  (bb 14
-    (assign (p 24) (cast int-to-int (move (p 25)) u64) (at "src/merkle/mmr/iterator.rs" 77 38))
-    (assign (p 26) (checked sub (copy (p 22)) (copy (p 24))) (at "src/merkle/mmr/iterator.rs" 77 28))
-    (assert (move (p 26 (field 1 bool))) false overflow 15 (at "src/merkle/mmr/iterator.rs" 77 28)))
-  (bb 15
-    (assign (p 21) (use (move (p 26 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 77 28))
-    (assign (p 27) (bin le (copy (p 21)) (copy (p 10))) (at "src/merkle/mmr/iterator.rs" 79 16))
-    (switch (move (p 27)) (0 17) (otherwise 16) (at "src/merkle/mmr/iterator.rs" 79 16)))
-  (bb 16
-    (assign (p 11) (use (copy (p 16))) (at "src/merkle/mmr/iterator.rs" 80 17))
-    (goto 9 (at "src/merkle/mmr/iterator.rs" 79 13)))
-  (bb 17
-    (assign (p 28) (checked sub (copy (p 16)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 82 24))
-    (assert (move (p 28 (field 1 bool))) false overflow 18 (at "src/merkle/mmr/iterator.rs" 82 24)))
-  (bb 18
-    (assign (p 12) (use (move (p 28 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 82 17))
-    (goto 9 (at "src/merkle/mmr/iterator.rs" 79 13)))
-  (bb 19
-    (assign (p 31) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 87 26))
-    (assign (p 32) (checked mul (int u64 2) (copy (p 31))) (at "src/merkle/mmr/iterator.rs" 87 22))
-    (assert (move (p 32 (field 1 bool))) false overflow 20 (at "src/merkle/mmr/iterator.rs" 87 22)))
-  (bb 20
-    (assign (p 30) (use (move (p 32 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 87 22))
-    (assign (p 35) (use (copy (p 11))) (at "src/merkle/mmr/iterator.rs" 87 32))
-    (call (fn "core::num::<impl u64>::count_ones") (args (move (p 35))) (p 34) 21 (at "src/merkle/mmr/iterator.rs" 87 32)))
-  (bb 21
-    (assign (p 33) (cast int-to-int (move (p 34)) u64) (at "src/merkle/mmr/iterator.rs" 87 32))
-    (assign (p 36) (checked sub (copy (p 30)) (copy (p 33))) (at "src/merkle/mmr/iterator.rs" 87 22))
-    (assert (move (p 36 (field 1 bool))) false overflow 22 (at "src/merkle/mmr/iterator.rs" 87 22)))
-  (bb 22
-    (assign (p 29) (use (move (p 36 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 87 22))
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::new") (args (copy (p 29))) (p 0) 23 (at "src/merkle/mmr/iterator.rs" 88 9)))
-  (bb 23
-    (return (at "src/merkle/mmr/iterator.rs" 89 6)))
-)
-(fn "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::iter::Iterator>::next"
-  (kind root) (def "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::iter::Iterator>::next") (args ())
-  (item impl (adt "merkle::mmr::iterator::PeakIterator") "Iterator" () "next")
-  (span "src/merkle/mmr/iterator.rs" 95 5)
-  (argc 1)
-  (locals
-    (0 (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
-    (1 (ref mut (adt "merkle::mmr::iterator::PeakIterator")) imm)
-    (2 bool mut)
-    (3 u64 mut)
-    (4 bool mut)
-    (5 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (6 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (7 (tuple (adt "merkle::position::Position<merkle::mmr::Family>") u32) imm)
-    (8 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
-    (9 u32 mut)
-    (10 u32 mut)
-    (11 u64 mut)
-    (12 (tuple u32 bool) mut)
-    (13 unit imm)
-    (14 (ref mut (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (15 u64 mut)
-    (16 u64 mut)
-    (17 (tuple u64 bool) mut)
-    (18 bool mut)
-    (19 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (20 (ref shared (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (21 never mut)
-    (22 u32 mut)
-    (23 bool mut)
-    (24 unit imm)
-    (25 (ref mut (adt "merkle::position::Position<merkle::mmr::Family>")) mut)
-    (26 u64 mut))
-  (debug "self" (p 1) (arg 1))
-  (debug "peak_item" (p 7))
-  (bb 0
-    (goto 1 (at "src/merkle/mmr/iterator.rs" 96 9)))
-  (bb 1
-    (assign (p 3) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 96 15))
-    (assign (p 2) (bin gt (move (p 3)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 96 15))
-    (switch (move (p 2)) (0 14) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 96 15)))
-  (bb 2
-    (assign (p 5) (ref shared (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 97 16))
-    (assign (p 6) (ref shared (p 1 deref (field 0 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 97 32))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::lt") (args (move (p 5)) (move (p 6))) (p 4) 3 (at "src/merkle/mmr/iterator.rs" 97 16)))
-  (bb 3
-    (switch (move (p 4)) (0 12) (otherwise 4) (at "src/merkle/mmr/iterator.rs" 97 16)))
-  (bb 4
-    (assign (p 8) (use (copy (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>"))))) (at "src/merkle/mmr/iterator.rs" 99 34))
-    (assign (p 11) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 99 49))
-    (call (fn "core::num::<impl u64>::trailing_zeros") (args (move (p 11))) (p 10) 5 (at "src/merkle/mmr/iterator.rs" 99 49)))
-  (bb 5
-    (assign (p 12) (checked sub (copy (p 10)) (int u32 1)) (at "src/merkle/mmr/iterator.rs" 99 49))
-    (assert (move (p 12 (field 1 bool))) false overflow 6 (at "src/merkle/mmr/iterator.rs" 99 49)))
-  (bb 6
-    (assign (p 9) (use (move (p 12 (field 0 u32)))) (at "src/merkle/mmr/iterator.rs" 99 49))
-    (assign (p 7) (agg (tuple) (move (p 8)) (move (p 9))) (at "src/merkle/mmr/iterator.rs" 99 33))
-    (assign (p 14) (ref mut (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 101 17))
-    (assign (p 16) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 101 34))
-    (assign (p 17) (checked sub (copy (p 16)) (int u64 1)) (at "src/merkle/mmr/iterator.rs" 101 34))
-    (assert (move (p 17 (field 1 bool))) false overflow 7 (at "src/merkle/mmr/iterator.rs" 101 34)))
-  (bb 7
-    (assign (p 15) (use (move (p 17 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 101 34))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::AddAssign<u64>>::add_assign") (args (move (p 14)) (move (p 15))) (p 13) 8 (at "src/merkle/mmr/iterator.rs" 101 17)))
-  (bb 8
-    (assign (p 19) (ref shared (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 102 25))
-    (assign (p 20) (ref shared (p 1 deref (field 0 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 102 42))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::ge") (args (move (p 19)) (move (p 20))) (p 18) 9 (at "src/merkle/mmr/iterator.rs" 102 25)))
-  (bb 9
-    (switch (move (p 18)) (0 11) (otherwise 10) (at "src/merkle/mmr/iterator.rs" 102 25)))
-  (bb 10
-    (assign (p 0) (agg (adt (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") 1) (copy (p 7))) (at "src/merkle/mmr/iterator.rs" 103 24))
-    (goto 15 (at "src/merkle/mmr/iterator.rs" 110 6)))
-  (bb 11
-    (call (diverge "core::panicking::panic") (args (unsupported "constant of type (ref shared str)")) (p 21) none (at "src/merkle/mmr/iterator.rs" 102 17)))
-  (bb 12
-    (assign (p 22) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/iterator.rs" 106 13))
-    (assign (p 23) (bin lt (move (p 22)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 106 13))
-    (assert (move (p 23)) true overflow 13 (at "src/merkle/mmr/iterator.rs" 106 13)))
-  (bb 13
-    (assign (p 1 deref (field 2 u64)) (bin shr (copy (p 1 deref (field 2 u64))) (int i32 1)) (at "src/merkle/mmr/iterator.rs" 106 13))
-    (assign (p 25) (ref mut (p 1 deref (field 1 (adt "merkle::position::Position<merkle::mmr::Family>")))) (at "src/merkle/mmr/iterator.rs" 107 13))
-    (assign (p 26) (use (copy (p 1 deref (field 2 u64)))) (at "src/merkle/mmr/iterator.rs" 107 30))
-    (call (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::ops::SubAssign<u64>>::sub_assign") (args (move (p 25)) (move (p 26))) (p 24) 1 (at "src/merkle/mmr/iterator.rs" 107 13)))
-  (bb 14
-    (assign (p 0) (agg (adt (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0)) (at "src/merkle/mmr/iterator.rs" 109 9))
-    (goto 15 (at "src/merkle/mmr/iterator.rs" 110 6)))
-  (bb 15
-    (return (at "src/merkle/mmr/iterator.rs" 110 6)))
-)
-(fn "commonware_storage::merkle::mmr::iterator::pos_to_height"
-  (kind root) (def "commonware_storage::merkle::mmr::iterator::pos_to_height") (args ())
-  (item fn "pos_to_height")
-  (span "src/merkle/mmr/iterator.rs" 114 1)
-  (argc 1)
-  (locals
-    (0 u32 mut)
-    (1 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
-    (2 u64 mut)
-    (3 bool mut)
-    (4 u64 mut)
-    (5 u64 mut)
-    (6 u32 mut)
-    (7 u64 mut)
-    (8 bool mut)
-    (9 bool mut)
-    (10 u64 mut)
-    (11 bool mut)
-    (12 u64 mut)
-    (13 u64 mut)
-    (14 u64 mut)
-    (15 (tuple u64 bool) mut)
-    (16 u32 mut)
-    (17 bool mut)
-    (18 u64 mut))
-  (debug "pos" (p 1) (arg 1))
-  (debug "pos" (p 2))
-  (debug "size" (p 5))
-  (bb 0
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::as_u64") (args (copy (p 1))) (p 2) 1 (at "src/merkle/mmr/iterator.rs" 115 19)))
-  (bb 1
-    (assign (p 4) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 117 8))
-    (assign (p 3) (bin eq (move (p 4)) (int u64 0)) (at "src/merkle/mmr/iterator.rs" 117 8))
-    (switch (move (p 3)) (0 3) (otherwise 2) (at "src/merkle/mmr/iterator.rs" 117 8)))
-  (bb 2
-    (assign (p 0) (use (int u32 0)) (at "src/merkle/mmr/iterator.rs" 118 16))
-    (goto 13 (at "src/merkle/mmr/iterator.rs" 130 2)))
-  (bb 3
-    (assign (p 7) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 121 32))
-    (call (fn "core::num::<impl u64>::leading_zeros") (args (move (p 7))) (p 6) 4 (at "src/merkle/mmr/iterator.rs" 121 32)))
-  (bb 4
-    (assign (p 8) (bin lt (copy (p 6)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 121 20))
-    (assert (move (p 8)) true overflow 5 (at "src/merkle/mmr/iterator.rs" 121 20)))
-  (bb 5
-    (assign (p 5) (bin shr (const-item u64 "MAX" (int u64 18446744073709551615)) (move (p 6))) (at "src/merkle/mmr/iterator.rs" 121 20))
-    (goto 6 (at "src/merkle/mmr/iterator.rs" 122 5)))
-  (bb 6
-    (assign (p 10) (use (copy (p 5))) (at "src/merkle/mmr/iterator.rs" 122 11))
-    (assign (p 9) (bin ne (move (p 10)) (int u64 0)) (at "src/merkle/mmr/iterator.rs" 122 11))
-    (switch (move (p 9)) (0 12) (otherwise 7) (at "src/merkle/mmr/iterator.rs" 122 11)))
-  (bb 7
-    (assign (p 12) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 123 12))
-    (assign (p 13) (use (copy (p 5))) (at "src/merkle/mmr/iterator.rs" 123 19))
-    (assign (p 11) (bin ge (move (p 12)) (move (p 13))) (at "src/merkle/mmr/iterator.rs" 123 12))
-    (switch (move (p 11)) (0 10) (otherwise 8) (at "src/merkle/mmr/iterator.rs" 123 12)))
-  (bb 8
-    (assign (p 14) (use (copy (p 5))) (at "src/merkle/mmr/iterator.rs" 124 20))
-    (assign (p 15) (checked sub (copy (p 2)) (copy (p 14))) (at "src/merkle/mmr/iterator.rs" 124 13))
-    (assert (move (p 15 (field 1 bool))) false overflow 9 (at "src/merkle/mmr/iterator.rs" 124 13)))
-  (bb 9
-    (assign (p 2) (use (move (p 15 (field 0 u64)))) (at "src/merkle/mmr/iterator.rs" 124 13))
-    (goto 10 (at "src/merkle/mmr/iterator.rs" 123 9)))
-  (bb 10
-    (assign (p 16) (cast int-to-int (int i32 1) u32) (at "src/merkle/mmr/iterator.rs" 126 9))
-    (assign (p 17) (bin lt (move (p 16)) (int u32 64)) (at "src/merkle/mmr/iterator.rs" 126 9))
-    (assert (move (p 17)) true overflow 11 (at "src/merkle/mmr/iterator.rs" 126 9)))
-  (bb 11
-    (assign (p 5) (bin shr (copy (p 5)) (int i32 1)) (at "src/merkle/mmr/iterator.rs" 126 9))
-    (goto 6 (at "src/merkle/mmr/iterator.rs" 122 5)))
-  (bb 12
-    (assign (p 18) (use (copy (p 2))) (at "src/merkle/mmr/iterator.rs" 129 5))
-    (assign (p 0) (cast int-to-int (move (p 18)) u32) (at "src/merkle/mmr/iterator.rs" 129 5))
-    (goto 13 (at "src/merkle/mmr/iterator.rs" 130 2)))
-  (bb 13
-    (return (at "src/merkle/mmr/iterator.rs" 130 2)))
-)
 (fn "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::default::Default>::default"
   (kind root) (def "<commonware_storage::merkle::mmr::iterator::PeakIterator as std::default::Default>::default") (args ())
   (item impl (adt "merkle::mmr::iterator::PeakIterator") "Default" () "default")
@@ -2977,29 +2977,29 @@
 (fn "<commonware_storage::merkle::mmr::Family as std::clone::Clone>::clone"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as std::clone::Clone>::clone") (args ())
   (item impl (adt "merkle::mmr::Family") "Clone" () "clone")
-  (span "src/merkle/mmr/mod.rs" 116 16)
+  (span "src/merkle/mmr/mod.rs" 102 16)
   (argc 1)
   (locals
     (0 (adt "merkle::mmr::Family") mut)
     (1 (ref shared (adt "merkle::mmr::Family")) imm))
   (debug "self" (p 1) (arg 1))
   (bb 0
-    (return (at "src/merkle/mmr/mod.rs" 116 21)))
+    (return (at "src/merkle/mmr/mod.rs" 102 21)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as std::default::Default>::default"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as std::default::Default>::default") (args ())
   (item impl (adt "merkle::mmr::Family") "Default" () "default")
-  (span "src/merkle/mmr/mod.rs" 116 30)
+  (span "src/merkle/mmr/mod.rs" 102 30)
   (argc 0)
   (locals
     (0 (adt "merkle::mmr::Family") mut))
   (bb 0
-    (return (at "src/merkle/mmr/mod.rs" 116 37)))
+    (return (at "src/merkle/mmr/mod.rs" 102 37)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as std::cmp::PartialEq>::eq"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as std::cmp::PartialEq>::eq") (args ())
   (item impl (adt "merkle::mmr::Family") "PartialEq" ((adt "merkle::mmr::Family")) "eq")
-  (span "src/merkle/mmr/mod.rs" 116 39)
+  (span "src/merkle/mmr/mod.rs" 102 39)
   (argc 2)
   (locals
     (0 bool mut)
@@ -3008,20 +3008,20 @@
   (debug "self" (p 1) (arg 1))
   (debug "other" (p 2) (arg 2))
   (bb 0
-    (assign (p 0) (use (int bool 1)) (at "src/merkle/mmr/mod.rs" 116 39))
-    (return (at "src/merkle/mmr/mod.rs" 116 48)))
+    (assign (p 0) (use (int bool 1)) (at "src/merkle/mmr/mod.rs" 102 39))
+    (return (at "src/merkle/mmr/mod.rs" 102 48)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as std::cmp::Eq>::assert_fields_are_eq"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as std::cmp::Eq>::assert_fields_are_eq") (args ())
   (item impl (adt "merkle::mmr::Family") "Eq" () "assert_fields_are_eq")
-  (span "src/merkle/mmr/mod.rs" 116 50)
+  (span "src/merkle/mmr/mod.rs" 102 50)
   (argc 1)
   (locals
     (0 unit mut)
     (1 (ref shared (adt "merkle::mmr::Family")) imm))
   (debug "self" (p 1) (arg 1))
   (bb 0
-    (return (at "src/merkle/mmr/mod.rs" 116 52)))
+    (return (at "src/merkle/mmr/mod.rs" 102 52)))
 )
 (fn "core::num::<impl u64>::checked_add"
   (kind callee) (def "core::num::<impl u64>::checked_add") (args ())
@@ -3256,106 +3256,49 @@
     (assign (p 0) (agg (adt (adt "std::option::Option<std::cmp::Ordering>") 1) (move (p 3))))
     (return))
 )
-(fn "core::num::<impl u64>::checked_mul"
-  (kind callee) (def "core::num::<impl u64>::checked_mul") (args ())
-  (item inherent u64 "checked_mul")
-  (argc 2)
-  (locals
-    (0 (adt "std::option::Option<u64>") mut)
-    (1 u64 imm)
-    (2 u64 imm)
-    (3 u64 imm)
-    (4 bool imm)
-    (5 (tuple u64 bool) mut)
-    (6 unit imm))
-  (debug "self" (p 1) (arg 1))
-  (debug "rhs" (p 2) (arg 2))
-  (debug "a" (p 3))
-  (debug "b" (p 4))
-  (debug "self" (p 1) (arg 1))
-  (debug "rhs" (p 2) (arg 2))
-  (debug "b" (p 4) (arg 1))
-  (bb 0
-    (assign (p 5) (checked mul (copy (p 1)) (copy (p 2))))
-    (assign (p 3) (use (copy (p 5 (field 0 u64)))))
-    (assign (p 4) (use (copy (p 5 (field 1 bool)))))
-    (switch (copy (p 4)) (0 4) (otherwise 2)))
-  (bb 1
-    (return))
-  (bb 2
-    (call (intrinsic "cold_path" ()) (args) (p 6) 3))
-  (bb 3
-    (assign (p 0) (use (const-agg (adt "std::option::Option<u64>") 0)))
-    (goto 1))
-  (bb 4
-    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 1) (copy (p 3))))
-    (goto 1))
-)
-(fn "std::option::Option::<u64>::expect"
-  (kind callee) (def "std::option::Option::<T>::expect") (args (u64))
-  (item inherent (adt "std::option::Option<u64>") "expect")
-  (argc 2)
-  (locals
-    (0 u64 mut)
-    (1 (adt "std::option::Option<u64>") imm)
-    (2 (ref shared str) imm)
-    (3 isize mut)
-    (4 never mut))
-  (debug "self" (p 1) (arg 1))
-  (debug "msg" (p 2) (arg 2))
-  (debug "val" (p 0))
-  (bb 0
-    (assign (p 3) (discr (p 1)))
-    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
-  (bb 1
-    (unreachable))
-  (bb 2
-    (call (diverge "std::option::expect_failed") (args (move (p 2))) (p 4) none))
-  (bb 3
-    (assign (p 0) (use (move (p 1 (downcast 1) (field 0 u64)))))
-    (return))
-)
-(fn "core::num::<impl u64>::count_ones"
-  (kind callee) (def "core::num::<impl u64>::count_ones") (args ())
-  (item inherent u64 "count_ones")
+(fn "core::num::<impl u64>::leading_zeros"
+  (kind callee) (def "core::num::<impl u64>::leading_zeros") (args ())
+  (item inherent u64 "leading_zeros")
   (argc 1)
   (locals
     (0 u32 mut)
     (1 u64 imm))
   (debug "self" (p 1) (arg 1))
   (bb 0
-    (call (intrinsic "ctpop" (u64)) (args (move (p 1))) (p 0) 1))
+    (call (intrinsic "ctlz" (u64)) (args (move (p 1))) (p 0) 1))
   (bb 1
     (return))
 )
-(fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}"
-  (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args ())
-  (item closure)
-  (span "src/merkle/mmr/mod.rs" 167 17)
-  (argc 2)
+(fn "std::fmt::Arguments::<'_>::from_str"
+  (kind callee) (def "std::fmt::Arguments::<'a>::from_str") (args ())
+  (item inherent (adt "std::fmt::Arguments<'_>") "from_str")
+  (argc 1)
   (locals
-    (0 u64 mut)
-    (1 (ref shared (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}" unit)) mut)
-    (2 u64 imm)
-    (3 u64 mut)
-    (4 (tuple u64 bool) mut)
-    (5 u64 mut)
-    (6 u32 mut)
-    (7 (tuple u64 bool) mut))
-  (debug "n" (p 2) (arg 2))
+    (0 (adt "std::fmt::Arguments<'_>") mut)
+    (1 (ref shared str) imm)
+    (2 (adt "std::ptr::NonNull<u8>") mut)
+    (3 (unsupported "type RawPtr(Ty { id: 34, kind: RigidTy(Uint(U8)) }, Not)") mut)
+    (4 (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>") mut)
+    (5 usize mut)
+    (6 usize mut)
+    (7 usize mut)
+    (8 (unsupported "type RawPtr(Ty { id: 68, kind: RigidTy(Str) }, Not)") mut)
+    (9 (ref shared (slice u8)) imm))
+  (debug "s" (p 1) (arg 1))
+  (debug "self" (p 1) (arg 1))
+  (debug "self" (p 1) (arg 1))
+  (debug "self" (p 1) (arg 1))
   (bb 0
-    (assign (p 4) (checked mul (int u64 2) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 167 26))
-    (assert (move (p 4 (field 1 bool))) false overflow 1 (at "src/merkle/mmr/mod.rs" 167 26)))
-  (bb 1
-    (assign (p 3) (use (move (p 4 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 167 26))
-    (call (fn "core::num::<impl u64>::count_ones") (args (copy (p 2))) (p 6) 2 (at "src/merkle/mmr/mod.rs" 167 34)))
-  (bb 2
-    (assign (p 5) (cast int-to-int (move (p 6)) u64) (at "src/merkle/mmr/mod.rs" 167 34))
-    (assign (p 7) (checked sub (copy (p 3)) (copy (p 5))) (at "src/merkle/mmr/mod.rs" 167 26))
-    (assert (move (p 7 (field 1 bool))) false overflow 3 (at "src/merkle/mmr/mod.rs" 167 26)))
-  (bb 3
-    (assign (p 0) (use (move (p 7 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 167 26))
-    (return (at "src/merkle/mmr/mod.rs" 167 55)))
+    (assign (p 8) (unsupported "rvalue AddressOf(Const, (*_1))"))
+    (assign (p 3) (cast (unsupported "PtrToPtr") (copy (p 8)) (unsupported "type RawPtr(Ty { id: 34, kind: RigidTy(Uint(U8)) }, Not)")))
+    (assign (p 2) (cast transmute (copy (p 3)) (adt "std::ptr::NonNull<u8>")))
+    (assign (p 9) (cast transmute (copy (p 1)) (ref shared (slice u8))))
+    (assign (p 7) (un ptr-metadata (copy (p 9))))
+    (assign (p 6) (bin shl (move (p 7)) (int i32 1)))
+    (assign (p 5) (bin or (move (p 6)) (int usize 1)))
+    (assign (p 4) (cast transmute (move (p 5)) (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>")))
+    (assign (p 0) (agg (adt (adt "std::fmt::Arguments<'_>") 0) (move (p 2)) (move (p 4))))
+    (return))
 )
 (fn "core::num::<impl u64>::trailing_ones"
   (kind callee) (def "core::num::<impl u64>::trailing_ones") (args ())
@@ -3372,68 +3315,6 @@
     (call (intrinsic "cttz" (u64)) (args (move (p 2))) (p 0) 1))
   (bb 1
     (return))
-)
-(fn "std::ops::RangeInclusive::<u32>::new"
-  (kind callee) (def "std::ops::RangeInclusive::<Idx>::new") (args (u32))
-  (item inherent (adt "std::ops::RangeInclusive<u32>") "new")
-  (argc 2)
-  (locals
-    (0 (adt "std::ops::RangeInclusive<u32>") mut)
-    (1 u32 imm)
-    (2 u32 imm))
-  (debug "start" (p 1) (arg 1))
-  (debug "end" (p 2) (arg 2))
-  (bb 0
-    (assign (p 0) (agg (adt (adt "std::ops::RangeInclusive<u32>") 0) (copy (p 1)) (copy (p 2)) (int bool 0)))
-    (return))
-)
-(fn "core::num::<impl u64>::leading_zeros"
-  (kind callee) (def "core::num::<impl u64>::leading_zeros") (args ())
-  (item inherent u64 "leading_zeros")
-  (argc 1)
-  (locals
-    (0 u32 mut)
-    (1 u64 imm))
-  (debug "self" (p 1) (arg 1))
-  (bb 0
-    (call (intrinsic "ctlz" (u64)) (args (move (p 1))) (p 0) 1))
-  (bb 1
-    (return))
-)
-(fn "std::result::Result::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_storage::merkle::Error<commonware_storage::merkle::mmr::Family>>::expect"
-  (kind callee) (def "std::result::Result::<T, E>::expect") (args ((adt "merkle::position::Position<merkle::mmr::Family>") (adt "merkle::Error<merkle::mmr::Family>")))
-  (item inherent (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, merkle::Error<merkle::mmr::Family>>") "expect")
-  (argc 2)
-  (locals
-    (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
-    (1 (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, merkle::Error<merkle::mmr::Family>>") imm)
-    (2 (ref shared str) imm)
-    (3 isize mut)
-    (4 (adt "merkle::Error<merkle::mmr::Family>") imm)
-    (5 never mut)
-    (6 (ref shared (unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 2733, name: \"std::fmt::Debug\" }), generic_args: GenericArgs([]) }), bound_vars: [] }], Region { kind: ReErased })")) mut)
-    (7 (ref shared (adt "merkle::Error<merkle::mmr::Family>")) imm))
-  (debug "self" (p 1) (arg 1))
-  (debug "msg" (p 2) (arg 2))
-  (debug "t" (p 0))
-  (debug "e" (p 4))
-  (bb 0
-    (assign (p 3) (discr (p 1)))
-    (switch (move (p 3)) (0 3) (1 2) (otherwise 1)))
-  (bb 1
-    (unreachable))
-  (bb 2
-    (assign (p 4) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::Error<merkle::mmr::Family>"))))))
-    (assign (p 7) (ref shared (p 4)))
-    (assign (p 6) (cast unsize (copy (p 7)) (ref shared (unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 2733, name: \"std::fmt::Debug\" }), generic_args: GenericArgs([]) }), bound_vars: [] }], Region { kind: ReErased })"))))
-    (call (diverge "std::result::unwrap_failed") (args (move (p 2)) (move (p 6))) (p 5) none))
-  (bb 3
-    (assign (p 0) (use (move (p 1 (downcast 0) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
-    (return))
-  (bb 4
-    (drop (p 4) glue 5))
-  (bb 5
-    (resume))
 )
 (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::le"
   (kind root) (def "std::cmp::PartialOrd::le") (args ((adt "merkle::position::Position<merkle::mmr::Family>") (adt "merkle::position::Position<merkle::mmr::Family>")))
@@ -3471,224 +3352,6 @@
     (assign (p 0) (use (int bool 0)))
     (goto 2))
 )
-(fn "std::fmt::Arguments::<'_>::from_str"
-  (kind callee) (def "std::fmt::Arguments::<'a>::from_str") (args ())
-  (item inherent (adt "std::fmt::Arguments<'_>") "from_str")
-  (argc 1)
-  (locals
-    (0 (adt "std::fmt::Arguments<'_>") mut)
-    (1 (ref shared str) imm)
-    (2 (adt "std::ptr::NonNull<u8>") mut)
-    (3 (unsupported "type RawPtr(Ty { id: 34, kind: RigidTy(Uint(U8)) }, Not)") mut)
-    (4 (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>") mut)
-    (5 usize mut)
-    (6 usize mut)
-    (7 usize mut)
-    (8 (unsupported "type RawPtr(Ty { id: 68, kind: RigidTy(Str) }, Not)") mut)
-    (9 (ref shared (slice u8)) imm))
-  (debug "s" (p 1) (arg 1))
-  (debug "self" (p 1) (arg 1))
-  (debug "self" (p 1) (arg 1))
-  (debug "self" (p 1) (arg 1))
-  (bb 0
-    (assign (p 8) (unsupported "rvalue AddressOf(Const, (*_1))"))
-    (assign (p 3) (cast (unsupported "PtrToPtr") (copy (p 8)) (unsupported "type RawPtr(Ty { id: 34, kind: RigidTy(Uint(U8)) }, Not)")))
-    (assign (p 2) (cast transmute (copy (p 3)) (adt "std::ptr::NonNull<u8>")))
-    (assign (p 9) (cast transmute (copy (p 1)) (ref shared (slice u8))))
-    (assign (p 7) (un ptr-metadata (copy (p 9))))
-    (assign (p 6) (bin shl (move (p 7)) (int i32 1)))
-    (assign (p 5) (bin or (move (p 6)) (int usize 1)))
-    (assign (p 4) (cast transmute (move (p 5)) (adt "std::ptr::NonNull<core::fmt::rt::Argument<'_>>")))
-    (assign (p 0) (agg (adt (adt "std::fmt::Arguments<'_>") 0) (move (p 2)) (move (p 4))))
-    (return))
-)
-(fn "std::iter::once::<(commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, u32)>"
-  (kind callee) (def "std::iter::once") (args ((tuple (adt "merkle::position::Position<merkle::mmr::Family>") u32)))
-  (item fn "once")
-  (argc 1)
-  (locals
-    (0 (adt "std::iter::Once<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
-    (1 (tuple (adt "merkle::position::Position<merkle::mmr::Family>") u32) imm)
-    (2 (adt "std::option::IntoIter<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
-    (3 (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
-    (4 (adt "std::option::Item<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut))
-  (debug "value" (p 1) (arg 1))
-  (bb 0
-    (assign (p 3) (agg (adt (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") 1) (copy (p 1))))
-    (assign (p 4) (agg (adt (adt "std::option::Item<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0) (copy (p 3))))
-    (assign (p 2) (agg (adt (adt "std::option::IntoIter<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0) (move (p 4))))
-    (assign (p 0) (agg (adt (adt "std::iter::Once<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0) (move (p 2))))
-    (return))
-)
-(fn "core::num::<impl u64>::checked_shl"
-  (kind callee) (def "core::num::<impl u64>::checked_shl") (args ())
-  (item inherent u64 "checked_shl")
-  (argc 2)
-  (locals
-    (0 (adt "std::option::Option<u64>") mut)
-    (1 u64 imm)
-    (2 u32 imm)
-    (3 bool mut)
-    (4 u64 mut)
-    (5 unit imm))
-  (debug "self" (p 1) (arg 1))
-  (debug "rhs" (p 2) (arg 2))
-  (debug "self" (p 1) (arg 1))
-  (debug "rhs" (p 2) (arg 2))
-  (bb 0
-    (assign (p 3) (bin lt (copy (p 2)) (int u32 64)))
-    (switch (move (p 3)) (0 2) (otherwise 1)))
-  (bb 1
-    (switch (runtime-checks ub) (0 5) (otherwise 4)))
-  (bb 2
-    (assign (p 0) (use (const-agg (adt "std::option::Option<u64>") 0)))
-    (goto 3))
-  (bb 3
-    (return))
-  (bb 4
-    (call (fn "core::num::<impl u64>::unchecked_shl::precondition_check") (args (copy (p 2))) (p 5) 5))
-  (bb 5
-    (assign (p 4) (bin shl-unchecked (copy (p 1)) (copy (p 2))))
-    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 1) (move (p 4))))
-    (goto 3))
-)
-(fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:269:23: 269:26}>"
-  (kind closure) (def "std::option::Option::<T>::and_then") (args ())
-  (item inherent (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") "and_then")
-  (argc 2)
-  (locals
-    (0 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") mut)
-    (1 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") imm)
-    (2 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}" unit) imm)
-    (3 isize mut)
-    (4 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
-    (5 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}" unit) mut)
-    (6 (tuple (adt "merkle::position::Position<merkle::mmr::Family>")) mut))
-  (debug "self" (p 1) (arg 1))
-  (debug "f" (p 2) (arg 2))
-  (debug "x" (p 4))
-  (bb 0
-    (assign (p 3) (discr (p 1)))
-    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
-  (bb 1
-    (unreachable))
-  (bb 2
-    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") 0)))
-    (drop (p 2) no-glue 5))
-  (bb 3
-    (assign (p 4) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
-    (assign (p 5) (use (move (p 2))))
-    (assign (p 6) (agg (tuple) (copy (p 4))))
-    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}") (args (move (p 5)) (move (p 6))) (p 0) 4))
-  (bb 4
-    (goto 5))
-  (bb 5
-    (return))
-)
-(fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::expect"
-  (kind callee) (def "std::option::Option::<T>::expect") (args ((adt "merkle::position::Position<merkle::mmr::Family>")))
-  (item inherent (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") "expect")
-  (argc 2)
-  (locals
-    (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
-    (1 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") imm)
-    (2 (ref shared str) imm)
-    (3 isize mut)
-    (4 never mut))
-  (debug "self" (p 1) (arg 1))
-  (debug "msg" (p 2) (arg 2))
-  (debug "val" (p 0))
-  (bb 0
-    (assign (p 3) (discr (p 1)))
-    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
-  (bb 1
-    (unreachable))
-  (bb 2
-    (call (diverge "std::option::expect_failed") (args (move (p 2))) (p 4) none))
-  (bb 3
-    (assign (p 0) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
-    (return))
-)
-(fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:279:23: 279:26}>"
-  (kind closure) (def "std::option::Option::<T>::and_then") (args ())
-  (item inherent (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") "and_then")
-  (argc 2)
-  (locals
-    (0 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") mut)
-    (1 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") imm)
-    (2 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}" (tuple (ref shared u64))) imm)
-    (3 isize mut)
-    (4 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
-    (5 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}" (tuple (ref shared u64))) mut)
-    (6 (tuple (adt "merkle::position::Position<merkle::mmr::Family>")) mut))
-  (debug "self" (p 1) (arg 1))
-  (debug "f" (p 2) (arg 2))
-  (debug "x" (p 4))
-  (bb 0
-    (assign (p 3) (discr (p 1)))
-    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
-  (bb 1
-    (unreachable))
-  (bb 2
-    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") 0)))
-    (drop (p 2) no-glue 5))
-  (bb 3
-    (assign (p 4) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
-    (assign (p 5) (use (move (p 2))))
-    (assign (p 6) (agg (tuple) (copy (p 4))))
-    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}") (args (move (p 5)) (move (p 6))) (p 0) 4))
-  (bb 4
-    (goto 5))
-  (bb 5
-    (return))
-)
-(fn "std::option::Option::<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>::expect"
-  (kind callee) (def "std::option::Option::<T>::expect") (args ((adt "merkle::location::Location<merkle::mmr::Family>")))
-  (item inherent (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") "expect")
-  (argc 2)
-  (locals
-    (0 (adt "merkle::location::Location<merkle::mmr::Family>") mut)
-    (1 (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") imm)
-    (2 (ref shared str) imm)
-    (3 isize mut)
-    (4 never mut))
-  (debug "self" (p 1) (arg 1))
-  (debug "msg" (p 2) (arg 2))
-  (debug "val" (p 0))
-  (bb 0
-    (assign (p 3) (discr (p 1)))
-    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
-  (bb 1
-    (unreachable))
-  (bb 2
-    (call (diverge "std::option::expect_failed") (args (move (p 2))) (p 4) none))
-  (bb 3
-    (assign (p 0) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::location::Location<merkle::mmr::Family>"))))))
-    (return))
-)
-(fn "<std::result::Result<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_codec::Error> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, commonware_codec::Error>>>::from_residual"
-  (kind callee) (def "<std::result::Result<T, F> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, E>>>::from_residual") (args ((adt "merkle::position::Position<merkle::mmr::Family>") (adt "commonware_codec::Error") (adt "commonware_codec::Error")))
-  (item impl (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, commonware_codec::Error>") "FromResidual" ((adt "std::result::Result<std::convert::Infallible, commonware_codec::Error>")) "from_residual")
-  (argc 1)
-  (locals
-    (0 (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, commonware_codec::Error>") mut)
-    (1 (adt "std::result::Result<std::convert::Infallible, commonware_codec::Error>") imm)
-    (2 isize mut)
-    (3 (adt "commonware_codec::Error") imm)
-    (4 (adt "commonware_codec::Error") mut)
-    (5 bool mut))
-  (debug "residual" (p 1) (arg 1))
-  (debug "e" (p 3))
-  (bb 0
-    (assign (p 2) (discr (p 1)))
-    (assign (p 5) (bin eq (copy (p 2)) (int isize 1)))
-    (assume (move (p 5)))
-    (assign (p 3) (use (move (p 1 (downcast 1) (field 0 (adt "commonware_codec::Error"))))))
-    (call (fn "<commonware_codec::Error as std::convert::From<commonware_codec::Error>>::from") (args (move (p 3))) (p 4) 1))
-  (bb 1
-    (assign (p 0) (agg (adt (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, commonware_codec::Error>") 1) (move (p 4))))
-    (return))
-)
 (fn "core::num::<impl u64>::div_ceil"
   (kind callee) (def "core::num::<impl u64>::div_ceil") (args ())
   (item inherent u64 "div_ceil")
@@ -3722,6 +3385,19 @@
     (assign (p 0) (use (copy (p 3))))
     (goto 5))
   (bb 5
+    (return))
+)
+(fn "core::num::<impl u64>::count_ones"
+  (kind callee) (def "core::num::<impl u64>::count_ones") (args ())
+  (item inherent u64 "count_ones")
+  (argc 1)
+  (locals
+    (0 u32 mut)
+    (1 u64 imm))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (call (intrinsic "ctpop" (u64)) (args (move (p 1))) (p 0) 1))
+  (bb 1
     (return))
 )
 (fn "<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family> as std::cmp::PartialOrd>::lt"
@@ -3809,6 +3485,330 @@
     (assign (p 0) (use (int bool 0)))
     (goto 2))
 )
+(fn "core::num::<impl u64>::checked_mul"
+  (kind callee) (def "core::num::<impl u64>::checked_mul") (args ())
+  (item inherent u64 "checked_mul")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 u64 imm)
+    (2 u64 imm)
+    (3 u64 imm)
+    (4 bool imm)
+    (5 (tuple u64 bool) mut)
+    (6 unit imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (debug "a" (p 3))
+  (debug "b" (p 4))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (debug "b" (p 4) (arg 1))
+  (bb 0
+    (assign (p 5) (checked mul (copy (p 1)) (copy (p 2))))
+    (assign (p 3) (use (copy (p 5 (field 0 u64)))))
+    (assign (p 4) (use (copy (p 5 (field 1 bool)))))
+    (switch (copy (p 4)) (0 4) (otherwise 2)))
+  (bb 1
+    (return))
+  (bb 2
+    (call (intrinsic "cold_path" ()) (args) (p 6) 3))
+  (bb 3
+    (assign (p 0) (use (const-agg (adt "std::option::Option<u64>") 0)))
+    (goto 1))
+  (bb 4
+    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 1) (copy (p 3))))
+    (goto 1))
+)
+(fn "std::option::Option::<u64>::expect"
+  (kind callee) (def "std::option::Option::<T>::expect") (args (u64))
+  (item inherent (adt "std::option::Option<u64>") "expect")
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (adt "std::option::Option<u64>") imm)
+    (2 (ref shared str) imm)
+    (3 isize mut)
+    (4 never mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "msg" (p 2) (arg 2))
+  (debug "val" (p 0))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (call (diverge "std::option::expect_failed") (args (move (p 2))) (p 4) none))
+  (bb 3
+    (assign (p 0) (use (move (p 1 (downcast 1) (field 0 u64)))))
+    (return))
+)
+(fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}"
+  (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}") (args ())
+  (item closure)
+  (span "src/merkle/mmr/mod.rs" 153 17)
+  (argc 2)
+  (locals
+    (0 u64 mut)
+    (1 (ref shared (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Family>::position_to_location::{closure#0}" unit)) mut)
+    (2 u64 imm)
+    (3 u64 mut)
+    (4 (tuple u64 bool) mut)
+    (5 u64 mut)
+    (6 u32 mut)
+    (7 (tuple u64 bool) mut))
+  (debug "n" (p 2) (arg 2))
+  (bb 0
+    (assign (p 4) (checked mul (int u64 2) (copy (p 2))) (at "src/merkle/mmr/mod.rs" 153 26))
+    (assert (move (p 4 (field 1 bool))) false overflow 1 (at "src/merkle/mmr/mod.rs" 153 26)))
+  (bb 1
+    (assign (p 3) (use (move (p 4 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 153 26))
+    (call (fn "core::num::<impl u64>::count_ones") (args (copy (p 2))) (p 6) 2 (at "src/merkle/mmr/mod.rs" 153 34)))
+  (bb 2
+    (assign (p 5) (cast int-to-int (move (p 6)) u64) (at "src/merkle/mmr/mod.rs" 153 34))
+    (assign (p 7) (checked sub (copy (p 3)) (copy (p 5))) (at "src/merkle/mmr/mod.rs" 153 26))
+    (assert (move (p 7 (field 1 bool))) false overflow 3 (at "src/merkle/mmr/mod.rs" 153 26)))
+  (bb 3
+    (assign (p 0) (use (move (p 7 (field 0 u64)))) (at "src/merkle/mmr/mod.rs" 153 26))
+    (return (at "src/merkle/mmr/mod.rs" 153 55)))
+)
+(fn "std::ops::RangeInclusive::<u32>::new"
+  (kind callee) (def "std::ops::RangeInclusive::<Idx>::new") (args (u32))
+  (item inherent (adt "std::ops::RangeInclusive<u32>") "new")
+  (argc 2)
+  (locals
+    (0 (adt "std::ops::RangeInclusive<u32>") mut)
+    (1 u32 imm)
+    (2 u32 imm))
+  (debug "start" (p 1) (arg 1))
+  (debug "end" (p 2) (arg 2))
+  (bb 0
+    (assign (p 0) (agg (adt (adt "std::ops::RangeInclusive<u32>") 0) (copy (p 1)) (copy (p 2)) (int bool 0)))
+    (return))
+)
+(fn "std::result::Result::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_storage::merkle::Error<commonware_storage::merkle::mmr::Family>>::expect"
+  (kind callee) (def "std::result::Result::<T, E>::expect") (args ((adt "merkle::position::Position<merkle::mmr::Family>") (adt "merkle::Error<merkle::mmr::Family>")))
+  (item inherent (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, merkle::Error<merkle::mmr::Family>>") "expect")
+  (argc 2)
+  (locals
+    (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
+    (1 (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, merkle::Error<merkle::mmr::Family>>") imm)
+    (2 (ref shared str) imm)
+    (3 isize mut)
+    (4 (adt "merkle::Error<merkle::mmr::Family>") imm)
+    (5 never mut)
+    (6 (ref shared (unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 2736, name: \"std::fmt::Debug\" }), generic_args: GenericArgs([]) }), bound_vars: [] }], Region { kind: ReErased })")) mut)
+    (7 (ref shared (adt "merkle::Error<merkle::mmr::Family>")) imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "msg" (p 2) (arg 2))
+  (debug "t" (p 0))
+  (debug "e" (p 4))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 3) (1 2) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (assign (p 4) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::Error<merkle::mmr::Family>"))))))
+    (assign (p 7) (ref shared (p 4)))
+    (assign (p 6) (cast unsize (copy (p 7)) (ref shared (unsupported "type Dynamic([Binder { value: Trait(ExistentialTraitRef { def_id: TraitDef(DefId { id: 2736, name: \"std::fmt::Debug\" }), generic_args: GenericArgs([]) }), bound_vars: [] }], Region { kind: ReErased })"))))
+    (call (diverge "std::result::unwrap_failed") (args (move (p 2)) (move (p 6))) (p 5) none))
+  (bb 3
+    (assign (p 0) (use (move (p 1 (downcast 0) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
+    (return))
+  (bb 4
+    (drop (p 4) glue 5))
+  (bb 5
+    (resume))
+)
+(fn "std::iter::once::<(commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, u32)>"
+  (kind callee) (def "std::iter::once") (args ((tuple (adt "merkle::position::Position<merkle::mmr::Family>") u32)))
+  (item fn "once")
+  (argc 1)
+  (locals
+    (0 (adt "std::iter::Once<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
+    (1 (tuple (adt "merkle::position::Position<merkle::mmr::Family>") u32) imm)
+    (2 (adt "std::option::IntoIter<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
+    (3 (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut)
+    (4 (adt "std::option::Item<(merkle::position::Position<merkle::mmr::Family>, u32)>") mut))
+  (debug "value" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (agg (adt (adt "std::option::Option<(merkle::position::Position<merkle::mmr::Family>, u32)>") 1) (copy (p 1))))
+    (assign (p 4) (agg (adt (adt "std::option::Item<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0) (copy (p 3))))
+    (assign (p 2) (agg (adt (adt "std::option::IntoIter<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0) (move (p 4))))
+    (assign (p 0) (agg (adt (adt "std::iter::Once<(merkle::position::Position<merkle::mmr::Family>, u32)>") 0) (move (p 2))))
+    (return))
+)
+(fn "core::num::<impl u64>::checked_shl"
+  (kind callee) (def "core::num::<impl u64>::checked_shl") (args ())
+  (item inherent u64 "checked_shl")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<u64>") mut)
+    (1 u64 imm)
+    (2 u32 imm)
+    (3 bool mut)
+    (4 u64 mut)
+    (5 unit imm))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (debug "self" (p 1) (arg 1))
+  (debug "rhs" (p 2) (arg 2))
+  (bb 0
+    (assign (p 3) (bin lt (copy (p 2)) (int u32 64)))
+    (switch (move (p 3)) (0 2) (otherwise 1)))
+  (bb 1
+    (switch (runtime-checks ub) (0 5) (otherwise 4)))
+  (bb 2
+    (assign (p 0) (use (const-agg (adt "std::option::Option<u64>") 0)))
+    (goto 3))
+  (bb 3
+    (return))
+  (bb 4
+    (call (fn "core::num::<impl u64>::unchecked_shl::precondition_check") (args (copy (p 2))) (p 5) 5))
+  (bb 5
+    (assign (p 4) (bin shl-unchecked (copy (p 1)) (copy (p 2))))
+    (assign (p 0) (agg (adt (adt "std::option::Option<u64>") 1) (move (p 4))))
+    (goto 3))
+)
+(fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:255:23: 255:26}>"
+  (kind closure) (def "std::option::Option::<T>::and_then") (args ())
+  (item inherent (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") "and_then")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") mut)
+    (1 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") imm)
+    (2 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}" unit) imm)
+    (3 isize mut)
+    (4 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
+    (5 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}" unit) mut)
+    (6 (tuple (adt "merkle::position::Position<merkle::mmr::Family>")) mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "f" (p 2) (arg 2))
+  (debug "x" (p 4))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") 0)))
+    (drop (p 2) no-glue 5))
+  (bb 3
+    (assign (p 4) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
+    (assign (p 5) (use (move (p 2))))
+    (assign (p 6) (agg (tuple) (copy (p 4))))
+    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}") (args (move (p 5)) (move (p 6))) (p 0) 4))
+  (bb 4
+    (goto 5))
+  (bb 5
+    (return))
+)
+(fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::expect"
+  (kind callee) (def "std::option::Option::<T>::expect") (args ((adt "merkle::position::Position<merkle::mmr::Family>")))
+  (item inherent (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") "expect")
+  (argc 2)
+  (locals
+    (0 (adt "merkle::position::Position<merkle::mmr::Family>") mut)
+    (1 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") imm)
+    (2 (ref shared str) imm)
+    (3 isize mut)
+    (4 never mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "msg" (p 2) (arg 2))
+  (debug "val" (p 0))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (call (diverge "std::option::expect_failed") (args (move (p 2))) (p 4) none))
+  (bb 3
+    (assign (p 0) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
+    (return))
+)
+(fn "std::option::Option::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>>::and_then::<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, {closure@mod.rs:265:23: 265:26}>"
+  (kind closure) (def "std::option::Option::<T>::and_then") (args ())
+  (item inherent (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") "and_then")
+  (argc 2)
+  (locals
+    (0 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") mut)
+    (1 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") imm)
+    (2 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}" (tuple (ref shared u64))) imm)
+    (3 isize mut)
+    (4 (adt "merkle::position::Position<merkle::mmr::Family>") imm)
+    (5 (closure "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}" (tuple (ref shared u64))) mut)
+    (6 (tuple (adt "merkle::position::Position<merkle::mmr::Family>")) mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "f" (p 2) (arg 2))
+  (debug "x" (p 4))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (assign (p 0) (agg (adt (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") 0)))
+    (drop (p 2) no-glue 5))
+  (bb 3
+    (assign (p 4) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::position::Position<merkle::mmr::Family>"))))))
+    (assign (p 5) (use (move (p 2))))
+    (assign (p 6) (agg (tuple) (copy (p 4))))
+    (call (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}") (args (move (p 5)) (move (p 6))) (p 0) 4))
+  (bb 4
+    (goto 5))
+  (bb 5
+    (return))
+)
+(fn "std::option::Option::<commonware_storage::merkle::location::Location<commonware_storage::merkle::mmr::Family>>::expect"
+  (kind callee) (def "std::option::Option::<T>::expect") (args ((adt "merkle::location::Location<merkle::mmr::Family>")))
+  (item inherent (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") "expect")
+  (argc 2)
+  (locals
+    (0 (adt "merkle::location::Location<merkle::mmr::Family>") mut)
+    (1 (adt "std::option::Option<merkle::location::Location<merkle::mmr::Family>>") imm)
+    (2 (ref shared str) imm)
+    (3 isize mut)
+    (4 never mut))
+  (debug "self" (p 1) (arg 1))
+  (debug "msg" (p 2) (arg 2))
+  (debug "val" (p 0))
+  (bb 0
+    (assign (p 3) (discr (p 1)))
+    (switch (move (p 3)) (0 2) (1 3) (otherwise 1)))
+  (bb 1
+    (unreachable))
+  (bb 2
+    (call (diverge "std::option::expect_failed") (args (move (p 2))) (p 4) none))
+  (bb 3
+    (assign (p 0) (use (move (p 1 (downcast 1) (field 0 (adt "merkle::location::Location<merkle::mmr::Family>"))))))
+    (return))
+)
+(fn "<std::result::Result<commonware_storage::merkle::position::Position<commonware_storage::merkle::mmr::Family>, commonware_codec::Error> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, commonware_codec::Error>>>::from_residual"
+  (kind callee) (def "<std::result::Result<T, F> as std::ops::FromResidual<std::result::Result<std::convert::Infallible, E>>>::from_residual") (args ((adt "merkle::position::Position<merkle::mmr::Family>") (adt "commonware_codec::Error") (adt "commonware_codec::Error")))
+  (item impl (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, commonware_codec::Error>") "FromResidual" ((adt "std::result::Result<std::convert::Infallible, commonware_codec::Error>")) "from_residual")
+  (argc 1)
+  (locals
+    (0 (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, commonware_codec::Error>") mut)
+    (1 (adt "std::result::Result<std::convert::Infallible, commonware_codec::Error>") imm)
+    (2 isize mut)
+    (3 (adt "commonware_codec::Error") imm)
+    (4 (adt "commonware_codec::Error") mut)
+    (5 bool mut))
+  (debug "residual" (p 1) (arg 1))
+  (debug "e" (p 3))
+  (bb 0
+    (assign (p 2) (discr (p 1)))
+    (assign (p 5) (bin eq (copy (p 2)) (int isize 1)))
+    (assume (move (p 5)))
+    (assign (p 3) (use (move (p 1 (downcast 1) (field 0 (adt "commonware_codec::Error"))))))
+    (call (fn "<commonware_codec::Error as std::convert::From<commonware_codec::Error>>::from") (args (move (p 3))) (p 4) 1))
+  (bb 1
+    (assign (p 0) (agg (adt (adt "std::result::Result<merkle::position::Position<merkle::mmr::Family>, commonware_codec::Error>") 1) (move (p 4))))
+    (return))
+)
 (fn "<u64 as std::default::Default>::default"
   (kind callee) (def "<u64 as std::default::Default>::default") (args ())
   (item impl u64 "Default" () "default")
@@ -3881,7 +3881,7 @@
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::subtree_root_position::{closure#0}") (args ())
   (item closure)
-  (span "src/merkle/mmr/mod.rs" 269 23)
+  (span "src/merkle/mmr/mod.rs" 255 23)
   (argc 2)
   (locals
     (0 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") mut)
@@ -3889,14 +3889,14 @@
     (2 (adt "merkle::position::Position<merkle::mmr::Family>") imm))
   (debug "v" (p 2) (arg 2))
   (bb 0
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_sub") (args (copy (p 2)) (int u64 2)) (p 0) 1 (at "src/merkle/mmr/mod.rs" 269 27)))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_sub") (args (copy (p 2)) (int u64 2)) (p 0) 1 (at "src/merkle/mmr/mod.rs" 255 27)))
   (bb 1
-    (return (at "src/merkle/mmr/mod.rs" 269 43)))
+    (return (at "src/merkle/mmr/mod.rs" 255 43)))
 )
 (fn "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}"
   (kind root) (def "<commonware_storage::merkle::mmr::Family as commonware_storage::merkle::Graftable>::leftmost_leaf::{closure#0}") (args ())
   (item closure)
-  (span "src/merkle/mmr/mod.rs" 279 23)
+  (span "src/merkle/mmr/mod.rs" 265 23)
   (argc 2)
   (locals
     (0 (adt "std::option::Option<merkle::position::Position<merkle::mmr::Family>>") mut)
@@ -3907,9 +3907,9 @@
   (debug "v" (p 2) (arg 2))
   (debug "shift" (p 1 (field 0 (ref shared u64)) deref))
   (bb 0
-    (assign (p 4) (use (copy (p 1 (field 0 (ref shared u64))))) (at "src/merkle/mmr/mod.rs" 279 41))
-    (assign (p 3) (use (copy (p 4 deref))) (at "src/merkle/mmr/mod.rs" 279 41))
-    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_sub") (args (copy (p 2)) (move (p 3))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 279 27)))
+    (assign (p 4) (use (copy (p 1 (field 0 (ref shared u64))))) (at "src/merkle/mmr/mod.rs" 265 41))
+    (assign (p 3) (use (copy (p 4 deref))) (at "src/merkle/mmr/mod.rs" 265 41))
+    (call (fn "commonware_storage::merkle::position::Position::<commonware_storage::merkle::mmr::Family>::checked_sub") (args (copy (p 2)) (move (p 3))) (p 0) 1 (at "src/merkle/mmr/mod.rs" 265 27)))
   (bb 1
-    (return (at "src/merkle/mmr/mod.rs" 279 47)))
+    (return (at "src/merkle/mmr/mod.rs" 265 47)))
 )

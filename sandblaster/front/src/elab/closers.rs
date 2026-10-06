@@ -736,8 +736,8 @@ impl<'a> Elab<'a> {
         if self.s1.views.values().any(|v| v.global == g) {
             return true;
         }
-        // the optimizer's resumed and generated modes run without the S1
-        // state: a `#[view]` item's definition by name
+        // an elaboration without the S1 state: a `#[view]` item's
+        // definition by name
         let Some(name) = self.env.global_name(g) else { return false };
         let Some(ty_path) = name.strip_suffix("::view") else { return false };
         self.krate.items.iter().any(|it| {

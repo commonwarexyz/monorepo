@@ -6,12 +6,8 @@ next to them) with `sandblaster/mirx/extract.sh --manifest`.
 
 Each fixture is a small crate of this workspace whose module a test of
 `sandblaster/front/tests` lifts; the test reads the crate's source and the
-MIR with `include_str!`. A round-trip entry is the MIR of the lifted round
-trip's copy of a lowered module (DESIGN.md §2.1, docs/mir-lift.md §20.1): the
-copy is a checked-in file the test's lowering writes (`LoweredModule::
-roundtrip_copy`), compiled in place of the module's source (`--replace`).
-Re-run an entry when its sources change (the front end refuses a stale
-extraction). Without arguments every entry is extracted. The workspace's
+MIR with `include_str!`. Re-run an entry when its sources change (the front
+end refuses a stale extraction). Without arguments every entry is extracted. The workspace's
 members are written from the table below.
 """
 import os, subprocess, sys
@@ -20,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "../../../.."))
 
 # (name, crate dir, modules, output (relative to the crate dir), extra args);
-# `--replace` paths are relative to the crate dir
+# `--inject` paths are relative to the crate dir
 FIXTURES = [
     # tests/lift.rs
     ("lift_w", "lift_w", "w", "w.sbmir", []),
@@ -73,57 +69,19 @@ FIXTURES = [
     ("ai_ref_lt", "ai_ref_lt", "s", "s.sbmir", []),
     ("ai_ref_widen", "ai_ref_widen", "s", "s.sbmir", []),
     ("ai_ref_abs", "ai_ref_abs", "s", "s.sbmir", []),
-    # tests/lift_opt.rs (and tests/build_loop.rs: `opt_mbits`)
-    ("opt_bits", "opt_bits", "bits", "bits.sbmir", []),
-    ("opt_driven", "opt_driven", "bits", "bits.sbmir", []),
-    ("opt_driven_more", "opt_driven_more", "bits", "bits.sbmir", []),
-    ("opt_driven_taken", "opt_driven_taken", "bits", "bits.sbmir", []),
+    # tests/build_loop.rs (`opt_mbits`: the name is kept so its MIR stays as extracted)
     ("opt_mbits", "opt_mbits", "bits", "bits.sbmir", []),
-    ("opt_mbits_cheap", "opt_mbits_cheap", "bits", "bits.sbmir", []),
-    ("opt_buf", "opt_buf", "bits", "bits.sbmir", []),
-    ("opt_gen2", "opt_gen2", "bits", "bits.sbmir", []),
-    ("opt_gen2_more", "opt_gen2_more", "bits", "bits.sbmir", []),
-    ("opt_rd", "opt_rd", "bits", "bits.sbmir", []),
-    ("opt_panics", "opt_panics", "bits", "bits.sbmir", []),
-    ("opt_shipped", "opt_shipped", "bits", "bits.sbmir", []),
-    ("opt_ip_mod", "opt_ip_mod", "bits,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
-    ("opt_ip_inplace", "opt_ip_inplace", "bits,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
     # tests/build_loop.rs
     ("bl_mbits_edited", "bl_mbits_edited", "bits", "bits.sbmir", []),
     # tests/in_place_cache.rs
     ("ic_two", "ic_two", "a", "a.sbmir", []),
     # tests/reader_widen.rs
     ("rw_mix", "rw_mix", "a", "a.sbmir", []),
-    # tests/lowered_use.rs
-    ("lu_nested", "lu_nested", "outer,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
-    ("lu_nested_line", "lu_nested_line", "outer,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
-    ("lu_nested_mod", "lu_nested_mod", "outer,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
-    ("lu_top", "lu_top", "bits,opt", "bits.sbmir", ["--inject", "opt=opt.rs"]),
-    ("lu_hostmod", "lu_hostmod", "outer", "bits.sbmir", ["--items", "outer::bits="]),
+    # tests/refined_model.rs: the original, its optimization, a wrong optimization
+    ("rm_orig", "rm_orig", "a", "a.sbmir", []),
+    ("rm_fast", "rm_fast", "a", "a.sbmir", []),
+    ("rm_wrong", "rm_wrong", "a", "a.sbmir", []),
 ]
-
-# The module source each lowering fixture's round-trip copies replace: every
-# `rt*.rs` of the crate (a copy a test's lowering wrote) gets the entry
-# `<crate>/<rt>` writing `<rt>.sbmir` (`--replace <source>=<rt>.rs`).
-RT_SOURCE = {
-    "opt_bits": "bits.rs",
-    "opt_driven": "bits.rs",
-    "opt_driven_more": "bits.rs",
-    "opt_driven_taken": "bits.rs",
-    "opt_mbits": "bits.rs",
-    "opt_buf": "bits.rs",
-    "opt_gen2": "bits.rs",
-    "opt_gen2_more": "bits.rs",
-    "opt_rd": "bits.rs",
-    "opt_panics": "bits.rs",
-    "opt_shipped": "bits.rs",
-    "opt_ip_mod": "bits.rs",
-    "opt_ip_inplace": "src/bits.rs",
-    "bl_mbits_edited": "bits.rs",
-    "lu_nested": "src/outer/bits.rs",
-    "lu_nested_line": "src/outer/bits.rs",
-    "lu_top": "src/bits.rs",
-}
 
 # crates of the workspace that are dependencies only (no MIR of their own)
 DEPENDENCIES = ["fx_codec", "fx_cfg_if", "fx_hosts"]
@@ -150,39 +108,21 @@ def write_workspace():
     open(os.path.join(HERE, "Cargo.toml"), "w").write(text)
 
 
-def entries():
-    """The fixtures and the round-trip copies found next to them."""
-    out = []
-    for name, crate, modules, out_file, extra in FIXTURES:
-        out.append((name, crate, modules, out_file, extra))
-        src = RT_SOURCE.get(crate)
-        if src is None:
-            continue
-        for f in sorted(os.listdir(os.path.join(HERE, crate))):
-            if f.startswith("rt") and f.endswith(".rs"):
-                rt = f[:-3]
-                out.append((f"{crate}/{rt}", crate, modules, f"{rt}.sbmir", extra + ["--replace", f"{src}={f}"]))
-    return out
-
-
 def main():
     write_workspace()
     want = set(sys.argv[1:])
-    table = entries()
+    table = FIXTURES
     unknown = {w for w in want if w not in {f[0] for f in table} and w not in {f[1] for f in table}}
     if unknown:
         raise SystemExit(f"unknown fixture(s): {sorted(unknown)}")
     manifest = os.path.join(HERE, "Cargo.toml")
     failed = []
     for name, crate, modules, out, extra in table:
-        # a crate's name selects its fixture and its round-trip copies
+        # a crate's name selects its fixture
         if want and name not in want and crate not in want:
             continue
         args = list(extra)
         for i, a in enumerate(args):
-            if i > 0 and args[i - 1] == "--replace":
-                src, text = a.split("=", 1)
-                args[i] = f"{os.path.join(HERE, crate, src)}={os.path.join(HERE, crate, text)}"
             if i > 0 and args[i - 1] == "--inject":
                 mname, file = a.split("=", 1)
                 args[i] = f"{mname}={os.path.join(HERE, crate, file)}"
@@ -190,8 +130,6 @@ def main():
         print(f"== {name}", flush=True)
         if subprocess.run(cmd).returncode != 0:
             failed.append(name)
-    # (a round-trip copy of a faulty printer may not compile: rustc refuses
-    # it, so it has no MIR and the round trip cannot read it back)
     if failed:
         raise SystemExit(f"not extracted: {failed}")
 

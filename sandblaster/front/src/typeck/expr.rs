@@ -38,7 +38,7 @@ use crate::builtins::{ArrayMethod, Builtin, GhostFn, IntMethod, OptionMethod, Sl
 use crate::diag::{DiagKind, Diagnostic};
 use crate::hir::*;
 use crate::intrinsics;
-use crate::resolve::{Def, Ext, GhostKw, ItemSrc, ItemTag, Ns};
+use crate::resolve::{Def, Ext, GhostKw, ItemTag, Ns};
 use crate::span::Span;
 use crate::visit::{self, Visitor};
 
@@ -74,7 +74,6 @@ pub enum VRes {
     /// `u32::from_be_bytes`, `u32::wrapping_add` (UFCS).
     IntAssoc(UintTy, IntMethod),
     Intrinsic(intrinsics::IntrinsicId, Vec<i64>),
-    Helper(intrinsics::HelperId),
     Ghost(GhostFn, Vec<Ty>),
     GhostKw(GhostKw),
 }
@@ -229,7 +228,7 @@ struct ConstCheck<'x, 'c, 'a> {
 impl Visitor for ConstCheck<'_, '_, '_> {
     fn expr(&mut self, e: &Expr) {
         match &e.kind {
-            ExprKind::Call { callee: Callee::Item(..) | Callee::Intrinsic(..) | Callee::Helper(_), .. } => {
+            ExprKind::Call { callee: Callee::Item(..) | Callee::Intrinsic(..), .. } => {
                 self.cx.ck.diags.push(Diagnostic::error(DiagKind::Unsupported, e.span, "function calls are not allowed in constant initializers").note("user functions are not `const fn`; rustc would reject the call"));
             }
             ExprKind::Call { callee: Callee::Builtin(b, _), .. } if !b.is_const_fn() => {
@@ -337,7 +336,6 @@ pub fn check_fn(ck: &mut Checker, id: ItemId, inputs: &[syn::FnArg], block: &syn
             }
         }
     };
-    let implements = sig.contracts.implements.as_ref().and_then(|p| cx.implements_target(p));
     // the declared contract carried apart (typed last: the body's locals keep their ids)
     let saved = std::mem::replace(&mut cx.ghost, true);
     let declared = sig.contracts.declared.as_ref().map(|(r, d)| (r.iter().map(|e| cx.prop(e)).collect(), d.as_ref().map(|(e, max)| Decreases { measure: cx.measure(e), max: *max })));
@@ -363,14 +361,11 @@ pub fn check_fn(ck: &mut Checker, id: ItemId, inputs: &[syn::FnArg], block: &syn
         body,
         target_features: sig.target_features.clone(),
         feature_set: sig.feature_set.clone(),
-        implements,
-        specialize: sig.specialize,
         inline: sig.inline,
         must_use: sig.must_use,
         recursion: Recursion::None,
         law_proof,
         proves: None,
-        rewrite: sig.spec.rewrite,
         induction,
         spec,
         locals,
@@ -568,7 +563,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.block_expr(&b.block, exp, span)
             }
             syn::Expr::Unsafe(_) => {
-                self.push(Diagnostic::error(DiagKind::Unsupported, span, "`unsafe` blocks are not allowed").note("the DSL crate is `#![forbid(unsafe_code)]`; codegen emits the only unsafe code (DESIGN.md §2)"));
+                self.push(Diagnostic::error(DiagKind::Unsupported, span, "`unsafe` blocks are not allowed").note("the DSL crate is `#![forbid(unsafe_code)]` (DESIGN.md §2)"));
                 Self::error_expr(span)
             }
             syn::Expr::If(i) => self.if_expr(i, exp, span),
@@ -929,7 +924,6 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let imms = own_consts.iter().map(|(v, _)| *v as i64).collect();
                 Some(VRes::Intrinsic(i, imms))
             }
-            Def::Ext(Ext::Helper(h)) => Some(VRes::Helper(h)),
             Def::Ext(Ext::GhostFn(g)) => Some(VRes::Ghost(g, own_tys)),
             Def::Ext(Ext::GhostKw(k)) => Some(VRes::GhostKw(k)),
             Def::Ext(Ext::IsizeMax) => Some(VRes::BuiltinConst(BuiltinConst::IsizeMax)),
@@ -1016,7 +1010,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.ctor_app(c, args, &[], exp, span)
             }
             VRes::Fn(id, impl_args, own) if self.ghost => self.fn_value(id, impl_args, own, exp, span),
-            VRes::Fn(..) | VRes::IntAssoc(..) | VRes::Intrinsic(..) | VRes::Helper(_) | VRes::Ghost(..) => {
+            VRes::Fn(..) | VRes::IntAssoc(..) | VRes::Intrinsic(..) | VRes::Ghost(..) => {
                 self.push(Diagnostic::error(DiagKind::Closure, span, "functions cannot be used as values (no function pointers)").note("call the function instead; ghost code may pass a spec function as a function value"));
                 Self::error_expr(span)
             }
@@ -1936,12 +1930,6 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.fixed_call(Callee::Builtin(b, vec![]), &sig.params, sig.ret, &args, span)
             }
             VRes::Intrinsic(i, imms) => self.intrinsic_call(i, imms, &args, span),
-            VRes::Helper(h) => {
-                let info = intrinsics::helper(h);
-                self.require_features(info.features, &format!("sandblaster::arch helper `{}`", info.name), span);
-                let (params, ret) = (info.params.clone(), info.ret.clone());
-                self.fixed_call(Callee::Helper(h), &params, ret, &args, span)
-            }
             VRes::Ghost(g, explicit) => {
                 if !self.ghost {
                     self.err(DiagKind::Ghost, span, format!("ghost function `{}` in exec code", g.name()));
@@ -2013,11 +2001,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn intrinsic_call(&mut self, i: intrinsics::IntrinsicId, mut imms: Vec<i64>, args: &[syn::Expr], span: Span) -> Expr {
         let info = intrinsics::get(i);
         if info.pointer_args {
-            let helper = match info.name {
-                n if n.starts_with("vld1") || n.starts_with("_mm") && n.contains("load") => "a `sandblaster::arch` load helper (e.g. `load_u8x16`)",
-                _ => "a `sandblaster::arch` store helper (e.g. `store_u8x16`)",
-            };
-            self.push(Diagnostic::error(DiagKind::RawPointer, span, format!("`{}` takes raw pointers and cannot be called from user code", info.name)).note(format!("use {helper} (DESIGN.md §9.2)")));
+            self.push(Diagnostic::error(DiagKind::RawPointer, span, format!("`{}` takes raw pointers and cannot be called from user code", info.name)).note("take and return vector values, or build them with the modeled intrinsics; the pointer forms are modeled on typed arrays for reading host Rust (DESIGN.md §9.2)"));
             return Self::error_expr(span);
         }
         self.require_features(info.features, &format!("intrinsic `{}`", info.name), span);
@@ -3218,23 +3202,6 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Diagnostic::error(DiagKind::Exhaustive, span, format!("refutable pattern in {what}: `{w}` not covered")).note("use `let .. else` or `match`")
             };
             self.push(d);
-        }
-    }
-
-    /// Resolves the `#[implements(path)]` target.
-    fn implements_target(&mut self, p: &syn::Path) -> Option<ItemId> {
-        let segs: Vec<(String, Span)> = p.segments.iter().map(|s| (s.ident.to_string(), self.sp(s.ident.span()))).collect();
-        let span = self.sp(p.span());
-        match self.ck.res.resolve_path_defs(self.m, &segs, Ns::Value, p.leading_colon.is_some(), false) {
-            Ok(Def::Item(id)) if self.ck.res.items[id.0 as usize].tag == ItemTag::Fn && matches!(self.ck.res.items[id.0 as usize].src, ItemSrc::Fn(_) | ItemSrc::ImplFn { .. }) => Some(id),
-            Ok(_) => {
-                self.err(DiagKind::Contract, span, "`#[implements]` must name an exec function");
-                None
-            }
-            Err(d) => {
-                self.push(d);
-                None
-            }
         }
     }
 

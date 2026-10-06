@@ -99,8 +99,7 @@ fn main() {
     }
     let mut dargs = vec![rustc.clone()];
     dargs.extend(rest.iter().cloned());
-    // lints change no MIR: a denied lint (a round-trip copy's non-snake-case
-    // names) must not stop the extraction
+    // lints change no MIR: a denied lint must not stop the extraction
     if !rest.iter().any(|a| a.starts_with("--cap-lints")) {
         dargs.extend(["--cap-lints".to_string(), "warn".to_string()]);
     }
@@ -112,8 +111,8 @@ fn main() {
     }
 }
 
-/// The driver's callbacks: the substituted sources (`SBMIR_INJECT`,
-/// `SBMIR_REPLACE`) and the extraction after analysis.
+/// The driver's callbacks: the injected modules (`SBMIR_INJECT`) and the
+/// extraction after analysis.
 struct Driver {
     done: bool,
 }
@@ -137,23 +136,10 @@ impl rustc_driver::Callbacks for Driver {
     }
 }
 
-/// `SBMIR_REPLACE="path=text,.."` (absolute paths): the extraction compiles
-/// `path` as if its text were `text`'s (the lifted round trip's copy of a
-/// file, DESIGN.md §2.1); the build-script stubs and the recorded SHA-256
-/// use the same text. `SBMIR_INJECT="name=path,.."`: the crate root gets
-/// `mod name;` of the file `path` (a DSL module compiled in the crate's
-/// context: `#[lift(opt)]` alternatives). Nothing else is changed.
-fn replacements() -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
-    let canon = |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
-    std::env::var("SBMIR_REPLACE").unwrap_or_default().split(',').filter_map(|e| e.split_once('=')).map(|(a, b)| (canon(a), canon(b))).collect()
-}
-
-/// The text the extraction compiles for `path` (its replacement, if any).
-fn source_path(path: &std::path::Path) -> std::path::PathBuf {
-    let c = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    replacements().into_iter().find(|(a, _)| *a == c).map(|(_, b)| b).unwrap_or_else(|| path.to_path_buf())
-}
-
+/// The file loader: every file as it is on disk, except the crate root,
+/// which gets `mod name;` of each `SBMIR_INJECT="name=path,.."` file (a DSL
+/// module compiled in the crate's context: the verifier's `instances.rs`).
+/// Nothing else is changed.
 struct Sources {
     root: Option<std::path::PathBuf>,
 }
@@ -164,7 +150,7 @@ impl rustc_span::source_map::FileLoader for Sources {
     }
 
     fn read_file(&self, path: &std::path::Path) -> std::io::Result<String> {
-        let mut text = std::fs::read_to_string(source_path(path))?;
+        let mut text = std::fs::read_to_string(path)?;
         let canon = |p: &std::path::Path| std::fs::canonicalize(p).ok();
         if self.root.as_deref().and_then(canon).is_some_and(|r| Some(r) == canon(path)) {
             for e in std::env::var("SBMIR_INJECT").unwrap_or_default().split(',').filter(|e| !e.is_empty()) {
@@ -176,7 +162,7 @@ impl rustc_span::source_map::FileLoader for Sources {
     }
 
     fn read_binary_file(&self, path: &std::path::Path) -> std::io::Result<std::sync::Arc<[u8]>> {
-        std::fs::read(source_path(path)).map(Into::into)
+        std::fs::read(path).map(Into::into)
     }
 
     fn current_directory(&self) -> std::io::Result<std::path::PathBuf> {
@@ -185,11 +171,9 @@ impl rustc_span::source_map::FileLoader for Sources {
 }
 
 fn stub_build_script(rustc: &str, rest: &[String], stub: &str) -> ! {
-    // (the real build script declares the IDE twin's `cfg(rust_analyzer)`, DESIGN.md §2.1)
-    let mut body = String::from("#![allow(warnings)]\nfn main() {\n    println!(\"cargo::rustc-check-cfg=cfg(rust_analyzer)\");\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n");
+    let mut body = String::from("#![allow(warnings)]\nfn main() {\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n");
     for pair in stub.split(',').filter(|p| !p.is_empty()) {
         let (o, src) = pair.split_once('=').expect("SBMIR_STUB: out.rs=src.rs");
-        let src = source_path(std::path::Path::new(src)).display().to_string();
         let _ = writeln!(
             body,
             "    {{ let t = std::fs::read_to_string({src:?}).unwrap(); let t: String = t.lines().skip_while(|l| l.starts_with(\"//!\")).map(|l| format!(\"{{l}}\\n\")).collect(); std::fs::write(std::path::Path::new(&out).join({o:?}), t).unwrap(); }}"
@@ -222,7 +206,7 @@ impl SpanMap {
         let mut stubs = Vec::new();
         for pair in std::env::var("SBMIR_STUB").unwrap_or_default().split(',').filter(|p| !p.is_empty()) {
             if let Some((o, src)) = pair.split_once('=') {
-                let text = std::fs::read_to_string(source_path(std::path::Path::new(src))).unwrap_or_default();
+                let text = std::fs::read_to_string(src).unwrap_or_default();
                 let skipped = text.lines().take_while(|l| l.starts_with("//!")).count();
                 stubs.push((o.to_string(), src.to_string(), skipped));
             }
@@ -248,7 +232,7 @@ impl SpanMap {
         };
         let rel = path.strip_prefix(&format!("{}/", self.manifest)).unwrap_or(&path).to_string();
         if !self.files.contains_key(&rel) {
-            let text = std::fs::read(source_path(std::path::Path::new(&path))).unwrap_or_default();
+            let text = std::fs::read(&path).unwrap_or_default();
             use sha2::Digest;
             let h = sha2::Sha256::digest(&text);
             let hex: String = h.iter().map(|b| format!("{b:02x}")).collect();

@@ -271,8 +271,8 @@ fn slice_lemmas_in_use() {
 }
 
 // ---------------------------------------------------------------------------
-// The bit-count library (optimizer design §11.4; `lemmas/bits.core` and the
-// on-demand per-literal families of `auto::bitlib`).
+// The bit-count library (`lemmas/bits.core` and the on-demand per-literal
+// families of `auto::bitlib`).
 // ---------------------------------------------------------------------------
 
 use sandblaster_front::auto::bitlib::{self, Family};

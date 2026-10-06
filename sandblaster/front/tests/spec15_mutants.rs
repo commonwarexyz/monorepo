@@ -13,10 +13,13 @@
 //!   `incomplete` (`error[mutation-incomplete]`), never a pass;
 //! * spec mutants must be killed by examples or by definite law
 //!   counterexamples; the survivor comes with the example that kills it;
-//! * docs/qmdb-spec-design.md §2.10(b) in the tool: a law catches the
-//!   spec mutant that breaks the construction; only a known answer catches
-//!   the one wrong the same way on both sides; an insensitive law is
-//!   `warning[law-insensitive]`.
+//! * a law catches the spec mutant that breaks a two-sided construction;
+//!   only a known answer catches the one wrong the same way on both sides;
+//!   an insensitive law is `warning[law-insensitive]`;
+//! * spec mutation is an on-demand tool, not a gate: a build of a crate
+//!   with an under-pinned vocabulary function gets its verdict and runs no
+//!   mutant, while the tool (`driver::stage::mutate`, `sandblaster mutate`)
+//!   reports the survivor; with the pinning known answer it is killed.
 //!
 //! Each run is bounded (explicit caps) and deterministic.
 
@@ -1303,4 +1306,71 @@ fn a_spec_function_a_law_uses_is_mutated() {
     let mut d = Diagnostics::new();
     mutate::spec15_gate_mutants(&rep, &krate, &mut d);
     assert!(d.list.iter().any(|x| x.kind == DiagKind::SpecMutantSurvived && x.msg.contains("a mutant of `crate::twice`")), "{:?}", d.list.iter().map(|x| &x.msg).collect::<Vec<_>>());
+}
+
+// ---------------------------------------------------------------------
+// spec mutation is an on-demand tool, not a gate (2026-10)
+// ---------------------------------------------------------------------
+
+#[path = "gated_util.rs"]
+mod gated;
+
+/// The law crate over `checksum` (the root gets [`HEADER`]), with `spec`
+/// as its vocabulary, and the lock its own gates accept.
+fn locked_checksum_crate(spec: &str) -> Vec<(String, String)> {
+    let mut files = law_crate(spec, "checksum", CHECKSUM_LAW, "");
+    files[0].1 = format!("{HEADER}{}", files[0].1);
+    gated::with_accepted_lock(&files, "r/mod.rs", &TargetInfo::aarch64_apple_darwin()).unwrap_or_else(|e| panic!("the gates reject the crate:\n{e}"))
+}
+
+fn front(files: &[(String, String)]) -> driver::Checked {
+    let fs = MemFs::from_files(files.iter().map(|(p, c)| (p.as_str(), c.as_str())));
+    let c = driver::check(Path::new("r/mod.rs"), &fs, &TargetInfo::aarch64_apple_darwin());
+    assert!(c.ok(), "front-end errors:\n{}", c.render());
+    c
+}
+
+/// `checksum` with one known answer is under-pinned: its mutant
+/// `a + (2 + b)` agrees with it. The build does not run spec mutation: the
+/// crate gets its verdict, the report lists the five §15 gates and no
+/// mutation run. The tool reports the survivor, with the known answer that
+/// would kill it. Negative twin:
+/// [`a_pinned_vocabulary_function_is_killed_by_the_tool`].
+#[test]
+fn a_build_runs_no_mutation_and_the_tool_finds_the_survivor() {
+    let files = locked_checksum_crate(CHECKSUM);
+    let c = front(&files);
+    let b = driver::build_crate(&c, driver::LockUse::Enforce, "r/mod.rs");
+    assert!(b.verdict.is_some(), "the under-pinned crate builds:\n{}", b.render_failure(&c, "r/mod.rs"));
+    let gates: Vec<&str> = b.gates.results.iter().map(|r| r.gate).collect();
+    assert_eq!(gates, ["boundary", "examples", "sections", "law-rules", "lock"], "{gates:?}");
+    assert!(!b.report.contains("\"mutation\"") && !b.timing.contains("mutation"), "{}\n{}", b.report, b.timing);
+    assert!(!b.diagnostics().list.iter().any(|d| matches!(d.kind, DiagKind::SpecMutantSurvived | DiagKind::LawInsensitive | DiagKind::MutationIncomplete)), "{}", b.diagnostics().render(&c.sm));
+    // the tool
+    let t = driver::stage::mutate(&c);
+    let m = t.report.as_ref().expect("the crate verifies");
+    assert!(m.complete, "{:?}", m.incomplete_reasons);
+    let (x, o) = m.mutants.iter().find(|(x, _)| x.path == "crate::checksum" && x.desc.contains("`*` → `+`")).expect("the mutant `a + (2 + b)`");
+    assert_eq!((x.target, o.verdict), (Target::Spec, Verdict::Counterexample));
+    let found = |needle: &str| t.findings.list.iter().any(|d| d.kind == DiagKind::SpecMutantSurvived && (d.msg.contains(needle) || d.notes.iter().any(|n| n.1.contains(needle))));
+    assert!(found("a mutant of `crate::checksum` survives every example and law"), "{}", t.findings.render(&c.sm));
+    assert!(found("#[example(checksum("), "the known answer to add: {}", t.findings.render(&c.sm));
+    assert!(t.findings.has_errors());
+}
+
+/// Negative twin of [`a_build_runs_no_mutation_and_the_tool_finds_the_survivor`]:
+/// with a second, independent known answer `checksum` is pinned, and the
+/// tool kills its mutant by that example and reports no survivor.
+#[test]
+fn a_pinned_vocabulary_function_is_killed_by_the_tool() {
+    let pinned = CHECKSUM.replace("#[example(checksum(1, 2) == 5)]", "#[example(checksum(1, 2) == 5)]\n#[example(checksum(0, 0) == 0)]");
+    let files = locked_checksum_crate(&pinned);
+    let c = front(&files);
+    let t = driver::stage::mutate(&c);
+    let m = t.report.as_ref().expect("the crate verifies");
+    assert!(m.complete, "{:?}", m.incomplete_reasons);
+    let (_, o) = m.mutants.iter().find(|(x, _)| x.path == "crate::checksum" && x.desc.contains("`*` → `+`")).expect("the mutant `a + (2 + b)`");
+    assert_eq!(o.verdict, Verdict::KilledBySpec, "{:?}", o.by);
+    assert_eq!(m.count(Verdict::Counterexample), 0);
+    assert!(!t.findings.list.iter().any(|d| d.kind == DiagKind::SpecMutantSurvived), "{}", t.findings.render(&c.sm));
 }

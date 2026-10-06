@@ -280,8 +280,7 @@ fn hypervisor_vendor() -> Option<String> {
     None
 }
 
-/// A best-effort microarchitecture name for tuning files
-/// (`tuning-<arch>-<uarch>.json`): known x86 family/model pairs, else
+/// A best-effort microarchitecture name (reported by `--cpu`): known x86 family/model pairs, else
 /// `<vendor>-<family>-<model>`.
 pub fn uarch_name(cpu: &CpuId) -> String {
     let known = match (cpu.vendor.as_str(), cpu.family, cpu.model) {

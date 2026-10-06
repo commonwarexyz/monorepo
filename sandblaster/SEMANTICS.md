@@ -79,7 +79,7 @@ items see them.
 * A method (`impl` block function) is an ordinary function whose first
   parameter is the receiver; its kernel name is `crate::m::S::f`.
 * **spec fn, lemma, law, proof** — §13.
-* Hardware variants and intrinsic helpers — §15.
+* Intrinsic calls and `#[target_feature]` functions — §15.
 
 A definition whose elaboration fails (an unproven obligation, an
 unsupported construct) is replaced by an **opaque placeholder** of the same
@@ -1038,13 +1038,14 @@ each branch that continues; the locals it binds are the same in each copy.
   target's architecture only), named `<arch>::<intrinsic>`. Const-generic
   immediates are passed first, as `U32` literals, each with an irrelevant
   range proof (by evaluation). Vector types are arrays of lanes.
-* Load/store helpers (`sandblaster::arch::<arch>::…`) elaborate to the
-  library's `<arch>::<helper>` definitions (or, where the library has
-  none, to the intrinsic their template calls).
-* A function with `#[implements(portable)]` is elaborated and checked like
-  any exec function. The obligation `variant(x) = portable(x)`
-  (`VariantEquiv`) is **deferred to phase 3**: variants are emitted but not
-  dispatched to, so the portable function is what runs.
+* A `#[target_feature]` function is elaborated and checked like any exec
+  function; its target features only constrain which intrinsics it may
+  call (the feature rule, DESIGN.md §9.3). Each intrinsic's model is
+  validated natively against the hardware (`sandblaster/targets/evidence`).
+* `sandblaster::arch` load/store helpers and `#[implements]` hardware
+  variants are refused (native-dialect authoring forms removed with the
+  optimizer, 2026-10-05). Pointer-taking loads and stores are modeled on
+  typed arrays but cannot be called from the dialect.
 
 ## 16. Definitions added by the elaborator
 
@@ -1193,7 +1194,6 @@ arrays (or `"0x…"` hex strings for bytes) for arrays and slices, `null` /
 * `pow`, byte conversions of `u8`/`usize` and `split_last_chunk` are
   rejected as unsupported by the elaborator (`div_ceil` has a meaning,
   §19.4).
-* `VariantEquiv` obligations are deferred (§15).
 
 ## 19. Lifted modules (`#[lift] mod m;`)
 

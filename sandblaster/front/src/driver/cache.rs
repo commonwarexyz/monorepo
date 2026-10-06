@@ -40,10 +40,11 @@
 //! and `debug_assertions` (the toolchain's `debug_assert!`s are pure and
 //! it never branches on `cfg(debug_assertions)` — checked by
 //! `tests/build_loop.rs` —, so they can only add a panic, and a failed
-//! build stores nothing). Overflow checks and the optimizer's test hooks
-//! can change a result, so they are part of the context.
-//! * `mutant` — one spec mutant's verdict of the spec-mutation gate
-//!   (`crate::mutate`, *Gate mode*). The key covers the toolchain, the
+//! build stores nothing). Overflow checks can change a result, so they are
+//! part of the context.
+//! * `mutant` — one spec mutant's verdict of the on-demand spec-mutation
+//!   tool (`crate::mutate`, *Review mode*; `sandblaster mutate`; no build
+//!   runs it). The key covers the toolchain, the
 //!   target, the mutant (item, operator, site, diff), its plan (closure,
 //!   known answers, observation points) and a position-independent
 //!   fingerprint of every item its re-check can read (the reference
@@ -421,7 +422,6 @@ pub fn verifier_context(toolchain_id: &str, rustc_vv: Option<&str>, vars: &[(Str
     }
     let mut ctx = format!("{CONTEXT_FORMAT}\ntoolchain {id}\n");
     ctx.push_str(&format!("overflow-checks {}\n", if overflow_checks() { "on" } else { "off" }));
-    ctx.push_str(&format!("opt-test-hooks {}\n", if cfg!(feature = "opt-test-hooks") { "on" } else { "off" }));
     ctx.push_str(&format!("rustc {}\n", rustc_vv.map(|v| hex(&sha256(v.as_bytes()))).unwrap_or_else(|| "unavailable".into())));
     let mut vs: Vec<&(String, String)> = vars.iter().filter(|(k, _)| k.starts_with("SANDBLASTER_") && !NOT_IDENTITY.contains(&k.as_str())).collect();
     vs.sort();

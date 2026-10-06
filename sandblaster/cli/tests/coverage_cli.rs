@@ -3,6 +3,10 @@
 //! run of the counterexample engine (§15.9), as text and JSON, on a crate
 //! directory on disk. The fixture specifies `verify` by soundness only, so
 //! it fails the gates (and the exploration run shows why).
+//!
+//! `sandblaster mutate` (DESIGN.md §15.7): the on-demand spec-mutation
+//! tool reports a surviving spec mutant of an under-pinned vocabulary
+//! function (exit 1) and none once a known answer pins it (exit 0).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -65,8 +69,18 @@ fn crate_dir(name: &str) -> PathBuf {
     d
 }
 
+/// Runs the CLI with the verdict cache off (hermetic: no user cache).
 fn run(args: &[&str]) -> Output {
-    Command::new(bin()).args(args).env("SANDBLASTER_MEM_LIMIT_GB", "6").output().expect("run sandblaster")
+    run_env(args, &[("SANDBLASTER_CACHE", "off")])
+}
+
+fn run_env(args: &[&str], vars: &[(&str, &str)]) -> Output {
+    let mut c = Command::new(bin());
+    c.args(args).env("SANDBLASTER_MEM_LIMIT_GB", "6").env_remove("SANDBLASTER_CACHE").env_remove("SANDBLASTER_CACHE_DIR");
+    for (k, v) in vars {
+        c.env(k, v);
+    }
+    c.output().expect("run sandblaster")
 }
 
 fn text(o: &Output) -> (String, String) {
@@ -163,4 +177,78 @@ fn coverage_of_a_verified_crate_exits_zero() {
     // the exploration run is capped (and says so); the gate is not
     assert!(out.contains("INCOMPLETE"), "{out}");
     assert!(!err.contains("failed the §15 gates"), "{err}");
+}
+
+// ---------------------------------------------------------------------
+// `sandblaster mutate`: the spec-mutation tool (not a gate)
+// ---------------------------------------------------------------------
+
+/// A crate whose law puts `checksum` on the review surface, with the known
+/// answers `examples`.
+fn checksum_dir(name: &str, examples: &str) -> PathBuf {
+    let d = tmp(name);
+    let root = format!("#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n\n/// The checksum of two values.\n#[cfg(sandblaster)]\n#[spec]\n{examples}fn checksum(a: Nat, b: Nat) -> Nat {{ a + 2 * b }}\n\n#[cfg(sandblaster)]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[path = \"PROOF.rs\"]\nmod proof;\n");
+    let laws = "use sandblaster::prelude::*;\nuse super::checksum;\n\n/// The checksum covers its first value.\n#[law]\nfn checksum_covers_a(a: Nat, b: Nat) {\n    ensures(checksum(a, b) >= a);\n}\n";
+    let proof = "use sandblaster::prelude::*;\n#[allow(unused_imports)]\nuse super::checksum;\n\n#[proof]\nfn checksum_covers_a(a: Nat, b: Nat) {\n    follows();\n}\n";
+    for (f, t) in [("mod.rs", root.as_str()), ("LAWS.rs", laws), ("PROOF.rs", proof)] {
+        std::fs::write(d.join(f), t).unwrap();
+    }
+    d
+}
+
+/// One known answer leaves `checksum` under-pinned: `sandblaster mutate`
+/// reports the surviving mutant and the example that kills it, and exits
+/// 1 (it needs no lock: it states no verdict). Negative twin: with a
+/// second known answer nothing survives and it exits 0.
+#[test]
+fn mutate_reports_a_survivor_and_passes_a_pinned_crate() {
+    let d = checksum_dir("mutate-underpinned", "#[example(checksum(1, 2) == 5)]\n");
+    let o = run(&["mutate", d.to_str().unwrap()]);
+    let (out, err) = text(&o);
+    assert_eq!(o.status.code(), Some(1), "stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.contains("a review tool, not a gate") && out.contains("survived: #") && out.contains("`crate::checksum`"), "{out}");
+    assert!(out.contains("law `crate::laws::checksum_covers_a`: kills"), "{out}");
+    assert!(err.contains("error[spec-mutant-survived]") && err.contains("#[example(checksum("), "{err}");
+    // the engine's report as JSON
+    let o = run(&["mutate", d.to_str().unwrap(), "--json"]);
+    let (out, _) = text(&o);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(out.contains("\"counts\"") && out.contains("\"counterexample\": ") && !out.contains("\"counterexample\": 0"), "{out}");
+    // the exploration options belong to `coverage`
+    let o = run(&["mutate", d.to_str().unwrap(), "--mutants-max", "3"]);
+    assert_eq!(o.status.code(), Some(2), "{:?}", text(&o));
+    // pinned
+    let d = checksum_dir("mutate-pinned", "#[example(checksum(1, 2) == 5)]\n#[example(checksum(0, 0) == 0)]\n");
+    let o = run(&["mutate", d.to_str().unwrap()]);
+    let (out, err) = text(&o);
+    assert!(o.status.success(), "stdout:\n{out}\nstderr:\n{err}");
+    assert!(out.contains(" 0 survived") && !out.contains("survived: #") && !err.contains("error["), "{out}\n{err}");
+}
+
+/// `sandblaster mutate` caches each mutant's verdict (its toolchain
+/// identity from `build.rs`, the per-mutant keys of the verdict cache): a
+/// repeated run on unchanged inputs reuses every verdict and reports the
+/// same findings; a run with the cache off runs every mutant.
+#[test]
+fn mutate_reuses_cached_mutant_verdicts() {
+    let d = checksum_dir("mutate-cached", "#[example(checksum(1, 2) == 5)]\n");
+    let cache = tmp("mutate-cache-store");
+    let vars = [("SANDBLASTER_CACHE_DIR", cache.to_str().unwrap()), ("SANDBLASTER_CACHE_KEY", "test-key")];
+    let first = run_env(&["mutate", d.to_str().unwrap()], &vars);
+    let (out1, err1) = text(&first);
+    assert_eq!(first.status.code(), Some(1), "stdout:\n{out1}\nstderr:\n{err1}");
+    assert!(out1.contains("verdict cache: 0 hit(s), "), "{out1}");
+    let second = run_env(&["mutate", d.to_str().unwrap()], &vars);
+    let (out2, err2) = text(&second);
+    assert_eq!(second.status.code(), Some(1), "stdout:\n{out2}\nstderr:\n{err2}");
+    assert!(out2.contains(" hit(s), 0 run") && !out2.contains("verdict cache: 0 hit(s)"), "{out2}");
+    // the same survivors and findings either way
+    let survivors = |o: &str| o.lines().filter(|l| l.contains("survived: #")).map(String::from).collect::<Vec<_>>();
+    assert_eq!(survivors(&out1), survivors(&out2));
+    assert!(err2.contains("error[spec-mutant-survived]"), "{err2}");
+    // with the cache off: no cache line, every mutant runs
+    let off = run(&["mutate", d.to_str().unwrap()]);
+    let (out3, _) = text(&off);
+    assert!(!out3.contains("verdict cache:"), "{out3}");
+    assert_eq!(survivors(&out1), survivors(&out3));
 }

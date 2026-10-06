@@ -11,5 +11,5 @@
 
 pub use sandblaster_macros::{
     assumption, corollary, definitional, example, examples, fuel_sufficient, induction, law,
-    lemma, mirrors_impl, opaque, proof, reduces_to, rewrite, spec,
+    lemma, mirrors_impl, opaque, proof, reduces_to, spec,
 };

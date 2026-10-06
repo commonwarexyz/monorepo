@@ -45,6 +45,7 @@ pub mod gate;
 pub mod ir;
 pub mod literal;
 pub mod read;
+pub mod replay;
 pub mod sexp;
 pub mod simproof;
 pub mod stmt;
@@ -601,10 +602,7 @@ impl Names for ModuleNames {
         // the trait's module)
         let modp = self.dsl_module(&item_path).or_else(|| item_path.split_once(" as ").and_then(|(_, r)| self.dsl_module(r))).cloned().unwrap_or_else(|| self.current.borrow().clone());
         let has_requires = |n: &str| self.requires.contains(&format!("{modp}::{n}"));
-        // (a lowered copy `__sandblaster_opt_g` of `g`, the lifted round
-        // trip's, is bound where `g` is: binding is always a faithful order)
-        let copy_of = orig.strip_prefix(crate::driver::lowered::HELPER_PREFIX);
-        let total = !has_requires(&orig) && !has_requires(&name) && !copy_of.is_some_and(has_requires);
+        let total = !has_requires(&orig) && !has_requires(&name);
         // a `&self` receiver: the lift takes `self` by value
         let by_value: Vec<usize> = if f.argc >= 1 && f.debug.iter().any(|(n, l)| n == "self" && *l == 1) && matches!(f.locals.get(1), Some((Ty::Ref(false, _), _))) { vec![0] } else { vec![] };
         Some(LiftedCallee { path, states, has_ret, total, by_value })

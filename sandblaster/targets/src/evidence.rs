@@ -61,8 +61,7 @@
 //! failure on any CPU → not validated; otherwise validated if some CPU has a
 //! current validated entry (≥ [`REQUIRED_RANDOM_CASES`], zero mismatches),
 //! with the core record current as before. [`validation_on`] answers the
-//! same question for one CPU key (per-microarchitecture reporting and
-//! tuning; dispatch stays per architecture, DESIGN.md §9.2). Only results
+//! same question for one CPU key (per-microarchitecture reporting). Only results
 //! of an executor in [`VALIDATING_EXECUTORS`] (native hardware, Rosetta 2)
 //! count; anything else, including an unknown name, is recorded and never
 //! validates. A schema-3 model without host entries has no evidence.
@@ -73,14 +72,11 @@
 //! The records are inputs of this crate's build (`build.rs` declares
 //! `evidence/`), so a build script that consults them (the verified
 //! pipeline) re-runs when they change.
-//!
-//! [`tuning`] validates the tuning-evidence files (cost-model constants per
-//! microarchitecture; they change choices only, never dispatch).
+
 #![forbid(unsafe_code)]
 
 pub mod cpu;
 pub mod kat;
-pub mod tuning;
 
 use crate::diff::{Config, Outcome};
 use crate::fips;

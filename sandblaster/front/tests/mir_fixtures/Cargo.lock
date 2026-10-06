@@ -159,26 +159,6 @@ name = "fx-lo-walk"
 version = "0.0.0"
 
 [[package]]
-name = "fx-lu-hostmod"
-version = "0.0.0"
-
-[[package]]
-name = "fx-lu-nested"
-version = "0.0.0"
-
-[[package]]
-name = "fx-lu-nested-line"
-version = "0.0.0"
-
-[[package]]
-name = "fx-lu-nested-mod"
-version = "0.0.0"
-
-[[package]]
-name = "fx-lu-top"
-version = "0.0.0"
-
-[[package]]
 name = "fx-lv-bump"
 version = "0.0.0"
 
@@ -241,71 +221,19 @@ name = "fx-mt-qualified"
 version = "0.0.0"
 
 [[package]]
-name = "fx-opt-bits"
-version = "0.0.0"
-
-[[package]]
-name = "fx-opt-buf"
-version = "0.0.0"
-dependencies = [
- "bytes",
-]
-
-[[package]]
-name = "fx-opt-driven"
-version = "0.0.0"
-
-[[package]]
-name = "fx-opt-driven-more"
-version = "0.0.0"
-dependencies = [
- "bytes",
-]
-
-[[package]]
-name = "fx-opt-driven-taken"
-version = "0.0.0"
-
-[[package]]
-name = "fx-opt-gen2"
-version = "0.0.0"
-
-[[package]]
-name = "fx-opt-gen2-more"
-version = "0.0.0"
-dependencies = [
- "bytes",
-]
-
-[[package]]
-name = "fx-opt-ip-inplace"
-version = "0.0.0"
-
-[[package]]
-name = "fx-opt-ip-mod"
-version = "0.0.0"
-
-[[package]]
 name = "fx-opt-mbits"
 version = "0.0.0"
 
 [[package]]
-name = "fx-opt-mbits-cheap"
+name = "fx-rm-fast"
 version = "0.0.0"
 
 [[package]]
-name = "fx-opt-panics"
+name = "fx-rm-orig"
 version = "0.0.0"
 
 [[package]]
-name = "fx-opt-rd"
-version = "0.0.0"
-dependencies = [
- "bytes",
-]
-
-[[package]]
-name = "fx-opt-shipped"
+name = "fx-rm-wrong"
 version = "0.0.0"
 
 [[package]]

@@ -1,5 +1,0 @@
-base 960c27ac03c79b604ea6a75e7ecf819c37e9296a
-shipped codec src/varint.rs <- OUT_DIR/varint.rs sha256 fb796f89d121e27cd11dd8e483a85cc21f4dcbf923ccf4c7f335670d2243d80f
-shipped storage src/merkle/mmr/mod.rs <- OUT_DIR/mmr-lowered__merkle__mmr__iterator.rs sha256 25f96c42a3807cc4d2d3d5ad373e69df1d79feda40f05791b22122d509c4f683
-orig codec src/varint.rs sha256 47e60874f62bcd6f19fe0d3f8fabda94b8aa9d4849a15b0247cf07763bcb0512
-orig storage src/merkle/mmr/iterator.rs sha256 6330eaf101252b2245871d2316d7df35d8d4c995fabe892ad70c77f0c0d55731

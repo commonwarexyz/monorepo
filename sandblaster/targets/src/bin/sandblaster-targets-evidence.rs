@@ -60,9 +60,7 @@
 //!   kit's `sets` stage) under this machine's CPU key: `diagnostic` when
 //!   the CPU does not report every feature of the set (the run forced it;
 //!   never evidence), else `passed`/`failed`/`skipped`;
-//! * `--check-tuning PATH` validates a tuning-evidence file
-//!   (`evidence::tuning`); `--tuning-keys ARCH` prints the keys it requires;
-//!   `--kat-list` prints each KAT with its feature and instructions (the host
+//! * `--kat-list` prints each KAT with its feature and instructions (the host
 //!   kit checks them on the disassembly of `sandblaster_kat_<name>`).
 //!
 //! The core records (kernel cross-checks of `core/<arch>.core`, DESIGN.md
@@ -88,7 +86,7 @@ mod kat_hw;
 
 use sandblaster_targets::consistency;
 use sandblaster_targets::diff::{Config, Outcome};
-use sandblaster_targets::evidence::{self, Machine, Validation, cpu, kat, tuning};
+use sandblaster_targets::evidence::{self, Machine, Validation, cpu, kat};
 use sandblaster_targets::hw;
 use sandblaster_targets::json::{self, Json};
 use sandblaster_targets::registry::Arch;
@@ -100,7 +98,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: sandblaster-targets-evidence [--count N] [--seed S] [--out PATH] [--merge PATH | --no-merge] \
          [--kat-count N] [--kat-force] [--kat-only] [--executor NAME]\n       \
-         sandblaster-targets-evidence --check | --core-only [--arch A] | [--executor NAME] --cpu | --check-file PATH [--json] | --check-tuning PATH | --tuning-keys ARCH\n       \
+         sandblaster-targets-evidence --check | --core-only [--arch A] | [--executor NAME] --cpu | --check-file PATH [--json]\n       \
          sandblaster-targets-evidence --merge-files OUT A B ...\n       \
          sandblaster-targets-evidence --record-set --set NAME --features A,B --suite S --cases N --mismatches M [--source TEXT] [--out PATH] [--executor NAME]"
     );
@@ -266,40 +264,6 @@ fn check_file(path: &Path, as_json: bool) -> ExitCode {
         }
     }
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
-}
-
-/// `--check-tuning PATH`.
-fn check_tuning(path: &Path) -> ExitCode {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("{}: {e}", path.display());
-            return ExitCode::FAILURE;
-        }
-    };
-    match tuning::check(&text) {
-        Ok(s) => {
-            println!(
-                "{}: valid {} ({} {}, {}, {} measured, {} skipped{})",
-                path.display(),
-                tuning::SCHEMA,
-                s.arch.name(),
-                s.uarch,
-                s.cpu_key,
-                s.measured,
-                s.skipped,
-                if s.dry_run { ", DRY RUN" } else { "" }
-            );
-            ExitCode::SUCCESS
-        }
-        Err(errs) => {
-            eprintln!("{}: invalid tuning evidence:", path.display());
-            for e in errs {
-                eprintln!("  {e}");
-            }
-            ExitCode::FAILURE
-        }
-    }
 }
 
 /// The earlier record a campaign merges into: `--merge PATH`, else the
@@ -680,17 +644,9 @@ fn main() -> ExitCode {
             }
             "--check-file" => check_path = Some(PathBuf::from(args.next().unwrap_or_else(|| usage()))),
             "--json" => as_json = true,
-            "--check-tuning" => return check_tuning(Path::new(&args.next().unwrap_or_else(|| usage()))),
             "--kat-list" => {
                 for k in kat::KATS {
                     println!("{} {} {}", k.name, k.feature, k.instructions.join(","));
-                }
-                return ExitCode::SUCCESS;
-            }
-            "--tuning-keys" => {
-                let arch = Arch::from_name(&args.next().unwrap_or_else(|| usage())).unwrap_or_else(|| usage());
-                for k in tuning::required_keys(arch) {
-                    println!("{k}");
                 }
                 return ExitCode::SUCCESS;
             }

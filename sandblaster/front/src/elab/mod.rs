@@ -88,7 +88,6 @@ pub mod spec;
 pub mod tm;
 pub mod types;
 pub mod facts;
-pub mod generated;
 pub mod value;
 pub mod views;
 
@@ -133,7 +132,7 @@ pub struct Options {
     /// a split of both boolean results, an induction case) are small goals.
     /// Deterministic, like every budget (§15.8); not user-facing.
     pub complete_budget: u64,
-    /// The mutation gate's item filter (`crate::mutate`, gate mode): only
+    /// The mutation tool's item filter (`crate::mutate`, review mode): only
     /// these items are elaborated (types are always elaborated), and the
     /// whole-crate passes (§15 post passes, sections, law rules) are
     /// skipped. Build the set with [`order::filter_closure`]: closed under
@@ -263,8 +262,7 @@ pub struct Output {
     /// Items not elaborated in this phase (hardware variants etc.).
     pub deferred: Vec<(ItemId, String)>,
     /// `f::refines` lemmas (§15.2; filled from S1). S0: always empty (the
-    /// stage that fills a record list adds its accumulator to [`Elab`] and
-    /// to `generated::rebuild`/`finish`).
+    /// stage that fills a record list adds its accumulator to [`Elab`]).
     pub refinements: Vec<refines::RefinesRecord>,
     /// Checked examples (§15.7; filled from S1). S0: always empty.
     pub examples: Vec<examples::ExampleRecord>,
@@ -287,13 +285,11 @@ pub struct Output {
     /// The pre-commit body and measure of every measure-recursive
     /// definition the kernel accepted ([`PreCommit`]).
     pub pre_commit: HashMap<GlobalId, PreCommit>,
-    /// What the theorem gate generated and proved per MIR module (the
-    /// literal reading's state and the callee lemmas), for the lifted
-    /// round trip's theorems (`mir::checked::prove_roundtrip`).
+    /// The theorem gate's trusted record of the literal readings it loaded
+    /// (`mir::checked::GateMemory`).
     pub mir_gate: crate::mir::checked::GateMemory,
     /// Whether this is a test-only exec-only elaboration
-    /// ([`Options::exec_only`]): what elaborates more items against it (the
-    /// optimizer's clones and candidates) skips the ghost items the same way.
+    /// ([`Options::exec_only`]).
     pub exec_only: bool,
 }
 
@@ -558,9 +554,6 @@ pub struct Elab<'a> {
     /// through (spec function ↦ the first unproven goal): named in the
     /// failures of obligations that mention them.
     pub nat_range_missing: HashMap<GlobalId, String>,
-    /// Generated mode of the codegen round trip (DESIGN.md §8.3): definitions
-    /// are recorded instead of added ([`generated`]).
-    pub generated: Option<generated::Sink>,
     /// The §15 S1 stages' state (views, refinements, examples, spec
     /// closure; [`views::S1State`]).
     pub s1: views::S1State,
@@ -666,7 +659,6 @@ pub fn elaborate(krate: &Crate, prover: &mut ProverChain, opts: &Options) -> Out
         ens_rec: None,
         nat_ranges: HashMap::new(),
         nat_range_missing: HashMap::new(),
-        generated: None,
         s1: views::S1State { on: !opts.exec_only, ..Default::default() },
         s3: complete::S3State::default(),
         f: FnState::new(String::new(), None, &[], Span::DUMMY),
@@ -675,7 +667,7 @@ pub fn elaborate(krate: &Crate, prover: &mut ProverChain, opts: &Options) -> Out
     // §15.1 law rules (S3): recorded, enforced by the §15.8 gate
     let law_rules = if el.s1.on && opts.items.is_none() { el.law_rules_pass() } else { vec![] };
     if opts.items.is_some() {
-        el.diags.push(Diagnostic::error(DiagKind::Build, Span::DUMMY, "partial elaboration (the mutation gate's item filter): not a verification of the crate".to_string()));
+        el.diags.push(Diagnostic::error(DiagKind::Build, Span::DUMMY, "partial elaboration (the mutation tool's item filter): not a verification of the crate".to_string()));
     }
     let fn_globals = el
         .globals
@@ -779,7 +771,7 @@ impl<'a> Elab<'a> {
                 _ => {}
             }
         }
-        // a filtered elaboration (the mutation gate) has no whole-crate passes
+        // a filtered elaboration (the mutation tool) has no whole-crate passes
         if self.opts.items.is_some() {
             return;
         }
@@ -937,7 +929,7 @@ impl<'a> Elab<'a> {
             Some(ItemGlobal::Failed(why)) => Err(ElabError { span, msg: format!("depends on `{}`, which {why}", self.krate.item(id).path), kind: ErrKind::Blocked }),
             None => {
                 if self.hw_items.contains(&id) {
-                    Err(ElabError { span, msg: format!("depends on `{}`, a hardware function deferred to phase 3", self.krate.item(id).path), kind: ErrKind::Deferred })
+                    Err(ElabError { span, msg: format!("depends on `{}`, a hardware function deferred (no target models loaded, DESIGN.md §9)", self.krate.item(id).path), kind: ErrKind::Deferred })
                 } else {
                     Err(ElabError { span, msg: format!("`{}` has not been elaborated (dependency order)", self.krate.item(id).path), kind: ErrKind::Blocked })
                 }

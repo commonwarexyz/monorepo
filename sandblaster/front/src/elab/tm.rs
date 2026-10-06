@@ -664,3 +664,47 @@ pub fn ctor_congruence_term(env: &sandblaster_kernel::api::Env, ind: sandblaster
     }
     Some(mk::apps(acc, qs.iter().map(|q| (Rel::Irr, q.clone()))))
 }
+
+/// `body` (with `n` innermost binders) instantiated with `args` (terms at
+/// the outer depth; `args[0]` for the outermost of the `n`).
+pub fn subst_n(body: &Tm, args: &[Tm]) -> Tm {
+    let n = args.len() as u32;
+    crate::auto::util::map_term(body, 0, &mut |t, k| match &**t {
+        Term::Var(Idx(i)) if *i >= k && *i < k + n => Some(crate::auto::util::shift(&args[(n - 1 - (i - k)) as usize], k as i64)),
+        Term::Var(Idx(i)) if *i >= k + n => Some(Rc::new(Term::Var(Idx(i - n)))),
+        _ => None,
+    })
+}
+
+/// Head ι/β-reduction of a term: `(match Cₖ(ā) .. with arms) p`
+/// becomes arm `k` at `ā` applied to `p`, then `(λe. b) p` becomes
+/// `b[e := p]`.
+pub fn head_reduce(t: &Tm) -> Tm {
+    let mut t = t.clone();
+    for _ in 0..8 {
+        let next = match &*t {
+            Term::App { fun, arg, .. } => match &**fun {
+                Term::Match { scrut, arms, .. } => match &**scrut {
+                    Term::Ctor { ctor, args, .. } => {
+                        let Some(arm) = arms.get(*ctor as usize) else { return t };
+                        let b = subst_n(&arm.body, args);
+                        Rc::new(Term::App { rel: sandblaster_kernel::term::Rel::Irr, fun: b, arg: arg.clone() })
+                    }
+                    _ => return t,
+                },
+                Term::Lam { body, .. } => crate::auto::util::subst0(body, arg),
+                _ => return t,
+            },
+            Term::Match { scrut, arms, .. } => match &**scrut {
+                Term::Ctor { ctor, args, .. } => {
+                    let Some(arm) = arms.get(*ctor as usize) else { return t };
+                    subst_n(&arm.body, args)
+                }
+                _ => return t,
+            },
+            _ => return t,
+        };
+        t = next;
+    }
+    t
+}

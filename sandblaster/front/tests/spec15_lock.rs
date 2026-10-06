@@ -3,8 +3,7 @@
 //! enforcement (the lock gate of every build: a missing, malformed or
 //! mismatched lock fails the crate), acceptance (`sandblaster spec --accept`;
 //! the lock text through `lock::preview_accept` here), the kernel
-//! classification of changes (`--diff`, `--equivalent-only`) and the
-//! generated crate's `SANDBLASTER_SPEC_ROOT`.
+//! classification of changes (`--diff`, `--equivalent-only`).
 //!
 //! The fixture is a small crate with a spec helper, a spec with examples,
 //! a refinement, a vector file, two laws over an exec function and a
@@ -16,9 +15,8 @@ use std::path::Path;
 
 use sandblaster_front::diag::{Diagnostics, Severity};
 use sandblaster_front::driver::{self, Checked, stage::SpecBaseline, stage::SpecRun, VerifyOptions};
-use sandblaster_front::loader::{MemFs, RealFs};
+use sandblaster_front::loader::MemFs;
 use sandblaster_front::lock::{self, Lock, LockEntry, LockState, Selection, What};
-use sandblaster_front::opt::OptOptions;
 use sandblaster_front::specdiff::{self, Class};
 use sandblaster_front::surface::{self, SurfaceOptions};
 use sandblaster_front::target::TargetInfo;
@@ -370,30 +368,6 @@ fn a_crate_written_in_the_dsl_has_no_lift_prelude_line() {
     assert_eq!(lock::compare(Some(&text), &after, "r/SPEC.lock").state, LockState::Matches);
 }
 
-#[test]
-fn a_changed_target_model_evidence_is_detected() {
-    // the `simd` sample dispatches the NEON `vaddq_u32` on aarch64
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/samples/simd/mod.rs");
-    let c = driver::check(&root, &RealFs, &TargetInfo::aarch64_apple_darwin());
-    assert!(c.ok(), "{}", c.render());
-    let r = driver::stage::spec_run(&c, &SpecBaseline::None, false);
-    assert!(r.v.proofs_ok, "{}", r.v.diags.render(&c.sm));
-    let s = r.surface.unwrap();
-    let model = s.get("target-model:aarch64:vaddq_u32").unwrap_or_else(|| panic!("{:?}", s.items.iter().map(|i| &i.key).collect::<Vec<_>>()));
-    assert!(model.statement.iter().any(|l| l.contains("verdict Validated")), "{:?}", model.statement);
-    let text = lock::preview_accept(None, &s, &Selection::All).unwrap().0.render();
-    assert!(lock::compare(Some(&text), &s, "SPEC.lock").matches());
-    // the evidence verdict changes (withheld in this process)
-    let after = {
-        let _g = sandblaster_targets::evidence::withhold(sandblaster_targets::registry::Arch::Aarch64, &["vaddq_u32"]);
-        let r = driver::stage::spec_run(&c, &SpecBaseline::None, false);
-        r.surface.unwrap()
-    };
-    let st = lock::compare(Some(&text), &after, "SPEC.lock");
-    let changed: Vec<(&str, What)> = st.mismatches.iter().map(|m| (m.key.as_str(), m.what)).collect();
-    assert_eq!(changed, vec![("target-model:aarch64:vaddq_u32", What::Changed)], "{}", st.summary());
-}
-
 // ---------------------------------------------------------------------
 // --diff and --equivalent-only
 // ---------------------------------------------------------------------
@@ -546,101 +520,34 @@ fn the_kernel_source_list_is_the_kernel_crate() {
 }
 
 // ---------------------------------------------------------------------
-// the build: enforced by the lock gate; SANDBLASTER_SPEC_ROOT
+// the build: enforced by the lock gate
 // ---------------------------------------------------------------------
 
 #[test]
-fn the_generated_crate_exports_the_lock_root() {
-    let base = fixture();
-    let text = accepted(&base);
-    let root = Lock::parse(&text).unwrap().root;
-    let bytes = |r: &[u8; 32]| r.iter().map(|b| format!("0x{b:02x}u8")).collect::<Vec<_>>().join(", ");
-    for (files, want) in [(with_lock(&base, &text), root), (base.clone(), [0u8; 32])] {
-        let c = check(&files);
-        let built = driver::stage::verify_and_optimize(&c, &VerifyOptions::default(), &OptOptions { strict: true, ..Default::default() }, "r/mod.rs");
-        assert!(built.v.proofs_ok, "{}", built.v.diags.render(&c.sm));
-        let em = built.emit.unwrap().unwrap();
-        assert!(em.roundtrip.is_empty() && em.opt.errors.is_empty(), "{:?} {:?}", em.roundtrip, em.opt.errors);
-        assert_eq!(em.roundtrip_stats.spec_root, Some(want));
-        let line = format!("pub const SANDBLASTER_SPEC_ROOT: [u8; 32] = [{}];", bytes(&want));
-        assert!(em.code.contains(&line), "{}", &em.code[em.code.len().saturating_sub(600)..]);
-        assert_eq!(built.spec.root, want);
-    }
-}
-
-#[test]
-fn a_tampered_root_in_the_generated_code_fails_the_round_trip() {
-    let base = fixture();
-    let c = check(&base);
-    let k = c.krate.as_ref().unwrap();
-    let (value, failures) = sandblaster_front::elab::with_big_stack(|| {
-        let mut chain = sandblaster_front::elab::ProverChain::standard();
-        let mut out = sandblaster_front::elab::elaborate(k, &mut chain, &Default::default());
-        let em = driver::stage::optimize_emit(&c, &mut out, "r/mod.rs", "", &OptOptions { strict: true, ..Default::default() }).unwrap();
-        let zero = format!("[{}]", vec!["0x00u8"; 32].join(", "));
-        assert!(em.code.contains(&zero), "no lock: the exported root is zero");
-        let tampered = em.code.replacen("[0x00u8, ", "[0x01u8, ", 1);
-        let st = sandblaster_front::roundtrip::check(&tampered, &em.opt, &mut out, &c.sm, &c.reexports).unwrap();
-        let dropped = em.code.replacen(&sandblaster_front::canon::spec_root_item(&[0; 32]), "", 1);
-        assert_ne!(dropped, em.code);
-        let st2 = sandblaster_front::roundtrip::check(&dropped, &em.opt, &mut out, &c.sm, &c.reexports).unwrap();
-        (st.spec_root, st2.failures)
-    });
-    // the round trip reads the value back (the driver compares it with the
-    // lock's root, `verify_and_optimize`); a missing item is a failure
-    assert_eq!(value.map(|v| v[0]), Some(1));
-    assert!(failures.iter().any(|f| f.contains("SANDBLASTER_SPEC_ROOT")), "{failures:?}");
-}
-
-#[test]
 fn the_build_fails_without_a_matching_lock() {
-    use sandblaster_front::driver::{build_verified, LIB_RS_LINE};
-    let env: HashMap<String, String> = [
-        ("CARGO_MANIFEST_DIR", "/crate"),
-        ("OUT_DIR", "/out"),
-        ("CARGO_CFG_TARGET_ARCH", "aarch64"),
-        ("CARGO_CFG_TARGET_FEATURE", "neon,sha2,sha3,aes"),
-        ("CARGO_CFG_TARGET_ENDIAN", "little"),
-        ("CARGO_CFG_TARGET_POINTER_WIDTH", "64"),
-    ]
-    .iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect();
-    let build = |files: &Files| {
-        let mut all: Vec<(String, String)> = vec![("/crate/src/lib.rs".into(), LIB_RS_LINE.into())];
-        for (p, c) in files {
-            all.push((format!("/crate/sandblaster/{}", p.trim_start_matches("r/")), c.clone()));
-        }
-        let fs = MemFs::from_files(all.iter().map(|(p, c)| (p.as_str(), c.as_str())));
-        build_verified("sandblaster/mod.rs", &|k| env.get(k).cloned(), &fs)
+    // the crate path's lock gate (the build entry points run it unchanged)
+    let gate = |files: &Files| {
+        let c = check(files);
+        let b = driver::build_crate(&c, driver::LockUse::Enforce, "r/mod.rs");
+        (b.gates.diags.render(&c.sm), b.report.clone(), b.verdict.is_some())
     };
-    let report = |o: &driver::BuildOutcome| o.outputs.iter().find(|(p, _)| p.ends_with("sandblaster-report.json")).map(|(_, c)| c.clone()).unwrap();
-    let emitted = |o: &driver::BuildOutcome| o.outputs.iter().any(|(p, _)| p.ends_with("sandblaster.rs"));
     // (the fixture also fails other gates — exec functions at the root,
     // laws over exec functions — which is not what this test is about)
     // no lock: the lock gate fails the build
-    let o = build(&fixture());
-    assert!(!o.ok && !emitted(&o), "{}", o.stderr);
-    assert!(o.stderr.contains("error[spec-lock]: no SPEC.lock at `/crate/sandblaster/SPEC.lock`"), "{}", o.stderr);
-    assert!(report(&o).contains("\"status\": \"missing\""), "{}", report(&o));
-    // the lock is a build input even before it exists: a missing lock is
-    // noticed through the watched DSL root directory, and is not watched
-    // itself (Cargo re-runs a build script on every build while a watched
-    // path is missing: `driver::watch_existing`)
-    assert!(o.cargo.iter().any(|l| l == "cargo::rerun-if-changed=/crate/sandblaster"), "the DSL root directory is watched: {:?}", o.cargo);
-    assert!(!o.cargo.iter().any(|l| l == "cargo::rerun-if-changed=/crate/sandblaster/SPEC.lock"), "a missing lock is not a watched path: {:?}", o.cargo);
-    // an accepted lock: the lock gate passes (its root is what a verdict
-    // would export), and the lock is watched
+    let (d, report, verdict) = gate(&fixture());
+    assert!(!verdict);
+    assert!(d.contains("error[spec-lock]: no SPEC.lock at"), "{d}");
+    assert!(report.contains("\"status\": \"missing\""), "{report}");
+    // an accepted lock: the lock gate passes
     let text = accepted(&fixture());
-    let o = build(&with_lock(&fixture(), &text));
-    assert!(!o.stderr.contains("error[spec-lock]"), "{}", o.stderr);
-    assert!(report(&o).contains("\"status\": \"matches\""), "{}", report(&o));
-    assert!(o.cargo.iter().any(|l| l == "cargo::rerun-if-changed=/crate/sandblaster/SPEC.lock"), "an existing lock is a watched build input: {:?}", o.cargo);
+    let (d, report, _) = gate(&with_lock(&fixture(), &text));
+    assert!(!d.contains("error[spec-lock]"), "{d}");
+    assert!(report.contains("\"status\": \"matches\""), "{report}");
     // a mismatch is an error naming the item
-    let o = build(&edit(&with_lock(&fixture(), &text), "r/LAWS.rs", "requires(x < 1000);", "requires(x < 2000);"));
-    assert!(!o.ok && !emitted(&o));
-    assert!(o.stderr.contains("error[spec-lock]: SPEC.lock: `law:crate::laws::clamp_bounded` changed"), "{}", o.stderr);
-    assert!(report(&o).contains("\"status\": \"mismatch\""), "{}", report(&o));
+    let (d, report, verdict) = gate(&edit(&with_lock(&fixture(), &text), "r/LAWS.rs", "requires(x < 1000);", "requires(x < 2000);"));
+    assert!(!verdict);
+    assert!(d.contains("error[spec-lock]: SPEC.lock: `law:crate::laws::clamp_bounded` changed"), "{d}");
+    assert!(report.contains("\"status\": \"mismatch\""), "{report}");
 }
 
 #[test]
@@ -781,9 +688,9 @@ fn simulation_and_lossy_refinements_show_their_real_statement() {
     assert!(l.render().contains("NOT DETERMINING: refines `crate::spec::inc` up to view("));
     // the report records every refinement with its form and determinacy
     let c = check(&files);
-    let built = driver::stage::verify_and_optimize(&c, &VerifyOptions::default(), &OptOptions::default(), "r/mod.rs");
+    let built = driver::stage::verify_checked(&c, &VerifyOptions::default());
     assert!(built.v.proofs_ok, "{}", built.v.diags.render(&c.sm));
-    let json = driver::stage::report_json(&c, &built.v, &built.law_audit, "r/mod.rs", built.emit.as_ref().and_then(|x| x.as_ref().ok()), Some(&built.spec), Some(&built.spec15));
+    let json = driver::stage::report_json(&c, &built.v, &built.law_audit, "r/mod.rs", Some(&built.spec), Some(&built.spec15));
     let j = sandblaster_front::elab::value::J::parse(&json).expect("report JSON");
     let text = j.render();
     assert!(text.contains("\"function\":\"crate::bump\"") && text.contains("\"determines\":false") && text.contains("up to view("), "{text}");

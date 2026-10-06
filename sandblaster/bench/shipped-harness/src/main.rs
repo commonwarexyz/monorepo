@@ -1,23 +1,27 @@
-//! The shipped-code harness binary (finish-A, task 4; the held-out harness's
-//! protocol, `sandblaster/bench/heldout-harness`).
+//! The measurement harness binary (README.md): the original crates at a
+//! given commit against the worktree's own crates, in one binary.
 //!
-//! Three subjects of ONE crate source (`subject/lib.rs`), linked into this
-//! one binary:
+//! Three subjects of ONE crate source (`subject/lib.rs` with the probe's
+//! `probe.rs`), linked into this one binary:
 //!
 //! | subject | package | what |
 //! | --- | --- | --- |
-//! | original | `subj_orig` | the original Commonware code (the sandblaster branch's merge base) |
+//! | original | `subj_orig` | the crates at the base commit (`run.sh --base`) |
 //! | A/A | `subj_aa` | the same code again: the control (its own copies, identical code) |
-//! | shipped | `subj_shipped` | the code commonware-codec and commonware-storage compile from sandblaster's emitted and lowered copies |
+//! | worktree | `subj_wt` | the worktree's crates as they are (with the verified module a module-mode build writes to `OUT_DIR`) |
 //!
-//! `shipped-bench check` runs the differential check (every subject agrees on
-//! every input: generated inputs plus edge cases, each within the function's
-//! documented preconditions) and must pass before `shipped-bench bench
-//! [--rounds N] [--json PATH]` times anything: per function, N interleaved
-//! rounds (the subject order rotates each round), each subject's per-round
-//! value the median of 5 samples of about 200 microseconds, its reported value
-//! the median of its per-round values (ns per call, one out-of-line call into
-//! `probe::<fn>` per invocation).
+//! `bench-harness check [--only F,..]` runs the differential check (every
+//! subject agrees on every input: generated inputs plus edge cases, each
+//! within the function's documented preconditions) and must pass before
+//! `bench-harness bench [--rounds N] [--json PATH] [--only F,..]` times
+//! anything: per function, N >= 21 interleaved rounds (the subject order
+//! rotates each round), each subject's per-round value the median of 5
+//! samples of about 200 microseconds, its reported value the median of its
+//! per-round values (ns per call, one out-of-line call into `probe::<fn>`
+//! per invocation).
+
+// a probe's rows use only some of the input helpers
+#![allow(dead_code)]
 
 use std::fmt::Debug;
 use std::hint::black_box as bb;
@@ -167,7 +171,7 @@ impl<T: Debug, R: PartialEq + Debug, F0: Fn(&T) -> R, F1: Fn(&T) -> R, F2: Fn(&T
         for x in &self.inputs {
             let (a, b, c) = ((self.f.0)(x), (self.f.1)(x), (self.f.2)(x));
             if a != b || a != c {
-                return Err(format!("{}: input {:?}: original {:?}, A/A {:?}, shipped {:?}", self.name, x, a, b, c));
+                return Err(format!("{}: input {:?}: original {:?}, A/A {:?}, worktree {:?}", self.name, x, a, b, c));
             }
         }
         Ok(self.inputs.len())
@@ -191,80 +195,14 @@ macro_rules! row {
             $inputs,
             |$x| subj_orig::probe::$f($($arg),*),
             |$x| subj_aa::probe::$f($($arg),*),
-            |$x| subj_shipped::probe::$f($($arg),*),
+            |$x| subj_wt::probe::$f($($arg),*),
         )) as Box<dyn Case>
     };
 }
 
-/// The varint rows of one unsigned width.
-macro_rules! unsigned_rows {
-    ($v:ident, $t:ty, $bits:literal, $w:ident, $r:ident, $s:ident) => {
-        $v.push(row!("varint", $w, inputs(stringify!($w), vec![0, 1, 127, 128, <$t>::MAX], |r| r.bits($bits) as $t), |&x| (x)));
-        $v.push(row!("varint", $r, inputs(stringify!($r), vec![vec![], vec![0], vec![0x80], vec![0xff; 12]], |r| { let x = r.bits($bits); leb(r, x) }), |b| (b)));
-        $v.push(row!("varint", $s, inputs(stringify!($s), vec![0, 1, 127, 128, <$t>::MAX], |r| r.bits($bits) as $t), |&x| (x)));
-    };
-}
-
-const VERIFIER_LEAVES: u64 = 1024;
-
-fn cases() -> Vec<Box<dyn Case>> {
-    let mut v: Vec<Box<dyn Case>> = Vec::new();
-    // ---- codec: varint, the verified instances
-    unsigned_rows!(v, u16, 16, varint_u16_write, varint_u16_read, varint_u16_size);
-    unsigned_rows!(v, u32, 32, varint_u32_write, varint_u32_read, varint_u32_size);
-    unsigned_rows!(v, u64, 64, varint_u64_write, varint_u64_read, varint_u64_size);
-    v.push(row!("varint", varint_i16_write, inputs("varint_i16_write", vec![0, -1, 1, i16::MIN, i16::MAX], |r| r.signed(15) as i16), |&x| (x)));
-    v.push(row!("varint", varint_i16_read, inputs("varint_i16_read", vec![vec![], vec![1]], |r| { let x = zigzag(r.signed(15)) & 0xffff; leb(r, x) }), |b| (b)));
-    v.push(row!("varint", varint_i16_size, inputs("varint_i16_size", vec![0, -1, i16::MIN, i16::MAX], |r| r.signed(15) as i16), |&x| (x)));
-    v.push(row!("varint", varint_i32_write, inputs("varint_i32_write", vec![0, -1, 1, i32::MIN, i32::MAX], |r| r.signed(31) as i32), |&x| (x)));
-    v.push(row!("varint", varint_i32_read, inputs("varint_i32_read", vec![vec![], vec![1]], |r| { let x = zigzag(r.signed(31)) & 0xffff_ffff; leb(r, x) }), |b| (b)));
-    v.push(row!("varint", varint_i32_size, inputs("varint_i32_size", vec![0, -1, i32::MIN, i32::MAX], |r| r.signed(31) as i32), |&x| (x)));
-    v.push(row!("varint", varint_i64_write, inputs("varint_i64_write", vec![0, -1, 1, i64::MIN, i64::MAX], |r| r.signed(63)), |&x| (x)));
-    v.push(row!("varint", varint_i64_read, inputs("varint_i64_read", vec![vec![], vec![1]], |r| { let x = zigzag(r.signed(63)); leb(r, x) }), |b| (b)));
-    v.push(row!("varint", varint_i64_size, inputs("varint_i64_size", vec![0, -1, i64::MIN, i64::MAX], |r| r.signed(63)), |&x| (x)));
-    v.push(row!("varint", varint_u64_decoder, inputs("varint_u64_decoder", vec![vec![], vec![0x80; 11]], |r| { let x = r.bits(64); leb(r, x) }), |b| (b)));
-    v.push(row!("varint", varint_u32_decoder, inputs("varint_u32_decoder", vec![vec![], vec![0x80; 6]], |r| { let x = r.bits(32); leb(r, x) }), |b| (b)));
-    // ---- storage: the MMR (leaf counts below 2^62: every size, location and
-    // position within MAX_NODES / MAX_LEAVES)
-    v.push(row!("mmr", mmr_is_valid_size, inputs("mmr_is_valid_size", vec![0, 1, 2, 3, 4, u64::MAX], |r| if r.below(2) == 0 { mmr_size(r.bits(62)) } else { r.bits(63) }), |&s| (s)));
-    v.push(row!("mmr", mmr_to_nearest_size, inputs("mmr_to_nearest_size", vec![0, 1, 2, (1 << 63) - 1], |r| r.bits(63)), |&s| (s)));
-    v.push(row!("mmr", mmr_location_to_position, inputs("mmr_location_to_position", vec![0, 1, 1 << 62], |r| r.bits(62)), |&l| (l)));
-    v.push(row!("mmr", mmr_position_to_location, inputs("mmr_position_to_location", vec![0, 1, 2, (1 << 63) - 1], |r| if r.below(2) == 0 { mmr_size(r.bits(62)) } else { r.bits(63) }), |&p| (p)));
-    v.push(row!("mmr", mmr_peaks, inputs("mmr_peaks", vec![0, 1, 3, 4, mmr_size(1 << 62)], |r| mmr_size(r.bits(62))), |&s| (s)));
-    v.push(row!("mmr", mmr_peak_iterator, inputs("mmr_peak_iterator", vec![0, 1, 3, 4, mmr_size(1 << 62)], |r| mmr_size(r.bits(62))), |&s| (s)));
-    // a peak of height >= 1 of a valid size: its position and height
-    v.push(row!(
-        "mmr",
-        mmr_children,
-        inputs("mmr_children", vec![(2, 1)], |r| {
-            let n = 2 + r.bits(60);
-            // the first peak of `n` leaves: height floor(log2 n), at 2^(h+1) - 2
-            let h = 63 - n.leading_zeros();
-            ((1u64 << (h + 1)) - 2, h)
-        }),
-        |&(p, h)| (p, h)
-    ));
-    v.push(row!("mmr", mmr_parent_heights, inputs("mmr_parent_heights", vec![0, 1, 3, 7, u64::MAX >> 2], |r| r.bits(62)), |&l| (l)));
-    v.push(row!("mmr", mmr_location_from_position, inputs("mmr_location_from_position", vec![0, 1, 2, 3], |r| if r.below(2) == 0 { mmr_size(r.bits(62)) } else { r.bits(63) }), |&p| (p)));
-    v.push(row!("mmr", mmr_position_from_location, inputs("mmr_position_from_location", vec![0, 1, (1 << 62) + 1], |r| r.bits(63)), |&l| (l)));
-    // ---- storage: the Merkle proof verifier's first set
-    v.push(row!("verifier", hasher_leaf_digest, inputs("hasher_leaf_digest", vec![(0, vec![])], |r| (r.bits(62), r.bytes(64))), |(p, e)| (*p, e)));
-    v.push(row!("verifier", hasher_node_digest, inputs("hasher_node_digest", vec![(2, [0u8; 32], [0u8; 32])], |r| (r.bits(62), r.b32(), r.b32())), |&(p, a, b)| (p, a, b)));
-    // each subject's own MMR of VERIFIER_LEAVES leaves and proofs (built once, untimed)
-    let v0: &'static subj_orig::probe::Verifier = Box::leak(Box::new(subj_orig::probe::Verifier::new(VERIFIER_LEAVES)));
-    let v1: &'static subj_aa::probe::Verifier = Box::leak(Box::new(subj_aa::probe::Verifier::new(VERIFIER_LEAVES)));
-    let v2: &'static subj_shipped::probe::Verifier = Box::leak(Box::new(subj_shipped::probe::Verifier::new(VERIFIER_LEAVES)));
-    let inputs = inputs("proof_verify_element_inclusion", vec![(0usize, false), (VERIFIER_LEAVES as usize - 1, true)], |r| (r.below(VERIFIER_LEAVES) as usize, r.below(8) == 0));
-    v.push(Box::new(Row::new(
-        "verifier",
-        "proof_verify_element_inclusion",
-        inputs,
-        move |&(i, t): &(usize, bool)| subj_orig::probe::proof_verify_element_inclusion(v0, i, t),
-        move |&(i, t): &(usize, bool)| subj_aa::probe::proof_verify_element_inclusion(v1, i, t),
-        move |&(i, t): &(usize, bool)| subj_shipped::probe::proof_verify_element_inclusion(v2, i, t),
-    )));
-    v
-}
+// The probe's rows (`probes/<probe>/rows.rs`, copied by prepare.py):
+// `fn cases() -> Vec<Box<dyn Case>>`.
+include!("../gen/rows.rs");
 
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -283,7 +221,7 @@ fn check(cases: &[Box<dyn Case>]) -> bool {
     let mut ok = true;
     for c in cases {
         match c.check() {
-            Ok(n) => println!("agree  {} {} ({n} inputs: original, A/A and shipped)", c.set(), c.name()),
+            Ok(n) => println!("agree  {} {} ({n} inputs: original, A/A and worktree)", c.set(), c.name()),
             Err(e) => {
                 println!("DIFFER {} {e}", c.set());
                 ok = false;
@@ -293,10 +231,10 @@ fn check(cases: &[Box<dyn Case>]) -> bool {
     ok
 }
 
-const SUBJECTS: [&str; 3] = ["orig", "aa", "shipped"];
+const SUBJECTS: [&str; 3] = ["orig", "aa", "wt"];
 
 fn bench(cases: &[Box<dyn Case>], rounds: usize, json: Option<&str>) {
-    println!("| set | function | original ns | A/A ns | shipped ns | A/A / original | shipped / original | shipped / original, rounds p10..p90 |");
+    println!("| set | function | original ns | A/A ns | worktree ns | A/A / original | worktree / original | worktree / original, rounds p10..p90 |");
     println!("| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |");
     let mut rows = Vec::new();
     for c in cases {
@@ -320,10 +258,10 @@ fn bench(cases: &[Box<dyn Case>], rounds: usize, json: Option<&str>) {
         let ratios: Vec<f64> = (0..rounds).map(|i| per_round[2][i] / per_round[0][i]).collect();
         let aa_ratios: Vec<f64> = (0..rounds).map(|i| per_round[1][i] / per_round[0][i]).collect();
         let ns: Vec<f64> = (0..3).map(|s| median(&mut per_round[s].clone())).collect();
-        let (r_ship, r_aa) = (ns[2] / ns[0], ns[1] / ns[0]);
-        println!("| {} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3}..{:.3} |", c.set(), c.name(), ns[0], ns[1], ns[2], r_aa, r_ship, quantile(&ratios, 0.1), quantile(&ratios, 0.9));
+        let (r_wt, r_aa) = (ns[2] / ns[0], ns[1] / ns[0]);
+        println!("| {} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3}..{:.3} |", c.set(), c.name(), ns[0], ns[1], ns[2], r_aa, r_wt, quantile(&ratios, 0.1), quantile(&ratios, 0.9));
         rows.push(format!(
-            "{{\"set\":\"{}\",\"function\":\"{}\",\"reps\":{reps},\"inputs\":{N},\"ns\":{{\"{}\":{:.4},\"{}\":{:.4},\"{}\":{:.4}}},\"shipped_over_orig\":{r_ship:.5},\"aa_over_orig\":{r_aa:.5},\"round_ratios_shipped\":[{}],\"round_ratios_aa\":[{}]}}",
+            "{{\"set\":\"{}\",\"function\":\"{}\",\"reps\":{reps},\"inputs\":{N},\"ns\":{{\"{}\":{:.4},\"{}\":{:.4},\"{}\":{:.4}}},\"wt_over_orig\":{r_wt:.5},\"aa_over_orig\":{r_aa:.5},\"round_ratios_wt\":[{}],\"round_ratios_aa\":[{}]}}",
             c.set(),
             c.name(),
             SUBJECTS[0],
@@ -343,7 +281,35 @@ fn bench(cases: &[Box<dyn Case>], rounds: usize, json: Option<&str>) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cases = cases();
+    let mut rounds = 21;
+    let mut json = None;
+    let mut only: Option<Vec<String>> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--rounds" => {
+                rounds = args[i + 1].parse().expect("--rounds N");
+                i += 1;
+            }
+            "--json" => {
+                json = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--only" => {
+                only = Some(args[i + 1].split(',').map(String::from).collect());
+                i += 1;
+            }
+            a => panic!("unknown argument {a}"),
+        }
+        i += 1;
+    }
+    let mut cases = cases();
+    if let Some(only) = &only {
+        for o in only {
+            assert!(cases.iter().any(|c| c.name() == o), "--only: no row `{o}`");
+        }
+        cases.retain(|c| only.iter().any(|o| o == c.name()));
+    }
     match args.first().map(String::as_str) {
         Some("check") => {
             if !check(&cases) {
@@ -351,23 +317,6 @@ fn main() {
             }
         }
         Some("bench") => {
-            let mut rounds = 21;
-            let mut json = None;
-            let mut i = 1;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--rounds" => {
-                        rounds = args[i + 1].parse().expect("--rounds N");
-                        i += 1;
-                    }
-                    "--json" => {
-                        json = Some(args[i + 1].clone());
-                        i += 1;
-                    }
-                    a => panic!("unknown argument {a}"),
-                }
-                i += 1;
-            }
             assert!(rounds >= 21, "the protocol needs at least 21 rounds");
             // the differential check first: nothing is timed unless every subject agrees
             if !check(&cases) {
@@ -377,7 +326,7 @@ fn main() {
             bench(&cases, rounds, json.as_deref());
         }
         _ => {
-            eprintln!("usage: shipped-bench check | bench [--rounds N (>= 21)] [--json PATH]");
+            eprintln!("usage: bench-harness check [--only F,..] | bench [--rounds N (>= 21)] [--json PATH] [--only F,..]");
             std::process::exit(2);
         }
     }

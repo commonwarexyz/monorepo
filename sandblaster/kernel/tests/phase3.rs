@@ -574,7 +574,7 @@ fn shared_term_graphs_are_not_treated_as_trees() {
 // ---------------------------------------------------------------------------
 // BvRefl proves hardware-variant equivalence (DESIGN.md §9.3) against an
 // opaque, loop-based portable function (core-text shapes of the elaborated
-// sandblaster/fixtures/qmdb/sandblaster/sha256.rs `compress` / `compress_sha2`).
+// `compress` / `compress_sha2` of the former QMDB fixture, removed 2026-10-05).
 // ---------------------------------------------------------------------------
 
 const AARCH64_CORE: &str = include_str!("../../targets/core/aarch64.core");

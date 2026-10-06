@@ -1,8 +1,9 @@
 //! Executable reference models of target intrinsics (DESIGN.md §9.2).
 //!
 //! This crate is the executable half of sandblaster's **target semantics
-//! library** (TCB item 4 in DESIGN.md §1.1). For every hardware intrinsic the
-//! QMDB SHA-256 kernels need, it contains a pure, safe, intrinsic-free Rust
+//! library** (TCB item 4 in DESIGN.md §1.1). For every modeled hardware
+//! intrinsic (NEON, SHA-2, SHA-3/SHA-512; SSE2–SSE4.1, SHA-NI, AVX/AVX2,
+//! the AVX-512 families, GFNI), it contains a pure, safe, intrinsic-free Rust
 //! function that is a lane-level transcription of the vendor pseudocode (Arm
 //! Architecture Reference Manual for aarch64 NEON/SHA2, Intel SDM for
 //! x86_64 SSE/SSSE3/SSE4.1/SHA-NI), and the same lane-level definition
@@ -49,8 +50,9 @@
 //! * [`registry`] — the list of models with their feature requirements,
 //!   source items and pseudocode references; [`evidence`] — per-model source
 //!   and core hashes and the evidence records `evidence/<arch>.json` (fail
-//!   closed: the dispatcher must not select a variant whose models lack
-//!   hardware evidence or a current kernel cross-check).
+//!   closed: a model without current hardware evidence or a current kernel
+//!   cross-check is not validated; the front end pins each model's record and
+//!   verdict in the lock, its `target-model:` items).
 //! * [`json`] — a minimal JSON reader for the evidence records; [`rng`] — a
 //!   deterministic PRNG.
 //!

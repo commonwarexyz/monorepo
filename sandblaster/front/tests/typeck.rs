@@ -101,7 +101,7 @@ fn divergence_or_pattern_with_guard_is_kept_for_expansion() {
     let m = exprs(&f).into_iter().find(|e| matches!(e.kind, ExprKind::Match { .. })).unwrap();
     let ExprKind::Match { arms, .. } = &m.kind else { unreachable!() };
     assert!(matches!(arms[0].pat.kind, PatKind::Or(_)) && arms[0].guard.is_some());
-    let expanded = sandblaster_front::canon::expand_or_arms(arms);
+    let expanded = sandblaster_front::elab::pat::expand_or_arms(arms);
     assert_eq!(expanded.len(), 3);
     assert!(expanded[0].guard.is_some() && expanded[1].guard.is_some());
 }

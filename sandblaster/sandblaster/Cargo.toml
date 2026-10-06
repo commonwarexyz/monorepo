@@ -1,6 +1,6 @@
 [package]
 name = "sandblaster"
-description = "sandblaster: a proven subset of Rust with Bend-style laws, inline proofs and proven optimization."
+description = "sandblaster: Rust verified as written, against reviewed laws, with kernel-checked proofs."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

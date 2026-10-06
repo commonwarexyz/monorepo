@@ -142,10 +142,6 @@ impl<'a> DeElab<'a> {
                     let imm = if imms.is_empty() { String::new() } else { format!("::<{}>", imms.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ")) };
                     format!("core::arch::{}::{}{imm}({})", info.arch.name(), info.name, self.args(args))
                 }
-                Callee::Helper(h) => {
-                    let info = crate::intrinsics::helper(*h);
-                    format!("sandblaster::arch::{}::{}({})", info.arch.name(), info.name, self.args(args))
-                }
                 Callee::Ghost(g, tys) => {
                     let extra = match g {
                         crate::builtins::GhostFn::SChunks(n) | crate::builtins::GhostFn::SToArray(n) => format!("<{n}>"),

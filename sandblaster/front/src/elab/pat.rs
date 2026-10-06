@@ -2,7 +2,7 @@
 //! nested single-level core matches with **first-match** semantics.
 //!
 //! Or-patterns are expanded first with the normative expansion of §7.3
-//! ([`crate::canon::expand_or_arms`]: consecutive arms `p₁ if g => e; p₂ if
+//! ([`expand_or_arms`]: consecutive arms `p₁ if g => e; p₂ if
 //! g => e; …`, leftmost alternative varying slowest), so a guard is retried
 //! per alternative exactly as rustc does. The rows are then compiled as a
 //! clause matrix (Maranget-style decision tree):
@@ -82,7 +82,7 @@ impl<'a> Elab<'a> {
     /// expand.
     pub fn expanded_arms(&mut self, arms: &'a [Arm]) -> &'a [Arm] {
         if arms.iter().any(|a| a.pat.has_or()) {
-            let v = crate::canon::expand_or_arms(arms);
+            let v = expand_or_arms(arms);
             self.arena_arms(v)
         } else {
             arms
@@ -141,7 +141,7 @@ impl<'a> Elab<'a> {
         if !pat.has_or() {
             return vec![pat];
         }
-        let alts: &'a [Pat] = Box::leak(crate::canon::expand_pat(pat).into_boxed_slice());
+        let alts: &'a [Pat] = Box::leak(expand_pat(pat).into_boxed_slice());
         alts.iter().collect()
     }
 
@@ -718,4 +718,69 @@ fn specialize<'a>(occs: &[Occ], rows: Vec<Row<'a>>, c: usize, ci: u32, n: usize,
 /// checked-structuring walker and the provers expect).
 fn is_self_call(t: &Tm) -> bool {
     matches!(&**t, Term::Rec { .. })
+}
+
+/// Expands or-patterns of match arms into consecutive arms (cross product of
+/// nested or-patterns, leftmost alternative varying slowest), keeping guards
+/// and bodies — the normative expansion of DESIGN.md §7.3.
+pub fn expand_or_arms(arms: &[Arm]) -> Vec<Arm> {
+    let mut out = Vec::new();
+    for a in arms {
+        for p in expand_pat(&a.pat) {
+            out.push(Arm { pat: p, guard: a.guard.clone(), body: a.body.clone(), span: a.span });
+        }
+    }
+    out
+}
+
+/// All or-free alternatives of a pattern, in rustc's order.
+pub fn expand_pat(p: &Pat) -> Vec<Pat> {
+    let mk = |kind: PatKind| Pat { kind, ty: p.ty.clone(), span: p.span };
+    match &p.kind {
+        PatKind::Or(alts) => alts.iter().flat_map(expand_pat).collect(),
+        PatKind::Binding { local, mode, sub: Some(s) } => expand_pat(s).into_iter().map(|s| mk(PatKind::Binding { local: *local, mode: *mode, sub: Some(Box::new(s)) })).collect(),
+        PatKind::Tuple(ps) => product(ps).into_iter().map(|v| mk(PatKind::Tuple(v))).collect(),
+        PatKind::Ctor { ctor, ty_args, fields } => {
+            let ps: Vec<Pat> = fields.iter().map(|(_, p)| p.clone()).collect();
+            product(&ps).into_iter().map(|v| mk(PatKind::Ctor { ctor: *ctor, ty_args: ty_args.clone(), fields: fields.iter().map(|(i, _)| *i).zip(v).collect() })).collect()
+        }
+        PatKind::Deref { pat, implicit } => expand_pat(pat).into_iter().map(|s| mk(PatKind::Deref { pat: Box::new(s), implicit: *implicit })).collect(),
+        PatKind::Slice { prefix, rest, suffix } => {
+            let mut all: Vec<Pat> = prefix.clone();
+            let rest_p = match rest {
+                Some(Some(r)) => Some((**r).clone()),
+                _ => None,
+            };
+            if let Some(r) = &rest_p {
+                all.push(r.clone());
+            }
+            all.extend(suffix.iter().cloned());
+            product(&all)
+                .into_iter()
+                .map(|mut v| {
+                    let suf: Vec<Pat> = v.split_off(prefix.len() + usize::from(rest_p.is_some()));
+                    let r = if rest_p.is_some() { Some(Some(Box::new(v.pop().unwrap()))) } else { rest.as_ref().map(|_| None) };
+                    mk(PatKind::Slice { prefix: v, rest: r, suffix: suf })
+                })
+                .collect()
+        }
+        _ => vec![p.clone()],
+    }
+}
+
+fn product(ps: &[Pat]) -> Vec<Vec<Pat>> {
+    let mut acc: Vec<Vec<Pat>> = vec![vec![]];
+    for p in ps {
+        let alts = expand_pat(p);
+        let mut next = Vec::new();
+        for prefix in &acc {
+            for a in &alts {
+                let mut v = prefix.clone();
+                v.push(a.clone());
+                next.push(v);
+            }
+        }
+        acc = next;
+    }
+    acc
 }
