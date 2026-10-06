@@ -189,7 +189,7 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
             context.child("oversized"),
             oversized_cfg,
             cfg.metadata_partition,
-            commonware_runtime::ReadOptions::default(),
+            commonware_runtime::ReadOptions::DONT_CACHE,
         )
         .await?;
 

@@ -459,13 +459,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             && end < blob.size()
         {
             end = end.min(
-                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::default())
+                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::DONT_CACHE)
                     .await?,
             );
         }
         journal.0.manager = journal.0.manager.truncate_pending(section, end).await?;
         let mut replay = journal
-            .replay(0, 0, replay_buffer, ReadOptions::default())
+            .replay(0, 0, replay_buffer, ReadOptions::DONT_CACHE)
             .await?;
         while let Some(item) = replay.next().await {
             item?;

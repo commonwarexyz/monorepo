@@ -14,7 +14,7 @@
 
 use super::{
     CHECKSUM_SIZE, CacheRef, Replay,
-    read::PageReader,
+    read::{Malformed, PageReader},
     view::{Tail, View},
 };
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
@@ -209,6 +209,7 @@ impl<B: Blob> Sealed<B> {
             prefetch_pages,
             page_size_nz,
             read_options,
+            Malformed::Fail,
         );
         Ok(Replay::new(reader))
     }

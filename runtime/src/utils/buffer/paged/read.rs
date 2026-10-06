@@ -4,7 +4,7 @@ use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{Buf, FixedSize};
 use commonware_utils::Widen;
 use std::{collections::VecDeque, num::NonZeroU16, sync::Arc};
-use tracing::error;
+use tracing::{error, warn};
 
 /// Buffered pages from storage or a frozen logical tail.
 ///
@@ -17,6 +17,16 @@ pub(super) struct BufferState {
     num_pages: usize,
     /// Logical length of the last page (may be partial).
     last_page_len: usize,
+}
+
+/// How a [PageReader] handles a stored page that is not well-formed: one whose checksum is
+/// invalid, or a logically partial page before the last.
+#[derive(Clone, Copy)]
+pub(super) enum Malformed {
+    /// Fail the read with [Error::InvalidChecksum].
+    Fail,
+    /// End the blob's readable prefix before an invalid page, or after a partial one.
+    End,
 }
 
 /// Async I/O component that prefetches pages and validates CRCs.
@@ -42,6 +52,8 @@ pub(super) struct PageReader<B: Blob> {
     prefetch_count: usize,
     /// Options applied to every blob read.
     read_options: ReadOptions,
+    /// Handling of a stored page that is not well-formed.
+    malformed: Malformed,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -51,11 +63,13 @@ impl<B: Blob> PageReader<B> {
     /// (e.g., junk pages from an interrupted write). Each physical page is the same
     /// size on disk, but the CRC record indicates how much logical data it contains.
     /// The last page may be logically partial (CRC length < logical page size), but
-    /// all preceding pages must be logically full. A logically partial non-last page
-    /// indicates corruption and will cause an `Error::InvalidChecksum`.
+    /// all preceding pages must be logically full. A page with an invalid checksum or a
+    /// logically partial non-last page is handled according to `malformed`.
     ///
     /// A frozen `partial_page` contains exactly the logical bytes of the final partial page.
     /// Its physical page is included in `physical_blob_size` but is not read from storage.
+    /// Ending at an earlier malformed page discards the frozen page.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         blob: Arc<B>,
         mut physical_blob_size: u64,
@@ -64,6 +78,7 @@ impl<B: Blob> PageReader<B> {
         prefetch_count: usize,
         page_size: NonZeroU16,
         read_options: ReadOptions,
+        malformed: Malformed,
     ) -> Self {
         let page_size = page_size.get() as usize;
         let physical_page_size = page_size + Checksum::SIZE;
@@ -95,7 +110,18 @@ impl<B: Blob> PageReader<B> {
             blob_page: 0,
             prefetch_count,
             read_options,
+            malformed,
         }
+    }
+
+    /// End the readable prefix after `pages` pages and `logical_size` logical bytes.
+    fn end_at(&mut self, pages: u64, logical_size: u64) -> Result<(), Error> {
+        self.physical_blob_size = pages
+            .checked_mul(Widen::widen(self.physical_page_size))
+            .ok_or(Error::OffsetOverflow)?;
+        self.logical_blob_size = self.logical_blob_size.min(logical_size);
+        self.partial_page = None;
+        Ok(())
     }
 
     /// Returns the size of the blob.
@@ -159,16 +185,28 @@ impl<B: Blob> PageReader<B> {
                 .freeze(),
         );
 
-        // Validate CRCs and compute total logical bytes
+        // Validate CRCs and compute total logical bytes. Ending at a malformed page keeps only
+        // the pages before it, plus the page itself when it is valid but partial.
+        let mut pages = pages_to_read;
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
         let is_final_batch = Widen::widen(pages_to_read) == max_pages;
         for page_idx in 0..pages_to_read {
+            let page = self.blob_page + page_idx as u64;
+            let logical_start = page
+                .checked_mul(self.page_size as u64)
+                .ok_or(Error::OffsetOverflow)?;
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
                 &physical_buf.as_ref()[page_start..page_start + self.physical_page_size];
             let Some(checksum) = Checksum::validate_page(page_slice) else {
-                error!(page = self.blob_page + page_idx as u64, "CRC mismatch");
+                if matches!(self.malformed, Malformed::End) {
+                    warn!(page, "replay ends before page with invalid checksum");
+                    pages = page_idx;
+                    self.end_at(page, logical_start)?;
+                    break;
+                }
+                error!(page, "CRC mismatch");
                 return Err(Error::InvalidChecksum);
             };
             let len = checksum.len as usize;
@@ -176,9 +214,10 @@ impl<B: Blob> PageReader<B> {
             // Only the final page in the blob may have partial length
             let is_last_page_in_blob =
                 self.partial_page.is_none() && is_final_batch && page_idx + 1 == pages_to_read;
-            if !is_last_page_in_blob && len != self.page_size {
+            let partial_interior = !is_last_page_in_blob && len != self.page_size;
+            if partial_interior && matches!(self.malformed, Malformed::Fail) {
                 error!(
-                    page = self.blob_page + page_idx as u64,
+                    page,
                     expected = self.page_size,
                     actual = len,
                     "non-last page has partial length"
@@ -186,21 +225,32 @@ impl<B: Blob> PageReader<B> {
                 return Err(Error::InvalidChecksum);
             }
 
-            let logical_start = (self.blob_page + page_idx as u64)
-                .checked_mul(self.page_size as u64)
-                .ok_or(Error::OffsetOverflow)?;
             let logical_remaining = self.logical_blob_size.saturating_sub(logical_start);
             let logical_remaining_in_page = logical_remaining.min(self.page_size as u64) as usize;
             let exposed_len = len.min(logical_remaining_in_page);
 
             total_logical += exposed_len;
             last_len = exposed_len;
+
+            // A valid partial page ends the prefix wherever it appears.
+            if partial_interior {
+                warn!(page, len, "replay ends at partial page");
+                pages = page_idx + 1;
+                let logical_end = logical_start
+                    .checked_add(len as u64)
+                    .ok_or(Error::OffsetOverflow)?;
+                self.end_at(page + 1, logical_end)?;
+                break;
+            }
         }
-        self.blob_page += Widen::widen(pages_to_read);
+        self.blob_page += Widen::widen(pages);
+        if pages == 0 {
+            return Ok(None);
+        }
 
         let state = BufferState {
             buffer: physical_buf,
-            num_pages: pages_to_read,
+            num_pages: pages,
             last_page_len: last_len,
         };
 

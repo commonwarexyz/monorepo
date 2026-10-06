@@ -382,7 +382,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
     async fn recover_inferred(self, buffer: NonZeroUsize) -> Result<Oversized<E, I, V>, Error> {
         let mut replay = self
             .index
-            .replay(0, 0, buffer, ReadOptions::default())
+            .replay(0, 0, buffer, ReadOptions::DONT_CACHE)
             .await?;
         while let Some(result) = replay.next().await {
             result?;

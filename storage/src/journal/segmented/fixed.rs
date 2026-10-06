@@ -647,7 +647,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             && end < blob.size()
         {
             end = end.min(
-                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::default())
+                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::DONT_CACHE)
                     .await?,
             );
         }
@@ -657,7 +657,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .truncate_pending(section, end - end % Self::CHUNK_SIZE as u64)
             .await?;
         let mut replay = journal
-            .replay(0, 0, replay_buffer, ReadOptions::default())
+            .replay(0, 0, replay_buffer, ReadOptions::DONT_CACHE)
             .await?;
         while let Some(item) = replay.next().await {
             item?;

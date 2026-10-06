@@ -513,7 +513,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
                     acknowledged,
                     limit,
                     cfg.replay_buffer,
-                    ReadOptions::default(),
+                    ReadOptions::DONT_CACHE,
                 )
                 .await?;
             let valid_items = recoverable / Inner::<E, A>::CHUNK_SIZE_U64;
