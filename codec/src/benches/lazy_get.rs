@@ -7,6 +7,8 @@ use std::{hint::black_box, thread};
 
 const TXS: usize = 100_000;
 
+/// `Tx` contains only fixed-width integers and byte arrays, so every buffer of `Tx::SIZE` bytes
+/// is a valid encoding.
 fn encoded_transactions(mut rng: impl Rng) -> impl Iterator<Item = Bytes> {
     (0..TXS).map(move |_| {
         let mut bytes = vec![0; Tx::SIZE];
