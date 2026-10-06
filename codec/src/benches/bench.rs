@@ -1,6 +1,6 @@
 use criterion::criterion_main;
 
-mod lazy_get;
-mod tx;
+mod lazy;
+mod utils;
 
-criterion_main!(lazy_get::benches);
+criterion_main!(lazy::benches);

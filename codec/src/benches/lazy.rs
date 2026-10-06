@@ -1,4 +1,4 @@
-use crate::tx::{MemoTx, Tx};
+use crate::utils::{MemoTx, Tx};
 use bytes::Bytes;
 use commonware_codec::{Copying, DecodeExt as _, Encode, FixedSize, Read, types::lazy::Lazy};
 use criterion::{BatchSize, Criterion, criterion_group};
@@ -61,7 +61,7 @@ fn bench_shared<T: Read<Cfg = ()> + Encode + Sync + Send>(
     for conc in [1, 8] {
         c.bench_function(
             &format!(
-                "{}/value={value} source=shared txs={TXS} conc={conc}",
+                "{}::get/value={value} source=shared txs={TXS} conc={conc}",
                 module_path!()
             ),
             |b| {
@@ -85,7 +85,7 @@ fn bench_shared<T: Read<Cfg = ()> + Encode + Sync + Send>(
     }
 }
 
-fn bench_lazy_get(c: &mut Criterion) {
+fn bench_get(c: &mut Criterion) {
     let encoded: Vec<Bytes> = encoded_transactions(StdRng::seed_from_u64(0)).collect();
     let shared = slices_of_one_buffer(&encoded);
 
@@ -99,7 +99,10 @@ fn bench_lazy_get(c: &mut Criterion) {
     for conc in [1, 8] {
         for (source, items) in [("shared", &shared), ("private", &private)] {
             c.bench_function(
-                &format!("{}/source={source} txs={TXS} conc={conc}", module_path!()),
+                &format!(
+                    "{}::get/source={source} txs={TXS} conc={conc}",
+                    module_path!()
+                ),
                 |b| {
                     b.iter_batched(
                         || {
@@ -120,7 +123,10 @@ fn bench_lazy_get(c: &mut Criterion) {
             );
         }
         c.bench_function(
-            &format!("{}/source=borrowed txs={TXS} conc={conc}", module_path!()),
+            &format!(
+                "{}::get/source=borrowed txs={TXS} conc={conc}",
+                module_path!()
+            ),
             |b| {
                 b.iter(|| {
                     run(&shared, conc, |bytes| {
@@ -132,7 +138,7 @@ fn bench_lazy_get(c: &mut Criterion) {
     }
 }
 
-fn bench_lazy_get_values(c: &mut Criterion) {
+fn bench_get_values(c: &mut Criterion) {
     // A value that keeps a `Bytes` field, which `get` slices out of the shared buffer.
     bench_shared(
         c,
@@ -158,4 +164,4 @@ fn bench_lazy_get_values(c: &mut Criterion) {
     );
 }
 
-criterion_group!(benches, bench_lazy_get, bench_lazy_get_values);
+criterion_group!(benches, bench_get, bench_get_values);

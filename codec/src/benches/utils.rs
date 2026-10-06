@@ -1,4 +1,4 @@
-//! A transaction-shaped value shared by the codec benchmarks.
+//! Shared fixtures for the codec benchmarks.
 
 use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt as _, Write};
