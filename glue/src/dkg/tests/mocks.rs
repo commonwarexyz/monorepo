@@ -191,7 +191,6 @@ pub(crate) type TestReshareActor = reshare::Actor<
     StaticParticipants,
     MemorySecretStore,
     Sequential,
-    commonware_cryptography::ed25519::Batch,
     TestScheme,
     TestMarshalVariant,
     MockConsumer,

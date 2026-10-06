@@ -49,10 +49,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
-use std::{
-    marker::PhantomData,
-    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
-};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
 
@@ -102,7 +99,7 @@ where
 }
 
 /// Configuration for [`Actor`].
-pub struct Config<C, M, X, P, SS, T, BV, S, MV, R>
+pub struct Config<C, M, X, P, SS, T, S, MV, R>
 where
     C: Signer,
     X: Blocker<PublicKey = C::PublicKey>,
@@ -183,15 +180,12 @@ where
 
     /// Epoch schedule used to interpret finalized block heights.
     pub blocks_per_epoch: NonZeroU64,
-
-    /// Batch verifier used to verify dealer logs.
-    pub batch_verifier: PhantomData<BV>,
 }
 
 /// Reshare actor for one node.
 ///
 /// See the [module docs](crate::dkg::reshare) for the protocol it runs.
-pub struct Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A = Exact>
+pub struct Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A = Exact>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -202,7 +196,6 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
@@ -234,10 +227,9 @@ where
     metrics: ReshareMetrics<C::PublicKey>,
     mode: Mode<V, C::PublicKey, B::Directory>,
     tip: Option<FinalizedTip<B::Digest>>,
-    batch_verifier: PhantomData<BV>,
 }
 
-impl<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, BV, S, MV, R, A>
+impl<E, B, V, C, M, X, P, SS, T, S, MV, R, A> Actor<E, B, V, C, M, X, P, SS, T, S, MV, R, A>
 where
     E: Spawner + CryptoRng + Metrics + BufferPooler + Clock + Storage,
     B: ReshareBlock<Variant = V, Signer = C>,
@@ -248,7 +240,7 @@ where
     P: ParticipantsProvider<PublicKey = C::PublicKey, Directory = B::Directory>,
     SS: SecretStore,
     T: Strategy,
-    BV: BatchVerifier<PublicKey = C::PublicKey> + Send + 'static,
+    C::PublicKey: BatchVerifier,
     S: SimplexScheme<MV::Commitment, PublicKey = C::PublicKey>,
     MV: MarshalVariant<ApplicationBlock = B>,
     R: Registrar<Variant = V, PublicKey = C::PublicKey>,
@@ -257,7 +249,7 @@ where
     /// Creates an actor from `config` and returns it with its [`Mailbox`].
     pub fn new(
         context: E,
-        config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
+        config: Config<C, M, X, P, SS, T, S, MV, R>,
     ) -> (Self, Mailbox<B, V, C, A>) {
         let epocher = FixedEpocher::new(config.blocks_per_epoch);
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -290,7 +282,6 @@ where
                 metrics,
                 mode: Mode::Reshare,
                 tip: None,
-                batch_verifier: config.batch_verifier,
             },
             Mailbox::new(sender),
         )
@@ -298,7 +289,7 @@ where
 
     pub(crate) fn new_dkg(
         context: E,
-        config: Config<C, M, X, P, SS, T, BV, S, MV, R>,
+        config: Config<C, M, X, P, SS, T, S, MV, R>,
         dkg: DkgConfig<V, C::PublicKey, B::Directory>,
     ) -> (Self, Mailbox<B, V, C, A>) {
         let (mut actor, mailbox) = Self::new(context, config);
