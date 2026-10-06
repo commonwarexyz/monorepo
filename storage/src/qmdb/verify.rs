@@ -8,6 +8,25 @@ use commonware_cryptography::{Digest, DigestOf, Hasher};
 /// Digests extracted from a verified proof, paired with their Merkle positions.
 pub type ExtractedDigests<F, H> = Vec<(Position<F>, DigestOf<H>)>;
 
+/// Encode `operations` back to back into one buffer and call `f` with each operation's encoding.
+pub(crate) fn with_encoded_operations<Op: Encode, T>(
+    operations: &[Op],
+    f: impl FnOnce(&[&[u8]]) -> T,
+) -> T {
+    let mut buffer = Vec::with_capacity(operations.iter().map(Op::encode_size).sum());
+    let mut ends = Vec::with_capacity(operations.len());
+    for op in operations {
+        op.write(&mut buffer);
+        ends.push(buffer.len());
+    }
+    let starts = core::iter::once(0).chain(ends.iter().copied());
+    let elements: Vec<&[u8]> = starts
+        .zip(&ends)
+        .map(|(start, &end)| &buffer[start..end])
+        .collect();
+    f(&elements)
+}
+
 /// Verify that a [Proof] is valid for a range of operations and a target root.
 pub fn verify_proof<H, F, Op>(
     proof: &Proof<F, DigestOf<H>>,
@@ -21,8 +40,9 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(&hasher, &elements, start_loc, target_root)
+    with_encoded_operations(operations, |elements| {
+        proof.verify_range_inclusion(&hasher, elements, start_loc, target_root)
+    })
 }
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
@@ -39,8 +59,9 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_proof_and_pinned_nodes(&hasher, &elements, start_loc, pinned_nodes, target_root)
+    with_encoded_operations(operations, |elements| {
+        proof.verify_proof_and_pinned_nodes(&hasher, elements, start_loc, pinned_nodes, target_root)
+    })
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their
@@ -57,8 +78,9 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion_and_extract_digests(&hasher, &elements, start_loc, target_root)
+    with_encoded_operations(operations, |elements| {
+        proof.verify_range_inclusion_and_extract_digests(&hasher, elements, start_loc, target_root)
+    })
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
@@ -74,8 +96,9 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    ProofStore::new(&hasher, proof, &elements, start_loc, root)
+    with_encoded_operations(operations, |elements| {
+        ProofStore::new(&hasher, proof, elements, start_loc, root)
+    })
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].

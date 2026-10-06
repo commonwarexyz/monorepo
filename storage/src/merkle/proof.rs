@@ -490,6 +490,95 @@ impl<F: Family, D: Digest> Proof<F, D> {
             .map_err(|_| ReconstructionError::InvalidSize)?;
 
         let proof_digests = bp.split_proof_digests(&self.digests)?;
+        let siblings = proof_digests.siblings;
+
+        let max_height = bp
+            .range_peaks
+            .iter()
+            .map(|peak| peak.height as usize)
+            .fold(0, usize::max);
+        // A range has fewer nodes than leaves plus one per height at each end.
+        let max_nodes = elements.len() + 2 * max_height;
+        // Walk the range peaks without hashing, recording the leaves and nodes to hash.
+        let mut plan = Plan {
+            leaves: Vec::with_capacity(elements.len()),
+            nodes: Vec::with_capacity(max_nodes),
+            counts: [0; 64],
+            collected: collected
+                .is_some()
+                .then(|| Vec::with_capacity(2 * max_nodes + bp.range_peaks.len())),
+        };
+        let mut range_peaks = Vec::with_capacity(bp.range_peaks.len());
+        let mut sibling_cursor = 0usize;
+        let mut elements_iter = elements.iter();
+        for peak in &bp.range_peaks {
+            let peak_digest = peak.plan_digest(
+                &bp.range,
+                &mut elements_iter,
+                siblings.len(),
+                &mut sibling_cursor,
+                &mut plan,
+            )?;
+            if let Some(cd) = &mut plan.collected {
+                cd.push((peak.pos, peak_digest));
+            }
+            range_peaks.push(peak_digest);
+        }
+
+        // Verify all elements were consumed.
+        if elements_iter.next().is_some() {
+            return Err(ReconstructionError::ExtraDigests);
+        }
+
+        // Verify all siblings were consumed.
+        if sibling_cursor != siblings.len() {
+            return Err(ReconstructionError::ExtraDigests);
+        }
+
+        // Computed digests are stored by height, then rank. Order the nodes the same way.
+        let mut starts = [0; 65];
+        for height in 0..=max_height {
+            starts[height + 1] = starts[height] + plan.counts[height];
+        }
+        let first_node = starts[1];
+        let mut next = starts;
+        let mut order = vec![0; plan.nodes.len()];
+        for (index, node) in plan.nodes.iter().enumerate() {
+            let slot = &mut next[node.height as usize];
+            order[*slot - first_node] = index;
+            *slot += 1;
+        }
+        let resolve = |digests: &[D], planned: PlannedDigest| match planned {
+            PlannedDigest::Sibling(index) => siblings[index],
+            PlannedDigest::Computed { height, rank } => digests[starts[height as usize] + rank],
+        };
+
+        // Hash one batch per height; a lone leaf or node skips the batch's allocation.
+        let mut digests = Vec::with_capacity(starts[max_height + 1]);
+        match plan.leaves.as_slice() {
+            [(pos, element)] => digests.push(hasher.leaf_digest(*pos, element)),
+            leaves => digests.extend(hasher.leaf_digests(leaves)),
+        }
+        let mut inputs = Vec::with_capacity(plan.counts[1]);
+        for height in 1..=max_height {
+            inputs.clear();
+            inputs.extend(
+                order[starts[height] - first_node..starts[height + 1] - first_node]
+                    .iter()
+                    .map(|&index| {
+                        let node = &plan.nodes[index];
+                        (
+                            node.pos,
+                            resolve(&digests, node.left),
+                            resolve(&digests, node.right),
+                        )
+                    }),
+            );
+            match inputs.as_slice() {
+                [(pos, left, right)] => digests.push(hasher.node_digest(*pos, left, right)),
+                nodes => digests.extend(hasher.node_digests(nodes)),
+            }
+        }
 
         // Collect all peak digests to provide to hasher.root().
         let mut peak_digests = Vec::new();
@@ -507,22 +596,18 @@ impl<F: Family, D: Digest> Proof<F, D> {
             }
         }
 
-        let mut sibling_cursor = 0usize;
-        let mut elements_iter = elements.iter();
-        for peak in &bp.range_peaks {
-            let peak_digest = peak.reconstruct_digest(
-                hasher,
-                &bp.range,
-                &mut elements_iter,
-                proof_digests.siblings,
-                &mut sibling_cursor,
-                collected.as_deref_mut(),
-            )?;
-            if let Some(ref mut cd) = collected {
-                cd.push((peak.pos, peak_digest));
-            }
-            peak_digests.push(peak_digest);
+        if let (Some(cd), Some(planned)) = (&mut collected, plan.collected) {
+            cd.extend(
+                planned
+                    .into_iter()
+                    .map(|(pos, digest)| (pos, resolve(&digests, digest))),
+            );
         }
+        peak_digests.extend(
+            range_peaks
+                .into_iter()
+                .map(|digest| resolve(&digests, digest)),
+        );
 
         for (&after_peak_pos, &digest) in bp.after_peaks.iter().zip(proof_digests.after_peaks) {
             if let Some(ref mut cd) = collected {
@@ -532,16 +617,6 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
         if let Some(&digest) = proof_digests.suffix_acc {
             peak_digests.push(digest);
-        }
-
-        // Verify all elements were consumed.
-        if elements_iter.next().is_some() {
-            return Err(ReconstructionError::ExtraDigests);
-        }
-
-        // Verify all siblings were consumed.
-        if sibling_cursor != proof_digests.siblings.len() {
-            return Err(ReconstructionError::ExtraDigests);
         }
 
         hasher
@@ -675,72 +750,97 @@ impl<F: Family> Subtree<F> {
         Some(hasher.node_digest(self.pos, &left_d, &right_d))
     }
 
-    /// Reconstruct the digest of this subtree from a range of elements and sibling digests,
-    /// consuming both in left-first DFS order.
+    /// Plan the reconstruction of this subtree's digest from a range of elements and
+    /// `sibling_count` sibling digests, consuming both in left-first DFS order without hashing.
     ///
     /// At each node:
     /// - If the subtree is entirely outside the range: consume a sibling digest.
-    /// - If it's a leaf in the range: hash the next element.
-    /// - Otherwise: recurse into children via [`Family::children`] and compute the node digest.
-    ///
-    /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
-    /// reconstruction is appended to the vector.
-    fn reconstruct_digest<D, H, E>(
+    /// - If it's a leaf in the range: record the next element.
+    /// - Otherwise: recurse into children via [`Family::children`] and record the node.
+    fn plan_digest<'a, E: AsRef<[u8]>>(
         &self,
-        hasher: &H,
         range: &Range<Location<F>>,
-        elements: &mut E,
-        siblings: &[D],
+        elements: &mut core::slice::Iter<'a, E>,
+        sibling_count: usize,
         cursor: &mut usize,
-        mut collected: Option<&mut Vec<(Position<F>, D)>>,
-    ) -> Result<D, ReconstructionError>
-    where
-        D: Digest,
-        H: Hasher<F, Digest = D>,
-        E: Iterator<Item: AsRef<[u8]>>,
-    {
+        plan: &mut Plan<'a, F>,
+    ) -> Result<PlannedDigest, ReconstructionError> {
         // Entirely outside the range: consume a sibling digest.
         if self.is_outside(range) {
-            let Some(digest) = siblings.get(*cursor).copied() else {
+            if *cursor == sibling_count {
                 return Err(ReconstructionError::MissingDigests);
-            };
+            }
             *cursor += 1;
-            return Ok(digest);
+            return Ok(PlannedDigest::Sibling(*cursor - 1));
         }
 
-        // Leaf in range: hash the next element.
+        // Leaf in range: record the next element.
         if self.height == 0 {
             let elem = elements
                 .next()
                 .ok_or(ReconstructionError::MissingElements)?;
-            return Ok(hasher.leaf_digest(self.pos, elem.as_ref()));
+            plan.leaves.push((self.pos, elem.as_ref()));
+            return Ok(plan.computed(0));
         }
 
         // Recurse into children.
         let (left, right) = self.children();
-        let left_d = left.reconstruct_digest(
-            hasher,
-            range,
-            elements,
-            siblings,
-            cursor,
-            collected.as_deref_mut(),
-        )?;
-        let right_d = right.reconstruct_digest(
-            hasher,
-            range,
-            elements,
-            siblings,
-            cursor,
-            collected.as_deref_mut(),
-        )?;
+        let left_d = left.plan_digest(range, elements, sibling_count, cursor, plan)?;
+        let right_d = right.plan_digest(range, elements, sibling_count, cursor, plan)?;
 
-        if let Some(ref mut cd) = collected {
+        if let Some(cd) = &mut plan.collected {
             cd.push((left.pos, left_d));
             cd.push((right.pos, right_d));
         }
 
-        Ok(hasher.node_digest(self.pos, &left_d, &right_d))
+        plan.nodes.push(PlannedNode {
+            pos: self.pos,
+            height: self.height,
+            left: left_d,
+            right: right_d,
+        });
+        Ok(plan.computed(self.height))
+    }
+}
+
+/// A digest needed by range reconstruction.
+#[derive(Clone, Copy)]
+enum PlannedDigest {
+    /// The proof's sibling digest at this index.
+    Sibling(usize),
+    /// The digest reconstruction computes for the `rank`-th leaf (height 0) or node at `height`,
+    /// counting left to right.
+    Computed { height: u32, rank: usize },
+}
+
+/// A node whose digest range reconstruction computes from its children.
+struct PlannedNode<F: Family> {
+    pos: Position<F>,
+    height: u32,
+    left: PlannedDigest,
+    right: PlannedDigest,
+}
+
+/// The leaves and nodes range reconstruction hashes, recorded before hashing so that each height
+/// can be hashed in one batch.
+struct Plan<'a, F: Family> {
+    /// In-range leaves and their elements, left to right.
+    leaves: Vec<(Position<F>, &'a [u8])>,
+    /// Nodes in DFS post-order.
+    nodes: Vec<PlannedNode<F>>,
+    /// The number of leaves (height 0) or nodes recorded at each height. Heights are below 64
+    /// because a subtree's leaf count fits in a `u64`.
+    counts: [usize; 64],
+    /// If collecting, the `(position, digest)` pairs reconstruction authenticates, in order.
+    collected: Option<Vec<(Position<F>, PlannedDigest)>>,
+}
+
+impl<F: Family> Plan<'_, F> {
+    /// Assign the next rank at `height` to a just-recorded leaf or node.
+    const fn computed(&mut self, height: u32) -> PlannedDigest {
+        let rank = self.counts[height as usize];
+        self.counts[height as usize] += 1;
+        PlannedDigest::Computed { height, rank }
     }
 }
 
@@ -1096,6 +1196,7 @@ mod tests {
     use commonware_codec::{Decode, Encode, EncodeSize};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_traced;
+    use rand::RngExt as _;
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
@@ -2488,6 +2589,324 @@ mod tests {
         }
     }
 
+    /// A hasher with non-standard leaf and node digests whose batch methods are per-item loops.
+    #[derive(Clone)]
+    struct TaggedHasher(Bagging);
+
+    impl<F: Family> Hasher<F> for TaggedHasher {
+        type Digest = D;
+
+        fn hash(&self, parts: &[&[u8]]) -> D {
+            <Sha256 as commonware_cryptography::Hasher>::hash(parts)
+        }
+
+        fn root_bagging(&self) -> Bagging {
+            self.0
+        }
+
+        fn node_digest(&self, pos: Position<F>, left: &D, right: &D) -> D {
+            <Self as Hasher<F>>::hash(self, &[b"node", &(*pos).to_be_bytes(), left, right])
+        }
+
+        fn node_digest_pair(&self, nodes: [(Position<F>, &D, &D); 2]) -> (D, D) {
+            let [(lp, ll, lr), (rp, rl, rr)] = nodes;
+            (self.node_digest(lp, ll, lr), self.node_digest(rp, rl, rr))
+        }
+
+        fn node_digests(&self, nodes: &[(Position<F>, D, D)]) -> Vec<D> {
+            nodes
+                .iter()
+                .map(|(pos, left, right)| self.node_digest(*pos, left, right))
+                .collect()
+        }
+
+        fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> D {
+            <Self as Hasher<F>>::hash(self, &[b"leaf", &(*pos).to_be_bytes(), element])
+        }
+
+        fn leaf_digests(&self, leaves: &[(Position<F>, &[u8])]) -> Vec<D> {
+            leaves
+                .iter()
+                .map(|(pos, element)| self.leaf_digest(*pos, element))
+                .collect()
+        }
+    }
+
+    /// Reconstruct a subtree digest one hash at a time, as range reconstruction did before it
+    /// batched hashing.
+    fn reference_digest<F: Family, T: Hasher<F, Digest = D>, E: AsRef<[u8]>>(
+        subtree: &Subtree<F>,
+        hasher: &T,
+        range: &Range<Location<F>>,
+        elements: &mut core::slice::Iter<'_, E>,
+        siblings: &[D],
+        cursor: &mut usize,
+        collected: &mut Vec<(Position<F>, D)>,
+    ) -> Result<D, ReconstructionError> {
+        if subtree.is_outside(range) {
+            let digest = *siblings
+                .get(*cursor)
+                .ok_or(ReconstructionError::MissingDigests)?;
+            *cursor += 1;
+            return Ok(digest);
+        }
+        if subtree.height == 0 {
+            let element = elements
+                .next()
+                .ok_or(ReconstructionError::MissingElements)?;
+            return Ok(hasher.leaf_digest(subtree.pos, element.as_ref()));
+        }
+        let (left, right) = subtree.children();
+        let left_d = reference_digest(&left, hasher, range, elements, siblings, cursor, collected)?;
+        let right_d =
+            reference_digest(&right, hasher, range, elements, siblings, cursor, collected)?;
+        collected.push((left.pos, left_d));
+        collected.push((right.pos, right_d));
+        Ok(hasher.node_digest(subtree.pos, &left_d, &right_d))
+    }
+
+    /// A reconstructed root and the digests collected while reconstructing it.
+    type Reconstruction<F> = (D, Vec<(Position<F>, D)>);
+
+    /// Reconstruct a root and its collected digests as range reconstruction did before it batched
+    /// hashing.
+    fn reference_reconstruct<F: Family, T: Hasher<F, Digest = D>, E: AsRef<[u8]>>(
+        proof: &Proof<F, D>,
+        hasher: &T,
+        elements: &[E],
+        start_loc: Location<F>,
+    ) -> Result<Reconstruction<F>, ReconstructionError> {
+        let mut collected = Vec::new();
+        if elements.is_empty() {
+            if start_loc == 0 {
+                if proof.inactive_peaks != 0 {
+                    return Err(ReconstructionError::InvalidProof);
+                }
+                if proof.leaves != Location::new(0) {
+                    return Err(ReconstructionError::MissingElements);
+                }
+                return if proof.digests.is_empty() {
+                    Ok((hasher.digest(&proof.leaves.to_be_bytes()), collected))
+                } else {
+                    Err(ReconstructionError::ExtraDigests)
+                };
+            }
+            return Err(ReconstructionError::MissingElements);
+        }
+        if !start_loc.is_valid_index() {
+            return Err(ReconstructionError::InvalidStartLoc);
+        }
+        let end_loc = start_loc
+            .checked_add(elements.len() as u64)
+            .ok_or(ReconstructionError::InvalidEndLoc)?;
+        if end_loc > proof.leaves {
+            return Err(ReconstructionError::InvalidEndLoc);
+        }
+        let bp = Blueprint::new(
+            proof.leaves,
+            proof.inactive_peaks,
+            hasher.root_bagging(),
+            start_loc..end_loc,
+        )
+        .map_err(|_| ReconstructionError::InvalidSize)?;
+        let proof_digests = bp.split_proof_digests(&proof.digests)?;
+
+        let mut peak_digests = Vec::new();
+        peak_digests.extend(proof_digests.fold_prefix);
+        for (sub, &digest) in bp
+            .prefix_active_peaks
+            .iter()
+            .zip(proof_digests.prefix_active_peaks)
+        {
+            peak_digests.push(digest);
+            collected.push((sub.pos, digest));
+        }
+        let mut cursor = 0;
+        let mut elements_iter = elements.iter();
+        for peak in &bp.range_peaks {
+            let digest = reference_digest(
+                peak,
+                hasher,
+                &bp.range,
+                &mut elements_iter,
+                proof_digests.siblings,
+                &mut cursor,
+                &mut collected,
+            )?;
+            collected.push((peak.pos, digest));
+            peak_digests.push(digest);
+        }
+        for (&pos, &digest) in bp.after_peaks.iter().zip(proof_digests.after_peaks) {
+            collected.push((pos, digest));
+            peak_digests.push(digest);
+        }
+        peak_digests.extend(proof_digests.suffix_acc);
+        if elements_iter.next().is_some() || cursor != proof_digests.siblings.len() {
+            return Err(ReconstructionError::ExtraDigests);
+        }
+        let root = hasher
+            .root_with_folded_peaks(
+                proof.leaves,
+                bp.inactive_peaks_after_prefix_fold(proof.inactive_peaks),
+                proof.inactive_peaks,
+                peak_digests.iter(),
+            )
+            .ok_or(ReconstructionError::InvalidProof)?;
+        Ok((root, collected))
+    }
+
+    /// Assert that reconstruction, with and without collecting digests, matches the reference
+    /// under `hasher`, returning the reconstructed root.
+    fn check_against_reference<F: Family, T: Hasher<F, Digest = D>, E: AsRef<[u8]>>(
+        proof: &Proof<F, D>,
+        hasher: &T,
+        elements: &[E],
+        start_loc: Location<F>,
+    ) -> Option<D> {
+        let mut collected = Vec::new();
+        let batched = proof
+            .reconstruct_root_inner(hasher, elements, start_loc, Some(&mut collected))
+            .map(|root| (root, collected));
+        let reference = reference_reconstruct(proof, hasher, elements, start_loc);
+        match (&batched, &reference) {
+            (Ok(batched), Ok(reference)) => assert_eq!(batched, reference),
+            (Err(batched), Err(reference)) => assert_eq!(
+                core::mem::discriminant(batched),
+                core::mem::discriminant(reference)
+            ),
+            _ => panic!("batched {batched:?} differs from reference {reference:?}"),
+        }
+        let uncollected = proof.reconstruct_root_inner(hasher, elements, start_loc, None);
+        assert_eq!(
+            uncollected.as_ref().map_err(core::mem::discriminant),
+            batched
+                .as_ref()
+                .map(|(root, _)| root)
+                .map_err(core::mem::discriminant)
+        );
+        uncollected.ok()
+    }
+
+    /// Check `range` against the reference for the standard and tagged hashers, cycling through
+    /// root shapes by `case`.
+    fn check_range_against_reference<F: Family>(
+        mem: &Mem<F, D>,
+        range: Range<u64>,
+        shapes: &[(Bagging, usize)],
+        case: usize,
+    ) {
+        let (bagging, inactive_peaks) = shapes[case % shapes.len()];
+        let hasher = H::new(bagging);
+        let proof: Proof<F, D> = build_range_proof(
+            &hasher,
+            mem.leaves(),
+            inactive_peaks,
+            Location::new(range.start)..Location::new(range.end),
+            |pos| mem.get_node(pos),
+            Error::ElementPruned,
+        )
+        .unwrap();
+        let elements: Vec<_> = range.clone().map(u64::to_be_bytes).collect();
+        let start_loc = Location::new(range.start);
+        assert_eq!(
+            check_against_reference(&proof, &hasher, &elements, start_loc),
+            Some(mem.root(&hasher, inactive_peaks).unwrap()),
+            "range {range:?} with ({bagging:?}, {inactive_peaks})"
+        );
+        check_against_reference(&proof, &TaggedHasher(bagging), &elements, start_loc);
+    }
+
+    fn batched_reconstruction_matches_reference_small<F: Family>() {
+        for n in 1u64..=64 {
+            let mem = build_raw::<F>(&H::new(ForwardFold), n);
+            let shapes = supported_root_shapes::<F>(mem.leaves());
+            let mut case = 0;
+            for start in 0..n {
+                for end in start + 1..=n {
+                    check_range_against_reference(&mem, start..end, &shapes, case);
+                    case += 1;
+                }
+            }
+        }
+    }
+
+    fn batched_reconstruction_matches_reference_large<F: Family>() {
+        let n = 10_000u64;
+        let mem = build_raw::<F>(&H::new(ForwardFold), n);
+        let shapes = supported_root_shapes::<F>(mem.leaves());
+        let mut rng = commonware_utils::test_rng();
+        for case in 0..64 {
+            let start = rng.random_range(0..n);
+            let end = rng.random_range(start + 1..=n);
+            check_range_against_reference(&mem, start..end, &shapes, case);
+        }
+    }
+
+    fn batched_reconstruction_rejects_like_reference<F: Family>() {
+        let shapes = [(ForwardFold, 0), (BackwardFold, 0), (BackwardFold, 1)];
+        for n in [1u64, 2, 7, 13, 64, 100] {
+            let mem = build_raw::<F>(&H::new(ForwardFold), n);
+            for (start, end) in [(0, 1), (0, n), (n / 2, n), (n - 1, n), (n / 3, n - n / 4)] {
+                for (bagging, inactive_peaks) in shapes {
+                    let hasher = H::new(bagging);
+                    let root = mem.root(&hasher, inactive_peaks).unwrap();
+                    let proof: Proof<F, D> = build_range_proof(
+                        &hasher,
+                        mem.leaves(),
+                        inactive_peaks,
+                        Location::new(start)..Location::new(end),
+                        |pos| mem.get_node(pos),
+                        Error::ElementPruned,
+                    )
+                    .unwrap();
+                    let elements: Vec<_> = (start..end).map(u64::to_be_bytes).collect();
+                    let start_loc = Location::new(start);
+                    let check = |proof: &Proof<F, D>, elements: &[[u8; 8]], start_loc| {
+                        check_against_reference(proof, &hasher, elements, start_loc)
+                    };
+                    assert_eq!(check(&proof, &elements, start_loc), Some(root));
+
+                    // A flipped bit in each digest.
+                    for i in 0..proof.digests.len() {
+                        let mut tampered = proof.clone();
+                        tampered.digests[i].0[0] ^= 1;
+                        assert_ne!(check(&tampered, &elements, start_loc), Some(root));
+                    }
+
+                    // A wrong element.
+                    let mut wrong = elements.clone();
+                    wrong[0][7] ^= 1;
+                    assert_ne!(check(&proof, &wrong, start_loc), Some(root));
+
+                    // One digest too many or too few.
+                    let mut extra = proof.clone();
+                    extra.digests.push(test_digest(0));
+                    assert_ne!(check(&extra, &elements, start_loc), Some(root));
+                    if !proof.digests.is_empty() {
+                        let mut missing = proof.clone();
+                        missing.digests.pop();
+                        assert_ne!(check(&missing, &elements, start_loc), Some(root));
+                    }
+
+                    // One element too many or too few.
+                    let mut more = elements.clone();
+                    more.push(end.to_be_bytes());
+                    assert_ne!(check(&proof, &more, start_loc), Some(root));
+                    let fewer = &elements[..elements.len() - 1];
+                    assert_ne!(check(&proof, fewer, start_loc), Some(root));
+
+                    // A start location out of range.
+                    for bad_start in [n, u64::MAX] {
+                        assert_ne!(
+                            check(&proof, &elements, Location::new(bad_start)),
+                            Some(root)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------------
     // MMR tests
     // ---------------------------------------------------------------------------
@@ -2571,6 +2990,18 @@ mod tests {
     #[test]
     fn mmr_tampered_proof_digests_rejected() {
         tampered_proof_digests_rejected::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_batched_reconstruction_matches_reference_small() {
+        batched_reconstruction_matches_reference_small::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_batched_reconstruction_matches_reference_large() {
+        batched_reconstruction_matches_reference_large::<mmr::Family>();
+    }
+    #[test]
+    fn mmr_batched_reconstruction_rejects_like_reference() {
+        batched_reconstruction_rejects_like_reference::<mmr::Family>();
     }
     #[test]
     fn mmr_no_duplicate_positions() {
@@ -2668,6 +3099,18 @@ mod tests {
     #[test]
     fn mmb_tampered_proof_digests_rejected() {
         tampered_proof_digests_rejected::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_batched_reconstruction_matches_reference_small() {
+        batched_reconstruction_matches_reference_small::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_batched_reconstruction_matches_reference_large() {
+        batched_reconstruction_matches_reference_large::<mmb::Family>();
+    }
+    #[test]
+    fn mmb_batched_reconstruction_rejects_like_reference() {
+        batched_reconstruction_rejects_like_reference::<mmb::Family>();
     }
     #[test]
     fn mmb_backward_fold_range_proof_collapses_active_suffix() {

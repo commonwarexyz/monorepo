@@ -88,8 +88,9 @@ where
             if operations_len == 0 || operations_len > max_ops.get() {
                 false
             } else {
-                let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
-                proof.verify_range_inclusion(&hasher, &elements, *start, root)
+                qmdb::verify::with_encoded_operations(operations, |elements| {
+                    proof.verify_range_inclusion(&hasher, elements, *start, root)
+                })
             }
         }
         (

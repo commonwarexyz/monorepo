@@ -364,6 +364,34 @@ impl<'a, F: Graftable, H: Hasher> Verifier<'a, F, H> {
             _ops_family: PhantomData,
         }
     }
+
+    /// Return the chunk to combine with the ops subtree root at grafting-height `pos`, or `None`
+    /// if the grafted leaf is the ops subtree root itself.
+    fn graft_chunk(&self, pos: merkle::Position<F>) -> Option<&'a [u8]> {
+        // Convert the F-family position to a chunk index using F's leftmost_leaf.
+        let loc = F::leftmost_leaf(pos, self.grafting_height);
+        let chunk_idx = *loc >> self.grafting_height;
+
+        // Skip pending chunks. These will be incorporated in the root via the pending_chunk
+        // digest field.
+        if chunk_idx >= self.graftable_chunks {
+            debug!(?chunk_idx, "skipping pending chunk");
+            return None;
+        }
+
+        let Some(local) = chunk_idx
+            .checked_sub(self.start_chunk_index)
+            .filter(|&l| l < self.chunks.len() as u64)
+            .map(|l| l as usize)
+        else {
+            debug!(?pos, "chunk not available for grafted leaf");
+            return None;
+        };
+
+        // For all-zero chunks, the grafted leaf is the ops subtree root (identity).
+        let chunk = self.chunks[local];
+        (!chunk.iter().all(|&b| b == 0)).then_some(chunk)
+    }
 }
 
 impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
@@ -391,35 +419,9 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
             Ordering::Equal => {
                 // At grafting height: compute ops subtree root, then combine with bitmap chunk.
                 let ops_subtree_root = self.hasher.node_digest(pos, left_digest, right_digest);
-
-                // Convert the F-family position to a chunk index using F's leftmost_leaf.
-                let loc = F::leftmost_leaf(pos, self.grafting_height);
-                let chunk_idx = *loc >> self.grafting_height;
-
-                // Skip pending chunks. These will be incorporated in the root via the pending_chunk
-                // digest field.
-                if chunk_idx >= self.graftable_chunks {
-                    debug!(?chunk_idx, "skipping pending chunk");
-                    return ops_subtree_root;
-                }
-
-                let Some(local) = chunk_idx
-                    .checked_sub(self.start_chunk_index)
-                    .filter(|&l| l < self.chunks.len() as u64)
-                    .map(|l| l as usize)
-                else {
-                    debug!(?pos, "chunk not available for grafted leaf");
-                    return ops_subtree_root;
-                };
-
-                // For all-zero chunks, the grafted leaf is the ops subtree root (identity).
-                // For non-zero chunks: grafted_leaf = hash(chunk || ops_subtree_root).
-                let chunk = self.chunks[local];
-                if chunk.iter().all(|&b| b == 0) {
-                    ops_subtree_root
-                } else {
+                self.graft_chunk(pos).map_or(ops_subtree_root, |chunk| {
                     self.hash(&[chunk, ops_subtree_root.as_ref()])
-                }
+                })
             }
         }
     }
@@ -439,20 +441,30 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
     }
 
     fn leaf_digests(&self, leaves: &[(merkle::Position<F>, &[u8])]) -> Vec<H::Digest> {
-        leaves
-            .iter()
-            .map(|(pos, element)| self.leaf_digest(*pos, element))
-            .collect()
+        self.hasher.leaf_digests(leaves)
     }
 
     fn node_digests(
         &self,
         nodes: &[(merkle::Position<F>, H::Digest, H::Digest)],
     ) -> Vec<H::Digest> {
-        nodes
+        // Hash every node as an ops node, then graft chunks onto those at the grafting height.
+        let mut digests = self.hasher.node_digests(nodes);
+        let grafts: Vec<(usize, &[u8])> = nodes
             .iter()
-            .map(|(pos, left, right)| self.node_digest(*pos, left, right))
-            .collect()
+            .enumerate()
+            .filter(|(_, (pos, ..))| F::pos_to_height(*pos) == self.grafting_height)
+            .filter_map(|(index, (pos, ..))| Some((index, self.graft_chunk(*pos)?)))
+            .collect();
+        let messages: Vec<[&[u8]; 2]> = grafts
+            .iter()
+            .map(|&(index, chunk)| [chunk, digests[index].as_ref()])
+            .collect();
+        let grafted = H::hash_many_parts(&messages);
+        for ((index, _), digest) in grafts.into_iter().zip(grafted) {
+            digests[index] = digest;
+        }
+        digests
     }
 }
 
@@ -827,9 +839,9 @@ mod tests {
         let chunk: [u8; 1] = [0xAB];
         let zero: [u8; 1] = [0x00];
 
-        // Chunk 0 is not supplied, chunk 1 is combined, chunk 2 is all-zero, and chunk 3 is
-        // pending.
-        let verifier = Verifier::<mmr::Family, Sha256>::new(GH, 1, vec![&chunk, &zero], 3);
+        // Chunk 0 is not supplied, 1, 3, and 4 are combined, 2 is all-zero, and 5 is pending.
+        let verifier =
+            Verifier::<mmr::Family, Sha256>::new(GH, 1, vec![&chunk, &zero, &chunk, &chunk], 5);
         let root =
             |loc: u64, height: u32| mmr::Family::subtree_root_position(Location::new(loc), height);
         let positions = [
@@ -838,8 +850,10 @@ mod tests {
             root(0, GH),
             root(4, GH),
             root(8, GH),
-            root(12, GH),
             root(0, GH + 1),
+            root(12, GH),
+            root(16, GH),
+            root(20, GH),
             root(0, GH + 2),
         ];
         let nodes: Vec<_> = positions
@@ -858,7 +872,7 @@ mod tests {
             .collect();
         assert_eq!(verifier.node_digests(&nodes), expected);
 
-        // Only the node over chunk 1 differs from the standard node digest.
+        // Only the nodes over chunks 1, 3, and 4 differ from the standard node digest.
         let standard = qmdb::hasher::<Sha256>();
         let combined: Vec<bool> = nodes
             .iter()
@@ -872,7 +886,9 @@ mod tests {
             .collect();
         assert_eq!(
             combined,
-            [false, false, false, true, false, false, false, false]
+            [
+                false, false, false, true, false, false, true, true, false, false
+            ]
         );
 
         // Hash leaves in a batch and one at a time.
