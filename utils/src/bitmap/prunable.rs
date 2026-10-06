@@ -555,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extend_from_bitmap_with_pruning() {
+    fn test_extend_from_bitmap_after_pruning_matches_push() {
         // Appending after pruned chunks and a zero-filled gap matches pushing bit by bit.
         let mut src: BitMap = BitMap::new();
         for i in 0..1000u64 {
