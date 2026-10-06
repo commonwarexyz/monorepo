@@ -32,7 +32,10 @@ use commonware_consensus::{
         resolver::handler,
         standard::{Deferred, Standard},
     },
-    simplex::{mocks::scheme as scheme_mocks, types::Context},
+    simplex::{
+        mocks::scheme as scheme_mocks,
+        types::{Activity, Context},
+    },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
@@ -42,22 +45,23 @@ use commonware_macros::{select, test_group, test_traced};
 use commonware_p2p::simulated::Link;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock as _, Runner as _, Spawner as _, Supervisor as _,
+    Clock as _, Metrics as _, Runner as _, Spawner as _, Supervisor as _,
     buffer::paged::CacheRef,
     deterministic,
     mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
+    reschedule,
 };
 use commonware_storage::{
-    archive::prunable,
+    archive::{Archive as _, prunable},
     mmr,
     qmdb::{
         any::unordered::fixed,
         immutable::fixed as immutable_fixed,
-        sync::{Request, Source as QmdbSource, source},
+        sync::{Request, ServeError, Source as QmdbSource, source},
     },
 };
 use commonware_utils::{
-    Acknowledgement as _, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
+    Acknowledgement as _, NZDuration, NZU64, NZUsize, acknowledgement::Exact, channel::oneshot,
     non_empty_range, probability, sync::Mutex,
 };
 use properties::{
@@ -1223,6 +1227,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                     max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
                 },
+                sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                 prune_config: None,
             },
         );
@@ -1370,6 +1375,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                     max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
                 },
+                sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                 prune_config: None,
             },
         );
@@ -1455,6 +1461,388 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
 
         flusher.abort();
         pending.unblock();
+        stateful_actor.abort();
+        marshal_actor.abort();
+        let _ = stateful_actor.await;
+        let _ = marshal_actor.await;
+    });
+}
+
+/// Returns the value of the unlabeled gauge `name`, or zero if it is not registered.
+fn gauge(context: &deterministic::Context, name: &str) -> i64 {
+    context
+        .encode()
+        .lines()
+        .find_map(|line| line.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Replies held until the next recorded retarget.
+#[derive(Default)]
+struct WindowGate {
+    /// Retargets recorded so far.
+    window: u64,
+    /// Whether replies are served without holding.
+    open: bool,
+    /// Requests starting below this are never answered, and the rest are answered at once.
+    pruned_below: Option<u64>,
+    /// Held replies, each with the window its request arrived in and the request's start.
+    held: Vec<(u64, u64, oneshot::Sender<()>)>,
+    /// Replies released by a recorded retarget.
+    released: usize,
+}
+
+impl WindowGate {
+    /// Records a retarget and releases every reply to a request that arrived before it.
+    fn retarget(&mut self) {
+        self.window += 1;
+        let window = self.window;
+        let (released, held) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(arrival, _, _)| *arrival < window);
+        self.held = held;
+        for (_, _, release) in released {
+            if release.send(()).is_ok() {
+                self.released += 1;
+            }
+        }
+    }
+
+    /// Releases every held reply and serves later replies without holding.
+    fn open(&mut self) {
+        self.open = true;
+        for (_, _, release) in std::mem::take(&mut self.held) {
+            let _ = release.send(());
+        }
+    }
+
+    /// Stops answering requests that start below `floor`, as if every peer pruned them, and
+    /// answers every other request at once.
+    fn prune_below(&mut self, floor: u64) {
+        self.pruned_below = Some(floor);
+        let (pruned, released) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(_, start, _)| *start < floor);
+        self.held = pruned;
+        for (_, _, release) in released {
+            let _ = release.send(());
+        }
+    }
+}
+
+/// Serves state sync from a database and holds each reply until the [`WindowGate`] releases it.
+#[derive(Clone)]
+struct WindowGatedResolver {
+    database: SingleDatabaseSet<deterministic::Context>,
+    gate: Arc<Mutex<WindowGate>>,
+}
+
+impl QmdbSource for WindowGatedResolver {
+    type Family = mmr::Family;
+    type Digest = sha256::Digest;
+    type Op = fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
+    type Error = ServeError<mmr::Family>;
+
+    fn serve(
+        &self,
+        request: Request<Self::Family>,
+    ) -> impl Future<Output = source::Result<Self>> + Send {
+        let database = self.database.clone();
+        let (release, released) = oneshot::channel();
+        {
+            let mut gate = self.gate.lock();
+            let start = *request.start();
+            if gate.open || gate.pruned_below.is_some_and(|floor| start >= floor) {
+                let _ = release.send(());
+            } else {
+                let window = gate.window;
+                gate.held.push((window, start, release));
+            }
+        }
+        async move {
+            let _ = released.await;
+            database.serve(request).await
+        }
+    }
+}
+
+impl AttachableResolver<Qmdb<deterministic::Context>> for WindowGatedResolver {
+    async fn attach_database(&self, _db: Shared<Qmdb<deterministic::Context>>) {}
+}
+
+/// Builds a chain of `blocks` blocks and a database with every block applied.
+async fn build_source(
+    context: &deterministic::Context,
+    blocks: u64,
+) -> (Block, Vec<Block>, SingleDatabaseSet<deterministic::Context>) {
+    let initial_target =
+        <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::initial_sync_targets();
+    let genesis = Block::genesis(initial_target.root, initial_target.range);
+    let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
+        context.child("source"),
+        qmdb_config("window-gated-source", page_cache),
+        None,
+    )
+    .await;
+    let mut parent = genesis.clone();
+    let mut chain = Vec::with_capacity(blocks as usize);
+    for height in 1..=blocks {
+        let height = Height::new(height);
+        let batches = databases.new_batches().await;
+        let merkleized = App::execute(height, batches).await;
+        let bounds = merkleized.bounds();
+        let block = Block {
+            context: Context {
+                round: Round::new(Epoch::zero(), View::new(height.get())),
+                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                parent: (parent.context.round.view(), parent.digest()),
+            },
+            parent: parent.digest(),
+            height,
+            state_root: merkleized.root(),
+            range: non_empty_range!(bounds.inactivity_floor, bounds.tip.size),
+        };
+        databases.apply(merkleized).await;
+        parent = block.clone();
+        chain.push(block);
+    }
+    assert!(databases.finalize().await.durable().await);
+    (genesis, chain, databases)
+}
+
+/// State sync converges when each reply arrives only after the coordinator records the next
+/// window's tip, which makes every tail round trip longer than the tip interval. The coordinator
+/// refuses a tip before the chain ends, sync finishes at the last recorded tip, and processing
+/// applies the remaining blocks.
+#[test]
+fn state_sync_converges_when_tail_round_trip_exceeds_tip_interval() {
+    window_gated_sync(OnHold::Open);
+}
+
+/// State sync still converges when, once it holds, peers stop serving everything below the
+/// newest held block's lower bound and no more blocks are finalized. The recorded target still
+/// completes before the hold timeout. Processing then reaches the newest held block.
+#[test]
+fn state_sync_converges_after_peers_prune_held_target() {
+    window_gated_sync(OnHold::Prune);
+}
+
+/// What [`window_gated_sync`] does once state sync holds a window.
+enum OnHold {
+    /// Serve every reply and finalize the rest of the chain.
+    Open,
+    /// Stop serving requests below the newest held block's lower bound, as if every peer pruned
+    /// them, and finalize nothing more.
+    Prune,
+}
+
+/// Syncs a single QMDB from block 20 of a 40-block chain through a [`WindowGate`], finalizing
+/// one acknowledgement window at a time until state sync holds, then handles the hold as
+/// `on_hold` says.
+fn window_gated_sync(on_hold: OnHold) {
+    deterministic::Runner::timed(Duration::from_secs(60)).start(|context| async move {
+        const BLOCKS: u64 = 40;
+        const FLOOR: u64 = 20;
+        const WINDOW: u64 = 2;
+
+        // Build the chain and a source database with every block applied.
+        let (genesis, blocks, source) = build_source(&context, BLOCKS).await;
+        let floor_block = blocks[FLOOR as usize - 1].clone();
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let mut signing_context = context.child("signing");
+        let fixture = scheme_mocks::fixture(
+            &mut signing_context,
+            b"_COMMONWARE_GLUE_QMDB_WINDOW_GATED",
+            1,
+        );
+        let floor = fixtures::finalization(&fixture, FLOOR, floor_block.digest());
+
+        // Start marshal from the selected floor block.
+        let finalizations_by_height = prunable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                "window-gated-marshal",
+                "finalizations",
+                page_cache.clone(),
+                (),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = prunable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config("window-gated-marshal", "blocks", page_cache.clone(), ()),
+        )
+        .await
+        .expect("failed to initialize blocks archive")
+        .put(FLOOR, floor_block.digest(), &Arc::new(floor_block.clone()))
+        .await
+        .expect("failed to seed floor block")
+        .sync()
+        .await
+        .expect("failed to sync blocks archive");
+        let (marshal_actor, mut marshal, marshal_floor) =
+            MarshalActor::<_, Standard<Block>, _, _, _, _, _>::init(
+                context.child("marshal"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider: ConstantProvider::new(fixture.schemes[0].clone()),
+                    epocher: FixedEpocher::new(EPOCH_LENGTH),
+                    start: marshal::Start::Floor(floor.clone()),
+                    partition_prefix: "window-gated-marshal".to_string(),
+                    mailbox_size: NZUsize!(64),
+                    view_retention: ViewDelta::new(BLOCKS),
+                    prunable_items_per_section: NZU64!(10),
+                    page_cache: page_cache.clone(),
+                    replay_buffer: IO_BUFFER_SIZE,
+                    key_write_buffer: IO_BUFFER_SIZE,
+                    value_write_buffer: IO_BUFFER_SIZE,
+                    block_codec_config: (),
+                    max_repair: NZUsize!(10),
+                    max_pending_acks: NZUsize!(WINDOW as usize),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+
+        // Sync from the floor through a resolver that holds replies.
+        let gate = Arc::new(Mutex::new(WindowGate::default()));
+        let plan = SyncPlan::init(context.child("plan"), "window-gated-stateful".to_string())
+            .await
+            .set_floor(floor)
+            .await;
+        let (stateful, stateful_mailbox) = StatefulActor::new(
+            context.child("stateful"),
+            StatefulConfig {
+                application: App::new(genesis),
+                db_config: qmdb_config("window-gated-stateful", page_cache),
+                provider: (),
+                marshal: (marshal.clone(), marshal_floor),
+                mailbox_size: NZUsize!(64),
+                plan,
+                resolvers: WindowGatedResolver {
+                    database: source,
+                    gate: gate.clone(),
+                },
+                sync_config: SyncEngineConfig {
+                    fetch_batch_size: NZU64!(16),
+                    apply_batch_size: NZU64!(64),
+                    max_outstanding_requests: NZUsize!(8),
+                    update_channel_size: NZUsize!(4),
+                },
+                sync_hold_timeout: NZDuration!(Duration::from_secs(10)),
+                prune_config: None,
+            },
+        );
+        let (resolver_receiver, _resolver_handler) =
+            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+        let marshal_actor = marshal_actor.start_unbuffered(
+            stateful_mailbox.clone(),
+            (resolver_receiver, fixtures::IgnoreResolver),
+        );
+        let stateful_actor = stateful.start();
+        let databases = context.child("subscriber").spawn({
+            let mailbox = stateful_mailbox.clone();
+            move |_| async move { mailbox.subscribe_databases().await }
+        });
+
+        // Finalize the rest of the chain. The last block of each window retargets sync. Once
+        // marshal processes that block, the coordinator has recorded its tip, and the gate
+        // releases every reply to an earlier request. A window that stays unprocessed is held by
+        // state sync, and the gate then opens or prunes, as `on_hold` says.
+        let mut last_recorded = marshal
+            .get_processed()
+            .await
+            .map(|processed| processed.height());
+        let mut recorded = 0usize;
+        let mut held = None;
+        for block in &blocks[FLOOR as usize..] {
+            assert!(marshal.verified(block.context.round, block.clone()).await);
+            let _ = marshal.report(Activity::Finalization(fixtures::finalization(
+                &fixture,
+                block.height.get(),
+                block.digest(),
+            )));
+            let retargets = (block.height.get() - FLOOR + 1).is_multiple_of(WINDOW);
+            if !retargets || gate.lock().open {
+                continue;
+            }
+            let stalled_at = context.current() + Duration::from_secs(2);
+            loop {
+                let processed = marshal
+                    .get_processed()
+                    .await
+                    .map(|processed| processed.height());
+                if processed >= Some(block.height) {
+                    gate.lock().retarget();
+                    last_recorded = Some(block.height);
+                    recorded += 1;
+                    break;
+                }
+                if context.current() >= stalled_at {
+                    assert_eq!(
+                        processed, last_recorded,
+                        "a held window must stay unprocessed"
+                    );
+                    assert_eq!(gauge(&context, "stateful_sync_held"), 1);
+                    held = Some(block.clone());
+                    match on_hold {
+                        OnHold::Open => gate.lock().open(),
+                        OnHold::Prune => {
+                            // The newest held block's lower bound passes the recorded target's,
+                            // so pruning reaches into the recorded target.
+                            let recorded = processed.expect("a floor block is processed");
+                            let recorded_floor = blocks[recorded.get() as usize - 1].range.start();
+                            assert!(block.range.start() > recorded_floor);
+                            gate.lock().prune_below(*block.range.start());
+                        }
+                    }
+                    break;
+                }
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            if held.is_some() && matches!(on_hold, OnHold::Prune) {
+                break;
+            }
+        }
+
+        // The coordinator refused a tip before the chain ended, after replies were held across
+        // recorded retargets.
+        let held = held.expect("state sync recorded every window without holding");
+        assert!(recorded > 0);
+        assert!(gate.lock().released > 0);
+
+        // State sync converges, and processing applies every block finalized so far.
+        let databases = databases.await.expect("database subscriber failed");
+        let last = match on_hold {
+            OnHold::Open => blocks.last().expect("chain is non-empty").clone(),
+            OnHold::Prune => held,
+        };
+        while marshal
+            .get_processed()
+            .await
+            .map(|processed| processed.height())
+            != Some(last.height)
+        {
+            reschedule().await;
+        }
+        let committed = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
+            deterministic::Context,
+        >>::committed_targets(&databases)
+        .await;
+        let expected = <App as Application<deterministic::Context>>::sync_targets(&last);
+        assert_eq!(committed, expected);
+        assert_eq!(gauge(&context, "stateful_sync_held"), 0);
+        // Neither mode needs the hold timeout.
+        assert!(
+            context
+                .encode()
+                .lines()
+                .any(|line| line == "stateful_sync_hold_releases_total 0")
+        );
+
         stateful_actor.abort();
         marshal_actor.abort();
         let _ = stateful_actor.await;
@@ -1555,6 +1943,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                     max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
                 },
+                sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                 prune_config: None,
             },
         );
@@ -1812,6 +2201,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                     max_outstanding_requests: NZUsize!(1),
                     update_channel_size: NZUsize!(1),
                 },
+                sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                 // The first prune runs at block 4 and targets block 3's floor,
                 // which crosses the full QMDB's first journal blob.
                 prune_config: Some(PruneConfig {

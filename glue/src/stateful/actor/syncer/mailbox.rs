@@ -4,7 +4,7 @@ use super::Artifact;
 use crate::stateful::{
     Application,
     actor::{BlockDigest, SyncTargets},
-    db::{Anchor, TipUpdate},
+    db::{Anchor, Observation, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_runtime::{Clock, Metrics, Spawner};
@@ -20,6 +20,21 @@ where
         update: TipUpdate<BlockDigest<A, E>, SyncTargets<A, E>>,
         response: oneshot::Sender<Option<Artifact<E, A>>>,
     },
+}
+
+/// The outcome of a target update sent to the [`Syncer`](super::Syncer).
+pub(crate) enum Outcome<E, A>
+where
+    E: Rng + Spawner + Metrics + Clock,
+    A: Application<E>,
+{
+    /// The sync coordinator recorded the target.
+    Recorded,
+    /// The sync coordinator accepts no more targets until a forced update releases its hold. The
+    /// converged [`Artifact`] follows on completion.
+    Refused,
+    /// State sync converged.
+    Converged(Artifact<E, A>),
 }
 
 impl<E, A> Overflow<Message<E, A>> for Option<Message<E, A>>
@@ -75,32 +90,61 @@ where
         Self { sender }
     }
 
-    /// Sends a target update and waits until the sync coordinator records it.
+    /// Sends a target update and waits until the sync coordinator handles it.
     ///
-    /// Returns `None` once the update is recorded, or the converged [`Artifact`] if state sync
-    /// finished first.
+    /// Returns [`Outcome::Recorded`] once the update is recorded, [`Outcome::Refused`] once it is
+    /// refused, or [`Outcome::Converged`] with the converged [`Artifact`] if state sync finished
+    /// first.
     ///
     /// Panics if the syncer stops without responding.
     pub async fn retarget(
         &self,
         anchor: Anchor<BlockDigest<A, E>>,
         targets: SyncTargets<A, E>,
-    ) -> Option<Artifact<E, A>> {
+    ) -> Outcome<E, A> {
+        self.send(anchor, targets, false).await
+    }
+
+    /// Sends a target update that a holding sync coordinator records instead of refusing, which
+    /// releases the hold, and waits until the coordinator handles it.
+    ///
+    /// Returns as [`Self::retarget`] does.
+    pub async fn release(
+        &self,
+        anchor: Anchor<BlockDigest<A, E>>,
+        targets: SyncTargets<A, E>,
+    ) -> Outcome<E, A> {
+        self.send(anchor, targets, true).await
+    }
+
+    async fn send(
+        &self,
+        anchor: Anchor<BlockDigest<A, E>>,
+        targets: SyncTargets<A, E>,
+        forced: bool,
+    ) -> Outcome<E, A> {
         loop {
-            let (update, observed) = TipUpdate::with_observation(anchor, targets.clone());
+            let (update, observed) = if forced {
+                TipUpdate::forced_with_observation(anchor, targets.clone())
+            } else {
+                TipUpdate::with_observation(anchor, targets.clone())
+            };
             let (response, receiver) = oneshot::channel();
             let _ = self.sender.enqueue(Message::Retarget { update, response });
 
             match receiver.await.expect("Syncer should respond to retarget") {
-                Some(artifact) => return Some(artifact),
+                Some(artifact) => return Outcome::Converged(artifact),
                 None => {
-                    // Enqueueing can race with convergence, so wait for the coordinator to record it.
-                    if observed.await.is_ok() {
-                        return None;
-                    }
+                    // Enqueueing can race with convergence, so wait for the coordinator to handle
+                    // the update.
+                    match observed.await {
+                        Ok(Observation::Recorded) => return Outcome::Recorded,
+                        Ok(Observation::Refused) => return Outcome::Refused,
 
-                    // The update was dropped unrecorded. Retry until it is recorded or the
-                    // converged artifact is returned.
+                        // The update was dropped unhandled. Retry until it is handled or the
+                        // converged artifact is returned.
+                        Err(_) => {}
+                    }
                 }
             }
         }
@@ -109,7 +153,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Mailbox, Message};
+    use super::{Mailbox, Message, Outcome};
     use crate::stateful::{
         actor::syncer::Artifact,
         tests::mocks::{TestApp, anchor, test_databases},
@@ -151,16 +195,15 @@ mod tests {
                 "response receiver should be alive"
             );
 
-            let result = retarget.await;
-            assert_eq!(
-                result.expect("retry should return artifact").anchor,
-                expected.anchor
-            );
+            let Outcome::Converged(result) = retarget.await else {
+                panic!("retry should return artifact");
+            };
+            assert_eq!(result.anchor, expected.anchor);
         });
     }
 
     #[test]
-    fn retarget_returns_none_only_after_observation_is_recorded() {
+    fn retarget_returns_recorded_only_after_observation_is_recorded() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
@@ -180,7 +223,45 @@ mod tests {
 
             update.record(|_, _| {});
 
-            assert!(retarget.await.is_none());
+            assert!(matches!(retarget.await, Outcome::Recorded));
+        });
+    }
+
+    #[test]
+    fn retarget_returns_refused_once_observation_is_refused() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
+            let retarget = mailbox.retarget(anchor(7, 9), 7);
+            let respond = async {
+                let Some(Message::Retarget { update, response }) = receiver.recv().await else {
+                    panic!("update should be sent");
+                };
+                assert!(!update.forced());
+                assert!(response.send(None).is_ok());
+                update.refuse();
+            };
+            let (outcome, ()) = futures::join!(retarget, respond);
+            assert!(matches!(outcome, Outcome::Refused));
+        });
+    }
+
+    #[test]
+    fn release_sends_forced_update() {
+        deterministic::Runner::default().start(|context| async move {
+            let (sender, mut receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
+            let mailbox = Mailbox::<deterministic::Context, TestApp>::new(sender);
+            let release = mailbox.release(anchor(7, 9), 7);
+            let respond = async {
+                let Some(Message::Retarget { update, response }) = receiver.recv().await else {
+                    panic!("update should be sent");
+                };
+                assert!(update.forced());
+                assert!(response.send(None).is_ok());
+                update.record(|_, _| {});
+            };
+            let (outcome, ()) = futures::join!(release, respond);
+            assert!(matches!(outcome, Outcome::Recorded));
         });
     }
 }

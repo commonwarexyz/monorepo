@@ -414,6 +414,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::{
+        db::{Observation, Shared, StateSyncSet, TipUpdate},
+        tests::mocks::anchor,
+    };
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -426,8 +430,12 @@ mod tests {
         merkle::{full::Config as MerkleConfig, mmr},
         qmdb::{keyless as storage_keyless, sync::source},
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
-    use futures::pin_mut;
+    use commonware_utils::{
+        NZU16, NZU64, NZUsize,
+        channel::{oneshot, ring},
+        sequence::U64,
+    };
+    use futures::{FutureExt as _, SinkExt as _, pin_mut};
     use std::time::Duration;
 
     type FixedDb = fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
@@ -577,6 +585,35 @@ mod tests {
                 },
             }
         });
+    }
+
+    /// Serves a compact source, except that requests at the `held` size wait for `release` and
+    /// requests at the `never` size never complete, as if every peer pruned that target.
+    #[derive(Clone)]
+    struct StagedCompactSource {
+        source: Arc<FixedDb>,
+        held: Location<mmr::Family>,
+        release: futures::future::Shared<oneshot::Receiver<()>>,
+        never: Location<mmr::Family>,
+        never_requested: mpsc::Sender<()>,
+    }
+
+    impl sync::Source for StagedCompactSource {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
+        type Error = <Arc<FixedDb> as sync::Source>::Error;
+
+        async fn serve(&self, request: sync::Request<Self::Family>) -> source::Result<Self> {
+            if request.size() == self.never {
+                let _ = self.never_requested.try_send(());
+                return futures::future::pending().await;
+            }
+            if request.size() == self.held {
+                let _ = self.release.clone().await;
+            }
+            self.source.serve(request).await
+        }
     }
 
     fn fixed_config(context: &impl BufferPooler, suffix: &str) -> fixed::CompactConfig<Sequential> {
@@ -1014,6 +1051,94 @@ mod tests {
     #[test]
     fn state_sync_supersedes_stale_compact_target_after_deferred_update() {
         supersede_stale_compact_target(true);
+    }
+
+    /// A held sync whose recorded target no peer serves, with no later tip, finishes once a forced
+    /// tip arrives: the engine adopts the forced target through its own boundary.
+    #[test]
+    fn forced_tip_recovers_hold_on_unservable_target() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Three commits give targets t0, t1 and t2.
+            let mut source = FixedDb::init(
+                context.child("source"),
+                fixed_config(&context, "forced-source"),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut targets = Vec::new();
+            for value in [7u64, 8, 9] {
+                let floor = source.inactivity_floor_loc();
+                let batch = source
+                    .new_batch()
+                    .append(U64::new(value))
+                    .merkleize(&source, Some(U64::new(value)), floor)
+                    .await
+                    .unwrap();
+                (source, _) = source.apply_batch(batch).await.unwrap();
+                source = source.sync().await.unwrap();
+                targets.push(source.target());
+            }
+            let (t0, t1, t2) = (targets[0].clone(), targets[1].clone(), targets[2].clone());
+            let (release_tx, release_rx) = oneshot::channel();
+            let (never_tx, mut never_rx) = mpsc::channel(1);
+            let staged = StagedCompactSource {
+                source: Arc::new(source),
+                held: t0.size,
+                release: release_rx.shared(),
+                never: t1.size,
+                never_requested: never_tx,
+            };
+
+            let (mut tip_tx, tip_rx) = ring::channel(NZUsize!(4));
+            let sync = context.child("sync").spawn(move |context| async move {
+                <Shared<FixedDb> as StateSyncSet<_, _, Digest>>::sync(
+                    context.child("target"),
+                    fixed_config(&context, "forced-target"),
+                    staged,
+                    anchor(0, 0),
+                    t0,
+                    tip_rx,
+                    sync_config(),
+                )
+                .await
+            });
+            pin_mut!(sync);
+
+            // t1 is recorded and waits behind t0's held boundary. Its own boundary is never
+            // answered.
+            let (update, observed) = TipUpdate::with_observation(anchor(1, 1), t1);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            never_rx
+                .recv()
+                .await
+                .expect("t1's boundary should be requested");
+
+            // The database reaches t0, which is older than t1, so the sync holds and refuses t2.
+            release_tx.send(()).unwrap();
+            context.sleep(Duration::from_millis(100)).await;
+            let (update, observed) = TipUpdate::with_observation(anchor(2, 2), t2.clone());
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Refused));
+
+            // Without a forced tip, the sync never finishes.
+            select! {
+                _ = sync.as_mut() => panic!("a held sync must not finish at an unservable target"),
+                _ = context.sleep(Duration::from_secs(1)) => {},
+            }
+
+            // A forced tip is recorded, and the sync finishes at it.
+            let (update, observed) = TipUpdate::forced_with_observation(anchor(2, 2), t2.clone());
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            let (synced, converged) = sync
+                .await
+                .expect("sync task should complete")
+                .expect("sync should succeed");
+            assert_eq!(converged, anchor(2, 2));
+            assert_eq!(synced.read().await.target(), t2);
+        });
     }
 
     /// Syncs toward a stale compact target whose boundary never completes, then sends the latest

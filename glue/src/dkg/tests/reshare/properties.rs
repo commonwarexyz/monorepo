@@ -1,5 +1,5 @@
 use super::harness::{
-    CommitteeSchedule, Registration, RegistrationRole, ValidatorState, final_height,
+    CommitteeSchedule, Registration, RegistrationRole, SyncHolds, ValidatorState, final_height,
 };
 use crate::{
     dkg::{
@@ -656,6 +656,61 @@ impl Property<ed25519::PublicKey, ValidatorState> for StateSyncedSigner {
                     self.public_key, self.min_epoch
                 ))
             }
+        })
+    }
+}
+
+/// Checks that one of a node's state sync holds began before the network processed `height` and
+/// lasted until it had.
+#[derive(Clone)]
+pub(super) struct StateSyncHeldThrough {
+    public_key: ed25519::PublicKey,
+    height: Height,
+    sync_holds: SyncHolds,
+}
+
+impl StateSyncHeldThrough {
+    pub(super) const fn new(
+        public_key: ed25519::PublicKey,
+        height: Height,
+        sync_holds: SyncHolds,
+    ) -> Self {
+        Self {
+            public_key,
+            height,
+            sync_holds,
+        }
+    }
+}
+
+impl Property<ed25519::PublicKey, ValidatorState> for StateSyncHeldThrough {
+    fn name(&self) -> &str {
+        "state_sync_held_through"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        _states: &'a [&'a ValidatorState],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let holds = self
+                .sync_holds
+                .lock()
+                .get(&self.public_key)
+                .cloned()
+                .unwrap_or_default();
+            let height = self.height.get();
+            if holds
+                .iter()
+                .any(|&(first, last)| first < height && last >= height)
+            {
+                return Ok(());
+            }
+            Err(format!(
+                "node {} had no hold spanning height {height}, holds seen at heights {holds:?}",
+                self.public_key
+            ))
         })
     }
 }

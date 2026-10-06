@@ -23,8 +23,8 @@ use crate::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful as StatefulActor,
         SyncPlan,
         db::{
-            DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
-            p2p as qmdb_resolver,
+            AttachableResolver, DatabaseSet, Merkleized as _, Shared, SyncEngineConfig,
+            Unmerkleized as _, p2p as qmdb_resolver,
         },
     },
 };
@@ -73,7 +73,7 @@ use commonware_storage::{
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
         any::{FixedConfig, unordered::fixed},
-        sync::Target,
+        sync::{Request as SyncRequest, Source, Target, source},
     },
     translator::TwoCap,
 };
@@ -103,6 +103,10 @@ type Marshal = MarshalMailbox<Scheme, MarshalVariant>;
 type PublicKey = ed25519::PublicKey;
 type DiscoveryManager = simulated::Manager<PublicKey, DeterministicContext>;
 type LookupManager = AddressableManager<simulated::SocketManager<PublicKey, DeterministicContext>>;
+
+/// Each node's state sync holds, as the highest height any node had processed when the hold was
+/// first seen and when it was last seen.
+pub(super) type SyncHolds = Arc<Mutex<BTreeMap<PublicKey, Vec<(u64, u64)>>>>;
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(32);
 const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_E2E";
@@ -569,6 +573,48 @@ impl Registrar for TestRegistrar {
     }
 }
 
+/// Serves state sync like `inner`. With a gate, it answers requests for the first target size it
+/// sees at once and holds every other reply until some node has processed past the gate's height.
+#[derive(Clone)]
+struct GatedResolver<R> {
+    inner: R,
+    gate: Option<Arc<ReplyGate>>,
+}
+
+/// The state shared by a [`GatedResolver`]'s clones.
+struct ReplyGate {
+    context: DeterministicContext,
+    release_after: u64,
+    processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+    first_size: Mutex<Option<u64>>,
+}
+
+impl<R: Source> Source for GatedResolver<R> {
+    type Family = R::Family;
+    type Digest = R::Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn serve(&self, request: SyncRequest<Self::Family>) -> source::Result<Self> {
+        if let Some(gate) = &self.gate {
+            let size = *request.size();
+            let first = *gate.first_size.lock().get_or_insert(size);
+            while size != first
+                && gate.processed.lock().values().copied().max().unwrap_or(0) <= gate.release_after
+            {
+                gate.context.sleep(Duration::from_millis(10)).await;
+            }
+        }
+        self.inner.serve(request).await
+    }
+}
+
+impl<DB, R: AttachableResolver<DB>> AttachableResolver<DB> for GatedResolver<R> {
+    fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send {
+        self.inner.attach_database(db)
+    }
+}
+
 #[derive(Clone)]
 struct ScheduleProvider {
     pub(super) schedule: Arc<CommitteeSchedule>,
@@ -619,9 +665,12 @@ pub(super) struct ReshareEngine {
     pub(super) registrations: Arc<Mutex<BTreeMap<ed25519::PublicKey, Vec<Registration>>>>,
     pub(super) state_syncs: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     pub(super) state_sync_starts: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+    /// Each node's state sync holds.
+    pub(super) sync_holds: SyncHolds,
     state_sync_floor: Option<Height>,
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
+    sync_reply_gate: Option<Height>,
     stale: Option<Height>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
@@ -736,9 +785,11 @@ impl ReshareEngine {
             registrations: Arc::new(Mutex::new(BTreeMap::new())),
             state_syncs: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_starts: Arc::new(Mutex::new(BTreeMap::new())),
+            sync_holds: Arc::new(Mutex::new(BTreeMap::new())),
             state_sync_floor: None,
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
+            sync_reply_gate: None,
             stale: None,
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
@@ -770,6 +821,13 @@ impl ReshareEngine {
         height: Height,
     ) -> Self {
         *self.processed_hold.lock() = Some((participant, height.get()));
+        self
+    }
+
+    /// Holds a syncing node's state sync replies, except those for the first target it requests,
+    /// until some node has processed past `height`.
+    pub(super) const fn with_sync_reply_gate(mut self, height: Height) -> Self {
+        self.sync_reply_gate = Some(height);
         self
     }
 
@@ -983,6 +1041,41 @@ impl EngineDefinition for ReshareEngine {
                 .lock()
                 .entry(public_key.clone())
                 .or_default() += 1;
+
+            // Until state sync finishes, sample whether it holds a window and how far the network
+            // has processed when each hold is first and last seen.
+            let sync_holds = self.sync_holds.clone();
+            let processed = self.processed.clone();
+            let public_key = public_key.clone();
+            let node = format!("index=\"{index}\"");
+            context
+                .child("sync_hold_monitor")
+                .spawn(move |context| async move {
+                    let mut holding = false;
+                    loop {
+                        let metrics = context.encode();
+                        let gauge_is_set = |name: &str| {
+                            metrics.lines().any(|line| {
+                                line.contains(name) && line.contains(&node) && line.ends_with(" 1")
+                            })
+                        };
+                        if gauge_is_set("stateful_sync_done") {
+                            return;
+                        }
+                        let held = gauge_is_set("stateful_sync_held");
+                        if held {
+                            let height = processed.lock().values().copied().max().unwrap_or(0);
+                            let mut holds = sync_holds.lock();
+                            let holds = holds.entry(public_key.clone()).or_default();
+                            match holds.last_mut() {
+                                Some((_, last)) if holding => *last = height,
+                                _ => holds.push((height, height)),
+                            }
+                        }
+                        holding = held;
+                        context.sleep(Duration::from_millis(5)).await;
+                    }
+                });
         }
         let probe_artifact = if should_state_sync {
             let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
@@ -1203,13 +1296,27 @@ impl EngineDefinition for ReshareEngine {
                 marshal: (marshal.clone(), floor),
                 mailbox_size: NZUsize!(100),
                 plan,
-                resolvers: qmdb_sync_resolver,
+                resolvers: GatedResolver {
+                    inner: qmdb_sync_resolver,
+                    gate: self
+                        .sync_reply_gate
+                        .filter(|_| should_state_sync)
+                        .map(|height| {
+                            Arc::new(ReplyGate {
+                                context: context.child("sync_reply_gate"),
+                                release_after: height.get(),
+                                processed: self.processed.clone(),
+                                first_size: Mutex::new(None),
+                            })
+                        }),
+                },
                 sync_config: SyncEngineConfig {
                     fetch_batch_size: NZU64!(16),
                     apply_batch_size: NZU64!(64),
                     max_outstanding_requests: NZUsize!(8),
                     update_channel_size: NZUsize!(256),
                 },
+                sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                 prune_config: None,
             },
         );

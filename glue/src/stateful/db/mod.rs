@@ -34,6 +34,11 @@
 //! - Upon a tip at a greater height: adopt its anchor. If its targets differ from the current
 //!   targets, send them to the databases (tuple sets follow the
 //!   [convergence rules](#convergence-tuple-sets)).
+//! - Upon a single database reporting the current target: converge, leaving queued tips
+//!   unobserved.
+//! - Upon a single database reporting a target older than the current one: hold. A holding sync
+//!   refuses every later tip and finishes at the current target, unless a forced tip releases the
+//!   hold. A forced tip is recorded as above.
 //!
 //! Queued tips are coalesced: a tip superseded by a newer one before the sync dispatches it may
 //! never reach the databases. [`StateSyncSet::sync`] returns an anchor whose targets every database
@@ -611,8 +616,9 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// - Adopt a target from `tip_updates` only if it advances the current target.
     /// - When `finish` is `Some`, complete only once it has signaled and the current target is
     ///   reached. When `finish` is `None`, complete as soon as the current target is reached.
-    /// - When `reached_target` is `Some`, report each reached target on it at most once. A report
-    ///   may wait for channel capacity, so callers must drain the receiver.
+    /// - When `reached_target` is `Some`, report each reached target on it at most once, before
+    ///   adopting a newer target. A report may wait for channel capacity, so callers must drain
+    ///   the receiver.
     #[allow(clippy::too_many_arguments)]
     fn sync_db(
         context: E,
@@ -658,7 +664,18 @@ where
 pub struct TipUpdate<D: Digest, T> {
     anchor: Anchor<D>,
     targets: T,
-    observed: Option<oneshot::Sender<()>>,
+    forced: bool,
+    observed: Option<oneshot::Sender<Observation>>,
+}
+
+/// How a running sync handled a [`TipUpdate`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Observation {
+    /// The sync recorded the update, whether or not it adopted its targets.
+    Recorded,
+    /// The sync refused the update. It finishes at an earlier recorded tip, unless a later forced
+    /// update is recorded first.
+    Refused,
 }
 
 impl<D: Digest, T> TipUpdate<D, T> {
@@ -667,33 +684,62 @@ impl<D: Digest, T> TipUpdate<D, T> {
         Self {
             anchor,
             targets,
+            forced: false,
             observed: None,
         }
     }
 
-    /// Creates an update and a receiver that resolves once a sync has handled it, whether or not
-    /// the sync adopted it.
+    /// Creates an update and a receiver that resolves with how a sync handled it.
     ///
     /// The receiver errors if the update is dropped unhandled.
-    pub(crate) fn with_observation(anchor: Anchor<D>, targets: T) -> (Self, oneshot::Receiver<()>) {
+    pub(crate) fn with_observation(
+        anchor: Anchor<D>,
+        targets: T,
+    ) -> (Self, oneshot::Receiver<Observation>) {
         let (observed, receiver) = oneshot::channel();
         (
             Self {
                 anchor,
                 targets,
+                forced: false,
                 observed: Some(observed),
             },
             receiver,
         )
     }
 
+    /// Creates an update that a holding sync records instead of refusing, which releases the
+    /// hold, and a receiver that resolves with how the sync handled it.
+    ///
+    /// The receiver errors if the update is dropped unhandled.
+    pub(crate) fn forced_with_observation(
+        anchor: Anchor<D>,
+        targets: T,
+    ) -> (Self, oneshot::Receiver<Observation>) {
+        let (mut update, receiver) = Self::with_observation(anchor, targets);
+        update.forced = true;
+        (update, receiver)
+    }
+
+    /// Returns whether the update releases a holding sync.
+    pub(crate) const fn forced(&self) -> bool {
+        self.forced
+    }
+
     /// Passes the update to `record`, then resolves its observer.
     pub(crate) fn record<R>(self, record: impl FnOnce(Anchor<D>, T) -> R) -> R {
         let result = record(self.anchor, self.targets);
         if let Some(observed) = self.observed {
-            let _ = observed.send(());
+            let _ = observed.send(Observation::Recorded);
         }
         result
+    }
+
+    /// Resolves the observer without recording the update.
+    pub(crate) fn refuse(self) {
+        if let Some(observed) = self.observed {
+            let _ = observed.send(Observation::Refused);
+        }
     }
 }
 
@@ -854,48 +900,49 @@ where
         let coordinator = async {
             let mut current_anchor = anchor;
             let mut tip_updates = Some(tip_updates);
+            let mut held = false;
+            // The newest recorded target not yet sent to the database. It waits for channel
+            // capacity alongside reached reports, so the database never waits to report while the
+            // coordinator waits to send it a target.
+            let mut unsent = None;
             loop {
-                if !drain_single_tip_updates(
-                    &mut tip_updates,
-                    &target_tx,
-                    &mut current_anchor,
-                    &mut current_target,
-                )
-                .await
-                {
-                    return (current_anchor, current_target);
-                }
-
                 let update_future = tip_updates.as_mut().map_or_else(
                     || Either::Right(pending()),
                     |updates| Either::Left(updates.recv()),
                 );
+                let send_future = if unsent.is_some() {
+                    Either::Left(target_tx.reserve())
+                } else {
+                    Either::Right(pending())
+                };
                 select! {
                     reached = reached_rx.recv() => {
                         let Some(reached) = reached else {
                             return (current_anchor, current_target);
                         };
-                        if !drain_single_tip_updates(
-                            &mut tip_updates,
-                            &target_tx,
-                            &mut current_anchor,
-                            &mut current_target,
-                        )
-                        .await
-                        {
+                        // A report of the newest recorded target converges, leaving queued tips
+                        // unhandled, so a queued forced tip cannot discard a finished sync.
+                        if reached == current_target {
+                            let _ = finish_tx.send_lossy(()).await;
                             return (current_anchor, current_target);
-                        };
-                        if reached != current_target {
-                            continue;
                         }
-                        let _ = finish_tx.send_lossy(()).await;
-                        return (current_anchor, current_target);
+                        // Once the database reaches an earlier target, the sync refuses every
+                        // later tip, including those already queued, until a forced update
+                        // releases it.
+                        held = true;
                     },
                     update = update_future => {
                         let Some(update) = update else {
                             tip_updates = None;
                             continue;
                         };
+                        if update.forced() {
+                            held = false;
+                        }
+                        if held {
+                            update.refuse();
+                            continue;
+                        }
                         let target = update.record(|new_anchor, new_target| {
                             if new_anchor.height <= current_anchor.height {
                                 return None;
@@ -907,12 +954,15 @@ where
                             current_target = new_target.clone();
                             Some(new_target)
                         });
-                        let Some(new_target) = target else {
-                            continue;
-                        };
-                        if !target_tx.send_lossy(new_target).await {
-                            return (current_anchor, current_target);
+                        if target.is_some() {
+                            unsent = target;
                         }
+                    },
+                    permit = send_future => {
+                        let Ok(permit) = permit else {
+                            return (current_anchor, current_target);
+                        };
+                        permit.send(unsent.take().expect("a send waits only for an unsent target"));
                     },
                 }
             }
@@ -926,59 +976,6 @@ where
         );
         Ok((Self::new("stateful.db", database), converged_anchor))
     }
-}
-
-/// Handles every queued tip update, then forwards the newest adopted targets if they changed.
-///
-/// Returns `false` if the database stopped accepting targets.
-async fn drain_single_tip_updates<D, T>(
-    tip_updates: &mut Option<ring::Receiver<TipUpdate<D, T>>>,
-    target_tx: &mpsc::Sender<T>,
-    current_anchor: &mut Anchor<D>,
-    current_target: &mut T,
-) -> bool
-where
-    D: Digest,
-    T: Clone + PartialEq + Send + Sync,
-{
-    let mut drained = 0usize;
-    let mut latest = None;
-    loop {
-        let update = match tip_updates.as_mut().map(ring::Receiver::try_recv) {
-            Some(Ok(update)) => update,
-            Some(Err(ring::TryRecvError::Empty)) => break,
-            Some(Err(ring::TryRecvError::Disconnected)) => {
-                *tip_updates = None;
-                break;
-            }
-            None => break,
-        };
-        drained += 1;
-
-        update.record(|new_anchor, new_target| {
-            let latest_height = latest
-                .as_ref()
-                .map_or(current_anchor.height, |(anchor, _): &(Anchor<D>, T)| {
-                    anchor.height
-                });
-            if new_anchor.height > latest_height {
-                latest = Some((new_anchor, new_target));
-            }
-        });
-        if drained.is_multiple_of(MAX_CHANNEL_DRAIN_PER_TICK) {
-            reschedule().await;
-        }
-    }
-
-    let Some((new_anchor, new_target)) = latest else {
-        return true;
-    };
-    *current_anchor = new_anchor;
-    if new_target == *current_target {
-        return true;
-    }
-    *current_target = new_target.clone();
-    target_tx.send_lossy(new_target).await
 }
 
 macro_rules! impl_database_set {
@@ -1983,8 +1980,7 @@ mod tests {
     use super::{
         Anchor, AttachableResolver, AttachableResolverSet, Barrier, BatchContext,
         CoordinatorAction, CoordinatorState, DatabaseSet, InitError, MAX_CHANNEL_DRAIN_PER_TICK,
-        ManagedDb, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
-        drain_single_tip_updates,
+        ManagedDb, Observation, Shared, StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate,
     };
     use crate::stateful::tests::mocks::{TestMerkleized, TestUnmerkleized, anchor as mock_anchor};
     use commonware_cryptography::sha256;
@@ -3929,6 +3925,375 @@ mod tests {
 
     type TestAnchor = Anchor<sha256::Digest>;
 
+    struct LaggingSyncDb {
+        final_target: u64,
+    }
+
+    /// Signals that a [`LaggingSyncDb`] reported its initial target, and releases it.
+    type LagGate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+
+    impl<E: Send> ManagedDb<E> for LaggingSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("LaggingSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+            unreachable!("LaggingSyncDb is only constructed through state sync in tests")
+        }
+
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        ready_apply!();
+
+        fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
+    }
+
+    /// Reports its initial target once the first tip arrives, waits for release, then reports
+    /// and finishes at the newest forwarded target.
+    impl<E: Send> StateSyncDb<E, LagGate> for LaggingSyncDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            (reported, release): LagGate,
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            mut finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            let mut final_target = tip_updates.recv().await.expect("expected forwarded tip");
+            if let Some(reached_target) = reached_target.as_ref() {
+                let _ = reached_target.send(target).await;
+            }
+            let _ = reported.send(());
+
+            let _ = release.await;
+            while let Ok(update) = tip_updates.try_recv() {
+                final_target = update;
+            }
+            if let Some(reached_target) = reached_target.as_ref() {
+                let _ = reached_target.send(final_target).await;
+            }
+            if let Some(finish_rx) = finish.as_mut() {
+                let _ = finish_rx.recv().await;
+            }
+            Ok(Self { final_target })
+        }
+    }
+
+    fn lagging_sync_config() -> SyncEngineConfig {
+        SyncEngineConfig {
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: NZU64!(1),
+            max_outstanding_requests: NZUsize!(1),
+            update_channel_size: NonZeroUsize::new(4).unwrap(),
+        }
+    }
+
+    /// Once the database reaches an earlier target, the sync refuses later tips and finishes at
+    /// the newest recorded tip.
+    #[test]
+    fn single_state_sync_refuses_tips_after_reaching_earlier_target() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (reported_tx, reported_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let sync =
+                context
+                    .child("single_state_sync_refuses_tips")
+                    .spawn(move |context| async move {
+                        <Shared<LaggingSyncDb> as StateSyncSet<
+                            deterministic::Context,
+                            LagGate,
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            (),
+                            (reported_tx, release_rx),
+                            anchor(0),
+                            0,
+                            tip_rx,
+                            lagging_sync_config(),
+                        )
+                        .await
+                        .expect("single state sync should succeed")
+                    });
+
+            // The first tip is recorded and forwarded.
+            let (update, observed) = TipUpdate::with_observation(anchor(1), 1);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+
+            // The database reports its initial target. A later tip is refused.
+            reported_rx
+                .await
+                .expect("database should report its initial target");
+            let (update, observed) = TipUpdate::with_observation(anchor(2), 2);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Refused));
+
+            // Once released, the database reaches the newest recorded tip and the sync finishes
+            // there.
+            release_tx.send(()).unwrap();
+            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 1);
+            assert_eq!(converged_anchor, anchor(1));
+        });
+    }
+
+    /// A forced tip releases a holding sync: it is recorded and forwarded, and the sync finishes
+    /// at it.
+    #[test]
+    fn single_state_sync_forced_tip_releases_hold() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (reported_tx, reported_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let sync =
+                context
+                    .child("single_state_sync_forced_tip")
+                    .spawn(move |context| async move {
+                        <Shared<LaggingSyncDb> as StateSyncSet<
+                            deterministic::Context,
+                            LagGate,
+                            sha256::Digest,
+                        >>::sync(
+                            context,
+                            (),
+                            (reported_tx, release_rx),
+                            anchor(0),
+                            0,
+                            tip_rx,
+                            lagging_sync_config(),
+                        )
+                        .await
+                        .expect("single state sync should succeed")
+                    });
+
+            // The first tip is recorded. The database reports its initial target, which starts
+            // the hold, and a later tip is refused.
+            let (update, observed) = TipUpdate::with_observation(anchor(1), 1);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            reported_rx
+                .await
+                .expect("database should report its initial target");
+            let (update, observed) = TipUpdate::with_observation(anchor(2), 2);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Refused));
+
+            // A forced tip is recorded and forwarded, and the sync finishes there.
+            let (update, observed) = TipUpdate::forced_with_observation(anchor(3), 3);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            release_tx.send(()).unwrap();
+            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 3);
+            assert_eq!(converged_anchor, anchor(3));
+        });
+    }
+
+    /// A holding sync whose database reaches the recorded target while a forced tip is queued
+    /// finishes at the recorded target.
+    #[test]
+    fn single_state_sync_converges_before_queued_forced_tip() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (reported_tx, reported_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let sync = context.child("single_state_sync_queued_forced_tip").spawn(
+                move |context| async move {
+                    <Shared<LaggingSyncDb> as StateSyncSet<
+                        deterministic::Context,
+                        LagGate,
+                        sha256::Digest,
+                    >>::sync(
+                        context,
+                        (),
+                        (reported_tx, release_rx),
+                        anchor(0),
+                        0,
+                        tip_rx,
+                        lagging_sync_config(),
+                    )
+                    .await
+                    .expect("single state sync should succeed")
+                },
+            );
+
+            // The first tip is recorded, and the database's report of its initial target starts
+            // the hold.
+            let (update, observed) = TipUpdate::with_observation(anchor(1), 1);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Recorded));
+            reported_rx
+                .await
+                .expect("database should report its initial target");
+            let (update, observed) = TipUpdate::with_observation(anchor(2), 2);
+            let _ = tip_tx.send(update).await;
+            assert_eq!(observed.await, Ok(Observation::Refused));
+
+            // A forced tip is queued as the database reaches the recorded target. The sync polls
+            // the database before the coordinator, which takes reports before tips, so it
+            // converges before taking the forced tip.
+            let (update, _observed) = TipUpdate::forced_with_observation(anchor(3), 3);
+            let _ = tip_tx.send(update).await;
+            release_tx.send(()).unwrap();
+            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(database.read().await.final_target, 1);
+            assert_eq!(converged_anchor, anchor(1));
+        });
+    }
+
+    struct EagerSyncDb {
+        final_target: u64,
+    }
+
+    impl<E: Send> ManagedDb<E> for EagerSyncDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = u64;
+
+        fn initial_sync_target() -> Self::SyncTarget {
+            unreachable!("EagerSyncDb is only constructed through state sync in tests")
+        }
+
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+            unreachable!("EagerSyncDb is only constructed through state sync in tests")
+        }
+
+        fn new_batch(_database: BatchContext<'_, Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        ready_apply!();
+
+        fn sync_target(&self) -> Self::SyncTarget {
+            self.final_target
+        }
+    }
+
+    /// Once released, reports its initial target and then each forwarded target as soon as it
+    /// arrives, waiting for report capacity as the sync engine does, and finishes when asked.
+    impl<E: Send> StateSyncDb<E, oneshot::Receiver<()>> for EagerSyncDb {
+        type SyncError = Infallible;
+
+        async fn sync_db(
+            _context: E,
+            _config: Self::Config,
+            release: oneshot::Receiver<()>,
+            target: Self::SyncTarget,
+            mut tip_updates: mpsc::Receiver<Self::SyncTarget>,
+            finish: Option<mpsc::Receiver<()>>,
+            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
+            _sync_config: SyncEngineConfig,
+        ) -> Result<Self, Self::SyncError> {
+            let mut finish = finish.expect("single state sync requests a finish");
+            let reached_target = reached_target.expect("single state sync observes reports");
+            let _ = release.await;
+            let mut final_target = target;
+            let _ = reached_target.send(final_target).await;
+            loop {
+                select! {
+                    _ = finish.recv() => return Ok(Self { final_target }),
+                    update = tip_updates.recv() => {
+                        let Some(update) = update else {
+                            let _ = finish.recv().await;
+                            return Ok(Self { final_target });
+                        };
+                        final_target = update;
+                        let _ = reached_target.send(final_target).await;
+                    },
+                }
+            }
+        }
+    }
+
+    /// The coordinator keeps draining reached reports while it waits to forward a target, so a
+    /// database that reports each target before taking the next one cannot deadlock it.
+    #[test]
+    fn single_state_sync_drains_reports_while_forwarding_targets() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
+            let (release_tx, release_rx) = oneshot::channel();
+            let sync = context.child("single_state_sync_drains_reports").spawn(
+                move |context| async move {
+                    <Shared<EagerSyncDb> as StateSyncSet<
+                        deterministic::Context,
+                        oneshot::Receiver<()>,
+                        sha256::Digest,
+                    >>::sync(
+                        context,
+                        (),
+                        release_rx,
+                        anchor(0),
+                        0,
+                        tip_rx,
+                        SyncEngineConfig {
+                            fetch_batch_size: NZU64!(1),
+                            apply_batch_size: NZU64!(1),
+                            max_outstanding_requests: NZUsize!(1),
+                            update_channel_size: NonZeroUsize::new(1).unwrap(),
+                        },
+                    )
+                    .await
+                    .expect("single state sync should succeed")
+                },
+            );
+
+            // Before the database reports its initial target, the first tip fills the target
+            // channel, the second is recorded and waits to be forwarded, and the third waits in
+            // the tip ring.
+            for height in 1..=2 {
+                let (update, observed) = TipUpdate::with_observation(anchor(height), height);
+                let _ = tip_tx.send(update).await;
+                assert_eq!(observed.await, Ok(Observation::Recorded));
+            }
+            let (update, third) = TipUpdate::with_observation(anchor(3), 3);
+            let _ = tip_tx.send(update).await;
+
+            // The database reports every target as it arrives. The sync polls the database before
+            // the coordinator, which takes reports before tips, so the first report, of an earlier
+            // target, starts the hold before the third tip is taken. The third tip is refused and
+            // the sync finishes at the second.
+            release_tx.send(()).unwrap();
+            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            assert_eq!(third.await, Ok(Observation::Refused));
+            assert_eq!(database.read().await.final_target, 2);
+            assert_eq!(converged_anchor, anchor(2));
+        });
+    }
+
     fn anchor(n: u64) -> TestAnchor {
         mock_anchor(n, n as u8)
     }
@@ -3946,78 +4311,6 @@ mod tests {
 
             assert_eq!(recorded, Some((anchor(1), 7)));
             observed.await.expect("recorded update should be observed");
-        });
-    }
-
-    #[test]
-    fn single_tip_update_drain_keeps_highest_recorded_target() {
-        deterministic::Runner::default().start(|_context| async move {
-            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
-            let (target_tx, mut target_rx) = mpsc::channel(4);
-            let (newer_update, newer_observed) = TipUpdate::with_observation(anchor(2), 2u64);
-            let (older_update, older_observed) = TipUpdate::with_observation(anchor(1), 1u64);
-
-            let _ = tip_tx.send(newer_update).await;
-            let _ = tip_tx.send(older_update).await;
-
-            let mut tip_updates = Some(tip_rx);
-            let mut current_anchor = anchor(0);
-            let mut current_target = 0u64;
-            assert!(
-                drain_single_tip_updates(
-                    &mut tip_updates,
-                    &target_tx,
-                    &mut current_anchor,
-                    &mut current_target,
-                )
-                .await
-            );
-
-            newer_observed
-                .await
-                .expect("newer update should be observed");
-            older_observed
-                .await
-                .expect("older update should also be observed");
-            assert_eq!(current_anchor, anchor(2));
-            assert_eq!(current_target, 2);
-            assert_eq!(target_rx.recv().await, Some(2));
-            assert!(matches!(
-                target_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
-        });
-    }
-
-    #[test]
-    fn single_tip_update_drain_advances_anchor_without_duplicate_target() {
-        deterministic::Runner::default().start(|_context| async move {
-            let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let (target_tx, mut target_rx) = mpsc::channel(1);
-            let (update, observed) = TipUpdate::with_observation(anchor(3), 7u64);
-
-            let _ = tip_tx.send(update).await;
-
-            let mut tip_updates = Some(tip_rx);
-            let mut current_anchor = anchor(2);
-            let mut current_target = 7u64;
-            assert!(
-                drain_single_tip_updates(
-                    &mut tip_updates,
-                    &target_tx,
-                    &mut current_anchor,
-                    &mut current_target,
-                )
-                .await
-            );
-
-            observed.await.expect("update should be observed");
-            assert_eq!(current_anchor, anchor(3));
-            assert_eq!(current_target, 7);
-            assert!(matches!(
-                target_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
         });
     }
 
@@ -4176,8 +4469,7 @@ mod tests {
                 },
             );
 
-            // Let the coordinator finish its initial queue drain so the update
-            // below exercises the live select arm.
+            // Let the coordinator start waiting before the update below arrives.
             context.sleep(Duration::from_millis(10)).await;
             let (update, observed) = TipUpdate::with_observation(anchor(9), 7);
             let _ = tip_tx.send(update).await;
@@ -4194,7 +4486,7 @@ mod tests {
     }
 
     #[test]
-    fn single_state_sync_ignores_stale_reached_after_forwarded_tip() {
+    fn single_state_sync_finishes_at_forwarded_tip_after_stale_reached() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(4).unwrap());
 

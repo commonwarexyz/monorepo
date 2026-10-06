@@ -216,7 +216,7 @@ mod tests {
     use super::{Config, Syncer, resolve};
     use crate::stateful::{
         Application, Config as StatefulConfig, Input, Proposed, Stateful,
-        actor::syncer::{SyncPlan, open},
+        actor::syncer::{Outcome, SyncPlan, open},
         db::{
             Anchor, AttachableResolverSet, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig,
             TipUpdate,
@@ -243,7 +243,7 @@ mod tests {
         Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
     use commonware_utils::{
-        NZU64, NZUsize,
+        NZDuration, NZU64, NZUsize,
         channel::{oneshot, ring},
     };
     use std::{convert::Infallible, time::Duration};
@@ -776,6 +776,7 @@ mod tests {
                         max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NZUsize!(1),
                     },
+                    sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                     prune_config: None,
                 },
             );
@@ -1090,7 +1091,10 @@ mod tests {
                 .spawn(move |_| async move { mailbox.retarget(anchor(1, 1), 1).await });
             let result = update.await.expect("update task failed");
             assert!(
-                matches!(&result, Some(artifact) if artifact.anchor.height == Height::zero()),
+                matches!(
+                    &result,
+                    Outcome::Converged(artifact) if artifact.anchor.height == Height::zero()
+                ),
                 "stranded update must resolve to the completed artifact",
             );
 

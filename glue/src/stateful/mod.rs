@@ -55,6 +55,11 @@
 //! * Retain `b` with its marshal acknowledgement.
 //! * When marshal's pending acknowledgement window fills, record the newest retained block as
 //!   the sync target and acknowledge the retained blocks.
+//! * If the sync refuses that target (see [Anchors](db#anchors)), hold the window: keep every
+//!   retained block unacknowledged, so marshal stops delivering blocks and the sync finishes at
+//!   the last recorded target.
+//! * If a hold lasts longer than [`Config::sync_hold_timeout`], release it: record the newest
+//!   retained block as the target, acknowledge the retained blocks, and resume as above.
 //!
 //! Upon convergence at anchor `a`:
 //!

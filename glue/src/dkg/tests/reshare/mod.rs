@@ -14,7 +14,7 @@ mod properties;
 use properties::{
     AllActiveProcessedHeight, AllNodesRecovered, BoundaryEpochInfos, BoundaryOutputMode,
     EpochInfoContinuity, FailedCeremonyCarryOver, SchemesRegistered, SignerRegistered,
-    StateSyncMembership, StateSyncedAtHeight, StateSyncedSigner,
+    StateSyncHeldThrough, StateSyncMembership, StateSyncedAtHeight, StateSyncedSigner,
 };
 
 fn reshare_plan_with_boundary(
@@ -446,6 +446,55 @@ fn reshare_e2e_state_sync_epoch_first_next_player(#[case] network: Network) {
     .timeout(Duration::from_secs(120))
     .run()
     .unwrap();
+}
+
+/// A node's state sync holds while the network crosses into the next epoch. Replies for its first
+/// target arrive at once, so it reaches that target and holds, and every later reply waits until
+/// the network has processed past the boundary. It then syncs at its epoch-1 floor, catches up
+/// through ordinary marshal delivery, and participates normally afterward: dealt to as a player
+/// during epoch 3, it registers as a signer for epoch 4.
+#[rstest]
+#[case::discovery(Network::Discovery)]
+#[case::lookup(Network::Lookup)]
+#[test_group("slow")]
+#[test_traced("INFO")]
+fn reshare_e2e_state_sync_holds_across_epoch_boundary(#[case] network: Network) {
+    let probe_epoch = Epoch::new(1);
+    let epocher = FixedEpocher::new(EPOCH_LENGTH);
+    let start_height = epocher
+        .midpoint(probe_epoch)
+        .expect("test epoch should be supported");
+    let boundary = epocher
+        .first(probe_epoch.next())
+        .expect("test epoch should be supported");
+    let engine = ReshareEngine::with_committee(network, 6, 4).with_sync_reply_gate(boundary);
+    let delayed = engine.participants[5].clone();
+    let registrations = engine.registrations.clone();
+    let state_syncs = engine.state_syncs.clone();
+    let sync_holds = engine.sync_holds.clone();
+    reshare_plan_with_boundary(engine, 4, BoundaryEpochInfos::new(5))
+        .crash(Crash::DelayRound {
+            participants: vec![delayed.clone()],
+            round: height_round(start_height),
+        })
+        .property(StateSyncedAtHeight::new(
+            delayed.clone(),
+            epocher
+                .first(probe_epoch)
+                .expect("test epoch should be supported"),
+            final_height(probe_epoch.get()),
+            state_syncs.clone(),
+        ))
+        .property(StateSyncedSigner::new(
+            delayed.clone(),
+            Epoch::new(4),
+            registrations,
+            state_syncs,
+        ))
+        .property(StateSyncHeldThrough::new(delayed, boundary, sync_holds))
+        .timeout(Duration::from_secs(180))
+        .run()
+        .unwrap();
 }
 
 #[rstest]

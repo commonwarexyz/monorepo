@@ -542,6 +542,7 @@ impl EngineDefinition for SingleDbEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
+                sync_hold_timeout: NZDuration!(Duration::from_secs(10)),
                 prune_config: Some(PruneConfig {
                     maintenance_interval: NZUsize!(5),
                     retained_marshal_blocks: self.retained_marshal_blocks,

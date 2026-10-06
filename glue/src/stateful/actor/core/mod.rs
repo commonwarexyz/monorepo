@@ -26,7 +26,7 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{NonZeroDuration, channel::oneshot};
 use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
@@ -58,10 +58,12 @@ pub struct PruneConfig {
     /// Finalized blocks' worth of operations to retain in QMDB beyond marshal's
     /// acknowledgement window plus one.
     ///
-    /// This value is generally safe to set to 0, as QMDB operations below the active range are only
-    /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
-    /// a non-zero value here to provide a larger buffer for serving state sync requests during periods
-    /// of instability.
+    /// QMDB operations below the active range are only needed to serve state sync requests for
+    /// lagging peers. A peer keeps serving a block's state sync targets for at least about
+    /// `max_pending_acks + 1 + retained_qmdb_blocks` blocks after it. A syncing node with a single
+    /// database converges once the database's tail round trip fits within that window. Some
+    /// network topologies may benefit from a non-zero value here to provide a larger buffer for
+    /// serving state sync requests during periods of instability.
     pub retained_qmdb_blocks: usize,
 }
 
@@ -114,6 +116,15 @@ where
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
+    /// How long state sync may hold a window of finalized blocks before releasing it (see
+    /// [State Sync](crate::stateful#state-sync)).
+    ///
+    /// Use a value well above a database's tail round trip, since a release restarts the tail at a
+    /// newer target. A hold that is never released stalls forever if peers prune the held target,
+    /// so there is no option to disable the timeout. A duration too long to add to the current
+    /// time never releases.
+    pub sync_hold_timeout: NonZeroDuration,
+
     /// Periodic database and marshal pruning configuration (no pruning when `None`).
     ///
     /// When set, [`Stateful`] retains the last `max_pending_acks + 1` finalized blocks (marshal's
@@ -152,6 +163,8 @@ where
     resolvers: R,
     /// Sync engine settings.
     sync_config: SyncEngineConfig,
+    /// How long state sync may hold a window of finalized blocks.
+    sync_hold_timeout: NonZeroDuration,
 
     /// Pruning schedule from [`Config::prune_config`], with a random phase.
     pruning: Option<Pruning<SyncTargets<A, E>>>,
@@ -195,6 +208,7 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
+                sync_hold_timeout: config.sync_hold_timeout,
                 pruning,
             },
             Mailbox::new(sender),
@@ -245,6 +259,9 @@ where
             resolvers: self.resolvers,
             completion: receiver,
             pending_finalizations: Default::default(),
+            held: false,
+            hold_timeout: self.sync_hold_timeout,
+            hold_deadline: None,
             pruning: self.pruning,
             metrics,
         };
@@ -302,7 +319,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
-        Acknowledgement as _, NZU64, NZUsize,
+        Acknowledgement as _, NZDuration, NZU64, NZUsize,
         acknowledgement::Exact,
         channel::{mpsc, oneshot},
         sync::Mutex,
@@ -408,6 +425,7 @@ mod tests {
                         max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NZUsize!(1),
                     },
+                    sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                     prune_config: None,
                 },
             );
@@ -466,6 +484,7 @@ mod tests {
                         max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NZUsize!(1),
                     },
+                    sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                     prune_config: None,
                 },
             );

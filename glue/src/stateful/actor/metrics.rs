@@ -17,6 +17,12 @@ pub(crate) struct Metrics {
     /// Whether the actor has finished startup state sync or recovery.
     pub sync_done: Registered<Gauge>,
 
+    /// Whether state sync holds a window of finalized blocks.
+    pub sync_held: Registered<Gauge>,
+
+    /// State sync holds released by the hold timeout.
+    pub sync_hold_releases: Registered<Counter>,
+
     /// Unfinalized blocks with cached speculative state.
     pub pending_blocks: Registered<Gauge>,
 
@@ -49,6 +55,19 @@ impl Metrics {
             Gauge::default(),
         );
         let _ = sync_done.try_set(0);
+
+        let sync_held = context.register(
+            "sync_held",
+            "Whether state sync holds a window of finalized blocks",
+            Gauge::default(),
+        );
+        let _ = sync_held.try_set(0);
+
+        let sync_hold_releases = context.register(
+            "sync_hold_releases",
+            "State sync holds released by the hold timeout",
+            Counter::default(),
+        );
 
         let pending_blocks = context.register(
             "pending_blocks",
@@ -94,6 +113,8 @@ impl Metrics {
 
         Self {
             sync_done,
+            sync_held,
+            sync_hold_releases,
             pending_blocks,
             pruned_forks,
             propose_duration: Timed::new(propose_hist),

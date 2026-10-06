@@ -23,7 +23,7 @@ use commonware_cryptography::{Digestible as _, certificate::ConstantProvider};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::archive::prunable;
-use commonware_utils::{NZU64, NZUsize, channel::ring};
+use commonware_utils::{NZDuration, NZU64, NZUsize, channel::ring};
 use std::{sync::Arc, time::Duration};
 
 /// Keeps a finalized target unapplied across recovery cuts.
@@ -153,6 +153,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                         max_outstanding_requests: NZUsize!(1),
                         update_channel_size: NZUsize!(1),
                     },
+                    sync_hold_timeout: NZDuration!(Duration::from_secs(600)),
                     prune_config: None,
                 },
             );
