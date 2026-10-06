@@ -1048,16 +1048,12 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 /// If the starting position falls within a pruned region, iteration
 /// begins at the first unpruned bit.
 ///
-/// The bitmap's length and the current chunk are read once and reused (the chunk until iteration
-/// crosses into the next one), so the bitmap's contents must not change for the iterator's
-/// lifetime.
+/// The iterator reads the bitmap's length once and each chunk once, so the bitmap must not
+/// change while the iterator lives.
 ///
-/// Owned bitmaps (`BitMap`, `Prunable`) guarantee this through the immutable borrow.
-///
-/// A `Readable` whose reads go through interior mutability (e.g. a lock-guarded shared bitmap)
-/// instead requires the caller to prevent concurrent mutation across the whole iteration, for
-/// example by constructing the iterator from a held read guard rather than a bare shared
-/// reference.
+/// The shared borrow of an owned bitmap (`BitMap`, `Prunable`) guarantees that. A `Readable`
+/// with interior mutability, such as a lock-guarded bitmap, does not: iterate it through a held
+/// read guard, not through the shared handle.
 pub struct OnesIter<'a, B, const N: usize> {
     bitmap: &'a B,
     /// The exclusive end of iteration: the range's end, capped at the bitmap's length when the

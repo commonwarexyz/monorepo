@@ -131,10 +131,6 @@ fn test_config(
     }
 }
 
-fn replacement(seed: u8) -> Value {
-    vec![seed; usize::from(seed % 16) + 1]
-}
-
 /// Check every key the run touched against the model of committed state.
 async fn assert_matches_model(db: &StoreDb, model: &BTreeMap<Key, Value>, keys: &BTreeSet<Key>) {
     assert_eq!(db.is_empty(), model.is_empty(), "empty-db state diverged");
@@ -191,7 +187,8 @@ fn fuzz(input: FuzzInput) {
                     }
                     let changeset = batch.finalize(metadata_bytes.clone());
                     let inherited = db.inactivity_floor_loc();
-                    let mut policy = Recorder::new(plan, replacement);
+                    let mut policy =
+                        Recorder::new(plan, |seed| vec![seed; usize::from(seed % 16) + 1]);
                     let (db, range) = db
                         .apply_batch(changeset, &mut policy)
                         .await

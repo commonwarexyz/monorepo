@@ -113,10 +113,6 @@ fn generate_seed_kv(index: u64) -> (RawKey, RawValue) {
     (key, value)
 }
 
-fn replacement(seed: u8) -> Value {
-    Value::new([seed; 32])
-}
-
 async fn commit_pending<F: Graftable>(
     db: Db<F>,
     plan: &Plan,
@@ -130,7 +126,7 @@ async fn commit_pending<F: Graftable>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let mut policy = Recorder::new(plan, replacement);
+    let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
     let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
     let (db, _) = db
         .apply_batch(merkleized)

@@ -154,10 +154,6 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
     Value::new(bytes)
 }
 
-fn replacement(seed: u8) -> Value {
-    Value::new([seed; 32])
-}
-
 fn apply_mutations<F: Graftable>(mut batch: Batch<F>, mutations: &[Mutation]) -> Batch<F> {
     for mutation in mutations {
         batch = match mutation {
@@ -193,7 +189,7 @@ async fn merkleize<F: Graftable>(
     plan: &Plan,
     model: &mut BTreeMap<Key, Value>,
 ) -> (Arc<Merkleized<F>>, Recorder<Key, Value>) {
-    let mut policy = Recorder::new(plan, replacement);
+    let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
     let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
     let bounds = merkleized.bounds();
     policy.check(
@@ -213,7 +209,7 @@ async fn rebuild<F: Graftable>(
     plan: &Plan,
     original: &Recorder<Key, Value>,
 ) -> Arc<Merkleized<F>> {
-    let mut policy = Recorder::new(plan, replacement);
+    let mut policy = Recorder::new(plan, |seed| Value::new([seed; 32]));
     let merkleized = batch.merkleize(db, None, &mut policy).await.unwrap();
     policy.assert_same_walk(original);
     merkleized
