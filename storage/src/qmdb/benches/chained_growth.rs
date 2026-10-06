@@ -16,7 +16,7 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
     merkle::{self, mmb::Family as Mmb},
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
@@ -52,8 +52,8 @@ type CurUFix256Mmb =
 type CurOFix256Mmb =
     OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &impl Strategizer) -> commonware_storage::journal::authenticated::Config<Rayon> {
-    commonware_storage::journal::authenticated::Config {
+fn merkle_cfg(ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
+    MerkleConfig {
         metadata_partition: format!("metadata-{PARTITION}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),

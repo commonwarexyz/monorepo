@@ -7,8 +7,8 @@
 //! reopen every operation ever written. The keyless cases never prune.
 
 use crate::common::{
-    Digest, define_fixed_variants, define_vec_variants, gen_random_kv, make_fixed_value,
-    make_var_value, open_keyless_db,
+    Digest, KeylessDb, define_fixed_variants, define_vec_variants, gen_random_kv, keyless_cfg,
+    make_fixed_value, make_var_value, open_keyless_db,
 };
 use commonware_macros::boxed;
 use commonware_runtime::{
@@ -118,8 +118,9 @@ fn bench_fixed_value_init(c: &mut Criterion) {
     for (elements, operations) in CASES {
         for prune in PRUNE {
             for &variant in FIXED_VARIANTS {
-                // Populated lazily on the first sample of the first matched cache size, then reused by
-                // every cache size for this variant (all read the same on-disk database).
+                // Populated lazily on the first sample of the first matched cache size, then
+                // reused by every cache size for this variant (all read the same on-disk
+                // database).
                 let mut initialized = false;
                 for &cache_size in &CACHE_SIZES {
                     let cache = cache_size.map_or(0, NonZeroUsize::get);
@@ -189,8 +190,9 @@ fn bench_var_value_init(c: &mut Criterion) {
     for (elements, operations) in CASES {
         for prune in PRUNE {
             for &variant in VEC_VARIANTS {
-                // Populated lazily on the first sample of the first matched cache size, then reused by
-                // every cache size for this variant (all read the same on-disk database).
+                // Populated lazily on the first sample of the first matched cache size, then
+                // reused by every cache size for this variant (all read the same on-disk
+                // database).
                 let mut initialized = false;
                 for &cache_size in &CACHE_SIZES {
                     let cache = cache_size.map_or(0, NonZeroUsize::get);
@@ -250,9 +252,12 @@ fn bench_var_value_init(c: &mut Criterion) {
 
 /// Reopen a keyless database `iters` times, returning the total time.
 async fn keyless_init<F: Family>(ctx: Context, iters: u64) -> Duration {
+    let cfg = keyless_cfg(&ctx);
     let start = Instant::now();
     for _ in 0..iters {
-        let db = open_keyless_db::<F>(ctx.child("storage")).await;
+        let db = KeylessDb::<F>::init(ctx.child("storage"), cfg.clone(), None)
+            .await
+            .unwrap();
         assert_ne!(db.bounds().end, 0);
     }
     start.elapsed()

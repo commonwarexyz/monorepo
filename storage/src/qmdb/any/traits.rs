@@ -95,8 +95,6 @@ pub trait DbAny<F: Family>:
     fn root(&self) -> Self::Digest;
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     fn bounds(&self) -> Range<Location<F>>;
 
     /// Return the Location of the next operation appended to this db.

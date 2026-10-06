@@ -2,10 +2,12 @@
 //! storage fuzz targets.
 
 use arbitrary::Unstructured;
+use commonware_cryptography::sha256;
 use commonware_runtime::{
     deterministic::{self, PartialWriteMode},
     mocks::PendingSyncs,
 };
+use commonware_storage::journal::authenticated::CacheConfig;
 use commonware_utils::{Probability, probability};
 use futures::future::poll_immediate;
 use rand::{Rng, RngExt as _};
@@ -188,6 +190,11 @@ pub fn bounded_resident_height(u: &mut Unstructured<'_>) -> arbitrary::Result<u3
 /// Generate a number of cached digest regions in `0..=2`.
 pub fn bounded_cache_regions(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
     u.int_in_range(0..=2)
+}
+
+/// A cache of one region of SHA-256 digests, so proofs evict and rebuild digests.
+pub fn single_region_cache() -> CacheConfig {
+    CacheConfig::with_regions::<sha256::Digest>(2, 1)
 }
 
 /// Generate a buffer size in `1..=2048`.

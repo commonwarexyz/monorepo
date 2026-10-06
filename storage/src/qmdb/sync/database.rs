@@ -10,7 +10,7 @@ use commonware_utils::range::NonEmptyRange;
 use std::{future::Future, num::NonZeroU64};
 
 /// Durable state held while an operation range is being imported.
-pub trait SyncState<F: Family, D: Digest>: Send + Sync + Sized {
+pub trait SyncState<F: Family, D: Digest>: Send + Sized {
     /// Record `pins` as the pinned nodes at `location`, authenticated against the target.
     fn stage(
         self,
@@ -51,9 +51,8 @@ pub trait Database: Sized + Send {
     type SyncState: SyncState<Self::Family, Self::Digest>;
 
     /// Mark synchronization to `target` in progress and open its journal, pruned to the target's
-    /// start. Returns the pinned nodes at the target's start if they are already known.
-    ///
-    /// Until a sync completes, the database cannot be opened.
+    /// start. Returns the pinned nodes at the target's start if they are already known, in which
+    /// case they are already staged in the returned state.
     #[allow(clippy::type_complexity)]
     fn open_sync_journal(
         context: &Self::Context,
@@ -171,7 +170,7 @@ where
         match local {
             authenticated::Local::Authenticated(local) => pins = Some(local),
             // The final root check authenticates them, as it does a partial journal.
-            authenticated::Local::Unknown => {}
+            authenticated::Local::Unchecked => {}
             authenticated::Local::Mismatch => {
                 drop(journal);
                 journal = J::clear(context.child("journal"), journal_config, start)

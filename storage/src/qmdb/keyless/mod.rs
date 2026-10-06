@@ -271,8 +271,6 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)

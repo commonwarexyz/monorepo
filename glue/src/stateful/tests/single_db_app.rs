@@ -46,9 +46,7 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::{
-        authenticated::Config as MmrJournalConfig, contiguous::fixed::Config as FixedLogConfig,
-    },
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig},
     mmr::{self, Location},
     qmdb::{
         any::{FixedConfig, unordered::fixed},
@@ -72,7 +70,7 @@ pub(crate) type SingleDatabaseSet<E> = Shared<Qmdb<E>>;
 /// Builds the QMDB configuration used by single-database tests.
 pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
     FixedConfig {
-        merkle_config: MmrJournalConfig {
+        merkle_config: MerkleConfig {
             metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,

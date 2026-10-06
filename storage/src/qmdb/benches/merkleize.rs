@@ -23,7 +23,10 @@ use commonware_runtime::{
     tokio::{Config, Context},
 };
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
     merkle,
     qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
     translator::EightCap,
@@ -289,8 +292,8 @@ pub(crate) const LARGE_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(16_384);
 const SMALL_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(32);
 const PARTITION: &str = "bench-merkleize";
 
-fn merkle_cfg(ctx: &impl Strategizer) -> commonware_storage::journal::authenticated::Config<Rayon> {
-    commonware_storage::journal::authenticated::Config {
+fn merkle_cfg(ctx: &impl Strategizer) -> MerkleConfig<Rayon> {
+    MerkleConfig {
         metadata_partition: format!("metadata-{PARTITION}"),
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),

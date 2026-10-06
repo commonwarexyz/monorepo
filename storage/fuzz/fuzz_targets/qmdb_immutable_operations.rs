@@ -104,10 +104,7 @@ fn db_config(
             metadata_partition: format!("metadata-{suffix}"),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            // One cached region, so proofs evict and rebuild digests.
-            cache: commonware_storage::journal::authenticated::CacheConfig::with_regions::<
-                commonware_cryptography::sha256::Digest,
-            >(2, 1),
+            cache: commonware_storage_fuzz::single_region_cache(),
         },
         log: VConfig {
             partition: format!("log-{suffix}"),

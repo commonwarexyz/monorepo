@@ -794,10 +794,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                // One cached region, so reads evict and rebuild digests.
-                cache: crate::journal::authenticated::CacheConfig::with_regions::<
-                    commonware_cryptography::sha256::Digest,
-                >(2, 1),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: FConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
@@ -835,10 +832,7 @@ pub mod tests {
                 metadata_partition: format!("{partition_prefix}-metadata-partition"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                // One cached region, so reads evict and rebuild digests.
-                cache: crate::journal::authenticated::CacheConfig::with_regions::<
-                    commonware_cryptography::sha256::Digest,
-                >(2, 1),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             journal_config: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),

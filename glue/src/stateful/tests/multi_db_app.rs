@@ -48,7 +48,7 @@ use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
     journal::{
-        authenticated::Config as MmrJournalConfig,
+        authenticated::Config as MerkleConfig,
         contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
     },
     mmr::{self, Location},
@@ -90,7 +90,7 @@ pub(super) fn qmdb_config(
     immutable::fixed::CompactConfig<Sequential>,
 ) {
     let db_a = FixedConfig {
-        merkle_config: MmrJournalConfig {
+        merkle_config: MerkleConfig {
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,

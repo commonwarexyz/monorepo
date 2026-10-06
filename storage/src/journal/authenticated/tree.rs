@@ -81,15 +81,14 @@ impl<D: Copy> Resident<D> {
         self.levels.first()?.get(region)
     }
 
-    /// Add the nodes born between sizes `start` (holding `start_leaves` leaves) and `end`, whose
-    /// digests `node` returns.
+    /// Add the nodes born between sizes `start` and `end`, whose digests `node` returns.
     fn extend<F: Family>(
         &mut self,
-        start_leaves: u64,
         start: Position<F>,
         end: Position<F>,
         node: impl Fn(Position<F>) -> Option<D>,
     ) -> Result<(), merkle::Error<F>> {
+        let start_leaves = *Location::try_from(start)?;
         let leaves = *Location::try_from(end)?;
         for height in self.height..u64::BITS {
             if 1u64 << height > leaves {
@@ -352,6 +351,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             .try_set(capacity.saturating_mul(size_of::<D>()));
     }
 
+    /// Append the digests of the operations from the current size to `end`.
     pub(crate) async fn replay<C, H>(
         mut self,
         journal: &C,
@@ -466,21 +466,27 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     pub(crate) fn size(&self) -> Position<F> {
         self.mem.size()
     }
+
     pub(crate) fn leaves(&self) -> Location<F> {
         self.mem.leaves()
     }
-    pub(crate) fn bounds(&self) -> std::ops::Range<Location<F>> {
+
+    pub(crate) fn bounds(&self) -> Range<Location<F>> {
         self.boundary..self.leaves()
     }
+
     pub(crate) const fn strategy(&self) -> &S {
         &self.strategy
     }
+
     pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
         Arc::clone(&self.mem)
     }
+
     pub(crate) fn mem(&self) -> &Mem<F, D> {
         &self.mem
     }
+
     pub(crate) fn root(
         &self,
         hasher: &impl Hasher<F, Digest = D>,
@@ -488,9 +494,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     ) -> Result<D, merkle::Error<F>> {
         self.mem.root(hasher, inactive)
     }
+
     pub(crate) fn new_batch(&self) -> batch::UnmerkleizedBatch<F, D, S> {
         self.mem.new_batch_with_strategy(self.strategy.clone())
     }
+
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
         batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
     }
@@ -501,18 +509,14 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, merkle::Error<F>> {
-        let start_leaves = *self.leaves();
         let start = self.size();
-        let mut runs = Vec::new();
-        for (appended, overwrites) in batch.unapplied(start)? {
-            if !overwrites.is_empty() {
-                return Err(merkle::Error::DataCorrupted("batch overwrites nodes"));
-            }
-            runs.push(appended);
+        let runs = batch.unapplied(start)?;
+        if runs.iter().any(|(_, overwrites)| !overwrites.is_empty()) {
+            return Err(merkle::Error::DataCorrupted("batch overwrites nodes"));
         }
         let node = |pos: Position<F>| {
             let mut index = (*pos).checked_sub(*start)?;
-            for run in &runs {
+            for (run, _) in &runs {
                 if let Some(digest) = usize::try_from(index).ok().and_then(|i| run.get(i)) {
                     return Some(*digest);
                 }
@@ -521,7 +525,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             None
         };
         let end = batch.size();
-        self.resident.extend(start_leaves, start, end, node)?;
+        self.resident.extend(start, end, node)?;
 
         // Older peaks are already pinned as part of the previous frontier.
         let leaves = Location::try_from(end)?;
@@ -543,7 +547,9 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         self.update_metrics();
     }
 
+    /// Drop nodes before `boundary`, whose digests [`Family::nodes_to_pin`] lists as `pins`.
     pub(crate) fn prune(&mut self, boundary: Location<F>, pins: Vec<D>) {
+        debug_assert_eq!(F::nodes_to_pin(boundary).count(), pins.len());
         self.boundary = boundary;
         self.pins = F::nodes_to_pin(boundary).zip(pins).collect();
         self.resident.trim(F::location_to_position(boundary));
@@ -772,7 +778,8 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         }
 
         // Hash parents bottom-up. A parent at or past the boundary has children that are either
-        // also past it or pinned.
+        // also past it or pinned. A pinned parent with both children present checks them, which
+        // covers regions whose root is unborn.
         let mut parents = 0;
         for h in 1..height {
             let (row, below) = (self.regions.row(h), self.regions.row(h - 1));
@@ -785,21 +792,25 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 if pos >= size {
                     break;
                 }
-                if let Some(digest) = self.mem.get_node(pos) {
-                    region.put(slot, digest);
+                let pinned = self.mem.get_node(pos);
+                if pinned.is_none() && pos < boundary {
                     continue;
                 }
-                if pos < boundary {
-                    continue;
-                }
-                let child = |offset| {
-                    region
-                        .get(below + 2 * i as usize + offset)
-                        .ok_or(merkle::Error::MissingNode(pos))
+                let left = region.get(below + 2 * i as usize);
+                let right = region.get(below + 2 * i as usize + 1);
+                let digest = match (left, right, pinned) {
+                    (Some(left), Some(right), pinned) => {
+                        let digest = hasher.node_digest(pos, &left, &right);
+                        parents += 1;
+                        if pinned.is_some_and(|pinned| pinned != digest) {
+                            return Err(merkle::Error::RootMismatch);
+                        }
+                        digest
+                    }
+                    (_, _, Some(pinned)) => pinned,
+                    _ => return Err(merkle::Error::MissingNode(pos)),
                 };
-                let (left, right) = (child(0)?, child(1)?);
-                region.put(slot, hasher.node_digest(pos, &left, &right));
-                parents += 1;
+                region.put(slot, digest);
             }
         }
         self.metrics.reconstructed_parents.inc_by(parents);
@@ -1103,26 +1114,96 @@ mod tests {
         deterministic::Runner::default().start(demand_cache::<mmb::Family>);
     }
 
-    /// A stored operation that differs from the one replayed fails its region's root check.
-    async fn corrupt_operation<F: Family>(context: deterministic::Context) {
+    /// A region cached while partial keeps its leaves when later appends complete it, including
+    /// across a prune that empties a resident level.
+    async fn completed_region<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
-        let ops = Operations::new(128);
+        let mut ops = Operations::new(128);
+        let expected = oracle::<F>(&ops, &hasher);
         let tree = Tree::<F, D, _>::new(
             Location::new(0),
             Vec::new(),
-            &config(5, 0, 31),
+            &config(5, 8 * 1024 * 1024, 31),
             Metrics::new(&context),
         )
-        .unwrap()
-        .replay(&ops, &hasher, Location::new(128), NZU64!(7))
-        .await
         .unwrap();
-        ops.corrupt.store(3, Ordering::Relaxed);
-        let pos = F::location_to_position(Location::new(0));
-        assert!(matches!(
-            tree.get_node(&ops, &hasher, pos).await,
-            Err(merkle::Error::RootMismatch)
-        ));
+        let mut tree = tree
+            .replay(&ops, &hasher, Location::new(40), NZU64!(7))
+            .await
+            .unwrap();
+        let leaf = F::location_to_position(Location::new(32));
+        assert_eq!(
+            tree.get_node(&ops, &hasher, leaf).await.unwrap(),
+            expected.get_node(leaf)
+        );
+
+        let boundary = Location::new(32);
+        let pins = F::nodes_to_pin(boundary)
+            .map(|p| expected.get_node(p).unwrap())
+            .collect();
+        tree.prune(boundary, pins);
+        ops.bounds.start = *boundary;
+        let tree = tree
+            .replay(&ops, &hasher, Location::new(128), NZU64!(7))
+            .await
+            .unwrap();
+        assert_eq!(
+            tree.root(&hasher, 0).unwrap(),
+            expected.root(&hasher, 0).unwrap()
+        );
+
+        ops.clear_reads();
+        let positions: Vec<_> = (0..*tree.size())
+            .map(Position::new)
+            .filter(|&p| tree.available(p))
+            .collect();
+        let got = tree.get_nodes(&ops, &hasher, &positions).await.unwrap();
+        for (&pos, node) in positions.iter().zip(got) {
+            assert_eq!(Some(node), expected.get_node(pos), "position {pos}");
+        }
+        assert!(
+            ops.reads[32..40]
+                .iter()
+                .all(|r| r.load(Ordering::Relaxed) == 0),
+            "cached leaves must not be read again"
+        );
+    }
+
+    #[test]
+    fn completed_region_mmr() {
+        deterministic::Runner::default().start(completed_region::<mmr::Family>);
+    }
+    #[test]
+    fn completed_region_mmb() {
+        deterministic::Runner::default().start(completed_region::<mmb::Family>);
+    }
+
+    /// A stored operation that differs from the one replayed fails the check against its region's
+    /// root, or against the peak above it while the region root is unborn.
+    async fn corrupt_operation<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(Bagging::ForwardFold);
+        for leaves in [128, 40, 70] {
+            let ops = Operations::new(leaves);
+            let tree = Tree::<F, D, _>::new(
+                Location::new(0),
+                Vec::new(),
+                &config(5, 0, 31),
+                Metrics::new(&context),
+            )
+            .unwrap()
+            .replay(&ops, &hasher, Location::new(leaves), NZU64!(7))
+            .await
+            .unwrap();
+            ops.corrupt.store(33, Ordering::Relaxed);
+            let pos = F::location_to_position(Location::new(32));
+            assert!(
+                matches!(
+                    tree.get_node(&ops, &hasher, pos).await,
+                    Err(merkle::Error::RootMismatch)
+                ),
+                "{leaves} leaves"
+            );
+        }
     }
 
     #[test]

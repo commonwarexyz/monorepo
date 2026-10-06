@@ -1,3 +1,5 @@
+//! Durable state of an operation range being imported by synchronization.
+
 use super::{APPLY_BATCH_SIZE, Config, Error, Frontier, Tree, metrics::Metrics};
 use crate::{
     Context,
@@ -13,7 +15,7 @@ pub(crate) enum Local<D> {
     /// They do, and these are the pinned nodes at the target's start.
     Authenticated(Vec<D>),
     /// The staged boundary cannot rebuild the target, so the operations are unchecked.
-    Unknown,
+    Unchecked,
     /// They do not.
     Mismatch,
 }
@@ -88,11 +90,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
     {
         let Some(boundary) = self.frontier.boundary() else {
-            return Ok(Local::Unknown);
+            return Ok(Local::Unchecked);
         };
         let bounds = journal.bounds();
         if boundary.location > start || bounds.start > *boundary.location || bounds.end < *end {
-            return Ok(Local::Unknown);
+            return Ok(Local::Unchecked);
         }
         let mut tree = Tree::new(
             boundary.location,

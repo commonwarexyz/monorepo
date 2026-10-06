@@ -97,10 +97,7 @@ fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Se
             metadata_partition: format!("{test_name}-meta"),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            // One cached region, so proofs evict and rebuild digests.
-            cache: commonware_storage::journal::authenticated::CacheConfig::with_regions::<
-                commonware_cryptography::sha256::Digest,
-            >(2, 1),
+            cache: commonware_storage_fuzz::single_region_cache(),
         },
         journal_config: FConfig {
             partition: format!("{test_name}-log"),

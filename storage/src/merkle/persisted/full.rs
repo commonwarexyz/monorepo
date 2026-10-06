@@ -143,8 +143,8 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
     ///
-    /// Mutations go through [`Arc::make_mut`], which is in place while no other handle shares the
-    /// structure.
+    /// Held in an [`Arc`] to keep this by-value handle small. Nothing else holds it, so
+    /// [`Arc::make_mut`] never copies.
     mem: Arc<Mem<F, D>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been

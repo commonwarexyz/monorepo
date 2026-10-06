@@ -32,7 +32,10 @@ use commonware_runtime::{
     tokio::{Config as RConfig, Context, Runner},
 };
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
     merkle::mmb,
     qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
     translator::EightCap,
@@ -342,7 +345,7 @@ fn main() {
     Runner::new(RConfig::default()).start(|ctx| async move {
         let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, page_cache);
         let pc_var = pc.clone();
-        let merkle_config = commonware_storage::journal::authenticated::Config {
+        let merkle_config = MerkleConfig {
             metadata_partition: "constantinople-merkle-metadata".into(),
             replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),

@@ -220,8 +220,7 @@ where
 
     /// Return the retained operation range `[start, end)`.
     ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
-    /// [`Self::root`] also require the operations' bitmap chunks to be retained.
+    /// Proofs against [`Self::root`] also require the operations' bitmap chunks to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         self.any.bounds()
     }

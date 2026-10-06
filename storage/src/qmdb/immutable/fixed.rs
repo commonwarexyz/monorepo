@@ -28,7 +28,7 @@ pub type CompactConfig<S> = super::CompactConfig<(), S>;
 mod tests {
     use super::*;
     use crate::{
-        journal::authenticated::Config as MmrConfig,
+        journal::authenticated::Config as MerkleConfig,
         merkle::{Family, Location, mmb, mmr},
         qmdb::{
             Error,
@@ -60,14 +60,11 @@ mod tests {
     fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle_config: MmrConfig {
+            merkle_config: MerkleConfig {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                // One cached region, so reads evict and rebuild digests.
-                cache: crate::journal::authenticated::CacheConfig::with_regions::<
-                    commonware_cryptography::sha256::Digest,
-                >(2, 1),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             log: JournalConfig {
                 items_per_blob: NZU64!(5),
@@ -550,7 +547,7 @@ mod tests {
         test_fixed_batch_chain => run_batch_chain, open;
         test_fixed_operations_match_applied_log => run_operations_match_applied_log, open;
         test_fixed_build_and_authenticate => run_build_and_authenticate, open;
-        test_fixed_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
+        test_fixed_recovery_from_unsynced_commit => run_recovery_from_unsynced_commit, open;
         test_fixed_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;
         test_fixed_pruning => run_pruning, open;
         test_fixed_prune_beyond_floor => run_prune_beyond_floor, open;

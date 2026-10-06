@@ -357,8 +357,8 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Move the pruning boundary of a structure that retains no nodes forward to `leaves`, pinning
-    /// `peaks` (the nodes [`Family::nodes_to_pin`] returns for `leaves`). Nodes already pinned stay
-    /// pinned.
+    /// `peaks`. Together with the nodes already pinned, which stay pinned, they must include every
+    /// node [`Family::nodes_to_pin`] returns for `leaves`.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn skip_to(
         &mut self,

@@ -1,6 +1,6 @@
 //! Merkle digest lookup cost in an authenticated journal with a resident height of 5.
 //!
-//! Setup and startup replay are excluded. A `height=4` node lies below the resident height:
+//! Setup is excluded. A `height=4` node lies below the resident height:
 //! `cache=disabled` rebuilds its region from operations on every read, and `cache=warm` reads it
 //! from the region cache. A `height=5` node is resident. The runtime's page cache remains enabled
 //! in every case, so these measurements are not cold-device latency claims.
@@ -76,14 +76,13 @@ async fn run<F: Family>(
     }
     journal = journal.sync().await.unwrap();
     black_box(journal.get_node(position).await.unwrap());
-    let mut total = Duration::ZERO;
+    let start = Instant::now();
     for _ in 0..iters {
-        let start = Instant::now();
         black_box(journal.get_node(position).await.unwrap());
-        total += start.elapsed();
     }
+    let elapsed = start.elapsed();
     journal.destroy().await.unwrap();
-    total
+    elapsed
 }
 
 fn bench_family<F: Family>(c: &mut Criterion, family: &str) {

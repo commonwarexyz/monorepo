@@ -325,8 +325,6 @@ where
     }
 
     /// Return the retained operation range `[start, end)`.
-    ///
-    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
         Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
     }
@@ -1362,7 +1360,7 @@ pub(super) mod tests {
     }
 
     #[boxed]
-    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_unsynced_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,

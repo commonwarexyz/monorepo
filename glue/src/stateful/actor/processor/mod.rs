@@ -1610,7 +1610,7 @@ mod tests {
     };
     use commonware_storage::{
         journal::{
-            authenticated::Config as MmrJournalConfig, contiguous::fixed::Config as FixedLogConfig,
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedLogConfig,
         },
         mmr::{self, Location},
         qmdb::{any, sync::Target},
@@ -2316,7 +2316,7 @@ mod tests {
     ) -> any::FixedConfig<TwoCap, Sequential> {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
-            merkle_config: MmrJournalConfig {
+            merkle_config: MerkleConfig {
                 metadata_partition: format!("{prefix}_mmr_metadata"),
                 replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,

@@ -734,9 +734,7 @@ where
 
     /// Build the final database from the completed sync and verify its root against the
     /// target.
-    async fn complete(mut self) -> Result<DB, Error<DB, S>> {
-        self.journal = self.journal.sync().await?;
-
+    async fn complete(self) -> Result<DB, Error<DB, S>> {
         let database = DB::from_sync_result(
             self.context,
             self.config,

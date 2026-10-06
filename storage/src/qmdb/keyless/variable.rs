@@ -56,10 +56,7 @@ mod tests {
                 metadata_partition: format!("metadata-{suffix}"),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                // One cached region, so reads evict and rebuild digests.
-                cache: crate::journal::authenticated::CacheConfig::with_regions::<
-                    commonware_cryptography::sha256::Digest,
-                >(2, 1),
+                cache: crate::journal::authenticated::single_region_cache(),
             },
             log: JournalConfig {
                 partition: format!("log-journal-{suffix}"),

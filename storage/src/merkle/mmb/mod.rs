@@ -268,12 +268,12 @@ impl Graftable for Family {
     fn peak_birth_size(pos: Position, height: u32) -> u64 {
         if height == 0 {
             // Leaves have no merge delay; born as soon as appended.
-            return *<Self as merkle::Family>::leftmost_leaf(pos, 0) + 1;
+            return *Self::leftmost_leaf(pos, 0) + 1;
         }
 
         let width = 1u64.checked_shl(height).expect("height excessively large");
         // `base` is the leaf count at which all leaves in the subtree have been appended.
-        let base = <Self as merkle::Family>::leftmost_leaf(pos, height)
+        let base = Self::leftmost_leaf(pos, height)
             .checked_add(width)
             .expect("birth size overflow");
 

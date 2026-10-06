@@ -64,6 +64,8 @@ mod frontier;
 mod import;
 mod metrics;
 mod tree;
+#[cfg(test)]
+pub(crate) use config::tests::single_region_cache;
 pub use config::{CacheConfig, Config};
 pub(crate) use frontier::Frontier;
 pub use import::Import;
@@ -695,8 +697,8 @@ where
         if boundary.location != start || boundary.digests != pins {
             return Err(merkle::Error::InvalidPinnedNodes.into());
         }
-        // Reuse digests rebuilt while authenticating retained operations. The sync journal only
-        // appends at or above `start`, so a tree pruned to `start` hashed exactly these items.
+        // Reuse digests rebuilt while authenticating retained operations. The journal is only
+        // appended to since then, so the tree hashed a prefix of its items.
         let merkle = match tree {
             Some(tree)
                 if tree.bounds().start == start && *tree.leaves() <= journal.bounds().end =>
@@ -948,7 +950,7 @@ where
             .replay(&journal, &self.hasher, end, APPLY_BATCH_SIZE)
             .await?;
 
-        // Finish deleting operations below a frontier written before a crash.
+        // Delete operations below the frontier, left by a crash during pruning or by a sync.
         let (journal, _) = journal.prune(*merkle.bounds().start).await?;
         Ok(Journal {
             merkle,
@@ -1039,7 +1041,8 @@ where
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
         match boundary {
-            // Pruning writes the frontier first, so operations are never pruned without one.
+            // A frontier is written before the first operation, so operations without one are
+            // corrupt.
             None if bounds != (0..0) => return Err(Error::MissingFrontier),
             None => {}
             // A bounded open may end below the frontier, which the selection check reports.
@@ -1053,22 +1056,20 @@ where
             Some(_) => {}
         }
 
+        // Operations below the frontier cannot be authenticated, so selection treats them as
+        // deleted even while their blob remains.
+        let floor = boundary.map_or(bounds.start, |boundary| *boundary);
+        if max_size.is_some_and(|size| size < floor) {
+            return Err(JournalError::ItemPruned(floor).into());
+        }
+
         // A fully pruned empty journal has no retained item to match, but its append position
         // remains the selected end.
-        let selected_end = if max_size.is_none() && bounds.is_empty() {
+        let selected_end = if max_size.is_none() && floor == bounds.end {
             bounds.end
         } else {
-            journal
-                .last_matching(max_size.unwrap_or(u64::MAX), predicate)
-                .await?
+            last_matching_from(&journal, floor, max_size.unwrap_or(u64::MAX), predicate).await?
         };
-
-        // Operations below the frontier cannot be authenticated.
-        if let Some(boundary) = boundary
-            && selected_end < *boundary
-        {
-            return Err(JournalError::ItemPruned(*boundary).into());
-        }
         Ok(Recovery {
             journal,
             frontier,
@@ -1283,35 +1284,46 @@ pub trait BackingRecovery: Send + Sync + Sized {
     fn last_matching<P>(
         &self,
         ceiling: u64,
-        mut predicate: P,
+        predicate: P,
     ) -> impl Future<Output = Result<u64, JournalError>> + Send
     where
         P: FnMut(&<Self::Journal as Contiguous>::Item) -> bool + Send,
     {
-        async move {
-            let bounds = self.bounds();
-
-            // A ceiling below retained history cannot select a supported prefix.
-            if ceiling < bounds.start {
-                return Err(JournalError::ItemPruned(ceiling));
-            }
-
-            // Search backward and return the exclusive end immediately after the latest match.
-            let mut end = bounds.end.min(ceiling);
-            while end > bounds.start {
-                if predicate(&self.read(end - 1).await?) {
-                    return Ok(end);
-                }
-                end -= 1;
-            }
-
-            // Only an unpruned journal can establish genesis when no retained item matches.
-            if bounds.start != 0 {
-                return Err(JournalError::ItemPruned(bounds.start));
-            }
-            Ok(0)
-        }
+        last_matching_from(self, self.bounds().start, ceiling, predicate)
     }
+}
+
+/// [BackingRecovery::last_matching], ignoring items below `floor`, which must be at least the
+/// retained start.
+async fn last_matching_from<R, P>(
+    recovery: &R,
+    floor: u64,
+    ceiling: u64,
+    mut predicate: P,
+) -> Result<u64, JournalError>
+where
+    R: BackingRecovery,
+    P: FnMut(&<R::Journal as Contiguous>::Item) -> bool + Send,
+{
+    // A ceiling below retained history cannot select a supported prefix.
+    if ceiling < floor {
+        return Err(JournalError::ItemPruned(ceiling));
+    }
+
+    // Search backward and return the exclusive end immediately after the latest match.
+    let mut end = recovery.bounds().end.min(ceiling);
+    while end > floor {
+        if predicate(&recovery.read(end - 1).await?) {
+            return Ok(end);
+        }
+        end -= 1;
+    }
+
+    // Only an unpruned journal can establish genesis when no retained item matches.
+    if floor != 0 {
+        return Err(JournalError::ItemPruned(floor));
+    }
+    Ok(0)
 }
 
 /// A [Mutable] journal that can back an authenticated [Journal].
@@ -2626,7 +2638,7 @@ mod tests {
     }
 
     #[test]
-    fn importing_frontier_cannot_be_activated_by_pruning() {
+    fn test_importing_frontier_cannot_be_activated_by_pruning() {
         deterministic::Runner::default().start(|context| async move {
             let mut journal = create_journal_with_ops::<mmr::Family>(
                 context.child("initial"),
@@ -2654,7 +2666,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_operation_sync_cannot_advance_pruning_frontier() {
+    fn test_failed_operation_sync_cannot_advance_pruning_frontier() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
@@ -2755,11 +2767,11 @@ mod tests {
     }
 
     #[test]
-    fn frontier_before_deletion_mmr() {
+    fn test_frontier_before_deletion_mmr() {
         deterministic::Runner::default().start(recovery_frontier_ahead::<mmr::Family>);
     }
     #[test]
-    fn frontier_before_deletion_mmb() {
+    fn test_frontier_before_deletion_mmb() {
         deterministic::Runner::default().start(recovery_frontier_ahead::<mmb::Family>);
     }
 
@@ -2866,23 +2878,31 @@ mod tests {
             Err(Error::Journal(JournalError::ItemPruned(45)))
         ));
 
-        // A cap at the frontier selects nothing, and the operation below it cannot be validated.
-        let recovery = TestJournal::<F>::prepare(
-            context.child("at"),
-            cfg.clone(),
-            raw_cfg.clone(),
-            Some(45),
-            |_| true,
-            ForwardFold,
-        )
-        .await
-        .unwrap();
-        assert_eq!(recovery.bounds(), 45..45);
+        // Selection ignores matches below the frontier, as it would after their deletion.
         assert!(matches!(
-            recovery.read(44).await,
-            Err(JournalError::ItemPruned(44))
+            TestJournal::<F>::prepare(
+                context.child("at"),
+                cfg.clone(),
+                raw_cfg.clone(),
+                Some(45),
+                |_| true,
+                ForwardFold,
+            )
+            .await,
+            Err(Error::Journal(JournalError::ItemPruned(45)))
         ));
-        drop(recovery);
+        assert!(matches!(
+            TestJournal::<F>::prepare(
+                context.child("unmatched"),
+                cfg.clone(),
+                raw_cfg.clone(),
+                None,
+                |op| op == &create_operation(44),
+                ForwardFold,
+            )
+            .await,
+            Err(Error::Journal(JournalError::ItemPruned(45)))
+        ));
 
         // Retained operations below the frontier are not offered for validation, and abandoning
         // the selection discards nothing.

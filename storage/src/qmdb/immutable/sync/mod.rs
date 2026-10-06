@@ -57,9 +57,8 @@ where
 
     /// Returns an [Immutable](immutable::Immutable) initialized from data collected in the sync process.
     ///
-    /// The operations are authenticated by replaying them from the staged frontier, which must be
-    /// the boundary the engine received for `range`. Nothing is persisted until
-    /// [sync::Database::persist_sync_result].
+    /// The operations are replayed from the boundary staged at `range`'s start. Nothing is
+    /// persisted until [sync::Database::persist_sync_result].
     ///
     /// # Returns
     ///

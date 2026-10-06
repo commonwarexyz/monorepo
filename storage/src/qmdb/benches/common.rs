@@ -665,8 +665,7 @@ where
         }
     }
 
-    // Perform `num_operations` random updates/deletes, committing periodically. Each apply is
-    // followed by a `commit` so the merkle structure is flushed out of memory (see the seed phase).
+    // Perform `num_operations` random updates/deletes, committing periodically.
     {
         // Sample over the full keyspace (which may exceed the seeded set, so some samples hit unseeded
         // keys and insert them). `Zipf::new` samples a rank in `[1, space]`; map it to a 0-based index.
