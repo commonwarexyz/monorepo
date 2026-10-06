@@ -211,9 +211,10 @@ impl<N: Namespace> Generic<N> {
         })
     }
 
-    /// Stages key and signature references and returns the subject's namespace and message.
+    /// Stages a certificate and returns the subject's namespace and message.
     ///
-    /// Returns `None` if the certificate structure or signature encodings are invalid.
+    /// Returns `None` if the certificate structure or a signature encoding is invalid.
+    /// Earlier signatures may already have been staged.
     fn stage_certificate<'a, S: Scheme>(
         &'a self,
         subject: impl Subject<Namespace = N>,
@@ -831,7 +832,7 @@ mod tests {
         assert!(result.invalid.is_empty());
         assert_eq!(result.verified.len(), quorum);
 
-        // Test 1: Corrupt one attestation - invalid signer index
+        // An unknown signer index must invalidate only that attestation.
         let mut attestations_corrupted = attestations.clone();
         attestations_corrupted[0].signer = Participant::new(999);
         let result = schemes[0].verify_attestations::<_, Sha256Digest, _>(

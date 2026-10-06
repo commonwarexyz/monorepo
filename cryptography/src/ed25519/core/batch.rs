@@ -65,16 +65,10 @@ fn gen_u128<R: CryptoRng>(mut rng: R) -> u128 {
     u128::from_le_bytes(bytes)
 }
 
-/// Verify a batch of projected signatures.
+/// Verifies projected signatures as in [crate::BatchVerifier::verify_batch].
 ///
-/// With a namespace, the signed payload is the namespace's byte length encoded
-/// as an unsigned varint, followed by the namespace and message. `None` verifies
-/// the raw message. Rejects empty batches, invalid signatures, and namespace
-/// lengths that cannot be represented as a `u32`.
-///
-/// The projection receives the item's original slice index. It must return the
-/// same entry each time it is called for that index and item, and may be called
-/// concurrently.
+/// A `None` namespace verifies the raw message. A `Some` namespace uses
+/// [commonware_utils::union_unique] framing.
 pub fn verify_projected<'a, R, T, F>(
     rng: &mut R,
     items: &'a [T],
@@ -206,9 +200,8 @@ fn verify_shard<'a>(
     // the usual method. However, when m = 1 and all signatures are from a
     // single verification key, this is nearly twice as fast.
 
-    // Group coefficients by the original key encoding, retaining borrowed
-    // cached points with them in first-seen order. hashbrown with ahash
-    // supports no_std builds.
+    // Group coefficients by the original key encoding, keeping each key's
+    // cached point. hashbrown with ahash supports no_std builds.
     let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
         HashMap::with_capacity_and_hasher(n, RandomState::default());
     let mut A_terms: Vec<(Scalar, &EdwardsPoint)> = Vec::with_capacity(n);

@@ -174,9 +174,6 @@ commonware_macros::stability_scope!(BETA {
     }
 
     /// A borrowed view of one signature and the message it authenticates.
-    ///
-    /// All fields must remain available throughout batch verification. Messages are
-    /// supplied unhashed, and namespaces must match those used during signing.
     #[derive(Clone)]
     pub struct BatchEntry<'a, P: PublicKey> {
         /// The namespace used during signing.
@@ -195,9 +192,8 @@ commonware_macros::stability_scope!(BETA {
     pub trait BatchVerifier: PublicKey {
         /// Verify all signatures projected from a slice of items.
         ///
-        /// The projection receives each item's original slice index and a reference
-        /// to that item. It may be called repeatedly and concurrently, and must
-        /// return the same entry each time for a given index and item.
+        /// The projection receives each item's original slice index. It must
+        /// return the same entry for a given index and item.
         ///
         /// Messages should not be hashed before calling this function. Any hashing
         /// required by the signature scheme is performed internally.

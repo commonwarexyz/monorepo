@@ -163,10 +163,9 @@ impl BatchVerifier for PublicKey {
         T: Sync,
         F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
     {
-        // Keep each signature paired with its message hash and public key while preparing
-        // entries in input order. The serial branch fills the output vectors directly; the
-        // parallel branch uses the manual strategy so the execution choice made by `run` is not
-        // reconsidered.
+        // Keep each signature paired with its message hash and public key in input order.
+        // The serial branch fills the output vectors directly. The parallel branch uses
+        // the manual strategy because `run` has already chosen parallel execution.
         let prepare = |(index, item): (usize, &'a T)| {
             let entry = project(index, item);
             let hm =
