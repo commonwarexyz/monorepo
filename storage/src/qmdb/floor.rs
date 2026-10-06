@@ -248,6 +248,26 @@ impl<F: Family> Walk<F> {
         self.floor += 1;
     }
 
+    /// The number of leading `candidates`, the ascending locations of active updates, that the
+    /// walk's remaining entries and skips let it reach. A policy may stop the walk before it
+    /// decides them all.
+    pub(crate) fn reachable(&self, candidates: &[u64]) -> usize {
+        let (mut floor, mut skips) = (*self.floor, self.skips);
+        candidates
+            .iter()
+            .take(self.entries)
+            .take_while(|&&loc| {
+                let gap = loc - floor;
+                if gap > skips {
+                    return false;
+                }
+                skips -= gap;
+                floor = loc + 1;
+                true
+            })
+            .count()
+    }
+
     /// No active update remains below `end`: the floor moves there if the remaining skips reach
     /// it, and by them otherwise.
     pub(crate) fn exhaust(&mut self) {
@@ -389,5 +409,18 @@ mod tests {
         assert!(walk.reach(at(6)));
         walk.exhaust();
         assert_eq!(walk.floor, at(10));
+    }
+
+    /// The reachable prefix of ascending active locations ends where the entries or the skips
+    /// run out. An update at the floor needs no skip, and an inactive location at the floor
+    /// blocks every candidate when no skip is left.
+    #[test]
+    fn walk_reaches_leading_candidates_within_limits() {
+        assert_eq!(Walk::new(at(0), at(100), 3, 2).reachable(&[1, 2, 5, 6]), 2);
+        assert_eq!(Walk::new(at(0), at(100), 1, 10).reachable(&[3, 4]), 1);
+        assert_eq!(Walk::new(at(0), at(100), 2, 0).reachable(&[0, 2]), 1);
+        assert_eq!(Walk::new(at(0), at(100), 2, 0).reachable(&[1]), 0);
+        assert_eq!(Walk::new(at(0), at(100), 0, 10).reachable(&[0]), 0);
+        assert_eq!(Walk::new(at(0), at(100), 2, 0).reachable(&[]), 0);
     }
 }

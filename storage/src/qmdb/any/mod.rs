@@ -2025,6 +2025,7 @@ pub(crate) mod test {
     };
     use core::time::Duration;
     use futures::{pin_mut, poll};
+    use rand::RngExt as _;
 
     // Type aliases for all 12 MMR variants (all use OneCap for collision coverage).
     type UnorderedFixed =
@@ -2393,6 +2394,15 @@ pub(crate) mod test {
             }
         }
 
+        /// Return a policy with proportional limits. The walk never calls its `decide`.
+        pub(crate) const fn proportional(decide: D) -> Self {
+            Self {
+                limits: Limits::Proportional,
+                decide,
+                visited: Vec::new(),
+            }
+        }
+
         /// Return the location of each decided update, in order.
         pub(crate) fn locations(&self) -> Vec<GenericLocation<F>> {
             self.visited.iter().map(|(loc, _, _)| *loc).collect()
@@ -2416,11 +2426,60 @@ pub(crate) mod test {
         }
     }
 
+    pub(crate) const fn keep(_: &Digest) -> Choice {
+        Choice::Keep
+    }
+
     /// Sum the samples of the counter `name` across every database instance.
     pub(crate) fn counter(context: &Context, name: &str) -> u64 {
         metric_samples(&context.encode(), name)
             .map(|(_, value)| value.parse::<u64>().unwrap())
             .sum()
+    }
+
+    /// Model a [`Limits::Fixed`] walk from `floor` over the ascending `active` locations below
+    /// `tip`, the tip of the batch's writes, where the policy stops at the `stops` locations and
+    /// decides every other one. Returns the floor the walk reaches and the locations it visits,
+    /// a stopped one included.
+    ///
+    /// Reaching an active update spends the inactive gap before it in skips; when the gap exceeds
+    /// the remaining skips, the floor advances by them and the walk ends. Deciding an update spends
+    /// an entry and moves the floor past it, and stopping leaves the floor at it. Once no active
+    /// update remains, the floor moves to `tip` if the remaining skips reach it, and by them
+    /// otherwise. With no entries left the walk ends.
+    pub(crate) fn walk_model(
+        active: &[u64],
+        mut floor: u64,
+        tip: u64,
+        mut entries: usize,
+        mut skips: u64,
+        stops: &[u64],
+    ) -> (u64, Vec<u64>) {
+        let mut visited = Vec::new();
+        while entries > 0 {
+            let next = active
+                .iter()
+                .copied()
+                .find(|loc| *loc >= floor && *loc < tip)
+                .unwrap_or(tip);
+            let gap = next - floor;
+            if gap > skips {
+                floor += skips;
+                break;
+            }
+            skips -= gap;
+            floor = next;
+            if next == tip {
+                break;
+            }
+            visited.push(next);
+            if stops.contains(&next) {
+                break;
+            }
+            floor = next + 1;
+            entries -= 1;
+        }
+        (floor, visited)
     }
 
     /// Database access the policy tests need beyond [`DbAny`].
@@ -2538,6 +2597,260 @@ pub(crate) mod test {
         assert_eq!(encoded(a), encoded(b));
         assert_eq!(D::span(a).inactivity_floor, D::span(b).inactivity_floor);
         assert_eq!(MerkleizedTrait::root(a), MerkleizedTrait::root(b));
+    }
+
+    /// Return the keys of `live` ordered by the location of their updates, oldest first.
+    pub(crate) fn age<K: Copy + Ord, L: Copy + Ord>(live: &BTreeMap<K, L>) -> Vec<K> {
+        let mut entries: Vec<_> = live.iter().map(|(key, loc)| (*loc, *key)).collect();
+        entries.sort_unstable();
+        entries.into_iter().map(|(_, key)| key).collect()
+    }
+
+    /// Return the keys live after applying `writes`, in order, to the keys of `live`.
+    pub(crate) fn keys_after<K: Copy + Ord, V, L>(
+        live: &BTreeMap<K, L>,
+        writes: &[(K, Option<V>)],
+    ) -> BTreeSet<K> {
+        let mut keys: BTreeSet<_> = live.keys().copied().collect();
+        for (key, value) in writes {
+            if value.is_some() {
+                keys.insert(*key);
+            } else {
+                keys.remove(key);
+            }
+        }
+        keys
+    }
+
+    /// Assert the [`Proportional`] bound at a batch boundary with `floor`, exclusive tip `tip`,
+    /// and the location of every live key's update in `live`.
+    ///
+    /// Every live update lies at or above the floor and below the commit at `tip - 1`.
+    ///
+    /// When every batch since the initial commit is [`Proportional`], the floor trails the tip by
+    /// at most `3 * n + 1` operations for `n` live keys.
+    pub(crate) fn assert_bound<F: Family, K>(
+        floor: GenericLocation<F>,
+        tip: GenericLocation<F>,
+        live: &BTreeMap<K, GenericLocation<F>>,
+    ) {
+        let n = live.len() as u64;
+        assert!(floor < tip, "floor={floor:?}, tip={tip:?}");
+        assert!(
+            live.values().all(|loc| *loc >= floor && **loc < *tip - 1),
+            "a live update lies outside the floor and the commit: floor={floor:?}, tip={tip:?}",
+        );
+        assert!(
+            *tip - *floor <= 3 * n + 1,
+            "tip={tip:?}, floor={floor:?}, n={n}, gap={}, bound={}",
+            *tip - *floor,
+            3 * n + 1,
+        );
+    }
+
+    /// Return deletes of the `n` live keys with the highest locations.
+    fn newest<K: Copy + Ord, L: Copy + Ord, V>(
+        live: &BTreeMap<K, L>,
+        n: usize,
+    ) -> Vec<(K, Option<V>)> {
+        age(live)
+            .into_iter()
+            .rev()
+            .take(n)
+            .map(|key| (key, None))
+            .collect()
+    }
+
+    /// Apply a large batch of creates, hot-key updates, delete and recreate churn, shrinking by
+    /// deleting the newest keys, bursts of creates followed by deletes of the newest keys, and
+    /// large mixed batches to `db`. Keys come from `key` and values from `value`. `apply` applies
+    /// one batch and records the location of each live key in its map.
+    pub(crate) async fn churn<D, K, V, L>(
+        mut db: D,
+        key: impl Fn(u64) -> K,
+        value: impl Fn(u64) -> V,
+        mut apply: impl AsyncFnMut(D, &mut BTreeMap<K, L>, &[(K, Option<V>)]) -> D,
+    ) -> D
+    where
+        K: Copy + Ord,
+        L: Copy + Ord,
+    {
+        let mut live = BTreeMap::new();
+
+        // Create 256 keys in one batch.
+        let writes: Vec<_> = (0..256).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+
+        // Update four hot keys in each of 64 batches.
+        for round in 0..64 {
+            let writes: Vec<_> = (0..4)
+                .map(|i| (key(i), Some(value(1000 + round))))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Delete eight keys, then delete the next eight in each of 64 batches while recreating
+        // the eight the previous batch deleted.
+        let window = |round: u64| (8 * round..8 * round + 8).map(|i| key(i % 256));
+        let writes: Vec<_> = window(0).map(|key| (key, None)).collect();
+        db = apply(db, &mut live, &writes).await;
+        for round in 0..64 {
+            let writes: Vec<_> = window(round)
+                .map(|key| (key, Some(value(2000 + round))))
+                .chain(window(round + 1).map(|key| (key, None)))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Delete the eight newest keys in each batch until eight keys remain.
+        while live.len() > 8 {
+            let writes = newest(&live, 8);
+            db = apply(db, &mut live, &writes).await;
+        }
+
+        // Four times, create a burst of 64 keys and then delete the eight newest keys in each of
+        // eight batches.
+        for burst in 0..4 {
+            let start = 1000 + 64 * burst;
+            let writes: Vec<_> = (start..start + 64)
+                .map(|i| (key(i), Some(value(i))))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+            for _ in 0..8 {
+                let writes = newest(&live, 8);
+                db = apply(db, &mut live, &writes).await;
+            }
+        }
+
+        // Create 512 keys in one batch, then delete 64 keys, update 128, and create 32 in each of
+        // four batches.
+        let writes: Vec<_> = (2000..2512).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+        for round in 0..4 {
+            let keys: Vec<_> = live.keys().copied().collect();
+            let start = 3000 + 32 * round;
+            let deletes = keys[..64].iter().map(|&key| (key, None));
+            let updates = keys[64..192].iter().map(|&key| (key, Some(value(round))));
+            let creates = (start..start + 32).map(|i| (key(i), Some(value(i))));
+            let writes: Vec<_> = deletes.chain(updates).chain(creates).collect();
+            db = apply(db, &mut live, &writes).await;
+        }
+        db
+    }
+
+    /// Apply a fixed then a randomized schedule of batches to `db`, drawing choices from
+    /// `context`. Keys come from `key` and values from `value`. `apply` applies one batch and
+    /// records the location of each live key in its map.
+    ///
+    /// The fixed prefix creates 20 keys, deletes all but the oldest in one batch, and empties the
+    /// database. It then creates 19 keys, deletes the three newest in each batch until one
+    /// remains, and empties the database again.
+    ///
+    /// Each of two epochs then creates 96 keys, rewrites hot keys, and deletes the newest (first
+    /// epoch) or the oldest (second epoch) keys in batches until one remains. It applies batches
+    /// of random writes and empty batches, and ends by emptying the database.
+    pub(crate) async fn randomized_churn<D, K, V, L>(
+        context: &mut Context,
+        mut db: D,
+        key: impl Fn(u64) -> K,
+        value: impl Fn(u64) -> V,
+        mut apply: impl AsyncFnMut(D, &mut BTreeMap<K, L>, &[(K, Option<V>)]) -> D,
+    ) -> D
+    where
+        K: Copy + Ord,
+        L: Copy + Ord,
+    {
+        let mut live = BTreeMap::new();
+
+        // Delete all but the oldest of 20 keys in one batch, then empty the database.
+        let writes: Vec<_> = (0..20).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+        let writes: Vec<_> = age(&live).into_iter().skip(1).map(|k| (k, None)).collect();
+        db = apply(db, &mut live, &writes).await;
+        assert_eq!(live.len(), 1);
+        let writes: Vec<_> = live.keys().map(|k| (*k, None)).collect();
+        db = apply(db, &mut live, &writes).await;
+        db = apply(db, &mut live, &[]).await;
+
+        // Create 19 keys, delete the three newest in each batch until one remains, then empty the
+        // database.
+        let writes: Vec<_> = (0..19).map(|i| (key(i), Some(value(i)))).collect();
+        db = apply(db, &mut live, &writes).await;
+        while live.len() > 1 {
+            let writes = newest(&live, 3.min(live.len() - 1));
+            db = apply(db, &mut live, &writes).await;
+        }
+        let writes: Vec<_> = live.keys().map(|k| (*k, None)).collect();
+        db = apply(db, &mut live, &writes).await;
+
+        for epoch in 0..2u64 {
+            let writes: Vec<_> = (0..96)
+                .map(|i| (key(i), Some(value(epoch * 1000 + i))))
+                .collect();
+            db = apply(db, &mut live, &writes).await;
+
+            // Rewrite up to four of eight hot keys in each of 32 batches.
+            let hot: Vec<_> = live.keys().copied().take(8).collect();
+            for round in 0..32u64 {
+                let count = context.random_range(0..=4u64);
+                let writes: Vec<_> = (0..count)
+                    .map(|i| {
+                        let k = hot[context.random_range(0..hot.len())];
+                        (k, Some(value(epoch * 1000 + round * 8 + i)))
+                    })
+                    .collect();
+                db = apply(db, &mut live, &writes).await;
+            }
+
+            // Delete up to eight of the newest (first epoch) or oldest (second epoch) keys in each
+            // batch until one remains.
+            while live.len() > 1 {
+                let count = context.random_range(1..=8.min(live.len() - 1));
+                let mut keys = age(&live);
+                if epoch == 0 {
+                    keys.reverse();
+                }
+                let writes: Vec<_> = keys.into_iter().take(count).map(|k| (k, None)).collect();
+                db = apply(db, &mut live, &writes).await;
+            }
+
+            // Apply 48 batches of up to 12 random writes over 160 keys, each a delete with
+            // probability 0.45. They likely create, update, and delete live keys, delete absent
+            // keys, write a key twice, and recreate deleted keys. An empty batch follows each
+            // round divisible by eight.
+            for round in 0..48 {
+                let count = context.random_range(0..=12usize);
+                let writes: Vec<_> = (0..count)
+                    .map(|_| {
+                        let k = key(context.random_range(0..160u64));
+                        let v = context
+                            .random_bool(0.55)
+                            .then(|| value(context.random::<u64>()));
+                        (k, v)
+                    })
+                    .collect();
+                db = apply(db, &mut live, &writes).await;
+                if round % 8 == 0 {
+                    db = apply(db, &mut live, &[]).await;
+                }
+            }
+
+            // Delete all but the oldest key, apply an empty batch, then empty the database.
+            if live.is_empty() {
+                db = apply(db, &mut live, &[(key(0), Some(value(epoch)))]).await;
+            }
+            let writes: Vec<_> = age(&live).into_iter().skip(1).map(|k| (k, None)).collect();
+            db = apply(db, &mut live, &writes).await;
+            assert_eq!(live.len(), 1);
+            db = apply(db, &mut live, &[]).await;
+            let writes: Vec<_> = live.keys().map(|k| (*k, None)).collect();
+            db = apply(db, &mut live, &writes).await;
+            for _ in 0..3 {
+                db = apply(db, &mut live, &[]).await;
+                assert!(live.is_empty());
+            }
+        }
+        db
     }
 
     /// Assert that `db` holds exactly the `live` keys with their values, that each links to the
