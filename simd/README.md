@@ -14,7 +14,10 @@ Native and array-backed emulated providers implement the same instruction contra
 | Scalar | 1/1/1 | None |
 | NEON | 16/4/2 | Baseline AArch64 NEON |
 | Armv9 | 16/4/2 | NEON, SVE, and SVE2; fixed 128-bit logical vectors |
-| Ice Lake | 64/16/8 | AVX-512F, AVX-512BW, GFNI, and AVX-512IFMA |
+| Ice Lake | 64/16/8 | AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA-NI |
+
+Ice Lake also provides a separate four-lane `u32` vector for SHA-256 rounds
+and message scheduling.
 
 The default `std` feature enables runtime detection. Without `std`, native
 providers require the instruction bundle to be enabled at compile time.
