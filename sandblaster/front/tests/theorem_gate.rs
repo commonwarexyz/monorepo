@@ -220,6 +220,9 @@ fn gate_on(c: &Checked, items: Vec<String>, opts: GateOptions<'static>) -> Vec<M
         let k = c.krate.as_ref().unwrap();
         let mut items = items;
         items.extend(["^words::", "^stdlib::", "^sha256::"].map(String::from));
+        // (the panic lemmas the proof files attach: reached through the
+        // lift's hints, not through the functions)
+        items.extend(c.lift_facts.panic_lemmas.iter().map(|(_, l)| l.trim_start_matches("crate::").to_string()));
         let mut out = checked::elaborate_names(k, &items);
         checked::prove_and_check(&mut out, k, &c.lift_facts, &opts)
     })
@@ -329,10 +332,12 @@ fn the_trusted_check_refuses_a_weaker_theorem_the_kernel_accepted() {
         assert_eq!(parts.len(), 2, "feed's `Out`: the final `self`, the result");
         let ret = &parts[1];
         let proj = format!("(fun (t : {out_ty}) => match t : {out_ty} as _ return {ret} with | tuple2(p0, p1) => p1 end)");
-        let (lhs, rhs) = (st.l_of(), format!("Some[{out_ty}]({})", st.erase_ret.replace("@Y@", &format!("({})", st.app()))));
-        let sig = format!("Sigma (k : Int), ((n : List(Unit)) -> (.hle : Eq(Bool, #le_int(k, seq::len Unit n), true)) -> Eq(Option({ret}), mir::map {out_ty} {ret} ({lhs}) {proj}, mir::map {out_ty} {ret} ({rhs}) {proj}))");
+        let (lhs, rhs) = (st.l_of(), format!("mir::Res::Ret[{out_ty}]({})", st.erase_ret.replace("@Y@", &format!("({})", st.app()))));
+        // (the outcome's value projected: `mir::then` of `Ret ∘ proj`)
+        let pmap = |x: &str| format!("mir::then {out_ty} {ret} ({x}) (fun (t : {out_ty}) => mir::Res::Ret[{ret}]({proj} t))");
+        let sig = format!("Sigma (k : Int), ((n : List(Unit)) -> (.hle : Eq(Bool, #le_int(k, seq::len Unit n), true)) -> Eq(mir::Res({ret}), {}, {}))", pmap(&lhs), pmap(&rhs));
         let full = format!("(test::orig{args})");
-        let body = format!("fun {lam}=> pair({sig}, fst {full}, fun (n : List(Unit)) (.hle : Eq(Bool, #le_int(fst {full}, seq::len Unit n), true)) => eq::cong (Option({out_ty})) (Option({ret})) (fun (o : Option({out_ty})) => mir::map {out_ty} {ret} o {proj}) ({lhs}) ({rhs}) ((snd {full}) n .hle))");
+        let body = format!("fun {lam}=> pair({sig}, fst {full}, fun (n : List(Unit)) (.hle : Eq(Bool, #le_int(fst {full}, seq::len Unit n), true)) => eq::cong (mir::Res({out_ty})) (mir::Res({ret})) (fun (o : mir::Res({out_ty})) => {}) ({lhs}) ({rhs}) ((snd {full}) n .hle))", pmap("o"));
         out.env.load_core(&format!("def[lemma, arity = {arity}] {thm} : {}{sig} := {body}", st.tele()), &mut Budget { steps: 4_000_000_000 }).unwrap_or_else(|e| panic!("the kernel accepts the weaker theorem: {e}"));
         let e = verdict(out, c, FEED).expect_err("a dropped component of `erase`");
         assert!(e.contains("states something else"), "{e}");
@@ -398,7 +403,7 @@ fn prove_by_evaluation(out: &mut Output, c: &Checked, key: &str, s_global: &str)
         stmt::statement(&out.env, &mut Gen::resume(&mm.m, &k, state.clone()), &lf, &mm.m.fns[key], s_global).expect("the statement")
     };
     let ty = st.theorem_ty();
-    let pf = format!("pair({ty}, 0int, fun (n : List(Unit)) (.hle : Eq(Bool, #le_int(0int, seq::len Unit n), true)) => refl(Option({}), {}))", st.l_out, st.l_of());
+    let pf = format!("pair({ty}, 0int, fun (n : List(Unit)) (.hle : Eq(Bool, #le_int(0int, seq::len Unit n), true)) => refl(mir::Res({}), {}))", st.l_out, st.l_of());
     out.env.load_core(&format!("def[lemma, arity = 0] L::thm::{} : {ty} := {pf}", lf.id), &mut Budget { steps: 4_000_000_000 }).unwrap_or_else(|e| panic!("the kernel accepts the theorem of `{key}`: {e}"));
 }
 

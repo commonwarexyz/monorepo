@@ -302,9 +302,12 @@ fn the_lift_records_the_mmr_features_for_the_check() {
     // a derived `Default` and a custom `Iterator`
     assert!(matches!(&find("crate::m::Pos::default").callee, ConformCallee::Trait { trait_path, method, .. } if trait_path == "Default" && method == "default"));
     assert_eq!(find("crate::m::Down::next").params, vec![ParamPass::MutRef]);
-    // excluded with a reason: the `impl Iterator` return and the loop helper
+    // the `impl Iterator` return: recorded with its result opaque (the
+    // check compares it only on a panic contract's panic region, and skips
+    // it without one); the loop helper: excluded with a reason
+    assert!(find("crate::m::down").opaque_ret);
+    assert!(!find("crate::m::next").opaque_ret);
     let skipped: Vec<(&str, &str)> = c.lift_facts.conform_skipped.iter().map(|s| (s.lifted.as_str(), s.why.as_str())).collect();
-    assert!(skipped.iter().any(|(l, w)| *l == "crate::m::down" && w.contains("impl Trait")), "{skipped:#?}");
     assert!(skipped.iter().any(|(l, w)| l.starts_with("crate::m::count__") && w.contains("loop helper")), "{skipped:#?}");
     // nothing lifted is left unaccounted for
     for f in ["next", "is_at", "at_is", "zero", "dec2", "half_or_zero", "shl_or_zero", "ones", "tripled", "halved", "count", "Pos::new", "Down::new"] {

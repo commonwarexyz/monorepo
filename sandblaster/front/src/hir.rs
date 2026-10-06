@@ -1001,6 +1001,11 @@ pub struct FnDef {
     pub ret_lts: Lifetimes,
     /// Conjoined preconditions (each a separate irrelevant binder, §4.2).
     pub requires: Vec<Expr>,
+    /// A panic contract (`panics_when(p)` in the laws file, a lifted
+    /// function read from MIR; DESIGN.md §16.5): the last of `requires` is
+    /// its no-panic clause `!(p)` ([`FnDef::nopanic_clause`]), and the gate
+    /// wants the panic theorem too.
+    pub panics: bool,
     pub ensures: Option<Ensures>,
     pub decreases: Option<Decreases>,
     /// A lifted function read from MIR: its declared contract (`requires`
@@ -1098,6 +1103,21 @@ impl FnDef {
     /// summaries, else `f::ensures`.
     pub fn contract_lemma(&self) -> &'static str {
         if self.spec.contract_ensures.is_some() { "contract" } else { "ensures" }
+    }
+
+    /// The index in `requires` of a panic contract's no-panic clause `!(p)`
+    /// (the last one), if the function has a panic contract.
+    pub fn nopanic_clause(&self) -> Option<usize> {
+        self.panics.then(|| self.requires.len().saturating_sub(1))
+    }
+
+    /// The panic condition `p` of a panic contract (the no-panic clause's
+    /// operand).
+    pub fn panic_condition(&self) -> Option<&Expr> {
+        match &self.requires.get(self.nopanic_clause()?)?.kind {
+            ExprKind::PropNot(p) => Some(p),
+            _ => None,
+        }
     }
 
     /// Whether the function has a precondition other than literal `true`

@@ -100,11 +100,109 @@ fn shl_one(b: u32) {
     else { by_contradiction(); }
 }
 
-/// `children`: `1 << height` is `2^height`.
+/// `children`: `1 << height` is `2^height`; its panic theorem's walk
+/// uses `children_panics`.
 #[lift_attach(crate::merkle::mmr::Family::children)]
 fn children_facts() {
     at_start! {
         crate::proofs::shl_one(height);
+    }
+    panic_lemma(crate::proofs::children_panics);
+}
+
+/// Congruence: equal amounts, equal wrapping shifts.
+#[lemma]
+fn wshlx_cong(x: u64, b: u32, j: u32) {
+    requires(b == j);
+    ensures(x.wrapping_shl(b) == x.wrapping_shl(j));
+    follows();
+}
+
+/// `1.wrapping_shl(b)` is `2^b` below 64: the literal reading's `1 << b`
+/// (MIR's `Shl` masks its amount; one case per amount, as `shl_one`).
+#[lemma]
+fn wshl_one(b: u32) {
+    requires(b < 64u32);
+    ensures((1u64.wrapping_shl(b) as Int) == pow2(b as Int));
+    if b <= 0u32 { assert(b == 0u32); wshlx_cong(1u64, b, 0u32); pow2_eq(b as Int, 0); follows(); }
+    else if b <= 1u32 { assert(b == 1u32); wshlx_cong(1u64, b, 1u32); pow2_eq(b as Int, 1); follows(); }
+    else if b <= 2u32 { assert(b == 2u32); wshlx_cong(1u64, b, 2u32); pow2_eq(b as Int, 2); follows(); }
+    else if b <= 3u32 { assert(b == 3u32); wshlx_cong(1u64, b, 3u32); pow2_eq(b as Int, 3); follows(); }
+    else if b <= 4u32 { assert(b == 4u32); wshlx_cong(1u64, b, 4u32); pow2_eq(b as Int, 4); follows(); }
+    else if b <= 5u32 { assert(b == 5u32); wshlx_cong(1u64, b, 5u32); pow2_eq(b as Int, 5); follows(); }
+    else if b <= 6u32 { assert(b == 6u32); wshlx_cong(1u64, b, 6u32); pow2_eq(b as Int, 6); follows(); }
+    else if b <= 7u32 { assert(b == 7u32); wshlx_cong(1u64, b, 7u32); pow2_eq(b as Int, 7); follows(); }
+    else if b <= 8u32 { assert(b == 8u32); wshlx_cong(1u64, b, 8u32); pow2_eq(b as Int, 8); follows(); }
+    else if b <= 9u32 { assert(b == 9u32); wshlx_cong(1u64, b, 9u32); pow2_eq(b as Int, 9); follows(); }
+    else if b <= 10u32 { assert(b == 10u32); wshlx_cong(1u64, b, 10u32); pow2_eq(b as Int, 10); follows(); }
+    else if b <= 11u32 { assert(b == 11u32); wshlx_cong(1u64, b, 11u32); pow2_eq(b as Int, 11); follows(); }
+    else if b <= 12u32 { assert(b == 12u32); wshlx_cong(1u64, b, 12u32); pow2_eq(b as Int, 12); follows(); }
+    else if b <= 13u32 { assert(b == 13u32); wshlx_cong(1u64, b, 13u32); pow2_eq(b as Int, 13); follows(); }
+    else if b <= 14u32 { assert(b == 14u32); wshlx_cong(1u64, b, 14u32); pow2_eq(b as Int, 14); follows(); }
+    else if b <= 15u32 { assert(b == 15u32); wshlx_cong(1u64, b, 15u32); pow2_eq(b as Int, 15); follows(); }
+    else if b <= 16u32 { assert(b == 16u32); wshlx_cong(1u64, b, 16u32); pow2_eq(b as Int, 16); follows(); }
+    else if b <= 17u32 { assert(b == 17u32); wshlx_cong(1u64, b, 17u32); pow2_eq(b as Int, 17); follows(); }
+    else if b <= 18u32 { assert(b == 18u32); wshlx_cong(1u64, b, 18u32); pow2_eq(b as Int, 18); follows(); }
+    else if b <= 19u32 { assert(b == 19u32); wshlx_cong(1u64, b, 19u32); pow2_eq(b as Int, 19); follows(); }
+    else if b <= 20u32 { assert(b == 20u32); wshlx_cong(1u64, b, 20u32); pow2_eq(b as Int, 20); follows(); }
+    else if b <= 21u32 { assert(b == 21u32); wshlx_cong(1u64, b, 21u32); pow2_eq(b as Int, 21); follows(); }
+    else if b <= 22u32 { assert(b == 22u32); wshlx_cong(1u64, b, 22u32); pow2_eq(b as Int, 22); follows(); }
+    else if b <= 23u32 { assert(b == 23u32); wshlx_cong(1u64, b, 23u32); pow2_eq(b as Int, 23); follows(); }
+    else if b <= 24u32 { assert(b == 24u32); wshlx_cong(1u64, b, 24u32); pow2_eq(b as Int, 24); follows(); }
+    else if b <= 25u32 { assert(b == 25u32); wshlx_cong(1u64, b, 25u32); pow2_eq(b as Int, 25); follows(); }
+    else if b <= 26u32 { assert(b == 26u32); wshlx_cong(1u64, b, 26u32); pow2_eq(b as Int, 26); follows(); }
+    else if b <= 27u32 { assert(b == 27u32); wshlx_cong(1u64, b, 27u32); pow2_eq(b as Int, 27); follows(); }
+    else if b <= 28u32 { assert(b == 28u32); wshlx_cong(1u64, b, 28u32); pow2_eq(b as Int, 28); follows(); }
+    else if b <= 29u32 { assert(b == 29u32); wshlx_cong(1u64, b, 29u32); pow2_eq(b as Int, 29); follows(); }
+    else if b <= 30u32 { assert(b == 30u32); wshlx_cong(1u64, b, 30u32); pow2_eq(b as Int, 30); follows(); }
+    else if b <= 31u32 { assert(b == 31u32); wshlx_cong(1u64, b, 31u32); pow2_eq(b as Int, 31); follows(); }
+    else if b <= 32u32 { assert(b == 32u32); wshlx_cong(1u64, b, 32u32); pow2_eq(b as Int, 32); follows(); }
+    else if b <= 33u32 { assert(b == 33u32); wshlx_cong(1u64, b, 33u32); pow2_eq(b as Int, 33); follows(); }
+    else if b <= 34u32 { assert(b == 34u32); wshlx_cong(1u64, b, 34u32); pow2_eq(b as Int, 34); follows(); }
+    else if b <= 35u32 { assert(b == 35u32); wshlx_cong(1u64, b, 35u32); pow2_eq(b as Int, 35); follows(); }
+    else if b <= 36u32 { assert(b == 36u32); wshlx_cong(1u64, b, 36u32); pow2_eq(b as Int, 36); follows(); }
+    else if b <= 37u32 { assert(b == 37u32); wshlx_cong(1u64, b, 37u32); pow2_eq(b as Int, 37); follows(); }
+    else if b <= 38u32 { assert(b == 38u32); wshlx_cong(1u64, b, 38u32); pow2_eq(b as Int, 38); follows(); }
+    else if b <= 39u32 { assert(b == 39u32); wshlx_cong(1u64, b, 39u32); pow2_eq(b as Int, 39); follows(); }
+    else if b <= 40u32 { assert(b == 40u32); wshlx_cong(1u64, b, 40u32); pow2_eq(b as Int, 40); follows(); }
+    else if b <= 41u32 { assert(b == 41u32); wshlx_cong(1u64, b, 41u32); pow2_eq(b as Int, 41); follows(); }
+    else if b <= 42u32 { assert(b == 42u32); wshlx_cong(1u64, b, 42u32); pow2_eq(b as Int, 42); follows(); }
+    else if b <= 43u32 { assert(b == 43u32); wshlx_cong(1u64, b, 43u32); pow2_eq(b as Int, 43); follows(); }
+    else if b <= 44u32 { assert(b == 44u32); wshlx_cong(1u64, b, 44u32); pow2_eq(b as Int, 44); follows(); }
+    else if b <= 45u32 { assert(b == 45u32); wshlx_cong(1u64, b, 45u32); pow2_eq(b as Int, 45); follows(); }
+    else if b <= 46u32 { assert(b == 46u32); wshlx_cong(1u64, b, 46u32); pow2_eq(b as Int, 46); follows(); }
+    else if b <= 47u32 { assert(b == 47u32); wshlx_cong(1u64, b, 47u32); pow2_eq(b as Int, 47); follows(); }
+    else if b <= 48u32 { assert(b == 48u32); wshlx_cong(1u64, b, 48u32); pow2_eq(b as Int, 48); follows(); }
+    else if b <= 49u32 { assert(b == 49u32); wshlx_cong(1u64, b, 49u32); pow2_eq(b as Int, 49); follows(); }
+    else if b <= 50u32 { assert(b == 50u32); wshlx_cong(1u64, b, 50u32); pow2_eq(b as Int, 50); follows(); }
+    else if b <= 51u32 { assert(b == 51u32); wshlx_cong(1u64, b, 51u32); pow2_eq(b as Int, 51); follows(); }
+    else if b <= 52u32 { assert(b == 52u32); wshlx_cong(1u64, b, 52u32); pow2_eq(b as Int, 52); follows(); }
+    else if b <= 53u32 { assert(b == 53u32); wshlx_cong(1u64, b, 53u32); pow2_eq(b as Int, 53); follows(); }
+    else if b <= 54u32 { assert(b == 54u32); wshlx_cong(1u64, b, 54u32); pow2_eq(b as Int, 54); follows(); }
+    else if b <= 55u32 { assert(b == 55u32); wshlx_cong(1u64, b, 55u32); pow2_eq(b as Int, 55); follows(); }
+    else if b <= 56u32 { assert(b == 56u32); wshlx_cong(1u64, b, 56u32); pow2_eq(b as Int, 56); follows(); }
+    else if b <= 57u32 { assert(b == 57u32); wshlx_cong(1u64, b, 57u32); pow2_eq(b as Int, 57); follows(); }
+    else if b <= 58u32 { assert(b == 58u32); wshlx_cong(1u64, b, 58u32); pow2_eq(b as Int, 58); follows(); }
+    else if b <= 59u32 { assert(b == 59u32); wshlx_cong(1u64, b, 59u32); pow2_eq(b as Int, 59); follows(); }
+    else if b <= 60u32 { assert(b == 60u32); wshlx_cong(1u64, b, 60u32); pow2_eq(b as Int, 60); follows(); }
+    else if b <= 61u32 { assert(b == 61u32); wshlx_cong(1u64, b, 61u32); pow2_eq(b as Int, 61); follows(); }
+    else if b <= 62u32 { assert(b == 62u32); wshlx_cong(1u64, b, 62u32); pow2_eq(b as Int, 62); follows(); }
+    else if b <= 63u32 { assert(b == 63u32); wshlx_cong(1u64, b, 63u32); pow2_eq(b as Int, 63); follows(); }
+    else { by_contradiction(); }
+}
+
+/// `children`'s panic condition as its code tests it: a height of 64 or
+/// more (the shift's check), or `pos` below `1 << height` (the
+/// subtraction's).
+#[lemma]
+fn children_panics(pos: Position, height: u32) {
+    requires(height >= 64u32 || (pos.0 as Int) < pow2(height as Int));
+    ensures(height >= 64u32 || pos.0 < 1u64.wrapping_shl(height));
+    if height >= 64u32 {
+        follows();
+    } else {
+        wshl_one(height);
+        follows();
     }
 }
 
@@ -138,9 +236,22 @@ fn children_of_subtree_facts() {
         crate::proofs::right_start(self);
         crate::proofs::halves_are(self);
         crate::proofs::halves_facts(self);
+        crate::proofs::children_in_range(self);
     }
     ensures(|ret: (Subtree, Subtree)| crate::laws::well_shaped(ret.0) && crate::laws::well_shaped(ret.1)
         && ret.0.height == self.height - 1u32 && ret.1.height == self.height - 1u32);
+}
+
+/// A well-shaped subtree above the leaves is in `Family::children`'s
+/// range: the no-panic clause of its panic contract.
+#[lemma]
+fn children_in_range(s: crate::merkle::proof::Subtree) {
+    requires(crate::laws::well_shaped(s) && s.height >= 1u32);
+    ensures(!(s.height >= 64u32 || (s.pos.0 as Int) < pow2(s.height as Int)));
+    shape_bounds(s);
+    crate::stdlib::bits::pow2_step(s.height as Int);
+    crate::stdlib::bits::pow2_step((s.height as Int) + 1);
+    follows();
 }
 
 /// The first leaf of the right half as `children` computes it

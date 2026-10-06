@@ -9,9 +9,9 @@
 //! kernel, on the inputs the check compares S on, and compares its result
 //! with `rustc`'s output for the same input, independently of S:
 //!
-//! * the left side is `L::<f>::run fuel b0 (Some(init(x̄)))` at the inputs
+//! * the left side is `L::<f>::run fuel b0 (Ret(init(x̄)))` at the inputs
 //!   (`init` from the theorem's statement, `mir::stmt`), with fuel `2^16`;
-//! * the right side is `Some(erase(r))`, where `r` is `rustc`'s output
+//! * the right side is `Ret(erase(r))`, where `r` is `rustc`'s output
 //!   read back as a value of S's result type (the states, then the
 //!   result) and `erase` the statement's own map into L's `Out`;
 //! * both are evaluated by `Env::eval_closed` (the kernel's type check and
@@ -19,6 +19,13 @@
 //!   and goes through the reference strategy of `sandblaster eval`, as the
 //!   structured reading's evaluation does) and compared by the kernel's
 //!   conversion.
+//!
+//! An input where the function's panic contract says it panics (in place:
+//! its domain holds, its no-panic clause does not; `conform::PANIC_CASE`)
+//! is compared too: rustc must panic there, and L must give `Panic` (a test
+//! of the trusted panic reading, `literal::must_panic`, against rustc). The
+//! check seeks such inputs on purpose (`Gen::panic_region`), compares them
+//! on a budget of their own, and fails a panic contract compared on none.
 //!
 //! A difference is a mismatch of the check (the build fails). It is bounded
 //! (the first [`LITERAL_CASES`] compared inputs of each function, in the
@@ -49,12 +56,14 @@ const FUEL_LOG: usize = 16;
 
 /// The closed terms of one function's comparison.
 pub(super) struct LitFn {
-    /// `λ x̄ n. L::<f>::run n b0 (Some(init(x̄)))` over the relevant parameters.
+    /// `λ x̄ n. L::<f>::run n b0 (Ret(init(x̄)))` over the relevant parameters.
     run: Tm,
     /// `λ (yy : R_S). erase(yy)`.
     erase: Tm,
-    /// `λ (o : Out). Some(o)`.
+    /// `λ (o : Out). Ret(o)` (the value outcome, `mir::Res`).
     some: Tm,
+    /// `Panic` (the panic outcome at `Out`).
+    panic: Tm,
     fuel: Tm,
 }
 
@@ -110,12 +119,12 @@ pub(super) fn prepare(out: &mut elab::Output, c: &Checked, entries: &[&ConformEn
                 }
             };
             let binders: Vec<String> = spec.params.iter().filter(|p| p.1 == Rel::Rel).map(|(n, _, t)| format!("({n} : {t}) ")).collect();
-            let texts = [format!("fun {}(n : List(Unit)) => {}", binders.concat(), spec.l_of()), spec.erase_fn(), format!("fun (o : {o}) => Some[{o}](o)", o = spec.l_out)];
+            let texts = [format!("fun {}(n : List(Unit)) => {}", binders.concat(), spec.l_of()), spec.erase_fn(), format!("fun (o : {o}) => mir::Res::Ret[{o}](o)", o = spec.l_out), format!("mir::Res::Panic[{}]", spec.l_out)];
             let parsed: Result<Vec<Tm>, String> = texts.iter().map(|t| out.env.parse_term(&[], t).map_err(|e| e.to_string())).collect();
             match parsed {
                 Ok(v) => {
-                    let [run, erase, some]: [Tm; 3] = v.try_into().unwrap_or_else(|_| unreachable!());
-                    res.insert(i.to_string(), LitFn { run, erase, some, fuel: fuel.clone() });
+                    let [run, erase, some, panic]: [Tm; 4] = v.try_into().unwrap_or_else(|_| unreachable!());
+                    res.insert(i.to_string(), LitFn { run, erase, some, panic, fuel: fuel.clone() });
                 }
                 Err(e) => rep.errors.push(format!("`{}`: L's comparison terms do not parse: {e}", k.global)),
             }
@@ -132,12 +141,50 @@ fn fuel_term(env: &sandblaster_kernel::api::Env) -> Result<Tm, String> {
 }
 
 /// Compares L with `rustc` on the first [`LITERAL_CASES`] inputs of each
-/// function `rustc` returned on (its outputs in `rustc`, by case).
-pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[Result<Vec<J>, String>], lits: &HashMap<String, LitFn>, rep: &mut Report) {
+/// function `rustc` returned on (its outputs in `rustc`, by case), and on
+/// up to as many inputs of its panic contract's panic region where rustc
+/// panicked (L must give `Panic`); returns, per function, the panic inputs
+/// on which both panicked (`conform::panic_coverage` fails a contract
+/// with none).
+pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[Result<Vec<J>, String>], lits: &HashMap<String, LitFn>, rep: &mut Report) -> std::collections::BTreeMap<String, usize> {
     let env = &g.out.env;
     let conv = g.conv();
+    // (per function, the panics compared: inputs of its panic region where
+    // rustc panicked and L gave `Panic`)
+    let mut panics: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for (c, r) in cases.iter().zip(rustc) {
         let p = &plans[c.plan];
+        // (an input of a panic contract's panic region, where rustc panicked:
+        // L must give `Panic`)
+        let panic_case = c.model.as_ref().err().is_some_and(|e| e == super::PANIC_CASE) && r.as_ref().is_err_and(|e| e.starts_with("a panic ("));
+        // (the panic inputs have a budget of their own: the search for them
+        // runs after the coverage-driven inputs, which spend `literal`'s)
+        if panic_case && let Some(lit) = lits.get(&p.e.lifted) && rep.entries[p.index].panics < LITERAL_CASES {
+            let Ok(args) = p.params.iter().zip(&c.args).map(|(t, j)| conv.term(t, j)).collect::<Result<Vec<Tm>, String>>() else { continue };
+            let input = format!("({})", c.args.iter().map(J::render).collect::<Vec<_>>().join(", "));
+            let lhs = mk::apps(lit.run.clone(), args.into_iter().map(|a| (Rel::Rel, a)).chain([(Rel::Rel, lit.fuel.clone())]));
+            let got = env.eval_closed(&lhs, &mut Budget { steps: STEPS }).and_then(|nf| env.eval(&VEnv::default(), Lvl(0), &nf, &mut Budget { steps: STEPS }).map_err(|e| e.into()));
+            let want = env.eval(&VEnv::default(), Lvl(0), &lit.panic, &mut Budget { steps: STEPS });
+            let ok = matches!((&got, &want), (Ok(l), Ok(w)) if env.conv(Lvl(0), l, w, &mut Budget { steps: STEPS }).unwrap_or(false));
+            if ok {
+                *panics.entry(p.e.lifted.clone()).or_default() += 1;
+                rep.entries[p.index].panics += 1;
+            } else {
+                let what = match &got {
+                    Ok(l) => env.print_term(&[], &env.quote(Lvl(0), l, false)),
+                    Err(e) => format!("no outcome (its kernel evaluation failed: {})", format!("{e:?}").lines().next().unwrap_or("")),
+                };
+                rep.mismatches.push(Mismatch { lifted: p.e.lifted.clone(), callee: p.callee.clone(), input, model: format!("the literal reading of rustc's MIR gives {what} where its panic contract says it panics"), rustc: r.as_ref().err().cloned().unwrap_or_default() });
+            }
+            rep.entries[p.index].literal += 1;
+            rep.literal_cases += 1;
+            continue;
+        }
+        // (a panic input where rustc returned is a mismatch of the check
+        // already: there is no value of the model to compare L with)
+        if c.model.as_ref().err().is_some_and(|e| e == super::PANIC_CASE) {
+            continue;
+        }
         let (Some(lit), Ok(comps)) = (lits.get(&p.e.lifted), r) else { continue };
         if rep.entries[p.index].literal >= LITERAL_CASES {
             continue;
@@ -186,4 +233,8 @@ pub(super) fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], rustc: &[
         rep.entries[p.index].literal += 1;
         rep.literal_cases += 1;
     }
+    for (f, n) in &panics {
+        rep.notes.push(format!("`{f}`: its panic contract's panic region compared with rustc on {n} input(s): rustc panicked and the literal reading gave `Panic` on each"));
+    }
+    panics
 }

@@ -6,8 +6,8 @@
 //! impls (`Write`, `EncodeSize`, `Read`), `LocationRangeExt`, the `Clone`,
 //! `Copy` and `Eq` impls (read as value semantics: the model copies a value
 //! and compares with `PartialEq::eq`) and the `arbitrary::Arbitrary` impls
-//! behind the `arbitrary` cargo feature. Claims and preconditions only;
-//! PROOF.rs proves them.
+//! behind the `arbitrary` cargo feature. Claims, preconditions and panic
+//! contracts only; PROOF.rs proves them.
 //!
 //! An MMR with `n` leaves is a row of perfect binary trees (mountains): one
 //! of height `h` for each set bit `h` of `n`, tallest first. Its nodes are
@@ -17,7 +17,11 @@
 //! Reading the statements: a position or location is its value `.0` (a
 //! `u64`); `x as Int` / `x as Nat` read a word as an unbounded integer, so
 //! `+`, `-` and `<` on them never wrap; `pow2(k)` is `2^k`, `log2(x)` the
-//! position of the highest set bit, `popcount(n)` the number of set bits. In
+//! position of the highest set bit, `popcount(n)` the number of set bits.
+//! A function's `requires(p)` is its domain: what callers guarantee
+//! (outside it nothing is promised); its `panics_when(p)` says that on its
+//! domain it panics exactly when `p` holds, and otherwise returns what its
+//! contract says. A function with neither returns on every input. In
 //! a contract `ensures(|ret: T| ..)`, `ret` is the result; for a method on
 //! `&mut self` (`+=`, `-=`, `next`) it is the new `self` (for `next`, the
 //! pair of the new iterator and the item). `ord_lt(o)` is `o == Some(Less)`,
@@ -63,6 +67,15 @@ pub fn max_nodes() -> Int {
 #[example(max_leaves() == pow2(62))]
 pub fn max_leaves() -> Int {
     pow2(62)
+}
+
+/// The end of chunk `c` of `2^g` leaves: the chunk is the leaves
+/// `[c·2^g, chunk_end(c, g))`.
+#[spec]
+#[example(chunk_end(0, 0) == 1 && chunk_end(0, 3) == 8 && chunk_end(2, 3) == 24)]
+#[example(chunk_end(pow2(62) - 1, 0) == pow2(62) && chunk_end(pow2(62), 2) == pow2(64) + 4)]
+pub fn chunk_end(c: Int, g: Int) -> Int {
+    (c + 1) * pow2(g)
 }
 
 /// Whether `r` nodes make perfect binary trees (of `2^(k+1) - 1` nodes
@@ -184,151 +197,177 @@ pub fn search_step(s: Int, p: Int, t: Int) -> (Int, Int, Option<(Int, Int)>) {
 }
 
 // ---------------------------------------------------------------------------
-// Preconditions: what the code's documentation makes callers guarantee (a
-// documented panic, or a documented domain), stated where the host calls
-// it (each is proven at every call inside the verified files and is an
-// obligation of host callers; the record lists them)
+// Where the code panics, and what callers guarantee. A documented panic is
+// a panic contract: `panics_when(p)` says that where the function's
+// `requires` hold it panics exactly when `p` holds (proven of rustc's MIR;
+// the record lists it). A `requires` is what the documentation makes
+// callers guarantee where the code would not simply panic: it is proven at
+// every call inside the verified files and is an obligation of host
+// callers (the record lists it); outside it nothing is promised.
+//
+// An overflow or underflow panic (the position and location arithmetic,
+// `children`) is rustc's overflow check: it holds in a build with overflow
+// checks on, as every profile of this workspace sets them; a build without
+// them (a downstream crate's default release profile) wraps instead of
+// panicking (DESIGN.md §16.5).
 // ---------------------------------------------------------------------------
 
-/// `PeakIterator::new` needs an MMR size of at most `MAX_NODES`. `new` itself
-/// panics only from `2^63` ("size overflow"); the documented panic for any
-/// other invalid size ("iteration will panic if size is not a valid MMR
-/// size") comes from `next`, and is required here, where the size is given:
-/// before panicking, iteration of an invalid size can yield a wrong peak
-/// (size 5 yields `(2, 1)` first).
+/// `PeakIterator::new` panics on a size above `MAX_NODES` ("size
+/// overflow": the size's top bit is set). Up to `MAX_NODES` the size must
+/// be an MMR size: the documented panic for any other size ("iteration
+/// will panic if size is not a valid MMR size") comes from `next`, not
+/// from `new`, and before it iteration can yield a wrong peak (size 5
+/// yields `(2, 1)` first), so it is a precondition here, where the size is
+/// given.
 #[lift_attach(crate::merkle::mmr::iterator::PeakIterator::new)]
-fn peak_iterator_new_pre() {
-    requires((size.0 as Int) <= crate::laws::max_nodes() && crate::laws::valid_size(size.0 as Nat));
+fn peak_iterator_new_panics() {
+    requires(implies((size.0 as Int) <= crate::laws::max_nodes(), crate::laws::valid_size(size.0 as Nat)));
+    panics_when((size.0 as Int) > crate::laws::max_nodes());
 }
 
-/// `PeakIterator::to_nearest_size` needs a size of at most `MAX_NODES`.
+/// `PeakIterator::to_nearest_size` panics on a size above `MAX_NODES`
+/// ("size exceeds MAX_NODES", as documented; the host's
+/// `test_to_nearest_size_panic` checks it at `MAX_NODES + 1`).
 #[lift_attach(crate::merkle::mmr::iterator::PeakIterator::to_nearest_size)]
-fn to_nearest_size_pre() {
-    requires((size.0 as Int) <= crate::laws::max_nodes());
+fn to_nearest_size_panics() {
+    panics_when((size.0 as Int) > crate::laws::max_nodes());
 }
 
-/// `Family::to_nearest_size`: the same.
+/// `Family::to_nearest_size`: the same (it is
+/// `PeakIterator::to_nearest_size`).
 #[lift_attach(crate::merkle::mmr::Family::to_nearest_size)]
-fn family_to_nearest_size_pre() {
-    requires((size.0 as Int) <= crate::laws::max_nodes());
+fn family_to_nearest_size_panics() {
+    panics_when((size.0 as Int) > crate::laws::max_nodes());
 }
 
-/// `Family::peaks`: a size as for `PeakIterator::new`.
+/// `Family::peaks`: as `PeakIterator::new` (it is the peak iterator).
 #[lift_attach(crate::merkle::mmr::Family::peaks)]
-fn family_peaks_pre() {
-    requires((size.0 as Int) <= crate::laws::max_nodes() && crate::laws::valid_size(size.0 as Nat));
+fn family_peaks_panics() {
+    requires(implies((size.0 as Int) <= crate::laws::max_nodes(), crate::laws::valid_size(size.0 as Nat)));
+    panics_when((size.0 as Int) > crate::laws::max_nodes());
 }
 
 /// `location_to_position` is for locations up to `MAX_LEAVES` (`2^62`), the
-/// trait's guaranteed domain (the code itself panics only from `2^63`).
+/// trait's guaranteed domain ("callers must not rely on" larger ones).
+/// Above it the code does not simply panic: it returns `2·loc -
+/// popcount(loc)`, which is no position of a valid MMR, up to `2^63`, and
+/// panics only from `2^63` on (`checked_mul(2)`'s `expect`).
 #[lift_attach(crate::merkle::mmr::Family::location_to_position)]
 fn location_to_position_pre() {
     requires((loc.0 as Int) <= crate::laws::max_leaves());
 }
 
 /// `position_to_location` is for positions up to `MAX_NODES` (the trait:
-/// "the caller guarantees `pos <= MAX_NODES`").
+/// "the caller guarantees `pos <= MAX_NODES`"). Above it the code does not
+/// simply panic: it still answers (position `2^63` gives location
+/// `2^62 + 1`, past `MAX_LEAVES`), and panics only near `2^64`, where
+/// `pos + popcount(n)` overflows.
 #[lift_attach(crate::merkle::mmr::Family::position_to_location)]
 fn position_to_location_pre() {
     requires((pos.0 as Int) <= crate::laws::max_nodes());
 }
 
-/// `children` needs `height < 64` and `2^height <= pos` (the shift
-/// `1 << height` and the subtraction `pos - 2^height` must not overflow).
+/// `children` panics where its arithmetic overflows: at a height of 64 or
+/// more (the shift `1 << height`), or when the left child would come
+/// before position 0 (`pos < 2^height`: the subtraction `pos - 2^height`).
 /// The trait's caller guarantee `height > 0` is not needed by the code: at
 /// height 0 it returns `(pos - 1, pos - 1)`.
 #[lift_attach(crate::merkle::mmr::Family::children)]
-fn children_pre() {
-    requires(height < 64u32 && pow2(height as Int) <= (pos.0 as Int));
+fn children_panics() {
+    panics_when(height >= 64u32 || (pos.0 as Int) < pow2(height as Int));
 }
 
-/// `chunk_peaks` needs the chunk's leaves `[c·2^g, (c+1)·2^g)` (`c` is
-/// `chunk_idx`, `g` is `grafting_height`) within the structure of size
-/// `size` — the trait's documented panic ("the chunk's leaf range exceeds
-/// the structure's leaf count") — and within `MAX_LEAVES`. The trait
-/// documents no panic for the second bound: it is the code's own
-/// `expect("chunk_peaks: chunk overflow")` on `Position::try_from` of the
-/// chunk's end. Outside it the code does not always panic: `(c + 1) << g`
-/// drops high bits, and it returns another chunk's root (`c = 2^62, g = 2,
-/// size = 7` gives `(6, 2)`, the root of chunk 0). The trait's other
-/// documented panic, `size` not a valid size, is not raised by the MMR's
-/// code and is not required.
+/// `chunk_peaks` panics, as the trait documents, when the chunk's leaf
+/// range `[c·2^g, chunk_end(c, g))` (`c` is `chunk_idx`, `g` is
+/// `grafting_height`) exceeds the structure's leaf count: when the MMR of
+/// `chunk_end(c, g)` leaves, the smallest that holds the chunk, has more
+/// than `size` nodes. It needs the chunk's end within `MAX_LEAVES`: past
+/// it the code panics on some inputs ("chunk_peaks: chunk overflow", or an
+/// overflow of `c + 1` or of the shift) and on others returns a wrong
+/// root: where `(c + 1) << g` drops high bits it returns another chunk's
+/// (`c = 2^62, g = 2, size = 7` gives `(6, 2)`, the root of chunk 0). The
+/// trait's other documented panic, `size` not a valid size, is not raised
+/// by the MMR's code.
 #[lift_attach(crate::merkle::mmr::Family::chunk_peaks)]
-fn chunk_peaks_pre() {
-    requires(((chunk_idx as Int) + 1) * pow2(grafting_height as Int) <= crate::laws::max_leaves()
-        && crate::laws::mmr_size(((chunk_idx as Nat) + 1) * pow2(grafting_height as Int)) <= size.0 as Nat);
+fn chunk_peaks_panics() {
+    requires(crate::laws::chunk_end(chunk_idx as Int, grafting_height as Int) <= crate::laws::max_leaves());
+    panics_when(crate::laws::mmr_size(crate::laws::chunk_end(chunk_idx as Int, grafting_height as Int)) > (size.0 as Int));
 }
 
-/// `Position + Position` must not overflow (the code documents the panic).
+/// `Position + Position` panics when the sum overflows a `u64` (as
+/// documented).
 #[lift_attach(crate::merkle::position::Position::add)]
-fn position_add_pre() {
-    requires((self.0 as Int) + (rhs.0 as Int) < pow2(64));
+fn position_add_panics() {
+    panics_when((self.0 as Int) + (rhs.0 as Int) >= pow2(64));
 }
 
-/// `Position + u64` must not overflow.
+/// `Position + u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::position::Position::add__u64)]
-fn position_add_u64_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn position_add_u64_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Position += u64` must not overflow.
+/// `Position += u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::position::Position::add_assign__u64)]
-fn position_add_assign_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn position_add_assign_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Position - Position` must not underflow.
+/// `Position - Position` panics when the difference underflows (`rhs`
+/// above `self`).
 #[lift_attach(crate::merkle::position::Position::sub)]
-fn position_sub_pre() {
-    requires(rhs.0 <= self.0);
+fn position_sub_panics() {
+    panics_when(rhs.0 > self.0);
 }
 
-/// `Position - u64` must not underflow.
+/// `Position - u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::position::Position::sub__u64)]
-fn position_sub_u64_pre() {
-    requires(rhs <= self.0);
+fn position_sub_u64_panics() {
+    panics_when(rhs > self.0);
 }
 
-/// `Position -= u64` must not underflow.
+/// `Position -= u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::position::Position::sub_assign__u64)]
-fn position_sub_assign_pre() {
-    requires(rhs <= self.0);
+fn position_sub_assign_panics() {
+    panics_when(rhs > self.0);
 }
 
-/// `Location + Location` must not overflow.
+/// `Location + Location` panics when the sum overflows a `u64` (as
+/// documented).
 #[lift_attach(crate::merkle::location::Location::add)]
-fn location_add_pre() {
-    requires((self.0 as Int) + (rhs.0 as Int) < pow2(64));
+fn location_add_panics() {
+    panics_when((self.0 as Int) + (rhs.0 as Int) >= pow2(64));
 }
 
-/// `Location + u64` must not overflow.
+/// `Location + u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::location::Location::add__u64)]
-fn location_add_u64_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn location_add_u64_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Location += u64` must not overflow.
+/// `Location += u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::location::Location::add_assign__u64)]
-fn location_add_assign_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn location_add_assign_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Location - Location` must not underflow.
+/// `Location - Location` panics when the difference underflows (`rhs`
+/// above `self`).
 #[lift_attach(crate::merkle::location::Location::sub)]
-fn location_sub_pre() {
-    requires(rhs.0 <= self.0);
+fn location_sub_panics() {
+    panics_when(rhs.0 > self.0);
 }
 
-/// `Location - u64` must not underflow.
+/// `Location - u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::location::Location::sub__u64)]
-fn location_sub_u64_pre() {
-    requires(rhs <= self.0);
+fn location_sub_u64_panics() {
+    panics_when(rhs > self.0);
 }
 
-/// `Location -= u64` must not underflow.
+/// `Location -= u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::location::Location::sub_assign__u64)]
-fn location_sub_assign_pre() {
-    requires(rhs <= self.0);
+fn location_sub_assign_panics() {
+    panics_when(rhs > self.0);
 }
 
 // ---------------------------------------------------------------------------

@@ -8,9 +8,15 @@ sandblaster reads existing Rust as it is: the item skeleton from the
 source, every function body from rustc's own MIR. Nothing is generated,
 rewritten or printed for rustc. `cargo build` fails unless
 
-* every verified function terminates and never panics within its stated
-  preconditions (no overflow, division by zero, out-of-bounds access or bad
-  shift is reachable),
+* every verified function terminates within its stated preconditions and
+  panics exactly where its laws say (a panic contract, `panics_when(p)`:
+  it panics if and only if `p`); without one it never panics there (no
+  overflow, division by zero, out-of-bounds access or bad shift is
+  reachable). Two limits: an overflow panic is rustc's overflow check, so
+  it holds in a build with overflow checks on (every profile of this
+  workspace; a downstream default release profile wraps instead), and the
+  buffer traits are modeled without a capacity (a write into a `&mut [u8]`
+  too short for it panics inside `bytes`, outside the verified code),
 * every contract and every law in `LAWS.rs` is proven,
 * every function's kernel theorem ties rustc's MIR of it to the reading the
   laws are about, and that reading agrees with rustc on generated inputs,
@@ -105,7 +111,16 @@ DESIGN.md §1.1 and the kernel's AUDIT.md.
 
 ## Status
 
-The work now is proof techniques and laws for complex optimized code:
-panic contracts, lockstep and coupled-loop proofs between an implementation
-and its reference, bit-trick automation, and per-function checking, driven
-by pilots on real Commonware hot paths (DESIGN.md §16–§18).
+Panic contracts landed on 2026-10-05: a documented panic is a law, proven
+of rustc's MIR in both directions (DESIGN.md §16.5). The storage roots'
+laws state their documented panics (the MMR 18, the Merkle proof verifier
+13), each proven; varint's functions do not panic on their own (a write
+into a `&mut [u8]` too short for it panics inside `bytes`, outside the
+verified code). An overflow panic holds in a build with overflow checks
+on, as every profile of this workspace sets them. Verified code is safe
+Rust, for good: `unsafe` is out of scope (no memory model for raw
+pointers, no unsafe standard-library APIs). The work now is proof techniques and laws
+for complex optimized code: lockstep and coupled-loop proofs between an
+implementation and its reference, bit-trick automation, and per-function
+checking, driven by pilots on real Commonware hot paths (DESIGN.md
+§16–§18).

@@ -748,8 +748,45 @@ impl<'a> Elab<'a> {
             t = next;
         }
         let ty = super::tm::subst_closed(&t, args);
-        let proof = mk::apps(mk::global(eg), args.iter().map(|a| (Rel::Rel, a.clone())));
+        let proof = mk::apps(mk::global(eg), self.contract_args(id, args).into_iter().map(|a| (Rel::Rel, a)));
         Some((eg, ty, proof))
+    }
+
+    /// The arguments `all` of a call of `id` as its contract lemmas
+    /// (`f::ensures`, `f::refines`) take them: every binder of theirs is
+    /// relevant. A `requires` proof was proven for the call's irrelevant
+    /// slot, so it may use an irrelevant fact (a statement's `requires` in a
+    /// `#[proof(complete = ..)]` script, such as a no-panic clause `!(p)`).
+    /// In proof mode, where the lemma's application is the proof of a
+    /// relevant fact, a proof that mentions an irrelevant variable is
+    /// promoted to a relevant one where its proposition carries no
+    /// information ([`Elab::promote_irr`]: equations, negations and other
+    /// `Π`s, `Σ`s, `Empty`, propositions by cases); every other argument is
+    /// passed as it is (the kernel's check of the fact is the verdict). The
+    /// fact's statement keeps the call's own arguments (irrelevant
+    /// arguments do not matter to conversion).
+    pub(super) fn contract_args(&self, id: ItemId, all: &[Tm]) -> Vec<Tm> {
+        let mut out = all.to_vec();
+        if self.f.mode != super::Mode::Proof {
+            return out;
+        }
+        let Some(super::ItemGlobal::Def(g)) = self.globals.get(&id) else { return out };
+        let Some(mut t) = self.env.global_type(*g) else { return out };
+        let entries = &self.f.scope.ctx.entries;
+        let d = entries.len() as u32;
+        // a free variable bound irrelevantly in the context
+        let irrelevant = |p: &Tm| super::tm::any_node_depth(p, &mut |n, k| matches!(n, Term::Var(ix) if ix.0 >= k && ix.0 - k < d && entries[(d - 1 - (ix.0 - k)) as usize].rel == Rel::Irr));
+        for i in 0..all.len() {
+            let Term::Pi { rel, dom, cod, .. } = &*t.clone() else { break };
+            if *rel == Rel::Irr && irrelevant(&all[i]) {
+                let target = super::tm::subst_closed(dom, &all[..i]);
+                if let Some(q) = self.promote_irr(&target, &all[i], 16) {
+                    out[i] = q;
+                }
+            }
+            t = cod.clone();
+        }
+        out
     }
 
     /// [`Self::item_call`], also returning all argument terms (relevant

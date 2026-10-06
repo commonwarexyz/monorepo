@@ -15,10 +15,8 @@
 //!   uses the turbofish.
 //!
 //! Pointer-taking loads/stores (`vld1q_u8`, `_mm_loadu_si128`, ...) are listed
-//! with `pointer_args = true` and are **not** user-callable: user code uses
-//! the safe `sandblaster::arch::{aarch64,x86_64}` helpers ([`HELPERS`]), which
-//! codegen emits as trusted glue (`#[target_feature] #[inline] fn` with an
-//! unaligned load inside, §9.2).
+//! with `pointer_args = true` and are **not** user-callable: verified code is
+//! safe Rust, with no raw pointers (DESIGN.md §16.5).
 //!
 //! The formal models (core-text `DefKind::Intrinsic` globals) live in
 //! `sandblaster/front/targets/` (owned by the targets work); phase 2
@@ -167,7 +165,7 @@ fn build_table() -> Vec<IntrinsicInfo> {
     let u8t = Ty::Uint(UintTy::U8);
     let u64t = Ty::Uint(UintTy::U64);
 
-    // ---- aarch64: loads/stores (pointer args; use the helpers) ----
+    // ---- aarch64: loads/stores (pointer args; not user-callable) ----
     add("vld1q_u8", a(), NEON, vec![], &[], v(Uint8x16), true);
     add("vld1q_u32", a(), NEON, vec![], &[], v(Uint32x4), true);
     add("vld1q_u64", a(), NEON, vec![], &[], v(Uint64x2), true);
@@ -260,7 +258,7 @@ fn build_table() -> Vec<IntrinsicInfo> {
     add("vaeseq_u8", a(), AES, vec![v(Uint8x16), v(Uint8x16)], &[], v(Uint8x16), false);
     add("vaesmcq_u8", a(), AES, vec![v(Uint8x16)], &[], v(Uint8x16), false);
 
-    // ---- x86_64: loads/stores (pointer args; use the helpers) ----
+    // ---- x86_64: loads/stores (pointer args; not user-callable) ----
     add("_mm_loadu_si128", x(), &["sse2"], vec![], &[], v(M128i), true);
     add("_mm_storeu_si128", x(), &["sse2"], vec![], &[], Ty::unit(), true);
     add("_mm256_loadu_si256", x(), &["avx"], vec![], &[], v(M256i), true);
@@ -317,86 +315,6 @@ pub fn arch_type_alias(arch: &Arch, name: &str) -> Option<Ty> {
         (Arch::X86_64, "__mmask16") => Some(Ty::Uint(UintTy::U16)),
         _ => None,
     }
-}
-
-/// Index into [`HELPERS`].
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-pub struct HelperId(pub u32);
-
-/// A safe load/store helper of `sandblaster::arch::<arch>` (trusted glue).
-#[derive(Clone, Debug)]
-pub struct HelperInfo {
-    pub name: &'static str,
-    pub arch: Arch,
-    /// The `#[target_feature(enable = ..)]` of the generated helper; callers
-    /// need these features.
-    pub features: &'static [&'static str],
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    /// Rust source of the generated helper function (parameter `a` or `v`).
-    pub template: &'static str,
-}
-
-/// The helper table.
-pub fn helpers() -> &'static [HelperInfo] {
-    static H: OnceLock<Vec<HelperInfo>> = OnceLock::new();
-    H.get_or_init(build_helpers)
-}
-
-pub fn helper(id: HelperId) -> &'static HelperInfo {
-    &helpers()[id.0 as usize]
-}
-
-/// The Rust source the printer emits for helper `id`: its
-/// [`HelperInfo::template`], or, in test builds only, a replacement a
-/// must-reject test installed on this thread
-/// (`opt::hooks::with_helper_template`; R26: a changed template must rename
-/// the lane kernels that call the helper).
-pub fn helper_template(id: HelperId) -> &'static str {
-    #[cfg(any(test, feature = "opt-test-hooks"))]
-    if let Some(t) = TEMPLATE_OVERRIDE.with(|o| o.borrow().get(&id).copied()) {
-        return t;
-    }
-    helper(id).template
-}
-
-#[cfg(any(test, feature = "opt-test-hooks"))]
-thread_local! {
-    /// Test-only template replacements ([`helper_template`]).
-    pub(crate) static TEMPLATE_OVERRIDE: std::cell::RefCell<std::collections::HashMap<HelperId, &'static str>> = std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// Looks a helper up by architecture and name.
-pub fn lookup_helper(arch: &Arch, name: &str) -> Option<HelperId> {
-    helpers().iter().position(|h| &h.arch == arch && h.name == name).map(|i| HelperId(i as u32))
-}
-
-fn build_helpers() -> Vec<HelperInfo> {
-    use VecTy::*;
-    let arr = |t: UintTy, n: u64| Ty::array(Ty::Uint(t), n);
-    let r = |t: Ty| Ty::reference(t);
-    vec![
-        HelperInfo { name: "load_u8x16", arch: Arch::Aarch64, features: &["neon"], params: vec![r(arr(UintTy::U8, 16))], ret: v(Uint8x16), template: "unsafe { ::core::arch::aarch64::vld1q_u8(a.as_ptr()) }" },
-        HelperInfo { name: "load_u32x4", arch: Arch::Aarch64, features: &["neon"], params: vec![r(arr(UintTy::U32, 4))], ret: v(Uint32x4), template: "unsafe { ::core::arch::aarch64::vld1q_u32(a.as_ptr()) }" },
-        HelperInfo { name: "load_u64x2", arch: Arch::Aarch64, features: &["neon"], params: vec![r(arr(UintTy::U64, 2))], ret: v(Uint64x2), template: "unsafe { ::core::arch::aarch64::vld1q_u64(a.as_ptr()) }" },
-        HelperInfo { name: "load_u8x8", arch: Arch::Aarch64, features: &["neon"], params: vec![r(arr(UintTy::U8, 8))], ret: v(Uint8x8), template: "unsafe { ::core::arch::aarch64::vld1_u8(a.as_ptr()) }" },
-        HelperInfo { name: "store_u8x16", arch: Arch::Aarch64, features: &["neon"], params: vec![v(Uint8x16)], ret: arr(UintTy::U8, 16), template: "let mut out = [0u8; 16]; unsafe { ::core::arch::aarch64::vst1q_u8(out.as_mut_ptr(), a) }; out" },
-        HelperInfo { name: "store_u32x4", arch: Arch::Aarch64, features: &["neon"], params: vec![v(Uint32x4)], ret: arr(UintTy::U32, 4), template: "let mut out = [0u32; 4]; unsafe { ::core::arch::aarch64::vst1q_u32(out.as_mut_ptr(), a) }; out" },
-        HelperInfo { name: "store_u64x2", arch: Arch::Aarch64, features: &["neon"], params: vec![v(Uint64x2)], ret: arr(UintTy::U64, 2), template: "let mut out = [0u64; 2]; unsafe { ::core::arch::aarch64::vst1q_u64(out.as_mut_ptr(), a) }; out" },
-        HelperInfo { name: "load_u8x16", arch: Arch::X86_64, features: &["sse2"], params: vec![r(arr(UintTy::U8, 16))], ret: v(M128i), template: "unsafe { ::core::arch::x86_64::_mm_loadu_si128(a.as_ptr().cast()) }" },
-        HelperInfo { name: "load_u32x4", arch: Arch::X86_64, features: &["sse2"], params: vec![r(arr(UintTy::U32, 4))], ret: v(M128i), template: "unsafe { ::core::arch::x86_64::_mm_loadu_si128(a.as_ptr().cast()) }" },
-        HelperInfo { name: "m128i_from_u32x4", arch: Arch::X86_64, features: &["sse2"], params: vec![arr(UintTy::U32, 4)], ret: v(M128i), template: "unsafe { ::core::arch::x86_64::_mm_loadu_si128(a.as_ptr().cast()) }" },
-        HelperInfo { name: "store_u8x16", arch: Arch::X86_64, features: &["sse2"], params: vec![v(M128i)], ret: arr(UintTy::U8, 16), template: "let mut out = [0u8; 16]; unsafe { ::core::arch::x86_64::_mm_storeu_si128(out.as_mut_ptr().cast(), a) }; out" },
-        HelperInfo { name: "store_u32x4", arch: Arch::X86_64, features: &["sse2"], params: vec![v(M128i)], ret: arr(UintTy::U32, 4), template: "let mut out = [0u32; 4]; unsafe { ::core::arch::x86_64::_mm_storeu_si128(out.as_mut_ptr().cast(), a) }; out" },
-        HelperInfo { name: "load_u8x32", arch: Arch::X86_64, features: &["avx"], params: vec![r(arr(UintTy::U8, 32))], ret: v(M256i), template: "unsafe { ::core::arch::x86_64::_mm256_loadu_si256(a.as_ptr().cast()) }" },
-        HelperInfo { name: "load_u32x8", arch: Arch::X86_64, features: &["avx"], params: vec![r(arr(UintTy::U32, 8))], ret: v(M256i), template: "unsafe { ::core::arch::x86_64::_mm256_loadu_si256(a.as_ptr().cast()) }" },
-        HelperInfo { name: "store_u8x32", arch: Arch::X86_64, features: &["avx"], params: vec![v(M256i)], ret: arr(UintTy::U8, 32), template: "let mut out = [0u8; 32]; unsafe { ::core::arch::x86_64::_mm256_storeu_si256(out.as_mut_ptr().cast(), a) }; out" },
-        HelperInfo { name: "store_u32x8", arch: Arch::X86_64, features: &["avx"], params: vec![v(M256i)], ret: arr(UintTy::U32, 8), template: "let mut out = [0u32; 8]; unsafe { ::core::arch::x86_64::_mm256_storeu_si256(out.as_mut_ptr().cast(), a) }; out" },
-        // plan O10: the AVX-512 lane kernels' pack and unpack
-        HelperInfo { name: "load_u8x64", arch: Arch::X86_64, features: &["avx512f"], params: vec![r(arr(UintTy::U8, 64))], ret: v(M512i), template: "unsafe { ::core::arch::x86_64::_mm512_loadu_si512(a.as_ptr().cast()) }" },
-        HelperInfo { name: "load_u32x16", arch: Arch::X86_64, features: &["avx512f"], params: vec![r(arr(UintTy::U32, 16))], ret: v(M512i), template: "unsafe { ::core::arch::x86_64::_mm512_loadu_si512(a.as_ptr().cast()) }" },
-        HelperInfo { name: "store_u32x16", arch: Arch::X86_64, features: &["avx512f"], params: vec![v(M512i)], ret: arr(UintTy::U32, 16), template: "let mut out = [0u32; 16]; unsafe { ::core::arch::x86_64::_mm512_storeu_si512(out.as_mut_ptr().cast(), a) }; out" },
-    ]
 }
 
 #[cfg(test)]

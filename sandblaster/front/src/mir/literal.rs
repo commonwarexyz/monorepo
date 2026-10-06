@@ -7,27 +7,37 @@
 //!
 //! * `St` has one `Option` slot per local (`None`: not initialized) and one
 //!   per **cell**, the referent of a `&mut` parameter (state passing);
-//! * `run : (fuel : List(Unit)) -> (b : Blk) -> (os : Option(St)) ->
-//!   Option(Out)` has one arm per block `b<k>` and per switch dispatcher
+//! * `run : (fuel : List(Unit)) -> (b : Blk) -> (os : mir::Res(St)) ->
+//!   mir::Res(Out)` has one arm per block `b<k>` and per switch dispatcher
 //!   `d<k>`, by measure recursion (`len(fuel) * 65536 + rank(b)`); a jump
 //!   to a loop header and a self-call consume one unit of fuel;
 //! * a `&mut` value is a **reference code** `(root, path)` of the frame; a
 //!   shared reference is its referent's value (a snapshot);
-//! * statements run in the option monad (`mir::bind`).
+//! * statements run in the option monad (`mir::bind`); a terminator hands
+//!   the next block a `mir::Res(St)`.
 //!
-//! Each construct is read locally, and each reading function names the MIR
-//! construct it reads. `None` is undefined behaviour, a panic, running out of
-//! fuel, or a construct this reading does not model: it can make a theorem
-//! unprovable, never false. Every construct read as `None` is recorded in
-//! [`LFn::faults`], named by its MIR construct. The reading never structures
-//! (no joins, loops or carried values).
+//! **Outcomes** (`mir::Res`, docs/mir-lift.md §20.4): `Ret(v)` a value;
+//! `Panic` an explicit panic of the code, which only a terminator causes —
+//! a failed `Assert` of a kind whose failure panics ([`PANIC_ASSERT_KINDS`],
+//! `mir::check`; any other kind is stuck where it fails,
+//! `mir::check_or_stuck`), a block every path of which panics
+//! ([`must_panic`]: it ends in a call of a panic function, [`PANIC_FNS`]),
+//! a callee's panic (`mir::then`); `Stuck` anything else that gives no
+//! value: undefined behaviour, running out of fuel, a construct this
+//! reading does not model (inside a block `None`, made `Stuck` at its
+//! terminator). Neither failure can make a theorem false, only unprovable;
+//! a `Panic` is claimed only where the MIR certainly panics. Every
+//! construct read as stuck is recorded in [`LFn::faults`], named by its
+//! MIR construct. The reading never structures (no joins, loops or carried
+//! values).
 //!
 //! Not trusted (`cfg.rs`, see there): the blocks' ranks and loop headers
 //! (where fuel is consumed: the kernel checks every decrease), the blocks
-//! from which every path panics (read as `None`), which types a code can
-//! reach inside which (pruning: `None`), and the rendering of fault messages.
-//! Within this file, text is written with `@RC@` for the function's code
-//! type and replaced where each definition is emitted.
+//! from which every path diverges (read as stuck unless [`must_panic`]
+//! reads them as a panic), which types a code can reach inside which
+//! (pruning: `None`), and the rendering of fault messages. Within this
+//! file, text is written with `@RC@` for the function's code type and
+//! replaced where each definition is emitted.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -106,12 +116,16 @@ pub struct LFn {
     pub cells: Vec<Cell>,
     /// Loop headers (a jump to one consumes fuel).
     pub headers: Vec<usize>,
-    /// Constructs read as `None` that are not panics: undefined behaviour
-    /// and unmodeled cases, each named by its MIR construct.
+    /// Constructs read as stuck: undefined behaviour and unmodeled cases,
+    /// each named by its MIR construct.
     pub faults: Vec<String>,
-    /// Blocks read as `None` because every path from them panics (or is
-    /// unreachable): exactly their meaning.
+    /// Blocks read as `Panic` because every path from them ends in a call
+    /// of a panic function ([`must_panic`]): exactly their meaning.
     pub panics: Vec<usize>,
+    /// Blocks read as stuck because every path from them diverges (an
+    /// `unreachable`, an abort, a call that does not return) without each
+    /// path being a panic ([`must_panic`]).
+    pub diverging: Vec<usize>,
 }
 
 /// A cell: the referent of a `&mut` parameter (or of a `&mut` inside it).
@@ -174,6 +188,16 @@ fn bind(a: &str, b: &str, v: &str, x: &str, body: &str) -> String { format!("mir
 fn map(a: &str, b: &str, v: &str, x: &str, body: &str) -> String { format!("mir::map {a} {b} ({v}) (fun ({x} : {a}) => {body})") }
 fn some(t: &str, v: &str) -> String { format!("Some[{t}]({v})") }
 fn none(t: &str) -> String { format!("None[{t}]") }
+/// The outcomes (`mir::Res`): a value, stuck, a panic.
+fn ret(t: &str, v: &str) -> String { format!("mir::Res::Ret[{t}]({v})") }
+fn stuck(t: &str) -> String { format!("mir::Res::Stuck[{t}]") }
+fn panicked(t: &str) -> String { format!("mir::Res::Panic[{t}]") }
+/// A block's `Option` (`None`: stuck) as an outcome.
+fn res_of(t: &str, o: &str) -> String { format!("mir::st {t} ({o})") }
+/// `mir::bind` of an `Option` into an outcome (`None`: stuck).
+fn bindr(a: &str, b: &str, v: &str, x: &str, body: &str) -> String { format!("mir::bindr {a} {b} ({v}) (fun ({x} : {a}) => {body})") }
+/// A callee's outcome continued (its panic or stuck propagated).
+fn then(a: &str, b: &str, v: &str, x: &str, body: &str) -> String { format!("mir::then {a} {b} ({v}) (fun ({x} : {a}) => {body})") }
 /// `match x : T as _ return R with arms end`.
 fn mat(x: &str, t: &str, r: &str, arms: &str) -> String { format!("match {x} : {t} as _ return {r} with {arms} end") }
 /// The selection `if i == k0 { e0 } else if ..` over `(k, e)`, else `dflt`.
@@ -526,7 +550,10 @@ impl FnCx {
     fn st(&self) -> String { format!("{}::St", self.p) }
     fn root(&self) -> String { format!("{}::Root", self.p) }
     fn rank(&self, b: usize) -> i64 { 2 * self.post[b] as i64 + 2 }
-    fn none_out(&self) -> String { none(&self.out_ty) }
+    fn stuck_out(&self) -> String { stuck(&self.out_ty) }
+    fn panic_out(&self) -> String { panicked(&self.out_ty) }
+    /// The block's state (`Option(St)`, `None`: stuck) handed to a jump.
+    fn res_st(&self, os: &str) -> String { res_of(&self.st(), os) }
     /// Slot `i` of the state `s`.
     fn get(&self, i: usize) -> String { format!("{}::g{i} s", self.p) }
     /// `deref__<n>` / `write__<n>` (`f`) of the state `s` through the code `q`.
@@ -633,17 +660,29 @@ impl<'a> Gen<'a> {
             outs.push(slot_tys[0].clone());
         }
         let out_ty = out_tuple(&outs, &outs).0;
-        let lf = LFn { key: key.to_string(), id, run: format!("{p}::run"), st: st.clone(), blk: format!("{p}::Blk"), out_ty: out_ty.clone(), out_parts: outs.clone(), local_tys, cells: cells.clone(), headers: headers.clone(), faults: vec![], panics: vec![] };
+        let lf = LFn { key: key.to_string(), id, run: format!("{p}::run"), st: st.clone(), blk: format!("{p}::Blk"), out_ty: out_ty.clone(), out_parts: outs.clone(), local_tys, cells: cells.clone(), headers: headers.clone(), faults: vec![], panics: vec![], diverging: vec![] };
         self.s.fns.insert(key.to_string(), lf.clone());
         let mut fx = FnCx { p: p.clone(), rc, f: f.clone(), key: key.to_string(), slot_tys, unmodeled, nl, cells, out_ty: out_ty.clone(), outs, post, headers, targets: BTreeMap::new(), cur: String::new() };
-        let (mut arms, mut faults, panics) = (Vec::new(), Vec::new(), panic_blocks(&f));
+        // a block every path of which panics ([`must_panic`], trusted) is
+        // `Panic`; another from which every path diverges (`cfg.rs`, not
+        // trusted: an `unreachable`, an abort, a call that does not return)
+        // is stuck; both without reading their code (a panic's message)
+        let (mut arms, mut faults) = (Vec::new(), Vec::new());
+        let mut memo = BTreeMap::new();
+        let panics: Vec<usize> = (0..nb).filter(|b| must_panic(&f, *b, &mut Vec::new(), &mut memo)).collect();
+        let diverging: Vec<usize> = panic_blocks(&f).into_iter().filter(|b| !panics.contains(b)).collect();
         for b in 0..nb {
-            // a block from which every path panics (or is unreachable) is `None`
-            let codes = if panics.contains(&b) { [Ok(fx.none_out()), Ok(fx.none_out())] } else { [self.block(&mut fx, b), self.dispatcher(&mut fx, b)] };
+            let codes = if panics.contains(&b) {
+                [Ok(fx.panic_out()), Ok(fx.panic_out())]
+            } else if diverging.contains(&b) {
+                [Ok(fx.stuck_out()), Ok(fx.stuck_out())]
+            } else {
+                [self.block(&mut fx, b), self.dispatcher(&mut fx, b)]
+            };
             for (pre, code) in ["b", "d"].into_iter().zip(codes) {
                 let code = code.unwrap_or_else(|e| {
                     faults.push(format!("bb{b}{}: {e}", if pre == "d" { " (switch)" } else { "" }));
-                    fx.none_out()
+                    fx.stuck_out()
                 });
                 arms.push(format!("| {pre}{b} => {code}"));
             }
@@ -652,11 +691,11 @@ impl<'a> Gen<'a> {
             self.deref_fns(&fx, &name, &t)?;
         }
         let run = format!(
-            "def[exec] {p}::run : (fuel : List(Unit)) -> (b : {p}::Blk) -> (os : Option({st})) -> Option({out_ty}) :=\n  fun (fuel : List(Unit)) (b : {p}::Blk) (os : Option({st})) =>\n    match os : Option({st}) as _ return Option({out_ty}) with\n    | None => None[{out_ty}]\n    | Some(s) => match b : {p}::Blk as yb return Option({out_ty}) using .eb with\n      {}\n      end\n    end\n  measure (#iadd(#imul(seq::len Unit fuel, {RANK_MULT}int), {p}::rank b))",
+            "def[exec] {p}::run : (fuel : List(Unit)) -> (b : {p}::Blk) -> (os : mir::Res({st})) -> mir::Res({out_ty}) :=\n  fun (fuel : List(Unit)) (b : {p}::Blk) (os : mir::Res({st})) =>\n    match os : mir::Res({st}) as _ return mir::Res({out_ty}) with\n    | Stuck => mir::Res::Stuck[{out_ty}]\n    | Ret(s) => match b : {p}::Blk as yb return mir::Res({out_ty}) using .eb with\n      {}\n      end\n    | Panic => mir::Res::Panic[{out_ty}]\n    end\n  measure (#iadd(#imul(seq::len Unit fuel, {RANK_MULT}int), {p}::rank b))",
             arms.join("\n      ")
         );
         self.emit(&format!("{p}::run"), run.replace("@RC@", &fx.rc));
-        let lf = LFn { faults, panics, ..lf };
+        let lf = LFn { faults, panics, diverging, ..lf };
         self.s.fns.insert(key.to_string(), lf.clone());
         Ok(lf)
     }
@@ -676,30 +715,32 @@ impl<'a> Gen<'a> {
         Ok(code + &term)
     }
 
-    /// A jump to block `to` with state `os`: free when the rank decreases,
-    /// else (a loop header) it consumes one unit of fuel.
+    /// A jump to block `to` with the state `os` (a `mir::Res(St)`): free
+    /// when the rank decreases, else (a loop header) it consumes one unit of
+    /// fuel.
     fn jump(&self, fx: &FnCx, from_rank: i64, to: usize, os: &str) -> String {
         let tr = fx.rank(to);
         if tr < from_rank && !fx.headers.contains(&to) { format!("rec(fuel, {}::Blk::b{to}, {os}; {})", fx.p, decrease(&fx.p, &fx.cur, tr, from_rank, false)) } else { fuel_jump(fx, from_rank, to, os) }
     }
 
     /// `Goto`, `Return`, `Assert`, `SwitchInt` (to its dispatcher), `Drop`,
-    /// `Call`; `Unreachable`/`Resume`/`Abort` are `None`.
+    /// `Call` (`os`: the block's state after its statements, an
+    /// `Option(St)`); `Unreachable`/`Resume`/`Abort` are stuck.
     fn terminator(&mut self, fx: &mut FnCx, b: usize, os: &str) -> R<String> {
         let (st, rb) = (fx.st(), fx.rank(b));
         Ok(match &fx.f.blocks[b].term.clone() {
             // (a drop without glue does nothing)
-            Term::Goto(t) | Term::Drop(_, false, t) => self.jump(fx, rb, *t, os),
+            Term::Goto(t) | Term::Drop(_, false, t) => self.jump(fx, rb, *t, &fx.res_st(os)),
             Term::Return => {
-                // `Some((cells.., return place))`: each read (an optional cell
-                // as an `Option`), `None` when one is uninitialized
+                // `Ret((cells.., return place))`: each read (an optional cell
+                // as an `Option`), stuck when one is uninitialized
                 let mut gets: Vec<String> = fx.cells.iter().enumerate().map(|(j, c)| if c.optional { some(&fx.outs[j], &fx.get(fx.nl + j)) } else { fx.get(fx.nl + j) }).collect();
                 if !is_unit(&fx.f.locals[0].0) {
                     fx.live(0)?;
                     gets.push(fx.get(0));
                 }
                 let vars: Vec<String> = (0..gets.len()).map(|i| format!("o{i}")).collect();
-                bind(&st, &fx.out_ty, os, "s", &binds(&gets, &fx.outs, &fx.out_ty, "o", some(&fx.out_ty, &out_tuple(&fx.outs, &vars).1)))
+                bindr(&st, &fx.out_ty, os, "s", &bindsr(&gets, &fx.outs, &fx.out_ty, "o", ret(&fx.out_ty, &out_tuple(&fx.outs, &vars).1)))
             }
             Term::Unreachable | Term::Resume | Term::Abort => return Err("unreachable, an unwind or an abort".into()),
             // a drop with glue: nothing for a variant without glue (`no-glue`), else not read
@@ -714,28 +755,32 @@ impl<'a> Gen<'a> {
                 let arms = self.arms(k, "y", |_, vi, _| Ok(if d.variants[vi].no_glue { some(&st, "s") } else { none(&st) }))?;
                 let v = self.read(fx, pl)?;
                 let dropped = bind(&st, &st, os, "s", &bind(&ptt, &st, &v, "x", &format!("match x : {ptt} as _ return Option({st}) with{arms} end")));
-                self.jump(fx, rb, *t, &dropped)
+                self.jump(fx, rb, *t, &fx.res_st(&dropped))
             }
-            Term::Assert(c, expected, _, t) => {
+            // `Assert(c, expected)`: on to the target when `c == expected`,
+            // else a panic where the assertion's kind panics, stuck where its
+            // failure aborts (reading `c` may be stuck)
+            Term::Assert(c, expected, kind, t) => {
                 let cv = self.operand(fx, c)?;
                 let cond = if *expected { cv } else { map("Bool", "Bool", &cv, "c0", "bool::not c0") };
-                let guarded = bind(&st, &st, os, "s", &bind("Bool", &st, &cond, "c", &format!("mir::guard {st} c s")));
-                self.jump(fx, rb, *t, &guarded)
+                let check = if assert_panics(kind) { "mir::check" } else { "mir::check_or_stuck" };
+                let checked = bindr(&st, &st, os, "s", &bindr("Bool", &st, &cond, "c", &format!("{check} {st} c s")));
+                self.jump(fx, rb, *t, &checked)
             }
-            Term::Switch(..) => format!("rec(fuel, {}::Blk::d{b}, {os}; {})", fx.p, decrease(&fx.p, &fx.cur, rb - 1, rb, false)),
+            Term::Switch(..) => format!("rec(fuel, {}::Blk::d{b}, {}; {})", fx.p, fx.res_st(os), decrease(&fx.p, &fx.cur, rb - 1, rb, false)),
             Term::Call(callee, args, dest, target) => self.call(fx, b, callee, args, dest, *target, os)?,
             Term::Unsupported(s) => return Err(format!("the terminator {s}")),
         })
     }
 
     /// The dispatcher `d<b>` of a `SwitchInt`: the operand compared with each
-    /// arm's value, then the jump (`None` when `b` is not a switch).
+    /// arm's value, then the jump (stuck when `b` is not a switch).
     fn dispatcher(&mut self, fx: &mut FnCx, b: usize) -> R<String> {
         fx.cur = format!("d{b}");
-        let Term::Switch(op, arms, otherwise) = fx.f.blocks[b].term.clone() else { return Ok(fx.none_out()) };
-        let (ro, rd, t) = (format!("Option({})", fx.out_ty), fx.rank(b) - 1, op_ty(&fx.f, &op)?);
+        let Term::Switch(op, arms, otherwise) = fx.f.blocks[b].term.clone() else { return Ok(fx.stuck_out()) };
+        let (ro, rd, t) = (format!("mir::Res({})", fx.out_ty), fx.rank(b) - 1, op_ty(&fx.f, &op)?);
         let v = self.operand(fx, &op)?;
-        let jump = |tg: usize| self.jump(fx, rd, tg, &some(&fx.st(), "s"));
+        let jump = |tg: usize| self.jump(fx, rd, tg, &ret(&fx.st(), "s"));
         let body = if t == Ty::Bool {
             let pick = |k: u128| arms.iter().find(|a| a.0 == k).map(|a| a.1).unwrap_or(otherwise);
             mat("x", "Bool", &ro, &format!("| false => {} | true => {}", jump(pick(0)), jump(pick(1))))
@@ -743,7 +788,7 @@ impl<'a> Gen<'a> {
             let (w, xb) = bits(&t, "x").ok_or_else(|| format!("a switch on {t:?}"))?;
             arms.iter().rev().fold(jump(otherwise), |e, (val, tg)| mat(&format!("#eq_{w}({xb}, {})", word_lit(*val, w)), "Bool", &ro, &format!("| false => {e} | true => {}", jump(*tg))))
         };
-        Ok(bind(&self.ty(&t)?, &fx.out_ty, &v, "x", &body))
+        Ok(bindr(&self.ty(&t)?, &fx.out_ty, &v, "x", &body))
     }
 
     /// A statement as an `Option(St)` term over `s` (`None`: no effect).
@@ -1058,6 +1103,172 @@ impl<'a> Gen<'a> {
     }
 }
 
+// ----- panics -----------------------------------------------------------------
+
+/// The panic functions, by their library path under `std::` or `core::`
+/// with generic arguments dropped ([`lib_fn`]): functions returning `!`
+/// that panic (start unwinding) whatever their arguments, which are only
+/// the panic's message. A call of another function returning `!` (the
+/// aborting `panic_nounwind*`, `process::exit`, a crate's own) is stuck.
+pub const PANIC_FNS: &[&str] = &[
+    "panicking::panic",
+    "panicking::panic_fmt",
+    "panicking::panic_display",
+    "panicking::panic_explicit",
+    "panicking::panic_str_2015",
+    "panicking::unreachable_display",
+    "panicking::assert_failed",
+    "panicking::panic_bounds_check",
+    "panicking::begin_panic",
+    // (std's re-exports, the paths `panic!` and `assert!` call through)
+    "rt::panic_fmt",
+    "rt::panic_display",
+    "rt::begin_panic",
+    "option::unwrap_failed",
+    "option::expect_failed",
+    "result::unwrap_failed",
+    "slice::index::slice_start_index_len_fail",
+    "slice::index::slice_end_index_len_fail",
+    "slice::index::slice_index_order_fail",
+];
+
+/// The constructors of a panic's message (`fmt::Arguments` and its
+/// arguments), by library path as in [`PANIC_FNS`]: a call returns,
+/// without a panic or undefined behaviour, whatever its arguments.
+pub const PANIC_MSG_FNS: &[&str] = &[
+    "fmt::Arguments::<'_>::from_str",
+    "fmt::Arguments::<'_>::new_const",
+    "fmt::Arguments::<'_>::new_v1",
+    "fmt::Arguments::<'_>::new_v1_formatted",
+    "fmt::rt::Argument::<'_>::new_display",
+    "fmt::rt::Argument::<'_>::new_debug",
+];
+
+/// A MIR instance key of core or std (`core::panicking::assert_failed::<u64,
+/// u64>`) as its path below the crate, its final generic arguments dropped
+/// (`panicking::assert_failed`); `None` for any other crate's. (rustc writes
+/// no `::<` inside a type argument; a key cut wrongly matches no table.)
+pub fn lib_fn(key: &str) -> Option<&str> {
+    let p = key.strip_prefix("std::").or_else(|| key.strip_prefix("core::"))?;
+    Some(if p.ends_with('>') { p.rsplit_once("::<").map_or(p, |x| x.0) } else { p })
+}
+
+/// The kinds of `Assert` whose failure panics, by the names `mirx` prints
+/// for rustc's `AssertMessage` (TRUSTED): an overflow (arithmetic or shift),
+/// a negation's overflow, a bounds check, a division or remainder by zero.
+/// Every other kind (`other`: a misaligned or null pointer dereference, an
+/// invalid enum construction, whose failure aborts the process; a kind the
+/// parse does not name) is read as stuck where it fails, and a panic's
+/// path ([`must_panic`]) may not run it.
+pub const PANIC_ASSERT_KINDS: &[&str] = &["overflow", "overflow-neg", "bounds", "div-zero", "rem-zero"];
+
+/// Whether a failed `Assert` of kind `kind` panics ([`PANIC_ASSERT_KINDS`]).
+pub fn assert_panics(kind: &str) -> bool {
+    PANIC_ASSERT_KINDS.contains(&kind)
+}
+
+/// Whether every path from block `b` of `f` panics (TRUSTED: such a block
+/// is read as `Panic` without reading its code, its message's
+/// construction; docs/mir-lift.md §20.4 "Panics"). Every path is acyclic
+/// and ends in a call of a panic function ([`PANIC_FNS`]); on the way it
+/// runs only statements that cannot be undefined behaviour
+/// ([`panic_path_ok`]), `Goto`, `SwitchInt` (every target panics),
+/// `Assert` of a kind whose failure is a panic too ([`assert_panics`]),
+/// drops without glue and calls of message constructors
+/// ([`PANIC_MSG_FNS`]), each of which returns. So the
+/// MIR's execution from `b` panics, in every state the function's own
+/// execution reaches `b` in (borrow-checked MIR: a place's index passed its
+/// bounds check). (`path`: the blocks on the current path; `memo`: the
+/// answers so far, which do not depend on the path: a block that reaches
+/// the path again is on a cycle.)
+pub fn must_panic(f: &Fn, b: usize, path: &mut Vec<usize>, memo: &mut BTreeMap<usize, bool>) -> bool {
+    if let Some(r) = memo.get(&b) {
+        return *r;
+    }
+    let Some(bl) = f.blocks.get(b) else { return false };
+    if path.contains(&b) {
+        return false;
+    }
+    let lib = |k: &str, table: &[&str]| lib_fn(k).is_some_and(|p| table.contains(&p));
+    let next: Option<Vec<usize>> = if !bl.stmts.iter().all(|s| panic_path_ok(f, s)) {
+        None
+    } else {
+        match &bl.term {
+            Term::Call(Callee::Diverge(k), args, _, _) if lib(k, PANIC_FNS) && args.iter().all(|a| operand_ok(f, a)) => Some(vec![]),
+            Term::Goto(t) | Term::Drop(_, false, t) => Some(vec![*t]),
+            Term::Assert(c, _, kind, t) if operand_ok(f, c) && assert_panics(kind) => Some(vec![*t]),
+            Term::Switch(o, arms, other) if operand_ok(f, o) => Some(arms.iter().map(|a| a.1).chain([*other]).collect()),
+            Term::Call(Callee::Fn(k), args, dest, Some(t)) if lib(k, PANIC_MSG_FNS) && args.iter().all(|a| operand_ok(f, a)) && place_ok(f, dest) => Some(vec![*t]),
+            _ => None,
+        }
+    };
+    let r = match next {
+        None => false,
+        Some(ts) => {
+            path.push(b);
+            let r = ts.iter().all(|t| must_panic(f, *t, path, memo));
+            path.pop();
+            r
+        }
+    };
+    memo.insert(b, r);
+    r
+}
+
+/// The operators and casts a panic's path may run ([`panic_path_ok`]), by
+/// the parse's names: none can be undefined behaviour (MIR's `add`, `sub`,
+/// `mul` and `neg` wrap, its shifts mask the amount). Not the unchecked
+/// operators, `div`, `rem`, `offset`, `transmute`, nor any the parse does
+/// not name.
+const PANIC_PATH_BIN: &[&str] = &["add", "sub", "mul", "xor", "and", "or", "shl", "shr", "eq", "lt", "le", "ne", "ge", "gt", "cmp"];
+const PANIC_PATH_UN: &[&str] = &["not", "neg", "ptr-metadata"];
+const PANIC_PATH_CASTS: &[&str] = &["int-to-int", "unsize", "reify-fn-pointer"];
+
+/// A statement a panic's path may run ([`must_panic`]): an assignment that
+/// cannot be undefined behaviour (no `Assume`; operators and casts only from
+/// the lists above; places only through references; nothing the parse does
+/// not know).
+fn panic_path_ok(f: &Fn, s: &Stmt) -> bool {
+    let Stmt::Assign(pl, rv, _) = s else { return false };
+    let ops_ok = |ops: &[&Operand]| ops.iter().all(|o| operand_ok(f, o));
+    place_ok(f, pl)
+        && match rv {
+            Rvalue::Use(o) | Rvalue::Repeat(o, _) => ops_ok(&[o]),
+            Rvalue::Un(op, o) => PANIC_PATH_UN.contains(&op.as_str()) && ops_ok(&[o]),
+            Rvalue::Bin(op, a, b) => PANIC_PATH_BIN.contains(&op.as_str()) && ops_ok(&[a, b]),
+            Rvalue::Checked(_, a, b) => ops_ok(&[a, b]),
+            Rvalue::Cast(kind, o, _) => PANIC_PATH_CASTS.contains(&kind.as_str()) && ops_ok(&[o]),
+            Rvalue::Ref(_, q) | Rvalue::Discr(q) | Rvalue::Len(q) => place_ok(f, q),
+            Rvalue::Agg(_, ops) => ops.iter().all(|o| operand_ok(f, o)),
+            Rvalue::Unsupported(_) => false,
+        }
+}
+
+/// An operand a panic's path may read: a constant, or a place through
+/// references only.
+fn operand_ok(f: &Fn, o: &Operand) -> bool {
+    match o {
+        Operand::Copy(p) | Operand::Move(p) => place_ok(f, p),
+        Operand::Const(_) | Operand::RuntimeChecks(_) => true,
+    }
+}
+
+/// A place whose every `Deref` is of a reference (never a raw pointer) and
+/// whose projections the parse knows.
+fn place_ok(f: &Fn, p: &Place) -> bool {
+    let Some(mut t) = f.locals.get(p.local).map(|l| l.0.clone()) else { return false };
+    for pr in &p.proj {
+        if matches!(pr, Proj::Unsupported(_)) || (matches!(pr, Proj::Deref) && !matches!(t, Ty::Ref(..))) {
+            return false;
+        }
+        match proj_ty(&t, pr) {
+            Ok(n) => t = n,
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 // ----- rvalues ----------------------------------------------------------------
 
 /// Binary operators on words (`BinOp`): the L term over the bits `a`, `b`
@@ -1344,7 +1555,10 @@ impl<'a> Gen<'a> {
                 let e = binds(&vals, &tys, &rt, "a", some(&rt, &tmpl.replace("{w}", w)));
                 self.result(fx, dest, os, &rt, &e)?
             }
-            Callee::Leaf(path, tys) => self.leaf(fx, path, tys, args, dest, os)?,
+            Callee::Leaf(path, tys) => {
+                let after = self.leaf(fx, path, tys, args, dest, os)?;
+                return Ok(self.jump(fx, fx.rank(b), t, &after));
+            }
             // core's slice iterator and range `get` (raw pointers): their models
             Callee::Fn(k2) if let Some((model, elem)) = self.m.fns.get(k2).and_then(super::model_of) => self.model_call(fx, model, &elem, args, dest, os)?,
             // `Deref::deref` of a library newtype of bytes (its MIR is not exported)
@@ -1362,7 +1576,7 @@ impl<'a> Gen<'a> {
             Callee::Fn(k2) => return self.call_fn(fx, b, k2, args, dest, t, os),
             Callee::Unextracted(k) | Callee::Unsupported(k) => return Err(format!("a call of `{k}`, which was not extracted")),
         };
-        Ok(self.jump(fx, fx.rank(b), t, &after))
+        Ok(self.jump(fx, fx.rank(b), t, &fx.res_st(&after)))
     }
 
     /// A call of a function with MIR (§20.4 "Calls"): the callee's `run` on
@@ -1454,14 +1668,16 @@ impl<'a> Gen<'a> {
             }
         }
         let gst = format!("{gp}::St");
-        let init = some(&gst, &format!("{gst}::st({})", slots.join(", ")));
+        let init = ret(&gst, &format!("{gst}::st({})", slots.join(", ")));
         let run = if self_call { format!("rec(f1, {p}::Blk::b0, {init}; {})", decrease(&p, &fx.cur, fx.rank(0), rb, true)) } else { format!("{gp}::run fuel {gp}::Blk::b0 ({init})") };
         let dt = place_ty(&fx.f, dest)?;
         steps.push(if has_ret { bind(&self.ty(&dt)?, &st, &self.xout(&gl, fx, &g.locals[0].0, &parts[nparts - 1])?, "rr", &self.write(fx, dest, "rr")?) } else { self.write(fx, dest, "tt")? });
         let chain = steps.iter().rev().fold(some(&st, "s"), |acc, stp| bind(&st, &st, stp, "s", &acc));
         let body = if nparts > 1 { mat("res", &gl.out_ty, &ost, &format!("| {}({}) => {chain}", tuple_pat(nparts), parts.join(", "))) } else { chain };
-        let called = pre.iter().rev().fold(bind(&gl.out_ty, &st, &run, "res", &body), |acc, (l, a, v, x)| format!("{l}{}", bind(a, &st, v, x, &acc)));
-        let full = bind(&st, &st, os, "s", &called);
+        // the callee's outcome: its value goes on to the write-backs, its
+        // panic or stuck is the caller's (`mir::then`)
+        let called = pre.iter().rev().fold(then(&gl.out_ty, &st, &run, "res", &fx.res_st(&body)), |acc, (l, a, v, x)| format!("{l}{}", bindr(a, &st, v, x, &acc)));
+        let full = bindr(&st, &st, os, "s", &called);
         // (a self-call consumes one unit of fuel)
         Ok(if self_call { fuel_jump(fx, rb, t, &full) } else { self.jump(fx, rb, t, &full) })
     }
@@ -1492,7 +1708,9 @@ impl<'a> Gen<'a> {
     }
 
     /// A leaf call (§20.4 "Leaves"): a library function without MIR whose
-    /// meaning is a model of `literal.core` or of a host model.
+    /// meaning is a model of `literal.core` or of a host model. The state
+    /// after it, a `mir::Res(St)`: an index leaf panics where core's `index`
+    /// does (`leaf::*_index_*`), a failure of any other leaf is stuck.
     fn leaf(&mut self, fx: &mut FnCx, path: &str, tys: &[Ty], args: &[Operand], dest: &Place, os: &str) -> R<String> {
         let dtt = self.ty(&place_ty(&fx.f, dest)?)?;
         // a leaf with a `&mut` first argument: its referent through the code
@@ -1505,9 +1723,11 @@ impl<'a> Gen<'a> {
             }
             let tparam = if leaf.ends_with("vec_push") { format!(" {}", sty.strip_prefix("List(").and_then(|x| x.strip_suffix(')')).ok_or("push on a non-`Vec`")?) } else { String::new() };
             self.leaf_def(leaf);
-            return self.state_leaf(fx, target, &sty, &format!("{leaf}{tparam}"), args, dest, os);
+            let after = self.state_leaf(fx, target, &sty, &format!("{leaf}{tparam}"), args, dest, os)?;
+            return Ok(fx.res_st(&after));
         }
-        // a value leaf: a model at the arguments (a range's fields), `Option`-valued or total
+        // a value leaf: a model at the arguments (a range's fields), an
+        // outcome (an index leaf: its panic) or total
         let method = path.rsplit("::").next().unwrap_or("");
         let (f, partial, vals) = match tys {
             // `<[T; N] as Index<range>>::index(&a, r)`, `<[T] as Index<range>>::index(&s, r)`
@@ -1543,8 +1763,16 @@ impl<'a> Gen<'a> {
         };
         let call = (0..vals.len()).fold(f, |c, i| format!("{c} a{i}"));
         let (tys, vals): (Vec<String>, Vec<String>) = vals.into_iter().unzip();
-        let e = binds(&vals, &tys, &dtt, "a", if partial { call } else { some(&dtt, &call) });
-        self.result(fx, dest, os, &dtt, &e)
+        if !partial {
+            let e = binds(&vals, &tys, &dtt, "a", some(&dtt, &call));
+            let after = self.result(fx, dest, os, &dtt, &e)?;
+            return Ok(fx.res_st(&after));
+        }
+        // (the leaf's outcome: its value written to `dest`, its panic the run's)
+        let st = fx.st();
+        let w = self.write(fx, dest, "r")?;
+        let written = then(&dtt, &st, &call, "r", &fx.res_st(&w));
+        Ok(bindr(&st, &st, os, "s", &bindsr(&vals, &tys, &st, "a", written)))
     }
 
     /// A leaf whose first argument is a `&mut`: its referent (of L type
@@ -1621,10 +1849,15 @@ fn binds(vals: &[String], tys: &[String], r: &str, x: &str, body: String) -> Str
     vals.iter().zip(tys).enumerate().rev().fold(body, |e, (i, (v, t))| bind(t, r, v, &format!("{x}{i}"), &e))
 }
 
-/// A jump to block `to` that consumes one unit of fuel (`None` without it).
+/// [`binds`] into an outcome (`body` a `mir::Res(r)`; `None`: stuck).
+fn bindsr(vals: &[String], tys: &[String], r: &str, x: &str, body: String) -> String {
+    vals.iter().zip(tys).enumerate().rev().fold(body, |e, (i, (v, t))| bindr(t, r, v, &format!("{x}{i}"), &e))
+}
+
+/// A jump to block `to` that consumes one unit of fuel (stuck without it).
 fn fuel_jump(fx: &FnCx, from_rank: i64, to: usize, os: &str) -> String {
     let o = &fx.out_ty;
-    format!("match fuel : List(Unit) as yf return Option({o}) using .ef with | Nil => None[{o}] | Cons(u, f1) => rec(f1, {}::Blk::b{to}, {os}; {}) end", fx.p, decrease(&fx.p, &fx.cur, fx.rank(to), from_rank, true))
+    format!("match fuel : List(Unit) as yf return mir::Res({o}) using .ef with | Nil => {} | Cons(u, f1) => rec(f1, {}::Blk::b{to}, {os}; {}) end", stuck(o), fx.p, decrease(&fx.p, &fx.cur, fx.rank(to), from_rank, true))
 }
 
 /// The decrease proof of a jump from a block of rank `from` to one of rank

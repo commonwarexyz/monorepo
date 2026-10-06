@@ -99,7 +99,7 @@ impl Fixture {
             slots.push(if args[c.param - 1] == "-" { format!("None[{ct}]") } else { format!("Some[{ct}]({})", args[c.param - 1]) });
         }
         let fuel = (0..fuel).fold("Nil[Unit]".to_string(), |l, _| format!("Cons[Unit](tt, {l})"));
-        format!("{} ({fuel}) {}::b0 (Some[{st}]({st}::st({})))", lf.run, lf.blk, slots.join(", "), st = lf.st)
+        format!("{} ({fuel}) {}::b0 (mir::Res::Ret[{st}]({st}::st({})))", lf.run, lf.blk, slots.join(", "), st = lf.st)
     }
 }
 
@@ -165,15 +165,15 @@ const ARITH: &str = r#"(fn "k::m::add" (kind root) (def "k::m::add") (args ()) (
 fn checked_and_partial_arithmetic_fail_exactly_where_rust_panics_or_is_undefined() {
     with_env(|env| {
         let fx = load(env, ARITH);
-        same(env, &fx.run("add", 0, &["3u16", "4u16"]), "Some[U16](7u16)");
+        same(env, &fx.run("add", 0, &["3u16", "4u16"]), "mir::Res::Ret[U16](7u16)");
         // negative twin: the overflow assert fails
-        same(env, &fx.run("add", 0, &["65535u16", "1u16"]), "None[U16]");
-        same(env, &fx.run("div", 0, &["7u32", "2u32"]), "Some[U32](3u32)");
-        same(env, &fx.run("div", 0, &["7u32", "0u32"]), "None[U32]");
+        same(env, &fx.run("add", 0, &["65535u16", "1u16"]), "mir::Res::Panic[U16]");
+        same(env, &fx.run("div", 0, &["7u32", "2u32"]), "mir::Res::Ret[U32](3u32)");
+        same(env, &fx.run("div", 0, &["7u32", "0u32"]), "mir::Res::Stuck[U32]");
         // `Shl` masks its amount (9 is 1 for a byte); `ShlUnchecked` is undefined there
-        same(env, &fx.run("shl", 0, &["1u8", "9u32"]), "Some[U8](2u8)");
-        same(env, &fx.run("shlu", 0, &["1u8", "9u32"]), "None[U8]");
-        same(env, &fx.run("shlu", 0, &["1u8", "7u32"]), "Some[U8](128u8)");
+        same(env, &fx.run("shl", 0, &["1u8", "9u32"]), "mir::Res::Ret[U8](2u8)");
+        same(env, &fx.run("shlu", 0, &["1u8", "9u32"]), "mir::Res::Stuck[U8]");
+        same(env, &fx.run("shlu", 0, &["1u8", "7u32"]), "mir::Res::Ret[U8](128u8)");
     });
 }
 
@@ -182,13 +182,13 @@ fn signed_values_are_their_bits_with_signed_comparisons_and_sign_extension() {
     with_env(|env| {
         let fx = load(env, ARITH);
         // -1 < 1 for `i8` (bits 255), while 255 < 1 is false for `u8`
-        same(env, &fx.run("slt", 0, &["255u8", "1u8"]), "Some[Bool](true)");
-        same(env, &fx.run("ult", 0, &["255u8", "1u8"]), "Some[Bool](false)");
+        same(env, &fx.run("slt", 0, &["255u8", "1u8"]), "mir::Res::Ret[Bool](true)");
+        same(env, &fx.run("ult", 0, &["255u8", "1u8"]), "mir::Res::Ret[Bool](false)");
         // `-2i16 as i64` extends the sign; `65534u16 as u64` does not
-        same(env, &fx.run("sext", 0, &["crate::__lift::I16::I16(65534u16)"]), "Some[crate::__lift::I64](crate::__lift::I64::I64(18446744073709551614u64))");
-        same(env, &fx.run("zext", 0, &["65534u16"]), "Some[U64](65534u64)");
+        same(env, &fx.run("sext", 0, &["crate::__lift::I16::I16(65534u16)"]), "mir::Res::Ret[crate::__lift::I64](crate::__lift::I64::I64(18446744073709551614u64))");
+        same(env, &fx.run("zext", 0, &["65534u16"]), "mir::Res::Ret[U64](65534u64)");
         // `-8i32 >> 1` is arithmetic
-        same(env, &fx.run("sar", 0, &["crate::__lift::I32::I32(4294967288u32)", "1u32"]), "Some[crate::__lift::I32](crate::__lift::I32::I32(4294967292u32))");
+        same(env, &fx.run("sar", 0, &["crate::__lift::I32::I32(4294967288u32)", "1u32"]), "mir::Res::Ret[crate::__lift::I32](crate::__lift::I32::I32(4294967292u32))");
     });
 }
 
@@ -196,11 +196,11 @@ fn signed_values_are_their_bits_with_signed_comparisons_and_sign_extension() {
 fn intrinsics_and_transmute_are_their_primitives() {
     with_env(|env| {
         let fx = load(env, ARITH);
-        same(env, &fx.run("cnt", 0, &["1u64"]), "Some[U32](63u32)");
-        same(env, &fx.run("swap", 0, &["16909060u32"]), "Some[U32](67305985u32)");
+        same(env, &fx.run("cnt", 0, &["1u64"]), "mir::Res::Ret[U32](63u32)");
+        same(env, &fx.run("swap", 0, &["16909060u32"]), "mir::Res::Ret[U32](67305985u32)");
         // the targets are little-endian
-        same(env, &fx.run("le", 0, &["16909060u32"]), "Some[Array U8 4usize](u32::to_le_bytes 16909060u32)");
-        same(env, &fx.run("le", 0, &["16909060u32"]), "Some[Array U8 4usize](pair(Array U8 4usize, Cons[U8](4u8, Cons[U8](3u8, Cons[U8](2u8, Cons[U8](1u8, Nil[U8])))), refl(Int, 4int)))");
+        same(env, &fx.run("le", 0, &["16909060u32"]), "mir::Res::Ret[Array U8 4usize](u32::to_le_bytes 16909060u32)");
+        same(env, &fx.run("le", 0, &["16909060u32"]), "mir::Res::Ret[Array U8 4usize](pair(Array U8 4usize, Cons[U8](4u8, Cons[U8](3u8, Cons[U8](2u8, Cons[U8](1u8, Nil[U8])))), refl(Int, 4int)))");
     });
 }
 
@@ -255,11 +255,11 @@ fn readings_the_review_found_wrong_are_none_where_rust_differs() {
         assert!(fx.lf("wide").faults.iter().any(|f| f.starts_with("bb0")), "{:?}", fx.lf("wide").faults);
         // negative twin: a `u64` sum is read
         assert!(fx.lf("narrow").faults.is_empty(), "{:?}", fx.lf("narrow").faults);
-        same(env, &fx.run("narrow", 0, &["2u64", "3u64"]), "Some[U64](5u64)");
+        same(env, &fx.run("narrow", 0, &["2u64", "3u64"]), "mir::Res::Ret[U64](5u64)");
         // `ShlUnchecked` by a `u64` amount of 2^32 is undefined behaviour: its low
         // 32 bits (0) were tested instead
-        same(env, &fx.run("shlw", 0, &["1u8", "4294967296u64"]), "None[U8]");
-        same(env, &fx.run("shlw", 0, &["1u8", "3u64"]), "Some[U8](8u8)");
+        same(env, &fx.run("shlw", 0, &["1u8", "4294967296u64"]), "mir::Res::Stuck[U8]");
+        same(env, &fx.run("shlw", 0, &["1u8", "3u64"]), "mir::Res::Ret[U8](8u8)");
         // a zero-sized constant of a type with several variants is not read as
         // its first variant
         assert!(fx.lf("zst").faults.iter().any(|f| f.contains("zst") || f.contains("Zst")), "{:?}", fx.lf("zst").faults);
@@ -267,14 +267,14 @@ fn readings_the_review_found_wrong_are_none_where_rust_differs() {
         // type whose path merely ends in `ops::RangeTo` was read as `&a[..j]`
         let a = "pair(Array U8 4usize, Cons[U8](1u8, Cons[U8](2u8, Cons[U8](3u8, Cons[U8](4u8, Nil[U8])))), refl(Int, 4int))";
         assert!(fx.lf("mypre").faults.iter().any(|f| f.contains("k::myops::RangeTo")), "{:?}", fx.lf("mypre").faults);
-        same(env, &fx.run("mypre", 0, &[a, "2usize"]), "None[Usize]");
+        same(env, &fx.run("mypre", 0, &[a, "2usize"]), "mir::Res::Stuck[Usize]");
         // negative twin: core's `RangeTo`
-        same(env, &fx.run("pre", 0, &[a, "2usize"]), "Some[Usize](2usize)");
+        same(env, &fx.run("pre", 0, &[a, "2usize"]), "mir::Res::Ret[Usize](2usize)");
         // the same for the index leaf itself (stage tcb-review): a crate's own
         // `myops::Index::index` on an array (the printer makes any such call a
         // leaf) was read as core's indexing; its meaning is the crate's impl
         assert!(fx.lf("myidx").faults.iter().any(|f| f.contains("k::myops::Index::index")), "{:?}", fx.lf("myidx").faults);
-        same(env, &fx.run("myidx", 0, &[a, "2usize"]), "None[Usize]");
+        same(env, &fx.run("myidx", 0, &[a, "2usize"]), "mir::Res::Stuck[Usize]");
         // a crate's own `option::Option` is not the prelude's `Option` (it is
         // read as L's own inductive), while core's is
         assert!(fx.lit.state.adt_ty("option::Option<u16>").is_some_and(|t| t.starts_with("L::")), "{:?}", fx.lit.state.adt_ty("option::Option<u16>"));
@@ -361,8 +361,8 @@ const FLOW: &str = r#"(adt-def "std::option::Option<u16>" (path "std::option::Op
 fn a_switch_tests_the_value_and_a_discriminant_its_variant() {
     with_env(|env| {
         let fx = load(env, FLOW);
-        same(env, &fx.run("get", 0, &["Some[U16](5u16)"]), "Some[U16](5u16)");
-        same(env, &fx.run("get", 0, &["None[U16]"]), "Some[U16](0u16)");
+        same(env, &fx.run("get", 0, &["Some[U16](5u16)"]), "mir::Res::Ret[U16](5u16)");
+        same(env, &fx.run("get", 0, &["None[U16]"]), "mir::Res::Ret[U16](0u16)");
     });
 }
 
@@ -372,10 +372,10 @@ fn a_loop_needs_one_unit_of_fuel_per_entry_of_its_header() {
         let fx = load(env, FLOW);
         assert_eq!(fx.lf("sum").headers, vec![1]);
         // 0 + 1 + 2 + 3: the header is entered 5 times
-        same(env, &fx.run("sum", 5, &["4u32"]), "Some[U32](6u32)");
-        same(env, &fx.run("sum", 50, &["4u32"]), "Some[U32](6u32)");
+        same(env, &fx.run("sum", 5, &["4u32"]), "mir::Res::Ret[U32](6u32)");
+        same(env, &fx.run("sum", 50, &["4u32"]), "mir::Res::Ret[U32](6u32)");
         // negative twin: one unit less is out of fuel
-        same(env, &fx.run("sum", 4, &["4u32"]), "None[U32]");
+        same(env, &fx.run("sum", 4, &["4u32"]), "mir::Res::Stuck[U32]");
     });
 }
 
@@ -383,13 +383,13 @@ fn a_loop_needs_one_unit_of_fuel_per_entry_of_its_header() {
 fn a_path_that_panics_fails_and_a_self_call_consumes_fuel() {
     with_env(|env| {
         let fx = load(env, FLOW);
-        same(env, &fx.run("nz", 0, &["3u16"]), "Some[U16](3u16)");
-        same(env, &fx.run("nz", 0, &["0u16"]), "None[U16]");
+        same(env, &fx.run("nz", 0, &["3u16"]), "mir::Res::Ret[U16](3u16)");
+        same(env, &fx.run("nz", 0, &["0u16"]), "mir::Res::Panic[U16]");
         assert_eq!(fx.lf("nz").panics, vec![1]);
         assert!(fx.lf("nz").faults.is_empty(), "{:?}", fx.lf("nz").faults);
         // 4! with the four nested calls each consuming one unit
-        same(env, &fx.run("fact", 4, &["4u32"]), "Some[U32](24u32)");
-        same(env, &fx.run("fact", 3, &["4u32"]), "None[U32]");
+        same(env, &fx.run("fact", 4, &["4u32"]), "mir::Res::Ret[U32](24u32)");
+        same(env, &fx.run("fact", 3, &["4u32"]), "mir::Res::Stuck[U32]");
     });
 }
 
@@ -397,10 +397,215 @@ fn a_path_that_panics_fails_and_a_self_call_consumes_fuel() {
 fn a_string_constant_is_a_token_and_a_closure_takes_its_arguments_spread() {
     with_env(|env| {
         let fx = load(env, FLOW);
-        same(env, &fx.run("expect", 0, &["Some[U16](3u16)"]), "Some[U16](3u16)");
-        same(env, &fx.run("expect", 0, &["None[U16]"]), "None[U16]");
-        same(env, &fx.run("clo", 0, &["4u16"]), "Some[U16](5u16)");
+        same(env, &fx.run("expect", 0, &["Some[U16](3u16)"]), "mir::Res::Ret[U16](3u16)");
+        same(env, &fx.run("expect", 0, &["None[U16]"]), "mir::Res::Panic[U16]");
+        same(env, &fx.run("clo", 0, &["4u16"]), "mir::Res::Ret[U16](5u16)");
     });
+}
+
+/// The outcomes of a run (`mir::Res`, docs/mir-lift.md §20.4): a panic is
+/// read only where the MIR certainly panics; everything else that gives no
+/// value is stuck. Each body is `if x <= 10 { x } else { <panic path> }`,
+/// the panic path built as rustc builds `assert!(c, "msg")` (the message's
+/// `fmt::Arguments`, then `std::rt::panic_fmt`), or with one construct
+/// changed: a function returning `!` that is no panic (`process::abort`, the
+/// aborting `panic_nounwind_fmt`), an `assume` on the way (undefined
+/// behaviour unless it holds), a switch one of whose targets is
+/// `unreachable` (undefined behaviour), a jump to itself (no termination).
+const PANICS: &str = r#"(adt-def "std::fmt::Arguments<'_>" (path "std::fmt::Arguments") (kind struct) (args ())
+  (variant 0 "Arguments" 0 (field "template" usize) (no-glue)))
+(fn "std::fmt::Arguments::<'_>::from_str" (kind callee) (def "std::fmt::Arguments::<'a>::from_str") (args ()) (item inherent (adt "std::fmt::Arguments<'_>") "from_str") (argc 1)
+  (locals (0 (adt "std::fmt::Arguments<'_>") mut) (1 (ref shared str) imm))
+  (bb 0 (unreachable)))
+(fn "k::m::msg" (kind root) (def "k::m::msg") (args ()) (item fn "msg") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 (adt "std::fmt::Arguments<'_>") mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 4) 3))
+  (bb 3 (call (diverge "std::rt::panic_fmt") (args (move (p 4))) (p 3) none)))
+(fn "k::m::abort" (kind root) (def "k::m::abort") (args ()) (item fn "abort") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 (adt "std::fmt::Arguments<'_>") mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 4) 3))
+  (bb 3 (call (diverge "std::process::abort") (args) (p 3) none)))
+(fn "k::m::nounwind" (kind root) (def "k::m::nounwind") (args ()) (item fn "nounwind") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 (adt "std::fmt::Arguments<'_>") mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (call (fn "std::fmt::Arguments::<'_>::from_str") (args (unsupported "constant of type (ref shared str)")) (p 4) 3))
+  (bb 3 (call (diverge "core::panicking::panic_nounwind_fmt") (args (move (p 4))) (p 3) none)))
+(fn "k::m::assumed" (kind root) (def "k::m::assumed") (args ()) (item fn "assumed") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (assume (copy (p 2))) (call (diverge "core::panicking::panic") (args) (p 3) none)))
+(fn "k::m::half" (kind root) (def "k::m::half") (args ()) (item fn "half") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 u16 mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (assign (p 4) (bin rem (copy (p 1)) (int u16 2))) (switch (move (p 4)) (0 3) (otherwise 4)))
+  (bb 3 (call (diverge "core::panicking::panic") (args) (p 3) none))
+  (bb 4 (unreachable)))
+(fn "k::m::wrapped" (kind root) (def "k::m::wrapped") (args ()) (item fn "wrapped") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 u16 mut) (5 u32 mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (assign (p 4) (bin add (copy (p 1)) (int u16 1))) (assign (p 5) (cast int-to-int (copy (p 4)) u32)) (call (diverge "core::panicking::panic") (args) (p 3) none)))
+(fn "k::m::divided" (kind root) (def "k::m::divided") (args ()) (item fn "divided") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 u16 mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (assign (p 4) (bin div (int u16 100) (copy (p 1)))) (call (diverge "core::panicking::panic") (args) (p 3) none)))
+(fn "k::m::transmuted" (kind root) (def "k::m::transmuted") (args ()) (item fn "transmuted") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 i16 mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (assign (p 4) (cast transmute (copy (p 1)) i16)) (call (diverge "core::panicking::panic") (args) (p 3) none)))
+(fn "k::m::spin" (kind root) (def "k::m::spin") (args ()) (item fn "spin") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (goto 2)))
+"#;
+
+/// A block every path of which ends in a call of a panic function (the
+/// message built on the way) is a panic; its twins are stuck.
+#[test]
+fn a_panic_is_read_only_where_every_path_ends_in_a_panic_function() {
+    with_env(|env| {
+        let fx = load(env, PANICS);
+        same(env, &fx.run("msg", 0, &["4u16"]), "mir::Res::Ret[U16](4u16)");
+        same(env, &fx.run("msg", 0, &["11u16"]), "mir::Res::Panic[U16]");
+        assert_eq!(fx.lf("msg").panics, vec![2, 3]);
+        assert!(fx.lf("msg").faults.is_empty(), "{:?}", fx.lf("msg").faults);
+        // negative twins: a function returning `!` that is no panic function
+        // (an abort; the aborting `panic_nounwind_fmt`), an `assume` on the
+        // way, a switch one of whose targets is `unreachable`: stuck
+        for f in ["abort", "nounwind", "assumed", "half"] {
+            same(env, &fx.run(f, 0, &["4u16"]), "mir::Res::Ret[U16](4u16)");
+            same(env, &fx.run(f, 0, &["11u16"]), "mir::Res::Stuck[U16]");
+        }
+        for f in ["abort", "nounwind", "assumed"] {
+            assert!(fx.lf(f).panics.is_empty(), "{f}: {:?}", fx.lf(f).panics);
+        }
+        // (`half`'s block of the panic call alone is a panic; the switch
+        // that may reach `unreachable` is stuck, even where it would panic)
+        assert_eq!(fx.lf("half").panics, vec![3]);
+        same(env, &fx.run("half", 0, &["12u16"]), "mir::Res::Stuck[U16]");
+        // the allow-lists of a panic's path: a wrapping operator and an
+        // integer cast on the way are a panic; a division (undefined on a
+        // zero divisor) or a transmute on the way is stuck
+        for f in ["wrapped", "divided", "transmuted"] {
+            same(env, &fx.run(f, 0, &["4u16"]), "mir::Res::Ret[U16](4u16)");
+        }
+        same(env, &fx.run("wrapped", 0, &["11u16"]), "mir::Res::Panic[U16]");
+        assert_eq!(fx.lf("wrapped").panics, vec![2]);
+        for f in ["divided", "transmuted"] {
+            same(env, &fx.run(f, 0, &["11u16"]), "mir::Res::Stuck[U16]");
+            assert!(fx.lf(f).panics.is_empty(), "{f}: {:?}", fx.lf(f).panics);
+        }
+    });
+}
+
+const ASSERT_KINDS: &str = r#"(fn "k::m::a_overflow" (kind root) (def "k::m::a_overflow") (args ()) (item fn "a_overflow") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (assert (copy (p 2)) true overflow 1))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return)))
+(fn "k::m::a_overflow_neg" (kind root) (def "k::m::a_overflow_neg") (args ()) (item fn "a_overflow_neg") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (assert (copy (p 2)) true overflow-neg 1))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return)))
+(fn "k::m::a_bounds" (kind root) (def "k::m::a_bounds") (args ()) (item fn "a_bounds") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (assert (copy (p 2)) true bounds 1))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return)))
+(fn "k::m::a_div_zero" (kind root) (def "k::m::a_div_zero") (args ()) (item fn "a_div_zero") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (assert (copy (p 2)) true div-zero 1))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return)))
+(fn "k::m::a_rem_zero" (kind root) (def "k::m::a_rem_zero") (args ()) (item fn "a_rem_zero") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (assert (copy (p 2)) true rem-zero 1))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return)))
+(fn "k::m::a_other" (kind root) (def "k::m::a_other") (args ()) (item fn "a_other") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (assert (copy (p 2)) true other 1))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return)))
+(fn "k::m::g_overflow" (kind root) (def "k::m::g_overflow") (args ()) (item fn "g_overflow") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (assign (p 4) (bin lt (copy (p 1)) (int u16 1000))) (assert (copy (p 4)) true overflow 3))
+  (bb 3 (call (diverge "core::panicking::panic") (args) (p 3) none)))
+(fn "k::m::g_other" (kind root) (def "k::m::g_other") (args ()) (item fn "g_other") (argc 1)
+  (locals (0 u16 mut) (1 u16 imm) (2 bool mut) (3 never imm) (4 bool mut))
+  (bb 0 (assign (p 2) (bin le (copy (p 1)) (int u16 10))) (switch (move (p 2)) (0 2) (otherwise 1)))
+  (bb 1 (assign (p 0) (use (copy (p 1)))) (return))
+  (bb 2 (assign (p 4) (bin lt (copy (p 1)) (int u16 1000))) (assert (copy (p 4)) true other 3))
+  (bb 3 (call (diverge "core::panicking::panic") (args) (p 3) none)))
+"#;
+
+/// A failed `Assert` is a panic only for the kinds whose failure panics
+/// (overflow, bounds, division or remainder by zero); a kind whose failure
+/// aborts (`other`: a misaligned or null pointer dereference, an invalid
+/// enum construction) is stuck where it fails, and a panic's path may not
+/// run it.
+#[test]
+fn a_failed_assert_is_a_panic_only_for_the_kinds_that_panic() {
+    with_env(|env| {
+        let fx = load(env, ASSERT_KINDS);
+        for f in ["a_overflow", "a_overflow_neg", "a_bounds", "a_div_zero", "a_rem_zero", "a_other"] {
+            same(env, &fx.run(f, 0, &["4u16"]), "mir::Res::Ret[U16](4u16)");
+        }
+        for f in ["a_overflow", "a_overflow_neg", "a_bounds", "a_div_zero", "a_rem_zero"] {
+            same(env, &fx.run(f, 0, &["11u16"]), "mir::Res::Panic[U16]");
+        }
+        // negative twin: the same failed assertion of kind `other` aborts
+        same(env, &fx.run("a_other", 0, &["11u16"]), "mir::Res::Stuck[U16]");
+        // on a panic's path: an overflow check that may fail is a panic
+        // either way, so its block panics; an `other` check is not (where
+        // it fails the process aborts), so only the call's block is a
+        // panic, and the block of the check, from which every path
+        // diverges without every path panicking, is stuck as a whole
+        assert_eq!(fx.lf("g_overflow").panics, vec![2, 3]);
+        assert_eq!(fx.lf("g_other").panics, vec![3]);
+        assert!(fx.lf("g_other").diverging.contains(&2), "{:?}", fx.lf("g_other").diverging);
+        for f in ["g_overflow", "g_other"] {
+            same(env, &fx.run(f, 0, &["4u16"]), "mir::Res::Ret[U16](4u16)");
+        }
+        for x in ["11u16", "2000u16"] {
+            same(env, &fx.run("g_overflow", 0, &[x]), "mir::Res::Panic[U16]");
+            same(env, &fx.run("g_other", 0, &[x]), "mir::Res::Stuck[U16]");
+        }
+    });
+}
+
+/// A path that does not terminate is stuck at every fuel, never a panic.
+#[test]
+fn a_path_that_does_not_terminate_is_stuck_at_every_fuel() {
+    with_env(|env| {
+        let fx = load(env, PANICS);
+        same(env, &fx.run("spin", 0, &["4u16"]), "mir::Res::Ret[U16](4u16)");
+        for fuel in [0, 1, 7, 64] {
+            same(env, &fx.run("spin", fuel, &["11u16"]), "mir::Res::Stuck[U16]");
+        }
+    });
+}
+
+/// The library paths of the panic functions: core's and std's, generic
+/// arguments dropped; a crate's own is none.
+#[test]
+fn panic_functions_are_core_and_std_paths() {
+    use sandblaster_front::mir::literal::{lib_fn, PANIC_FNS};
+    assert_eq!(lib_fn("core::panicking::assert_failed::<u64, u64>"), Some("panicking::assert_failed"));
+    assert_eq!(lib_fn("std::rt::panic_fmt"), Some("rt::panic_fmt"));
+    assert_eq!(lib_fn("std::fmt::Arguments::<'_>::from_str"), Some("fmt::Arguments::<'_>::from_str"));
+    assert_eq!(lib_fn("std::fmt::rt::Argument::<'_>::new_display::<u64>"), Some("fmt::rt::Argument::<'_>::new_display"));
+    assert!(PANIC_FNS.contains(&"panicking::panic") && PANIC_FNS.contains(&"option::expect_failed"));
+    // negative twins: a crate's own function of the same path; an abort
+    assert_eq!(lib_fn("k::panicking::panic"), None);
+    assert!(!PANIC_FNS.iter().any(|p| p.contains("abort") || p.contains("nounwind") || p.contains("exit")));
 }
 
 /// A closure without captures that the MIR never assigns (rustc's
@@ -423,9 +628,9 @@ const ZST: &str = r#"(fn "k::m::cloz::{closure#0}" (kind callee) (def "k::m::clo
 fn a_data_free_local_holds_its_value_unassigned_and_a_local_with_data_does_not() {
     with_env(|env| {
         let fx = load(env, ZST);
-        same(env, &fx.run("cloz", 0, &["4u16"]), "Some[U16](5u16)");
+        same(env, &fx.run("cloz", 0, &["4u16"]), "mir::Res::Ret[U16](5u16)");
         // negative twin: a local with data, never assigned, is read as a failure
-        same(env, &fx.run("unset", 0, &["4u16"]), "None[U16]");
+        same(env, &fx.run("unset", 0, &["4u16"]), "mir::Res::Stuck[U16]");
     });
 }
 
@@ -490,11 +695,11 @@ const REFS: &str = r#"(adt-def "k::m::P" (path "k::m::P") (kind struct) (args ()
 fn a_write_through_a_borrow_changes_the_place_and_a_value_read_before_keeps_its_value() {
     with_env(|env| {
         let fx = load(env, REFS);
-        same(env, &fx.run("bump", 0, &["5u32"]), "Some[U32](6u32)");
+        same(env, &fx.run("bump", 0, &["5u32"]), "mir::Res::Ret[U32](6u32)");
         // negative twin of a historical structuring bug (a value snapshot
         // restored a variable after an in-place write): the copy taken
         // before is 5, the variable after is 6
-        same(env, &fx.run("snap", 0, &["5u32"]), "Some[U32](11u32)");
+        same(env, &fx.run("snap", 0, &["5u32"]), "mir::Res::Ret[U32](11u32)");
     });
 }
 
@@ -503,14 +708,14 @@ fn a_mut_parameter_is_a_cell_written_back_at_each_call() {
     with_env(|env| {
         let fx = load(env, REFS);
         // the cell's final value is the output
-        same(env, &fx.run("inc", 0, &["5u32"]), "Some[U32](6u32)");
-        same(env, &fx.run("twice", 0, &["5u32"]), "Some[U32](7u32)");
-        same(env, &fx.run("setb", 0, &["crate::m::P::P(1u32, 2u32)", "9u32"]), "Some[crate::m::P](crate::m::P::P(1u32, 9u32))");
+        same(env, &fx.run("inc", 0, &["5u32"]), "mir::Res::Ret[U32](6u32)");
+        same(env, &fx.run("twice", 0, &["5u32"]), "mir::Res::Ret[U32](7u32)");
+        same(env, &fx.run("setb", 0, &["crate::m::P::P(1u32, 2u32)", "9u32"]), "mir::Res::Ret[crate::m::P](crate::m::P::P(1u32, 9u32))");
         // a borrow of a field is a code with a path; the callee's write lands there
-        same(env, &fx.run("fieldref", 0, &["crate::m::P::P(1u32, 2u32)"]), "Some[crate::m::P](crate::m::P::P(2u32, 2u32))");
+        same(env, &fx.run("fieldref", 0, &["crate::m::P::P(1u32, 2u32)"]), "mir::Res::Ret[crate::m::P](crate::m::P::P(2u32, 2u32))");
         // an `Option<&mut T>` parameter: a cell when present
-        same(env, &fx.run("opt", 0, &["5u32"]), "Some[Option(U32)](Some[U32](6u32))");
-        same(env, &fx.run("opt", 0, &["-"]), "Some[Option(U32)](None[U32])");
+        same(env, &fx.run("opt", 0, &["5u32"]), "mir::Res::Ret[Option(U32)](Some[U32](6u32))");
+        same(env, &fx.run("opt", 0, &["-"]), "mir::Res::Ret[Option(U32)](None[U32])");
     });
 }
 
@@ -525,7 +730,7 @@ fn a_returned_reference_is_translated_back_and_nested_cells_are_written_back() {
         assert_eq!(fx.lf("ad").cells[1].parent, Some(0));
         assert_eq!(fx.lf("dm").cells.len(), 2);
         // both writes through the returned references land in `x`: (5 + 1) * 10
-        same(env, &fx.run("through", 0, &["5u32"]), "Some[U32](60u32)");
+        same(env, &fx.run("through", 0, &["5u32"]), "mir::Res::Ret[U32](60u32)");
     });
 }
 
@@ -587,10 +792,10 @@ const VALUES: &str = r#"(adt-def "k::lib::E" (path "k::lib::E") (kind enum) (arg
 fn aggregates_are_their_constructors_and_a_discriminant_is_its_value_at_its_type() {
     with_env(|env| {
         let fx = load(env, VALUES);
-        same(env, &fx.run("mk", 0, &["1u8", "2u8"]), "Some[Tuple2(Array U8 2usize, Array U8 3usize)](tuple2[Array U8 2usize, Array U8 3usize](pair(Array U8 2usize, Cons[U8](1u8, Cons[U8](2u8, Nil[U8])), refl(Int, 2int)), pair(Array U8 3usize, Cons[U8](2u8, Cons[U8](2u8, Cons[U8](2u8, Nil[U8]))), refl(Int, 3int))))");
+        same(env, &fx.run("mk", 0, &["1u8", "2u8"]), "mir::Res::Ret[Tuple2(Array U8 2usize, Array U8 3usize)](tuple2[Array U8 2usize, Array U8 3usize](pair(Array U8 2usize, Cons[U8](1u8, Cons[U8](2u8, Nil[U8])), refl(Int, 2int)), pair(Array U8 3usize, Cons[U8](2u8, Cons[U8](2u8, Cons[U8](2u8, Nil[U8]))), refl(Int, 3int))))");
         // `A = -1` is the bits 255 of an `i8`; `B = 1`
-        same(env, &fx.run("dis", 0, &["true"]), "Some[U8](255u8)");
-        same(env, &fx.run("dis", 0, &["false"]), "Some[U8](1u8)");
+        same(env, &fx.run("dis", 0, &["true"]), "mir::Res::Ret[U8](255u8)");
+        same(env, &fx.run("dis", 0, &["false"]), "mir::Res::Ret[U8](1u8)");
     });
 }
 
@@ -599,9 +804,9 @@ fn a_drop_with_glue_is_nothing_only_for_a_variant_without_glue() {
     with_env(|env| {
         let fx = load(env, VALUES);
         let e = fx.lit.state.adt_ty("k::lib::E").expect("E");
-        same(env, &fx.run("drp", 0, &[&format!("{e}::v0_A")]), "Some[U16](1u16)");
+        same(env, &fx.run("drp", 0, &[&format!("{e}::v0_A")]), "mir::Res::Ret[U16](1u16)");
         // negative twin: the variant with glue (its drop code is not read)
-        same(env, &fx.run("drp", 0, &[&format!("{e}::v1_B(3u16)")]), "None[U16]");
+        same(env, &fx.run("drp", 0, &[&format!("{e}::v1_B(3u16)")]), "mir::Res::Stuck[U16]");
     });
 }
 
@@ -609,15 +814,15 @@ fn a_drop_with_glue_is_nothing_only_for_a_variant_without_glue() {
 fn leaves_are_their_models_through_the_referent() {
     with_env(|env| {
         let fx = load(env, VALUES);
-        same(env, &fx.run("get", 0, &["Cons[U8](5u8, Cons[U8](6u8, Nil[U8]))"]), "Some[Tuple2(List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError))](tuple2[List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError)](Cons[U8](6u8, Nil[U8]), crate::__lift::Result::Ok[U8, crate::__lift::TryGetError](5u8)))");
-        same(env, &fx.run("get", 0, &["Nil[U8]"]), "Some[Tuple2(List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError))](tuple2[List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError)](Nil[U8], crate::__lift::Result::Err[U8, crate::__lift::TryGetError](crate::__lift::TryGetError::TryGetError)))");
+        same(env, &fx.run("get", 0, &["Cons[U8](5u8, Cons[U8](6u8, Nil[U8]))"]), "mir::Res::Ret[Tuple2(List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError))](tuple2[List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError)](Cons[U8](6u8, Nil[U8]), crate::__lift::Result::Ok[U8, crate::__lift::TryGetError](5u8)))");
+        same(env, &fx.run("get", 0, &["Nil[U8]"]), "mir::Res::Ret[Tuple2(List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError))](tuple2[List(U8), crate::__lift::Result(U8, crate::__lift::TryGetError)](Nil[U8], crate::__lift::Result::Err[U8, crate::__lift::TryGetError](crate::__lift::TryGetError::TryGetError)))");
         // two pushes through the same `&mut Vec`: both land, in order
-        same(env, &fx.run("push2", 0, &["Nil[U32]"]), "Some[List(U32)](Cons[U32](1u32, Cons[U32](2u32, Nil[U32])))");
+        same(env, &fx.run("push2", 0, &["Nil[U32]"]), "mir::Res::Ret[List(U32)](Cons[U32](1u32, Cons[U32](2u32, Nil[U32])))");
         // `&a[..=j]`: a panic past the end
         let a = "pair(Array U8 4usize, Cons[U8](1u8, Cons[U8](2u8, Cons[U8](3u8, Cons[U8](4u8, Nil[U8])))), refl(Int, 4int))";
-        same(env, &fx.run("upto", 0, &[a, "1usize"]), "Some[Usize](2usize)");
-        same(env, &fx.run("upto", 0, &[a, "4usize"]), "None[Usize]");
-        same(env, &fx.run("len", 0, &[a]), "Some[Usize](4usize)");
+        same(env, &fx.run("upto", 0, &[a, "1usize"]), "mir::Res::Ret[Usize](2usize)");
+        same(env, &fx.run("upto", 0, &[a, "4usize"]), "mir::Res::Panic[Usize]");
+        same(env, &fx.run("len", 0, &[a]), "mir::Res::Ret[Usize](4usize)");
     });
 }
 
@@ -625,8 +830,8 @@ fn leaves_are_their_models_through_the_referent() {
 fn an_unmodeled_construct_is_none_on_its_path_only_and_named() {
     with_env(|env| {
         let fx = load(env, VALUES);
-        same(env, &fx.run("un", 0, &["false"]), "Some[U16](2u16)");
-        same(env, &fx.run("un", 0, &["true"]), "None[U16]");
+        same(env, &fx.run("un", 0, &["false"]), "mir::Res::Ret[U16](2u16)");
+        same(env, &fx.run("un", 0, &["true"]), "mir::Res::Stuck[U16]");
         let faults = &fx.lf("un").faults;
         assert!(faults.iter().any(|f| f.starts_with("bb1: statement 0") && f.contains("Unsupported(\"type FnPtr(..)\")")), "{faults:?}");
     });
@@ -855,11 +1060,11 @@ fn rotations_take_their_amount_modulo_the_width() {
     with_env(|env| {
         let fx = load(env, WIDEN);
         // 0x8000_0001 rotated left by 1 is 3; by 33 the same (Rust: the amount modulo 32)
-        same(env, &fx.run("rotl", 0, &["2147483649u32", "1u32"]), "Some[U32](3u32)");
-        same(env, &fx.run("rotl", 0, &["2147483649u32", "33u32"]), "Some[U32](3u32)");
+        same(env, &fx.run("rotl", 0, &["2147483649u32", "1u32"]), "mir::Res::Ret[U32](3u32)");
+        same(env, &fx.run("rotl", 0, &["2147483649u32", "33u32"]), "mir::Res::Ret[U32](3u32)");
         // negative twin: a rotation is not a shift (the high bit comes back)
-        same(env, &fx.run("rotl", 0, &["2147483648u32", "1u32"]), "Some[U32](1u32)");
-        same(env, &fx.run("rotr", 0, &["1u8", "1u32"]), "Some[U8](128u8)");
+        same(env, &fx.run("rotl", 0, &["2147483648u32", "1u32"]), "mir::Res::Ret[U32](1u32)");
+        same(env, &fx.run("rotr", 0, &["1u8", "1u32"]), "mir::Res::Ret[U8](128u8)");
         assert!(fx.lf("rotl").faults.is_empty() && fx.lf("rotr").faults.is_empty());
     });
 }
@@ -869,13 +1074,13 @@ fn signed_checked_arithmetic_flags_exactly_the_overflows_of_the_signed_range() {
     with_env(|env| {
         let fx = load(env, WIDEN);
         let i32v = |v: i32| format!("crate::__lift::I32::I32({}u32)", v as u32);
-        let pair = |v: i32, o: bool| format!("Some[Tuple2(crate::__lift::I32, Bool)](tuple2[crate::__lift::I32, Bool]({}, {o}))", i32v(v));
+        let pair = |v: i32, o: bool| format!("mir::Res::Ret[Tuple2(crate::__lift::I32, Bool)](tuple2[crate::__lift::I32, Bool]({}, {o}))", i32v(v));
         same(env, &fx.run("sadd", 0, &[&i32v(i32::MAX), &i32v(1)]), &pair(i32::MIN, true));
         same(env, &fx.run("sadd", 0, &[&i32v(-1), &i32v(i32::MIN)]), &pair(i32::MAX, true));
         same(env, &fx.run("sadd", 0, &[&i32v(-5), &i32v(3)]), &pair(-2, false));
         // negative twin: what is an overflow of the unsigned bits (-1 + 1) is none here
         same(env, &fx.run("sadd", 0, &[&i32v(-1), &i32v(1)]), &pair(0, false));
-        let p8 = |v: i8, o: bool| format!("Some[Tuple2(U8, Bool)](tuple2[U8, Bool]({}u8, {o}))", v as u8);
+        let p8 = |v: i8, o: bool| format!("mir::Res::Ret[Tuple2(U8, Bool)](tuple2[U8, Bool]({}u8, {o}))", v as u8);
         same(env, &fx.run("ssub", 0, &[&format!("{}u8", i8::MIN as u8), "1u8"]), &p8(i8::MAX, true));
         same(env, &fx.run("ssub", 0, &["0u8", &format!("{}u8", i8::MIN as u8)]), &p8(i8::MIN, true));
         same(env, &fx.run("ssub", 0, &[&format!("{}u8", (-100i8) as u8), &format!("{}u8", 27u8)]), &p8(-127, false));
@@ -890,10 +1095,10 @@ fn the_residual_of_question_mark_on_option_is_its_one_value_even_unassigned() {
         let fx = load(env, WIDEN);
         // `Option<Infallible>` has one value, `None`: read unassigned (rustc drops
         // the assignment of a zero-sized value) and as a zero-sized constant
-        same(env, &fx.run("resid", 0, &[]), "Some[Bool](true)");
-        same(env, &fx.run("residc", 0, &[]), "Some[Option(mir::Infallible)](None[mir::Infallible])");
+        same(env, &fx.run("resid", 0, &[]), "mir::Res::Ret[Bool](true)");
+        same(env, &fx.run("residc", 0, &[]), "mir::Res::Ret[Option(mir::Infallible)](None[mir::Infallible])");
         // negative twin: an `Option<u8>` read unassigned is a failure
-        same(env, &fx.run("unset8", 0, &[]), "None[Bool]");
+        same(env, &fx.run("unset8", 0, &[]), "mir::Res::Stuck[Bool]");
     });
 }
 
@@ -902,7 +1107,7 @@ fn bytes_transmuted_to_a_word_are_its_little_endian_bytes() {
     with_env(|env| {
         let fx = load(env, WIDEN);
         let a = "pair(Array U8 4usize, Cons[U8](1u8, Cons[U8](2u8, Cons[U8](3u8, Cons[U8](4u8, Nil[U8])))), refl(Int, 4int))";
-        same(env, &fx.run("le4", 0, &[a]), "Some[U32](67305985u32)");
+        same(env, &fx.run("le4", 0, &[a]), "mir::Res::Ret[U32](67305985u32)");
         // negative twin: three bytes are no `u32` (not modeled)
         assert!(fx.lf("le3").faults.iter().any(|f| f.contains("transmute")), "{:?}", fx.lf("le3").faults);
     });
@@ -914,13 +1119,13 @@ fn core_slice_iterator_is_its_slice_and_index_and_yields_each_element_once() {
         let fx = load(env, WIDEN);
         assert_eq!(fx.lit.state.adt_ty("std::slice::Iter<'_, u8>").as_deref(), Some("Tuple2((Slice U8), Usize)"));
         // 1 + 2 + 250: the header is entered once per element and once more
-        same(env, &fx.run("sum", 4, &[&sl(&[1, 2, 250])]), "Some[U64](253u64)");
-        same(env, &fx.run("sum", 1, &[&sl(&[])]), "Some[U64](0u64)");
+        same(env, &fx.run("sum", 4, &[&sl(&[1, 2, 250])]), "mir::Res::Ret[U64](253u64)");
+        same(env, &fx.run("sum", 1, &[&sl(&[])]), "mir::Res::Ret[U64](0u64)");
         // negative twin: one unit of fuel less is out of fuel
-        same(env, &fx.run("sum", 3, &[&sl(&[1, 2, 250])]), "None[U64]");
+        same(env, &fx.run("sum", 3, &[&sl(&[1, 2, 250])]), "mir::Res::Stuck[U64]");
         // a function only named like core's `next` is read from its MIR (here
         // `unreachable`): the model is core's, by its exact path
-        same(env, &fx.run("mysum", 4, &[&sl(&[1, 2, 250])]), "None[U64]");
+        same(env, &fx.run("mysum", 4, &[&sl(&[1, 2, 250])]), "mir::Res::Stuck[U64]");
         assert!(fx.lf("sum").faults.is_empty(), "{:?}", fx.lf("sum").faults);
     });
 }
@@ -929,8 +1134,8 @@ fn core_slice_iterator_is_its_slice_and_index_and_yields_each_element_once() {
 fn a_slices_get_by_a_range_is_the_subslice_or_none() {
     with_env(|env| {
         let fx = load(env, WIDEN);
-        let some = |b: &[u8]| format!("Some[Option(Slice U8)](Some[Slice U8]({}))", sl(b));
-        let none = "Some[Option(Slice U8)](None[Slice U8])";
+        let some = |b: &[u8]| format!("mir::Res::Ret[Option(Slice U8)](Some[Slice U8]({}))", sl(b));
+        let none = "mir::Res::Ret[Option(Slice U8)](None[Slice U8])";
         same(env, &fx.run("win", 0, &[&sl(&[10, 20, 30]), "1usize", "3usize"]), &some(&[20, 30]));
         same(env, &fx.run("win", 0, &[&sl(&[10, 20, 30]), "3usize", "3usize"]), &some(&[]));
         // `None` is a value here, not a panic: start past end, end past the length
@@ -948,8 +1153,9 @@ fn a_slices_index_by_a_range_is_the_subslice_or_a_panic() {
     with_env(|env| {
         let fx = load(env, WIDEN);
         let s = sl(&[10, 20, 30]);
-        let some = |b: &[u8]| format!("Some[Slice U8]({})", sl(b));
-        let panic = "None[Slice U8]";
+        let some = |b: &[u8]| format!("mir::Res::Ret[Slice U8]({})", sl(b));
+        let panic = "mir::Res::Panic[Slice U8]";
+        let stuck = "mir::Res::Stuck[Slice U8]";
         for f in ["sto", "sfrom", "srange", "sincl"] {
             assert!(fx.lf(f).faults.is_empty(), "{f}: {:?}", fx.lf(f).faults);
         }
@@ -969,9 +1175,9 @@ fn a_slices_index_by_a_range_is_the_subslice_or_a_panic() {
         same(env, &fx.run("sincl", 0, &[&s, "3usize"]), panic);
         // negative twins: a crate's own range type, a crate's own `Index`
         assert!(fx.lf("smyrange").faults.iter().any(|f| f.contains("k::myops::Range")), "{:?}", fx.lf("smyrange").faults);
-        same(env, &fx.run("smyrange", 0, &[&s, "1usize", "3usize"]), panic);
+        same(env, &fx.run("smyrange", 0, &[&s, "1usize", "3usize"]), stuck);
         assert!(fx.lf("smyidx").faults.iter().any(|f| f.contains("k::myops::Index::index")), "{:?}", fx.lf("smyidx").faults);
-        same(env, &fx.run("smyidx", 0, &[&s, "1usize", "3usize"]), panic);
+        same(env, &fx.run("smyidx", 0, &[&s, "1usize", "3usize"]), stuck);
     });
 }
 

@@ -49,6 +49,18 @@
 //! refused (*unrelated*) when an abstracted part still reaches an
 //! implementation through another global's definition. The kernel checks the
 //! abstracted implication, so no proof can unfold the real body.
+//!
+//! **A panic contract is compared only by review.** A function's panic
+//! contract (`panics_when(p)`, DESIGN.md §16.5) reaches its kernel type as
+//! an ordinary hypothesis, the no-panic clause `Not(p)`, so the kernel
+//! statement cannot tell `requires(!(p))` (the caller must avoid `p`) from
+//! `panics_when(p)` (the function promises to panic on `p`). Any change in
+//! whether a function has a panic contract, or in its condition as
+//! rendered, is therefore never *equivalent*, in either direction and
+//! whatever the kernel proves of the two types: the item is *unrelated*
+//! ("the panic contract changed"), and with it every item that depends on
+//! it. This decides only the classification: what an item hashes and
+//! renders is unchanged.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
@@ -194,6 +206,36 @@ fn lams(bs: &[(Name, Rel, Tm)], body: Tm) -> Tm {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").chars().take(300).collect()
+}
+
+/// The panic contract of an item as its review statement renders it (the
+/// `panics_when p` clause of a function's contract, `deelab`; a lock entry
+/// stores the same lines): `None` without one. The kernel statement does
+/// not carry it (the no-panic clause is an ordinary hypothesis `Not(p)`).
+fn panic_contract<S: AsRef<str>>(statement: &[S]) -> Option<Vec<String>> {
+    let lines: Vec<String> = statement.iter().flat_map(|s| s.as_ref().lines()).map(str::trim).filter(|l| l.starts_with("panics_when ")).map(str::to_string).collect();
+    (!lines.is_empty()).then_some(lines)
+}
+
+/// Why a change is not equivalent because of the panic contract: `Some`
+/// when the old and the new statement differ in whether the function has a
+/// panic contract or in its condition (module docs).
+fn panic_change<A: AsRef<str>, B: AsRef<str>>(old: &[A], new: &[B]) -> Option<String> {
+    let (o, n) = (panic_contract(old), panic_contract(new));
+    if o == n {
+        return None;
+    }
+    let show = |p: &Option<Vec<String>>| p.as_ref().map(|l| format!("`{}`", l.join(" "))).unwrap_or_else(|| "none".into());
+    let what = match (&o, &n) {
+        (None, Some(_)) => "a panic contract was added",
+        (Some(_), None) => "the panic contract was removed",
+        _ => "the panic condition changed",
+    };
+    Some(format!(
+        "{what} ({} -> {}): a panic contract reaches the kernel type only as its no-panic clause, an ordinary hypothesis (`requires(!(p))` and `panics_when(p)` have the same type), so a change in it is never equivalent: review it",
+        show(&o),
+        show(&n)
+    ))
 }
 
 /// The classifier (on the elaboration thread of the new surface).
@@ -347,7 +389,11 @@ impl<'a> Classifier<'a> {
                     let new_stmt = LockEntry::of(&n, &self.new.target).statement;
                     if o.hash == n.hash {
                         if o.statement != new_stmt {
-                            out.push(Change { key: k, what: What::Restated, class: Some(Class::Equivalent), reason: "the same hash: only the rendering of the statement changed".into(), old: o.statement.clone(), new: new_stmt });
+                            let (class, reason) = match panic_change(&o.statement, &new_stmt) {
+                                Some(why) => (Class::Unrelated, why),
+                                None => (Class::Equivalent, "the same hash: only the rendering of the statement changed".into()),
+                            };
+                            out.push(Change { key: k, what: What::Restated, class: Some(class), reason, old: o.statement.clone(), new: new_stmt });
                         }
                         continue;
                     }
@@ -419,6 +465,12 @@ impl<'a> Classifier<'a> {
         let (Some(o), Some(n)) = (self.old.get(key).cloned(), self.new.get(key).cloned()) else { return (Class::Unrelated, "not on both sides".into()) };
         if o.hash == n.hash {
             return (Class::Equivalent, "unchanged".into());
+        }
+        // before the kernel comparison, which cannot see a panic contract
+        // (and before the identical-statement rule, which would call
+        // `requires(!(p))` to `panics_when(p)` equivalent)
+        if let Some(why) = panic_change(&o.statement, &n.statement) {
+            return (Class::Unrelated, why);
         }
         if let Err(why) = self.same_dependencies(key) {
             return (Class::Unrelated, why);

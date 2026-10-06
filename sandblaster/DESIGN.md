@@ -77,34 +77,49 @@ definition; the implementation is free.** The code still defines behavior
 where no law reaches, inside internal functions, which callers can observe
 only through host-callable functions, whose behavior the laws file pins.
 
-For a function `f` with precondition `pre_f`, a declared panic condition
-`panic_f` and a reference `R`, "implementation equals reference" is:
+For a function `f` with precondition `pre_f` (its `requires`, host
+obligations), a declared panic condition `panic_f` (its panic contract
+`panics_when(p)`, §16.5; `false` when it has none) and a reference `R`,
+"implementation equals reference" is:
 
 | | statement | status |
 | --- | --- | --- |
-| E1, the value | `∀x. pre_f(x) → S_f(x) = R(x)`: a kernel lemma over S (for a characterization, the laws themselves) | built |
-| E2, the code | `L::thm::f`: on every `x` with `pre_f(x)` rustc's MIR terminates without panic and returns `S_f(x)`, final `&mut` values included | built, every build |
-| E3, the panics | `∀x. ¬pre_f(x) ∧ panic_f(x) →` the MIR panics on `x` | not built (C1, §18) |
-| E4, the rest | neither: nothing is promised; the record lists the precondition as a host obligation | built |
+| E1, the value | `∀x. pre_f(x) ∧ ¬panic_f(x) → S_f(x) = R(x)`: a kernel lemma over S (for a characterization, the laws themselves) | built |
+| E2, the code | `L::thm::f`: on every `x` with `pre_f(x) ∧ ¬panic_f(x)` rustc's MIR terminates without panic and returns `S_f(x)`, final `&mut` values included | built, every build |
+| E3, the panics | `L::pthm::f`: on every `x` with `pre_f(x) ∧ panic_f(x)` rustc's MIR panics (a panic, never a loop, an abort or undefined behaviour) | built (C1), every build of a function with a panic contract |
+| E4, the rest | `¬pre_f(x)`: nothing is promised; the record lists the precondition as a host obligation | built |
 
-A function without a precondition (all of varint's boundary, most of the
-MMR) gets "equal on every input of its type" from E1 and E2. Inside the
-domain there is no panic to compare: verified code cannot panic there, and
-a defensive `assert!` is proven never to fire.
+E2 and E3 together: on its domain the function panics exactly when its
+laws say. A function without a precondition or a panic contract (all of
+varint's boundary, most of the MMR) gets "equal on every input of its type"
+from E1 and E2: verified code without a panic contract cannot panic in its
+domain, and a defensive `assert!` is proven never to fire. Two limits: the
+host code it calls through the buffer traits is modeled without a capacity
+(a `BufMut` is the bytes put so far), so a write into a `&mut [u8]` too
+short for it panics inside `bytes`, outside the verified code; and an
+overflow panic is rustc's overflow check, so it is a panic only in a build
+with overflow checks on (§1.1 item 7). A documented
+panic is a panic contract, so the laws say when the code panics, and a new
+body that drops the `assert!` fails E3.
 
 ### What a green build means
 
 For every function read from the verified files: the MIR rustc compiles
 terminates without panic on every input that satisfies the function's
-declared precondition, with the value of its structured reading; every law
-holds of these functions; every host-callable function is determined by the
-laws file (§15.5); the laws file equals the accepted lock. All of this rests
-on the trusted base of §1.1.
+declared precondition and not its panic condition, with the value of its
+structured reading, and panics on every such input that satisfies its panic
+condition; every law holds of these functions; every host-callable function
+is determined by the laws file (§15.5); the laws file equals the accepted
+lock. All of this rests on the trusted base of §1.1.
 
-It does **not** mean anything about inputs outside the precondition (until
-panic contracts, C1); that the laws say what the author meant (that is the
-reviewer's reading, helped by known answers and the on-demand spec-mutation
-tool, §15.7); or that the code is fast (only a benchmark says that, §17).
+It does **not** mean anything about inputs outside the precondition; about
+a build without overflow checks, where an overflow wraps instead of
+panicking (§1.1 item 7); about the host code the verified functions call
+through the buffer traits, modeled without a capacity (a write into a
+`&mut [u8]` too short for it panics inside `bytes`); that
+the laws say what the author meant (that is the reviewer's reading, helped
+by known answers and the on-demand spec-mutation tool, §15.7); or that the
+code is fast (only a benchmark says that, §17).
 
 ### Honest evidence
 
@@ -271,7 +286,19 @@ lift, is not listed there yet (§19, stale text).
    assumption; host code calls a `#[target_feature]` function only on a
    CPU with those features; a process free of undefined behavior (host `unsafe`,
    `transmute` and C externs can forge any value, including values of
-   invariant types).
+   invariant types); and **overflow checks on** in the build that compiles
+   the verified files. The MIR is extracted with them and L reads
+   `RuntimeChecks(overflow)` as true; the build refuses an extraction
+   without them, but cannot see the profile that compiles the crate
+   (`cfg(overflow_checks)` is unstable, and Cargo does not pass a profile's
+   `overflow-checks` to build scripts). A panic contract whose panic is an
+   overflow or underflow (13 of the MMR's 18: the position and location
+   arithmetic and `children`; all 13 of the verifier's) holds only with
+   them. Every profile of this workspace sets them; a downstream crate's
+   default release profile does not, and there that code wraps instead of
+   panicking. (The value theorems carry over: where they hold no checked
+   operation overflows, so a build without the checks computes the same
+   values.)
 8. **The lift** (`#[lift(mir = "m.sbmir", ..)] mod m;`, SEMANTICS.md §19,
    `docs/mir-lift.md` §20): the exec items the lift produces from a Rust
    file mean what rustc compiles from it. Its parts:
@@ -279,31 +306,46 @@ lift, is not listed there yet (§19, stale text).
      definition per MIR instance, one arm per basic block, a table-driven
      translation of a fixed set of MIR constructs. rustc has already
      expanded macros and lowered `?`, closures, operators, iterators and
-     loops. Files: the generator `mir/literal.rs` (1,297 code lines) and its
-     library `literal.core` (186); the theorem statement `mir/stmt.rs`
-     (213); the parse `mir/ir.rs` and `sexp.rs` (482, 131); names and load
-     checks `mir/mod.rs` (531); the printer `mirx` (1,122: a rustc driver on
-     the pinned nightly of the stable release; its output is checked in
-     with the sources' SHA-256). Then the gate's trusted check
-     `mir/gate.rs` (159, plus about 27 at its call site
+     loops. A run's outcome is `Ret(v)`, `Panic` or `Stuck`
+     (`mir::Res`, C1): `Panic` only where the MIR certainly panics (a
+     failed `Assert`, a block every path of which ends in a call of a panic
+     function, a callee's panic, an index leaf past the end), `Stuck` for
+     everything else that gives no value (out of fuel, undefined
+     behaviour, an unmodeled construct; `docs/mir-lift.md` §20.4). Files:
+     the generator `mir/literal.rs` (1,436 code lines; 1,297 before C1) and
+     its library `literal.core` (203; 186); the theorem statements
+     `mir/stmt.rs` (240; 213); the parse `mir/ir.rs` and `sexp.rs` (482,
+     131); names and load checks `mir/mod.rs` (531); the printer `mirx`
+     (1,122: a rustc driver on the pinned nightly of the stable release; its
+     output is checked in with the sources' SHA-256). Then the gate's
+     trusted check `mir/gate.rs` (176; 159, plus about 30 at its call site
      `driver::gates::theorem_gate`): L enters the kernel only through it,
      and a function is accepted only when its MIR instance is that
-     function, the kernel holds `L::thm::f` with a type α-equal to
-     `stmt.rs`'s statement generated afresh, reaching only definitions of
-     the elaboration, of L's library or of its own extraction, and every
-     module type its MIR reaches is declared alike by the MIR and the
-     subset. Then the elaborator's precondition check (39: a function read
-     from MIR is elaborated only when each precondition is α-equal to its
-     declared contract's clause) and the lift glue (about 260). **About
-     4.45k code lines in all** (re-counted after the removal; 4.55k
-     before it).
+     function, the kernel holds `L::thm::f` (and, with a panic contract,
+     listed as the function declares it, `L::pthm::f`) with a type α-equal
+     to `stmt.rs`'s statement generated
+     afresh, reaching only definitions of the elaboration, of L's library or
+     of its own extraction, and every module type its MIR reaches is
+     declared alike by the MIR and the subset. Then the elaborator's
+     precondition check (39: a function read from MIR is elaborated only
+     when each precondition, a panic contract's no-panic clause included,
+     is α-equal to its declared contract's clause) and the lift glue (about
+     300, the panic contract's attachment and no-panic clause included).
+     **About 4.69k code lines in all** (4.45k before C1, which added about
+     237: the outcome split and `must_panic` with its tables of panic
+     functions and message constructors in L, the `Assert` kinds that
+     panic, the panic statement, the gate's second theorem, the glue).
    * **The theorem.** S (`mir/read.rs` 2,975, steered by `mir/cfg.rs` 298)
      is untrusted. Every build checks, per lifted function,
-     `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0 (Some init(x̄))
-     = Some(erase(S_f x̄))` (total correctness, final `&mut` referents
-     included), proven by the untrusted walker (`mir/simproof.rs`,
-     `mir/checked.rs`) and checked by the kernel. Today: varint 63 of 63,
-     MMR 69 of 69, verifier 69 of 69.
+     `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0 (Ret init(x̄))
+     = Ret(erase(S_f x̄))` (total correctness, final `&mut` referents
+     included), and per panic contract `L::pthm::f : Π x̄ (pre with P for
+     Not(P)). Σ k. Π n (k ≤ len n). run n b0 (Ret init(x̄)) = Panic`, proven
+     by the untrusted walker (`mir/simproof.rs`, `mir/checked.rs`; a panic
+     theorem by its panic mode) and checked by the kernel. Today: varint 63
+     of 63 (no function of varint panics on its own; a write into a
+     too-short `&mut [u8]` panics inside `bytes`), MMR 69 of 69 with 18 panic
+     theorems, verifier 69 of 69 with 13.
    * **The item skeleton**: `front/src/lift.rs` and `lift_open.rs`
      (`macro_rules!` expansion of item macros, inline modules, sealed-trait
      monomorphization, state passing in signatures, struct and enum
@@ -323,8 +365,10 @@ lift, is not listed there yet (§19, stale text).
    original is compiled by the build's rustc (overflow checks on) and run
    on deterministic, coverage-driven inputs; outputs, errors and buffer
    states must agree, or the build fails with the input. L itself is also
-   run and compared with rustc (the first 64 inputs per function). It is a
-   test, not a proof. Fault injection (`tests/fault_injection.rs`) shows
+   run and compared with rustc (the first 64 inputs per function), and on
+   inputs sought inside each panic contract's panic region rustc must
+   panic and L give `Panic` (a contract compared on no input fails). It
+   is a test, not a proof. Fault injection (`tests/fault_injection.rs`) shows
    that a mutated MIR construct of each kind, and both historical
    structuring bugs, break a theorem. `tests/literal.rs` checks each
    construct of L against rustc's semantics with negative twins. Every
@@ -388,6 +432,16 @@ host/
 * `#[cfg(sandblaster)]` items are **ghost**: never compiled by rustc; the
   checker treats `cfg(sandblaster)` as true. `#![forbid(unsafe_code)]` is
   required at the DSL root.
+* **No `unsafe`, for good** (user decision, 2026-10-05: proof-justified
+  `unsafe` in shipped Commonware code? "then remove it"). Verified code is
+  safe Rust: the DSL root forbids `unsafe_code`; the front end refuses an
+  `unsafe` block (the lift: in a body it reads, and any `unsafe` written in
+  a body read from MIR, even around an operation L reads), `unsafe fn`
+  (typeck) and `unsafe impl` (resolve); and L reads raw pointers, raw
+  borrows' dereferences and transmutes other than its few modeled ones as
+  stuck. There is no memory model for raw pointers and no plan for one;
+  code that needs `unsafe` stays unverified host code outside the verified
+  files (its undefined behavior is the assumption of §1.1 item 7).
 * Target information comes from `CARGO_CFG_TARGET_*`, never from the host.
 * A crate written entirely in sandblaster's own dialect (no `#[lift]`) can
   be checked (`sandblaster check`): it gets a verdict and no code.
@@ -401,8 +455,9 @@ path (`#[lift(in_place, ..)] #[path = "../../src/x.rs"] mod x;`, SEMANTICS.md
 rustc compiles exactly the files the verifier read. The build runs the
 proofs, every §15 gate, the theorem gate and the conformance check, then
 writes a record `OUT_DIR/<name>-verified.txt`: the verified items, the
-preconditions host callers must meet (host obligations), and every item
-left out. This is the mode the model is built for.
+preconditions host callers must meet (host obligations), the panic
+contracts (proven: where each function panics), and every item left out.
+This is the mode the model is built for.
 
 **Module mode** (`compile_module(root, module_file)`; codec's varint). One
 pure file becomes a verified module: a lifted copy of it is emitted to
@@ -616,7 +671,11 @@ Ghost code is never compiled by rustc. It is parsed by `syn`.
 ### 4.2 Contracts on exec functions
 
 `#[requires(p)]` (several are conjoined, each its own irrelevant binder),
-`#[ensures(|ret| p)]`, `#[decreases(e)]` / `#[decreases(e, max = C)]`.
+`#[ensures(|ret| p)]`, `#[decreases(e)]` / `#[decreases(e, max = C)]`, and
+for a lifted function read from MIR the **panic contract**
+`panics_when(p);` (laws file only, §16.5): on its domain the function
+panics exactly when the proposition `p` holds; its no-panic clause `!(p)`
+is its last precondition, so its `ensures` hold where it does not panic.
 Measures are inferred for slice-pattern recursion and for `n − k` under a
 path condition. For lifted functions, contracts are attached from the laws
 file or a proof file with `#[lift_attach(path)]` (§15.6). Every
@@ -1317,8 +1376,13 @@ obligation per section.
   characterizations of boolean functions (`f(x) == true ↔ P(x)`);
   extensionality of the lift prelude's `Ordering` enums; recursive
   equations by induction.
-* **Domain.** Determinacy is over inputs satisfying `requires`. Every such
-  `requires` must survive the non-vacuity refuter and be met by an example.
+* **Domain.** Determinacy is over inputs satisfying `requires`, a panic
+  contract's no-panic clause included. On the rest of its domain a function
+  with a panic contract panics, which the panic contract states and its
+  panic theorem proves (E3), so the documented panics are part of what is
+  pinned: every host-callable function's behaviour on its domain is fully
+  determined, value or panic. Every such `requires` must survive the
+  non-vacuity refuter and be met by an example.
 
 ### 15.6 The specification surface and `SPEC.lock`
 
@@ -1345,7 +1409,8 @@ file is a **proof-internal summary**: proven, a fact at every call, never
 locked, never a determinacy hypothesis. Nothing a proof file defines may
 appear in a locked statement (`surface::proof_file_errors`). On a locked
 item, only the laws file may attach a precondition, a depth bound or an
-invariant (`surface::attached_proof_file_errors`). Attachments name their
+invariant (`surface::attached_proof_file_errors`); a panic contract only
+the laws file states at all (the lift refuses one from a proof file). Attachments name their
 target by full path (`crate::m::S::f`; an impl on a primitive by its lifted
 name, `crate::merkle::position::u64__from__Position`). The source text a lock
 item hashes is the statement's own tokens (`hir::Attached`,
@@ -1476,6 +1541,8 @@ mutants the edit can affect; resource outcomes are never stored.
 | a vocabulary function the known answers do not pin | the spec-mutation tool, on demand; what binds code to statements is unchanged |
 | an unvalidated or edited hardware model | per-model evidence, fail-closed verdicts, `target-model:` lock items (§9) |
 | a hardware variant chosen at run time | `#[implements]` and dispatch are refused; a `#[target_feature]` function is called only by code with its features |
+| a documented panic that a new body drops, or a precondition that hides where the code panics | the panic contract (§16.5): a panic theorem for every documented panic, refused when the code returns, loops or aborts there |
+| a loop, an abort or undefined behaviour passed off as a panic | L reads `Panic` only for a failed `Assert`, a call of a panic function on every path, a callee's panic, an index leaf; everything else is `Stuck` (§1.1 item 8) |
 
 ### 15.9 The counterexample engine (untrusted, diagnostic)
 
@@ -1525,7 +1592,15 @@ S0–S5 landed (2026-09): the §15 interface, spec functions and refinement,
 invariants and views, computed sections with `complete_p`, the law rules,
 the counterexample engine, the crate path with every gate on and no
 transitional mode. On 2026-10-05 spec mutation and LR8 left the gates for
-the on-demand tool. Three Commonware roots verify with accepted locks:
+the on-demand tool, and panic contracts (C1, §16.5) landed and were
+applied: the MMR's and the verifier's laws state every documented panic
+of their host-callable functions (18 and 13 panic contracts: position and
+location arithmetic, `to_nearest_size`, `PeakIterator::new` and
+`Family::peaks`, `children`, `chunk_peaks`), each with its panic theorem;
+varint's functions do not panic on their own (a write into a `&mut [u8]`
+too short for it panics inside `bytes`). Three Commonware roots verify; their
+locks were accepted before the panic contracts, whose lock changes wait
+for review:
 
 | root | mode | laws file | MIR theorems | lock root |
 | --- | --- | --- | ---: | --- |
@@ -1541,7 +1616,7 @@ Build times after the refocus: codec 5.5 min for the whole `cargo test`
 
 Each becomes mandatory in the release that lands it.
 
-* **Panic contracts** (C1, first): §16.5.
+* **Panic contracts** (C1): built, §16.5.
 * **Behavior snapshots and the unconstrained-behavior report**: the code's
   outputs on a deterministic input set, locked, so a behavior change no law
   covers shows up concretely in the lock diff. Not built.
@@ -1577,8 +1652,8 @@ models, by native validation, §9).
 | loops with invariants | loop attachments, loop lemmas, fuel functions | iterator adapters; fold matching | per-adapter models; fold matching |
 | bit tricks | `bvnorm`, K1 bit-count axioms, `stdlib::bits`, proof by computation | symbolic shifts and masks, carries, `u128` | C4, then C11 |
 | SIMD lanes | models retained and validated (§9); dialect code proven over them | reading `core::arch` from MIR (S and L), loads, dispatch | C8 |
-| `unsafe` | refused | unchecked APIs; raw pointers | C9, C10 (gated) |
-| panics outside the domain | — (the gate's panic statement was removed; it seeds C1) | panic contracts | C1 |
+| documented panics | built and applied: panic contracts (`panics_when`, the panic theorem; §16.5); panic lemmas restate a condition in the code's terms | a panic reached only after many loop iterations (the panic walk's fuel bound); panics inside lifted callees' loops; shifts by a variable amount need a per-amount lemma (C4) | a panic loop lemma, when a pilot needs one |
+| `unsafe` | refused, and out of scope for good (§2, §16.5) | — | — |
 | proof reuse and stability | per-module verdicts; theorem and mutant caches | per-function checking; cross-root reuse | C6, C7 |
 
 ### 16.1 Relational and equivalence proofs
@@ -1668,8 +1743,10 @@ readings:
   through the front end, which already resolves `core::arch`, types vector
   values and elaborates intrinsic calls to the models. Missing: lifted
   modules with `#[target_feature]` functions end to end (attachments,
-  contracts over vector values), `unsafe` blocks around value-only
-  intrinsics in code older than Rust 1.86, and loads (below).
+  contracts over vector values). Code older than Rust 1.87 that wraps
+  value-only intrinsics in `unsafe` blocks is first made safe (they are
+  safe calls inside a `#[target_feature]` function now); loads are host
+  code (below).
 * **L** (the literal reading, trusted). `mirx` must print a call to a
   `core::arch` function as an intrinsic leaf (its stdarch path, its const
   generic immediates: rustc has already turned legacy immediate arguments
@@ -1682,12 +1759,17 @@ readings:
   checked on MIR (the function's `#[target_feature]` set, which `mirx`
   prints, covers each model's features). Trusted: +150–300 lines of L and
   `mirx`.
-* **Loads and stores** take raw pointers. First slice: read
-  `vld1q_u8(a.as_ptr())` and `vld1q_u8(s.as_ptr().add(i))` patterns as the
-  array model applied to the addressed sub-array, with the bounds as an
-  obligation (+50–100 trusted lines); general pointers need C10.
-  `transmute` between a vector and an array of the same lanes reads as the
-  identity on `Array(lane, lanes)`.
+* **Loads and stores** take raw pointers and need `unsafe`, which verified
+  code never contains (§2, §16.5). A verified SIMD function takes and
+  returns vectors and arrays and builds its vectors with value-only
+  intrinsics (safe inside a `#[target_feature]` function since Rust 1.87);
+  the loads that feed it, and any `transmute` between a vector and an
+  array, stay in unverified host code at the boundary. (The `unsafe`
+  load/store templates of the removed `sandblaster::arch` helpers left
+  `intrinsics.rs` with C1's lock acceptance, which changed every lock's
+  `builtins` line. The pointer forms' models in `targets` and their
+  surface entries, marked not callable, are unreachable under this
+  policy; the models are hashed into every lock's `target` line.)
 * **The walker and the theorem gate** treat model applications as opaque
   leaves equal on both sides; lane-wise proofs use `bvnorm` per lane.
 * **Dispatch.** A `#[target_feature]` function called from code without the
@@ -1701,46 +1783,133 @@ readings:
   item hashes are restated (not their statements) at that acceptance.
 
 Estimate: a first slice (value-only NEON intrinsics in a `#[target_feature]`
-function, no loads, no dispatch) 8–12 agent-days; with array loads,
-dispatch, x86 and tests 18–30 agent-days. Commonware's intrinsic code is the
+function, no dispatch) 8–12 agent-days; with dispatch, x86 and tests 15–25
+agent-days. Commonware's intrinsic code is the
 Reed–Solomon engines and curve25519's backends (pilot C); the SHA-256
 kernels are inline assembly, out of scope for any MIR-level tool. A cheaper
 first step is SWAR in safe Rust (eight byte lanes in a `u64`, pilot B).
 
-### 16.5 Panics outside the domain, and `unsafe`
+### 16.5 Panic contracts (C1, built), and no `unsafe`
 
-**Panic contracts (C1).** `PeakIterator::to_nearest_size` asserts `size <=
-MAX_NODES` and a host test checks the panic; the precondition excludes
-those inputs, so a new body without the `assert!` would verify and the host
-would silently get a wrong size. Plan: split L's failure outcome into
-**Panic** (a failed `Assert`, a diverging call) and **Stuck** (fuel, UB, an
-unmodeled construct), +60–120 trusted lines in L, `stmt.rs` and `gate.rs`;
-`panics_when(..)` contracts in the laws file, locked like preconditions,
-with the obligation `∀x. panics_when(x) → ∃k. run k b0 init(x) = Panic`
-proven by the walker along the guard's path; the record states three
-regions per host-callable function (domain, panic region, the rest).
-**C1 is seeded from the gate's panic statement removed with the optimizer**
-(user decision, 2026-10-05; all at `4a0e5a23fc`): `mir/stmt.rs`'s
-`statement_panic` (the `Option`-valued statement: where the reading is
-`None`, the literal run returns no value), `mir/gate.rs`'s
-`Ledger::accept_shipped_panic` with its checks `panic_exact` (no fault, no
-loop, no self-call, every block read as panicking diverges) and
-`must_diverge`, and `same_telescope_option`, and the walker's panic mode
-(`mir/simproof.rs`, `mir/checked.rs`: `L::pthm`, `L::plem`). C1 restores
-them from git, drops the optimizer's panic-explicit readings as the subject
-(the subject becomes the laws file's `panics_when`), and replaces the
-"nothing but a panic is `None`" restriction by the Panic/Stuck split. Total equivalence on every input,
-including where the original loops or returns garbage, is not offered: it
-would oblige an optimization to reproduce undocumented misbehavior.
+**Panic contracts.** `PeakIterator::to_nearest_size` asserts `size <=
+MAX_NODES` and a host test checks the panic. With the precondition `size
+<= MAX_NODES` alone, a new body without the `assert!` would verify and the
+host would silently get a wrong size. A **panic contract** makes the
+documented panic part of the laws (C1, 2026-10-05; `docs/mir-lift.md`
+§20.4–§20.6 is normative):
 
-**`unsafe` (gated on a user decision).** Level (a), C9: unsafe standard
-library APIs as leaves (`get_unchecked`, `unwrap_unchecked`, ...), each
-transcribing its documented safety precondition, so the obligation is the
-bounds check the safe version performs at run time (5–15 trusted lines
-each). Level (b), C10: a memory model for raw pointers (allocations with
-provenance, bounds-checked access, byte-level casts) with a syntactic
-no-aliasing rule stated plainly, +1,000–1,500 trusted lines; only if a
-pilot shows (a) and a shim are not enough.
+```rust
+#[lift_attach(crate::merkle::mmr::iterator::PeakIterator::to_nearest_size)]
+fn to_nearest_size_contract() {
+    panics_when((size.0 as Int) > crate::laws::max_nodes());
+}
+```
+
+* **Semantics.** `panics_when(p)`, `p` a proposition over the parameters
+  (the rules of a `requires`), attached in the laws file to a lifted
+  function read from MIR (never from a proof file: it is locked; at most
+  one per function: join conditions with `||`). On the function's domain,
+  where its `requires` hold, it panics **if and only if** `p` holds.
+  * With `requires`: preconditions stay host obligations (E4: outside
+    them nothing is promised); the panic contract covers the rest of the
+    domain, splitting it into the panic region (`p`) and the value region
+    (`!p`).
+  * With `ensures`: they hold where it does not panic. The no-panic clause
+    `!(p)` is the function's last precondition, so `f::ensures`, every
+    law's use of `f` and every caller in the module work under it; a
+    caller proves it like any precondition, or propagates the panic with a
+    panic contract of its own.
+  * With determinacy (§15.5): `complete_p` is over the value region; the
+    panic region is pinned by the panic contract itself. So a
+    host-callable function's behaviour on its domain is fully determined,
+    and a reviewer reads exactly when it panics.
+  * Locked (§15.6): the function's kernel type carries `Not(P)`, its
+    source text `panics_when(p)`; the spec sheet prints `panics_when p`;
+    the record lists it ("panics when"), never as a host obligation.
+* **The theorems** (§1.1 item 8). E2, `L::thm::f`, holds on the value
+  region (its preconditions include `Not(P)`). E3, the panic theorem
+  `L::pthm::f : Π x̄ (pre with P for Not(P)). Σ k. Π n ≥ k. run n b0
+  (Ret init(x̄)) = Panic`, holds on the panic region. Both are checked by
+  the gate (`mir/gate.rs`) against statements generated afresh
+  (`stmt::statement`, `stmt::statement_panic`).
+* **The literal reading's split** (trusted, construct by construct, each
+  with a test and its negative twin in `tests/literal.rs`): a run's outcome
+  is `Ret(v)`, `Panic` or `Stuck`. `Panic` comes only from a terminator: a
+  failed `Assert` of a kind whose failure panics (overflow, bounds,
+  division or remainder by zero; any other kind, whose failure aborts, is
+  `Stuck`), a block every path of which ends in a call of a panic
+  function (`literal::must_panic`, the table `PANIC_FNS`; on the way only
+  a panic message's construction and steps that cannot be undefined
+  behaviour), a callee's panic, and core's `Index::index` by a range past
+  the end. Out of fuel (a loop that does not end), undefined behaviour
+  (`Assume`, an unchecked operation, `unreachable`), an abort
+  (`process::abort`, the aborting `panic_nounwind*`) and an unmodeled
+  construct are `Stuck`: never a panic. Value theorems are unchanged (the value outcome is the same
+  constructor's). The lift conformance check runs each panic region
+  against rustc too (in place): it generates inputs inside the panic
+  condition on purpose, rustc must panic and L give `Panic` on each, and a
+  panic contract compared on no input fails the check (which also catches
+  a condition that never holds on the domain, whose panic theorem would be
+  vacuous).
+* **Overflow checks.** An overflow or underflow panic is rustc's overflow
+  check (`Assert` of kind overflow): the 12 position and location
+  operators and `children` (13 of the MMR's 18 contracts, all 13 of the
+  verifier's) panic only in a build with overflow checks on. The MIR is
+  extracted with them and every profile of this workspace sets them; a
+  downstream crate's default release profile does not, and there these
+  functions wrap instead of panicking. It is an assumption of §1.1 item 7,
+  stated on every panic contract of the record; the `assert!`-based
+  contracts (`to_nearest_size`, `PeakIterator::new`, `Family::peaks`,
+  `chunk_peaks`) hold in any profile.
+* **Too wide or too narrow.** A `p` that holds where the code returns,
+  loops or aborts has no panic theorem (the panic walk names the path it
+  cannot refute); a `p` that misses a panic leaves the structured
+  reading's obligation at that panic (`unreachable!()`, an overflow)
+  unproven, so the function has no definition and no theorem. Either way
+  the build is refused (`tests/panic_contracts.rs`). A `p` that never
+  holds on the domain proves vacuously; the conformance check refuses it
+  (no input inside it).
+* **Proving it** (untrusted): the walker's panic mode drives the literal
+  side alone from the entry under the preconditions and `P`, deciding each
+  test by the facts or splitting on it, unfolding callees' runs, and
+  refuting every outcome but `Panic` (a disjunctive `P` split where a path
+  needs it); a loop header costs one of 64 units of fuel and the walk
+  follows at most 48 split tests or loop iterations on one path, so a
+  panic reached only after many loop iterations is not proven yet (a
+  panic loop lemma, when a pilot needs one). The walk's arithmetic is
+  linear in the literal reading's terms; where the laws' vocabulary is not
+  (`2^h` against `1 << h`, `size > MAX_NODES` against `leading_zeros`), a
+  **panic lemma** of the proof file restates the condition in the code's
+  terms (`panic_lemma(path);` in the function's attachment: the walk
+  applies it to the function's parameters and hypotheses and uses its
+  `ensures` as facts; `docs/mir-lift.md` §20.6). The no-panic clause is
+  a fact and a goal like any precondition: `auto` reads `!(a || b)` as
+  `!a` and `!b` and a negated comparison as the comparison's other value
+  (`auto::facts`, `prover_gaps` test 8), and a domain written
+  `implies(a <= b, q)` gives `q` under the clause `!(a > b)` (an
+  implication whose premise is a comparison of the same operands, proven
+  by linear arithmetic: `prover_gaps` test 10).
+* **Seeded** from the panic statement removed with the optimizer
+  (`4a0e5a23fc`): `stmt::statement_panic` is restored with the panic
+  contract as its subject; `Ledger::accept_shipped_panic`'s checks became
+  the outcome split (`panic_exact`/`must_diverge` are now
+  `literal::must_panic`, decided in L itself, and `same_telescope_option`
+  is the panic statement's construction from `S_f`'s own telescope); the
+  walker's panic mode is `Walker::panic_walk`.
+
+Total equivalence on every input, including where the original loops or
+returns garbage, is not offered: it would oblige an optimization to
+reproduce undocumented misbehavior.
+
+**No `unsafe`, for good** (user decision, 2026-10-05: "then remove it").
+Proof-justified `unsafe` in shipped Commonware code is not part of the
+model, now or later: verified code stays `#![forbid(unsafe_code)]` (§2),
+there is no capability for unsafe standard-library APIs
+(`get_unchecked`, ...) and no memory model for raw pointers. A hot path
+that needs `unsafe` is either rewritten in safe Rust (an optimizer's
+`get_unchecked` usually becomes a bounds check the compiler removes, or a
+safe API such as `chunks_exact`), or stays unverified host code outside
+the verified files.
 
 ### 16.6 Proof reuse and stability
 
@@ -1822,16 +1991,26 @@ and proof size even after C4, that is a strategic finding for the user.
 **Done (2026-10-05):** the removal (§19); spec mutation off the build path;
 the three roots re-verified with header-only lock re-accepts; the hardware
 semantics restored (§9; another header-only re-accept); the measurement
-harness restored for pilots (§17).
+harness restored for pilots (§17); **C1, panic contracts** (§16.5: the
+Panic/Stuck split of L, `panics_when`, the panic theorem and its gate
+check, the walker's panic mode; +about 230 trusted lines, more than the
++60–120 planned: the tables of panic functions and message constructors
+and `must_panic`'s checks are most of it); **C1 applied** to the three
+roots (the MMR's 18 and the verifier's 13 documented panics stated and
+proven; varint's functions do not panic on their own; no trusted line: the walk splits
+disjunctions and takes panic lemmas, `auto` reads negated disjunctions;
+the two storage locks' changes wait for review).
 
 **Pilot A: MMR `to_nearest_size` and `is_valid_size`.** Replace the binary
 search in `storage/src/merkle/mmr/iterator.rs` by the six-probe search
 (private helpers in `iterator.rs`, whose only child is `tests`);
 `is_valid_size` becomes `size <= MAX_NODES && to_nearest_size(size) ==
 size`. Proof: summary-preserving (§16.1 a) and characterization (b); no law
-changes. Builds C1 for `to_nearest_size`'s panic. **Exit:** the lock diff is
-the one panic contract; 0 law and law-proof lines changed; ≤ 300 new proof
-lines; ≤ 1 agent-day to green (excluding C1); MMR check time within 10% of
+changes. `to_nearest_size`'s documented panic is already a panic contract
+(C1 applied); the new body keeps its `assert!` and the panic theorem
+proves it again. **Exit:** the lock diff is empty; 0 law and law-proof
+lines changed; ≤ 300 new proof lines; ≤ 1
+agent-day to green; MMR check time within 10% of
 today; a speedup measured by §17 (target ≥ 10× on a uniform distribution of
 bit lengths, the realistic one reported beside it). Then the Verus
 comparison.
@@ -1840,16 +2019,14 @@ comparison.
 
 | # | capability | forcing example | trusted base | agent-days |
 | --- | --- | --- | --- | ---: |
-| C1 | panic contracts (Panic/Stuck split, `panics_when`), seeded from the gate's panic statement at `4a0e5a23fc` (§16.5) | pilot A | +60–120 | 5–8 |
+| C1 | **done** (2026-10-05): panic contracts (Panic/Stuck split, `panics_when`), seeded from the gate's panic statement at `4a0e5a23fc` (§16.5) | pilot A | +about 230 | — |
 | C2 | pinned originals and proof copies (`#[lift(reference)]` via `mirx --inject`, provenance check, native differential check) | pilots B, C | one item kind | 3–5 |
 | C3 | lockstep for lifted functions | pilot B, verifier | none | 5–8 |
 | C4 | bit bridge library, `by_enumeration`, `u128` as pairs | pilot B | `u128`: +100–200 | 9–16 |
 | C5 | coupled loops | pilot B | none | 8–15 |
 | C6 | per-function checking, summary lint, library spec mutation once per version | every pilot's loop time | small | 11–21 |
 | C7 | contract schemas (one reviewed line generates a newtype's routine contracts), views on lifted types, host-callable by name, cross-root reuse | review cost; a representation change of `PeakIterator` | +150–350 | 13–23 |
-| C8 | reading `core::arch` intrinsic calls in host Rust from MIR (S and L) onto the retained models; array loads, dispatch (§16.4) | pilot C | +200–400 (models already item 4) | 8–12 first slice; 18–30 in all |
-| C9 | (gated) unsafe standard-library leaves | unchecked indexing | +100–200 | 3–5 |
-| C10 | (gated, only if needed) raw-pointer memory model | pilot C without a shim | +1,000–1,500 | 20–40 |
+| C8 | reading `core::arch` value intrinsic calls in host Rust from MIR (S and L) onto the retained models; dispatch (§16.4; loads and stores need `unsafe`, out of scope) | pilot C | +150–300 (models already item 4) | 8–12 first slice; 15–25 in all |
 | C11 | (research) bit-blasting with a checked certificate checker | after C4, if bit proofs still dominate | none | 5 spike, then 20–40 |
 
 **Pilot B: a harder safe case.** Criteria: safe Rust, a real hot path with a
@@ -1870,12 +2047,19 @@ generically.
 **Pilot C (gated): SIMD against a scalar reference.** Reed–Solomon
 `Neon::mul` against `Scalar::mul` (the crate already treats the scalar
 engine as the reference). Needs C8, `u128` and a proof that the NEON tables
-are the nibble split of the scalar ones. 15–25 agent-days after decision 1
+are the nibble split of the scalar ones. Verified code is safe Rust
+(decision 1, §16.5), and today's engine is `unsafe` throughout (13
+`unsafe` in `engine_neon.rs`: `unsafe fn mul_neon`, raw-pointer loads and
+stores), so the pilot first splits it: the vector arithmetic as safe
+`#[target_feature]` functions over vectors and arrays (verified), the loads
+and stores in thin unverified wrappers. 15–25 agent-days after that split
 (the models are retained, so decision 2 is taken).
 
 **Decisions for the user:** (1) proof-justified `unsafe` in shipped
-Commonware code; (2) restoring SIMD models: **taken** (2026-10-05, kept and
-first-class, §9); (3) whether
+Commonware code: **taken** (2026-10-05: "then remove it"; verified code
+stays `#![forbid(unsafe_code)]`, and the unsafe/raw-pointer capability
+left the roadmap, §16.5); (2) restoring SIMD models: **taken** (2026-10-05,
+kept and first-class, §9); (3) whether
 "behaves exactly like the code at revision R" is an acceptable law for
 existing code (pinned originals); (4) the `Buf::chunk` buffer model; (5)
 when to move varint in place (a lock change: `Decoder::new`/`feed` become

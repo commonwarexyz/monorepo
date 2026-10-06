@@ -56,6 +56,7 @@ members = [
     "mt_pair",
     "mt_qualified",
     "opt_mbits",
+    "pc_guard",
     "rm_fast",
     "rm_orig",
     "rm_wrong",

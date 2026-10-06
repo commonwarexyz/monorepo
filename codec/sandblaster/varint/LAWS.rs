@@ -5,6 +5,15 @@
 //! `UInt(x).write(buf)` appends `x` in LEB128; `UInt::read_cfg(buf)` takes
 //! one LEB128 value off the front of `buf`; `encode_size` says how many
 //! bytes `write` appends.
+//!
+//! No function here panics on its own: none has a precondition or a panic
+//! contract (`panics_when`), so each one's theorem says that rustc's MIR
+//! returns on every input of its type; a short or malformed input is an
+//! `Err`, never a panic (`Decoder::feed`'s `unwrap` included, which the
+//! decoder's state never reaches). The buffer a `write` puts into is host
+//! code, modeled without a capacity (the bytes put so far): a write into a
+//! `&mut [u8]` too short for it panics inside `bytes`, outside the verified
+//! code.
 
 use sandblaster::prelude::*;
 use crate::varint::{SInt, SPrim, UInt, UPrim};

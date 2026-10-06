@@ -174,6 +174,10 @@ pub struct LiftFacts {
     /// C)`, DESIGN.md §3.7): at the boundary a stack-depth bound the host
     /// must meet (`(function, "e <= C")`).
     pub host_depth_bounds: Vec<(String, String)>,
+    /// Lifted functions with a panic contract (`panics_when(p);`, DESIGN.md
+    /// §16.5): on the domain the function panics exactly when `p` holds
+    /// (`(function, p)`), proven by its panic theorem.
+    pub panic_contracts: Vec<(String, String)>,
     /// Open traits at their verified instance (`(trait, instance)`).
     pub open_instances: Vec<(String, String)>,
     /// The host models of a crate lifted in place (`#[lift(host)]` type
@@ -207,6 +211,13 @@ pub struct LiftFacts {
     /// The loop helpers the (untrusted) reading of the bodies built, with
     /// what their loop lemmas are stated over (`crate::mir::checked`).
     pub mir_helpers: Vec<MirHelper>,
+    /// The panic lemmas a proof file attaches to a function with a panic
+    /// contract (`panic_lemma(path);`): `(function, lemma)`. An untrusted
+    /// hint for its panic theorem's walk (`crate::mir::checked`), which
+    /// applies the lemma to the function's parameters and the hypotheses
+    /// its `requires` name and walks with its `ensures` as facts; never
+    /// part of a statement.
+    pub panic_lemmas: Vec<(String, String)>,
     /// Per in-place lifted source file: what host code the lift leaves out
     /// can call of it besides its non-private functions (DESIGN.md §15.5;
     /// [`crate::hir::HostAccess`], read by `validate::in_place_host_fns`).
@@ -257,6 +268,11 @@ pub struct MirContract {
     pub global: String,
     /// Its MIR instance.
     pub key: String,
+    /// A declared panic contract (`panics_when(p);` in the laws file): the
+    /// index of its no-panic clause `!(p)` among the preconditions (after
+    /// every `requires`, before the depth bound). The gate then wants the
+    /// panic theorem too (`crate::mir::stmt::statement_panic`).
+    pub panic: Option<usize>,
 }
 
 /// How the original function takes one parameter (receiver included), for
@@ -313,6 +329,12 @@ pub struct ConformEntry {
     /// The original returns a value (the lifted function returns the
     /// states, in parameter order, then that value).
     pub has_ret: bool,
+    /// The original returns `impl Trait`: an opaque value the harness
+    /// cannot compare. Such a function is compared only on its panic
+    /// contract's panic region, where rustc must panic before returning
+    /// (in place; without a panic contract it is skipped, compared through
+    /// its callers).
+    pub opaque_ret: bool,
 }
 
 /// A lifted exec function with no conformance entry of its own, and why:
@@ -696,11 +718,13 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     facts.mir_read = std::mem::take(&mut cx.mir_read);
     facts.mir_contracts = std::mem::take(&mut cx.mir_contracts);
     facts.mir_helpers = std::mem::take(&mut cx.mir_helpers);
+    facts.panic_lemmas = std::mem::take(&mut cx.panic_lemmas);
     facts.instances = std::mem::take(&mut cx.instances);
     facts.test_hook = test_hook::get();
     facts.conform_skipped = std::mem::take(&mut cx.conform_skipped);
     facts.host_obligations = std::mem::take(&mut cx.open.host_obligations);
     facts.host_depth_bounds = std::mem::take(&mut cx.open.host_depth_bounds);
+    facts.panic_contracts = std::mem::take(&mut cx.open.panic_contracts);
     let mut inst: Vec<(String, String)> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p))).collect();
     inst.sort();
     facts.open_instances = inst;
@@ -920,6 +944,8 @@ struct Ctx {
     mir_contracts: Vec<MirContract>,
     /// [`LiftFacts::mir_helpers`].
     mir_helpers: Vec<MirHelper>,
+    /// [`LiftFacts::panic_lemmas`].
+    panic_lemmas: Vec<(String, String)>,
     /// The text of every lifted source file and its line starts (an
     /// attachment's statements are read from their own file's text).
     texts: HashMap<FileId, (String, Vec<usize>)>,
@@ -2062,6 +2088,13 @@ impl Ctx {
         // attachments' below (never what the reading of the body adds)
         let n_skeleton = f.attrs.len();
         if use_mir {
+            // verified code is safe Rust (DESIGN.md §2, "No `unsafe`, for
+            // good"): a body read from MIR is refused with an `unsafe` in it
+            // (a block, an `unsafe fn` or `impl` inside, a macro's argument),
+            // as the expression reading refuses an `unsafe` block
+            if let Some(sp) = first_unsafe(f.block.to_token_stream()) {
+                self.err(sp, "`unsafe` in a lifted function: verified code is safe Rust (DESIGN.md §2); code that needs `unsafe` stays unverified host code");
+            }
             let n = self.mir_read.len();
             let (b, h) = self.mir_body(&mut f.sig, &akey, self_ty.as_ref(), &state_names, &state_tys);
             f.block = Box::new(b);
@@ -2077,6 +2110,8 @@ impl Ctx {
             }
         }
         let n_read = f.attrs.len();
+        // `panic_lemma(path);` of a proof file: the panic walk's hints
+        let mut panic_lemmas: Vec<(String, Span)> = Vec::new();
         if let Some(at) = self.attach_fn.get(&akey).cloned() {
             self.attach_used.insert(format!("fn {akey}"));
             let sigma2: HashMap<String, syn::Type> = self.attach_sigma.clone();
@@ -2138,6 +2173,54 @@ impl Ctx {
                     srcs.push(at.src_attr(i, "requires"));
                     continue;
                 }
+                // `panic_lemma(path);`: a lemma of the proof files whose
+                // `ensures` the panic theorem's walk uses as facts (an
+                // untrusted hint, `LiftFacts::panic_lemmas`): what the panic
+                // condition means in the code's own terms (`1 << h` for
+                // `2^h`), proven like any lemma
+                if let Some(e) = attach_call(st, "panic_lemma") {
+                    if in_laws {
+                        self.err(st.span(), "`panic_lemma(..);` is a proof step: attach it from a proof file (the laws file states the panic contract, `panics_when(..);`)");
+                        continue;
+                    }
+                    let syn::Expr::Path(p) = &e else {
+                        self.err(st.span(), "`panic_lemma(..);` names a lemma by its path (`panic_lemma(crate::proof::f_panics);`)");
+                        continue;
+                    };
+                    let path = p.path.segments.iter().map(|s| s.ident.to_string()).collect::<Vec<_>>().join("::");
+                    panic_lemmas.push((path, at.spans[i]));
+                    continue;
+                }
+                // `panics_when(p);`: the panic contract (DESIGN.md §16.5,
+                // docs/mir-lift.md §20.5): on the domain the function panics
+                // exactly when `p` holds. Its no-panic clause `!(p)` becomes
+                // the last precondition (`typeck`); the gate wants the panic
+                // theorem too. Only the laws file states one (it is locked),
+                // and only of a function read from MIR
+                if let Some(mut e) = attach_call(st, "panics_when") {
+                    if !in_laws {
+                        self.err(st.span(), "`panics_when(..);` is attached from a proof file: a panic contract is part of the locked contract, which only the laws file states (DESIGN.md §15.6)");
+                        continue;
+                    }
+                    if !use_mir {
+                        self.err(st.span(), "`panics_when(..);` is a contract of a lifted function read from rustc's MIR: the panic theorem is about its MIR (docs/mir-lift.md §20.5)");
+                        continue;
+                    }
+                    if f.attrs.iter().any(|a| a.path().is_ident("panics_when")) {
+                        self.err(st.span(), "`panics_when(..);` twice for the same function (state one condition, joined with `||`)");
+                        continue;
+                    }
+                    let ab = self.attach_bounds.clone();
+                    let mut rw = FnRw::new(self, sigma2.clone(), true);
+                    rw.bounds = ab;
+                    rw.self_ty = self_ty.clone();
+                    rw.expr(&mut e, None);
+                    drop(rw);
+                    self.open.panic_contracts.push((orig_name.clone(), attach_call(st, "panics_when").map(|x| x.to_token_stream().to_string()).unwrap_or_default()));
+                    f.attrs.push(syn::parse_quote!(#[panics_when(#e)]));
+                    srcs.push(at.src_attr(i, "panics_when"));
+                    continue;
+                }
                 // `decreases(e, max = C);`: the measure and depth bound of a
                 // non-tail recursive function (DESIGN.md §3.7; checked like any)
                 if let syn::Stmt::Expr(syn::Expr::Call(c), _) = st
@@ -2167,7 +2250,7 @@ impl Ctx {
                     continue;
                 }
                 let Some(mut e) = attach_call(st, "ensures") else {
-                    self.errors.push((at.spans[i], "a function attachment holds `requires(..);`, `ensures(..);`, `decreases(..);`, `opaque();` and `at_start! { .. }` only".into(), vec![]));
+                    self.errors.push((at.spans[i], "a function attachment holds `requires(..);`, `ensures(..);`, `panics_when(..);`, `decreases(..);`, `opaque();`, `panic_lemma(..);` and `at_start! { .. }` only".into(), vec![]));
                     continue;
                 };
                 let ab = self.attach_bounds.clone();
@@ -2191,7 +2274,11 @@ impl Ctx {
         // the body adds no attribute), carried apart (`hir::FnDef::declared`):
         // the elaborator refuses the function unless its preconditions are it
         if let Some(key) = mir_key {
-            let declared: Vec<syn::Meta> = f.attrs[..n_skeleton].iter().chain(&f.attrs[n_read..]).filter(|a| a.path().is_ident("requires") || a.path().is_ident("decreases")).map(|a| a.meta.clone()).collect();
+            let declared: Vec<syn::Meta> = f.attrs[..n_skeleton].iter().chain(&f.attrs[n_read..]).filter(|a| a.path().is_ident("requires") || a.path().is_ident("decreases") || a.path().is_ident("panics_when")).map(|a| a.meta.clone()).collect();
+            // (a panic contract's no-panic clause follows the `requires`:
+            // its index among the preconditions)
+            let n_requires = declared.iter().filter(|m| m.path().is_ident("requires")).count();
+            let panic = declared.iter().any(|m| m.path().is_ident("panics_when")).then_some(n_requires);
             f.attrs.push(syn::parse_quote!(#[mir_contract(#(#declared),*)]));
             // (`test_hook`: a precondition changed after its declaration was carried)
             if test_hook::get() == Some(test_hook::WrongRule::ChangedRequires)
@@ -2204,7 +2291,14 @@ impl Ctx {
                 Some(st) if !is_prim(&st) => format!("{mp}::{st}::{}", f.sig.ident),
                 _ => format!("{mp}::{}", f.sig.ident),
             };
-            self.mir_contracts.push(MirContract { global, key });
+            if !panic_lemmas.is_empty() && panic.is_none() {
+                self.errors.push((panic_lemmas[0].1, format!("`panic_lemma(..);` attached to `{global}`, which has no panic contract (`panics_when(..);` in the laws file)"), vec![]));
+            }
+            self.panic_lemmas.extend(panic_lemmas.drain(..).map(|(p, _)| (global.clone(), p)));
+            self.mir_contracts.push(MirContract { global, key, panic });
+        }
+        if let Some((_, sp)) = panic_lemmas.first() {
+            self.errors.push((*sp, "`panic_lemma(..);` is a hint for the panic theorem of a function read from rustc's MIR (docs/mir-lift.md §20.6)".into(), vec![]));
         }
         if !ghost {
             // loop helpers have no original: they are compared through the
@@ -2542,11 +2636,9 @@ impl Ctx {
             _ => (ConformCallee::Free { modpath: in_mod_path(&f.attrs), name: method, generics: generic_args(&own) }, format!("{mp}::{lifted_name}")),
         };
         // `-> impl Trait`: the original's result is opaque (the lifted
-        // function returns its concrete type)
-        if matches!(&f.sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::ImplTrait(_))) {
-            self.conform_skipped.push(ConformSkip { module: self.cur_module.clone(), lifted, why: "it returns `impl Trait` (an opaque value the harness cannot compare: compared through its callers)".into() });
-            return;
-        }
+        // function returns its concrete type): only a panic region is
+        // compared ([`ConformEntry::opaque_ret`])
+        let opaque_ret = matches!(&f.sig.output, syn::ReturnType::Type(_, t) if matches!(&**t, syn::Type::ImplTrait(_)));
         // the state parameters of §19.10's table (`open::state_param`)
         let iters = open::byte_iter_params(&f.sig.generics);
         let state_pass = |t: &syn::Type| -> Option<ParamPass> {
@@ -2580,7 +2672,7 @@ impl Ctx {
             },
         }).collect();
         let has_ret = !matches!(f.sig.output, syn::ReturnType::Default);
-        self.conform.push(ConformEntry { module: self.cur_module.clone(), lifted, callee, params, has_ret });
+        self.conform.push(ConformEntry { module: self.cur_module.clone(), lifted, callee, params, has_ret, opaque_ret });
     }
 
     fn subst_ty(&self, t: &syn::Type, sigma: &HashMap<String, syn::Type>) -> syn::Type {
@@ -4525,6 +4617,16 @@ fn conjoin_ensures(es: Vec<syn::Expr>) -> Result<Option<syn::Expr>, String> {
             Ok(Some(syn::parse_quote!(#((#all))&&*)))
         }
     }
+}
+
+/// The span of the first `unsafe` written in `ts` (a function's body; a
+/// raw identifier `r#unsafe` is no keyword).
+fn first_unsafe(ts: TokenStream) -> Option<PSpan> {
+    ts.into_iter().find_map(|t| match t {
+        TokenTree::Ident(i) if i == "unsafe" => Some(i.span()),
+        TokenTree::Group(g) => first_unsafe(g.stream()),
+        _ => None,
+    })
 }
 
 /// Whether `st` is the argument-less attachment statement `name();`.

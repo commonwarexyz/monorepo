@@ -123,6 +123,98 @@ fn current_updates_have_proofs(db: Db, location: Nat, key: Digest, value: Digest
 Inside `PROOF.rs` a law's name stands for the law itself: calling
 `equal_roots_agree(a, b)` uses that law as a lemma.
 
+### Panic contracts: where the code panics
+
+A lifted function whose documentation says when it panics states it in the
+laws file, beside its other contracts (DESIGN.md §16.5):
+
+```rust
+/// `halve_capped` is half of `x`, and panics above 1000.
+#[lift_attach(crate::a::halve_capped)]
+fn halve_capped_contract() {
+    panics_when(x > 1000u64);
+    ensures(|ret: u64| ret == x / 2u64);
+}
+```
+
+`panics_when(p)` says: where the function's `requires` hold, it panics if
+and only if `p` holds. Its `ensures` hold where it does not panic, and the
+spec sheet and the lock show `panics_when p` (only the laws file states
+one: it is part of the locked contract). The build proves both directions
+of rustc's MIR, with nothing for you to write:
+
+* **Where `p` does not hold**, the function returns as its laws say. `!(p)`
+  is its last precondition, so every `unreachable!()` the structured
+  reading has where the MIR panics, and every operator that could
+  overflow, must follow from it. If `p` misses a panic (it is *too
+  narrow*), that obligation fails: the function is not elaborated, and the
+  error names the panic's line. Callers in the module prove `!(p)` at
+  their call, like any precondition, or state their own panic contract.
+* **Where `p` holds**, the MIR panics (the panic theorem; the gate's
+  `mir-theorems` note counts them). The walk follows the literal reading
+  under `p` and splits each test `p` does not decide; a path that returns
+  is refuted from `p` and the path's tests. If `p` covers an input where
+  the code returns (it is *too wide*), the error is `the literal reading
+  returns a value on a path where the panic condition holds` with the
+  path's facts: pick `p` as the documentation states it. A path that loops
+  forever, aborts or is undefined behaviour is never a panic.
+
+State `p` as the documentation states it, in the laws' vocabulary:
+`(size.0 as Int) > crate::laws::max_nodes()`, `(self.0 as Int) + (rhs as
+Int) >= pow2(64)`, `x.is_none()`, a disjunction `height >= 64u32 ||
+(pos.0 as Int) < pow2(height as Int)` (the walk splits it). The walk's
+arithmetic is linear: it decides a panic condition that compares the
+parameters with what the code compares them with. When the code computes
+the test with operations the laws do not use (a shift by a variable
+amount, `leading_zeros`, `count_ones`, wrapping arithmetic), give the walk
+the panic condition in the code's own terms with a **panic lemma** in the
+proof file:
+
+```rust
+/// `new`'s panic condition as its code tests it: above `MAX_NODES` the
+/// size's top bit is set, so `start`, `u64::MAX >> leading_zeros`, is
+/// `u64::MAX` (its `assert_ne!`).
+#[lemma]
+fn new_panics(size: Position) {
+    requires((size.0 as Int) > crate::laws::max_nodes());
+    ensures(size.0.leading_zeros() == 0u32 && (u64::MAX.wrapping_shr(size.0.leading_zeros()) == u64::MAX) == true);
+    // ... its proof, as for any lemma
+}
+
+#[lift_attach(crate::merkle::mmr::iterator::PeakIterator::new)]
+fn new_facts() {
+    panic_lemma(crate::proof::new_panics);
+}
+```
+
+The lemma's parameters are the function's, in order; each of its
+`requires` must be one of the panic theorem's hypotheses as written (a
+`requires` of the function, or its panic condition). The walk applies it
+and uses its `ensures` as facts. Write them in the terms of the literal
+reading: rustc's `a << s` is `a.wrapping_shl(s)` (MIR's `Shl` masks its
+amount), a checked `a + b` that did not overflow is `a.wrapping_add(b)`,
+and so on (`docs/mir-lift.md` §20.4); a fact that does not match the
+code's term is simply not used. A lemma is a proof internal: it is never
+locked, and a wrong one cannot make a wrong panic contract pass (its
+`ensures` are proven).
+
+A panic reached only after many steps (more than 48 split tests or loop
+iterations on its path, the panic walk's bound; its fuel premise is 64) is
+not proven yet: the error says the literal reading `does not reach a panic
+within the walk's bound`.
+
+**A domain, a panic, or both.** A function can have a `requires` and a
+panic contract: `requires` is the domain (outside it nothing is
+promised), `panics_when` splits the domain. Keep a documented condition as
+a `requires` when the code does not simply panic outside it: when it
+returns a wrong or meaningless value there (`chunk_peaks` past
+`MAX_LEAVES`, where a shift drops high bits and it returns another
+chunk's root), or when the documentation makes it the caller's guarantee
+and the code's behaviour there is not to be relied on
+(`location_to_position` above `MAX_LEAVES`). Say so in its doc comment.
+A function whose code cannot panic on its domain needs no panic contract:
+its theorem already says it returns there.
+
 ## 2. What auto does, and what it does not
 
 Auto is proof search that has to produce a proof term, which the kernel then
@@ -144,6 +236,10 @@ checks. It:
     chain;
   * a fact `a || b` and a fact `!b` give `a` (and `!a` gives `b`), without
     waiting for a case split;
+  * a fact `!(a || b)` (a panic contract's no-panic clause) gives `!a` and
+    `!b`, and a negated comparison `!(x < y)` is the fact `(x < y) ==
+    false`, which linear arithmetic reads; a goal `!(a || b)` (a callee's
+    no-panic clause at its call) is the two goals `!a` and `!b`;
   * a fact about a function at one argument proves the same statement at an
     argument that is equal by arithmetic: `r(y) == 4` and `y + 1 == x`
     give `r(x - 1) == 4`. You do not need a lemma that restates `r` at

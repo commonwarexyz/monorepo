@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! L::thm::<f> : Π x̄ (.h̄ : pre). Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
-//!     Eq(Option(Out), L::<f>::run n b0 (Some(init(x̄))), Some(erase(S_f x̄ .h̄)))
+//!     Eq(mir::Res(Out), L::<f>::run n b0 (Ret(init(x̄))), Ret(erase(S_f x̄ .h̄)))
 //! ```
 //!
 //! * `x̄ .h̄` is the telescope of `S_f`, the structured reading's definition.
@@ -25,6 +25,23 @@
 //!   projections of the relevant fields. S's result (its states in
 //!   parameter order, then its return value) is erased component-wise into
 //!   `Out` (the cells' final values, then the return place).
+//!
+//! **The panic statement** ([`statement_panic`], docs/mir-lift.md §20.5)
+//! of a function whose declared contract has a panic contract
+//! `panics_when(p)` (`lift::MirContract::panic`): its preconditions end in
+//! the no-panic clause `Not(P)` (`P` the elaboration of `p`; the
+//! elaborator checks it against the declared contract), and
+//!
+//! ```text
+//! L::pthm::<f> : Π x̄ (.h̄ : pre, with `Not(P)` replaced by P). Σ (k : Int).
+//!     Π (n : List(Unit)) (.hle : k ≤ len n). Eq(mir::Res(Out), L::<f>::run n b0 (Ret(init(x̄))), Panic)
+//! ```
+//!
+//! On every input of the domain where `p` holds, the MIR run panics (with
+//! enough fuel; `Panic` is never a run out of fuel, undefined behaviour or
+//! an unmodeled construct, which are `Stuck`). With `L::thm::<f>`, whose
+//! preconditions include `Not(P)`, it says that on the domain the
+//! function panics exactly when `p` holds.
 
 use sandblaster_kernel::api::Env;
 use sandblaster_kernel::term::{Rel, Term};
@@ -49,12 +66,15 @@ pub struct StmtSpec {
     pub init_slots: Vec<String>,
     /// `erase` of S's result `@Y@` (core text).
     pub erase_ret: String,
+    /// The panic statement ([`statement_panic`]): the conclusion is `Panic`,
+    /// and `params` hold the panic hypothesis `P` where `S_f` has `Not(P)`.
+    pub panic: bool,
 }
 
 impl StmtSpec {
-    /// `run n b0 (Some init)`, `n` free.
+    /// `run n b0 (Ret init)`, `n` free.
     pub fn l_of(&self) -> String {
-        format!("{} n {}::b0 (Some[{st}]({st}::st({})))", self.l_run, self.l_blk, self.init_slots.join(", "), st = self.l_st)
+        format!("{} n {}::b0 (mir::Res::Ret[{st}]({st}::st({})))", self.l_run, self.l_blk, self.init_slots.join(", "), st = self.l_st)
     }
 
     /// `λ (yy : R_S). erase(yy)`.
@@ -73,7 +93,8 @@ impl StmtSpec {
     }
 
     /// The trusted theorem: some fuel bound `k` after which the literal
-    /// reading returns the structured reading's value (with more fuel too).
+    /// reading returns the structured reading's value (with more fuel too);
+    /// for the panic statement, after which it panics.
     pub fn theorem_ty(&self) -> String {
         self.eq_under(&format!("{}Sigma (k : Int), ((n : List(Unit)) -> (.hle : Eq(Bool, #le_int(k, seq::len Unit n), true)) -> ", self.tele()), ")")
     }
@@ -85,14 +106,19 @@ impl StmtSpec {
     }
 
     /// The equation's right side for the structured value `s` (core text
-    /// of type `s_ret`): `Some(erase(s))`.
+    /// of type `s_ret`): `Ret(erase(s))`.
     pub fn rhs_of(&self, s: &str) -> String {
         let out = &self.l_out;
-        format!("Some[{out}]({})", self.erase_ret.replace("@Y@", &format!("({s})")))
+        format!("mir::Res::Ret[{out}]({})", self.erase_ret.replace("@Y@", &format!("({s})")))
+    }
+
+    /// The equation's right side: `Ret(erase(S_f x̄ .h̄))`, or `Panic`.
+    pub fn rhs(&self) -> String {
+        if self.panic { format!("mir::Res::Panic[{}]", self.l_out) } else { self.rhs_of(&self.app()) }
     }
 
     fn eq_under(&self, pre: &str, post: &str) -> String {
-        format!("{pre}Eq(Option({out}), {}, {}){post}", self.l_of(), self.rhs_of(&self.app()), out = self.l_out)
+        format!("{pre}Eq(mir::Res({out}), {}, {}){post}", self.l_of(), self.rhs(), out = self.l_out)
     }
 }
 
@@ -100,15 +126,46 @@ impl StmtSpec {
 /// its MIR instance `f` (also, untrusted, of a model lemma: a library
 /// function's reading against the lift prelude's model, `u64::div_ceil`).
 pub fn statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str) -> Result<StmtSpec, String> {
+    statement_as(env, g, lf, f, s_global, None)
+}
+
+/// The panic statement (module docs) of `S_f`, whose declared contract's
+/// panic contract is its no-panic clause `nopanic` (`lift::MirContract::
+/// panic`: the clause's index among `S_f`'s preconditions, its `requires`
+/// and depth bound in order): that precondition must be `Not(P)`, and the
+/// statement has `P` in its place.
+pub fn statement_panic(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str, nopanic: usize) -> Result<StmtSpec, String> {
+    statement_as(env, g, lf, f, s_global, Some(nopanic))
+}
+
+fn statement_as(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &str, nopanic: Option<usize>) -> Result<StmtSpec, String> {
     let sg = env.lookup_global(s_global).ok_or_else(|| format!("no definition `{s_global}`"))?;
     let (mut cur, arity) = (env.global_type(sg).ok_or("no type")?, env.global_arity(sg).ok_or("no arity")?);
     let mut params: Vec<(String, Rel, String)> = Vec::new();
     let mut names: Vec<sandblaster_kernel::term::Name> = Vec::new();
+    // (the panic statement: the precondition `nopanic`, `Not(P)`, as `P`)
+    let not_g = env.lookup_global("Not");
+    let mut irr = 0usize;
+    let mut flipped = false;
     for i in 0..arity {
         let Term::Pi { rel, dom, cod, .. } = &*cur else { return Err(format!("`{s_global}`'s type has no binder {i}")) };
-        params.push((format!("x{i}"), *rel, env.print_term(&names, dom)));
+        let mut d = dom.clone();
+        if *rel == Rel::Irr {
+            if nopanic == Some(irr) {
+                match &**dom {
+                    Term::App { rel: Rel::Rel, fun, arg } if matches!(&**fun, Term::Global(h) if Some(*h) == not_g) => d = arg.clone(),
+                    _ => return Err(format!("`{s_global}`'s precondition {irr} is not the negation of a panic contract")),
+                }
+                flipped = true;
+            }
+            irr += 1;
+        }
+        params.push((format!("x{i}"), *rel, env.print_term(&names, &d)));
         names.push(std::rc::Rc::from(format!("x{i}").as_str()));
         cur = cod.clone();
+    }
+    if nopanic.is_some() && !flipped {
+        return Err(format!("`{s_global}` has no precondition {} (its panic contract's no-panic clause)", nopanic.unwrap_or_default()));
     }
     let s_ret = env.print_term(&names, &cur);
     let rel: Vec<String> = params.iter().filter(|p| p.1 == Rel::Rel).map(|p| p.0.clone()).collect();
@@ -159,7 +216,7 @@ pub fn statement(env: &Env, g: &mut Gen<'_>, lf: &LFn, f: &ir::Fn, s_global: &st
             format!("(match @Y@ : @SRET@ as _ return {} with | tuple{n}({}) => tuple{n}[{}]({}) end)", lf.out_ty, ys.join(", "), outs.join(", "), es.join(", "))
         }
     };
-    Ok(StmtSpec { s_global: s_global.to_string(), params, s_ret: s_ret.clone(), l_run: lf.run.clone(), l_st: lf.st.clone(), l_blk: lf.blk.clone(), l_out: lf.out_ty.clone(), init_slots: slots, erase_ret: erase_ret.replace("@SRET@", &s_ret) })
+    Ok(StmtSpec { s_global: s_global.to_string(), params, s_ret: s_ret.clone(), l_run: lf.run.clone(), l_st: lf.st.clone(), l_blk: lf.blk.clone(), l_out: lf.out_ty.clone(), init_slots: slots, erase_ret: erase_ret.replace("@SRET@", &s_ret), panic: nopanic.is_some() })
 }
 
 fn s_ty(_env: &Env, params: &[(String, Rel, String)], x: &str) -> String {

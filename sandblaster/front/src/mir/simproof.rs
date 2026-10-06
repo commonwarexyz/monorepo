@@ -6,19 +6,19 @@
 //!
 //! ```text
 //! L::thm::<f> : Π x̄ (.h̄ : pre). Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
-//!     Eq(Option(Out), L::<f>::run n b0 (Some(init(x̄))), Some(erase(S_f x̄ .h̄)))
+//!     Eq(mir::Res(Out), L::<f>::run n b0 (Ret(init(x̄))), Ret(erase(S_f x̄ .h̄)))
 //! ```
 //!
 //! is proven from untrusted intermediate lemmas whose fuel is explicit:
 //!
-//! * a function: `Π x̄ h̄ (n) (.hle : W(x̄) ≤ len n). Eq(.., run n b0 (Some init), Some(erase(S_f x̄)))`,
+//! * a function: `Π x̄ h̄ (n) (.hle : W(x̄) ≤ len n). Eq(.., run n b0 (Ret init), Ret(erase(S_f x̄)))`,
 //!   where `W` (the **fuel shadow**) is the structured body with every tail
 //!   replaced by the fuel it needs (0 for a value, `μ_h(ā) + 1` for a call of a
 //!   loop helper `h` with measure `μ_h`), so a fuel-independent function holds
 //!   at every fuel;
 //! * a loop helper `h` (the structured reading's tail-recursive helper of the
 //!   loop with header `H`): `Π p̄ (j̄ : the dead slots) (n) (.hle : μ_h(p̄) ≤ len n).
-//!   Eq(.., run n H (Some σ(p̄, j̄)), Some(erase(h p̄)))`, by measure recursion
+//!   Eq(.., run n H (Ret σ(p̄, j̄)), Ret(erase(h p̄)))`, by measure recursion
 //!   with `h`'s own measure and **its own decrease proofs** (the induction
 //!   hypothesis at each recursive call of `h`).
 //!
@@ -128,7 +128,7 @@ pub struct Goal {
     pub s: Tm,
     pub ins: Vec<Tm>,
     /// Inside a terminal, the equation's right side once a split has
-    /// abstracted a test in it (`None`: `Some(erase(s))`).
+    /// abstracted a test in it (`None`: `Ret(erase(s))`).
     pub rhs: Option<Tm>,
     /// The fuel the calls of the `let`s already walked need (fuel-dependent
     /// callees: their lemmas apply at the terminals, from the premise).
@@ -183,12 +183,12 @@ pub struct RecFn {
     pub mult: i64,
     pub nparams: u32,
     pub rels: Vec<Rel>,
-    /// `run n b0 (Some init(x̄))` over (relevant x̄, n).
+    /// `run n b0 (Ret init(x̄))` over (relevant x̄, n).
     pub l_of: Tm,
 }
 
 /// A lifted callee with its lemma: `Π x̄ h̄ (n) (.hle : W(x̄) ≤ len n).
-/// Eq(Opt_g, run_g n b0 (Some init_g(x̄)), Some(erase_g(g x̄ h̄)))` (with the
+/// Eq(Res_g, run_g n b0 (Ret init_g(x̄)), Ret(erase_g(g x̄ h̄)))` (with the
 /// presence conjunct when `g` has optional cells: a `Sigma`).
 #[derive(Clone)]
 pub struct Callee {
@@ -196,7 +196,7 @@ pub struct Callee {
     pub lemma: GlobalId,
     /// The callee's telescope relevances.
     pub rels: Vec<Rel>,
-    /// `run_g n b0 (Some init_g(x̄))` as a term over (relevant x̄, n).
+    /// `run_g n b0 (Ret init_g(x̄))` as a term over (relevant x̄, n).
     pub l_of: Tm,
     pub out_ty: Tm,
     pub erase: Tm,
@@ -258,9 +258,9 @@ pub struct FuelMode {
 /// continuation:
 ///
 /// ```text
-/// Π p̄ j̄ (n) (C : Option(Out)) (hC : Π m (.hm : len n − μ(p̄) ≤ len m) k̄.
-///     Eq(run m X (Some σ_X(h p̄, w̄)), C)) (.hle : μ(p̄) ≤ len n).
-///   Eq(run n H (Some σ(p̄, j̄)), C)
+/// Π p̄ j̄ (n) (C : mir::Res(Out)) (hC : Π m (.hm : len n − μ(p̄) ≤ len m) k̄.
+///     Eq(run m X (Ret σ_X(h p̄, w̄)), C)) (.hle : μ(p̄) ≤ len n).
+///   Eq(run n H (Ret σ(p̄, j̄)), C)
 /// ```
 ///
 /// With a fuel function `F` (nested loops) the continuation's fuel is a
@@ -268,7 +268,7 @@ pub struct FuelMode {
 ///
 /// ```text
 /// Π p̄ j̄ (n) (R : Int) (C) (hC : Π m (.hm : R ≤ len m) k̄. ..) (.hR : 0 ≤ R)
-///     (.hle : F(p̄) + R ≤ len n). Eq(run n H (Some σ(p̄, j̄)), C)
+///     (.hle : F(p̄) + R ≤ len n). Eq(run n H (Ret σ(p̄, j̄)), C)
 /// ```
 #[derive(Clone)]
 pub struct WhileHelper {
@@ -427,7 +427,16 @@ pub struct Walker<'e> {
     pub whiles: Vec<WhileHelper>,
     /// A `while` lemma's walk.
     pub exit: Option<ExitMode>,
+    /// A panic theorem's walk (`stmt::statement_panic`): the goal's right
+    /// side is `Panic` (`Goal::rhs`), the literal side is driven to it
+    /// alone, and a value is an outcome to refute.
+    pub panic: bool,
 }
+
+/// The constructors of the literal run's outcome `mir::Res` (`literal.core`).
+pub const RES_STUCK: u32 = 0;
+pub const RES_RET: u32 = 1;
+pub const RES_PANIC: u32 = 2;
 
 fn name(s: &str) -> Name {
     Rc::from(s)
@@ -483,11 +492,23 @@ impl<'e> Walker<'e> {
     pub fn list_unit(&self) -> Tm {
         mk::ind(self.ind("List"), vec![self.unit_ty()])
     }
+    /// The literal run's outcome type `mir::Res(Out)`.
     fn opt_out(&self) -> Tm {
-        mk::ind(self.ind("Option"), vec![self.out_ty.clone()])
+        mk::ind(self.ind("mir::Res"), vec![self.out_ty.clone()])
     }
+    /// The value outcome `Ret(v)`.
     fn some_out(&self, v: Tm) -> Tm {
-        Rc::new(Term::Ctor { ind: self.ind("Option"), ctor: 1, params: vec![self.out_ty.clone()], args: vec![v] })
+        Rc::new(Term::Ctor { ind: self.ind("mir::Res"), ctor: RES_RET, params: vec![self.out_ty.clone()], args: vec![v] })
+    }
+    /// The panic outcome (the right side of a panic theorem's equation).
+    pub fn panic_out(&self) -> Tm {
+        Rc::new(Term::Ctor { ind: self.ind("mir::Res"), ctor: RES_PANIC, params: vec![self.out_ty.clone()], args: vec![] })
+    }
+    /// The constructor of the outcome the goal wants (`Ret`, or `Panic` in
+    /// a panic theorem's walk): a literal side that is any other outcome
+    /// fails (its path must be refuted).
+    fn goal_ctor(&self) -> u32 {
+        if self.panic { RES_PANIC } else { RES_RET }
     }
     pub(crate) fn len_n(&self, depth: u32) -> Tm {
         let ni = depth - 1 - self.n_level;
@@ -906,12 +927,12 @@ impl<'e> Walker<'e> {
         if self.prem_in_ctx { self.goal_c(g) } else { self.goal_p(ctx, g) }
     }
 
-    /// `Eq(Opt, l, Some(erase(s)))`.
+    /// `Eq(Opt, l, Ret(erase(s)))`.
     pub fn goal_e(&self, g: &Goal) -> Tm {
         mk::eq(self.opt_out(), g.l.clone(), self.goal_rhs(g))
     }
 
-    /// The equation's right side: `Some(erase(s))`, or the abstracted one.
+    /// The equation's right side: `Ret(erase(s))`, or the abstracted one.
     fn goal_rhs(&self, g: &Goal) -> Tm {
         g.rhs.clone().unwrap_or_else(|| self.some_out(mk::app(self.erase.clone(), self.commit(&g.s))))
     }
@@ -981,7 +1002,7 @@ impl<'e> Walker<'e> {
     }
 
     /// The literal side's call `lcall` (a callee's or the function's own
-    /// run) moved to `sval = Some(erase(S call))` along `eq : Eq(Opt_g,
+    /// run) moved to `sval = Ret(erase(S call))` along `eq : Eq(Opt_g,
     /// lcall, sval)`: the new goal and the transport (its value a hole), or
     /// `None` when the call is not in the literal side (or already
     /// converts).
@@ -1055,7 +1076,7 @@ impl<'e> Walker<'e> {
     #[allow(clippy::too_many_arguments)]
     fn transport_with(&mut self, ctx: &Ctx, g: &Goal, l_abs: Tm, lcall: &Tm, sval: &Tm, out_g: &Tm, eq: Tm, with_prem: bool) -> Result<(Goal, Tm), String> {
         self.stats.transports += 1;
-        let opt_g = mk::ind(self.ind("Option"), vec![out_g.clone()]);
+        let opt_g = mk::ind(self.ind("mir::Res"), vec![out_g.clone()]);
         let sym = mk::apps(mk::global(self.g("eq::sym")?), vec![(Rel::Rel, opt_g.clone()), (Rel::Rel, lcall.clone()), (Rel::Rel, sval.clone()), (Rel::Rel, eq)]);
         let gm = g.with(l_abs.clone(), shift(&g.s, 1), 1);
         let ctx_y = self.push(ctx, "y", Rel::Rel, &opt_g, None)?;
@@ -1529,7 +1550,7 @@ impl<'e> Walker<'e> {
         Err(self.fail(ctx, &g1, &format!("the self-call is not reached in the literal side (the induction hypothesis's literal side: {})", trunc(&lcall, 2000))))
     }
 
-    /// The induction hypothesis's literal side `run n b0 (Some init(ā))` at
+    /// The induction hypothesis's literal side `run n b0 (Ret init(ā))` at
     /// the current fuel.
     fn ih_lcall(&self, ctx: &Ctx, args: &Args) -> Result<Tm, String> {
         let rf = self.rec_fn.as_ref().ok_or("no recursion")?;
@@ -2434,7 +2455,7 @@ impl<'e> Walker<'e> {
                 let mut sub = rel_args.clone();
                 sub.push(mk::var(ni));
                 let lcall = crate::elab::tm::subst_n(&ci.l_of, &sub);
-                let sval = Rc::new(Term::Ctor { ind: self.ind("Option"), ctor: 1, params: vec![ci.out_ty.clone()], args: vec![mk::app(ci.erase.clone(), mk::apps(mk::global(*cg), args.clone()))] });
+                let sval = Rc::new(Term::Ctor { ind: self.ind("mir::Res"), ctor: RES_RET, params: vec![ci.out_ty.clone()], args: vec![mk::app(ci.erase.clone(), mk::apps(mk::global(*cg), args.clone()))] });
                 // the lemma's fuel premise: at every fuel, or the callee's need
                 // from the premise (a hypothesis: inside a terminal, or before
                 // the walk); otherwise the call waits for the terminal
@@ -2998,11 +3019,27 @@ impl<'e> Walker<'e> {
         (Rc::new(Term::App { rel: Rel::Irr, fun: tr, arg: e.clone() }), iota_syn(&crate::elab::tm::subst0(&a_e, c)))
     }
 
+    /// A panic theorem's walk ([`Walker::panic`], `stmt::statement_panic`):
+    /// the literal side `l` alone driven to `Panic` in `ctx`, whose facts
+    /// (`facts`: the preconditions, the panic hypothesis, the fuel premise)
+    /// decide its tests or refute its paths; a test they do not decide is
+    /// split, and every outcome but a panic must be refuted (the panic
+    /// condition is then too wide, or the walk cannot show the path is
+    /// impossible). A proof of `Eq(mir::Res(Out), l, Panic)`.
+    pub fn panic_walk(&mut self, ctx: &Ctx, l: &Tm, facts: &[Fact]) -> Result<Tm, String> {
+        let g = Goal { l: l.clone(), s: self.tt(), ins: vec![], rhs: Some(self.panic_out()), acc: None };
+        self.terminal(ctx, &g, facts, 0)
+    }
+
     /// A terminal (a value, a loop helper's call, a recursive call), with the
     /// fuel premise in the context: the bare equation `goal_e(g)`.
     fn terminal(&mut self, ctx: &Ctx, g: &Goal, facts: &[Fact], depth: u32) -> Result<Tm, String> {
         if depth > 48 {
-            return Err("too many literal-reading steps at one tail".into());
+            return Err(if self.panic {
+                "the literal reading does not reach a panic within the walk's bound (48 tests or loop iterations on one path) where the panic condition holds: a loop that does not end there, or a panic after more iterations than the panic walk follows".into()
+            } else {
+                "too many literal-reading steps at one tail".into()
+            });
         }
         // (a loop's call where the literal side is at the loop's header
         // already: an inner loop's exit jumped there)
@@ -3028,10 +3065,11 @@ impl<'e> Walker<'e> {
             self.stats.leaves += 1;
             return Ok(mk::refl(self.opt_out(), rhs_t));
         }
-        let fails = matches!(&*lv, Value::Ctor { ctor: 0, .. });
+        let fails = matches!(&*lv, Value::Ctor { ctor, .. } if *ctor != self.goal_ctor());
         if fails {
-            // the literal reading fails (a failed assertion, an overflow):
-            // the path contradicts the facts (constructor clash, arithmetic)
+            // the literal reading has another outcome than the goal's (stuck,
+            // a panic; in a panic theorem a value): the path contradicts the
+            // facts (constructor clash, arithmetic)
             if let Some(pf) = self.refute(ctx, facts)? {
                 self.stats.refuted += 1;
                 return Ok(Rc::new(Term::Absurd { ty: self.goal_e(g), proof: pf }));
@@ -3043,6 +3081,20 @@ impl<'e> Walker<'e> {
             if let Some(pf) = self.refute_eval(ctx, facts)? {
                 self.stats.refuted += 1;
                 return Ok(Rc::new(Term::Absurd { ty: self.goal_e(g), proof: pf }));
+            }
+            // (a panic theorem: a disjunctive fact split, each side refuted)
+            if self.panic
+                && let Some(pf) = self.refute_or(ctx, facts, 3)?
+            {
+                self.stats.refuted += 1;
+                return Ok(Rc::new(Term::Absurd { ty: self.goal_e(g), proof: pf }));
+            }
+            // (a panic theorem: a value or stuck where the facts allow it)
+            if self.panic {
+                let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
+                let fs: Vec<String> = facts.iter().filter(|f| !f.is_marker()).filter_map(|f| self.eval(ctx, &f.ty).ok()).map(|v| trunc(&self.env.print_term(&names, &self.quote(ctx, &v)), 300)).collect();
+                let what = if matches!(&*lv, Value::Ctor { ctor: RES_RET, .. }) { "returns a value" } else { "is stuck (undefined behaviour, out of fuel or a construct it does not model)" };
+                return Err(self.fail(ctx, g, &format!("the literal reading {what} on a path where the panic condition holds, and the facts do not refute the path: the panic contract is too wide there (or the walk cannot show the path is impossible)\n  facts:\n    {}", fs.join("\n    "))));
             }
         } else if let Some(pf) = self.refute_last(ctx, facts)? {
             // (the newest path equation against the others: each earlier one
@@ -4284,6 +4336,55 @@ impl<'e> Walker<'e> {
     /// that two machine words differ (`eq(a, b) = false`, `ne(a, b) = true`,
     /// which `linarith` cannot use: a disjunction), the equality proven by
     /// `linarith` from the others, against the fact (a constructor clash).
+    /// A refutation by cases on a disjunctive fact (`A ∨ B`: a panic
+    /// condition `a || b`, a panic lemma's conclusion; a panic theorem's
+    /// walk keeps them whole): each side, added to the facts with its
+    /// conjuncts, is refuted by the other refuters, or by a split of
+    /// another disjunction (`depth` more). The proof matches on the
+    /// disjunction; it is the proof of an `Absurd` (an irrelevant
+    /// position), where the proofs of hypotheses may be inspected.
+    fn refute_or(&mut self, ctx: &Ctx, facts: &[Fact], depth: u32) -> Result<Option<Tm>, String> {
+        let Some(either) = self.env.lookup_ind("Either") else { return Ok(None) };
+        let empty = mk::ind(self.env.empty_ind(), vec![]);
+        for (i, f) in facts.iter().enumerate() {
+            if f.is_marker() {
+                continue;
+            }
+            let fty = self.eval(ctx, &f.ty)?;
+            let Value::Ind { ind, params } = &*fty else { continue };
+            if *ind != either || params.len() != 2 {
+                continue;
+            }
+            let sides: Vec<Tm> = params.iter().map(|p| self.quote(ctx, p)).collect();
+            let rest: Vec<Fact> = facts.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, x)| x.shifted(1)).collect();
+            let mut arms = Vec::new();
+            for side in &sides {
+                let actx = self.push(ctx, "side", Rel::Rel, side, None)?;
+                let mut fs = rest.clone();
+                side_facts(self.env, mk::var(0), &shift(side, 1), &mut fs);
+                let pf = match self.refute(&actx, &fs)? {
+                    Some(p) => Some(p),
+                    None => match self.refute_arith(&actx, &fs)? {
+                        Some(p) => Some(p),
+                        None => match self.refute_eval(&actx, &fs)? {
+                            Some(p) => Some(p),
+                            None if depth > 0 => self.refute_or(&actx, &fs, depth - 1)?,
+                            None => None,
+                        },
+                    },
+                };
+                match pf {
+                    Some(p) => arms.push(Arm { names: vec![name("value")], body: p }),
+                    None => break,
+                }
+            }
+            if arms.len() == 2 {
+                return Ok(Some(Rc::new(Term::Match { ind: either, params: sides, scrut: f.proof.clone(), motive: empty.clone(), arms })));
+            }
+        }
+        Ok(None)
+    }
+
     fn refute_arith(&mut self, ctx: &Ctx, facts: &[Fact]) -> Result<Option<Tm>, String> {
         let r = self.refute_arith0(ctx, facts)?;
         self.check_empty(ctx, r.as_ref(), "refute_arith")?;
@@ -5537,6 +5638,23 @@ fn sigma_facts_w(p: Tm, ty: &Tm, out: &mut Vec<Fact>) {
             sigma_facts_w(Rc::new(Term::Fst(p.clone())), fst, out);
             sigma_facts_w(Rc::new(Term::Snd(p)), &shift(snd, -1), out);
         }
+        _ => {}
+    }
+}
+
+/// The facts of a side of a disjunction (a proof `p` of `ty`): an
+/// equation, the components of a non-dependent pair of them, and a nested
+/// disjunction kept whole (`Walker::refute_or` splits it in turn).
+fn side_facts(env: &Env, p: Tm, ty: &Tm, out: &mut Vec<Fact>) {
+    let or = env.lookup_global("Or");
+    match &**ty {
+        Term::Eq { .. } => out.push(Fact { reused: true, ..Fact::eq(p, ty.clone()) }),
+        Term::Sigma { fst, snd, .. } if count_var(snd, 0) == 0 => {
+            side_facts(env, Rc::new(Term::Fst(p.clone())), fst, out);
+            side_facts(env, Rc::new(Term::Snd(p)), &shift(snd, -1), out);
+        }
+        Term::App { fun, .. } if matches!(&**fun, Term::App { fun: g, .. } if matches!(&**g, Term::Global(x) if Some(*x) == or)) => out.push(Fact::eq(p, ty.clone())),
+        Term::Ind { ind, params } if params.len() == 2 && Some(*ind) == env.lookup_ind("Either") => out.push(Fact::eq(p, ty.clone())),
         _ => {}
     }
 }

@@ -81,6 +81,8 @@ FIXTURES = [
     ("rm_orig", "rm_orig", "a", "a.sbmir", []),
     ("rm_fast", "rm_fast", "a", "a.sbmir", []),
     ("rm_wrong", "rm_wrong", "a", "a.sbmir", []),
+    # tests/panic_contracts.rs: documented panics as panic contracts
+    ("pc_guard", "pc_guard", "a", "a.sbmir", []),
 ]
 
 # crates of the workspace that are dependencies only (no MIR of their own)

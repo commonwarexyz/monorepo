@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use sandblaster_kernel::api::{Ctx, CtxEntry, Env, KernelError, KernelErrorKind};
-use sandblaster_kernel::term::{GlobalId, Lvl, Rel, Sort, Term, Tm, Width};
+use sandblaster_kernel::term::{Arm, GlobalId, Lvl, Rel, Sort, Term, Tm, Width};
 use sandblaster_kernel::util::mk;
 use sandblaster_kernel::value::{Budget, Closure, EnvEntry, EvalError, Head, Neutral, V, Value};
 
@@ -632,6 +632,12 @@ impl<'a> Engine<'a> {
         let d = st.depth();
         match &*t {
             Value::Pi { name, rel, dom, cod } => {
+                // ¬(P ∨ Q) (a panic contract's no-panic clause at a call,
+                // DESIGN.md §16.5): ¬P and ¬Q, each its own goal, joined by
+                // a match on the disjunction
+                if let Some(p) = self.solve_not_or(st, *rel, dom, cod, irr)? {
+                    return Ok(Some(p));
+                }
                 let is_prop = self.is_prop(dom, d);
                 let e = st.push_lam(self.env, name.clone(), *rel, dom.clone(), is_prop);
                 let Some(cod_v) = self.inst(cod, vec![e], st.depth())? else { return Ok(None) };
@@ -1292,6 +1298,14 @@ impl<'a> Engine<'a> {
             if let Value::Pi { rel, dom, cod, .. } = &*f.ty {
                 let x = self.env.fresh_var(Lvl(d), *rel, dom);
                 let cod_v = self.inst(cod, vec![x], d + 1)?;
+                // (a negation saturation already gave in the form the
+                // other checks use — `¬(P ∨ Q)` as `¬P` and `¬Q`, `¬(c ==
+                // b)` as `c == !b`, `facts::not_fact` — is not proven again:
+                // proving a disjunction is the costly search a goal's
+                // budget is lost to)
+                if self.negation_normalized(st, &facts, *rel, dom)? {
+                    continue;
+                }
                 if matches!(cod_v.as_deref(), Some(Value::Ind { ind, .. }) if *ind == self.n.empty_ind) && self.is_prop(dom, d) {
                     let mut c = st.child();
                     c.depth_left = 0;
@@ -1304,6 +1318,92 @@ impl<'a> Engine<'a> {
             }
         }
         Ok(None)
+    }
+
+    /// A goal `¬(P ∨ Q)` (`Π(x : P ∨ Q). Empty`) as the two goals `¬P` and
+    /// `¬Q`: `λx. match x { Left(p) => ¬P's proof p, Right(q) => ¬Q's
+    /// proof q }`. `None` when the goal is no negated disjunction or a side
+    /// is not proven (the goal is then searched as it is).
+    fn solve_not_or(&mut self, st: &mut St, rel: Rel, dom: &V, cod: &Closure, irr: bool) -> R<Option<Tm>> {
+        let d = st.depth();
+        let Some(either) = self.n.either else { return Ok(None) };
+        let Some((p, q)) = self.either_sides(st, dom)? else { return Ok(None) };
+        let x = self.env.fresh_var(Lvl(d), rel, dom);
+        if !matches!(self.inst(cod, vec![x], d + 1)?.as_deref(), Some(Value::Ind { ind, .. }) if *ind == self.n.empty_ind) {
+            return Ok(None);
+        }
+        let empty = mk::ind(self.n.empty_ind, vec![]);
+        let sides: Vec<Tm> = [p, q].iter().map(|p| self.quote(st, p)).collect();
+        let mut pfs = Vec::new();
+        for side in &sides {
+            let Some(neg) = self.eval(st, &mk::pi("x", rel, side.clone(), empty.clone()))? else { return Ok(None) };
+            match self.solve(st, neg, irr)? {
+                Some(p) => pfs.push(p),
+                None => return Ok(None),
+            }
+        }
+        self.note("¬(p ∨ q): ¬p and ¬q");
+        let arms: Vec<Arm> = pfs.iter().map(|p| Arm { names: vec![Rc::from("p")], body: Rc::new(Term::App { rel, fun: shift(p, 2), arg: mk::var(0) }) }).collect();
+        let dom_tm = mk::ind(either, sides.clone());
+        let m = Rc::new(Term::Match { ind: either, params: sides.iter().map(|s| shift(s, 1)).collect(), scrut: mk::var(0), motive: empty, arms });
+        Ok(Some(mk::lam("x", rel, dom_tm, m)))
+    }
+
+    /// The sides of a disjunction `P ∨ Q`: `Either(P, Q)`, or the prelude's
+    /// `Or(P, Q)` not unfolded yet (a goal keeps the global).
+    pub fn either_sides(&mut self, st: &St, v: &V) -> R<Option<(V, V)>> {
+        let Some(either) = self.n.either else { return Ok(None) };
+        if let Value::Ind { ind, params } = &**v
+            && *ind == either
+            && params.len() == 2
+        {
+            return Ok(Some((params[0].clone(), params[1].clone())));
+        }
+        if let Value::Neu(Neutral { head: Head::Global { def, .. }, spine }) = &**v
+            && spine.is_empty()
+            && self.env.global_name(*def).is_some_and(|n| &*n == "Or")
+            && let Some((_, body)) = self.unfold_app(st, v, *def)?
+            && let Value::Ind { ind, params } = &*body
+            && *ind == either
+            && params.len() == 2
+        {
+            return Ok(Some((params[0].clone(), params[1].clone())));
+        }
+        Ok(None)
+    }
+
+    /// Whether the negation `¬dom` is among `facts` in the form saturation
+    /// gives it (`facts::not_fact`): for `dom = P ∨ Q`, the facts `¬P` and
+    /// `¬Q`; for `dom = (c == b)`, the fact `c == !b`.
+    fn negation_normalized(&mut self, st: &St, facts: &[super::state::Fact], rel: Rel, dom: &V) -> R<bool> {
+        let d = st.depth();
+        let has = |e: &mut Self, t: &V| -> R<bool> {
+            for g in facts {
+                if e.conv(d, &g.ty, t)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        if let Some((p, q)) = self.either_sides(st, dom)? {
+            let empty = mk::ind(self.n.empty_ind, vec![]);
+            for p in [p, q] {
+                let neg_tm = mk::pi("x", rel, self.quote(st, &p), empty.clone());
+                let Some(neg) = self.eval(st, &neg_tm)? else { return Ok(false) };
+                if !has(self, &neg)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        if let Some((ty, c, b)) = as_eq(dom)
+            && matches!(&**ty, Value::Ind { ind, .. } if *ind == self.n.bool_ind)
+            && let Some(b) = bool_lit(self.n.bool_ind, b)
+        {
+            let other = Rc::new(Value::Eq { ty: ty.clone(), lhs: c.clone(), rhs: self.bool_v(!b) });
+            return has(self, &other);
+        }
+        Ok(false)
     }
 
     /// `BvRefl` for an equation over machine integers / arrays (§8.1 step

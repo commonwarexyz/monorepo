@@ -172,6 +172,8 @@ pub struct OpenCtx {
     pub host_obligations: Vec<(String, String)>,
     /// Lifted functions with a recursion depth bound (for the record).
     pub host_depth_bounds: Vec<(String, String)>,
+    /// Lifted functions with a panic contract (for the record).
+    pub panic_contracts: Vec<(String, String)>,
     /// The module being emitted is lifted in place.
     pub cur_in_place: bool,
     /// Provided methods of the open traits declared in a lifted file, by
@@ -1331,6 +1333,7 @@ impl Ctx {
                 callee: super::ConformCallee::Trait { modpath, self_ty: src_ty, trait_path: "Default".into(), method: "default".into() },
                 params: vec![],
                 has_ret: true,
+                opaque_ret: false,
             });
         }
         // an attached contract (`#[lift_attach(S::default)]`: `ensures(..)`,

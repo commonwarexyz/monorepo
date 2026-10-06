@@ -46,6 +46,16 @@
 //!    does not finish, or a harness that does not compile is a failure.
 //!    Any failure fails the build and names the function, the input and
 //!    both outputs.
+//! 5. **Panic contracts** (in place, DESIGN.md §16.5). After step 1 the
+//!    check seeks inputs inside each panic contract's panic region on
+//!    purpose (where its domain holds and its no-panic clause does not:
+//!    [`PANIC_INPUTS`] of them, from the parameters' pools and mutants,
+//!    deciding each by the precondition checkers only); on those rustc must
+//!    panic and the literal reading must give `Panic`. A function returning
+//!    `impl Trait` is compared there only (its result is opaque). A panic
+//!    contract compared on no input fails the check: this also catches a
+//!    condition that never holds on the function's domain, whose panic
+//!    theorem would hold vacuously.
 //!
 //! Bounded (a fixed evaluation budget per function; seconds for the varint
 //! pilot's 64 functions) and cached: a pass is recorded in the work
@@ -91,7 +101,7 @@ pub use in_place::{check_in_place, host_inputs, HostInputs};
 pub use literal::LITERAL_CASES;
 
 /// This check's version (part of the cache key).
-pub const VERSION: &str = "sandblaster-lift-conformance/4";
+pub const VERSION: &str = "sandblaster-lift-conformance/6";
 /// The buffer model in Rust (the harness's crate `bytes`).
 pub const BYTES_SHIM: &str = include_str!("../lift/conform_bytes.rs");
 /// The host traits the lift knows (the harness root).
@@ -109,6 +119,16 @@ const STEPS: u64 = 500_000_000;
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 /// The harness module appended to the source copy.
 const HARNESS_MOD: &str = "__sandblaster_conformance";
+/// Inputs sought inside each panic contract's panic region (in place):
+/// generated on purpose, after the coverage-driven inputs, until this many
+/// are found or [`PANIC_TRIES`] candidates are spent.
+const PANIC_INPUTS: usize = 16;
+/// Candidates tried per panic contract in that search (only its domain and
+/// precondition checkers are evaluated on them).
+const PANIC_TRIES: usize = 4096;
+/// Why a function returning `impl Trait` without a panic contract is not
+/// called by the harness.
+const OPAQUE_SKIP: &str = "it returns `impl Trait` (an opaque value the harness cannot compare: compared through its callers)";
 
 /// Where and with what the check runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -231,6 +251,9 @@ pub struct EntryReport {
     /// Inputs on which the literal reading L of its MIR was compared with
     /// rustc's build too ([`literal`]).
     pub literal: usize,
+    /// Inputs of its panic contract's panic region on which rustc panicked
+    /// and L gave `Panic` (in place; part of `literal`).
+    pub panics: usize,
 }
 
 /// A difference between the lifted model and `rustc`'s build.
@@ -340,6 +363,9 @@ impl Report {
                         o.num("rejected_by_invariant", e.rejected as i64);
                         o.num("reference_evaluations", e.reference as i64);
                         o.num("literal_cases", e.literal as i64);
+                        if e.panics > 0 {
+                            o.num("panic_cases", e.panics as i64);
+                        }
                         if let Some(s) = &e.skipped {
                             o.str("skipped", s);
                         }
@@ -375,11 +401,15 @@ pub fn check(out: &mut elab::Output, krate: &Crate, c: &Checked, info: &LiftedIn
         return rep;
     }
     let hosts: Vec<(String, String)> = c.lifted.iter().filter(|l| l.host).map(|l| (l.name.clone(), c.sm.get(l.file).map(|f| f.text.clone()).unwrap_or_default())).collect();
-    let entries: Vec<&ConformEntry> = c.lift_facts.conform.iter().filter(|e| e.module == info.name).collect();
-    // lifted functions without an entry of their own (loop helpers, ..):
-    // reported, compared through their callers
+    let entries: Vec<&ConformEntry> = c.lift_facts.conform.iter().filter(|e| e.module == info.name && !e.opaque_ret).collect();
+    // lifted functions without an entry of their own (loop helpers, ..),
+    // and those returning `impl Trait` (compared only in place, on a panic
+    // contract's panic region): reported, compared through their callers
     for sk in c.lift_facts.conform_skipped.iter().filter(|s| s.module == info.name) {
         rep.entries.push(EntryReport { lifted: sk.lifted.clone(), callee: "(none)".into(), skipped: Some(sk.why.clone()), ..Default::default() });
+    }
+    for e in c.lift_facts.conform.iter().filter(|e| e.module == info.name && e.opaque_ret) {
+        rep.entries.push(EntryReport { lifted: e.lifted.clone(), callee: "(none)".into(), skipped: Some(OPAQUE_SKIP.into()), ..Default::default() });
     }
     // what the harness cannot build yet fails the check (never a vacuous pass)
     if info.in_place {
@@ -440,7 +470,8 @@ pub fn check(out: &mut elab::Output, krate: &Crate, c: &Checked, info: &LiftedIn
         match harness(&g, &plans, &cases, &src, &hosts, cfg) {
             Ok(outputs) => {
                 let rustc = compare(&g, &plans, &cases, &outputs, &mut rep);
-                literal::compare(&g, &plans, &cases, &rustc, &lits, &mut rep);
+                let panics = literal::compare(&g, &plans, &cases, &rustc, &lits, &mut rep);
+                panic_coverage(krate, &entries, &panics, &mut rep);
             }
             Err(e) => rep.errors.push(e),
         }
@@ -550,7 +581,7 @@ impl Record {
             t.push_str(&format!("note {}\n", esc(n)));
         }
         for e in &self.entries {
-            t.push_str(&format!("entry {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", esc(&e.lifted), esc(&e.callee), e.cases, e.classes, e.rejected, e.reference, e.literal, e.skipped.as_deref().map(|s| format!("+{}", esc(s))).unwrap_or_else(|| "-".into())));
+            t.push_str(&format!("entry {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", esc(&e.lifted), esc(&e.callee), e.cases, e.classes, e.rejected, e.reference, e.literal, e.panics, e.skipped.as_deref().map(|s| format!("+{}", esc(s))).unwrap_or_else(|| "-".into())));
         }
         t
     }
@@ -571,12 +602,12 @@ impl Record {
                 r.notes.push(unesc(n));
             } else {
                 let f: Vec<&str> = l.strip_prefix("entry ")?.split('\t').collect();
-                let [lifted, callee, cases, classes, rejected, reference, literal, skipped]: [&str; 8] = f.try_into().ok()?;
+                let [lifted, callee, cases, classes, rejected, reference, literal, panics, skipped]: [&str; 9] = f.try_into().ok()?;
                 let skipped = match skipped {
                     "-" => None,
                     s => Some(unesc(s.strip_prefix('+')?)),
                 };
-                r.entries.push(EntryReport { lifted: unesc(lifted), callee: unesc(callee), cases: cases.parse().ok()?, classes: classes.parse().ok()?, rejected: rejected.parse().ok()?, reference: reference.parse().ok()?, literal: literal.parse().ok()?, skipped });
+                r.entries.push(EntryReport { lifted: unesc(lifted), callee: unesc(callee), cases: cases.parse().ok()?, classes: classes.parse().ok()?, rejected: rejected.parse().ok()?, reference: reference.parse().ok()?, literal: literal.parse().ok()?, panics: panics.parse().ok()?, skipped });
             }
         }
         Some(r)
@@ -611,7 +642,22 @@ struct Plan<'a> {
     invariant_arg: bool,
     /// The checker of the function's precondition (in-place modules).
     pre: Option<GlobalId>,
+    /// A panic contract (`panics_when(p)`, in-place modules): the checker of
+    /// its domain, the `requires` before the no-panic clause (`None`: every
+    /// input). An input in the domain that does not meet the precondition
+    /// meets `p`: rustc must panic on it, and the literal reading too
+    /// ([`PANIC_CASE`]).
+    pre_dom: Option<Option<GlobalId>>,
+    /// The original returns `impl Trait` (`ConformEntry::opaque_ret`): only
+    /// inputs of its panic region are compared (no result is read back).
+    panic_only: bool,
 }
+
+/// The model's outcome of an input on which the function's panic contract
+/// says it panics (a [`Case`]'s `model`): the structured reading is not
+/// evaluated there; rustc must panic, and the literal reading must give
+/// `Panic` (`literal::compare`).
+pub(super) const PANIC_CASE: &str = "a panic (its panic contract's condition holds)";
 
 /// One compared input.
 struct Case {
@@ -639,6 +685,10 @@ struct Gen<'a> {
     /// (lifted function → its checker in `pre_out`'s environment), so that
     /// a function with a `requires` is compared on the inputs that meet it.
     pre: HashMap<ItemId, GlobalId>,
+    /// In-place modules: the functions with a panic contract, each with the
+    /// checker of its domain (`None`: every input), so that the inputs where
+    /// it panics are compared too (rustc panics, the literal reading panics).
+    pre_dom: HashMap<ItemId, Option<GlobalId>>,
     pre_out: Option<&'a elab::Output>,
 }
 
@@ -655,7 +705,7 @@ fn num(j: &J) -> Option<u128> {
 
 impl<'a> Gen<'a> {
     fn new(out: &'a elab::Output, krate: &'a Crate, c: &'a Checked, info: &LiftedInfo) -> Gen<'a> {
-        Gen { out, krate, c, module: info.name.clone(), hosts: c.lifted.iter().filter(|l| l.host).map(|l| l.name.clone()).collect(), harvest: HashMap::new(), harvest_shapes: HashMap::new(), pools: HashMap::new(), rng: Rng(SEED), ip: None, pre: HashMap::new(), pre_out: None }
+        Gen { out, krate, c, module: info.name.clone(), hosts: c.lifted.iter().filter(|l| l.host).map(|l| l.name.clone()).collect(), harvest: HashMap::new(), harvest_shapes: HashMap::new(), pools: HashMap::new(), rng: Rng(SEED), ip: None, pre: HashMap::new(), pre_dom: HashMap::new(), pre_out: None }
     }
 
     fn conv(&self) -> Conv<'_> {
@@ -689,6 +739,12 @@ impl<'a> Gen<'a> {
                 continue;
             };
             let pre = self.pre.get(&id).copied();
+            let pre_dom = self.pre_dom.get(&id).copied();
+            // (an opaque result: compared only where it panics)
+            if e.opaque_ret && (pre.is_none() || pre_dom.is_none()) {
+                skip(&mut er, OPAQUE_SKIP.into(), rep);
+                continue;
+            }
             if f.params.iter().any(|p| p.ghost) || (pre.is_none() && self.out.env.global_param_rels(g).is_none_or(|r| r.contains(&Rel::Irr))) {
                 skip(&mut er, "it has a precondition (it is checked through its callers)".into(), rep);
                 continue;
@@ -714,7 +770,7 @@ impl<'a> Gen<'a> {
                     _ => {}
                 }
             }
-            if e.has_ret {
+            if e.has_ret && !e.opaque_ret {
                 let r = match (&f.ret, comps.len()) {
                     (Ty::Tuple(ts), n) if n > 0 && ts.len() == n + 1 => ts[n].clone(),
                     (t, 0) => t.clone(),
@@ -732,7 +788,7 @@ impl<'a> Gen<'a> {
             }
             let invariant_arg = params.iter().any(|t| self.has_invariant(t));
             rep.entries.push(er);
-            plans.push(Plan { e, index: rep.entries.len() - 1, g, params, ret: f.ret.clone(), comps, state_of, callee, invariant_arg, pre });
+            plans.push(Plan { e, index: rep.entries.len() - 1, g, params, ret: f.ret.clone(), comps, state_of, callee, invariant_arg, pre, pre_dom, panic_only: e.opaque_ret });
         }
         plans
     }
@@ -999,9 +1055,14 @@ impl<'a> Gen<'a> {
         }
         if let Some(chk) = p.pre {
             // the precondition, decided by its checker: an input that does
-            // not meet it is not compared
+            // not meet it is not compared, unless it is in the domain of a
+            // panic contract (then it meets the panic condition: compared as
+            // a panic)
             if !self.meets_pre(chk, p, args).map_err(Some)? {
-                return Err(None);
+                return match p.pre_dom {
+                    Some(dom) if dom.is_none_or(|d| self.meets_pre(d, p, args).unwrap_or(false)) => Err(Some(PANIC_CASE.into())),
+                    _ => Err(None),
+                };
             }
             // (the `requires` binders get erased proofs: the reference strategy)
             let rels = self.out.env.global_param_rels(p.g).unwrap_or_default();
@@ -1286,7 +1347,7 @@ impl<'a> Gen<'a> {
         for round in 0..ROUNDS {
             for (pi, p) in plans.iter().enumerate() {
                 let budget = EVALS * (round + 1) / ROUNDS;
-                if evals[pi] >= budget {
+                if evals[pi] >= budget || p.panic_only {
                     continue;
                 }
                 self.rng = Rng(SEED ^ meval::hash_str(&p.e.lifted) ^ (round as u64).wrapping_mul(0x9E37_79B9));
@@ -1357,11 +1418,95 @@ impl<'a> Gen<'a> {
                 queue.clear();
             }
         }
+        // inputs inside each panic contract's panic region, on purpose
+        for (pi, p) in plans.iter().enumerate() {
+            if p.pre_dom.is_some() {
+                evals[pi] += self.panic_region(pi, p, &mut seen[pi], &mut cases);
+            }
+        }
         for (pi, p) in plans.iter().enumerate() {
             rep.entries[p.index].cases = evals[pi];
             rep.entries[p.index].classes = classes[pi].len();
         }
         cases
+    }
+
+    /// Seeks inputs inside the panic region of `p`'s panic contract (its
+    /// domain holds, its no-panic clause does not), on purpose: the
+    /// coverage-driven inputs land there rarely (one or two of a function's
+    /// first inputs, none for a function compared only there). Candidates
+    /// are drawn from the parameters' pools (every small value, the powers
+    /// of two ±1, the maximum, the states reached), then mutants of the
+    /// inputs found, and only the domain and precondition checkers are
+    /// evaluated on them; up to [`PANIC_INPUTS`] in all (counting those
+    /// the coverage-driven search found) become cases (rustc must panic,
+    /// L must give `Panic`). Returns the number added. Finding none is not
+    /// an error here: the comparison's tally fails a panic contract
+    /// compared on no input ([`panic_coverage`]).
+    fn panic_region(&mut self, pi: usize, p: &Plan<'_>, seen: &mut HashSet<String>, cases: &mut Vec<Case>) -> usize {
+        let (Some(chk), Some(dom)) = (p.pre, p.pre_dom) else { return 0 };
+        let mut have = cases.iter().filter(|c| c.plan == pi && c.model.as_ref().err().is_some_and(|e| e == PANIC_CASE)).count();
+        let mut found: Vec<Vec<J>> = Vec::new();
+        let mut added = 0;
+        self.rng = Rng(SEED ^ meval::hash_str(&p.e.lifted) ^ 0x7061_6e69_635f_7265);
+        let pools: Vec<Vec<J>> = p.params.iter().map(|t| self.pool(t, 0)).collect();
+        let mut queue = combine(&pools, PANIC_TRIES, &mut self.rng);
+        let mut tries = 0;
+        let mut qi = 0;
+        while have < PANIC_INPUTS && tries < PANIC_TRIES {
+            tries += 1;
+            let args = if qi < queue.len() {
+                qi += 1;
+                queue[qi - 1].clone()
+            } else if !found.is_empty() {
+                let parent = found[self.rng.below(found.len() as u64) as usize].clone();
+                let i = self.rng.below(parent.len().max(1) as u64) as usize;
+                let mut child = parent.clone();
+                if let (Some(t), Some(a)) = (p.params.get(i), parent.get(i)) {
+                    child[i] = self.mutate(t, a, 0);
+                }
+                child
+            } else if pools.iter().all(|x| !x.is_empty()) {
+                pools.iter().map(|x| x[self.rng.below(x.len() as u64) as usize].clone()).collect()
+            } else {
+                break;
+            };
+            if !seen.insert(args.iter().map(J::render).collect::<Vec<_>>().join("\u{1}")) {
+                continue;
+            }
+            let inside = match self.meets_pre(chk, p, &args) {
+                Ok(false) => dom.is_none_or(|d| self.meets_pre(d, p, &args).unwrap_or(false)),
+                _ => false,
+            };
+            if inside {
+                found.push(args.clone());
+                cases.push(Case { plan: pi, args, model: Err(PANIC_CASE.into()) });
+                have += 1;
+                added += 1;
+            }
+        }
+        queue.clear();
+        added
+    }
+}
+
+/// Fails each panic contract of the checked functions that was compared on
+/// no input: a contract is compared only on inputs of its panic region
+/// where rustc panicked and the literal reading gave `Panic`
+/// (`panics_seen`, by lifted function). A contract the check could not
+/// compare (no checker of its precondition or domain, a skipped function,
+/// no input found inside its condition) fails too, and so does a condition
+/// that never holds on the function's domain, whose panic theorem would be
+/// vacuous.
+fn panic_coverage(krate: &Crate, entries: &[&ConformEntry], panics_seen: &std::collections::BTreeMap<String, usize>, rep: &mut Report) {
+    for e in entries {
+        let Some(f) = krate.find(&e.lifted).and_then(|id| krate.fn_def(id)) else { continue };
+        if f.nopanic_clause().is_none() {
+            continue;
+        }
+        if panics_seen.get(&e.lifted).copied().unwrap_or(0) == 0 {
+            rep.errors.push(format!("`{}`: its panic contract was compared with rustc on no input (no generated input meets its condition on its domain, or the function could not be compared): a condition that never holds there would prove vacuously", e.lifted));
+        }
     }
 }
 
@@ -1839,7 +1984,11 @@ fn entry_fn(em: &mut Emit<'_, '_>, g: &Gen<'_>, pi: usize, p: &Plan<'_>, vis: &s
             _ => s.push_str(&format!("        __W::w(&a{i}, &mut o);\n")),
         }
     }
-    if p.e.has_ret {
+    if p.e.opaque_ret {
+        // (an opaque result is not read back: on a panic input rustc must
+        // panic before returning it)
+        s.push_str("        let _ = ret;\n");
+    } else if p.e.has_ret {
         if !first {
             s.push_str("        o.push(',');\n");
         }
@@ -2021,8 +2170,10 @@ fn compare(g: &Gen<'_>, plans: &[Plan<'_>], cases: &[Case], outputs: &[String], 
             Ok(xs) => format!("[{}]", xs.iter().map(J::render).collect::<Vec<_>>().join(", ")),
             Err(e) => e.clone(),
         };
-        let model: Result<Vec<J>, String> = c.model.clone().map_err(|e| format!("no value (kernel evaluation failed: {e})"));
-        let same = matches!((&model, &rustc), (Ok(a), Ok(b)) if a == b);
+        // (an input where the panic contract says the function panics: rustc must panic)
+        let panic_case = c.model.as_ref().err().is_some_and(|e| e == PANIC_CASE);
+        let model: Result<Vec<J>, String> = c.model.clone().map_err(|e| if panic_case { e } else { format!("no value (kernel evaluation failed: {e})") });
+        let same = matches!((&model, &rustc), (Ok(a), Ok(b)) if a == b) || (panic_case && rustc.as_ref().is_err_and(|e| e.starts_with("a panic (")));
         if !same {
             rep.mismatches.push(Mismatch { lifted: p.e.lifted.clone(), callee: p.callee.clone(), input, model: show(&model), rustc: show(&rustc) });
         }

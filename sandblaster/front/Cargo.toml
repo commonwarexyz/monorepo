@@ -21,12 +21,6 @@ proc-macro2 = { workspace = true, features = ["span-locations"] }
 num-bigint = { workspace = true, features = ["std"] }
 num-traits = { workspace = true, features = ["std"] }
 
-[features]
-# Declared only because `src/intrinsics.rs` (hashed into every SPEC.lock, so
-# kept byte-identical) names it in a `cfg`; nothing enables it (the
-# optimizer's test hooks were removed with the optimizer).
-opt-test-hooks = []
-
 [lints.rust]
 # `cfg(sandblaster)` is the ghost marker of DSL sources (DESIGN.md §2; the
 # build declares it the same way); test programs that rustc also compiles

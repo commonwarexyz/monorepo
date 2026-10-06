@@ -243,6 +243,9 @@ pub fn in_place_record(h: &InPlaceInfo<'_>, facts: &LiftFacts) -> String {
     for (f, b) in &facts.host_depth_bounds {
         s.push_str(&format!("// Host obligation (a recursion depth bound, the stack safety of DESIGN.md §3.7: proven at every lifted call, unchecked at host calls): `{f}` needs `{b}`.\n"));
     }
+    for (f, p) in &facts.panic_contracts {
+        s.push_str(&format!("// Panic contract (proven of rustc's MIR with overflow checks on, DESIGN.md §16.5: where its preconditions hold, it panics exactly when the condition holds, and otherwise returns as its laws say; an overflow panic needs overflow checks in the profile that builds this crate, and a build without them wraps instead): `{f}` panics when `{p}`.\n"));
+    }
     if !h.host_models.is_empty() {
         s.push_str(&format!("// Host models the proofs assume: {}.\n", h.host_models.join(", ")));
     }

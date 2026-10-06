@@ -344,7 +344,17 @@ impl<'a> DeElab<'a> {
     }
 
     fn requires_ensures(&self, f: &FnDef) -> Vec<String> {
-        let mut out: Vec<String> = f.requires.iter().map(|r| format!("requires {}", self.expr(r))).collect();
+        // (a panic contract's no-panic clause `!(p)`: the contract `panics_when p`)
+        let np = f.nopanic_clause();
+        let mut out: Vec<String> = f
+            .requires
+            .iter()
+            .enumerate()
+            .map(|(i, r)| match (&r.kind, Some(i) == np) {
+                (ExprKind::PropNot(p), true) => format!("panics_when {}", self.expr(p)),
+                _ => format!("requires {}", self.expr(r)),
+            })
+            .collect();
         // the contract's `ensures` (a proof file's summaries are not part
         // of it, DESIGN.md §15.6)
         if let Some(en) = f.contract_ensures() {

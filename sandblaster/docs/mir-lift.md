@@ -426,7 +426,10 @@ is refused (the error names `sandblaster/mirx/extract.sh`). It keeps §19's
 item skeleton (which items exist, their lifted names and signatures, state
 passing, the sealed-trait families, the struct and enum declarations, the
 attachments) and reads **every function body** from rustc's MIR, never from
-the surface syntax (`crate::mir`; DESIGN.md §1.1 item 8, §2.1). The source
+the surface syntax (`crate::mir`; DESIGN.md §1.1 item 8, §2.1). One look
+at a body's syntax remains: a body with an `unsafe` in it (a block, an
+`unsafe fn` or `impl` inside, a macro's argument) is refused, whatever L
+would read of it (verified code is safe Rust, DESIGN.md §2). The source
 lift's body rewrites of exec code are **retired**: §19.1's
 `?`/`map_err`/`unwrap`/`checked_*().unwrap()` and `&a[..=j]`, §19.3's
 translation of signed operations in exec code, §19.7's templates and closures, §19.8's operator,
@@ -667,11 +670,64 @@ Every MIR instance with a body is read as kernel definitions, written as
 core text by `mir/literal.rs` over the fixed library `mir/literal.core` and
 checked by the kernel like any definition (types, and the termination of
 `run`). Nothing is structured: one arm per basic block, every jump a call
-of `run`. `None` means a panic, undefined behaviour, running out of fuel,
-or a construct L does not model; it never is a value, so a construct read
-as `None` can only make a theorem unprovable. The reading of each
-construct is local; the generator records every construct it reads as
-`None` other than a panic (`LFn::faults`, naming the MIR construct).
+of `run`. The reading of each construct is local; the generator records
+every construct it reads as stuck (`LFn::faults`, naming the MIR
+construct).
+
+**Outcomes** (C1, 2026-10-05). A run's outcome is a `mir::Res(Out)`:
+
+| outcome | meaning |
+| --- | --- |
+| `Ret(v)` | the MIR's execution returns `v` (the cells' final values, then the return place) |
+| `Panic` | the MIR's execution panics: an explicit panic of the code, never anything else (below) |
+| `Stuck` | anything else that gives no value: running out of fuel, undefined behaviour, a construct L does not model |
+
+Neither failure is ever a value, so a construct read as `Panic` or
+`Stuck` can only make a value theorem unprovable; `Panic` is claimed only
+where the MIR certainly panics, so a panic theorem (§20.5) is never proven
+of a path that is stuck, loops or aborts. A panic is its start, the call
+of the panic machinery; what follows is not the function's behaviour
+(the panic hook formatting the message, which may call a type's `Debug`
+or `Display`; then unwinding, or the abort under `panic = "abort"`). Inside a block a failure is the
+option monad's `None` (MIR statements never panic: undefined behaviour or
+an unmodeled construct), stuck at the block's terminator; a jump hands the
+next block a `mir::Res(St)`. **`Panic` comes only from a terminator**, in
+exactly three ways:
+
+1. a failed `Assert(c, expected)` of a kind whose failure panics (an
+   overflow, an index out of bounds, a division or remainder by zero:
+   rustc's checks; `literal::PANIC_ASSERT_KINDS`), `mir::check`; an
+   `Assert` of any other kind (mirx's `other`: a misaligned or null pointer
+   dereference, an invalid enum construction, whose failure aborts) is
+   `Stuck` where it fails (`mir::check_or_stuck`);
+2. a block **every path of which panics** (`literal::must_panic`, read as
+   `Panic` without reading its code, a panic's message): every path from it
+   is acyclic and ends in a call of a **panic function** (`PANIC_FNS`, by
+   its path under `std::` or `core::`, generic arguments dropped:
+   `panicking::panic`, `panic_fmt`, `panic_display`, `panic_explicit`,
+   `panic_str_2015`, `unreachable_display`, `assert_failed`,
+   `panic_bounds_check`, `begin_panic`; std's re-exports `rt::panic_fmt`,
+   `rt::panic_display`, `rt::begin_panic`; `option::unwrap_failed`,
+   `option::expect_failed`, `result::unwrap_failed`; the
+   `slice::index::slice_*_fail` functions), and on the way runs only
+   assignments that cannot be undefined behaviour (no `Assume`; operators
+   only from an allow-list of those that wrap, mask or compare: `add`,
+   `sub`, `mul`, `neg`, the bit operations, shifts, comparisons, never an
+   unchecked one, `div`, `rem` or `offset`; casts only `int-to-int`,
+   `unsize`, `reify-fn-pointer`, never a transmute; a `Deref` only of a
+   reference; nothing the parse does not know), `Goto`,
+   `SwitchInt` whose every target panics, `Assert` of a kind whose failure
+   is a panic too, drops without glue, and calls of a panic message's constructors
+   (`PANIC_MSG_FNS`: `fmt::Arguments::{from_str, new_const, new_v1,
+   new_v1_formatted}`, `fmt::rt::Argument::{new_display, new_debug}`),
+   which return; a call of any other function returning `!` (the aborting
+   `panic_nounwind*`, `process::abort`, `process::exit`, a crate's own) is
+   stuck, and so is every other block from which every path diverges (an
+   `unreachable`, an abort, an unwind: `cfg.rs`, not trusted, since it only
+   makes blocks stuck);
+3. a callee's `Panic` (`mir::then`), and an **index leaf** past the end
+   (core's `Index::index` by a range, below), exactly where core's `index`
+   panics.
 
 **Per instance** `f` (`L::<id>`; a comment line names its MIR key):
 
@@ -682,7 +738,7 @@ construct is local; the generator records every construct it reads as
 | `g<i>`, `s<i>` | get and set of slot `i` |
 | `Blk` | `b<k>` per block, `d<k>` its switch's dispatcher |
 | `rank` | `2·post(k) + 2` for `b<k>`, one less for `d<k>` (`post`: the depth-first post-order from the entry); a target of a depth-first back edge is a **loop header** |
-| `run : (fuel : List(Unit)) -> (b : Blk) -> (os : Option(St)) -> Option(Out)` | `None` on `None`; else the arm of `b`; by measure recursion on `len(fuel)·65536 + rank(b)`, the decrease of every call proven by `linarith` from the arm's path equations |
+| `run : (fuel : List(Unit)) -> (b : Blk) -> (os : mir::Res(St)) -> mir::Res(Out)` | stuck on `Stuck`, a panic on `Panic`; on `Ret(s)` the arm of `b`; by measure recursion on `len(fuel)·65536 + rank(b)`, the decrease of every call proven by `linarith` from the arm's path equations |
 | `Out` | each cell's final value (an optional cell's as an `Option`), then the return place unless it is `()`; one component is itself |
 
 A **cell** is the referent of a `&mut T` parameter, or of an
@@ -694,11 +750,13 @@ referent of `&mut &[u8]` / `&mut &mut [u8]` is the buffer model's
 
 **Jumps and fuel.** A jump to a block of lower rank that is not a loop
 header is `rec(fuel, b, os)`; a jump to a loop header, and a self-call,
-consume one unit: `match fuel with Nil => None | Cons(u, f1) => rec(f1, ..)`.
-Fuel only bounds termination: if `run n b σ = Some(v)` for some `n`, the
-MIR execution from `b` in `σ` terminates with `v`. The post-order and the
-loop headers come from `cfg.rs` (untrusted): a wrong one fails the kernel's
-check of `run` or consumes more fuel, never changes a value.
+consume one unit: `match fuel with Nil => Stuck | Cons(u, f1) => rec(f1, ..)`.
+Fuel only bounds termination: if `run n b σ = Ret(v)` for some `n`, the
+MIR execution from `b` in `σ` terminates with `v`; if `run n b σ = Panic`,
+it panics. A path that does not terminate is stuck at every fuel. The
+post-order and the loop headers come from `cfg.rs` (untrusted): a wrong one
+fails the kernel's check of `run` or consumes more fuel, never changes an
+outcome.
 
 **Types**
 
@@ -750,7 +808,7 @@ extends the code `r` holds; `&place` is the value of the place.
 | --- | --- |
 | `StorageLive`/`StorageDead`, fake borrows, nops | nothing |
 | `place = rv` | `rv`'s value written to `place` |
-| `Assume(c)` | `None` unless `c` |
+| `Assume(c)` | `None` (stuck: undefined behaviour) unless `c` |
 | `copy p`, `move p` | the value of `p` (a moved-out slot is not read again in borrow-checked MIR) |
 | constants | their values (integers at their width, as bits for signed types; aggregates; `&c` is `c`; a constant item its value; a zero-sized constant of an ADT is its one variant, and is not modeled for a type of several variants) |
 | `RuntimeChecks(overflow)`, `RuntimeChecks(ub)` | `true` (the extraction has overflow checks, §20.1), `false`; other runtime checks are not modeled. `ub` as `false` skips the library's precondition checks: where one would fail, the operation it guards is undefined behaviour, which L reads as `None` for every operation it models (unchecked arithmetic and shifts, `Assume`, indexing), so no value is read where a build with the checks panics. A library-UB precondition (`check_library_ub`) guards operations L does not model (raw pointers, transmutes into types with a niche), which are `None` anyway; in the three extractions the one `ub` check guards `unchecked_shl` (core's `u64::checked_shl`) |
@@ -781,12 +839,13 @@ extends the code `r` holds; `&place` is the value of the place.
 | --- | --- |
 | `Goto` | the jump |
 | `SwitchInt(v, ..)` | a jump to the dispatcher, which compares `v` (its bits) with each arm's value and jumps |
-| `Assert(c, expected)` | `None` unless `c == expected`, then the jump |
-| `Return` | `Some(Out)`, each part read from its slot (`None` if not initialized) |
+| `Assert(c, expected)` | the jump when `c == expected`, else `Panic` for an overflow, bounds or division/remainder-by-zero check and `Stuck` for any other kind (its failure aborts); stuck when `c` cannot be read |
+| `Return` | `Ret(Out)`, each part read from its slot (stuck if not initialized) |
 | `Drop` without glue | the jump |
 | `Drop` with glue of an ADT value | the jump when its variant runs no drop code (`no-glue`), else not modeled |
-| `Unreachable`, `UnwindResume`, `Abort`, a call that does not return | `None`; so is every block from which every path ends in one (a panic) |
-| `Call` of an instance with MIR | its `run` on the same fuel (a self-call: `rec` on one unit less, the continuation too) from its initial state: the parameters in their slots (a closure's spread from the tuple its callers pass), each callee cell holding the referent read through the caller's code for it (a nested cell: through the code its parent's referent holds; a held code in the callee's terms is the nested cell's own); after `Some(out)`, each cell's final value written back through that code, then the result to the destination. A code the callee returns, in a cell or its result (`&mut T`, `Option<&mut T>`), rooted at a callee cell, is the caller's code for that cell extended by its path; rooted at a callee local (dangling) it is `None` |
+| a call of a panic function, and every block every path of which panics (`must_panic`, "Outcomes" above) | `Panic` |
+| `Unreachable`, `UnwindResume`, `Abort`, a call of another function that does not return | stuck; so is every other block from which every path ends in one |
+| `Call` of an instance with MIR | its `run` on the same fuel (a self-call: `rec` on one unit less, the continuation too) from its initial state: the parameters in their slots (a closure's spread from the tuple its callers pass), each callee cell holding the referent read through the caller's code for it (a nested cell: through the code its parent's referent holds; a held code in the callee's terms is the nested cell's own); after `Ret(out)`, each cell's final value written back through that code, then the result to the destination; the callee's `Panic` is the caller's, so is its stuck (`mir::then`). A code the callee returns, in a cell or its result (`&mut T`, `Option<&mut T>`), rooted at a callee cell, is the caller's code for that cell extended by its path; rooted at a callee local (dangling) it is `None` |
 | `Call` of a leaf | its model, below |
 | intrinsics `ctlz`, `cttz`, `ctpop`, `bswap`, `saturating_add/sub`, `*_with_overflow`, `rotate_left/right`, `cold_path` | their primitives (`bswap` by shifts and masks, so the word normalizer sees through it; a rotation's amount, a `u32`, taken modulo the width); `cold_path` is nothing |
 | `Call` of a function read as a model (`mod.rs`'s `Model`, by the exact path of its definition: core's slice iterator's `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`, `Iter::new`, `<Iter as Iterator>::next`; `<Range<usize> as SliceIndex<[T]>>::get`) | its leaf below, not its MIR (raw pointers); `next` through the iterator's code like a `&mut` leaf |
@@ -803,7 +862,7 @@ and writes the new referent back):
 | `BufMut::put_u8`, `put_slice` | `bufmut_put_u8`, `bufmut_put_slice` on the buffer |
 | `Vec::push` | `vec_push` on the list |
 | `Iterator::next` at `Copied<slice::Iter<&[u8]>>` | `crate::__lift::bytes_iter_next` |
-| `<[T; N] as Index<RangeToInclusive / RangeTo / RangeFrom / Range>>::index` (core's range types, by exact path), and the same of a slice `[T]` (`leaf::slice_index_*`, stage finish-A) | the subslice, `None` past the end (`&a[..j + 1]` .. `&a[i..j]`; for a slice its length in place of `N`) |
+| `<[T; N] as Index<RangeToInclusive / RangeTo / RangeFrom / Range>>::index` (core's range types, by exact path), and the same of a slice `[T]` (`leaf::slice_index_*`, stage finish-A) | the subslice, `Panic` exactly where core's `index` panics (`&a[..j + 1]` .. `&a[i..j]`: past the end, or `i > j`; for a slice its length in place of `N`; an array of more than `isize::MAX` elements, only of a zero-sized type, is stuck) |
 | a method of a host model's declared instance (`<Sha256 as Hasher>::hash`) | the host model's function (`crate::merkle::host::Sha256::hash`) |
 | `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`, `slice::Iter::new` | `leaf::slice_iter_new`: the slice at index 0 |
 | `<slice::Iter<'_, T> as Iterator>::next` | `leaf::slice_iter_next`: at index `i < len`, the element (a `&T`, read as its value) with the index one further; else `None`, the iterator unchanged |
@@ -819,11 +878,11 @@ structured reading `S_f` (`x̄ .h̄`: its telescope):
 
 ```text
 L::thm::<f> : Π x̄ (.h̄ : pre). Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
-    Eq(Option(Out), L::<f>::run n b0 (Some(init(x̄))), Some(erase(S_f x̄ .h̄)))
+    Eq(mir::Res(Out), L::<f>::run n b0 (Ret(init(x̄))), Ret(erase(S_f x̄ .h̄)))
 ```
 
 For every input satisfying the preconditions there is a fuel bound after
-which L returns `Some` of S's value: the MIR run terminates without a
+which L returns `Ret` of S's value: the MIR run terminates without a
 panic or undefined behaviour, with S's return value and S's final `&mut`
 referents. This is total correctness of the MIR against S, the object the
 laws and proofs are about.
@@ -868,18 +927,65 @@ laws and proofs are about.
   S's result (its states in parameter order, then its return value) is
   erased component by component into `Out`.
 
-(The panic statement, a variant of the theorem for the optimizer's
-panic-explicit readings, was removed with the optimizer on 2026-10-05.)
+**Panic contracts** (C1, 2026-10-05; DESIGN.md §16.5). A function whose
+laws file states `panics_when(p);` in its attachment (`#[lift_attach(f)]`
+of `LAWS.rs`; a proof file may not state one, and only a function read
+from MIR has one) has a **panic contract**: on its domain, where its
+`requires` hold, it panics if and only if `p` holds. `p` is a proposition
+over the parameters, with the rules of a `requires`. Its parts:
+
+* **The no-panic clause.** `!(p)` is the function's last precondition
+  (after every `requires`, before a depth bound): `S_f`'s binder `Not(P)`,
+  `P` the elaboration of `p`, in the declared contract like any clause
+  (`#[mir_contract(.., panics_when(p))]`, checked by the elaborator). So
+  `L::thm::<f>` above holds where `p` does not: the MIR returns, without a
+  panic, the value the laws describe, and every `ensures` holds there. The
+  structured reading's own obligations (an `unreachable!()` where the MIR
+  panics, an operator's overflow) must follow from it, so a `p` that leaves
+  out a panic is refused there (too narrow). Callers in the module prove
+  the no-panic clause like any precondition.
+* **The panic statement** (`stmt::statement_panic`, `MirContract::panic`:
+  the no-panic clause's index among the preconditions):
+
+  ```text
+  L::pthm::<f> : Π x̄ (.h̄ : pre, with the no-panic clause's `Not(P)` replaced by P).
+      Σ (k : Int). Π (n : List(Unit)) (.hle : k ≤ len n).
+      Eq(mir::Res(Out), L::<f>::run n b0 (Ret(init(x̄))), Panic)
+  ```
+
+  For every input of the domain where `p` holds there is a fuel bound after
+  which L panics: since L reads `Panic` only where the MIR certainly panics
+  (§20.4, "Outcomes"), the MIR's execution panics on that input. A `p` that
+  covers an input where the code returns, loops, aborts or is undefined is
+  refused (too wide): there is no such theorem.
+* **Together** (the gate, §20.6, wants both): on its domain the function
+  panics exactly when `p` holds, and otherwise meets its laws. Outside the
+  domain nothing is promised; the record lists each `requires` as a host
+  obligation and each panic contract as proven.
+* **Determinacy** (DESIGN.md §15.5) is over the domain where it does not
+  panic (`complete_p`'s `Req_p` includes the no-panic clause); the panic
+  region is pinned by the panic contract itself, a locked statement.
+* **The lock** holds the panic contract as part of the function's contract
+  (its kernel type carries `Not(P)`; its source text `panics_when(p)`;
+  the spec sheet prints it as `panics_when p`).
+
+(The earlier panic statement, a variant of the theorem for the
+optimizer's panic-explicit readings, was removed with the optimizer on
+2026-10-05; its gate checks became `literal::must_panic`.)
 
 #### 20.6 The gate
 
 Every verified build (`compile_module`, `compile_lifted`, crate mode and
 `sandblaster check`) runs the gate after the §15 gates, in the environment
 of the module's structured reading: for every lifted exec function read
-from MIR, its theorem `L::thm::<f>` of §20.5 is kernel-checked, or the
-build reports `error[mir-theorem]` naming the function and why (a walk that
-failed, a theorem it needs that failed, the literal reading not accepted,
-a recursion L does not read), and the module is not verified. There is
+from MIR, its theorem `L::thm::<f>` of §20.5 is kernel-checked, and for a
+function with a panic contract its panic theorem `L::pthm::<f>` too (the
+trusted check also confirms that the lift lists the panic contract the
+function declares, its last precondition), or
+the build reports `error[mir-theorem]` naming the function and why (a walk
+that failed, a theorem it needs that failed, the literal reading not
+accepted, a recursion L does not read, a panic contract too wide), and the
+module is not verified. There is
 no build that reports the findings without enforcing them (the former
 pending-gates development build is deleted).
 
@@ -893,6 +999,32 @@ pending-gates development build is deleted).
   lemma from its header to its exit that hands the literal state to a
   continuation (`docs/checked-structuring.md` §5.12). These lemmas are
   untrusted steps: only the theorems' statements are trusted.
+* A **panic theorem** is proven by the walker's panic mode
+  (`Walker::panic_walk`, untrusted): the literal side alone, from the
+  function's entry, under its preconditions and the panic hypothesis `P`;
+  each test it reaches is decided by those facts and the path so far
+  (linear arithmetic, evaluation, the path equations) or split, a callee's
+  run is unfolded, a loop header consumes one of the premise's `K = 64`
+  units of fuel (`checked::PANIC_FUEL`), and every outcome but `Panic` must
+  be refuted by the facts; a disjunctive fact (`P` = `a || b`) is split
+  when a path needs it, each side refuted (`Walker::refute_or`). A `Ret`
+  or `Stuck` it cannot refute is the failure's message: the panic contract
+  is too wide there, or the walk cannot show the path impossible. The walk
+  follows at most 48 split tests or loop iterations on one path (within
+  the premise's fuel): a loop that does not end where `P` holds, or a panic
+  only after more steps, is refused with `does not reach a panic within the
+  walk's bound` (the latter is not proven yet). Its lemma is
+  `L::plem::<f>`.
+* **Panic lemmas** (untrusted hints, `LiftFacts::panic_lemmas`). A proof
+  file's attachment `panic_lemma(path);` names a checked lemma whose
+  parameters are the function's and each of whose hypotheses is one of the
+  panic statement's (a precondition, or `P`): the walk applies it and uses
+  its conclusion as facts. It restates the panic condition in the literal
+  reading's own terms where the laws' vocabulary is not linear in them (`1
+  << h` as `1u64.wrapping_shl(h)` for `2^h`; `leading_zeros`; wrapping
+  arithmetic), so that linear arithmetic decides the code's tests. The
+  lemma is checked like any; it adds facts the walk could use, never a
+  statement, so it cannot widen a panic contract.
 * A library function with MIR that the lift prelude models
   (`core::num::<impl uN>::div_ceil` against `uN::div_ceil`) gets an
   untrusted **model lemma**: its literal reading returns the model's value
@@ -915,8 +1047,9 @@ pending-gates development build is deleted).
 * The verdict is the trusted check's (`mir/gate.rs`, §20.3), run after the
   walks on what the kernel holds; the walks' outcomes only explain a
   refusal.
-* The report's `mir_theorems` section lists, per module, every theorem and
-  loop lemma, proven or not and why.
+* The report's `mir_theorems` section lists, per module, every theorem,
+  panic theorem and loop lemma, proven or not and why; the gate's note
+  counts the panic contracts with a kernel-checked panic theorem.
 #### 20.7 The shipped code (removed)
 
 The lifted round trip's theorems of optimizer-rewritten functions
@@ -935,11 +1068,21 @@ checks test it, and test that the theorems catch what they should:
   in place: for each lifted function read from MIR, on the first 64 inputs
   it compares S on, the kernel evaluates `L::<f>::run` at fuel `2^16` from
   §20.5's `init` of the input and compares it, by the kernel's conversion,
-  with `Some(erase(r))`, `r` rustc's output read back at S's result type
+  with `Ret(erase(r))`, `r` rustc's output read back at S's result type
   (`crate::conform::literal`). L is compared with rustc directly, not
-  through S. A difference fails the build like any mismatch; the counts
-  are in the report (`literal_cases`) and the check's cached record, whose
-  key covers the generator and the MIR.
+  through S. In place, a function with a panic contract is also run on
+  inputs of its panic region (its domain holds, its no-panic clause does
+  not; S is not evaluated there), sought on purpose after the
+  coverage-driven inputs (up to 16 per contract, from the parameters'
+  pools and mutants, decided by the precondition checkers alone): rustc
+  must panic, and L must give `Panic` (`conform::PANIC_CASE`; the report
+  notes, per function, how many panics were compared). A function that
+  returns `impl Trait` is compared there only (its result is opaque). A
+  panic contract compared on no input fails the check, which also catches
+  a condition that never holds on the domain (its panic theorem would be
+  vacuous). A difference fails the build like any mismatch;
+  the counts are in the report (`literal_cases`) and the check's cached
+  record, whose key covers the generator and the MIR.
 * **Fault injection** (`tests/fault_injection.rs`). One construct of the
   MIR L reads is changed, S (read from the unchanged MIR) is not: the
   theorem of the function that runs it fails for its own reason, and the

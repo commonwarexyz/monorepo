@@ -6,6 +6,25 @@ statement and the lifted round trip were removed with the optimizer
 `prove_roundtrip`). The implementation log keeps them as history; the
 theorem gate of §3 and §4 is unchanged.*
 
+*2026-10-05, later (C1, panic contracts): L's failure outcome is split.
+`run` now hands a `mir::Res(St)` from block to block and returns a
+`mir::Res(Out)`: `Ret(v)`, `Panic` (only where the MIR certainly panics: a
+failed `Assert`, a block every path of which ends in a panic function, a
+callee's panic, an index leaf past the end) or `Stuck` (everything else
+that gives no value). Read `None`/`Some` of a run below as `Stuck`/`Ret`;
+inside a block, statements still run in the option monad. A function with
+a panic contract has, besides its theorem, the panic theorem
+`L::pthm::f` (`stmt::statement_panic`, restored for this), proven by the
+walker's panic mode. `docs/mir-lift.md` §20.4–§20.6 is normative.*
+
+*2026-10-05, C1 applied to the three roots: the panic walk splits a
+disjunctive fact (a panic condition `a || b`) when a path needs it
+(`Walker::refute_or`), and uses the conclusions of the panic lemmas a
+proof file attaches (`panic_lemma(path);`, `checked::Prover::panic_lemma_at`):
+the panic condition restated in the literal reading's terms (`1 << h` as
+`1u64.wrapping_shl(h)`), proven like any lemma. Both are untrusted steps
+of the walk; the statement it proves is unchanged.*
+
 Status: **accepted (option A, shallow) with the coordinator's amendments
 (a)–(g) below; implemented (plan steps 1–9).** Stage "cs-literal" (plan steps 1–3) is
 done: the production literal reading, its library, the statement generator,
@@ -63,12 +82,13 @@ section; the design follows it, updated where the implementation differs. This n
 ## Amendments (binding)
 
 * **(a)** L, one literal reading per MIR instance, is the only trusted
-  reading of bodies. `run(fuel, block, Option(St))` is defined by measure
-  recursion with kernel-checked decreases; `None` is a panic, undefined
-  behaviour, running out of fuel or an unmodeled construct. `read.rs` is an
-  untrusted proposer of S.
+  reading of bodies. `run(fuel, block, mir::Res(St))` is defined by measure
+  recursion with kernel-checked decreases; `Stuck` is undefined behaviour,
+  running out of fuel or an unmodeled construct, `Panic` an explicit panic
+  of the code (C1; before it, both were `None`). `read.rs` is an untrusted
+  proposer of S.
 * **(b)** The theorem is `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n).
-  run n b0 (Some init(x̄)) = Some(erase(S_f x̄))`: total correctness,
+  run n b0 (Ret init(x̄)) = Ret(erase(S_f x̄))`: total correctness,
   including the final `&mut` referents. Its preconditions come from the
   function's declared contract (skeleton and attachments), never from
   `read.rs`; an `S_f` precondition the contract does not state is an error.
@@ -680,7 +700,7 @@ on the first 64 inputs it compares S on (`conform::LITERAL_CASES`, in the
 check's deterministic order), the kernel evaluates
 `(λ x̄ n. L::<f>::run n b0 (Some init(x̄))) args 2^16` (the closed terms built
 from `stmt::statement`'s own `init` and `erase`) and compares it, by the
-kernel's conversion, with `Some(erase(r))`, `r` rustc's output read back at
+kernel's conversion, with `Ret(erase(r))`, `r` rustc's output read back at
 S's result type. L is compared with rustc directly, not through S. The
 literal reading is the gate's when it ran on the elaboration (`elab::Output::mir_gate`),
 else generated and checked there (the stage tool `sandblaster conform`);
@@ -2038,7 +2058,7 @@ For each lifted function `f` with structured reading `S_f` (parameters
 ```
 L::thm::f : Π x̄ (.h̄ : pre(x̄)).
   Σ (k : Int). Π (n : List(Unit)) (.hle : Eq(Bool, #le_int(k, seq::len Unit n), true)).
-    Eq(Option(Out_f), L::f::run n b0 (Some(init(x̄))), Some(erase(S_f x̄ .h̄)))
+    Eq(mir::Res(Out_f), L::f::run n b0 (Ret(init(x̄))), Ret(erase(S_f x̄ .h̄)))
 ```
 
 **`init(x̄)`.** Slot `i` holds the `i`-th parameter:
@@ -2178,7 +2198,7 @@ The trusted statement is derived from an intermediate lemma whose fuel is
 explicit.
 
 **Function lemma.**
-`Π x̄ h̄ (n) (.hle : W(x̄) ≤ len n). Eq(…, run n b0 (Some init), Some(erase(S x̄)))`.
+`Π x̄ h̄ (n) (.hle : W(x̄) ≤ len n). Eq(…, run n b0 (Ret init), Ret(erase(S x̄)))`.
 
 * `W` is the **fuel shadow**: S's body with every tail replaced by the fuel
   it needs. A value needs 0. A call of a loop helper `h` needs `μ_h(ā) + 1`,
@@ -2189,7 +2209,7 @@ explicit.
 
 **Loop-helper lemma.** For S's tail-recursive helper `h` of the loop with
 header `H`:
-`Π p̄ (j̄ : dead slots) (n) (.hle : μ_h(p̄) ≤ len n). Eq(…, run n H (Some σ(p̄, j̄)), Some(erase(h p̄)))`.
+`Π p̄ (j̄ : dead slots) (n) (.hle : μ_h(p̄) ≤ len n). Eq(…, run n H (Ret σ(p̄, j̄)), Ret(erase(h p̄)))`.
 
 * It is proven by **measure recursion with `h`'s own measure**.
 * Each recursive call of `h` in S is the induction hypothesis
@@ -2307,7 +2327,7 @@ unchanged.
   `n` mid-walk; `Nil` contradicts the premise with the pending call's
   decrease) or a parameter (`collected`, split on both sides). There the
   induction hypothesis `Rec(ā', h̄', n1, fuel)` is a callee lemma: the
-  literal `run n1 b0 (Some st(..))` is transported to `Some(erase(S ā'))`;
+  literal `run n1 b0 (Ret st(..))` is transported to `Ret(erase(S ā'))`;
   the `Rec`'s decrease proof is the lemma's own obligation, derived by
   `linarith` from S's decrease proof and the measure's congruence along the
   eta splits (S's proof is about `height(Subtree(f0, f1, f2))`, the

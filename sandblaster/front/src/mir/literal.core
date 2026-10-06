@@ -1,9 +1,18 @@
 -- The literal reading's fixed library (docs/mir-lift.md §20.4,
 -- docs/checked-structuring.md §2.6). TRUSTED: each definition is the meaning
--- of one MIR construct. Every definition is total; undefined behaviour and
--- panics are `None`, which can only make the literal reading fail, never
--- give it a wrong value. The leaves at the end are emitted into a module's
+-- of one MIR construct. Every definition is total. Inside a block a failure
+-- is `None` (undefined behaviour, a construct not modeled: MIR statements
+-- never panic); a run's outcome is a `mir::Res` (stuck, a value, or a
+-- panic, which only a terminator causes). Neither failure ever gives the
+-- reading a wrong value. The leaves at the end are emitted into a module's
 -- reading where it calls them (they name the lift's models).
+
+-- The outcome of a run, and the state a jump hands to the next block:
+-- `Stuck` (out of fuel, undefined behaviour, a construct L does not model),
+-- `Ret(v)` (the value), `Panic` (an explicit panic of the code: a failed
+-- `Assert` whose failure panics, a call of a panic function, a callee's
+-- panic).
+inductive mir::Res (A : Type) { | Stuck | Ret(v : A) | Panic }
 
 -- MIR types without a counterpart in the subset, and the slot type of a
 -- local whose type the reading does not model (every use of it is `None`).
@@ -100,9 +109,36 @@ def[prelude] mir::bind : (A : Type) -> (B : Type) -> (o : Option(A)) -> (f : A -
 def[prelude] mir::map : (A : Type) -> (B : Type) -> (o : Option(A)) -> (f : A -> B) -> Option(B) :=
   fun (A : Type) (B : Type) (o : Option(A)) (f : A -> B) =>
     match o : Option(A) as _ return Option(B) with | None => None[B] | Some(x) => Some[B](f x) end
--- `assert(c == expected)`, `assume(c)`: the state, or failure.
+-- `assume(c)`: the state, or failure (undefined behaviour).
 def[prelude] mir::guard : (S : Type) -> (c : Bool) -> (s : S) -> Option(S) :=
   fun (S : Type) (c : Bool) (s : S) => match c : Bool as _ return Option(S) with | false => None[S] | true => Some[S](s) end
+
+-- A block's `Option` as an outcome: `None` is stuck.
+def[prelude] mir::st : (A : Type) -> (o : Option(A)) -> mir::Res(A) :=
+  fun (A : Type) (o : Option(A)) => match o : Option(A) as _ return mir::Res(A) with | None => mir::Res::Stuck[A] | Some(x) => mir::Res::Ret[A](x) end
+-- `mir::bind` into an outcome: `None` is stuck.
+def[prelude] mir::bindr : (A : Type) -> (B : Type) -> (o : Option(A)) -> (f : A -> mir::Res(B)) -> mir::Res(B) :=
+  fun (A : Type) (B : Type) (o : Option(A)) (f : A -> mir::Res(B)) =>
+    match o : Option(A) as _ return mir::Res(B) with | None => mir::Res::Stuck[B] | Some(x) => f x end
+-- A callee's outcome: its value goes on, a panic or stuck is the caller's.
+def[prelude] mir::then : (A : Type) -> (B : Type) -> (r : mir::Res(A)) -> (f : A -> mir::Res(B)) -> mir::Res(B) :=
+  fun (A : Type) (B : Type) (r : mir::Res(A)) (f : A -> mir::Res(B)) =>
+    match r : mir::Res(A) as _ return mir::Res(B) with | Stuck => mir::Res::Stuck[B] | Ret(x) => f x | Panic => mir::Res::Panic[B] end
+-- A library function's result whose `None` is exactly where the function
+-- panics (the index leaves): `None` a panic.
+def[prelude] mir::or_panic : (A : Type) -> (o : Option(A)) -> mir::Res(A) :=
+  fun (A : Type) (o : Option(A)) => match o : Option(A) as _ return mir::Res(A) with | None => mir::Res::Panic[A] | Some(x) => mir::Res::Ret[A](x) end
+-- `Assert(c, expected)` of a kind whose failure panics (an overflow, a
+-- bounds check, a division or remainder by zero), with `c == expected`
+-- already compared: the state when it holds, else a panic (the
+-- assertion's failure).
+def[prelude] mir::check : (S : Type) -> (c : Bool) -> (s : S) -> mir::Res(S) :=
+  fun (S : Type) (c : Bool) (s : S) => match c : Bool as _ return mir::Res(S) with | false => mir::Res::Panic[S] | true => mir::Res::Ret[S](s) end
+-- `Assert` of any other kind (a misaligned or null pointer dereference, an
+-- invalid enum construction: their failure aborts): the state when it
+-- holds, else stuck.
+def[prelude] mir::check_or_stuck : (S : Type) -> (c : Bool) -> (s : S) -> mir::Res(S) :=
+  fun (S : Type) (c : Bool) (s : S) => match c : Bool as _ return mir::Res(S) with | false => mir::Res::Stuck[S] | true => mir::Res::Ret[S](s) end
 
 %for W in u8 u16 u32 u64 usize
 -- `CheckedAdd(a, b)` and friends: (the wrapped result, the overflow flag).
@@ -196,57 +232,65 @@ def[prelude] leaf::vec_push : (T : Type) -> (v : List(T)) -> (x : T) -> Tuple2(L
 def[prelude] leaf::bytes_iter_next : (it : Slice (Slice U8)) -> Tuple2(Slice (Slice U8), Option(Slice U8)) :=
   fun (it : Slice (Slice U8)) => crate::__lift::bytes_iter_next it
 
--- `<[T; N] as Index<RangeToInclusive<usize>>>::index(&a, ..=j)`: `&a[..j + 1]` (a panic past the end;
--- `j + 1` cannot overflow below `N`: the checked sum, its test always true there)
-def[prelude] leaf::array_index_to_inclusive : (T : Type) -> (N : Usize) -> (a : Array T N) -> (j : Usize) -> Option(Slice T) :=
-  fun (T : Type) (N : Usize) (a : Array T N) (j : Usize) =>
-    if #lt_usize(j, N) return Option(Slice T) then
-      (if #le_int(#iadd(#cast_usize_int(j), #cast_usize_int(1usize)), 18446744073709551615int) as .h return Option(Slice T)
-       then mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::prefix T s (#add_usize(j, 1usize; h)))
-       else None[Slice T])
-    else None[Slice T]
+-- The index leaves: core's `Index::index` of an array or a slice by a range
+-- (core's range types, by exact path). Each is the sub-slice, or a panic
+-- exactly where core's `index` panics (`slice_*_fail`): `mir::prefix` and
+-- `mir::suffix` are `None` exactly past the length. An array is read as its
+-- slice first (stuck past `isize::MAX` elements, which only an array of a
+-- zero-sized type can have and which no `Slice` holds).
 
--- `<[T; N] as Index<RangeTo<usize>>>::index(&a, ..j)`: `&a[..j]`
-def[prelude] leaf::array_index_to : (T : Type) -> (N : Usize) -> (a : Array T N) -> (j : Usize) -> Option(Slice T) :=
-  fun (T : Type) (N : Usize) (a : Array T N) (j : Usize) =>
-    mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::prefix T s j)
-
--- `<[T; N] as Index<RangeFrom<usize>>>::index(&a, i..)`: `&a[i..]`
-def[prelude] leaf::array_index_from : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> Option(Slice T) :=
-  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) =>
-    mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::suffix T s i)
-
--- `<[T; N] as Index<Range<usize>>>::index(&a, i..j)`: `&a[i..j]` (a panic unless `i <= j <= N`)
-def[prelude] leaf::array_index_range : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> (j : Usize) -> Option(Slice T) :=
-  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) (j : Usize) =>
-    if #le_usize(i, j) return Option(Slice T) then
-      mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::bind (Slice T) (Slice T) (mir::prefix T s j) (fun (p : Slice T) => mir::suffix T p i))
-    else None[Slice T]
-
--- `<[T] as Index<RangeToInclusive<usize>>>::index(&s, ..=j)`: `&s[..j + 1]` (a panic unless `j < s.len()`;
--- `j + 1` cannot overflow below the length: the checked sum, its test always true there)
-def[prelude] leaf::slice_index_to_inclusive : (T : Type) -> (s : Slice T) -> (j : Usize) -> Option(Slice T) :=
+-- `<[T] as Index<RangeToInclusive<usize>>>::index(&s, ..=j)`: `&s[..j + 1]`, a panic unless `j < s.len()`
+-- (`j + 1` cannot overflow below the length: the checked sum, its test always true there)
+def[prelude] leaf::slice_index_to_inclusive : (T : Type) -> (s : Slice T) -> (j : Usize) -> mir::Res(Slice T) :=
   fun (T : Type) (s : Slice T) (j : Usize) =>
-    if #lt_usize(j, slice::len T s) return Option(Slice T) then
-      (if #le_int(#iadd(#cast_usize_int(j), #cast_usize_int(1usize)), 18446744073709551615int) as .h return Option(Slice T)
-       then mir::prefix T s (#add_usize(j, 1usize; h))
-       else None[Slice T])
-    else None[Slice T]
+    if #lt_usize(j, slice::len T s) return mir::Res(Slice T) then
+      (if #le_int(#iadd(#cast_usize_int(j), #cast_usize_int(1usize)), 18446744073709551615int) as .h return mir::Res(Slice T)
+       then mir::or_panic (Slice T) (mir::prefix T s (#add_usize(j, 1usize; h)))
+       else mir::Res::Stuck[Slice T])
+    else mir::Res::Panic[Slice T]
 
--- `<[T] as Index<RangeTo<usize>>>::index(&s, ..j)`: `&s[..j]`
-def[prelude] leaf::slice_index_to : (T : Type) -> (s : Slice T) -> (j : Usize) -> Option(Slice T) :=
-  fun (T : Type) (s : Slice T) (j : Usize) => mir::prefix T s j
+-- `<[T] as Index<RangeTo<usize>>>::index(&s, ..j)`: `&s[..j]`, a panic unless `j <= s.len()`
+def[prelude] leaf::slice_index_to : (T : Type) -> (s : Slice T) -> (j : Usize) -> mir::Res(Slice T) :=
+  fun (T : Type) (s : Slice T) (j : Usize) => mir::or_panic (Slice T) (mir::prefix T s j)
 
--- `<[T] as Index<RangeFrom<usize>>>::index(&s, i..)`: `&s[i..]`
-def[prelude] leaf::slice_index_from : (T : Type) -> (s : Slice T) -> (i : Usize) -> Option(Slice T) :=
-  fun (T : Type) (s : Slice T) (i : Usize) => mir::suffix T s i
+-- `<[T] as Index<RangeFrom<usize>>>::index(&s, i..)`: `&s[i..]`, a panic unless `i <= s.len()`
+def[prelude] leaf::slice_index_from : (T : Type) -> (s : Slice T) -> (i : Usize) -> mir::Res(Slice T) :=
+  fun (T : Type) (s : Slice T) (i : Usize) => mir::or_panic (Slice T) (mir::suffix T s i)
 
--- `<[T] as Index<Range<usize>>>::index(&s, i..j)`: `&s[i..j]` (a panic unless `i <= j <= s.len()`)
-def[prelude] leaf::slice_index_range : (T : Type) -> (s : Slice T) -> (i : Usize) -> (j : Usize) -> Option(Slice T) :=
+-- `<[T] as Index<Range<usize>>>::index(&s, i..j)`: `&s[i..j]`, a panic unless `i <= j <= s.len()`
+def[prelude] leaf::slice_index_range : (T : Type) -> (s : Slice T) -> (i : Usize) -> (j : Usize) -> mir::Res(Slice T) :=
   fun (T : Type) (s : Slice T) (i : Usize) (j : Usize) =>
-    if #le_usize(i, j) return Option(Slice T) then
-      mir::bind (Slice T) (Slice T) (mir::prefix T s j) (fun (p : Slice T) => mir::suffix T p i)
-    else None[Slice T]
+    if #le_usize(i, j) return mir::Res(Slice T) then
+      mir::or_panic (Slice T) (mir::bind (Slice T) (Slice T) (mir::prefix T s j) (fun (p : Slice T) => mir::suffix T p i))
+    else mir::Res::Panic[Slice T]
+
+-- `<[T; N] as Index<RangeToInclusive<usize>>>::index(&a, ..=j)`: `&a[..j + 1]`, a panic unless `j < N`
+def[prelude] leaf::array_index_to_inclusive : (T : Type) -> (N : Usize) -> (a : Array T N) -> (j : Usize) -> mir::Res(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (j : Usize) =>
+    mir::bindr (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) =>
+      if #lt_usize(j, slice::len T s) return mir::Res(Slice T) then
+        (if #le_int(#iadd(#cast_usize_int(j), #cast_usize_int(1usize)), 18446744073709551615int) as .h return mir::Res(Slice T)
+         then mir::or_panic (Slice T) (mir::prefix T s (#add_usize(j, 1usize; h)))
+         else mir::Res::Stuck[Slice T])
+      else mir::Res::Panic[Slice T])
+
+-- `<[T; N] as Index<RangeTo<usize>>>::index(&a, ..j)`: `&a[..j]`, a panic unless `j <= N`
+def[prelude] leaf::array_index_to : (T : Type) -> (N : Usize) -> (a : Array T N) -> (j : Usize) -> mir::Res(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (j : Usize) =>
+    mir::bindr (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::or_panic (Slice T) (mir::prefix T s j))
+
+-- `<[T; N] as Index<RangeFrom<usize>>>::index(&a, i..)`: `&a[i..]`, a panic unless `i <= N`
+def[prelude] leaf::array_index_from : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> mir::Res(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) =>
+    mir::bindr (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::or_panic (Slice T) (mir::suffix T s i))
+
+-- `<[T; N] as Index<Range<usize>>>::index(&a, i..j)`: `&a[i..j]`, a panic unless `i <= j <= N`
+def[prelude] leaf::array_index_range : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i : Usize) -> (j : Usize) -> mir::Res(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (i : Usize) (j : Usize) =>
+    mir::bindr (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) =>
+      if #le_usize(i, j) return mir::Res(Slice T) then
+        mir::or_panic (Slice T) (mir::bind (Slice T) (Slice T) (mir::prefix T s j) (fun (p : Slice T) => mir::suffix T p i))
+      else mir::Res::Panic[Slice T])
 
 -- `Deref::deref(&d)` of a library newtype of bytes read as its field (SHA-256's `Digest`): `&d[..]`
 def[prelude] leaf::bytes_deref : (N : Usize) -> (a : Array U8 N) -> Option(Slice U8) :=

@@ -1,11 +1,15 @@
 //! What the lifted verifier guarantees (first set), for `hasher.rs` and
 //! `proof.rs` as written at QMDB's instance (the MMR family, SHA-256), and
-//! what each function host code can call returns. Claims and preconditions
-//! only; PROOF.rs proves them.
+//! what each function host code can call returns. Claims, preconditions
+//! and panic contracts only; PROOF.rs proves them.
 //!
 //! Reading the statements: a position or location is its value `.0` (a
 //! `u64`); `x as Int` reads a word as an unbounded integer, so `+`, `-` and
-//! `<` on it never wrap; `pow2(k)` is `2^k`. A `Subtree` is the perfect
+//! `<` on it never wrap; `pow2(k)` is `2^k`. A function's `requires(p)` is
+//! its domain: what callers guarantee (outside it nothing is promised); its
+//! `panics_when(p)` says that on its domain it panics exactly when `p`
+//! holds, and otherwise returns what its contract says. A function with
+//! neither returns on every input. A `Subtree` is the perfect
 //! binary subtree of an MMR whose root is at position `pos`, of height
 //! `height`, whose first leaf is at location `leaf_start`. In a contract
 //! `ensures(|ret: T| ..)`, `ret` is the result; for a method that takes
@@ -74,99 +78,116 @@ pub fn order(a: Int, b: Int) -> crate::__lift::Ordering {
 }
 
 // ---------------------------------------------------------------------------
-// Preconditions of the position arithmetic the verifier calls (what the
-// code's documentation makes callers guarantee; the same statements as
-// `sandblaster/mmr/LAWS.rs`)
+// Where the position arithmetic the verifier calls panics, and what callers
+// guarantee (the same statements as `sandblaster/mmr/LAWS.rs`). A documented
+// panic is a panic contract: `panics_when(p)` says that where the function's
+// `requires` hold it panics exactly when `p` holds (proven of rustc's MIR;
+// the record lists it). A `requires` is what the documentation makes
+// callers guarantee where the code would not simply panic: it is proven at
+// every call inside the verified files and is an obligation of host
+// callers (the record lists it); outside it nothing is promised.
+//
+// Every panic here is rustc's overflow check: it holds in a build with
+// overflow checks on, as every profile of this workspace sets them; a
+// build without them (a downstream crate's default release profile) wraps
+// instead of panicking (DESIGN.md §16.5).
 // ---------------------------------------------------------------------------
 
 /// `location_to_position` is for locations up to `MAX_LEAVES` (`2^62`), the
-/// trait's guaranteed domain (the code itself panics only from `2^63`).
+/// trait's guaranteed domain ("callers must not rely on" larger ones).
+/// Above it the code does not simply panic: it returns `2·loc -
+/// popcount(loc)`, which is no position of a valid MMR, up to `2^63`, and
+/// panics only from `2^63` on (`checked_mul(2)`'s `expect`).
 #[lift_attach(crate::merkle::mmr::Family::location_to_position)]
 fn location_to_position_pre() {
     requires((loc.0 as Int) <= crate::laws::max_leaves());
 }
 
-/// `children` needs `height < 64` and `2^height <= pos` (the shift
-/// `1 << height` and the subtraction `pos - 2^height` must not overflow).
+/// `children` panics where its arithmetic overflows: at a height of 64 or
+/// more (the shift `1 << height`), or when the left child would come
+/// before position 0 (`pos < 2^height`: the subtraction `pos - 2^height`).
 /// The trait's caller guarantee `height > 0` is not needed by the code: at
 /// height 0 it returns `(pos - 1, pos - 1)`.
 #[lift_attach(crate::merkle::mmr::Family::children)]
-fn children_pre() {
-    requires(height < 64u32 && pow2(height as Int) <= (pos.0 as Int));
+fn children_panics() {
+    panics_when(height >= 64u32 || (pos.0 as Int) < pow2(height as Int));
 }
 
-/// `Position + Position` must not overflow (the code documents the panic).
+/// `Position + Position` panics when the sum overflows a `u64` (as
+/// documented).
 #[lift_attach(crate::merkle::position::Position::add)]
-fn position_add_pre() {
-    requires((self.0 as Int) + (rhs.0 as Int) < pow2(64));
+fn position_add_panics() {
+    panics_when((self.0 as Int) + (rhs.0 as Int) >= pow2(64));
 }
 
-/// `Position + u64` must not overflow.
+/// `Position + u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::position::Position::add__u64)]
-fn position_add_u64_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn position_add_u64_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Position += u64` must not overflow.
+/// `Position += u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::position::Position::add_assign__u64)]
-fn position_add_assign_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn position_add_assign_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Position - Position` must not underflow.
+/// `Position - Position` panics when the difference underflows (`rhs`
+/// above `self`).
 #[lift_attach(crate::merkle::position::Position::sub)]
-fn position_sub_pre() {
-    requires(rhs.0 <= self.0);
+fn position_sub_panics() {
+    panics_when(rhs.0 > self.0);
 }
 
-/// `Position - u64` must not underflow.
+/// `Position - u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::position::Position::sub__u64)]
-fn position_sub_u64_pre() {
-    requires(rhs <= self.0);
+fn position_sub_u64_panics() {
+    panics_when(rhs > self.0);
 }
 
-/// `Position -= u64` must not underflow.
+/// `Position -= u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::position::Position::sub_assign__u64)]
-fn position_sub_assign_pre() {
-    requires(rhs <= self.0);
+fn position_sub_assign_panics() {
+    panics_when(rhs > self.0);
 }
 
-/// `Location + Location` must not overflow.
+/// `Location + Location` panics when the sum overflows a `u64` (as
+/// documented).
 #[lift_attach(crate::merkle::location::Location::add)]
-fn location_add_pre() {
-    requires((self.0 as Int) + (rhs.0 as Int) < pow2(64));
+fn location_add_panics() {
+    panics_when((self.0 as Int) + (rhs.0 as Int) >= pow2(64));
 }
 
-/// `Location + u64` must not overflow.
+/// `Location + u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::location::Location::add__u64)]
-fn location_add_u64_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn location_add_u64_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Location += u64` must not overflow.
+/// `Location += u64` panics when the sum overflows.
 #[lift_attach(crate::merkle::location::Location::add_assign__u64)]
-fn location_add_assign_pre() {
-    requires((self.0 as Int) + (rhs as Int) < pow2(64));
+fn location_add_assign_panics() {
+    panics_when((self.0 as Int) + (rhs as Int) >= pow2(64));
 }
 
-/// `Location - Location` must not underflow.
+/// `Location - Location` panics when the difference underflows (`rhs`
+/// above `self`).
 #[lift_attach(crate::merkle::location::Location::sub)]
-fn location_sub_pre() {
-    requires(rhs.0 <= self.0);
+fn location_sub_panics() {
+    panics_when(rhs.0 > self.0);
 }
 
-/// `Location - u64` must not underflow.
+/// `Location - u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::location::Location::sub__u64)]
-fn location_sub_u64_pre() {
-    requires(rhs <= self.0);
+fn location_sub_u64_panics() {
+    panics_when(rhs > self.0);
 }
 
-/// `Location -= u64` must not underflow.
+/// `Location -= u64` panics when the difference underflows.
 #[lift_attach(crate::merkle::location::Location::sub_assign__u64)]
-fn location_sub_assign_pre() {
-    requires(rhs <= self.0);
+fn location_sub_assign_panics() {
+    panics_when(rhs > self.0);
 }
-
 
 // ---------------------------------------------------------------------------
 // The shape of a subtree (`proof.rs`): what every `Subtree` the verifier
@@ -174,7 +195,11 @@ fn location_sub_assign_pre() {
 // peaks of a structure of at most `MAX_LEAVES` leaves), so this is a
 // precondition of the subtree methods, an obligation of host code listed
 // in the record, until that code is lifted. (A type invariant would need
-// private fields: `Subtree`'s are `pub`.)
+// private fields: `Subtree`'s are `pub`.) The methods document no panic:
+// on another subtree their arithmetic can overflow and panic (a height of
+// 64 or more, leaves past `2^64`, a root position below `2^height`) or
+// they answer for a subtree no MMR has, so the shape stays a
+// precondition, not a panic contract.
 // ---------------------------------------------------------------------------
 
 /// A subtree the verifier can be given: it is at most 62 high, has its

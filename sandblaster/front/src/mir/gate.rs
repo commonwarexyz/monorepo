@@ -49,12 +49,25 @@
 //! check (`elab::items`: each α-equal to the elaboration of the declared
 //! clause, which the lift carries apart, `hir::FnDef::declared`).
 //!
+//! **Panic contracts** (docs/mir-lift.md §20.5, DESIGN.md §16.5). A
+//! function whose declared contract has a panic contract `panics_when(p)`
+//! (`MirContract::panic`: the index of its no-panic clause `!(p)` among
+//! the preconditions) is accepted only when, besides `L::thm::<id>` (whose
+//! preconditions include `Not(P)`), the kernel holds `L::pthm::<id>` with
+//! exactly the panic statement of `stmt::statement_panic` (checks 1–4
+//! alike): on the domain, where `p` holds, the MIR run panics. The literal
+//! reading reads `Panic` only where the MIR certainly panics
+//! (`literal::must_panic`, a failed `Assert`, a callee's panic), so the
+//! two theorems say that the function panics exactly when `p` holds.
+//!
 //! # What it trusts
 //!
 //! The kernel; the generator `literal.rs` and `literal.core`; the statement
 //! `stmt.rs`; the parse `ir.rs`/`sexp.rs`; the names of `mod.rs`; the lift's
 //! list of the functions read from MIR (which instance each is, check 0
-//! checks); and the elaborator, with its check of preconditions.
+//! checks; its panic contract, checked against the function's declaration,
+//! `hir::FnDef::nopanic_clause`); and the elaborator, with its check of
+//! preconditions.
 //!
 //! # What it does not trust
 //!
@@ -155,16 +168,34 @@ impl Ledger {
             if is.as_deref() != Some(c.global.as_str()) {
                 return Err(format!("its MIR instance `{}` is {}, not this function", c.key, is.map_or("no lifted function".into(), |g| format!("`{g}`"))));
             }
-            self.accept(env, krate, &mm.loaded.m, &mm.loaded.names, c, &c.key, "L::thm::", &c.global)
+            // the panic contract listed is the declared one, which the lock
+            // shows (`hir::FnDef::panics`, its no-panic clause the last
+            // precondition)
+            let fd = krate.items.iter().find_map(|it| match &it.kind {
+                ItemKind::Fn(fd) if it.path.to_string() == c.global => Some(fd),
+                _ => None,
+            });
+            let declared = fd.ok_or_else(|| format!("no lifted function `{}` in the crate", c.global))?.nopanic_clause();
+            if c.panic != declared {
+                let show = |p: Option<usize>| p.map_or("none".to_string(), |i| format!("precondition {i}"));
+                return Err(format!("its panic contract is listed as {} but declared as {}", show(c.panic), show(declared)));
+            }
+            self.accept(env, krate, &mm.loaded.m, &mm.loaded.names, c, &c.key, "L::thm::", None)?;
+            // a panic contract: its panic theorem too
+            match c.panic {
+                Some(np) => self.accept(env, krate, &mm.loaded.m, &mm.loaded.names, c, &c.key, "L::pthm::", Some(np)).map_err(|e| format!("its panic contract: {e}")),
+                None => Ok(()),
+            }
         };
         facts.mir_contracts.iter().map(|c| Verdict { global: c.global.clone(), key: c.key.clone(), result: accept(c) }).collect()
     }
 
     /// `<prefix><id>`, `id` the literal reading of `m`'s instance `key`, is
-    /// a kernel declaration of the statement of `subject` (`c.global`) under
-    /// `c`.
+    /// a kernel declaration of the statement of `c.global`: its theorem, or
+    /// with `panic` (the no-panic clause's index) its panic statement.
     #[allow(clippy::too_many_arguments)]
-    fn accept(&self, env: &Env, krate: &Crate, m: &Sbmir, names: &ModuleNames, _c: &MirContract, key: &str, prefix: &str, subject: &str) -> Result<(), String> {
+    fn accept(&self, env: &Env, krate: &Crate, m: &Sbmir, names: &ModuleNames, c: &MirContract, key: &str, prefix: &str, panic: Option<usize>) -> Result<(), String> {
+        let subject = c.global.as_str();
         let (state, read) = self.readings.get(&m.module).ok_or("the literal reading of its module was not loaded")?;
         let lf = state.fns.get(key).ok_or_else(|| format!("no literal reading of `{key}`"))?;
         let f = m.fns.get(key).ok_or_else(|| format!("no MIR of `{key}`"))?;
@@ -180,7 +211,10 @@ impl Ledger {
         }
         let kn = KNames { names, env };
         let mut g = Gen::resume(m, &kn, state.clone());
-        let st = stmt::statement(env, &mut g, lf, f, subject)?;
+        let st = match panic {
+            Some(np) => stmt::statement_panic(env, &mut g, lf, f, subject, np)?,
+            None => stmt::statement(env, &mut g, lf, f, subject)?,
+        };
         let want = env.parse_term(&[], &st.theorem_ty()).map_err(|e| format!("its statement: {e}"))?;
         let name = format!("{prefix}{}", lf.id);
         let got = env.lookup_global(&name).and_then(|g| env.global_type(g)).ok_or_else(|| format!("the kernel holds no `{name}`"))?;

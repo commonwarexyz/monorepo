@@ -699,7 +699,7 @@ impl<'a> Elab<'a> {
         // the statement's spec-side proofs are instantiated with the call's
         // arguments: re-certify their linear arithmetic
         let ty = super::recert::recertify(&self.env, &self.f.scope.ctx, &super::tm::subst_closed(&t, args));
-        let proof = mk::apps(mk::global(rg), args.iter().map(|a| (Rel::Rel, a.clone())));
+        let proof = mk::apps(mk::global(rg), self.contract_args(id, args).into_iter().map(|a| (Rel::Rel, a)));
         Some((rg, ty, proof))
     }
 

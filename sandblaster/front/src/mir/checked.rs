@@ -84,7 +84,16 @@ pub enum Entry {
     /// a callee lemma for the walks of the functions that call it, so that
     /// both readings hold the model's call.
     Model { key: String, s_global: String },
+    /// The trusted panic theorem of a lifted function with a panic contract
+    /// (`stmt::statement_panic`; `nopanic`: its no-panic clause's index
+    /// among the preconditions, `lift::MirContract::panic`).
+    Panic { key: String, s_global: String, nopanic: usize },
 }
+
+/// The fuel a panic theorem's lemma takes as its premise (`K ≤ len n`):
+/// the units the literal run may consume on its way to the panic (a loop
+/// header entered, a self-call), on every path the walk follows.
+pub const PANIC_FUEL: i64 = 64;
 
 /// Library functions with MIR that the lift prelude models (`elab/lift.core`,
 /// read by `read::builtin_leaf`): the MIR instance and the model. Their
@@ -128,11 +137,15 @@ pub struct Prover<'a> {
     whiles: Vec<WhileHelper>,
     /// Every declaration added since the last take (a verdict-cache entry).
     pub added: Vec<DefDecl>,
+    /// The panic lemmas of the functions with a panic contract
+    /// (`LiftFacts::panic_lemmas`: `(function, lemma)`), hints for their
+    /// panic theorems' walks.
+    pub panic_lemmas: Vec<(String, String)>,
 }
 
 impl<'a> Prover<'a> {
     pub fn new(env: &'a mut Env, m: &'a Sbmir, names: &'a ModuleNames, lit: &'a Literal, pre_commit: &'a std::collections::HashMap<GlobalId, crate::elab::PreCommit>, contracts: &'a [MirContract]) -> Self {
-        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), helpers: Vec::new(), whiles: Vec::new(), added: Vec::new() }
+        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), helpers: Vec::new(), whiles: Vec::new(), added: Vec::new(), panic_lemmas: Vec::new() }
     }
 
     /// Adds `d` to the environment (the kernel checks it) and to the log.
@@ -153,7 +166,164 @@ impl<'a> Prover<'a> {
             Entry::Helper { key, s_global, header, slots } => self.prove_helper(key, s_global, *header, slots),
             Entry::While { key, s_global, header, local_names, returned } => self.prove_while(key, s_global, *header, local_names, returned.as_deref()),
             Entry::Model { key, s_global } => self.prove_fn_as(key, s_global, true),
+            Entry::Panic { key, s_global, nopanic } => self.prove_panic(key, s_global, *nopanic),
         }
+    }
+
+    /// The panic theorem of a function with a panic contract
+    /// (`stmt::statement_panic`): `L::pthm::<id>`, from the (untrusted)
+    /// lemma `L::plem::<id> : Π x̄ h̄ (n) (.hle : K ≤ len n). Eq(mir::Res(Out),
+    /// run n b0 (Ret init), Panic)` (`K` = [`PANIC_FUEL`]), proven by the
+    /// walker's panic mode ([`Walker::panic_walk`]): the literal side alone,
+    /// its tests decided by the preconditions, the panic hypothesis and the
+    /// path, or split, every other outcome refuted.
+    fn prove_panic(&mut self, key: &str, s_global: &str, nopanic: usize) -> Result<Proven, String> {
+        let t0 = Instant::now();
+        let lf = self.lit.lfn(key).cloned().ok_or_else(|| format!("no literal reading of `{key}`"))?;
+        self.contracts.iter().find(|c| c.global == s_global && c.key == key && c.panic == Some(nopanic)).ok_or_else(|| format!("`{s_global}` has no panic contract of the MIR instance `{key}`"))?;
+        let st = {
+            let k = KNames { names: self.names, env: self.env };
+            let mut g = Gen::resume(self.m, &k, self.lit.state.clone());
+            let f = self.m.fns.get(key).ok_or("no MIR")?;
+            stmt::statement_panic(self.env, &mut g, &lf, f, s_global, nopanic)?
+        };
+        let names: Vec<&str> = st.params.iter().map(|p| p.0.as_str()).collect();
+        let mut tele: Tele = Vec::new();
+        for (i, (n, r, t)) in st.params.iter().enumerate() {
+            let ty = self.env.parse_term(&names[..i], t).map_err(|e| format!("the panic statement's parameter {i}: {e}"))?;
+            tele.push((Rc::from(n.as_str()), *r, ty));
+        }
+        let arity = tele.len() as u32;
+        let out_tm = self.env.parse_term(&[], &lf.out_ty).map_err(|e| format!("out type: {e}"))?;
+        let erase_tm = self.env.parse_term(&[], &st.erase_fn()).map_err(|e| format!("erase: {e}"))?;
+        let mut names_n = names.clone();
+        names_n.push("n");
+        let l_tm = self.env.parse_term(&names_n, &st.l_of()).map_err(|e| format!("l: {e}"))?;
+        let run_g = self.env.lookup_global(&lf.run).ok_or("no run")?;
+        let opaque = self.opaque(run_g);
+        let mut w = self.walker(out_tm.clone(), erase_tm, (0..arity).collect(), arity, None, None, opaque);
+        w.fname = format!("{s_global} (its panic theorem)");
+        w.panic = true;
+        w.prem_in_ctx = true;
+        let mut ctx = Ctx::default();
+        for (nm, r, d) in tele.iter() {
+            ctx = w.push(&ctx, nm, *r, d, None)?;
+        }
+        let lu = w.list_unit();
+        let nctx = w.push(&ctx, "n", Rel::Rel, &lu, None)?;
+        let len_at = |env: &Env, v: u32| mk::apps(mk::global(env.lookup_global("seq::len").unwrap()), vec![(Rel::Rel, mk::ind(env.lookup_ind("Unit").unwrap(), vec![])), (Rel::Rel, mk::var(v))]);
+        // the premise over (x̄, n)
+        let prem = le_int(self.env, mk::lit(Width::Int, PANIC_FUEL), len_at(self.env, 0));
+        let hctx = w.push(&nctx, "hle", Rel::Irr, &prem, None)?;
+        // the facts: the preconditions with the panic hypothesis, the premise
+        let d = hctx.depth().0;
+        let mut facts: Vec<Fact> = Vec::new();
+        for (lv, (_, r, ty)) in tele.iter().enumerate() {
+            if *r == Rel::Irr {
+                self.panic_facts(mk::var(d - 1 - lv as u32), &shift(ty, (d - lv as u32) as i64), &mut facts);
+            }
+        }
+        facts.push(Fact::eq(mk::var(0), shift(&prem, 1)));
+        // the panic lemmas (untrusted hints): their `ensures`, at the
+        // function's parameters and the hypotheses their `requires` name
+        let lemmas: Vec<String> = self.panic_lemmas.iter().filter(|(g, _)| g == s_global).map(|(_, l)| l.clone()).collect();
+        for l in &lemmas {
+            let (proof, ty) = self.panic_lemma_at(l, &tele, d)?;
+            self.panic_facts(proof, &ty, &mut facts);
+        }
+        let walked = w.panic_walk(&hctx, &shift(&l_tm, 1), &facts).map_err(|e| format!("walk of `{s_global}`'s panic theorem: {e}"))?;
+        let stats = format!("{:?}", w.stats);
+        let concl = mk::eq(mk::ind(self.env.lookup_ind("mir::Res").ok_or("no `mir::Res`")?, vec![out_tm.clone()]), shift(&l_tm, 1), shift(&w.panic_out(), 0));
+        drop(w);
+        let mut lem_ty = mk::pi("n", Rel::Rel, lu.clone(), mk::pi("hle", Rel::Irr, prem.clone(), concl));
+        let mut proof = mk::lam("n", Rel::Rel, lu.clone(), mk::lam("hle", Rel::Irr, prem.clone(), walked));
+        for (nm, r, d) in tele.iter().rev() {
+            lem_ty = mk::pi(nm, *r, d.clone(), lem_ty);
+            proof = mk::lam(nm, *r, d.clone(), proof);
+        }
+        let raw_nodes = crate::elab::tm::size(&proof);
+        let proof = if std::env::var("CS_NO_HASHCONS").is_ok() { proof } else { super::simproof::hashcons(&proof) };
+        let nodes = crate::elab::tm::size(&proof);
+        let walk_secs = t0.elapsed().as_secs_f64();
+        let t1 = Instant::now();
+        let lem_name = format!("L::plem::{}", lf.id);
+        self.dump(&format!("plem_{}.core", lf.id), &self.env.print_term(&[], &lem_ty));
+        let decl = DefDecl { name: Rc::from(lem_name.as_str()), kind: DefKind::Lemma, ty: lem_ty, body: proof, recursion: Recursion::None, arity: arity + 2, opaque: false };
+        let lem_g = self.add(decl, 40_000_000_000).map_err(|e| format!("the kernel rejected the panic lemma of `{s_global}`: {}", trunc(&e.to_string(), 3000)))?;
+        // the trusted panic theorem: pair(K, λ n .hle. plem x̄ n .hle)
+        let thm_text = st.theorem_ty();
+        self.dump(&format!("pthm_{}.core", lf.id), &thm_text);
+        let thm_ty = self.env.parse_term(&[], &thm_text).map_err(|e| format!("panic theorem type: {e}"))?;
+        let mut sig = thm_ty.clone();
+        for _ in 0..arity {
+            let Term::Pi { cod, .. } = &*sig else { return Err("panic theorem".into()) };
+            sig = cod.clone();
+        }
+        let mut lem_args: Vec<(Rel, Tm)> = (0..arity).map(|i| (tele[i as usize].1, mk::var(arity + 1 - i))).collect();
+        lem_args.push((Rel::Rel, mk::var(1)));
+        lem_args.push((Rel::Irr, mk::var(0)));
+        let snd = mk::lam("n", Rel::Rel, lu, mk::lam("hle", Rel::Irr, prem, mk::apps(mk::global(lem_g), lem_args)));
+        let mut tproof: Tm = Rc::new(Term::Pair { ty: sig, fst: mk::lit(Width::Int, PANIC_FUEL), snd });
+        for (nm, r, d) in tele.iter().rev() {
+            tproof = mk::lam(nm, *r, d.clone(), tproof);
+        }
+        let decl = DefDecl { name: Rc::from(format!("L::pthm::{}", lf.id).as_str()), kind: DefKind::Lemma, ty: thm_ty, body: tproof, recursion: Recursion::None, arity, opaque: false };
+        self.add(decl, 4_000_000_000).map_err(|e| format!("the kernel rejected the panic theorem of `{s_global}`: {}", trunc(&e.to_string(), 2000)))?;
+        Ok(Proven { s_global: s_global.into(), kind: "panic theorem", walk_secs, check_secs: t1.elapsed().as_secs_f64(), nodes, stats: format!("{stats}; {raw_nodes} nodes before sharing") })
+    }
+
+    /// A panic walk's facts from a proof `p` of `ty`: [`sigma_facts`], and
+    /// a disjunction (`Or`, a panic condition `a || b` or a panic lemma's
+    /// conclusion) kept whole, for the walk to split
+    /// (`Walker::refute_or`).
+    fn panic_facts(&self, p: Tm, ty: &Tm, out: &mut Vec<Fact>) {
+        let or = self.env.lookup_global("Or");
+        match &**ty {
+            Term::Sigma { fst, snd, .. } if count_free0(snd) => {
+                self.panic_facts(Rc::new(Term::Fst(p.clone())), fst, out);
+                self.panic_facts(Rc::new(Term::Snd(p)), &shift(snd, -1), out);
+            }
+            Term::Let { val, body, .. } => self.panic_facts(p, &crate::elab::tm::subst0(body, val), out),
+            Term::App { fun, .. } if matches!(&**fun, Term::App { fun: g, .. } if matches!(&**g, Term::Global(x) if Some(*x) == or)) => out.push(Fact::eq(p, ty.clone())),
+            Term::Ind { ind, params } if params.len() == 2 && Some(*ind) == self.env.lookup_ind("Either") => out.push(Fact::eq(p, ty.clone())),
+            _ => sigma_facts(p, ty, out),
+        }
+    }
+
+    /// The panic lemma `name` applied in the panic walk's context (depth
+    /// `d`; the panic statement's telescope `tele` first): its parameters
+    /// are the function's relevant parameters, in order; each of its
+    /// hypotheses is the telescope's hypothesis of the same statement (a
+    /// precondition, or the panic condition). The proof and its conclusion.
+    fn panic_lemma_at(&self, name: &str, tele: &Tele, d: u32) -> Result<(Tm, Tm), String> {
+        let g = self.env.lookup_global(name).ok_or_else(|| format!("the panic lemma `{name}` is not a checked lemma of the crate"))?;
+        let mut ty = self.env.global_type(g).ok_or_else(|| format!("the panic lemma `{name}` has no type"))?;
+        let rel_params: Vec<usize> = (0..tele.len()).filter(|i| tele[*i].1 == Rel::Rel).collect();
+        let tele_at = |lv: usize| -> (Tm, Tm) { (mk::var(d - 1 - lv as u32), shift(&tele[lv].2, (d - lv as u32) as i64)) };
+        let mut app = mk::global(g);
+        let mut k = 0;
+        while let Term::Pi { rel, dom, cod, .. } = &*ty {
+            let arg = if k < rel_params.len() {
+                let (v, t) = tele_at(rel_params[k]);
+                if !self.env.alpha_eq_relevant(dom, &t, &|a, b| a == b) {
+                    return Err(format!("the panic lemma `{name}`: its parameter {k} is not the function's (`{}`, the function's `{}`)", self.env.print_term(&[], dom), self.env.print_term(&[], &t)));
+                }
+                v
+            } else {
+                let found = (0..tele.len()).filter(|lv| tele[*lv].1 == Rel::Irr).map(tele_at).find(|(_, t)| self.env.alpha_eq_relevant(dom, t, &|a, b| a == b));
+                match found {
+                    Some((v, _)) => v,
+                    None => return Err(format!("the panic lemma `{name}`: its hypothesis `{}` is none of the panic theorem's (the preconditions with the panic condition)", trunc(&self.env.print_term(&[], dom), 600))),
+                }
+            };
+            app = Rc::new(Term::App { rel: *rel, fun: app, arg: arg.clone() });
+            ty = crate::elab::tm::subst0(cod, &arg);
+            k += 1;
+        }
+        if k < rel_params.len() {
+            return Err(format!("the panic lemma `{name}` takes {k} argument(s); the function has {} parameter(s)", rel_params.len()));
+        }
+        Ok((app, ty))
     }
 
     fn opaque(&self, run: GlobalId) -> Vec<GlobalId> {
@@ -196,6 +366,7 @@ impl<'a> Prover<'a> {
             steps: 0,
             whiles: self.whiles.clone(),
             exit: None,
+            panic: false,
         }
     }
 
@@ -495,7 +666,7 @@ impl<'a> Prover<'a> {
         let slots: Vec<String> = (0..nslots).map(|i| slots_txt[i].clone().unwrap_or_else(|| format!("j{i}"))).collect();
         let pc = self.pre_commit.get(&sg).ok_or_else(|| format!("no pre-commit body for `{s_global}`"))?;
         let (pre_body, measure) = (pc.body.clone(), pc.measure.clone());
-        let st_text = format!("Some[{st}]({st}::st({}))", slots.join(", "), st = lf.st);
+        let st_text = format!("mir::Res::Ret[{st}]({st}::st({}))", slots.join(", "), st = lf.st);
         let mut tele_txt: String = params.iter().map(|(n, r, t)| format!("({}{n} : {t}) -> ", if *r == Rel::Irr { "." } else { "" })).collect();
         for i in &junk {
             tele_txt.push_str(&format!("(j{i} : Option({})) -> ", slot_ty(*i)));
@@ -528,7 +699,7 @@ impl<'a> Prover<'a> {
                 if width == Width::Int { mu_raw } else { format!("#cast_{}_int({mu_raw})", format!("{width:?}").to_lowercase()) }
             }
         };
-        let lem_ty_text = format!("{tele_txt}(n : List(Unit)) -> (.hle : Eq(Bool, #le_int({mu_txt}, seq::len Unit n), true)) -> Eq(Option({out}), {run} n {blk}::b{header} ({st_text}), Some[{out}]({er}))", out = lf.out_ty, run = lf.run, blk = lf.blk);
+        let lem_ty_text = format!("{tele_txt}(n : List(Unit)) -> (.hle : Eq(Bool, #le_int({mu_txt}, seq::len Unit n), true)) -> Eq(mir::Res({out}), {run} n {blk}::b{header} ({st_text}), mir::Res::Ret[{out}]({er}))", out = lf.out_ty, run = lf.run, blk = lf.blk);
         self.dump(&format!("hlem_{}.core", lf.id), &lem_ty_text);
         let lem_ty = self.env.parse_term(&[], &lem_ty_text).map_err(|e| format!("helper lemma type: {e}"))?;
         let nj = junk.len() as u32;
@@ -615,9 +786,9 @@ impl Prover<'_> {
     /// [`super::simproof::WhileHelper`]):
     ///
     /// ```text
-    /// Π p̄ j̄ (n) (C : Option(Out)) (hC : Π m (.hm : len n − μ(p̄) ≤ len m) k̄.
-    ///     Eq(run m X (Some σ_X(h p̄, w̄)), C)) (.hle : μ(p̄) ≤ len n).
-    ///   Eq(run n H (Some σ(p̄, j̄)), C)
+    /// Π p̄ j̄ (n) (C : mir::Res(Out)) (hC : Π m (.hm : len n − μ(p̄) ≤ len m) k̄.
+    ///     Eq(run m X (Ret σ_X(h p̄, w̄)), C)) (.hle : μ(p̄) ≤ len n).
+    ///   Eq(run n H (Ret σ(p̄, j̄)), C)
     /// ```
     ///
     /// `σ`: the helper's parameters in their slots (by the reading's names of
@@ -706,7 +877,7 @@ impl Prover<'_> {
         let nj = junk.len() as u32;
         let e0 = arity + nj;
         let assigned = loop_assigned(&f, header, &lf);
-        // a parameter's slot value `Some(erase(p_k))` over the parameters
+        // a parameter's slot value `Ret(erase(p_k))` over the parameters
         let pnames: Vec<String> = (0..arity).map(|k| format!("p{k}")).collect();
         let pn: Vec<&str> = pnames.iter().map(|x| x.as_str()).collect();
         let kn = KNames { names: self.names, env: self.env };
@@ -757,7 +928,7 @@ impl Prover<'_> {
                 w.push(Some(mk::var(nj - 1 - m)));
             }
         }
-        let sx_txt = format!("fun{sx_bind} => Some[{st}]({st}::st({}))", sx_slots.join(", "), st = lf.st);
+        let sx_txt = format!("fun{sx_bind} => mir::Res::Ret[{st}]({st}::st({}))", sx_slots.join(", "), st = lf.st);
         let sx = self.env.parse_term(&[], &sx_txt).map_err(|e| format!("the state at the `while` loop's exit: {e}"))?;
         drop(g);
         // the exit block: the header's successor outside the loop
@@ -776,8 +947,8 @@ impl Prover<'_> {
         // the telescope p̄ j̄ n C hC (then hle); with a fuel function p̄ j̄ n R
         // C hC hR (then hle)
         let out_tm = self.env.parse_term(&[], &lf.out_ty).map_err(|e| format!("out type: {e}"))?;
-        let opt = self.env.lookup_ind("Option").unwrap();
-        let opt_out = mk::ind(opt, vec![out_tm.clone()]);
+        let res = self.env.lookup_ind("mir::Res").ok_or("no `mir::Res`")?;
+        let opt_out = mk::ind(res, vec![out_tm.clone()]);
         let lu = mk::ind(self.env.lookup_ind("List").unwrap(), vec![mk::ind(self.env.lookup_ind("Unit").unwrap(), vec![])]);
         let seq_len = self.env.lookup_global("seq::len").ok_or("seq::len")?;
         let len_of = |t: Tm| mk::apps(mk::global(seq_len), vec![(Rel::Rel, mk::ind(self.env.lookup_ind("Unit").unwrap(), vec![])), (Rel::Rel, t)]);
@@ -866,7 +1037,7 @@ impl Prover<'_> {
             });
         }
         let st_h = Rc::new(Term::Ctor { ind: st_ind, ctor: 0, params: vec![], args: slots_h });
-        let os = Rc::new(Term::Ctor { ind: opt, ctor: 1, params: vec![mk::ind(st_ind, vec![])], args: vec![st_h] });
+        let os = Rc::new(Term::Ctor { ind: res, ctor: super::simproof::RES_RET, params: vec![mk::ind(st_ind, vec![])], args: vec![st_h] });
         let l_tm = mk::apps(mk::global(run_g), vec![(Rel::Rel, mk::var(e3 - 1 - e0)), (Rel::Rel, blk((2 * header) as u32)), (Rel::Rel, os)]);
         let prem = match fuel {
             Some(_) => le_int(self.env, mk::prim(PrimOp::IAdd, vec![hinfo.need_int(&hinfo.params_at(e3)), mk::var(e3 - 1 - (e0 + 1))], vec![]), len_of(mk::var(e3 - 1 - e0))),
@@ -1299,11 +1470,12 @@ pub struct Planned {
 }
 
 impl Planned {
-    /// `theorem`, `loop lemma` or `model lemma`.
+    /// `theorem`, `panic theorem`, `loop lemma` or `model lemma`.
     pub fn kind(&self) -> &'static str {
         match self.entry {
             _ if self.is_fn => "theorem",
             Entry::Model { .. } => "model lemma",
+            Entry::Panic { .. } => "panic theorem",
             _ => "loop lemma",
         }
     }
@@ -1415,8 +1587,12 @@ pub fn plan(m: &Sbmir, lit: &Literal, contracts: &[MirContract], helpers: &[crat
         for c in cs {
             let mut needs = dep_idx.clone();
             needs.extend(own.iter().copied());
-            out.push(Planned { entry: Entry::Fn { key: k.clone(), s_global: c.global.clone() }, global: c.global.clone(), key: k.clone(), needs, is_fn: true });
+            out.push(Planned { entry: Entry::Fn { key: k.clone(), s_global: c.global.clone() }, global: c.global.clone(), key: k.clone(), needs: needs.clone(), is_fn: true });
             fn_idx.entry(k.clone()).or_default().push(out.len() - 1);
+            // a panic contract: its panic theorem (the literal side alone)
+            if let Some(np) = c.panic {
+                out.push(Planned { entry: Entry::Panic { key: k.clone(), s_global: c.global.clone(), nopanic: np }, global: c.global.clone(), key: k.clone(), needs: vec![], is_fn: false });
+            }
         }
     }
     (out, errors)
@@ -1445,7 +1621,7 @@ pub struct Outcome {
     pub global: String,
     pub key: String,
     pub is_fn: bool,
-    /// `theorem`, `loop lemma` or `model lemma`.
+    /// `theorem`, `panic theorem`, `loop lemma` or `model lemma`.
     pub kind: &'static str,
     /// Proven now (`Ok`), or why not.
     pub result: Result<Proven, String>,
@@ -1483,6 +1659,12 @@ impl ModuleTheorems {
     }
     pub fn cached(&self) -> usize {
         self.outcomes.iter().filter(|o| o.is_fn && o.cached).count()
+    }
+    /// The panic theorems (functions with a panic contract), and those
+    /// kernel-checked (now or cached).
+    pub fn panic_theorems(&self) -> (usize, usize) {
+        let p: Vec<&Outcome> = self.outcomes.iter().filter(|o| o.kind == "panic theorem").collect();
+        (p.len(), p.iter().filter(|o| o.result.is_ok()).count())
     }
 }
 
@@ -1702,7 +1884,7 @@ pub fn prove_lifted(out: &mut crate::elab::Output, facts: &crate::lift::LiftFact
             (outcomes, _) = prove_module(out, (m, names, &lit, facts), opts, &plan, &vec![None; plan.len()], &keys_c);
         }
         rep.missing.extend(errors.into_iter().map(|(g, _, why)| (g, why)));
-        rep.missing.extend(outcomes.iter().filter(|o| o.is_fn).filter_map(|o| o.result.as_ref().err().map(|e| (o.global.clone(), e.clone()))));
+        rep.missing.extend(outcomes.iter().filter(|o| o.is_fn || o.kind == "panic theorem").filter_map(|o| o.result.as_ref().err().map(|e| (o.global.clone(), if o.is_fn { e.clone() } else { format!("its panic theorem: {e}") }))));
         rep.outcomes = outcomes;
         rep.secs = t0.elapsed().as_secs_f64();
         reports.push(rep);
@@ -1735,6 +1917,7 @@ fn prove_module(out: &mut crate::elab::Output, (m, names, lit, facts): (&Sbmir, 
     pv.budget_secs = opts.budget_secs;
     pv.max_steps = opts.max_steps;
     pv.trace = opts.trace;
+    pv.panic_lemmas = facts.panic_lemmas.clone();
     let (mut failed, mut outcomes, mut stores, mut rejected) = (vec![false; n], Vec::new(), Vec::new(), false);
     for (i, p) in plan.iter().enumerate() {
         let replay = !walk[i] && selected[i] && stored[i].is_some();

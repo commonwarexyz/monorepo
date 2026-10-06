@@ -47,6 +47,27 @@
 //!   (an irrelevant proof the abstraction does not touch) where the match,
 //!   now on the motive variable `y`, takes a proof of `y == y`, and the
 //!   kernel rejected the proof. That argument is now `refl(y)`.
+//!
+//! Two more, from the MMR's and the verifier's panic contracts (C1: a
+//! no-panic clause `!(p)` is a function's last precondition):
+//!
+//! * a negated disjunction `!(a || b)` gave auto neither side as a fact,
+//!   and as a goal it was not split;
+//! * a call's precondition proof, proven for the call's irrelevant slot
+//!   from an irrelevant fact (the statement's no-panic clause in a
+//!   `#[proof(complete = ..)]` script), went unchanged into the callee's
+//!   `ensures` fact, a relevant `let` in proof mode, and the kernel
+//!   rejected the proof ("irrelevant variable `h_req0` used in a relevant
+//!   position"). Such a proof is now promoted where the precondition
+//!   carries no information (`Elab::contract_args`);
+//! * a domain written `implies(a <= b, q)` with the no-panic clause
+//!   `!(a > b)` did not give `q`: the implication was used only by backward
+//!   chaining on its conclusion as written, which the target, its spec
+//!   function unfolded, no longer matched, and the clause's comparison is
+//!   not the premise's. An implication whose premise is a comparison now
+//!   gives its conclusion when a fact compares the same operands and
+//!   linear arithmetic proves the premise (`auto::facts`,
+//!   `implication_units`).
 
 #[path = "spec15_util.rs"]
 mod util;
@@ -767,4 +788,210 @@ fn rw_scrut_bad(x: u8, v: u8) {
     );
     proven(&r, "rw_scrut");
     refuted(&r, "rw_scrut_bad");
+}
+
+// ---------------------------------------------------------------------------
+// 8. A negated disjunction (a panic contract's no-panic clause)
+// ---------------------------------------------------------------------------
+
+/// A panic contract `panics_when(a || b)` makes `!(a || b)` a precondition
+/// (its no-panic clause, DESIGN.md §16.5): the function's body needs each
+/// side's comparison from it (`children`'s shift needs `height < 64` from
+/// `!(height >= 64 || pos < 2^height)`), and its callers prove it. As a
+/// fact it gives `!a` and `!b`, each as the comparison's other value, which
+/// linear arithmetic reads; as a goal it is the goals `!a` and `!b`.
+/// Negative twins: a negated conjunction gives neither side, and the goal
+/// fails when one side may hold.
+#[test]
+fn a_negated_disjunction_gives_each_side_negated() {
+    let r = run_plain(
+        r#"
+/// Both sides of a negated disjunction, as comparisons.
+#[lemma]
+fn no_panic_sides(h: u32, p: u64, q: u64) {
+    requires(!(h >= 64u32 || (p as Int) < (q as Int)));
+    ensures(h < 64u32 && q <= p);
+    follows();
+}
+/// Negative twin: a negated conjunction says neither.
+#[lemma]
+fn no_panic_conj(h: u32, p: u64, q: u64) {
+    requires(!(h >= 64u32 && (p as Int) < (q as Int)));
+    ensures(h < 64u32);
+    follows();
+}
+/// The clause as a goal: each side refuted.
+#[lemma]
+fn no_panic_goal(h: u32, p: u64, q: u64) {
+    requires(h <= 62u32 && q <= p);
+    ensures(!(h >= 64u32 || (p as Int) < (q as Int)));
+    follows();
+}
+/// Negative twin: one side may hold.
+#[lemma]
+fn no_panic_goal_open(h: u32, p: u64, q: u64) {
+    requires(h <= 62u32);
+    ensures(!(h >= 64u32 || (p as Int) < (q as Int)));
+    follows();
+}
+/// The clause as a callee's hypothesis, proven at the call (the goal keeps
+/// the prelude's `Not(Or(..))` unexpanded).
+#[lemma]
+fn calls_with_clause(h: u32, p: u64, q: u64) {
+    requires(h <= 62u32 && q <= p);
+    ensures(h < 64u32);
+    no_panic_sides(h, p, q);
+    follows();
+}
+/// Negative twin: the call's clause may fail.
+#[lemma]
+fn calls_without_clause(h: u32, p: u64, q: u64) {
+    requires(h <= 62u32);
+    ensures(h < 64u32);
+    no_panic_sides(h, p, q);
+    follows();
+}
+"#,
+    );
+    proven(&r, "no_panic_sides");
+    refuted(&r, "no_panic_conj");
+    proven(&r, "no_panic_goal");
+    refuted(&r, "no_panic_goal_open");
+    proven(&r, "calls_with_clause");
+    refuted(&r, "calls_without_clause");
+}
+
+// ---------------------------------------------------------------------------
+// 9. A call's precondition proof in a relevant contract fact
+// ---------------------------------------------------------------------------
+
+const DOWN_ROOT: &str = r#"
+/// Rounds down to an even number; its precondition is a no-panic clause.
+#[requires(!(x > 1000u32))]
+pub(crate) fn down(x: u32) -> u32 { x - x % 2 }
+
+/// `down` by another name: its contract reads the real `down`.
+#[requires(!(x > 1000u32))]
+#[ensures(|r: u32| r == down(x))]
+pub(crate) fn down_too(x: u32) -> u32 { down(x) }
+
+/// The total boundary.
+#[ensures(|r: u32| r == down_too(x as u32))]
+pub fn api(x: u8) -> u32 { down_too(x as u32) }
+
+#[cfg(sandblaster)]
+#[path = "LAWS.rs"]
+mod laws;
+
+#[cfg(sandblaster)]
+#[path = "PROOF.rs"]
+mod proof;
+"#;
+
+const DOWN_LAWS: &str = r#"use sandblaster::prelude::*;
+use super::down;
+
+/// `down` clears the lowest bit.
+#[law]
+fn down_value(x: u32) {
+    requires(x <= 1000u32);
+    ensures(down(x) == x - x % 2u32);
+}
+"#;
+
+fn down_proof(arg: &str) -> String {
+    format!(
+        r#"use sandblaster::prelude::*;
+#[allow(unused_imports)]
+use super::{{down, down_too}};
+
+#[proof]
+fn down_value(x: u32) {{
+    follows();
+}}
+
+/// Pinned by its law. The call of `down_too` (outside the section) needs
+/// its precondition, which the statement's irrelevant no-panic clause
+/// proves; its `ensures` fact is a relevant `let`.
+#[proof(complete = super::down)]
+fn down_determined(x: u32) {{
+    let b = down_too({arg});
+    use_hyp(0, x);
+    use_real(0, x);
+    follows();
+}}
+"#
+    )
+}
+
+/// A `#[proof(complete = ..)]` script calls a function whose precondition
+/// is a negation, proven from the statement's irrelevant precondition: the
+/// callee's `ensures` fact takes the proof relevantly, promoted. Negative
+/// twin: a precondition that does not follow stays an unproven obligation,
+/// never a kernel rejection.
+#[test]
+fn a_calls_precondition_proof_is_promoted_for_its_contract_fact() {
+    let run = |arg: &str| run_files(&[("r/mod.rs", DOWN_ROOT), ("r/LAWS.rs", DOWN_LAWS), ("r/PROOF.rs", &down_proof(arg))]);
+    let r = run("x");
+    assert!(r.front_ok, "{}", r.rendered);
+    no_rejection(&r);
+    assert!(r.unproven.is_empty() && r.failed_defs.is_empty(), "not verified:\n{}", r.explain());
+    assert!(r.checked_defs.iter().any(|d| d == "crate::down::complete"), "`down::complete` not checked:\n{}", r.explain());
+    let r = run("x + 1u32");
+    assert!(r.front_ok, "{}", r.rendered);
+    no_rejection(&r);
+    assert!(r.unproven.iter().any(|(d, k, _)| d.contains("down::complete") && k == "callee-requires"), "the call's precondition proved:\n{}", r.explain());
+}
+
+// ---------------------------------------------------------------------------
+// 10. An implication whose premise follows by arithmetic
+// ---------------------------------------------------------------------------
+
+/// `PeakIterator::new`'s domain, `implies(size <= MAX_NODES,
+/// valid_size(size))`, and its no-panic clause `!(size > MAX_NODES)` give
+/// `valid_size(size)` (the code needs it): modus ponens, the premise proven
+/// by linear arithmetic from the clause. Negative twins: without the
+/// clause the premise may fail, and a clause about other operands proves
+/// nothing.
+#[test]
+fn an_implication_whose_premise_follows_by_arithmetic_gives_its_conclusion() {
+    let r = run_plain(
+        r#"
+/// Whether `r` is even below `2^h` (a stand-in for `valid_size`: a
+/// recursive predicate the search unfolds).
+#[spec]
+#[decreases(h + 1)]
+#[example(evenish(4, 3) && !evenish(5, 3))]
+pub fn evenish(r: Int, h: Int) -> bool {
+    if h < 0 { r == 0 } else if r >= pow2(h) { evenish(r - pow2(h), h - 1) } else { evenish(r, h - 1) }
+}
+
+/// The domain and the clause give the predicate.
+#[lemma]
+fn domain_mp(s: u64, m: u64) {
+    requires(implies((s as Int) <= (m as Int), evenish(s as Int, 8)));
+    requires(!((s as Int) > (m as Int)));
+    ensures(evenish(s as Int, 8));
+    follows();
+}
+/// Negative twin: without the clause the premise may fail.
+#[lemma]
+fn domain_mp_open(s: u64, m: u64) {
+    requires(implies((s as Int) <= (m as Int), evenish(s as Int, 8)));
+    ensures(evenish(s as Int, 8));
+    follows();
+}
+/// Negative twin: a clause about other operands.
+#[lemma]
+fn domain_mp_other(s: u64, m: u64, t: u64) {
+    requires(implies((s as Int) <= (m as Int), evenish(s as Int, 8)));
+    requires(!((t as Int) > (m as Int)));
+    ensures(evenish(s as Int, 8));
+    follows();
+}
+"#,
+    );
+    proven(&r, "domain_mp");
+    refuted(&r, "domain_mp_open");
+    refuted(&r, "domain_mp_other");
 }

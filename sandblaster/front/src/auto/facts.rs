@@ -9,7 +9,10 @@
 //!   non-dependent relevant fields) and pair components (`Eq(Σ, p, q)` with a
 //!   pair side ⇒ `fst p = fst q`, and the second components when they are
 //!   relevant and non-dependent);
-//! * conjunctions and existentials (`Σ` propositions) are split;
+//! * conjunctions and existentials (`Σ` propositions) are split; a negated
+//!   disjunction `¬(P ∨ Q)` gives `¬P` and `¬Q`, and a negated boolean
+//!   equation `¬(c == b)` gives `c == !b` (a panic contract's no-panic
+//!   clause `!(p)`, DESIGN.md §16.5, in the form the rest uses);
 //! * **determination** of stuck scrutinees: a fact `Eq(Bool, S, b)` whose `S`
 //!   is a stuck match (in the elaborator's dependent-match shape or plain)
 //!   determines the scrutinee when exactly one constructor's arm is
@@ -33,7 +36,7 @@
 
 use std::rc::Rc;
 
-use sandblaster_kernel::term::{IndId, Lvl, PrimOp, Rel, Term, Tm, Width};
+use sandblaster_kernel::term::{Arm, IndId, Lvl, PrimOp, Rel, Term, Tm, Width};
 use sandblaster_kernel::util::mk;
 use sandblaster_kernel::value::{Arg, Elim, EnvEntry, Head, Neutral, V, VEnv, Value};
 
@@ -100,6 +103,7 @@ impl<'a> Engine<'a> {
                 }
                 if bool_lit(self.n.bool_ind, &rhs).is_some() {
                     self.either_units(st, f)?;
+                    self.implication_units(st, f)?;
                 }
             }
             Value::Sigma { snd_rel, fst, snd, .. } if self.is_prop(&ty, d) => {
@@ -119,8 +123,10 @@ impl<'a> Engine<'a> {
                 }
             }
             Value::Pi { .. } => {
+                self.not_fact(st, f)?;
                 self.not_eq_fact(st, f)?;
                 self.either_units(st, f)?;
+                self.implication_units(st, f)?;
                 self.forward_rule_on_facts(st, f)?;
             }
             Value::Ind { ind, params } if Some(*ind) == self.n.either && params.len() == 2 => self.either_units(st, f)?,
@@ -264,6 +270,91 @@ impl<'a> Engine<'a> {
         Ok(None)
     }
 
+    /// Negations in the form saturation uses (a panic contract's no-panic
+    /// clause `!(p)` is the precondition `Not(P)`, DESIGN.md §16.5):
+    /// * a negated disjunction `h : ¬(P ∨ Q)` gives `¬P` and `¬Q`
+    ///   (`λp. h(Left(p))`, `λq. h(Right(q))`), each normalized in turn;
+    /// * a negated boolean equation `h : ¬(c == b)`, `b` a literal and `c`
+    ///   stuck, gives `c == !b`, by a case split on `c` whose `b` arm is
+    ///   absurd (`h` applied to the path equation): the form linarith,
+    ///   determination and rewriting use.
+    fn not_fact(&mut self, st: &mut St, f: &Fact) -> R<()> {
+        let d = st.depth();
+        let Value::Pi { rel, dom, cod, .. } = &*f.ty else { return Ok(()) };
+        let (rel, dom) = (*rel, dom.clone());
+        let x = self.env.fresh_var(Lvl(d), rel, &dom);
+        let Some(cv) = self.inst(cod, vec![x], d + 1)? else { return Ok(()) };
+        if !matches!(&*cv, Value::Ind { ind, .. } if *ind == self.n.empty_ind) {
+            return Ok(());
+        }
+        let empty = mk::ind(self.n.empty_ind, vec![]);
+        // ¬(P ∨ Q): ¬P and ¬Q
+        if let Some(either) = self.n.either
+            && let Some((p, q)) = self.either_sides(st, &dom)?
+        {
+            let params = [p, q];
+            for k in 0..2 {
+                // (quoted at the current depth: the first side's fact is a
+                // binder of the second's context)
+                let d1 = st.depth();
+                let sides: Vec<Tm> = params.iter().map(|p| self.quote(st, p)).collect();
+                let neg_tm = mk::pi("x", rel, sides[k].clone(), empty.clone());
+                let Some(neg) = self.eval(st, &neg_tm)? else { continue };
+                let mut known = false;
+                for g in st.scan_facts() {
+                    if self.conv(d1, &g.ty, &neg)? {
+                        known = true;
+                        break;
+                    }
+                }
+                if known {
+                    continue;
+                }
+                let inj = Rc::new(Term::Ctor { ind: either, ctor: k as u32, params: sides.iter().map(|s| shift(s, 1)).collect(), args: vec![mk::var(0)] });
+                let body = Rc::new(Term::App { rel, fun: shift(&st.var(f.lvl), 1), arg: inj });
+                st.push_fact(self.env, neg, mk::lam("x", rel, sides[k].clone(), body), Origin::Derived("¬(p ∨ q) as ¬p and ¬q"));
+            }
+            return Ok(());
+        }
+        // ¬(c == b): c == !b
+        let bi = self.n.bool_ind;
+        let Some((ty, c, b)) = as_eq(&dom) else { return Ok(()) };
+        if !matches!(&**ty, Value::Ind { ind, .. } if *ind == bi) {
+            return Ok(());
+        }
+        let Some(bv) = bool_lit(bi, b) else { return Ok(()) };
+        if as_neu(c).is_none() {
+            return Ok(());
+        }
+        let c = c.clone();
+        let bt = Rc::new(Value::Ind { ind: bi, params: vec![] });
+        let target = Rc::new(Value::Eq { ty: bt, lhs: c.clone(), rhs: self.bool_v(!bv) });
+        for g in st.scan_facts() {
+            if self.conv(d, &g.ty, &target)? {
+                return Ok(());
+            }
+        }
+        // `match c as y return (Eq(Bool, c, y) -> Eq(Bool, c, !b)) with
+        // | b => λe. absurd(h e) | !b => λe. e end refl(Bool, c)`: a term, no
+        // search (`Bool`'s constructor 0 is `false`)
+        let c_tm = self.quote(st, &c);
+        let bool_ty = mk::ind(bi, vec![]);
+        let h = st.var(f.lvl);
+        let motive = mk::pi("e", Rel::Rel, mk::eq(bool_ty.clone(), shift(&c_tm, 1), mk::var(0)), mk::eq(bool_ty.clone(), shift(&c_tm, 2), mk::bool_lit(bi, !bv)));
+        let arm = |k: bool| -> Arm {
+            let body = if k == bv {
+                Rc::new(Term::Absurd { ty: mk::eq(bool_ty.clone(), shift(&c_tm, 1), mk::bool_lit(bi, !bv)), proof: Rc::new(Term::App { rel, fun: shift(&h, 1), arg: mk::var(0) }) })
+            } else {
+                mk::var(0)
+            };
+            Arm { names: vec![], body: mk::lam("e", Rel::Rel, mk::eq(bool_ty.clone(), c_tm.clone(), mk::bool_lit(bi, k)), body) }
+        };
+        let m = Rc::new(Term::Match { ind: bi, params: vec![], scrut: c_tm.clone(), motive, arms: vec![arm(false), arm(true)] });
+        let proof = Rc::new(Term::App { rel: Rel::Rel, fun: m, arg: mk::refl(bool_ty.clone(), c_tm.clone()) });
+        st.push_fact(self.env, target, proof, Origin::Derived("¬(c == b) as c == !b"));
+        Ok(())
+    }
+
     /// A negated integer equation `h : ¬(a = b)` (`requires(a != b)`, a
     /// proposition) as the boolean fact `eq(a, b) == false`, which the rest
     /// of saturation uses: the unsigned `a ≠ 0` normalization (`0 < a`),
@@ -382,6 +473,82 @@ impl<'a> Engine<'a> {
             return Ok(Some(clash));
         }
         Ok(None)
+    }
+
+    /// The operands of an ordered comparison stated as a boolean fact,
+    /// `(a ⋈ b) == v` with `⋈` one of `<`, `<=`, `>`, `>=` (any width) and
+    /// `v` a literal.
+    fn ordered_cmp(&self, v: &V) -> Option<(V, V)> {
+        let (bt, c, b) = as_eq(v)?;
+        if !matches!(&**bt, Value::Ind { ind, .. } if *ind == self.n.bool_ind) || bool_lit(self.n.bool_ind, b).is_none() {
+            return None;
+        }
+        let (op, args) = as_prim(c)?;
+        match op {
+            PrimOp::Lt(_) | PrimOp::Le(_) | PrimOp::Gt(_) | PrimOp::Ge(_) if args.len() == 2 => Some((args[0].clone(), args[1].clone())),
+            _ => None,
+        }
+    }
+
+    /// Modus ponens on an implication fact whose premise is a comparison:
+    /// `h : (a ⋈ b) == v -> B` and a fact comparing the same two operands
+    /// (either order, any comparison: `(a > b) == false`, a panic
+    /// contract's no-panic clause, against the premise `(a <= b) == true`
+    /// of a domain written `implies(a <= b, ..)`) give `B`, its premise
+    /// proven by linarith, which runs only on such a pair. Without it the
+    /// implication is used only by backward chaining on its conclusion as
+    /// written, which an unfolded target no longer matches. `f` is the new
+    /// fact: an implication (checked against every comparison fact) or a
+    /// comparison (checked against every implication).
+    fn implication_units(&mut self, st: &mut St, f: &Fact) -> R<()> {
+        let d = st.depth();
+        // an implication: its binder, its premise's operands, its conclusion
+        let imp = |e: &mut Engine<'a>, g: &Fact| -> R<Option<(Rel, V, (V, V))>> {
+            let Value::Pi { rel, dom, cod, .. } = &*g.ty else { return Ok(None) };
+            let Some(ops) = e.ordered_cmp(dom) else { return Ok(None) };
+            // (a negation `¬P` is `not_fact`'s)
+            let x = e.env.fresh_var(Lvl(d), *rel, dom);
+            if matches!(e.inst(cod, vec![x], d + 1)?.as_deref(), Some(Value::Ind { ind, .. }) if *ind == e.n.empty_ind) {
+                return Ok(None);
+            }
+            Ok(Some((*rel, dom.clone(), ops)))
+        };
+        let facts = st.scan_facts();
+        let pairs: Vec<(Fact, Fact)> = if matches!(&*f.ty, Value::Pi { .. }) {
+            facts.into_iter().filter(|g| g.lvl != f.lvl && self.ordered_cmp(&g.ty).is_some()).map(|g| (f.clone(), g)).collect()
+        } else if self.ordered_cmp(&f.ty).is_some() {
+            facts.into_iter().filter(|g| g.lvl != f.lvl && matches!(&*g.ty, Value::Pi { .. })).map(|g| (g, f.clone())).collect()
+        } else {
+            return Ok(());
+        };
+        let mut used: Vec<u32> = Vec::new();
+        for (h, c) in pairs {
+            if used.contains(&h.lvl) {
+                continue;
+            }
+            let Some((rel, dom, (a, b))) = imp(self, &h)? else { continue };
+            let Some((x, y)) = self.ordered_cmp(&c.ty) else { continue };
+            let same = (self.conv(d, &a, &x)? && self.conv(d, &b, &y)?) || (self.conv(d, &a, &y)? && self.conv(d, &b, &x)?);
+            if !same {
+                continue;
+            }
+            let Some(p) = self.lin_prove(st, &dom, false)? else { continue };
+            let Value::Pi { cod, .. } = &*h.ty else { continue };
+            let Some(concl) = self.inst(cod, vec![irr_entry(&st.venv, &p)], d)? else { continue };
+            used.push(h.lvl);
+            let mut known = false;
+            for g in st.scan_facts() {
+                if self.conv(d, &g.ty, &concl)? {
+                    known = true;
+                    break;
+                }
+            }
+            if !known {
+                let proof = Rc::new(Term::App { rel, fun: st.var(h.lvl), arg: p });
+                st.push_fact(self.env, concl, proof, Origin::Derived("modus ponens by arithmetic"));
+            }
+        }
+        Ok(())
     }
 
     fn either_units(&mut self, st: &mut St, f: &Fact) -> R<()> {

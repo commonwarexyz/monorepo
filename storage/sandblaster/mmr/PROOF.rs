@@ -4,7 +4,7 @@
 //! the host files.
 
 use sandblaster::prelude::*;
-use crate::laws::{fits, height_in, iter_ok, mmr_size, mountains, node_height, peaks, valid_size};
+use crate::laws::{chunk_end, fits, height_in, iter_ok, mmr_size, mountains, node_height, peaks, valid_size};
 use crate::iter::yields;
 use crate::merkle::{Location, Position};
 use crate::merkle::mmr::Family;
@@ -589,13 +589,44 @@ fn new_facts() {
         crate::proof::new_facts(size.0);
         crate::proof::new_bits(size.0);
     }
+    panic_lemma(crate::proof::new_panics);
+}
+
+/// `Family::peaks` is `PeakIterator::new`: the same panic.
+#[lift_attach(crate::merkle::mmr::Family::peaks)]
+fn family_peaks_facts() {
+    panic_lemma(crate::proof::new_panics);
+}
+
+/// `new`'s panic condition as its code tests it: above `MAX_NODES` the
+/// size's top bit is set (no leading zeros), so `start`, `u64::MAX >>
+/// leading_zeros`, is `u64::MAX` (its `assert_ne!`, "size overflow").
+#[lemma]
+fn new_panics(size: Position) {
+    requires((size.0 as Int) > crate::laws::max_nodes());
+    ensures(size.0.leading_zeros() == 0u32 && (u64::MAX.wrapping_shr(size.0.leading_zeros()) == u64::MAX) == true);
+    lz_bits_u64(size.0);
+    let k = size.0.leading_zeros();
+    assert(k == 0u32, {
+        if k >= 1u32 {
+            crate::stdlib::bits::pow2_mono(64 - (k as Int), 63);
+            by_contradiction();
+        } else {
+            follows();
+        }
+    });
+    follows();
 }
 
 /// `new`'s first state (from its contract): its remaining peaks are the
-/// MMR's peaks by size.
+/// MMR's peaks by size. (`new`'s precondition and no-panic clause are
+/// stated as they are, so that the statement's three calls carry them as
+/// variables.)
 #[lemma]
 fn new_peaks(size: Position) {
     requires((size.0 as Int) < pow2(63) && valid_size(size.0 as Nat));
+    requires(implies((size.0 as Int) <= crate::laws::max_nodes(), valid_size(size.0 as Nat)));
+    requires(!((size.0 as Int) > crate::laws::max_nodes()));
     ensures(plist(PeakIterator::new(size).size.0, PeakIterator::new(size).node_pos.0, PeakIterator::new(size).two_h) == srow(0, size.0 as Nat, 63));
     let it = PeakIterator::new(size);
     new_facts(size.0);
@@ -2411,11 +2442,19 @@ fn try_from_summary() {
     });
 }
 
+/// `chunk_end` at `chunk_peaks`'s arguments, unfolded.
+#[lemma]
+fn chunk_end_eq(c: u64, g: u32) {
+    ensures(chunk_end(c as Int, g as Int) == ((c as Int) + 1) * pow2(g as Int));
+    by_unfolding(chunk_end);
+}
+
 /// `chunk_peaks`: the chunk's bounds and the root's offset.
 #[lift_attach(crate::merkle::mmr::Family::chunk_peaks)]
 fn chunk_peaks_facts() {
     opaque();
     at_start! {
+        crate::proof::chunk_end_eq(chunk_idx, grafting_height);
         crate::proof::chunk_facts(chunk_idx, grafting_height);
         crate::proof::chunk_valid(chunk_idx, grafting_height);
         crate::proof::chunk_end_le(crate::merkle::position::Position::try_from__Location(crate::merkle::location::Location::new((chunk_idx + 1u64) << grafting_height)), size);
@@ -2425,6 +2464,120 @@ fn chunk_peaks_facts() {
         crate::proof::mmr_size_cong((chunk_idx << grafting_height) as Int, (chunk_idx as Int) * pow2(grafting_height as Int));
         crate::proof::chunk_root(chunk_idx, grafting_height);
     }
+    panic_lemma(crate::proof::chunk_peaks_panics);
+}
+
+/// Congruence: equal amounts, equal wrapping shifts.
+#[lemma]
+fn wshlx_cong(x: u64, b: u32, j: u32) {
+    requires(b == j);
+    ensures(x.wrapping_shl(b) == x.wrapping_shl(j));
+    follows();
+}
+
+/// A shift by `g < 64` that does not overflow: the wrapping one (the
+/// literal reading's `x << g`: MIR's `Shl` masks its amount) is exact (one
+/// case per amount: a shift by a variable amount is a prover gap,
+/// DESIGN.md §16.3).
+#[lemma]
+fn wshl_exact(x: u64, g: u32) {
+    requires(g < 64u32 && (x as Int) * pow2(g as Int) < pow2(64));
+    ensures((x.wrapping_shl(g) as Int) == (x as Int) * pow2(g as Int));
+    if g <= 0u32 { assert(g == 0u32); wshlx_cong(x, g, 0u32); assert(x.wrapping_shl(0u32) == x, { bv(); }); pow2_eq(g as Int, 0); follows(); }
+    else if g <= 1u32 { assert(g == 1u32); wshlx_cong(x, g, 1u32); sandblaster::lemmas::bits::wshl_exact_u64_1(x); pow2_eq(g as Int, 1); follows(); }
+    else if g <= 2u32 { assert(g == 2u32); wshlx_cong(x, g, 2u32); sandblaster::lemmas::bits::wshl_exact_u64_2(x); pow2_eq(g as Int, 2); follows(); }
+    else if g <= 3u32 { assert(g == 3u32); wshlx_cong(x, g, 3u32); sandblaster::lemmas::bits::wshl_exact_u64_3(x); pow2_eq(g as Int, 3); follows(); }
+    else if g <= 4u32 { assert(g == 4u32); wshlx_cong(x, g, 4u32); sandblaster::lemmas::bits::wshl_exact_u64_4(x); pow2_eq(g as Int, 4); follows(); }
+    else if g <= 5u32 { assert(g == 5u32); wshlx_cong(x, g, 5u32); sandblaster::lemmas::bits::wshl_exact_u64_5(x); pow2_eq(g as Int, 5); follows(); }
+    else if g <= 6u32 { assert(g == 6u32); wshlx_cong(x, g, 6u32); sandblaster::lemmas::bits::wshl_exact_u64_6(x); pow2_eq(g as Int, 6); follows(); }
+    else if g <= 7u32 { assert(g == 7u32); wshlx_cong(x, g, 7u32); sandblaster::lemmas::bits::wshl_exact_u64_7(x); pow2_eq(g as Int, 7); follows(); }
+    else if g <= 8u32 { assert(g == 8u32); wshlx_cong(x, g, 8u32); sandblaster::lemmas::bits::wshl_exact_u64_8(x); pow2_eq(g as Int, 8); follows(); }
+    else if g <= 9u32 { assert(g == 9u32); wshlx_cong(x, g, 9u32); sandblaster::lemmas::bits::wshl_exact_u64_9(x); pow2_eq(g as Int, 9); follows(); }
+    else if g <= 10u32 { assert(g == 10u32); wshlx_cong(x, g, 10u32); sandblaster::lemmas::bits::wshl_exact_u64_10(x); pow2_eq(g as Int, 10); follows(); }
+    else if g <= 11u32 { assert(g == 11u32); wshlx_cong(x, g, 11u32); sandblaster::lemmas::bits::wshl_exact_u64_11(x); pow2_eq(g as Int, 11); follows(); }
+    else if g <= 12u32 { assert(g == 12u32); wshlx_cong(x, g, 12u32); sandblaster::lemmas::bits::wshl_exact_u64_12(x); pow2_eq(g as Int, 12); follows(); }
+    else if g <= 13u32 { assert(g == 13u32); wshlx_cong(x, g, 13u32); sandblaster::lemmas::bits::wshl_exact_u64_13(x); pow2_eq(g as Int, 13); follows(); }
+    else if g <= 14u32 { assert(g == 14u32); wshlx_cong(x, g, 14u32); sandblaster::lemmas::bits::wshl_exact_u64_14(x); pow2_eq(g as Int, 14); follows(); }
+    else if g <= 15u32 { assert(g == 15u32); wshlx_cong(x, g, 15u32); sandblaster::lemmas::bits::wshl_exact_u64_15(x); pow2_eq(g as Int, 15); follows(); }
+    else if g <= 16u32 { assert(g == 16u32); wshlx_cong(x, g, 16u32); sandblaster::lemmas::bits::wshl_exact_u64_16(x); pow2_eq(g as Int, 16); follows(); }
+    else if g <= 17u32 { assert(g == 17u32); wshlx_cong(x, g, 17u32); sandblaster::lemmas::bits::wshl_exact_u64_17(x); pow2_eq(g as Int, 17); follows(); }
+    else if g <= 18u32 { assert(g == 18u32); wshlx_cong(x, g, 18u32); sandblaster::lemmas::bits::wshl_exact_u64_18(x); pow2_eq(g as Int, 18); follows(); }
+    else if g <= 19u32 { assert(g == 19u32); wshlx_cong(x, g, 19u32); sandblaster::lemmas::bits::wshl_exact_u64_19(x); pow2_eq(g as Int, 19); follows(); }
+    else if g <= 20u32 { assert(g == 20u32); wshlx_cong(x, g, 20u32); sandblaster::lemmas::bits::wshl_exact_u64_20(x); pow2_eq(g as Int, 20); follows(); }
+    else if g <= 21u32 { assert(g == 21u32); wshlx_cong(x, g, 21u32); sandblaster::lemmas::bits::wshl_exact_u64_21(x); pow2_eq(g as Int, 21); follows(); }
+    else if g <= 22u32 { assert(g == 22u32); wshlx_cong(x, g, 22u32); sandblaster::lemmas::bits::wshl_exact_u64_22(x); pow2_eq(g as Int, 22); follows(); }
+    else if g <= 23u32 { assert(g == 23u32); wshlx_cong(x, g, 23u32); sandblaster::lemmas::bits::wshl_exact_u64_23(x); pow2_eq(g as Int, 23); follows(); }
+    else if g <= 24u32 { assert(g == 24u32); wshlx_cong(x, g, 24u32); sandblaster::lemmas::bits::wshl_exact_u64_24(x); pow2_eq(g as Int, 24); follows(); }
+    else if g <= 25u32 { assert(g == 25u32); wshlx_cong(x, g, 25u32); sandblaster::lemmas::bits::wshl_exact_u64_25(x); pow2_eq(g as Int, 25); follows(); }
+    else if g <= 26u32 { assert(g == 26u32); wshlx_cong(x, g, 26u32); sandblaster::lemmas::bits::wshl_exact_u64_26(x); pow2_eq(g as Int, 26); follows(); }
+    else if g <= 27u32 { assert(g == 27u32); wshlx_cong(x, g, 27u32); sandblaster::lemmas::bits::wshl_exact_u64_27(x); pow2_eq(g as Int, 27); follows(); }
+    else if g <= 28u32 { assert(g == 28u32); wshlx_cong(x, g, 28u32); sandblaster::lemmas::bits::wshl_exact_u64_28(x); pow2_eq(g as Int, 28); follows(); }
+    else if g <= 29u32 { assert(g == 29u32); wshlx_cong(x, g, 29u32); sandblaster::lemmas::bits::wshl_exact_u64_29(x); pow2_eq(g as Int, 29); follows(); }
+    else if g <= 30u32 { assert(g == 30u32); wshlx_cong(x, g, 30u32); sandblaster::lemmas::bits::wshl_exact_u64_30(x); pow2_eq(g as Int, 30); follows(); }
+    else if g <= 31u32 { assert(g == 31u32); wshlx_cong(x, g, 31u32); sandblaster::lemmas::bits::wshl_exact_u64_31(x); pow2_eq(g as Int, 31); follows(); }
+    else if g <= 32u32 { assert(g == 32u32); wshlx_cong(x, g, 32u32); sandblaster::lemmas::bits::wshl_exact_u64_32(x); pow2_eq(g as Int, 32); follows(); }
+    else if g <= 33u32 { assert(g == 33u32); wshlx_cong(x, g, 33u32); sandblaster::lemmas::bits::wshl_exact_u64_33(x); pow2_eq(g as Int, 33); follows(); }
+    else if g <= 34u32 { assert(g == 34u32); wshlx_cong(x, g, 34u32); sandblaster::lemmas::bits::wshl_exact_u64_34(x); pow2_eq(g as Int, 34); follows(); }
+    else if g <= 35u32 { assert(g == 35u32); wshlx_cong(x, g, 35u32); sandblaster::lemmas::bits::wshl_exact_u64_35(x); pow2_eq(g as Int, 35); follows(); }
+    else if g <= 36u32 { assert(g == 36u32); wshlx_cong(x, g, 36u32); sandblaster::lemmas::bits::wshl_exact_u64_36(x); pow2_eq(g as Int, 36); follows(); }
+    else if g <= 37u32 { assert(g == 37u32); wshlx_cong(x, g, 37u32); sandblaster::lemmas::bits::wshl_exact_u64_37(x); pow2_eq(g as Int, 37); follows(); }
+    else if g <= 38u32 { assert(g == 38u32); wshlx_cong(x, g, 38u32); sandblaster::lemmas::bits::wshl_exact_u64_38(x); pow2_eq(g as Int, 38); follows(); }
+    else if g <= 39u32 { assert(g == 39u32); wshlx_cong(x, g, 39u32); sandblaster::lemmas::bits::wshl_exact_u64_39(x); pow2_eq(g as Int, 39); follows(); }
+    else if g <= 40u32 { assert(g == 40u32); wshlx_cong(x, g, 40u32); sandblaster::lemmas::bits::wshl_exact_u64_40(x); pow2_eq(g as Int, 40); follows(); }
+    else if g <= 41u32 { assert(g == 41u32); wshlx_cong(x, g, 41u32); sandblaster::lemmas::bits::wshl_exact_u64_41(x); pow2_eq(g as Int, 41); follows(); }
+    else if g <= 42u32 { assert(g == 42u32); wshlx_cong(x, g, 42u32); sandblaster::lemmas::bits::wshl_exact_u64_42(x); pow2_eq(g as Int, 42); follows(); }
+    else if g <= 43u32 { assert(g == 43u32); wshlx_cong(x, g, 43u32); sandblaster::lemmas::bits::wshl_exact_u64_43(x); pow2_eq(g as Int, 43); follows(); }
+    else if g <= 44u32 { assert(g == 44u32); wshlx_cong(x, g, 44u32); sandblaster::lemmas::bits::wshl_exact_u64_44(x); pow2_eq(g as Int, 44); follows(); }
+    else if g <= 45u32 { assert(g == 45u32); wshlx_cong(x, g, 45u32); sandblaster::lemmas::bits::wshl_exact_u64_45(x); pow2_eq(g as Int, 45); follows(); }
+    else if g <= 46u32 { assert(g == 46u32); wshlx_cong(x, g, 46u32); sandblaster::lemmas::bits::wshl_exact_u64_46(x); pow2_eq(g as Int, 46); follows(); }
+    else if g <= 47u32 { assert(g == 47u32); wshlx_cong(x, g, 47u32); sandblaster::lemmas::bits::wshl_exact_u64_47(x); pow2_eq(g as Int, 47); follows(); }
+    else if g <= 48u32 { assert(g == 48u32); wshlx_cong(x, g, 48u32); sandblaster::lemmas::bits::wshl_exact_u64_48(x); pow2_eq(g as Int, 48); follows(); }
+    else if g <= 49u32 { assert(g == 49u32); wshlx_cong(x, g, 49u32); sandblaster::lemmas::bits::wshl_exact_u64_49(x); pow2_eq(g as Int, 49); follows(); }
+    else if g <= 50u32 { assert(g == 50u32); wshlx_cong(x, g, 50u32); sandblaster::lemmas::bits::wshl_exact_u64_50(x); pow2_eq(g as Int, 50); follows(); }
+    else if g <= 51u32 { assert(g == 51u32); wshlx_cong(x, g, 51u32); sandblaster::lemmas::bits::wshl_exact_u64_51(x); pow2_eq(g as Int, 51); follows(); }
+    else if g <= 52u32 { assert(g == 52u32); wshlx_cong(x, g, 52u32); sandblaster::lemmas::bits::wshl_exact_u64_52(x); pow2_eq(g as Int, 52); follows(); }
+    else if g <= 53u32 { assert(g == 53u32); wshlx_cong(x, g, 53u32); sandblaster::lemmas::bits::wshl_exact_u64_53(x); pow2_eq(g as Int, 53); follows(); }
+    else if g <= 54u32 { assert(g == 54u32); wshlx_cong(x, g, 54u32); sandblaster::lemmas::bits::wshl_exact_u64_54(x); pow2_eq(g as Int, 54); follows(); }
+    else if g <= 55u32 { assert(g == 55u32); wshlx_cong(x, g, 55u32); sandblaster::lemmas::bits::wshl_exact_u64_55(x); pow2_eq(g as Int, 55); follows(); }
+    else if g <= 56u32 { assert(g == 56u32); wshlx_cong(x, g, 56u32); sandblaster::lemmas::bits::wshl_exact_u64_56(x); pow2_eq(g as Int, 56); follows(); }
+    else if g <= 57u32 { assert(g == 57u32); wshlx_cong(x, g, 57u32); sandblaster::lemmas::bits::wshl_exact_u64_57(x); pow2_eq(g as Int, 57); follows(); }
+    else if g <= 58u32 { assert(g == 58u32); wshlx_cong(x, g, 58u32); sandblaster::lemmas::bits::wshl_exact_u64_58(x); pow2_eq(g as Int, 58); follows(); }
+    else if g <= 59u32 { assert(g == 59u32); wshlx_cong(x, g, 59u32); sandblaster::lemmas::bits::wshl_exact_u64_59(x); pow2_eq(g as Int, 59); follows(); }
+    else if g <= 60u32 { assert(g == 60u32); wshlx_cong(x, g, 60u32); sandblaster::lemmas::bits::wshl_exact_u64_60(x); pow2_eq(g as Int, 60); follows(); }
+    else if g <= 61u32 { assert(g == 61u32); wshlx_cong(x, g, 61u32); sandblaster::lemmas::bits::wshl_exact_u64_61(x); pow2_eq(g as Int, 61); follows(); }
+    else if g <= 62u32 { assert(g == 62u32); wshlx_cong(x, g, 62u32); sandblaster::lemmas::bits::wshl_exact_u64_62(x); pow2_eq(g as Int, 62); follows(); }
+    else if g <= 63u32 { assert(g == 63u32); wshlx_cong(x, g, 63u32); sandblaster::lemmas::bits::wshl_exact_u64_63(x); pow2_eq(g as Int, 63); follows(); }
+    else { by_contradiction(); }
+}
+
+/// `chunk_peaks`'s panic condition in the terms of its code: the chunk's
+/// end `w = (c + 1) << g` (the literal reading's wrapping `c + 1` and
+/// shift) is `s = chunk_end(c, g) = (c+1)·2^g` exactly, its set bits are
+/// `popcount(s)`, and
+/// the position `location_to_position` computes for it, `2·w -
+/// count_ones(w)` in wrapping words, is `mmr_size(s)` exactly.
+#[lemma]
+fn chunk_peaks_panics(size: Position, chunk_idx: u64, grafting_height: u32) {
+    requires(chunk_end(chunk_idx as Int, grafting_height as Int) <= crate::laws::max_leaves());
+    ensures(chunk_end(chunk_idx as Int, grafting_height as Int) == ((chunk_idx as Int) + 1) * pow2(grafting_height as Int)
+        && (chunk_idx.wrapping_add(1u64).wrapping_shl(grafting_height) as Int) == ((chunk_idx as Int) + 1) * pow2(grafting_height as Int)
+        && (chunk_idx.wrapping_add(1u64).wrapping_shl(grafting_height).count_ones() as Int) == popcount(((chunk_idx as Int) + 1) * pow2(grafting_height as Int))
+        && (chunk_idx.wrapping_add(1u64).wrapping_shl(grafting_height).wrapping_mul(2u64) as Int) == 2 * (((chunk_idx as Int) + 1) * pow2(grafting_height as Int))
+        && (chunk_idx.wrapping_add(1u64).wrapping_shl(grafting_height).wrapping_mul(2u64).wrapping_sub(chunk_idx.wrapping_add(1u64).wrapping_shl(grafting_height).count_ones() as u64) as Int)
+            == 2 * (((chunk_idx as Int) + 1) * pow2(grafting_height as Int)) - popcount(((chunk_idx as Int) + 1) * pow2(grafting_height as Int)));
+    chunk_end_eq(chunk_idx, grafting_height);
+    chunk_facts(chunk_idx, grafting_height);
+    let a = chunk_idx.wrapping_add(1u64);
+    assert((a as Int) == (chunk_idx as Int) + 1);
+    assert((a as Int) * pow2(grafting_height as Int) == ((chunk_idx as Int) + 1) * pow2(grafting_height as Int));
+    wshl_exact(a, grafting_height);
+    let w = a.wrapping_shl(grafting_height);
+    assert((w as Int) == ((chunk_idx as Int) + 1) * pow2(grafting_height as Int));
+    crate::stdlib::bits::count_ones_u64(w);
+    crate::words::count_ones_le_self(w);
+    assert((w.wrapping_mul(2u64) as Int) == 2 * (w as Int));
+    assert((w.wrapping_mul(2u64).wrapping_sub(w.count_ones() as u64) as Int) == 2 * (w as Int) - (w.count_ones() as Int));
+    follows();
 }
 
 /// Names a position (its contract becomes a fact where the call is
@@ -2475,11 +2628,28 @@ fn position_to_location_is_sound(pos: Position, loc: Location) {
     }
 }
 
-/// `children`: `1 << height` is `2^height`.
+/// `children`: `1 << height` is `2^height`; its panic theorem's walk
+/// uses `children_panics`.
 #[lift_attach(crate::merkle::mmr::Family::children)]
 fn children_facts() {
     at_start! {
         crate::proof::shl_one(height);
+    }
+    panic_lemma(crate::proof::children_panics);
+}
+
+/// `children`'s panic condition as its code tests it: a height of 64 or
+/// more (the shift's check), or `pos` below `1 << height` (the
+/// subtraction's).
+#[lemma]
+fn children_panics(pos: Position, height: u32) {
+    requires(height >= 64u32 || (pos.0 as Int) < pow2(height as Int));
+    ensures(height >= 64u32 || pos.0 < 1u64.wrapping_shl(height));
+    if height >= 64u32 {
+        follows();
+    } else {
+        wshl_exact(1u64, height);
+        follows();
     }
 }
 

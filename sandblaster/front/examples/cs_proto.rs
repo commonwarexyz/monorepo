@@ -166,7 +166,7 @@ fn main() {
                 pv.max_steps = x;
             }
             let (mut walk, mut check, mut nodes) = (0.0, 0.0, 0);
-            for e in entries.iter().filter(|e| match e { Entry::Fn { key, .. } | Entry::Helper { key, .. } | Entry::While { key, .. } | Entry::Model { key, .. } => m.fns.contains_key(key) }) {
+            for e in entries.iter().filter(|e| match e { Entry::Fn { key, .. } | Entry::Helper { key, .. } | Entry::While { key, .. } | Entry::Model { key, .. } | Entry::Panic { key, .. } => m.fns.contains_key(key) }) {
                 match pv.prove(e) {
                     Ok(p) => {
                         eprintln!("{} `{}` checked: walk {:.3}s, kernel {:.3}s, proof {} nodes, {}", p.kind.to_uppercase(), p.s_global, p.walk_secs, p.check_secs, p.nodes, p.stats);

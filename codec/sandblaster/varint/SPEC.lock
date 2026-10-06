@@ -4,11 +4,11 @@
 # the specification: `sandblaster spec` prints the spec sheet, `sandblaster spec
 # --diff <rev>` classifies changes (strengthened / weakened / equivalent / unrelated).
 format sandblaster-spec-lock/1
-root 9532b20c00ca33f56a0cca35393dd5abe76b41021088335b89cfae4971a24d43
+root 38c1c9c037cf34c9ba8355984600366715d3f23d159b85a3f2aeb930910020f1
 kernel fb3054eb8fa8c0a71e03d0ca1c1dabdfe3e402ad0c07d6f5c3dc35b19e1aee6a
 prelude 8187a4d7eda2b3787b11ed71204eb97f2f156d68fcd62d52e103888081c4f0a0
 semantics 222a4ccad0dd3b251121f2d2880643c16a05e10ef76a2f09f5b932d8bb95e874
-builtins c324380a064b82998bf2234d322f9922d5c235b8ae2de7f6ae3b67e10f878346
+builtins a8daf2cd6f21bbe171da696810912893813513a2b144e71f62a8072f11c93634
 lift 84a5e0dda5e9d790d7ce71ea9746b93b749fb698a2c2209b5ebc1fdcea079013
 target aarch64 aae2dae42dce95ef0c2d4f0c348c08b293b28bb3f22d4e2d5fb5d0afce5dfee0
 sections 18
@@ -298,10 +298,10 @@ item constant:crate::varint::DATA_BITS_PER_BYTE
   kernel body 7usize
 
 item constant:crate::varint::MAX_U128_VARINT_SIZE
-  hash 8c0846cc1861ce68eb087bc24693b4c60bb7cf6f1d2f0c749fdfa48e739ebcd4
+  hash 5c7cd59ea74d8c8916cccb2acaa231962e3167232ba88f8d6f5fb43831113d35
   canon 37beee0f77fe993283906c141fa5902f69d44542d28d02e43e0394601d9d5d5d
   src 36a39d01176f1561a60e85c4db728dc35062f8c79a036cff27b484c5c50612ea
-  ext builtins:usize::div_ceil c324380a064b82998bf2234d322f9922d5c235b8ae2de7f6ae3b67e10f878346
+  ext builtins:usize::div_ceil a8daf2cd6f21bbe171da696810912893813513a2b144e71f62a8072f11c93634
   dep constant:crate::varint::BITS_PER_BYTE 28742e94485ea56a5ef64022a0ff043717084d1359e9e464eb659844b48a05d5
   dep constant:crate::varint::DATA_BITS_PER_BYTE 53101ee9167fb1e1e0f6df3fc1298e126b3b0f266f5f7a176f7e37726c766f74
   | const crate::varint::MAX_U128_VARINT_SIZE: usize = <usize>::div_ceil((16usize * crate::varint::BITS_PER_BYTE), crate::varint::DATA_BITS_PER_BYTE)
@@ -309,10 +309,10 @@ item constant:crate::varint::MAX_U128_VARINT_SIZE
   kernel body usize::div_ceil #mul_usize(16usize, crate::varint::BITS_PER_BYTE; refl(Bool, #le_int(#imul(#cast_usize_int(16usize), #cast_usize_int(crate::varint::BITS_PER_BYTE)), 18446744073709551615int))) crate::varint::DATA_BITS_PER_BYTE .refl(Bool, #ne_usize(crate::varint::DATA_BITS_PER_BYTE, 0usize))
 
 item constant:crate::varint::MAX_U16_VARINT_SIZE
-  hash d61923679f3b73a0aba11217659e0e936d93c438c3b11fb4dd6a613a217403fc
+  hash 1e975960d7cfb690979e116367f472dc2447cdc571dda3a47225de74bf546fe4
   canon a738e2f785b175a63b5d5e92e6d37d898ffc88a2af98a32aecf8b621d871e1b8
   src 23db39746f1299a0a7eb795577ce21be2eebc8449abe0439a29c1cd340e29e30
-  ext builtins:usize::div_ceil c324380a064b82998bf2234d322f9922d5c235b8ae2de7f6ae3b67e10f878346
+  ext builtins:usize::div_ceil a8daf2cd6f21bbe171da696810912893813513a2b144e71f62a8072f11c93634
   dep constant:crate::varint::BITS_PER_BYTE 28742e94485ea56a5ef64022a0ff043717084d1359e9e464eb659844b48a05d5
   dep constant:crate::varint::DATA_BITS_PER_BYTE 53101ee9167fb1e1e0f6df3fc1298e126b3b0f266f5f7a176f7e37726c766f74
   | const crate::varint::MAX_U16_VARINT_SIZE: usize = <usize>::div_ceil((2usize * crate::varint::BITS_PER_BYTE), crate::varint::DATA_BITS_PER_BYTE)
@@ -320,10 +320,10 @@ item constant:crate::varint::MAX_U16_VARINT_SIZE
   kernel body usize::div_ceil #mul_usize(2usize, crate::varint::BITS_PER_BYTE; refl(Bool, #le_int(#imul(#cast_usize_int(2usize), #cast_usize_int(crate::varint::BITS_PER_BYTE)), 18446744073709551615int))) crate::varint::DATA_BITS_PER_BYTE .refl(Bool, #ne_usize(crate::varint::DATA_BITS_PER_BYTE, 0usize))
 
 item constant:crate::varint::MAX_U32_VARINT_SIZE
-  hash 104258253aadb72b932fa254abef3de35270aad469db4b3d288504cf9267cceb
+  hash a9f5fd4e7f5399c8db9337d6b7a3ca841b5a54a395864c4dd8e032ed7aba7a74
   canon 8812def38b8bedce3f0c288df5882f39cf4838e8a0c8f348fdd0e241fd64a3a0
   src 3a81704741af2ef7de66f6a94970166fc6ab6c38b36320222fee139db3658e6b
-  ext builtins:usize::div_ceil c324380a064b82998bf2234d322f9922d5c235b8ae2de7f6ae3b67e10f878346
+  ext builtins:usize::div_ceil a8daf2cd6f21bbe171da696810912893813513a2b144e71f62a8072f11c93634
   dep constant:crate::varint::BITS_PER_BYTE 28742e94485ea56a5ef64022a0ff043717084d1359e9e464eb659844b48a05d5
   dep constant:crate::varint::DATA_BITS_PER_BYTE 53101ee9167fb1e1e0f6df3fc1298e126b3b0f266f5f7a176f7e37726c766f74
   | const crate::varint::MAX_U32_VARINT_SIZE: usize = <usize>::div_ceil((4usize * crate::varint::BITS_PER_BYTE), crate::varint::DATA_BITS_PER_BYTE)
@@ -331,10 +331,10 @@ item constant:crate::varint::MAX_U32_VARINT_SIZE
   kernel body usize::div_ceil #mul_usize(4usize, crate::varint::BITS_PER_BYTE; refl(Bool, #le_int(#imul(#cast_usize_int(4usize), #cast_usize_int(crate::varint::BITS_PER_BYTE)), 18446744073709551615int))) crate::varint::DATA_BITS_PER_BYTE .refl(Bool, #ne_usize(crate::varint::DATA_BITS_PER_BYTE, 0usize))
 
 item constant:crate::varint::MAX_U64_VARINT_SIZE
-  hash ce751df634e44d996995f66f98092a3a7279016130939a9fa37cce3f2b26de4f
+  hash 391c312faac3818fea8a31135db21d900a8c53588569b23e739f55b5be79b97c
   canon 62c75dc2bd4ca73f0bb30eec866c9859451a0d9fa994890d1603fbddb08bfbdc
   src f89f3025403e016cf6128e9ce4bbecb739ff7a7d64dfa8c8f283b0d52f57834b
-  ext builtins:usize::div_ceil c324380a064b82998bf2234d322f9922d5c235b8ae2de7f6ae3b67e10f878346
+  ext builtins:usize::div_ceil a8daf2cd6f21bbe171da696810912893813513a2b144e71f62a8072f11c93634
   dep constant:crate::varint::BITS_PER_BYTE 28742e94485ea56a5ef64022a0ff043717084d1359e9e464eb659844b48a05d5
   dep constant:crate::varint::DATA_BITS_PER_BYTE 53101ee9167fb1e1e0f6df3fc1298e126b3b0f266f5f7a176f7e37726c766f74
   | const crate::varint::MAX_U64_VARINT_SIZE: usize = <usize>::div_ceil((8usize * crate::varint::BITS_PER_BYTE), crate::varint::DATA_BITS_PER_BYTE)

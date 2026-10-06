@@ -496,6 +496,7 @@ fn checker_fn(f: &FnDef, body: Expr) -> FnDef {
         ret: Ty::Bool,
         ret_lts: Lifetimes::default(),
         requires: vec![],
+        panics: false,
         ensures: None,
         decreases: None,
         declared: None,

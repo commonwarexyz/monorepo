@@ -61,8 +61,14 @@ pub struct Contracts {
     /// only, put there by the lift): [`hir::SpecAnnots::contract_ensures`].
     pub contract_ensures: Option<Option<syn::Expr>>,
     pub decreases: Option<DecreasesAttr>,
-    /// `#[mir_contract(requires(..).., decreases(..))]` (`hir::FnDef::declared`).
+    /// `#[mir_contract(requires(..).., decreases(..), panics_when(..))]`
+    /// (`hir::FnDef::declared`; a `panics_when(p)` as its no-panic clause
+    /// `!(p)`, the last `requires`).
     pub declared: Option<(Vec<syn::Expr>, Option<DecreasesAttr>)>,
+    /// `#[panics_when(p)]` (a lifted function read from MIR; put there by
+    /// the lift from the laws file's `panics_when(p);`): the panic contract,
+    /// whose no-panic clause `!(p)` is the last of [`Self::requires`].
+    pub panics_when: Option<syn::Expr>,
     /// `#[lift_src(..)]` (lifted functions only, put there by the lift): the
     /// attached statements as written ([`hir::SpecAnnots::attached`]).
     pub lift_src: Vec<hir::Attached>,
@@ -1084,7 +1090,7 @@ impl<'a> Checker<'a> {
         // lift puts it for an attachment's `opaque();` (crate::lift)
         let lifted_mod = self.res.mods[m.0 as usize].lifted;
         let allowed: &[&str] = match kind {
-            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract", "contract_ensures", "lift_src"],
+            FnKind::Exec if lifted_mod => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "refines", "example", "section", "trusted_extern", "opaque", "mir_contract", "contract_ensures", "lift_src", "panics_when"],
             FnKind::Exec => &["inline", "must_use", "target_feature", "requires", "ensures", "decreases", "implements", "refines", "example", "section", "trusted_extern"],
             FnKind::Spec => &["spec", "requires", "decreases", "inline", "must_use", "example", "examples", "mirrors_impl", "assumption", "opaque"],
             FnKind::Lemma => &["lemma", "decreases", "induction", "fuel_sufficient"],
@@ -1221,13 +1227,28 @@ impl<'a> Checker<'a> {
             } else if path.is_ident("mir_contract") {
                 // a lifted function's declared contract, carried apart (crate::lift)
                 let d = contracts.declared.insert(Default::default());
+                let mut panics: Option<syn::Expr> = None;
                 for meta in a.parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated).map_or_else(|_| vec![syn::parse_quote!(malformed)], |m| m.into_iter().collect()) {
                     let at = syn::Attribute { meta, ..a.clone() };
                     match (at.path().get_ident().map(|i| i.to_string()).as_deref(), at.parse_args(), parse_decreases(&at)) {
                         (Some("requires"), Ok(e), _) => d.0.push(e),
                         (Some("decreases"), _, Ok(x)) => d.1 = Some(x),
+                        (Some("panics_when"), Ok(e), _) if panics.is_none() => panics = Some(e),
                         _ => self.err(DiagKind::Contract, span, "malformed `#[mir_contract]`"),
                     }
+                }
+                // (the panic contract's no-panic clause: the last precondition)
+                if let Some(p) = panics {
+                    d.0.push(syn::parse_quote!(!(#p)));
+                }
+            } else if path.is_ident("panics_when") {
+                // a lifted function's panic contract (crate::lift)
+                if contracts.panics_when.is_some() {
+                    self.err(DiagKind::Contract, span, "at most one `#[panics_when]` per function");
+                }
+                match a.parse_args::<syn::Expr>() {
+                    Ok(e) => contracts.panics_when = Some(e),
+                    Err(e) => self.err(DiagKind::Contract, span, format!("malformed `#[panics_when]`: {e}")),
                 }
             } else if path.is_ident("lift_src") {
                 // an attached statement as its ghost module wrote it
@@ -1292,6 +1313,12 @@ impl<'a> Checker<'a> {
                     _ => {}
                 }
             }
+        }
+        // a panic contract's no-panic clause `!(p)`: the last precondition
+        // (the panic theorem's hypothesis is `p` in its place; the lift
+        // carries the same clause last in the declared contract)
+        if let Some(p) = &contracts.panics_when {
+            contracts.requires.push(syn::parse_quote!(!(#p)));
         }
         if inline == Some(Inline::Always) && !target_features.is_empty() {
             self.diags.push(Diagnostic::error(DiagKind::Attribute, sig_span, "`#[inline(always)]` cannot be combined with `#[target_feature]`").note("rustc rejects this combination (DESIGN.md §3.1)"));

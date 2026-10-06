@@ -355,6 +355,7 @@ pub fn check_fn(ck: &mut Checker, id: ItemId, inputs: &[syn::FnArg], block: &syn
         ret: sig.ret.clone(),
         ret_lts: sig.ret_lts.clone(),
         requires,
+        panics: sig.contracts.panics_when.is_some(),
         ensures,
         decreases,
         declared,
@@ -2001,7 +2002,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn intrinsic_call(&mut self, i: intrinsics::IntrinsicId, mut imms: Vec<i64>, args: &[syn::Expr], span: Span) -> Expr {
         let info = intrinsics::get(i);
         if info.pointer_args {
-            self.push(Diagnostic::error(DiagKind::RawPointer, span, format!("`{}` takes raw pointers and cannot be called from user code", info.name)).note("take and return vector values, or build them with the modeled intrinsics; the pointer forms are modeled on typed arrays for reading host Rust (DESIGN.md §9.2)"));
+            self.push(Diagnostic::error(DiagKind::RawPointer, span, format!("`{}` takes raw pointers and cannot be called from user code", info.name)).note("take and return vector values, or build them with the modeled intrinsics; a pointer load or store needs `unsafe`, which verified code never contains: it stays in unverified host code (DESIGN.md §2, §16.4)"));
             return Self::error_expr(span);
         }
         self.require_features(info.features, &format!("intrinsic `{}`", info.name), span);

@@ -571,8 +571,10 @@ pub fn build_crate_emitting(c: &Checked, lock: LockUse, root_display: &str, emis
 /// lifted exec function whose body was read from rustc's MIR must have its
 /// theorem `L::thm::f` kernel-checked — the literal reading of its MIR
 /// returns, at sufficient fuel, exactly the structured reading's value —
-/// or the build has an error and the module is not verified. A crate with
-/// no lifted MIR module records nothing.
+/// and, with a panic contract, its panic theorem `L::pthm::f` — where the
+/// panic condition holds, the MIR panics — or the build has an error and
+/// the module is not verified. A crate with no lifted MIR module records
+/// nothing.
 pub fn theorem_gate(out: &mut elab::Output, krate: &crate::hir::Crate, c: &Checked, rep: &mut GateReport) {
     if c.lift_facts.mir_loaded.is_empty() || c.lift_facts.mir_contracts.is_empty() {
         return;
@@ -596,7 +598,11 @@ pub fn theorem_gate(out: &mut elab::Output, krate: &crate::hir::Crate, c: &Check
         d.push(crate::diag::Diagnostic::error(crate::diag::DiagKind::MirTheorem, span_of(&v.global), msg));
     }
     let (total, proven, cached) = (verdicts.len(), verdicts.iter().filter(|v| v.result.is_ok()).count(), reports.iter().map(|r| r.cached()).sum::<usize>());
-    let note = format!("{proven} of {total} lifted function(s) read from MIR with a kernel-checked theorem ({cached} from the verdict cache), {:.1}s, the trusted check {trusted_secs:.1}s", t.elapsed().as_secs_f64());
+    // (the panic theorems of the functions with a panic contract, part of
+    // each one's verdict)
+    let (pt, pp) = reports.iter().map(|r| r.panic_theorems()).fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+    let panics = if pt > 0 { format!(", {pp} of {pt} panic contract(s) with a kernel-checked panic theorem") } else { String::new() };
+    let note = format!("{proven} of {total} lifted function(s) read from MIR with a kernel-checked theorem ({cached} from the verdict cache){panics}, {:.1}s, the trusted check {trusted_secs:.1}s", t.elapsed().as_secs_f64());
     let warnings = 0;
     rep.results.push(GateResult { gate: "mir-theorems", ran: true, errors: d.error_count(), warnings, note });
     rep.diags.extend(d);

@@ -254,10 +254,19 @@ fn instance_args(text: &str, inst: &[(String, String)], out: &mut Vec<(String, V
 
 /// The checkers of the preconditions of the entries' functions
 /// (`f__req(x̄) -> bool`, the mutation engine's: `crate::mutate::clone`),
-/// added to a copy of the crate: the copy, and each function's checker.
-fn precondition_checkers(krate: &Crate, entries: &[&ConformEntry]) -> (Crate, HashMap<ItemId, ItemId>) {
+/// added to a copy of the crate: the copy, each function's checker, and
+/// for a function with a panic contract the checker of its domain (its
+/// `requires` before the no-panic clause, `f__dom`; `None`: every input).
+#[allow(clippy::type_complexity)]
+fn precondition_checkers(krate: &Crate, entries: &[&ConformEntry]) -> (Crate, HashMap<ItemId, ItemId>, HashMap<ItemId, Option<ItemId>>) {
     let mut k = krate.clone();
-    let mut map = HashMap::new();
+    let (mut map, mut dom) = (HashMap::new(), HashMap::new());
+    let add = |k: &mut Crate, id: ItemId, suffix: &str, chk: FnDef| {
+        let it = krate.item(id);
+        let nid = ItemId(k.items.len() as u32);
+        k.items.push(Item { id: nid, name: format!("{}{suffix}", it.name), path: crate::mutate::clone::clone_path(&it.path, suffix), module: it.module, vis: Vis::Private, ghost: true, span: it.span, docs: vec![], allow: vec![], cfg: None, kind: ItemKind::Fn(chk) });
+        nid
+    };
     for e in entries {
         let Some(id) = krate.find(&e.lifted) else { continue };
         let Some(f) = krate.fn_def(id) else { continue };
@@ -265,18 +274,31 @@ fn precondition_checkers(krate: &Crate, entries: &[&ConformEntry]) -> (Crate, Ha
             continue;
         }
         let Some(chk) = crate::mutate::clone::requires_checker(f) else { continue };
-        let it = krate.item(id);
-        let nid = ItemId(k.items.len() as u32);
-        k.items.push(Item { id: nid, name: format!("{}__req", it.name), path: crate::mutate::clone::clone_path(&it.path, "__req"), module: it.module, vis: Vis::Private, ghost: true, span: it.span, docs: vec![], allow: vec![], cfg: None, kind: ItemKind::Fn(chk) });
+        let nid = add(&mut k, id, "__req", chk);
         map.insert(id, nid);
+        if let Some(np) = f.nopanic_clause() {
+            let mut fd = f.clone();
+            fd.requires.truncate(np);
+            fd.panics = false;
+            match (np, crate::mutate::clone::requires_checker(&fd)) {
+                (0, _) => {
+                    dom.insert(id, None);
+                }
+                (_, Some(chk)) => {
+                    let did = add(&mut k, id, "__dom", chk);
+                    dom.insert(id, Some(did));
+                }
+                _ => {}
+            }
+        }
     }
-    (k, map)
+    (k, map, dom)
 }
 
 /// Elaborates the checkers (and what they refer to) of the copy `k`.
-fn elaborate_checkers(k: &Crate, checkers: &HashMap<ItemId, ItemId>) -> elab::Output {
+fn elaborate_checkers(k: &Crate, checkers: &[(ItemId, ItemId)]) -> elab::Output {
     let mut filter: std::collections::BTreeSet<ItemId> = std::collections::BTreeSet::new();
-    let mut work: Vec<ItemId> = checkers.values().copied().collect();
+    let mut work: Vec<ItemId> = checkers.iter().map(|c| c.1).collect();
     while let Some(x) = work.pop() {
         if filter.insert(x) {
             work.extend(elab::order::refs(k, x));
@@ -518,9 +540,15 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
     ip.type_args = targs.into_iter().collect();
     // the entries
     let names: HashSet<&str> = infos.iter().map(|i| i.name.as_str()).collect();
-    let entries: Vec<&ConformEntry> = c.lift_facts.conform.iter().filter(|e| names.contains(e.module.as_str())).collect();
+    // (a function returning `impl Trait` is compared only on its panic
+    // contract's panic region: without one it is reported as skipped)
+    let has_panic_contract = |e: &ConformEntry| krate.find(&e.lifted).and_then(|id| krate.fn_def(id)).is_some_and(|f| f.nopanic_clause().is_some());
+    let entries: Vec<&ConformEntry> = c.lift_facts.conform.iter().filter(|e| names.contains(e.module.as_str()) && (!e.opaque_ret || has_panic_contract(e))).collect();
     for sk in c.lift_facts.conform_skipped.iter().filter(|s| names.contains(s.module.as_str())) {
         rep.entries.push(EntryReport { lifted: sk.lifted.clone(), callee: "(none)".into(), skipped: Some(sk.why.clone()), ..Default::default() });
+    }
+    for e in c.lift_facts.conform.iter().filter(|e| names.contains(e.module.as_str()) && e.opaque_ret && !has_panic_contract(e)) {
+        rep.entries.push(EntryReport { lifted: e.lifted.clone(), callee: "(none)".into(), skipped: Some(super::OPAQUE_SKIP.into()), ..Default::default() });
     }
     // rustc (the key and the report) and cargo
     let rv = match Command::new(&cfg.rustc).arg("-vV").output() {
@@ -566,8 +594,8 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
         return done(rep);
     }
     // the precondition checkers (a filtered elaboration of a copy of the crate)
-    let (pk, pmap) = precondition_checkers(krate, &entries);
-    let pre_out = if pmap.is_empty() { None } else { Some(elaborate_checkers(&pk, &pmap)) };
+    let (pk, pmap, dmap) = precondition_checkers(krate, &entries);
+    let pre_out = if pmap.is_empty() { None } else { Some(elaborate_checkers(&pk, &pmap.iter().map(|(a, b)| (*a, *b)).chain(dmap.iter().filter_map(|(a, b)| Some((*a, (*b)?)))).collect::<Vec<_>>())) };
     // the literal reading of every function read from MIR (amendment (f))
     let lits = super::literal::prepare(out, c, &entries, &mut rep);
     let first = infos[0];
@@ -581,6 +609,18 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
                 rep.notes.push(format!("the precondition checker of `{}` did not elaborate: it is checked through its callers", krate.item(*f).path));
             }
         }
+        // (a panic contract's domain: its panic region is compared too)
+        for (f, d) in &dmap {
+            match d.map(|d| po.fn_globals.get(&d).copied()) {
+                None => {
+                    g.pre_dom.insert(*f, None);
+                }
+                Some(Some(gl)) => {
+                    g.pre_dom.insert(*f, Some(gl));
+                }
+                Some(None) => rep.notes.push(format!("the domain checker of `{}`'s panic contract did not elaborate: its panics are not compared with rustc", krate.item(*f).path)),
+            }
+        }
         g.pre_out = Some(po);
     }
     let plans = g.plans(&entries, &mut rep);
@@ -590,7 +630,8 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
         match harness_in_place(&g, &plans, &cases, &files, &tree, &host, cfg) {
             Ok(outputs) => {
                 let rustc = compare(&g, &plans, &cases, &outputs, &mut rep);
-                super::literal::compare(&g, &plans, &cases, &rustc, &lits, &mut rep);
+                let panics = super::literal::compare(&g, &plans, &cases, &rustc, &lits, &mut rep);
+                super::panic_coverage(krate, &entries, &panics, &mut rep);
             }
             Err(e) => rep.errors.push(e),
         }
