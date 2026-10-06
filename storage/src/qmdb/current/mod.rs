@@ -2274,7 +2274,6 @@ pub mod tests {
     test_for_unordered_variants!(test_unordered_build_big, "WARN");
     test_for_unordered_variants!(test_unordered_build_small_close_reopen, "DEBUG");
 
-    // ---- Current-level batch API tests ----
     //
     // These exercise the current wrapper's batch methods (root, ops_root,
     // MerkleizedBatch::get, batch chaining) which layer bitmap and grafted tree

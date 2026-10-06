@@ -29,8 +29,6 @@ use commonware_runtime::{
 use commonware_utils::{NZU64, non_empty_range};
 use rand::Rng as _;
 
-// ===== Harness Implementations =====
-
 mod harnesses {
     use super::*;
     use crate::merkle::{self, mmb, mmr};
@@ -674,8 +672,6 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         drop(journal);
     });
 }
-
-// ===== Test Generation Macro =====
 
 /// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
 macro_rules! current_sync_tests_for_harness {

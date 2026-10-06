@@ -1164,7 +1164,7 @@ where
         let Operation::Update(update) = &op else {
             unreachable!("active operations are updates")
         };
-        let loc = self.base_state.size + ops.len() as u64;
+        let loc = self.base_state.size + Widen::widen(ops.len());
         match mv {
             Move::Existing { idx, base_old_loc } => {
                 diff[idx].1 = DiffEntry::Active {
@@ -1253,7 +1253,7 @@ where
             }
             Limits::Fixed { entries, skips } => (entries, skips),
         };
-        let tip = self.base_state.size + walked.ops.len() as u64;
+        let tip = self.base_state.size + Widen::widen(walked.ops.len());
         let mut walk = Walk::new(self.base_inactivity_floor_loc, tip, entries, skips);
         let strategy = db.strategy();
         if matches!(limits, Limits::Proportional) {
@@ -1459,7 +1459,7 @@ where
         assert!(total_active_keys >= 0, "active_keys underflow");
         if total_active_keys == 0 {
             // DB is empty after this batch; raise floor to tip.
-            floor = self.base_state.size + ops.len() as u64;
+            floor = self.base_state.size + Widen::widen(ops.len());
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
 
@@ -4601,7 +4601,7 @@ pub(crate) mod tests {
             let kept = write().merkleize(&db, None, &mut policy).await.unwrap();
             assert_eq!(kept.root(), proportional.root(), "{partition}");
             let reads = items() - before;
-            let expected = resolution + entries as u64;
+            let expected = resolution + Widen::widen(entries);
             assert_eq!(
                 (proportional_reads, reads),
                 (expected, expected),
@@ -5372,7 +5372,7 @@ pub(crate) mod tests {
                 );
                 assert_eq!(
                     merkleized.bounds().inactivity_floor,
-                    Location::new(7 + writes as u64)
+                    Location::new(7 + Widen::widen(writes))
                 );
                 assert_eq!(merkleized.get_next_key(&a, &db).await.unwrap(), Some(c));
                 assert_eq!(merkleized.get_prev_key(&c, &db).await.unwrap(), Some(a));

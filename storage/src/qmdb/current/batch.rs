@@ -1538,8 +1538,6 @@ mod tests {
         }
     }
 
-    // ---- build_chunk_overlay tests ----
-
     #[test]
     fn chunk_overlay_pushes() {
         use crate::qmdb::any::value::FixedEncoding;
@@ -1683,8 +1681,6 @@ mod tests {
         // Bits 16-18 set, bit 19 cleared (previous commit), 20-23 not set -> byte 2 = 0x07
         assert_eq!(c0[2], 0x07);
     }
-
-    // ---- next_candidate tests ----
 
     /// Single-step oracle for [`Candidates::fill`]: return the next floor candidate in
     /// `[floor, tip)` over any [`bitmap::Readable`]. `fill_candidates_matches_oracle` checks
@@ -1973,7 +1969,6 @@ mod tests {
         assert_eq!(got, want);
     }
 
-    // ---- trim_committed tests ----
     //
     // `trim_committed` is called from `MerkleizedBatch::new_batch` to strip any `Layer`s whose
     // overlays have already been absorbed into the shared committed bitmap by a prior apply.

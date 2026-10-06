@@ -2450,7 +2450,6 @@ mod harnesses {
     use commonware_utils::TestRng;
     use rand::Rng;
 
-    // ===== Family-generic op creation helpers =====
     //
     // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
     // are structurally identical across families.
@@ -2551,10 +2550,6 @@ mod harnesses {
         ops
     }
 
-    // ===== MMR harnesses (existing, unchanged) =====
-
-    // ----- Ordered/Fixed -----
-
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
@@ -2614,8 +2609,6 @@ mod harnesses {
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Ordered/Variable -----
 
     pub struct OrderedVariableHarness;
 
@@ -2681,8 +2674,6 @@ mod harnesses {
         }
     }
 
-    // ----- Unordered/Fixed -----
-
     pub struct UnorderedFixedHarness;
 
     impl SyncTestHarness for UnorderedFixedHarness {
@@ -2742,8 +2733,6 @@ mod harnesses {
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Variable -----
 
     pub struct UnorderedVariableHarness;
 
@@ -2812,10 +2801,6 @@ mod harnesses {
             db.commit().await.unwrap()
         }
     }
-
-    // ===== MMB harnesses =====
-
-    // ----- Ordered/Fixed MMB -----
 
     pub struct OrderedFixedMmbHarness;
 
@@ -2899,8 +2884,6 @@ mod harnesses {
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Ordered/Variable MMB -----
 
     pub struct OrderedVariableMmbHarness;
 
@@ -2992,8 +2975,6 @@ mod harnesses {
         }
     }
 
-    // ----- Unordered/Fixed MMB -----
-
     pub struct UnorderedFixedMmbHarness;
 
     impl SyncTestHarness for UnorderedFixedMmbHarness {
@@ -3078,8 +3059,6 @@ mod harnesses {
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Variable MMB -----
 
     pub struct UnorderedVariableMmbHarness;
 
@@ -3172,8 +3151,6 @@ mod harnesses {
         }
     }
 }
-
-// ===== Test Generation Macro =====
 
 /// Macro to generate all standard sync tests for a given harness.
 macro_rules! sync_tests_for_harness {

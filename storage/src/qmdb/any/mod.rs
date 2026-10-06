@@ -7237,7 +7237,6 @@ pub(crate) mod test {
         });
     }
 
-    // --- MMB family tests ---
     //
     // The tests above use MMR-backed databases (via the concrete Db type aliases). The tests
     // below verify the same core operations work with the MMB family, exercising the generic

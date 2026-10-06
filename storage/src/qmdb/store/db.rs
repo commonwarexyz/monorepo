@@ -109,7 +109,7 @@ use crate::{
 use commonware_codec::{CodecShared, Read};
 use commonware_macros::boxed;
 use commonware_runtime::Handle;
-use commonware_utils::bitmap;
+use commonware_utils::{Widen, bitmap};
 use core::{num::NonZeroUsize, ops::Range};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
@@ -574,7 +574,7 @@ where
         let mut ops: Vec<Operation<crate::mmr::Family, K, V>> = Vec::with_capacity(diff.len() + 1);
         let mut made_inactive = 0usize;
         for (key, value) in diff {
-            let new_loc = Location::new(*start_loc + ops.len() as u64);
+            let new_loc = Location::new(*start_loc + Widen::widen(ops.len()));
             let old_loc = resolved.remove(&key);
             let matches = |loc: &Location| Some(*loc) == old_loc;
             if let Some(value) = value {
@@ -615,7 +615,7 @@ where
         // A proportional walk spends one entry per operation the batch made inactive and one for
         // its previous commit.
         if !self.is_empty() {
-            let tip = Location::new(*start_loc + ops.len() as u64);
+            let tip = Location::new(*start_loc + Widen::widen(ops.len()));
             let (entries, skips) = match limits {
                 Limits::Proportional => (made_inactive + 1, u64::MAX),
                 Limits::Fixed { entries, skips } => (entries, skips),
@@ -627,7 +627,7 @@ where
 
         // The writes or the policy's evictions may leave the store empty.
         if self.is_empty() {
-            self.inactivity_floor_loc = Location::new(*start_loc + ops.len() as u64);
+            self.inactivity_floor_loc = Location::new(*start_loc + Widen::widen(ops.len()));
             debug!(tip = ?self.inactivity_floor_loc, "db is empty, raising floor to tip");
         }
 
@@ -684,7 +684,7 @@ where
         .into_iter();
         for &loc in &candidates[..reachable] {
             let reached = walk.reach(Location::new(loc));
-            debug_assert!(reached, "candidate within the walk's reach");
+            assert!(reached, "candidate within the walk's reach");
             let op = if loc < start {
                 reads.next().expect("one read per logged candidate")
             } else {
@@ -693,7 +693,7 @@ where
             let Operation::Update(Update(key, value)) = op else {
                 unreachable!("active candidate must be an update");
             };
-            let new_loc = Location::new(start + ops.len() as u64);
+            let new_loc = Location::new(start + Widen::widen(ops.len()));
             let action = match limits {
                 Limits::Proportional => Action::Write(value),
                 Limits::Fixed { .. } => policy
@@ -724,7 +724,7 @@ where
         match candidates.get(reachable) {
             Some(&beyond) => {
                 let reached = walk.reach(Location::new(beyond));
-                debug_assert!(!reached, "candidate beyond the walk's reach");
+                assert!(!reached, "candidate beyond the walk's reach");
             }
             None if walk.entries > 0 => walk.exhaust(),
             None => {}
@@ -1490,7 +1490,7 @@ mod test {
 
             // The walk has one entry per rewrite plus one for the previous commit, and every
             // update it reaches lies below the batch.
-            assert_eq!(walk_reads, positions.len() as u64 + 1);
+            assert_eq!(walk_reads, Widen::widen(positions.len()) + 1);
             let before = counter(&context, "log_items_read_total");
             let writes = positions
                 .iter()
@@ -1809,7 +1809,7 @@ mod test {
                 )
                 .chain([Operation::CommitFloor(None, Location::new(floor))])
                 .collect();
-            assert_eq!(expected.len() as u64, range.end - range.start);
+            assert_eq!(Widen::widen(expected.len()), range.end - range.start);
             for (loc, op) in range.zip(expected) {
                 assert_eq!(db.get_op(Location::new(loc)).await.unwrap(), op);
             }
@@ -2567,7 +2567,7 @@ mod test {
                     let (floor, decided) = walk_model(&active, 0, tip, entries, skips, &[]);
                     assert_eq!(
                         read,
-                        decided.len() as u64,
+                        Widen::widen(decided.len()),
                         "entries={entries} skips={skips}"
                     );
                     let decided: Vec<_> = decided.into_iter().map(Location::new).collect();
@@ -2619,7 +2619,7 @@ mod test {
             for writes in [Vec::new(), writes] {
                 // The active updates below the tip are the applied updates of keys the batch does
                 // not write and the batch's own updates.
-                let tip = 12 + writes.len() as u64;
+                let tip = 12 + Widen::widen(writes.len());
                 let mut live: BTreeMap<u64, (sha256::Digest, sha256::Digest)> = applied
                     .iter()
                     .filter(|(_, key, _)| writes.iter().all(|(written, _)| written != key))
@@ -2658,7 +2658,10 @@ mod test {
 
                         // Each decided update moves to the tip with its value after the writes
                         // and before the commit.
-                        assert_eq!(*range.start..*range.end, 12..tip + 1 + decided.len() as u64);
+                        assert_eq!(
+                            *range.start..*range.end,
+                            12..tip + 1 + Widen::widen(decided.len())
+                        );
                         for (loc, (_, key, value)) in (tip..).zip(&decided) {
                             let op = db.get_op(Location::new(loc)).await.unwrap();
                             assert_eq!(op, Operation::Update(Update(*key, *value)));
