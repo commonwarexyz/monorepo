@@ -8,29 +8,12 @@
 //!
 //! [Ed25519, section 4]: https://ed25519.cr.yp.to/ed25519-20110926.pdf
 
-use super::{F, G, GAffine};
+use super::{F, G, GAffine, Niels};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
 
 /// `TABLE[j][k]` is `(k + 1) * 256^j * B` for the Ed25519 basepoint `B`.
 static TABLE: [[Niels; 8]; 32] = table();
-
-/// An affine point `(x, y)` stored as `(y + x, y - x, 2d*x*y)`.
-#[derive(Clone, Copy)]
-struct Niels {
-    sum: F,
-    diff: F,
-    t2d: F,
-}
-
-impl Niels {
-    /// The neutral element, `(0, 1)`.
-    const IDENTITY: Self = Self {
-        sum: F::ONE,
-        diff: F::ONE,
-        t2d: F::ZERO,
-    };
-}
 
 impl ConditionallySelectable for Niels {
     #[inline]
@@ -63,25 +46,6 @@ impl G {
             result = result.add_niels(select(row, pair[0]));
         }
         result
-    }
-
-    /// Adds a point in [`Niels`] form with the formula of `G::add_mixed`.
-    #[inline(always)]
-    const fn add_niels(self, rhs: Niels) -> Self {
-        let a = self.y.sub(self.x).mul(rhs.diff);
-        let b = self.y.add(self.x).mul(rhs.sum);
-        let c = self.t.mul(rhs.t2d);
-        let d = self.z.add(self.z);
-        let e = b.sub(a);
-        let f = d.sub(c);
-        let g = d.add(c);
-        let h = b.add(a);
-        Self {
-            x: e.mul(f),
-            y: g.mul(h),
-            t: e.mul(h),
-            z: f.mul(g),
-        }
     }
 }
 

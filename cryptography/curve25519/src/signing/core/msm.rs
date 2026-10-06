@@ -1,9 +1,9 @@
 //! Variable-time multi-scalar multiplication for batch signature verification.
 //!
-//! [`Term`]s arrive decompressed and recoded into signed digits. Small serial batches use
-//! Straus's method, whose only per-window fixed cost is the shared doublings. Larger serial
-//! batches and parallel batches use Pippenger's bucket method: the kernel processes one term
-//! per private bucket stripe at once, so updates within each wave never collide.
+//! [`Term`]s arrive decompressed and recoded into signed digits. Small batches use Straus's
+//! method, whose only per-window fixed cost is the shared doublings, and a parallel run splits
+//! their terms across workers. Larger batches use Pippenger's bucket method: the kernel processes
+//! one term per private bucket stripe at once, so updates within each wave never collide.
 //!
 //! Bucket multiplication runs on strategy-supplied `(window, term range)` tiles. The strategy
 //! cuts a window into term ranges only where the extra tile's fold pays for itself. Each worker
@@ -25,13 +25,14 @@ const MAX_WIDTH: u32 = 10;
 
 /// Digit capacity per [`Term`]: enough windows for the narrowest width. Recoding at a wider
 /// width simply leaves the top entries zero (see [`Scalar::signed_digits`]).
-const MAX_WINDOWS: usize = 256usize.div_ceil(MIN_WIDTH as usize) + 1;
+const MAX_WINDOWS: usize = 256usize.div_ceil(MIN_WIDTH as usize);
 
-/// `256` scalar bits divided into `width`-bit windows, rounding up to cover the top window, plus
-/// one: recoding into *signed* digits (see [`Scalar::signed_digits`]) can carry a final `+1` past
-/// the naive window count, and this spare window is where it lands.
+/// `256` scalar bits divided into `width`-bit windows, rounding up. Recoding into *signed* digits
+/// (see [`Scalar::signed_digits`]) can carry a final `+1` out of the top window, but a [`Scalar`]
+/// is always below `L < 2^253`, which leaves the top window room to absorb that carry at every
+/// width from [`MIN_WIDTH`] to [`MAX_WIDTH`].
 const fn num_windows(width: u32) -> usize {
-    256usize.div_ceil(width as usize) + 1
+    256usize.div_ceil(width as usize)
 }
 
 /// One bucket per nonzero digit *magnitude*: a signed digit only ever needs a bucket for
@@ -50,10 +51,9 @@ const fn num_buckets(width: u32) -> usize {
 /// shallower than the textbook `log2(terms) - 4` rule, because the wide-window penalty on real
 /// hardware includes the AVX-512 bucket array (`8 * 2^(width-1)` points, ~320KB at width 9)
 /// spilling L2, not just the fold-count arithmetic. Parallel runs want one step narrower than
-/// serial: every concurrent batch holds its own bucket array, and a window split between batches
-/// is folded once in each. Every prediction below matched the sweep's measured optimum (or a
-/// runner-up within ~0.5%): serial 7/8/9/10 and parallel 7/8/9/9 for 1k/4k/16k/64k-signature
-/// batches.
+/// serial: every worker holds its own bucket array, and a window cut into several tiles is folded
+/// once per tile. Every prediction below matched the sweep's measured optimum (or a runner-up
+/// within ~0.5%): serial 7/8/9/10 and parallel 7/8/9/9 for 1k/4k/16k/64k-signature batches.
 pub(super) fn width_for(terms: usize, parallel: bool) -> u32 {
     let bits = terms.max(2).ilog2();
     if parallel {
@@ -124,12 +124,11 @@ fn pieces<'a>(
 /// One past the highest bucket any digit of `window` lands in over global range `[start, end)`
 /// (`0` if none does, i.e. the largest digit *magnitude*; see [`Scalar::signed_digits`]). Every
 /// bucket at or above this is still the identity after a fill and would contribute nothing to
-/// the bucket fold. When the terms are a small or sparse range (a tiny batch, the recoding's
-/// spare top window, or the windows above the digits of a short scalar such as a 128-bit batch
-/// coefficient), that is *most* of the buckets. Computed as a standalone prescan over the
-/// recoded digits (cheap: two byte-sized loads and a compare per term, no point arithmetic)
-/// rather than tracked inside the bucket-fill loop, which measurably slows the fill's hot wave
-/// prologue.
+/// the bucket fold. When the terms are a small or sparse range (a tiny batch or the windows above
+/// the digits of a short scalar such as a 128-bit batch coefficient), that is *most* of the
+/// buckets. Computed as a standalone prescan over the recoded digits (cheap: two byte-sized loads
+/// and a compare per term, no point arithmetic) rather than tracked inside the bucket-fill loop,
+/// which measurably slows the fill's hot wave prologue.
 fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> usize {
     pieces(chunks, start, end)
         .flatten()
@@ -302,8 +301,8 @@ const fn interleaved_window(slot: usize, windows: usize) -> usize {
 fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &impl Strategy) -> G {
     let windows = num_windows(width);
     let total = total_terms(chunks);
-    let partials = strategy.run_tiles(windows, total, tile_cost::<B>(width), 1, |tiles| {
-        tiles.fill_collect_vec(
+    strategy.run_tiles(windows, total, tile_cost::<B>(width), 1, |tiles| {
+        let partials = tiles.fill_collect_vec(
             || bucketed::Scratch::new(backend, width),
             |scratch, slot, range| {
                 let window = interleaved_window(slot, windows);
@@ -313,9 +312,9 @@ fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &im
                 let window = interleaved_window(slot, windows);
                 (window, scratch.finish(backend, width))
             },
-        )
-    });
-    backend.combine_windows(partials, windows, width)
+        );
+        backend.combine_windows(partials, windows, width)
+    })
 }
 
 /// Computes the full MSM over `chunks`, whose terms were recoded at `width` (see [`width_for`] and
@@ -344,10 +343,10 @@ pub(super) fn multiscalar_mul<B: Backend>(
         || {
             // Consecutive lane groups split into contiguous parts, one per strategy batch, each
             // with its own accumulator.
-            let terms = terms();
-            strategy
-                .run_batches(total.div_ceil(LANES), NonZeroUsize::MIN, LANES, |batches| {
-                    batches.map_collect_vec(
+            strategy.run_batches(total.div_ceil(LANES), NonZeroUsize::MIN, LANES, |batches| {
+                let terms = terms();
+                batches
+                    .map_collect_vec(
                         |ranges| ranges,
                         |groups| {
                             let part =
@@ -355,9 +354,9 @@ pub(super) fn multiscalar_mul<B: Backend>(
                             straus(backend, part, width)
                         },
                     )
-                })
-                .into_iter()
-                .fold(G::IDENTITY, G::add)
+                    .into_iter()
+                    .fold(G::IDENTITY, G::add)
+            })
         },
     )
 }
@@ -365,13 +364,18 @@ pub(super) fn multiscalar_mul<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::curve::Backend;
+    use crate::{
+        curve::Backend,
+        test::strategy::{Assembly, AssemblyBoundary},
+    };
     #[cfg(not(feature = "std"))]
     use alloc::vec;
     use arbitrary::Unstructured;
     use commonware_invariants::minifuzz::Builder;
     use commonware_parallel::Sequential;
+    use core::any::type_name;
     use rand_core::Rng as _;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
 
     /// The widths every differential test sweeps: [`width_for`]'s full output range.
     const TEST_WIDTHS: [u32; 5] = [6, 7, 8, 9, 10];
@@ -442,6 +446,63 @@ mod tests {
     /// Borrows a set of owned chunks as the slice-of-slices shape the MSM API takes.
     fn refs(chunks: &[Vec<Term>]) -> Vec<&[Term]> {
         chunks.iter().map(Vec::as_slice).collect()
+    }
+
+    #[test]
+    fn canonical_edge_terms_match_bitwise_multiplication() {
+        let mut top = [0u8; 32];
+        top[31] = 0x10;
+        let top = Scalar::from_canonical_bytes(&top).unwrap();
+        let one = Scalar::from_u128(1);
+        let torsion = GAffine::decompress(&[0u8; 32]).unwrap().to_extended();
+        let scalars = [
+            Scalar::ZERO,
+            one,
+            Scalar::from_u128(u128::MAX),
+            top.add_mod_l(&one.neg_mod_l()),
+            top,
+            top.add_mod_l(&one),
+            one.neg_mod_l(),
+        ];
+        let backend = crate::curve::test_backend();
+        for scalar in scalars {
+            for point in [
+                GAffine::BASEPOINT.to_extended(),
+                torsion,
+                GAffine::BASEPOINT.to_extended().add(torsion),
+            ] {
+                let expected = point.scalar_mul(scalar.bits_be());
+                let mut term = Term::zero(point.to_affine());
+                for width in TEST_WIDTHS.into_iter().rev() {
+                    term.recode(&scalar, width);
+                    let chunks = [&[term][..]];
+                    assert!(points_equal(straus(backend, &[&term], width), expected));
+                    assert!(points_equal(
+                        buckets(backend, &chunks, width, &Sequential),
+                        expected
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn strategy_callbacks_return_assembled_msm() {
+        for count in [LANES + 1, PARALLEL_STRAUS_TERM_CUTOFF] {
+            let terms =
+                vec![Term::new(GAffine::BASEPOINT, &Scalar::from_u128(1), MIN_WIDTH); count];
+            let strategy = Assembly::default();
+            let stopped = catch_unwind(AssertUnwindSafe(|| {
+                multiscalar_mul(
+                    crate::curve::test_backend(),
+                    &[&terms],
+                    MIN_WIDTH,
+                    &strategy,
+                )
+            }));
+            assert!(stopped.unwrap_err().is::<AssemblyBoundary>());
+            assert_eq!(*strategy.outputs.lock(), [type_name::<G>()]);
+        }
     }
 
     #[test]
@@ -677,14 +738,7 @@ mod tests {
                         let expected = values[..n]
                             .iter()
                             .fold(G::IDENTITY, |sum, &value| sum.add(value));
-                        let direct = backend.with_lanes(crate::curve::msm::Straus::new(
-                            terms,
-                            windows,
-                            width,
-                            |term| (&term.point, term.digits.as_slice()),
-                        ));
                         let refs: Vec<&Term> = terms.iter().collect();
-                        assert!(points_equal(direct, expected), "n={n} width={width}");
                         assert!(
                             points_equal(straus(backend, &refs, width), expected),
                             "n={n} width={width}"

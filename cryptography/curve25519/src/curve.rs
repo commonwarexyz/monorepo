@@ -411,14 +411,6 @@ impl FVec {
 
 /// Abstracts over base field operations.
 pub trait FBackend: Copy {
-    /// Negates the selected lanes and preserves the other lanes' limb representations.
-    ///
-    /// Variable-time, so the mask must be public.
-    #[inline(always)]
-    fn conditional_neg(self, value: FVec, negative: &[bool; LANES]) -> FVec {
-        value.select_lanes(self.neg(value), negative)
-    }
-
     /// a + b.
     fn add(self, a: FVec, b: FVec) -> FVec;
 
@@ -536,8 +528,18 @@ impl G {
     #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
     #[inline(always)]
     pub const fn add_mixed(self, rhs: GAffine) -> Self {
-        let a = self.y.sub(self.x).mul(rhs.y.sub(rhs.x));
-        let b = self.y.add(self.x).mul(rhs.y.add(rhs.x));
+        self.add_niels(Niels {
+            sum: rhs.y.add(rhs.x),
+            diff: rhs.y.sub(rhs.x),
+            t2d: rhs.t2d,
+        })
+    }
+
+    /// Adds a point in [`Niels`] form: [`G::add`] specialized to an operand whose `Z` is one.
+    #[inline(always)]
+    const fn add_niels(self, rhs: Niels) -> Self {
+        let a = self.y.sub(self.x).mul(rhs.diff);
+        let b = self.y.add(self.x).mul(rhs.sum);
         let c = self.t.mul(rhs.t2d);
         let d = self.z.add(self.z);
         let e = b.sub(a);
@@ -598,6 +600,23 @@ impl G {
     }
 }
 
+/// An affine point `(x, y)` stored as `(y + x, y - x, 2d*x*y)`.
+#[derive(Clone, Copy)]
+struct Niels {
+    sum: F,
+    diff: F,
+    t2d: F,
+}
+
+impl Niels {
+    /// The neutral element, `(0, 1)`.
+    const IDENTITY: Self = Self {
+        sum: F::ONE,
+        diff: F::ONE,
+        t2d: F::ZERO,
+    };
+}
+
 /// A compact affine point prepared for mixed addition.
 ///
 /// This stores individual affine points and their precomputed `2d*x*y` coordinate. Its
@@ -641,31 +660,6 @@ impl GAffine {
             1422107436869536,
             796239922652654,
             1953934009299142,
-        ]),
-    };
-
-    /// `2^128` times the base point, prepared for mixed addition.
-    pub const BASEPOINT_128: Self = Self {
-        x: F([
-            78814272546852,
-            343446598238096,
-            1469662686845463,
-            446722075312752,
-            1339733442806879,
-        ]),
-        y: F([
-            770831939905131,
-            1066752177064823,
-            855905013023480,
-            1194941381303059,
-            1674322643330780,
-        ]),
-        t2d: F([
-            22893968530686,
-            2235758574399251,
-            1661465835630252,
-            925707319443452,
-            1203475116966621,
         ]),
     };
 
@@ -897,9 +891,9 @@ impl GAffineVec {
         }
 
         Self {
-            x: backend.conditional_neg(packed.x, negative),
+            x: packed.x.select_lanes(backend.neg(packed.x), negative),
             y: packed.y,
-            t2d: backend.conditional_neg(packed.t2d, negative),
+            t2d: packed.t2d.select_lanes(backend.neg(packed.t2d), negative),
         }
     }
 }

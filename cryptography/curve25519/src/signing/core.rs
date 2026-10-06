@@ -95,13 +95,12 @@ const _: () = assert!(UNIT.is_multiple_of(4));
 const MIN_UNITS_PER_BATCH: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 /// One [`signature_phase`] partition's output: each unit's `R` terms and its signatures' `z*h`
-/// (their shares of their signers' coalesced `A` scalars), the partition's share of
-/// `sum(z*s) mod L`, and whether every signature in it is structurally valid.
+/// (their shares of their signers' coalesced `A` scalars), and the partition's share of
+/// `sum(z*s) mod L`.
 struct Partition {
     terms: Vec<[Term; LANES]>,
     zh: Vec<[Scalar; UNIT]>,
     zs_sum: Scalar,
-    valid: bool,
 }
 
 /// The encoding of the identity point, which pads the final unit of a decompression batch.
@@ -135,6 +134,8 @@ fn decompress_terms<B: Backend>(
 /// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. The unit's
 /// challenge inputs `R || A || M` are laid out in `challenges` and hashed together, and its `R`
 /// encodings decompress in one backend batch. Lanes past the last item hold identity terms.
+///
+/// Returns whether every signature in the unit has a canonical `s` and a decodable `R`.
 fn signature_unit<B: Backend>(
     backend: B,
     items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
@@ -143,7 +144,7 @@ fn signature_unit<B: Backend>(
     unit: usize,
     challenges: &mut Vec<u8>,
     partition: &mut Partition,
-) {
+) -> bool {
     let start = unit * UNIT;
     let lanes = &items[start..items.len().min(start + UNIT)];
     let mut z = [Scalar::ZERO; UNIT];
@@ -171,10 +172,11 @@ fn signature_unit<B: Backend>(
     }
     let digests = Sha512::hash_many(&inputs[..lanes.len()]);
 
+    let mut valid = true;
     let mut zh = [Scalar::ZERO; UNIT];
     for (j, (_, sig, _)) in lanes.iter().enumerate() {
         let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
-            partition.valid = false;
+            valid = false;
             continue;
         };
         let h = Scalar::from_bytes_mod_order_wide(&digests[j].0);
@@ -184,10 +186,11 @@ fn signature_unit<B: Backend>(
     partition.zh.push(zh);
 
     let offset = partition.terms.len();
-    partition.valid &= decompress_terms(backend, &encodings, &mut partition.terms);
+    valid &= decompress_terms(backend, &encodings, &mut partition.terms);
     for (term, coefficient) in partition.terms[offset].iter_mut().zip(&z[..lanes.len()]) {
         term.recode(coefficient, width);
     }
+    valid
 }
 
 /// The per-signature phase, parallel over [`UNIT`]-signature units in batch order: for each
@@ -196,7 +199,7 @@ fn signature_unit<B: Backend>(
 /// term recoded at `width`. Returns `None` if any `s` is non-canonical or any `R` fails to
 /// decompress.
 ///
-/// The phase needs no `A` point and no grouping, so it runs while [`verify_batch_inner`] sorts the
+/// The phase needs no `A` point and no grouping, so it runs while [`verify_pipeline`] sorts the
 /// keys.
 fn signature_phase<B: Backend>(
     backend: B,
@@ -210,34 +213,33 @@ fn signature_phase<B: Backend>(
         MIN_UNITS_PER_BATCH,
         UNIT,
         |batches| {
-            let partitions = batches.map_collect_vec(
-                |ranges| ranges,
-                |range| {
-                    let mut partition = Partition {
-                        terms: Vec::with_capacity(range.len()),
-                        zh: Vec::with_capacity(range.len()),
-                        zs_sum: Scalar::ZERO,
-                        valid: true,
-                    };
-                    let mut challenges = Vec::new();
-                    for unit in range {
-                        signature_unit(
-                            backend,
-                            items,
-                            seed,
-                            width,
-                            unit,
-                            &mut challenges,
-                            &mut partition,
-                        );
-                    }
-                    partition
-                },
-            );
-            partitions
-                .iter()
-                .all(|partition| partition.valid)
-                .then_some(partitions)
+            batches
+                .map_collect_vec(
+                    |ranges| ranges,
+                    |range| {
+                        let mut partition = Partition {
+                            terms: Vec::with_capacity(range.len()),
+                            zh: Vec::with_capacity(range.len()),
+                            zs_sum: Scalar::ZERO,
+                        };
+                        let mut challenges = Vec::new();
+                        let mut valid = true;
+                        for unit in range {
+                            valid &= signature_unit(
+                                backend,
+                                items,
+                                seed,
+                                width,
+                                unit,
+                                &mut challenges,
+                                &mut partition,
+                            );
+                        }
+                        valid.then_some(partition)
+                    },
+                )
+                .into_iter()
+                .collect()
         },
     )
 }
@@ -321,19 +323,24 @@ fn verify_batch_inner<B: Backend>(
     let mut seed = [0u8; 32];
     rng.fill_bytes(&mut seed);
     let terms = 2 * n + 1;
-    strategy.run(
-        n,
-        || {
-            verify_pipeline(
-                backend,
-                items,
-                &seed,
-                msm::width_for(terms, false),
-                &Sequential,
-            )
-        },
-        || verify_pipeline(backend, items, &seed, msm::width_for(terms, true), strategy),
-    )
+
+    // A structurally invalid batch stops before its MSM, so only pipelines that reach the batch
+    // equation inform the strategy's choice between the two shapes.
+    strategy
+        .try_run(
+            n,
+            || {
+                verify_pipeline(
+                    backend,
+                    items,
+                    &seed,
+                    msm::width_for(terms, false),
+                    &Sequential,
+                )
+            },
+            || verify_pipeline(backend, items, &seed, msm::width_for(terms, true), strategy),
+        )
+        .unwrap_or(false)
 }
 
 /// The batch-verification pipeline: a short sequence of data-parallel phases over flat arrays,
@@ -346,13 +353,16 @@ fn verify_batch_inner<B: Backend>(
 /// 2. Every `A` term is recoded with its coalesced scalar, the sum of its signatures' `z*h`.
 /// 3. One MSM over the terms, with the coalesced basepoint term `sum(z*s)*(-B)` riding along as
 ///    one final term, then the cofactored identity check.
+///
+/// Returns `Err` if any `s` is non-canonical or any `R` or `A` fails to decompress, which
+/// stops the pipeline before the MSM, and otherwise whether the batch equation holds.
 fn verify_pipeline<B: Backend>(
     backend: B,
     items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
     seed: &[u8; 32],
     width: u32,
     strategy: &impl Strategy,
-) -> bool {
+) -> Result<bool, ()> {
     let (signatures, (order, groups, a_terms)) = strategy.join(
         || signature_phase(backend, items, seed, width, strategy),
         || {
@@ -370,7 +380,7 @@ fn verify_pipeline<B: Backend>(
         },
     );
     let (Some(signatures), Some(mut a_terms)) = (signatures, a_terms) else {
-        return false;
+        return Err(());
     };
 
     // A signer's coalesced scalar: the sum of `z*h` over its run of `order`.
@@ -407,7 +417,12 @@ fn verify_pipeline<B: Backend>(
             (terms, first)
         })
         .collect();
-    strategy.map_collect_vec(a_work, |(terms, first)| {
+
+    // The partition count stops growing at the strategy's parallelism, so each partition is
+    // weighted by its average share of the summed signatures and recoded groups, which keeps the
+    // strategy's estimates for different batch sizes apart.
+    let work_per_partition = (order.len() + groups.len()).div_ceil(a_work.len());
+    strategy.map_collect_vec_with_multiplier(a_work, work_per_partition, |(terms, first)| {
         for (terms, groups) in terms.iter_mut().zip(groups[first..].chunks(LANES)) {
             // Summing a unit's groups before recoding any of them overlaps the scattered loads of
             // their summands.
@@ -435,7 +450,7 @@ fn verify_pipeline<B: Backend>(
         .collect();
     chunks.push(basepoint.as_slice());
     let result = msm::multiscalar_mul(backend, &chunks, width, strategy);
-    result.mul_by_cofactor().is_identity()
+    Ok(result.mul_by_cofactor().is_identity())
 }
 
 /// Width of the non-adjacent forms [`straus`] recodes its scalars into.
@@ -482,7 +497,7 @@ fn straus<const N: usize>(terms: [(G, Scalar); N]) -> G {
         for (digits, table) in digits.iter().zip(&tables) {
             let digit = digits[i];
             if digit != 0 {
-                let mut multiple = table[digit.unsigned_abs() as usize / 2];
+                let mut multiple = table[usize::from(digit.unsigned_abs()) / 2];
                 if digit < 0 {
                     multiple = multiple.negate();
                 }
@@ -492,6 +507,17 @@ fn straus<const N: usize>(terms: [(G, Scalar); N]) -> G {
     }
     sum
 }
+
+/// `2^128` times the Ed25519 basepoint, the base for the high half of `u*s` in [`verify`].
+const BASEPOINT_128: G = {
+    let mut point = GAffine::BASEPOINT.to_extended();
+    let mut doubling = 0;
+    while doubling < 128 {
+        point = point.add(point);
+        doubling += 1;
+    }
+    point
+};
 
 /// Verifies one signature per the [module's validation criteria](super).
 ///
@@ -529,10 +555,7 @@ pub fn verify(
     let (low, high) = s.mul_mod_l(&u).halves();
     straus([
         (GAffine::BASEPOINT.to_extended(), Scalar::from_u128(low)),
-        (
-            GAffine::BASEPOINT_128.to_extended(),
-            Scalar::from_u128(high),
-        ),
+        (BASEPOINT_128, Scalar::from_u128(high)),
         (r.to_extended().negate(), u),
         (a, Scalar::from_u128(v)),
     ])
@@ -585,11 +608,47 @@ pub(super) fn verify_batch_bytes<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        signing::{BatchVerifier, SigningKey},
+        test::strategy::Recording,
+    };
     use arbitrary::Unstructured;
+    use commonware_codec::{Copying, DecodeExt};
     use commonware_invariants::minifuzz::Builder;
     use commonware_parallel::Sequential;
     use commonware_utils::FuzzRng;
     use ed25519_consensus::SigningKey as RefSigningKey;
+
+    #[test]
+    fn structural_rejection_does_not_record_complete_work() {
+        let signer = SigningKey::from_seed([7; 32]);
+        let key = signer.verifying_key();
+        let valid = signer.sign(b"resource", b"control");
+        let mut bad_s = valid.clone();
+        bad_s.bytes[63] |= 0x80;
+        let mut bad_r = valid.clone();
+        bad_r.bytes[..32].copy_from_slice(&undecodable());
+        let bad_key =
+            crate::signing::VerifyingKey::decode(Copying(undecodable().as_slice())).unwrap();
+        for parallel in [false, true] {
+            for (key, signature, message, valid, complete) in [
+                (&key, &valid, b"control".as_slice(), true, true),
+                (&key, &bad_s, b"control".as_slice(), false, false),
+                (&key, &bad_r, b"control".as_slice(), false, false),
+                (&bad_key, &valid, b"control".as_slice(), false, false),
+                (&key, &valid, b"different".as_slice(), false, true),
+            ] {
+                let strategy = Recording::new(parallel);
+                let mut batch = BatchVerifier::new(1);
+                batch.add(b"resource", message, key, signature);
+                assert_eq!(
+                    batch.verify(&mut commonware_utils::test_rng(), &strategy),
+                    valid
+                );
+                assert_eq!(strategy.samples.lock().last(), Some(&complete));
+            }
+        }
+    }
 
     #[test]
     fn group_ranges_groups_adjacent_equal_keys() {

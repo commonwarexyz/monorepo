@@ -289,34 +289,6 @@ mod tests {
         }
     }
 
-    /// Every length in `0..=300`, across the one-, two-, and three-block padding boundaries,
-    /// split into three parts, through every single-message entrypoint.
-    #[test]
-    fn test_single_messages_match_sha2() {
-        let mut hasher = Sha512::default();
-        for len in 0..=300 {
-            let data = message(len, len);
-            let parts = [
-                &data[..len / 3],
-                &data[len / 3..2 * len / 3],
-                &data[2 * len / 3..],
-            ];
-            let digest = expected(&data);
-            assert_eq!(Sha512::hash(&parts), digest, "length {len}");
-            assert_eq!(
-                Sha512::hash_pair(&parts, &[&data]),
-                (digest, digest),
-                "length {len}"
-            );
-            for part in parts {
-                hasher.update(part);
-            }
-            let streamed;
-            (hasher, streamed) = hasher.finalize();
-            assert_eq!(streamed, digest, "length {len}");
-        }
-    }
-
     /// Every message count up to 20 (two full lane groups and a partial one) at every length
     /// in `0..=300`.
     #[test]

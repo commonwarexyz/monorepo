@@ -218,8 +218,9 @@ impl Scalar {
     /// of its range), replace it with `digit - 2^width` (negative, same residue) and carry a `+1`
     /// into the next digit, since `digit * 2^(width*i) = (digit - 2^width) * 2^(width*i) +
     /// 2^width * 2^(width*i)`, and that `2^width` term is exactly one unit of the next digit's
-    /// weight. `N` must be large enough that the final carry (at most `1`) has a digit to land in;
-    /// `256usize.div_ceil(width) + 1` unsigned windows' worth is always enough.
+    /// weight. `N` must leave room for the final carry (at most `1`). A scalar is below
+    /// `L < 2^253`, so for any `width` of at least 2 the top digit of `256usize.div_ceil(width)`
+    /// digits absorbs it.
     pub fn signed_digits<const N: usize>(&self, width: u32) -> [i32; N] {
         let half = 1i64 << (width - 1);
         let mut digits = [0i32; N];
@@ -324,7 +325,7 @@ impl Scalar {
             core::mem::swap(&mut r0, &mut r1);
             core::mem::swap(&mut t0, &mut t1);
         }
-        (t1, r1[0] as u128 | (r1[1] as u128) << 64)
+        (t1, u128::from(r1[0]) | u128::from(r1[1]) << 64)
     }
 }
 
@@ -562,7 +563,7 @@ mod tests {
                 assert!(previous - position >= W, "W={W} position={position}");
             }
             previous = Some(position);
-            let magnitude = Scalar::from_u128(digit.unsigned_abs() as u128);
+            let magnitude = Scalar::from_u128(u128::from(digit.unsigned_abs()));
             let term = if digit < 0 {
                 magnitude.neg_mod_l()
             } else {

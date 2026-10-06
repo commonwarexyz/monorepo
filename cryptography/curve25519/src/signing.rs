@@ -483,9 +483,12 @@ impl BatchVerifier {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchItem, BatchVerifier, SigningKey};
+    use super::{BatchItem, BatchVerifier, SigningKey, VerifyingKey};
+    use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+    use core::cmp::Ordering;
+    use std::collections::HashSet;
 
     #[test]
     fn batch_items_do_not_retain_decoded_key_cache() {
@@ -521,11 +524,6 @@ mod tests {
     /// whatever its cached point, and two encodings of the same point stay distinct keys.
     #[test]
     fn verifying_key_identity_follows_encoding() {
-        use super::VerifyingKey;
-        use commonware_codec::{Copying, DecodeExt, Encode};
-        use core::cmp::Ordering;
-        use std::collections::HashSet;
-
         let key =
             <SigningKey as commonware_math::algebra::Random>::random(test_rng()).verifying_key();
         let decoded = VerifyingKey::decode(key.encode()).unwrap();

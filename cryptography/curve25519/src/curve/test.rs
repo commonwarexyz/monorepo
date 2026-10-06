@@ -615,20 +615,6 @@ fn zip215_decompression_and_group_laws() {
     super::with_backend(Check);
 }
 
-#[cfg(test)]
-#[test]
-fn basepoint_128_is_doubled_basepoint() {
-    let mut point = GAffine::BASEPOINT.to_extended();
-    for _ in 0..128 {
-        point = point.double();
-    }
-    let expected = GAffine::decompress(&point.compress()).unwrap();
-    let actual = GAffine::BASEPOINT_128;
-    assert_eq!(actual.x.to_bytes(), expected.x.to_bytes());
-    assert_eq!(actual.y.to_bytes(), expected.y.to_bytes());
-    assert_eq!(actual.t2d.to_bytes(), expected.t2d.to_bytes());
-}
-
 /// Checks the runtime dispatch path as one multi-operation computation.
 #[test]
 fn with_backend_matches_portable() {
@@ -679,58 +665,6 @@ fn with_backend_matches_portable() {
         expected.1,
         "runtime-dispatched group computation",
     );
-}
-
-#[test]
-fn backend_conditional_neg_matches_every_mask() {
-    struct Check;
-
-    impl WithBackend for Check {
-        type Output = ();
-
-        fn call<B: Backend>(self, backend: B) {
-            let mixed = FVec {
-                limbs: array::from_fn(|limb| {
-                    array::from_fn(|lane| {
-                        let offset = (limb * LANES + lane) as u64;
-                        if (limb + lane) & 1 == 0 {
-                            offset
-                        } else {
-                            MASK_52 - offset
-                        }
-                    })
-                }),
-            };
-            for value in [FVec::splat(F::ZERO), FVec::splat(F([MASK_52; 5])), mixed] {
-                let lanes = value.untranspose();
-                for mask in 0..1u16 << LANES {
-                    let negative = array::from_fn(|lane| mask & (1 << lane) != 0);
-                    let actual = backend.conditional_neg(value, &negative);
-                    let expected = FVec::transpose(array::from_fn(|lane| {
-                        if negative[lane] {
-                            lanes[lane].neg()
-                        } else {
-                            lanes[lane]
-                        }
-                    }));
-                    assert_f_eq(actual, expected, "conditional negation");
-                    for (lane, negative) in negative.into_iter().enumerate() {
-                        if !negative {
-                            for limb in 0..5 {
-                                assert_eq!(
-                                    actual.limbs[limb][lane], value.limbs[limb][lane],
-                                    "unselected limb {limb}, lane {lane}, mask {mask:#04x}"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Check.call(super::portable::Backend::new());
-    super::with_backend(Check);
 }
 
 #[test]

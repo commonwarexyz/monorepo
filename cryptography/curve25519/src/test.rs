@@ -20,6 +20,8 @@
 //! ```
 
 #[cfg(test)]
+pub(crate) mod strategy;
+#[cfg(test)]
 mod vectors;
 
 /// ZIP215 point encodings shared with the curve property tests.
