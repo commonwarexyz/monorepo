@@ -1,15 +1,16 @@
 //! Policies that advance a batch's inactivity floor.
 //!
-//! A batch reads [`Policy::limits`] once. After its writes resolve, it walks the operations in
-//! location order from the floor it inherits toward the tip its writes reached. Every operation
-//! below that tip is eligible, including the batch's own writes. The walk's own effects land at
-//! or past that tip, so what it sees below the tip is the state the writes left.
+//! After a batch's writes resolve, it asks [`Policy::limits`] for its budget and walks the
+//! operations in location order from the floor it inherits toward the tip its writes reached.
+//! Every operation below that tip is eligible, including the batch's own writes. The walk's own
+//! effects land at or past that tip, so what it sees below the tip is the state the writes left.
 //!
 //! Each inactive location the walk passes spends a skip, whether it holds a superseded update, a
-//! delete, or a commit. Under [`Limits::Proportional`], each active update the walk reaches
-//! moves to the tip and spends an entry. Under [`Limits::Fixed`], it goes to [`Policy::decide`]
-//! as an [`Entry`] instead: keeping, replacing, or evicting it spends an entry and moves the floor
-//! one past it, while stopping spends nothing and ends the walk with the floor at the update.
+//! delete, or a commit. Each active update it reaches goes to [`Policy::decide`] as an
+//! [`Entry`]: keeping, replacing, or evicting it spends an entry and moves the floor one past it,
+//! while stopping spends nothing and ends the walk with the floor at the update. A policy that
+//! [keeps every entry](Policy::keeps) is not asked: the walk moves each reached update to the
+//! tip directly.
 //!
 //! Unless the policy stops it, the walk ends in one of three ways. When its entries run out, the
 //! floor stays where the last decision left it, or where it was inherited if there were none.
@@ -25,8 +26,10 @@
 //!
 //! The limits bound what the walk decides and passes, not what it reads: it may read candidates
 //! it then passes or never reaches, but only below both the tip and the inherited floor plus
-//! `skips` plus `entries`. Relinking an ordered database past evicted keys also reads the applied
-//! updates in their translated-key buckets and the buckets before them, wherever those lie.
+//! `skips` plus `entries` of the limits that sized the read, which for a staged batch's first
+//! round are the limits of an estimated count. Relinking an ordered database past evicted keys
+//! also reads the applied updates in their translated-key buckets and the buckets before them,
+//! wherever those lie.
 //!
 //! A walk reads candidates in rounds and may hold the operations of up to `entries` reached
 //! candidates in memory at once.
@@ -34,30 +37,33 @@
 use crate::merkle::{Family, Location};
 use commonware_utils::Widen;
 
-/// How far a policy advances the floor.
+/// How far a walk advances the floor: it decides at most `entries` active updates and passes at
+/// most `skips` inactive locations. Skips left once `entries` updates are decided go unspent, and
+/// zero `entries` passes no location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Limits {
-    /// Keep up to one active update for each operation the batch makes inactive: each update it
-    /// supersedes, each delete it appends, and its previous commit. The walk passes every inactive
-    /// location it meets, so it ends at the tip of the batch's writes unless those entries run out
-    /// first. [`Policy::decide`] is not called.
-    Proportional,
-    /// Decide at most `entries` active updates and pass at most `skips` inactive locations. Skips
-    /// left once `entries` updates are decided go unspent, and zero `entries` passes no location.
-    Fixed {
-        /// The most active updates to decide.
-        entries: usize,
-        /// The most inactive locations to pass.
-        skips: u64,
-    },
+pub struct Limits {
+    /// The most active updates to decide.
+    pub entries: usize,
+    /// The most inactive locations to pass.
+    pub skips: u64,
 }
 
 /// Chooses how a batch advances its inactivity floor.
 ///
 /// [`Proportional`] is the policy for batches that need no custom rule.
 pub trait Policy<F: Family, K, V> {
-    /// How far the floor advances.
-    fn limits(&self) -> Limits;
+    /// Whether the policy keeps every entry. The walk then moves each reached update to the tip
+    /// without calling [`decide`](Self::decide).
+    fn keeps(&self) -> bool;
+
+    /// How far the floor advances when the batch's writes made `made_inactive` operations
+    /// inactive: one for each update they supersede and two for each delete.
+    ///
+    /// The limits must depend only on `made_inactive` and the policy's own state. A batch asks
+    /// with the exact count before its walk, and only that answer bounds the walk. A staged batch
+    /// also asks earlier with an estimate, which can fall on either side of the exact count, to
+    /// size the candidates it reads while its writes resolve.
+    fn limits(&self, made_inactive: usize) -> Limits;
 
     /// Decide `entry`, the active update at the floor.
     ///
@@ -83,8 +89,12 @@ pub trait Policy<F: Family, K, V> {
 /// struct Evict;
 ///
 /// impl<F: Family> Policy<F, u64, u64> for Evict {
-///     fn limits(&self) -> Limits {
-///         Limits::Fixed { entries: 1, skips: 0 }
+///     fn keeps(&self) -> bool {
+///         false
+///     }
+///
+///     fn limits(&self, _inactive: usize) -> Limits {
+///         Limits { entries: 1, skips: 0 }
 ///     }
 ///
 ///     fn decide(&mut self, entry: Entry<'_, F, u64, u64>) -> Decision<u64> {
@@ -276,11 +286,21 @@ impl<F: Family> Walk<F> {
 pub struct Proportional;
 
 impl<F: Family, K, V> Policy<F, K, V> for Proportional {
-    fn limits(&self) -> Limits {
-        Limits::Proportional
+    fn keeps(&self) -> bool {
+        true
     }
 
-    /// Not called under [`Limits::Proportional`].
+    /// One entry per operation the batch made inactive and one for its previous commit, with
+    /// unlimited skips, so the walk ends at the tip of the batch's writes unless the entries run
+    /// out first.
+    fn limits(&self, made_inactive: usize) -> Limits {
+        Limits {
+            entries: made_inactive + 1,
+            skips: u64::MAX,
+        }
+    }
+
+    /// Not called: the walk keeps every entry.
     fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         entry.keep()
     }
@@ -292,8 +312,12 @@ impl<F: Family, K, V> Policy<F, K, V> for Proportional {
 pub struct Hold;
 
 impl<F: Family, K, V> Policy<F, K, V> for Hold {
-    fn limits(&self) -> Limits {
-        Limits::Fixed {
+    fn keeps(&self) -> bool {
+        false
+    }
+
+    fn limits(&self, _: usize) -> Limits {
+        Limits {
             entries: 0,
             skips: 0,
         }
@@ -315,13 +339,18 @@ pub struct Compact {
 }
 
 impl<F: Family, K, V> Policy<F, K, V> for Compact {
-    fn limits(&self) -> Limits {
-        Limits::Fixed {
+    fn keeps(&self) -> bool {
+        true
+    }
+
+    fn limits(&self, _: usize) -> Limits {
+        Limits {
             entries: self.entries,
             skips: self.skips,
         }
     }
 
+    /// Not called: the walk keeps every entry.
     fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         entry.keep()
     }

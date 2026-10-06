@@ -344,7 +344,7 @@ struct Round<F: Family, U: update::Update> {
     committed: Vec<Vec<Operation<F, U>>>,
 }
 
-/// A decision a walk under [`Limits::Fixed`] collected for emission after it: the decided
+/// A decision a walk collected for emission after it: the decided
 /// update's key and cached payload, how it moves in the diff, and the value to write for the
 /// key, or `None` to delete it.
 struct Decided<F: Family, U: update::Update> {
@@ -1186,13 +1186,12 @@ where
     }
 
     /// Walk the floor from the inherited location over the operations below the tip of
-    /// `walked.ops` under `limits`, returning the floor it reached and, under
-    /// [`Limits::Fixed`], the decisions it collected in ascending location order.
+    /// `walked.ops` under the limits `policy` sets for the writes, returning the floor it reached
+    /// and the decisions it collected in ascending location order.
     ///
-    /// Under [`Limits::Proportional`], every active update the walk reaches moves to the tip: one
-    /// entry for each operation the writes made inactive and one for the previous commit. Under
-    /// [`Limits::Fixed`], `policy` decides each one and the decisions wait for the caller to
-    /// emit them, so the diff the walk classifies against stays a snapshot of the state after the
+    /// A policy that keeps every entry moves each active update the walk reaches to the tip at
+    /// once. Otherwise `policy` decides each one and the decisions wait for the caller to emit
+    /// them, so the diff the walk classifies against stays a snapshot of the state after the
     /// writes, which is what [a move](Move) resolves against. An empty state has no active
     /// update, so the walk does not run.
     ///
@@ -1210,7 +1209,6 @@ where
         walked: &mut Walked<F, U>,
         mut superseded_locs: Vec<Location<F>>,
         policy: &mut P,
-        limits: Limits,
         mut prefetched: Option<Prefetched<F, U>>,
         mut source: impl Candidates<F>,
         db: &Db<F, E, C, I, H, U, N, S>,
@@ -1236,27 +1234,21 @@ where
             }));
         }
 
-        // A proportional walk spends one entry per operation the writes made inactive and one for
-        // the previous commit. Every write supersedes one update except a create, and a delete is
-        // itself inactive, so the writes made `ops.len() - active_keys_delta` operations inactive:
-        // one per superseded update and two per delete. The walk's moves lie above the tip, which
-        // it never reaches, and each moves one of the active keys.
+        // Every write supersedes one update except a create, and a delete is itself inactive, so
+        // the writes made `ops.len() - active_keys_delta` operations inactive: one per superseded
+        // update and two per delete. The policy's limits follow from that count. The walk's own
+        // effects lie above the tip, which it never reaches, and each moves one of the active keys.
         let active_keys =
             usize::try_from(self.base_active_keys as isize + walked.active_keys_delta)
                 .expect("active_keys underflow");
-        let (entries, skips) = match limits {
-            Limits::Proportional => {
-                let made_inactive =
-                    usize::try_from(walked.ops.len() as isize - walked.active_keys_delta)
-                        .expect("a batch creates at most one key per write");
-                (made_inactive + 1, u64::MAX)
-            }
-            Limits::Fixed { entries, skips } => (entries, skips),
-        };
+        let made_inactive = usize::try_from(walked.ops.len() as isize - walked.active_keys_delta)
+            .expect("a batch creates at most one key per write");
+        let Limits { entries, skips } = policy.limits(made_inactive);
+        let keeps = policy.keeps();
         let tip = self.base_state.size + Widen::widen(walked.ops.len());
         let mut walk = Walk::new(self.base_inactivity_floor_loc, tip, entries, skips);
         let strategy = db.strategy();
-        if matches!(limits, Limits::Proportional) {
+        if keeps {
             // The walk appends at most one moved op per entry or active key, plus the CommitFloor.
             let moves = entries.min(active_keys);
             walked.ops.reserve(moves + 1);
@@ -1332,7 +1324,7 @@ where
 
             // The round decides at most its candidates, the remaining entries, and the active
             // keys not yet decided.
-            if matches!(limits, Limits::Fixed { .. }) {
+            if !keeps {
                 decided.reserve(
                     round
                         .candidates
@@ -1355,32 +1347,30 @@ where
                     break 'walk;
                 }
                 let op = read.unwrap_or_else(|| self.peek_uncommitted(loc, &walked.ops).clone());
-                match limits {
-                    Limits::Proportional => self.relocate(
+                if keeps {
+                    self.relocate(
                         &mut walked.ops,
                         &mut walked.diff,
                         &mut walked.floor_diff,
                         op,
                         mv,
-                    ),
-                    Limits::Fixed { .. } => {
-                        let Operation::Update(update) = op else {
-                            unreachable!("active operations are updates")
-                        };
-                        let (key, value, cached) = update.into_parts();
-                        let value = match policy.decide(Entry::new(loc, &key, value)).into_action()
-                        {
-                            Action::Write(value) => Some(value),
-                            Action::Evict => None,
-                            Action::Stop => break 'walk,
-                        };
-                        decided.push(Decided {
-                            key,
-                            cached,
-                            mv,
-                            value,
-                        });
-                    }
+                    );
+                } else {
+                    let Operation::Update(update) = op else {
+                        unreachable!("active operations are updates")
+                    };
+                    let (key, value, cached) = update.into_parts();
+                    let value = match policy.decide(Entry::new(loc, &key, value)).into_action() {
+                        Action::Write(value) => Some(value),
+                        Action::Evict => None,
+                        Action::Stop => break 'walk,
+                    };
+                    decided.push(Decided {
+                        key,
+                        cached,
+                        mv,
+                        value,
+                    });
                 }
                 walk.decide();
                 if walk.entries == 0 {
@@ -1799,28 +1789,26 @@ where
         P: Policy<F, K, V::Value>,
     {
         let fill: &Shared<N> = &db.bitmap;
-        let limits = policy.limits();
         let (prepared, staged) = self
-            .resolve_updates_prefetched(updates, upserts, db, limits, fill)
+            .resolve_updates_prefetched(updates, upserts, db, &*policy, fill)
             .await?;
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, fill, policy, limits)
+            .merkleize_with_floor_walk(metadata, staged, fill, policy)
             .await?;
         Ok(batch)
     }
 
     /// Resolve the caller's updates on the strategy pool while selecting and reading committed
-    /// floor candidates under `limits`, overlapping the two. Returns the prepared batch, holding
-    /// the prefetched round, and the staged updates.
+    /// floor candidates under `policy`'s limits, overlapping the two. Returns the prepared batch,
+    /// holding the prefetched round, and the staged updates.
     ///
     /// Preparation validates and retains the live chain before any supplied-database read.
     ///
     /// The prefetch selects candidates with [`Merkleizer::read_round`] from the base floor and the
     /// `source` the floor walk scans, without knowing which locations the resolution makes
-    /// inactive, so it may read locations the walk then passes. Under [`Limits::Proportional`] it
-    /// selects up to an estimate of the walk's entries, and under [`Limits::Fixed`] up to
-    /// `entries` candidates below the walk's window end. The walk takes the round whole as its
-    /// first and resumes where the prefetch stopped.
+    /// inactive, so it asks `policy` for the limits of an estimated count and may read locations the
+    /// walk then passes. It selects up to those `entries` candidates below the walk's window end.
+    /// The walk takes the round whole as its first and resumes where the prefetch stopped.
     ///
     /// The selection is clamped to the committed boundary: a speculative source (e.g. the current
     /// variant's parent bitmap) extends past it, but its candidate sequence below the boundary is
@@ -1834,7 +1822,7 @@ where
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         db: &'a Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        limits: Limits,
+        policy: &impl Policy<F, K, V::Value>,
         mut source: impl Candidates<F>,
     ) -> Result<
         (
@@ -1857,48 +1845,42 @@ where
         let floor = prepared.merkleizer.base_inactivity_floor_loc;
         let db_size = prepared.merkleizer.db_state.size;
 
-        let (need, last) = match limits {
-            Limits::Proportional => {
-                // Bound the entries of the proportional walk: the previous commit grants one, and
-                // each emitted op grants one for an update or two for a delete.
-                //
-                // An op is emitted per location-resolved staged slot plus per upsert or prior
-                // mutation on a key alive in the committed snapshot. A slot written more than once
-                // counts only its final write. Fresh-key creates grant no entry, so unresolved
-                // slots and writes missing from the snapshot are excluded (one in-memory probe
-                // per key).
-                //
-                // The bound is approximate in both directions. Surplus candidates (a translated-key
-                // collision, a key an ancestor already deleted, or a key that another slot or an
-                // upsert also writes) are dropped by the walk once it moves enough ops. A
-                // shortfall (an upsert or prior mutation whose key is live only in an ancestor's
-                // diff) makes the walk read further rounds when the prefetched prefix runs out.
-                let entries = |value: &Option<V::Value>| if value.is_some() { 1 } else { 2 };
-                let mut counted = vec![false; resolutions.len()];
-                let mut staged_entries = 0;
-                for (slot, value) in updates.iter().rev() {
-                    if resolutions.get(*slot).is_some_and(Option::is_some) && !counted[*slot] {
-                        counted[*slot] = true;
-                        staged_entries += entries(value);
-                    }
-                }
-                let existing_entries: usize = upserts
-                    .iter()
-                    .map(|(key, value)| (key, value))
-                    .chain(&prepared.mutations)
-                    .filter(|&(key, _)| db.snapshot.get(key).next().is_some())
-                    .map(|(_, value)| entries(value))
-                    .sum();
-                (staged_entries + existing_entries + 1, db_size)
+        // Estimate the operations the writes will make inactive, which sets the policy's limits
+        // for this prefetch: one per update of an existing key and two per delete of one.
+        //
+        // An op is emitted per location-resolved staged slot plus per upsert or prior mutation on
+        // a key alive in the committed snapshot. A slot written more than once counts only its
+        // final write. Fresh-key creates make nothing inactive, so unresolved slots and writes
+        // missing from the snapshot are excluded (one in-memory probe per key).
+        //
+        // The estimate is approximate in both directions. Surplus candidates (a translated-key
+        // collision, a key an ancestor already deleted, or a key that another slot or an upsert
+        // also writes) are dropped by the walk once its entries run out. A shortfall (an upsert
+        // or prior mutation whose key is live only in an ancestor's diff) makes the walk read
+        // further rounds when the prefetched prefix runs out.
+        let made_inactive = |value: &Option<V::Value>| if value.is_some() { 1 } else { 2 };
+        let mut counted = vec![false; resolutions.len()];
+        let mut staged = 0;
+        for (slot, value) in updates.iter().rev() {
+            if resolutions.get(*slot).is_some_and(Option::is_some) && !counted[*slot] {
+                counted[*slot] = true;
+                staged += made_inactive(value);
             }
-            Limits::Fixed { entries, skips } => {
-                // The walk reads nothing at or past the floor plus its limits.
-                let reach = (*floor)
-                    .saturating_add(skips)
-                    .saturating_add(Widen::widen(entries));
-                (entries, Location::new(reach).min(db_size))
-            }
-        };
+        }
+        let existing: usize = upserts
+            .iter()
+            .map(|(key, value)| (key, value))
+            .chain(&prepared.mutations)
+            .filter(|&(key, _)| db.snapshot.get(key).next().is_some())
+            .map(|(_, value)| made_inactive(value))
+            .sum();
+        let Limits { entries, skips } = policy.limits(staged + existing);
+
+        // The walk reads nothing at or past the floor plus its limits.
+        let reach = (*floor)
+            .saturating_add(skips)
+            .saturating_add(Widen::widen(entries));
+        let (need, last) = (entries, Location::new(reach).min(db_size));
 
         // Below the committed boundary the activity bitmap has one set bit per active key plus
         // the last commit, which the walk passes unread.
@@ -1976,9 +1958,8 @@ where
         let fill: &Shared<N> = &db.bitmap;
         let (batch, staged) = self.resolve_updates(updates, upserts, db.strategy());
         let prepared = batch.prepare(db)?;
-        let limits = policy.limits();
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, fill, policy, limits)
+            .merkleize_with_floor_walk(metadata, staged, fill, policy)
             .await?;
         Ok(batch)
     }
@@ -2330,9 +2311,8 @@ where
     {
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
-        let limits = policy.limits();
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), fill, policy, limits)
+            .merkleize_with_floor_walk(metadata, Vec::new(), fill, policy)
             .await?;
         Ok(batch)
     }
@@ -2353,8 +2333,8 @@ where
 {
     /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would otherwise
-    /// require), walking the floor with `policy` under `limits`, and accepting the floor candidate
-    /// source. The walk takes the candidates the batch prefetched as its first round.
+    /// require), walking the floor with `policy`, and accepting the floor candidate source. The
+    /// walk takes the candidates the batch prefetched as its first round.
     ///
     /// The source must meet the [`Candidates`] contract: ascending candidates that cover every
     /// location that may hold an [active update in this chain](Move), and only set activity
@@ -2365,7 +2345,6 @@ where
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         source: T,
         policy: &mut P,
-        limits: Limits,
     ) -> RetainedMerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         P: Policy<F, K, V::Value>,
@@ -2505,15 +2484,7 @@ where
         // decision appends one operation, and the CommitFloor follows.
         let mut walked = Walked::new(ops, diff, active_keys_delta);
         let (floor, decided) = m
-            .walk(
-                &mut walked,
-                superseded_locs,
-                policy,
-                limits,
-                prefetched,
-                source,
-                db,
-            )
+            .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
         walked.ops.reserve(decided.len() + 1);
         walked.floor_diff.reserve(decided.len());
@@ -2558,9 +2529,8 @@ where
     {
         let fill: &Shared<N> = &db.bitmap;
         let prepared = self.prepare(db)?;
-        let limits = policy.limits();
         let (batch, _retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), fill, policy, limits)
+            .merkleize_with_floor_walk(metadata, Vec::new(), fill, policy)
             .await?;
         Ok(batch)
     }
@@ -2582,9 +2552,9 @@ where
     /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would otherwise
     /// require: the caller's new value and the cached next key feed op generation directly, and
-    /// updates also skip the index probe), walking the floor with `policy` under `limits`, and
-    /// accepting the floor candidate source. The walk takes the candidates the batch prefetched as
-    /// its first round.
+    /// updates also skip the index probe), walking the floor with `policy`, and accepting the
+    /// floor candidate source. The walk takes the candidates the batch prefetched as its first
+    /// round.
     ///
     /// The source must meet the [`Candidates`] contract: ascending candidates that cover every
     /// location that may hold an [active update in this chain](Move), and only set activity
@@ -2595,7 +2565,6 @@ where
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         source: T,
         policy: &mut P,
-        limits: Limits,
     ) -> RetainedMerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         P: Policy<F, K, V::Value>,
@@ -2970,15 +2939,7 @@ where
         // merge.
         let mut walked = Walked::new(ops, diff, active_keys_delta);
         let (floor, decided) = m
-            .walk(
-                &mut walked,
-                superseded_locs,
-                policy,
-                limits,
-                prefetched,
-                source,
-                db,
-            )
+            .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
         m.repair_links(&mut walked, decided, db).await?;
         m.finish(walked, floor, metadata, db).await
@@ -3879,7 +3840,7 @@ pub(crate) mod tests {
                 value::FixedEncoding,
             },
             current,
-            floor::{Compact, Decision, Entry, Hold, Proportional},
+            floor::{Compact, Decision, Entry, Hold, Limits, Policy, Proportional},
         },
         translator::OneCap,
     };
@@ -3983,8 +3944,12 @@ pub(crate) mod tests {
     }
 
     impl Policy<mmr::Family, sha256::Digest, CountedValue> for Probe {
-        fn limits(&self) -> Limits {
-            Limits::Fixed {
+        fn keeps(&self) -> bool {
+            false
+        }
+
+        fn limits(&self, _: usize) -> Limits {
+            Limits {
                 entries: usize::MAX,
                 skips: u64::MAX,
             }
@@ -4069,8 +4034,12 @@ pub(crate) mod tests {
     }
 
     impl Policy<mmr::Family, sha256::Digest, CountedValue> for Evict {
-        fn limits(&self) -> Limits {
-            Limits::Fixed {
+        fn keeps(&self) -> bool {
+            false
+        }
+
+        fn limits(&self, _: usize) -> Limits {
+            Limits {
                 entries: usize::MAX,
                 skips: u64::MAX,
             }
@@ -4272,13 +4241,19 @@ pub(crate) mod tests {
             drop((round, prepared));
 
             // The staged prefetch selects both live updates.
-            let limits = Limits::Fixed {
+            let policy = Compact {
                 entries: usize::MAX,
                 skips: u64::MAX,
             };
             let (_, staged) = db.new_batch().stage(&[], &db).await.unwrap();
             let (prepared, _) = staged
-                .resolve_updates_prefetched(Vec::new(), Vec::new(), &db, limits, db.bitmap.as_ref())
+                .resolve_updates_prefetched(
+                    Vec::new(),
+                    Vec::new(),
+                    &db,
+                    &policy,
+                    db.bitmap.as_ref(),
+                )
                 .await
                 .unwrap();
             let (round, scan) = prepared.prefetched.as_ref().unwrap();
@@ -4323,7 +4298,13 @@ pub(crate) mod tests {
             assert_eq!(parent.bounds().inactivity_floor, last);
             let (_, staged) = parent.new_batch().stage(&[], &db).await.unwrap();
             let (prepared, _) = staged
-                .resolve_updates_prefetched(Vec::new(), Vec::new(), &db, limits, db.bitmap.as_ref())
+                .resolve_updates_prefetched(
+                    Vec::new(),
+                    Vec::new(),
+                    &db,
+                    &policy,
+                    db.bitmap.as_ref(),
+                )
                 .await
                 .unwrap();
             let (round, scan) = prepared.prefetched.as_ref().unwrap();
@@ -4335,19 +4316,24 @@ pub(crate) mod tests {
         });
     }
 
-    /// Returns one entry from its first [`Policy::limits`] call and unbounded limits from later
-    /// calls. Keeps every update and counts the limits calls and the decisions.
+    /// Returns one entry from its `exact`th [`Policy::limits`] call and unbounded limits from every
+    /// other call. Keeps every update and counts the limits calls and the decisions.
     pub(crate) struct Growing {
+        pub(crate) exact: usize,
         pub(crate) reads: Cell<usize>,
         pub(crate) decided: usize,
     }
 
     impl Policy<mmr::Family, sha256::Digest, sha256::Digest> for Growing {
-        fn limits(&self) -> Limits {
-            let reads = self.reads.get();
-            self.reads.set(reads + 1);
-            let entries = if reads == 0 { 1 } else { usize::MAX };
-            Limits::Fixed {
+        fn keeps(&self) -> bool {
+            false
+        }
+
+        fn limits(&self, _: usize) -> Limits {
+            let reads = self.reads.get() + 1;
+            self.reads.set(reads);
+            let entries = if reads == self.exact { 1 } else { usize::MAX };
+            Limits {
                 entries,
                 skips: u64::MAX,
             }
@@ -4376,6 +4362,7 @@ pub(crate) mod tests {
             .unwrap();
         let (db, _) = db.apply_batch(seed).await.unwrap();
         let mut policy = Growing {
+            exact: 1,
             reads: Cell::new(0),
             decided: 0,
         };
@@ -4389,23 +4376,26 @@ pub(crate) mod tests {
     }
 
     /// Every merkleize entry point, unstaged and staged over unordered and ordered Any and Current
-    /// databases, reads its policy's limits once and decides under them.
+    /// databases, reads its policy's limits for the exact count once before the walk and decides
+    /// under them. The unordered staged entry points read them once more before that, with an
+    /// estimate for the prefetch; ordered staging has no prefetch.
     ///
-    /// Four keys lie at 1..5 with a held floor, and the staged batch rewrites the first. The first
-    /// limits allow one entry, which decides the first live update. Later calls would allow every
-    /// update.
+    /// Four keys lie at 1..5 with a held floor, and the staged batch rewrites the first. The limits
+    /// read for the exact count allow one entry, which decides the first live update. Any other
+    /// read would allow every update.
     #[test]
-    fn policy_reads_limits_once() {
+    fn policy_reads_limits_per_phase() {
         deterministic::Runner::default().start(|context| async move {
             let key = sha256::Digest::from([0; 32]);
             let mut policies = Vec::new();
 
             // Merkleize the unstaged and the staged batch on `db` and record both policies.
             macro_rules! limits_read {
-                ($label:literal, $db:expr) => {{
+                ($label:literal, $db:expr, $staged_reads:literal) => {{
                     let (db, policy) = limits_read_unstaged($db).await;
                     policies.push((concat!($label, " unstaged"), policy));
                     let mut policy = Growing {
+                        exact: $staged_reads,
                         reads: Cell::new(0),
                         decided: 0,
                     };
@@ -4427,14 +4417,16 @@ pub(crate) mod tests {
                 "any unordered",
                 AnyUnordered::init(context.child("any_unordered"), config, None)
                     .await
-                    .unwrap()
+                    .unwrap(),
+                2
             );
             let config = fixed_db_config::<OneCap>("limits-any-ordered", &context);
             limits_read!(
                 "any ordered",
                 AnyOrdered::init(context.child("any_ordered"), config, None)
                     .await
-                    .unwrap()
+                    .unwrap(),
+                1
             );
             let config =
                 current::tests::fixed_config::<OneCap>("limits-current-unordered", &context);
@@ -4442,20 +4434,22 @@ pub(crate) mod tests {
                 "current unordered",
                 CurrentUnordered::init(context.child("current_unordered"), config, None)
                     .await
-                    .unwrap()
+                    .unwrap(),
+                2
             );
             let config = current::tests::fixed_config::<OneCap>("limits-current-ordered", &context);
             limits_read!(
                 "current ordered",
                 CurrentOrdered::init(context.child("current_ordered"), config, None)
                     .await
-                    .unwrap()
+                    .unwrap(),
+                1
             );
 
             for (path, policy) in policies {
                 assert_eq!(
                     (policy.reads.get(), policy.decided),
-                    (1, 1),
+                    (policy.exact, 1),
                     "{path}: limits reads and decisions"
                 );
             }
@@ -4496,7 +4490,7 @@ pub(crate) mod tests {
                     Vec::new(),
                     upserts,
                     &db,
-                    Limits::Proportional,
+                    &Proportional,
                     db.bitmap.as_ref(),
                 )
                 .await
@@ -5132,7 +5126,7 @@ pub(crate) mod tests {
                     updates(writes),
                     Vec::new(),
                     &db,
-                    Limits::Proportional,
+                    &Proportional,
                     db.bitmap.as_ref(),
                 )
                 .await
@@ -5251,7 +5245,6 @@ pub(crate) mod tests {
                         db.bitmap.as_ref().fill(floor, tip.min(5), limit, out)
                     }),
                     &mut Proportional,
-                    Limits::Proportional,
                 )
                 .await
                 .unwrap();
@@ -5323,7 +5316,6 @@ pub(crate) mod tests {
                 let mut batches = Vec::new();
                 for split in [false, true] {
                     let mut policy = Script::new(usize::MAX, u64::MAX, choose);
-                    let limits = policy.limits();
                     let batch = write.map_or_else(
                         || db.new_batch(),
                         |value| db.new_batch().write(a, Some(value)),
@@ -5344,7 +5336,6 @@ pub(crate) mod tests {
                             Vec::new(),
                             db.bitmap.as_ref(),
                             &mut policy,
-                            limits,
                         )
                         .await
                         .unwrap();
@@ -8553,4 +8544,163 @@ pub(crate) mod tests {
         >,
         current::tests::fixed_config
     );
+
+    /// A policy that keeps every entry walks the direct path, and for every pair of limits, with
+    /// and without writes, its batch matches the batch of a scripted policy that keeps each entry
+    /// it decides.
+    async fn compact_matches_scripted_keep<D>(db: D)
+    where
+        D: DbAny<mmr::Family, Key = sha256::Digest, Value = sha256::Digest>
+            + crate::qmdb::any::test::Inspect<mmr::Family>,
+        Operation<mmr::Family, <D as crate::qmdb::any::test::Inspect<mmr::Family>>::Update>:
+            commonware_codec::Codec,
+    {
+        let keys = distinct(6);
+        let seed = keys
+            .iter()
+            .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+            .merkleize(&db, None, &mut Hold)
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let value = Some(sha256::Digest::from([0xEE; 32]));
+        let writes: [&[(usize, Option<sha256::Digest>)]; 3] =
+            [&[], &[(1, value)], &[(2, None), (4, value)]];
+        for entries in [0, 1, 3, usize::MAX] {
+            for skips in [0, 2, u64::MAX] {
+                for writes in writes {
+                    let batch = || {
+                        writes.iter().fold(db.new_batch(), |batch, &(i, value)| {
+                            batch.write(keys[i], value)
+                        })
+                    };
+                    let compact = batch()
+                        .merkleize(&db, None, &mut Compact { entries, skips })
+                        .await
+                        .unwrap();
+                    let mut keep = Script::new(entries, skips, crate::qmdb::any::test::keep);
+                    let scripted = batch().merkleize(&db, None, &mut keep).await.unwrap();
+                    assert_same(&db, &compact, &scripted);
+                }
+            }
+        }
+        db.destroy().await.unwrap();
+    }
+
+    /// [`compact_matches_scripted_keep`] on an unordered Any database.
+    #[test]
+    fn compact_matches_scripted_keep_unordered() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("compact-keep", &context);
+            let db = AnyUnordered::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            compact_matches_scripted_keep(db).await;
+        });
+    }
+
+    /// [`compact_matches_scripted_keep`] on an ordered Any database.
+    #[test]
+    fn compact_matches_scripted_keep_ordered() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("compact-keep", &context);
+            let db = AnyOrdered::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            compact_matches_scripted_keep(db).await;
+        });
+    }
+
+    /// Keeps every update it decides under limits that shrink with the operations the batch made
+    /// inactive, so the limits the prefetch reads under differ from the limits the walk runs
+    /// under.
+    struct Shrinking {
+        from: usize,
+        visited: Vec<u64>,
+    }
+
+    impl Policy<mmr::Family, sha256::Digest, sha256::Digest> for Shrinking {
+        fn keeps(&self) -> bool {
+            false
+        }
+
+        fn limits(&self, made_inactive: usize) -> Limits {
+            Limits {
+                entries: self.from.saturating_sub(made_inactive),
+                skips: u64::MAX,
+            }
+        }
+
+        fn decide(
+            &mut self,
+            entry: Entry<'_, mmr::Family, sha256::Digest, sha256::Digest>,
+        ) -> Decision<sha256::Digest> {
+            self.visited.push(*entry.location());
+            entry.keep()
+        }
+    }
+
+    /// A staged walk under limits that depend on the exact count decides what the direct walk
+    /// decides, including when the exact limits allow nothing after a nonempty prefetch. The
+    /// child upserts a key live only in its pending parent, which the prefetch's estimate leaves
+    /// out and the exact count includes.
+    #[rstest::rstest]
+    // The prefetch reads under two entries; the walk gets one and moves the update at 1.
+    #[case::one_entry(2, vec![1], 2)]
+    // The prefetch reads under one entry; the walk gets none and leaves the floor inherited.
+    #[case::no_entry(1, vec![], 0)]
+    fn argument_dependent_limits_match_direct(
+        #[case] from: usize,
+        #[case] visited: Vec<u64>,
+        #[case] floor: u64,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("shrinking", &context);
+            let db = AnyUnordered::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let keys = distinct(4);
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, key| batch.write(*key, Some(*key)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let created = sha256::Digest::from([0xCC; 32]);
+            let parent = db
+                .new_batch()
+                .write(created, Some(created))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            let value = Some(sha256::Digest::from([0xEE; 32]));
+            let mut policy = Shrinking {
+                from,
+                visited: Vec::new(),
+            };
+            let (_, batch) = parent.new_batch::<Sha256>().stage(&[], &db).await.unwrap();
+            let staged = batch
+                .merkleize(Vec::new(), vec![(created, value)], None, &db, &mut policy)
+                .await
+                .unwrap();
+            let mut twin = Shrinking {
+                from,
+                visited: Vec::new(),
+            };
+            let direct = parent
+                .new_batch::<Sha256>()
+                .write(created, value)
+                .merkleize(&db, None, &mut twin)
+                .await
+                .unwrap();
+            assert_eq!(policy.visited, visited);
+            assert_eq!(twin.visited, visited);
+            assert_eq!(staged.bounds().inactivity_floor, loc(floor));
+            assert_eq!(staged.root(), direct.root());
+            drop((staged, direct, parent));
+            db.destroy().await.unwrap();
+        });
+    }
 }

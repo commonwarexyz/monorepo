@@ -553,12 +553,11 @@ where
 
         // Overlap the update resolution with a candidate prefetch. The helper clamps the prefetch
         // to the committed prefix.
-        let limits = policy.limits();
         let (prepared, staged) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, limits, &bitmap_parent)
+            .resolve_updates_prefetched(updates, upserts, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy, limits)
+            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -620,9 +619,8 @@ where
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
-        let limits = policy.limits();
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy, limits)
+            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -670,9 +668,8 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
-        let limits = policy.limits();
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy, limits)
+            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -720,9 +717,8 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let prepared = inner.prepare(&db.any)?;
-        let limits = policy.limits();
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy, limits)
+            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);

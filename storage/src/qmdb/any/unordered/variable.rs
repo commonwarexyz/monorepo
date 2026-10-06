@@ -153,7 +153,7 @@ pub(crate) mod test {
         mmr,
         qmdb::{
             bitmap::{Candidates, FnCandidates},
-            floor::{Compact, Limits, Proportional},
+            floor::{Compact, Proportional},
         },
         translator::TwoCap,
     };
@@ -857,7 +857,7 @@ pub(crate) mod test {
                     vec![(0, Some(to_bytes(3_000)))],
                     vec![(key(101), Some(to_bytes(3_001)))],
                     &db,
-                    Limits::Proportional,
+                    &Proportional,
                     FnCandidates(|floor, tip, limit, out: &mut Vec<_>| {
                         // Preparation must retain the chain before prefetch starts.
                         drop(caller_ancestors.take());
@@ -870,13 +870,7 @@ pub(crate) mod test {
             assert!(weak_grandparent.upgrade().is_some());
 
             let (batch, retained_ancestors) = prepared
-                .merkleize_with_floor_walk(
-                    None,
-                    updates,
-                    db.bitmap.as_ref(),
-                    &mut Proportional,
-                    Limits::Proportional,
-                )
+                .merkleize_with_floor_walk(None, updates, db.bitmap.as_ref(), &mut Proportional)
                 .await
                 .unwrap();
             assert_eq!(batch.root(), expected_root);

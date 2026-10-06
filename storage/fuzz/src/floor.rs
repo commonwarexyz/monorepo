@@ -8,7 +8,7 @@
 //! checks the record and the floor the batch's commit operation records against the target's
 //! model of the batch's post-write state, then replays the record into that model.
 //!
-//! The oracle checks the decisions against the live values and the [`Limits::Fixed`] allowance,
+//! The oracle checks the decisions against the live values and the [`Limits`] of a fixed plan,
 //! and the floor against the decisions and the number of live keys.
 //!
 //! The model maps keys to values and does not track where each key's live update lies. So the
@@ -17,7 +17,7 @@
 //! live update.
 //!
 //! Without the tip of the batch's writes, the oracle also cannot tell where a walk that decided
-//! every live key should end, and it checks a [`Limits::Proportional`] walk only for a floor that
+//! every live key should end, and it checks a [`Proportional`] walk only for a floor that
 //! does not decrease and stays below the commit.
 //!
 //! Reopening a database rebuilds its state by replaying the log from the floor, so a target that
@@ -158,15 +158,16 @@ fn script_index(salt: u8, key: &[u8], value: &[u8]) -> usize {
 }
 
 impl<F: Family, K: Clone + AsRef<[u8]>, V: Clone + AsRef<[u8]>> Policy<F, K, V> for Recorder<K, V> {
-    fn limits(&self) -> Limits {
+    /// Only a proportional plan keeps every entry: a compact plan records each keep instead.
+    fn keeps(&self) -> bool {
+        matches!(self.plan, Plan::Proportional)
+    }
+
+    fn limits(&self, made_inactive: usize) -> Limits {
         match self.plan {
-            Plan::Proportional => Policy::<F, K, V>::limits(&Proportional),
-            Plan::Hold => Policy::<F, K, V>::limits(&Hold),
-            Plan::Compact { entries, skips } => Policy::<F, K, V>::limits(&Compact {
-                entries: entries.entries(),
-                skips: skips.skips(),
-            }),
-            Plan::Scripted { entries, skips, .. } => Limits::Fixed {
+            Plan::Proportional => Policy::<F, K, V>::limits(&Proportional, made_inactive),
+            Plan::Hold => Policy::<F, K, V>::limits(&Hold, made_inactive),
+            Plan::Compact { entries, skips } | Plan::Scripted { entries, skips, .. } => Limits {
                 entries: entries.entries(),
                 skips: skips.skips(),
             },
@@ -237,9 +238,12 @@ where
         floor: Location<F>,
         commit: Location<F>,
     ) {
-        let fixed = match Policy::<F, K, V>::limits(self) {
-            Limits::Fixed { entries, skips } => Some((entries, skips)),
-            Limits::Proportional => None,
+        let fixed = match self.plan {
+            Plan::Proportional => None,
+            Plan::Hold => Some((0, 0)),
+            Plan::Compact { entries, skips } | Plan::Scripted { entries, skips, .. } => {
+                Some((entries.entries(), skips.skips()))
+            }
         };
 
         // The walk hands out live updates with their post-write values, each key at most once,

@@ -517,7 +517,6 @@ where
     where
         P: Policy<crate::mmr::Family, K, V>,
     {
-        let limits = policy.limits();
         let start_loc = self.size();
         let Changeset { diff, metadata } = batch;
 
@@ -609,19 +608,14 @@ where
         // The previous commit becomes inactive.
         self.bitmap.set_bit(*start_loc - 1, false);
 
-        // Walk the floor toward the tip the writes reached, as the policy's limits direct. An
-        // empty store has no active update to move or decide.
-        //
-        // A proportional walk spends one entry per operation the batch made inactive and one for
-        // its previous commit.
+        // Walk the floor toward the tip the writes reached, under the limits the policy sets for
+        // the operations they made inactive. An empty store has no active update to move or
+        // decide.
         if !self.is_empty() {
             let tip = Location::new(*start_loc + Widen::widen(ops.len()));
-            let (entries, skips) = match limits {
-                Limits::Proportional => (made_inactive + 1, u64::MAX),
-                Limits::Fixed { entries, skips } => (entries, skips),
-            };
+            let Limits { entries, skips } = policy.limits(made_inactive);
             let mut walk = Walk::new(self.inactivity_floor_loc, tip, entries, skips);
-            self.walk(&mut walk, limits, policy, &mut ops).await?;
+            self.walk(&mut walk, policy, &mut ops).await?;
             self.inactivity_floor_loc = walk.floor;
         }
 
@@ -640,17 +634,16 @@ where
         Ok((self, start_loc..end_loc))
     }
 
-    /// Advance `walk` over the active updates below its end, keeping each one under
-    /// [`Limits::Proportional`] and deciding it with `policy` under [`Limits::Fixed`]. Each
-    /// decision applies at once: the snapshot, the bitmap, and the key count change with it, and
-    /// the update it writes or the delete it appends joins `ops`.
+    /// Advance `walk` over the active updates below its end, keeping each one when `policy`
+    /// keeps every entry and deciding it with `policy` otherwise. Each decision applies at once:
+    /// the snapshot, the bitmap, and the key count change with it, and the update it writes or
+    /// the delete it appends joins `ops`.
     ///
     /// `ops` holds the unappended operations starting at `log.size()`, and the bitmap covers them
     /// with the previous commit inactive.
     async fn walk<P>(
         &mut self,
         walk: &mut Walk<crate::mmr::Family>,
-        limits: Limits,
         policy: &mut P,
         ops: &mut Vec<Operation<crate::mmr::Family, K, V>>,
     ) -> Result<(), Error>
@@ -663,6 +656,7 @@ where
         // decides them all. Candidates in the batch's own region already have their operations
         // in memory.
         let start = self.log.size();
+        let keeps = policy.keeps();
         let mut candidates = Vec::<u64>::with_capacity(walk.entries.min(self.active_keys));
         fill_from(
             &self.bitmap,
@@ -694,11 +688,12 @@ where
                 unreachable!("active candidate must be an update");
             };
             let new_loc = Location::new(start + Widen::widen(ops.len()));
-            let action = match limits {
-                Limits::Proportional => Action::Write(value),
-                Limits::Fixed { .. } => policy
+            let action = if keeps {
+                Action::Write(value)
+            } else {
+                policy
                     .decide(Entry::new(Location::new(loc), &key, value))
-                    .into_action(),
+                    .into_action()
             };
             let op = match action {
                 Action::Write(value) => {
@@ -2774,8 +2769,9 @@ mod test {
             let db = open(context.child("store"), "limits").await;
             let (db, _) = apply(db, seed(4), &mut Hold).await;
 
-            // A policy that lifts its limits after the first read decides one update.
+            // A policy that allows one entry on its only limits read decides one update.
             let mut policy = Growing {
+                exact: 1,
                 reads: Cell::new(0),
                 decided: 0,
             };
@@ -2840,8 +2836,12 @@ mod test {
         }
 
         impl Policy<crate::mmr::Family, Digest, Vec<u8>> for BitmapPolicy<'_> {
-            fn limits(&self) -> Limits {
-                Limits::Fixed {
+            fn keeps(&self) -> bool {
+                false
+            }
+
+            fn limits(&self, _: usize) -> Limits {
+                Limits {
                     entries: 3,
                     skips: u64::MAX,
                 }

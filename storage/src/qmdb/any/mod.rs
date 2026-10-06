@@ -85,8 +85,11 @@
 //!     expired: Vec<(Key, Value)>,
 //! }
 //! impl<F: Family> Policy<F, Key, Value> for Expire {
-//!     fn limits(&self) -> Limits {
-//!         Limits::Fixed { entries: 8, skips: 16 }
+//!     fn keeps(&self) -> bool {
+//!         false
+//!     }
+//!     fn limits(&self, _inactive: usize) -> Limits {
+//!         Limits { entries: 8, skips: 16 }
 //!     }
 //!     fn decide(&mut self, entry: Entry<'_, F, Key, Value>) -> Decision<Value> {
 //!         if entry.value().expiry > self.now {
@@ -2470,8 +2473,8 @@ pub(crate) mod test {
 
     /// A test policy that decides each update from its key and records it.
     pub(crate) struct Script<F: Family, D> {
-        /// The limits the policy returns.
-        limits: Limits,
+        /// The fixed limits the policy returns, or `None` for proportional limits.
+        limits: Option<Limits>,
         /// Decides an update from its key.
         decide: D,
         /// The location, key, and value of each decided update, in order.
@@ -2495,16 +2498,17 @@ pub(crate) mod test {
         /// Return a policy with fixed limits that decides each update with `decide`.
         pub(crate) const fn new(entries: usize, skips: u64, decide: D) -> Self {
             Self {
-                limits: Limits::Fixed { entries, skips },
+                limits: Some(Limits { entries, skips }),
                 decide,
                 visited: Vec::new(),
             }
         }
 
-        /// Return a policy with proportional limits. The walk never calls its `decide`.
+        /// Return a policy with proportional limits that keeps every entry. The walk never calls
+        /// its `decide`.
         pub(crate) const fn proportional(decide: D) -> Self {
             Self {
-                limits: Limits::Proportional,
+                limits: None,
                 decide,
                 visited: Vec::new(),
             }
@@ -2517,8 +2521,14 @@ pub(crate) mod test {
     }
 
     impl<F: Family, D: FnMut(&Digest) -> Choice> Policy<F, Digest, Digest> for Script<F, D> {
-        fn limits(&self) -> Limits {
-            self.limits
+        fn keeps(&self) -> bool {
+            self.limits.is_none()
+        }
+
+        fn limits(&self, made_inactive: usize) -> Limits {
+            self.limits.unwrap_or_else(|| {
+                Policy::<F, Digest, Digest>::limits(&Proportional, made_inactive)
+            })
         }
 
         fn decide(&mut self, entry: Entry<'_, F, Digest, Digest>) -> Decision<Digest> {
@@ -2709,7 +2719,7 @@ pub(crate) mod test {
             .sum()
     }
 
-    /// Model a [`Limits::Fixed`] walk from `floor` over the ascending `active` locations below
+    /// Model a fixed-limit walk from `floor` over the ascending `active` locations below
     /// `tip`, the tip of the batch's writes, where the policy stops at the `stops` locations and
     /// decides every other one. Returns the floor the walk reaches and the locations it visits,
     /// a stopped one included.

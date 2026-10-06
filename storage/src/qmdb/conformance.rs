@@ -570,14 +570,20 @@ mod tests {
     }
 
     impl<F: Family> Policy<F, Digest, Digest> for Rule {
-        fn limits(&self) -> Limits {
+        fn keeps(&self) -> bool {
+            matches!(self, Self::Proportional | Self::Compact { .. })
+        }
+
+        fn limits(&self, made_inactive: usize) -> Limits {
             match *self {
-                Self::Proportional => Policy::<F, Digest, Digest>::limits(&Proportional),
-                Self::Hold => Policy::<F, Digest, Digest>::limits(&Hold),
-                Self::Compact { entries, skips } => {
-                    Policy::<F, Digest, Digest>::limits(&Compact { entries, skips })
+                Self::Proportional => {
+                    Policy::<F, Digest, Digest>::limits(&Proportional, made_inactive)
                 }
-                Self::Seeded { entries, skips, .. } => Limits::Fixed { entries, skips },
+                Self::Hold => Policy::<F, Digest, Digest>::limits(&Hold, made_inactive),
+                Self::Compact { entries, skips } => {
+                    Policy::<F, Digest, Digest>::limits(&Compact { entries, skips }, made_inactive)
+                }
+                Self::Seeded { entries, skips, .. } => Limits { entries, skips },
             }
         }
 
@@ -844,7 +850,11 @@ mod tests {
     }
 
     impl<F: Family> Policy<F, Digest, Digest> for Counted<'_> {
-        fn limits(&self) -> Limits {
+        fn keeps(&self) -> bool {
+            Policy::<F, Digest, Digest>::keeps(&self.rule)
+        }
+
+        fn limits(&self, made_inactive: usize) -> Limits {
             let kind = match self.rule {
                 Rule::Proportional => 0,
                 Rule::Hold => 1,
@@ -852,7 +862,7 @@ mod tests {
                 Rule::Seeded { .. } => 3,
             };
             self.rules[kind].fetch_add(1, Ordering::Relaxed);
-            Policy::<F, Digest, Digest>::limits(&self.rule)
+            Policy::<F, Digest, Digest>::limits(&self.rule, made_inactive)
         }
 
         fn decide(&mut self, entry: Entry<'_, F, Digest, Digest>) -> Decision<Digest> {
