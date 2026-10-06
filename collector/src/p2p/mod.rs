@@ -969,4 +969,43 @@ mod tests {
             clean_shutdown(seed);
         }
     }
+
+    /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5153.
+    ///
+    /// Once every mailbox is dropped, the engine must not spin on its closed
+    /// command channel: the runtime keeps running other tasks, and aborting the
+    /// engine completes.
+    #[test_traced]
+    fn pr_5153_regression() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (oracle, schemes, _, connections) =
+                setup_network_and_peers(&context, &[0, 1]).await;
+            let public_key = schemes[0].public_key();
+            let conn = connections.into_iter().next().unwrap();
+            let (engine, mailbox) = Engine::new(
+                context
+                    .child("engine")
+                    .with_attribute("public_key", &public_key),
+                Config {
+                    blocker: oracle.control(public_key),
+                    monitor: MockMonitor::dummy(),
+                    handler: MockHandler::dummy(),
+                    mailbox_size: MAILBOX_SIZE,
+                    priority_request: false,
+                    request_codec: (),
+                    priority_response: false,
+                    response_codec: (),
+                },
+            );
+            let handle = engine.start(conn.0, conn.1);
+
+            // Give the engine a chance to observe that every mailbox is gone.
+            drop(mailbox);
+            context.sleep(Duration::from_millis(100)).await;
+
+            handle.abort();
+            let _ = handle.await;
+        });
+    }
 }
