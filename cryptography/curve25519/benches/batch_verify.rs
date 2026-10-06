@@ -1,12 +1,12 @@
 //! Throughput of the public batch-verification API across batch sizes. Each signature is from an
 //! independent key over an independent 32-byte message (no key/message reuse to amortize), the
-//! harder case for the underlying MSM. Fixture generation and verifier construction are not timed.
+//! harder case for the underlying MSM. Fixture generation is not timed.
 
 use commonware_cryptography_curve25519::signing::{
-    BatchVerifier, Signature, SigningKey, VerifyingKey,
+    BatchEntry, Signature, SigningKey, VerifyingKey,
 };
 use commonware_math::algebra::Random;
-use commonware_parallel::{Rayon, Sequential};
+use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_utils::{NZUsize, TestRng, test_rng};
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -31,20 +31,30 @@ fn generate_batch(n: usize) -> Vec<(VerifyingKey, Signature, Vec<u8>)> {
         .collect()
 }
 
-fn batch_verifier(batch: &[(VerifyingKey, Signature, Vec<u8>)]) -> BatchVerifier {
-    let mut verifier = BatchVerifier::new(batch.len());
-    for (verifying_key, signature, message) in batch {
-        verifier.add(NAMESPACE, message, verifying_key, signature);
-    }
-    verifier
+fn verify_batch(
+    rng: &mut TestRng,
+    batch: &[(VerifyingKey, Signature, Vec<u8>)],
+    strategy: &impl Strategy,
+) -> bool {
+    VerifyingKey::verify_batch(
+        rng,
+        batch,
+        |_, (verifying_key, signature, message)| BatchEntry {
+            namespace: NAMESPACE,
+            message,
+            verifying_key,
+            signature,
+        },
+        strategy,
+    )
 }
 
 /// Nested so `module_path!()` includes the crate::module separator the benchmark-name lint (and
 /// the benchmark-tracking dashboard) expect.
 mod verify_batch_bytes_bench {
     use super::{
-        BatchSize, Criterion, NZUsize, Rayon, Sequential, TestRng, Throughput, batch_verifier,
-        black_box, generate_batch,
+        BatchSize, Criterion, NZUsize, Rayon, Sequential, TestRng, Throughput, black_box,
+        generate_batch, verify_batch,
     };
 
     pub fn bench(c: &mut Criterion) {
@@ -56,13 +66,13 @@ mod verify_batch_bytes_bench {
                 group.throughput(Throughput::Elements(n as u64));
                 group.bench_function(format!("sigs={n} conc={concurrency}"), |b| {
                     b.iter_batched(
-                        || (TestRng::new(1), batch_verifier(&batch)),
-                        |(mut rng, verifier)| {
+                        || TestRng::new(1),
+                        |mut rng| {
                             #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
-                                black_box(verifier.verify(&mut rng, rayon))
+                                black_box(verify_batch(&mut rng, &batch, rayon))
                             } else {
-                                black_box(verifier.verify(&mut rng, &Sequential))
+                                black_box(verify_batch(&mut rng, &batch, &Sequential))
                             }
                         },
                         BatchSize::SmallInput,

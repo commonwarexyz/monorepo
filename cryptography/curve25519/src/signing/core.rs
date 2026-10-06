@@ -6,6 +6,7 @@ mod scalar;
 use crate::curve::{Backend, G, GAffine, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use commonware_codec::Write as _;
 use commonware_cryptography::{Hasher as _, Sha512};
 use commonware_parallel::{Sequential, Strategy};
 use core::num::NonZeroUsize;
@@ -47,6 +48,18 @@ impl Signature {
         s.copy_from_slice(&bytes[32..]);
         Self { r, s }
     }
+}
+
+/// One signature's batch-verification inputs, borrowed from the caller.
+#[derive(Clone, Copy)]
+pub(super) struct Item<'a> {
+    pub(super) key: &'a VerifyingKeyBytes,
+    pub(super) r: &'a [u8; 32],
+    pub(super) s: &'a [u8; 32],
+    /// The namespace, framed before the message as in [`commonware_utils::union_unique`], or
+    /// `None` to hash the message as given.
+    pub(super) namespace: Option<&'a [u8]>,
+    pub(super) message: &'a [u8],
 }
 
 /// Derives four consecutive 128-bit batch coefficients `z_{4*block} .. z_{4*block + 3}` from
@@ -130,13 +143,14 @@ fn decompress_terms<B: Backend>(
 }
 
 /// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. The unit's
-/// challenge inputs `R || A || M` are laid out in `challenges` and hashed together, and its `R`
-/// encodings decompress in one backend batch. Lanes past the last item hold identity terms.
+/// challenge inputs `R || A || M`, with `M` the framed message, are laid out in `challenges` and
+/// hashed together, and its `R` encodings decompress in one backend batch. Lanes past the last
+/// item hold identity terms.
 ///
 /// Returns whether every signature in the unit has a canonical `s` and a decodable `R`.
 fn signature_unit<B: Backend>(
     backend: B,
-    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    items: &[Item<'_>],
     seed: &[u8; 32],
     width: u32,
     unit: usize,
@@ -159,23 +173,31 @@ fn signature_unit<B: Backend>(
     }
 
     // `Sha512::hash_many` takes each message as one slice, so every lane's `R || A || M` is
-    // staged back to back in `challenges`, a buffer reused across units. Lanes past the last
-    // item keep the identity encoding for decompression.
+    // staged back to back in `challenges`, a buffer reused across units, with the namespace
+    // framed before the message. Lanes past the last item keep the identity encoding for
+    // decompression.
     let mut encodings = [IDENTITY_ENCODING; LANES];
+    let mut ends = [0; LANES];
     challenges.clear();
-    for (encoding, &(a_bytes, sig, msg)) in encodings.iter_mut().zip(lanes) {
-        *encoding = sig.r;
-        challenges.extend_from_slice(&sig.r);
-        challenges.extend_from_slice(a_bytes.as_bytes());
-        challenges.extend_from_slice(msg);
+    for ((encoding, end), item) in encodings.iter_mut().zip(&mut ends).zip(lanes) {
+        *encoding = *item.r;
+        challenges.extend_from_slice(item.r);
+        challenges.extend_from_slice(item.key.as_bytes());
+        if let Some(namespace) = item.namespace {
+            namespace.len().write(challenges);
+            challenges.extend_from_slice(namespace);
+        }
+        challenges.extend_from_slice(item.message);
+        *end = challenges.len();
     }
 
     // Cut the staged bytes back into one input per lane, and hash the unit's challenges in one
     // multi-message call.
     let mut inputs: [&[u8]; LANES] = [&[]; LANES];
-    let mut rest = challenges.as_slice();
-    for (input, (a_bytes, sig, msg)) in inputs.iter_mut().zip(lanes) {
-        (*input, rest) = rest.split_at(sig.r.len() + a_bytes.as_bytes().len() + msg.len());
+    let mut start = 0;
+    for (input, &end) in inputs.iter_mut().zip(&ends[..lanes.len()]) {
+        *input = &challenges[start..end];
+        start = end;
     }
     let digests = Sha512::hash_many(&inputs[..lanes.len()]);
 
@@ -184,8 +206,8 @@ fn signature_unit<B: Backend>(
     // lane's `z*h` zero, and the remaining lanes still finish.
     let mut valid = true;
     let mut zh = [Scalar::ZERO; LANES];
-    for (j, (_, sig, _)) in lanes.iter().enumerate() {
-        let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
+    for (j, item) in lanes.iter().enumerate() {
+        let Some(s) = Scalar::from_canonical_bytes(item.s) else {
             valid = false;
             continue;
         };
@@ -218,7 +240,7 @@ fn signature_unit<B: Backend>(
 /// keys.
 fn signature_phase<B: Backend>(
     backend: B,
-    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    items: &[Item<'_>],
     seed: &[u8; 32],
     width: u32,
     strategy: &impl Strategy,
@@ -328,7 +350,7 @@ const SUM_CHUNK: usize = 1024;
 fn verify_batch_inner<B: Backend>(
     backend: B,
     rng: &mut impl CryptoRng,
-    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    items: &[Item<'_>],
     strategy: &impl Strategy,
 ) -> bool {
     let n = items.len();
@@ -383,7 +405,7 @@ fn verify_batch_inner<B: Backend>(
 /// adversary can cause.
 fn verify_pipeline<B: Backend>(
     backend: B,
-    items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
+    items: &[Item<'_>],
     seed: &[u8; 32],
     width: u32,
     strategy: &impl Strategy,
@@ -396,7 +418,7 @@ fn verify_pipeline<B: Backend>(
             let mut order: Vec<(VerifyingKeyBytes, u32)> = items
                 .iter()
                 .enumerate()
-                .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
+                .map(|(i, item)| (*item.key, i as u32))
                 .collect();
 
             // The signature phase occupies the pool meanwhile, so sort on this thread.
@@ -606,7 +628,7 @@ pub fn verify(
 
 struct VerifyBatchCall<'a, 'b, R, S> {
     rng: &'a mut R,
-    items: &'a [(&'b VerifyingKeyBytes, &'b Signature, &'b [u8])],
+    items: &'a [Item<'b>],
     strategy: &'a S,
 }
 
@@ -618,10 +640,16 @@ impl<R: CryptoRng, S: Strategy> WithBackend for VerifyBatchCall<'_, '_, R, S> {
     }
 }
 
-fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
-    rng: &mut R,
-    items: &[(&'a VerifyingKeyBytes, &'a Signature, &'a [u8])],
-    strategy: &S,
+/// Verifies a batch of items using a randomized linear combination.
+///
+/// Empty input is rejected.
+///
+/// `A` is coalesced by its raw encoding before ever being decompressed (see [`group_ranges`]), so
+/// a signer reused across the batch is decompressed once, not once per signature.
+pub(super) fn verify_batch_bytes(
+    rng: &mut impl CryptoRng,
+    items: &[Item<'_>],
+    strategy: &impl Strategy,
 ) -> bool {
     with_backend(VerifyBatchCall {
         rng,
@@ -630,27 +658,11 @@ fn verify_batch_dispatch<'a, R: CryptoRng, S: Strategy>(
     })
 }
 
-/// Verifies a batch of `(verifying_key_bytes, signature, message)` triples using a randomized
-/// linear combination.
-///
-/// Empty input is rejected.
-///
-/// `A` is coalesced by its raw encoding before ever being decompressed (see [`group_ranges`]), so
-/// a signer reused across the batch is decompressed once, not once per signature.
-pub(super) fn verify_batch_bytes<'a>(
-    rng: &mut impl CryptoRng,
-    items: impl IntoIterator<Item = (&'a VerifyingKeyBytes, &'a Signature, &'a [u8])>,
-    strategy: &impl Strategy,
-) -> bool {
-    let items: Vec<_> = items.into_iter().collect();
-    verify_batch_dispatch(rng, &items, strategy)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        signing::{BatchVerifier, SigningKey},
+        signing::{BatchEntry, SigningKey, VerifyingKey},
         test::strategy::Recording,
     };
     use arbitrary::Unstructured;
@@ -686,12 +698,18 @@ mod tests {
                 (&key, &valid, b"different".as_slice(), false, true),
             ] {
                 let strategy = Recording::new(parallel);
-                let mut batch = BatchVerifier::new(1);
-                batch.add(b"resource", message, key, signature);
-                assert_eq!(
-                    batch.verify(&mut commonware_utils::test_rng(), &strategy),
-                    valid
+                let verified = VerifyingKey::verify_batch(
+                    &mut commonware_utils::test_rng(),
+                    &[()],
+                    |_, _| BatchEntry {
+                        namespace: b"resource",
+                        message,
+                        verifying_key: key,
+                        signature,
+                    },
+                    &strategy,
                 );
+                assert_eq!(verified, valid);
                 assert_eq!(strategy.samples.lock().last(), Some(&complete));
             }
         }
@@ -861,6 +879,20 @@ mod tests {
 
     type BatchItem = (VerifyingKeyBytes, Signature, Vec<u8>);
 
+    /// Borrows `batch` as items whose messages are hashed as given.
+    fn items(batch: &[BatchItem]) -> Vec<Item<'_>> {
+        batch
+            .iter()
+            .map(|(key, sig, message)| Item {
+                key,
+                r: &sig.r,
+                s: &sig.s,
+                namespace: None,
+                message,
+            })
+            .collect()
+    }
+
     /// A batch of both independent signers and a repeated signer (every position divisible by 3),
     /// spanning multiple signature-phase and decompression partitions. Keys and messages come
     /// from one drawn seed, so they stay distinct however short the fuzzer's input is.
@@ -915,10 +947,9 @@ mod tests {
             .test(|u| {
                 let rng_seed: [u8; 32] = u.arbitrary()?;
                 let batch = mixed_batch_with_repeats(u, 700)?;
-                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
                 assert!(verify_batch_bytes(
                     &mut FuzzRng::new(rng_seed.to_vec()),
-                    items,
+                    &items(&batch),
                     &strategy,
                 ));
                 Ok(())
@@ -942,13 +973,11 @@ mod tests {
                 let mut batch = mixed_batch_with_repeats(u, 300)?;
                 batch[123].1.s[0] ^= 1;
 
-                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                let items = items(&batch);
                 let serial =
-                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), items, &Sequential);
-
-                let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
+                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), &items, &Sequential);
                 let parallel =
-                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), items, &strategy);
+                    verify_batch_bytes(&mut FuzzRng::new(rng_seed.to_vec()), &items, &strategy);
 
                 assert!(!serial);
                 assert_eq!(serial, parallel);
@@ -962,10 +991,7 @@ mod tests {
         fn check<B: Backend>(backend: B, strategy: &impl Strategy, batch: &[BatchItem]) {
             let seed = [7; 32];
             let width = msm::width_for(2 * batch.len() + 1, false);
-            let items: Vec<_> = batch
-                .iter()
-                .map(|(key, sig, msg)| (key, sig, msg.as_slice()))
-                .collect();
+            let items = items(batch);
             let partitions = signature_phase(backend, &items, &seed, width, strategy).unwrap();
             let zh: Vec<_> = partitions
                 .iter()
@@ -976,18 +1002,18 @@ mod tests {
             // Its `z*h` must sit at the unit and lane that index selects, whatever the partitions.
             let mut expected_sum = Scalar::ZERO;
             let mut expected_terms = Vec::with_capacity(batch.len());
-            for (i, &(key, sig, msg)) in items.iter().enumerate() {
+            for (i, item) in items.iter().enumerate() {
                 let z = batch_coefficients(&seed, (i / 4) as u64)[i % 4];
                 let h = Scalar::from_bytes_mod_order_wide(
-                    &Sha512::hash(&[&sig.r, key.as_bytes(), msg]).0,
+                    &Sha512::hash(&[item.r, item.key.as_bytes(), item.message]).0,
                 );
                 assert_eq!(
                     zh[i / LANES][i % LANES].to_bytes(),
                     z.mul_mod_l(&h).to_bytes()
                 );
-                let s = Scalar::from_canonical_bytes(&sig.s).unwrap();
+                let s = Scalar::from_canonical_bytes(item.s).unwrap();
                 expected_sum = expected_sum.add_mod_l(&z.mul_mod_l(&s));
-                expected_terms.push(Term::new(GAffine::decompress(&sig.r).unwrap(), &z, width));
+                expected_terms.push(Term::new(GAffine::decompress(item.r).unwrap(), &z, width));
             }
 
             // The partitions' `z*s` shares add up to the batch's sum, and the `R` terms carry the
@@ -1037,8 +1063,7 @@ mod tests {
 
     /// Verifies `batch` with a fixed seed.
     fn verify_with(batch: &[BatchItem], strategy: &impl Strategy) -> bool {
-        let items = batch.iter().map(|(vk, sig, msg)| (vk, sig, msg.as_slice()));
-        verify_batch_bytes(&mut FuzzRng::new(vec![7; 32]), items, strategy)
+        verify_batch_bytes(&mut FuzzRng::new(vec![7; 32]), &items(batch), strategy)
     }
 
     /// Verifies `batch` under `Sequential` and every pool, asserting that all reach the same

@@ -30,7 +30,7 @@ pub(crate) const ZIP215_POINTS: [[u8; 32]; 14] = vectors::ZIP215_POINTS;
 
 use crate::{
     key_exchange::{PublicKey as ExchangePublicKey, SecretKey},
-    signing::{BatchVerifier, Signature, SigningKey, VerifyingKey},
+    signing::{BatchEntry, Signature, SigningKey, VerifyingKey},
 };
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::{Copying, DecodeExt as _};
@@ -513,17 +513,18 @@ impl Batch {
     }
 
     fn verify(&self, strategy: &impl Strategy) -> bool {
-        let mut batch = BatchVerifier::new(self.items.len());
-        for item in &self.items {
-            batch.add(
-                &item.namespace,
-                &item.message,
-                &item.verifying_key,
-                &item.signature,
-            );
-        }
         let SecretBytes(rng_seed) = self.rng_seed;
-        batch.verify(&mut FuzzRng::new(rng_seed.to_vec()), strategy)
+        VerifyingKey::verify_batch(
+            &mut FuzzRng::new(rng_seed.to_vec()),
+            &self.items,
+            |_, item| BatchEntry {
+                namespace: &item.namespace,
+                message: &item.message,
+                verifying_key: &item.verifying_key,
+                signature: &item.signature,
+            },
+            strategy,
+        )
     }
 }
 
@@ -608,7 +609,7 @@ mod tests {
     };
     use crate::{
         key_exchange::SecretKey,
-        signing::{BatchVerifier, SigningKey},
+        signing::{BatchEntry, SigningKey},
     };
     use commonware_codec::{Copying, DecodeExt as _};
     use commonware_parallel::{Rayon, Sequential, Strategy};
@@ -644,13 +645,12 @@ mod tests {
             let verifying_key = VerifyingKey::decode(Copying(&vector.public_key)).unwrap();
             let valid = Signature::decode(Copying(vector.signature)).is_ok_and(|signature| {
                 let valid = verifying_key.verify_raw(vector.message, &signature);
-                let batch = || {
-                    let mut batch = BatchVerifier::new(1);
-                    batch.add_raw(vector.message, &verifying_key, &signature);
-                    batch
-                };
                 assert_eq!(
-                    batch().verify(&mut test_rng(), &Sequential),
+                    VerifyingKey::verify_batch_raw(
+                        &mut test_rng(),
+                        &[(&verifying_key, &signature, vector.message)],
+                        &Sequential
+                    ),
                     vector.valid_zip215,
                     "sequential Wycheproof test {}",
                     vector.tc_id
@@ -714,11 +714,24 @@ mod tests {
     #[test]
     fn zip215_verification_vectors() {
         const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_CURVE25519_ZIP215_VECTORS";
+        const MESSAGE: &[u8] = b"Zcash";
 
-        let message = b"Zcash";
+        fn verify(vectors: &[(VerifyingKey, Signature)], strategy: &impl Strategy) -> bool {
+            VerifyingKey::verify_batch(
+                &mut test_rng(),
+                vectors,
+                |_, (verifying_key, signature)| BatchEntry {
+                    namespace: NAMESPACE,
+                    message: MESSAGE,
+                    verifying_key,
+                    signature,
+                },
+                strategy,
+            )
+        }
+
         let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
-        let mut all_sequential = BatchVerifier::new(196);
-        let mut all_parallel = BatchVerifier::new(196);
+        let mut vectors = Vec::with_capacity(196);
 
         // These are the 196 ZIP215 test vectors: every pairing of the eight canonical
         // low-order encodings and their six non-canonical aliases. With s = 0, each pair
@@ -731,20 +744,14 @@ mod tests {
                 let signature = Signature::decode(Copying(&signature_bytes)).unwrap();
 
                 assert!(
-                    verifying_key.verify(NAMESPACE, message, &signature),
+                    verifying_key.verify(NAMESPACE, MESSAGE, &signature),
                     "ZIP215 vector failed for A={public_key_bytes:?}, R={r_bytes:?}",
                 );
-                let batch = || {
-                    let mut batch = BatchVerifier::new(1);
-                    batch.add(NAMESPACE, message, &verifying_key, &signature);
-                    batch
-                };
-                assert!(batch().verify(&mut test_rng(), &Sequential));
-                all_sequential.add(NAMESPACE, message, &verifying_key, &signature);
-                all_parallel.add(NAMESPACE, message, &verifying_key, &signature);
+                vectors.push((verifying_key, signature));
+                assert!(verify(&vectors[vectors.len() - 1..], &Sequential));
             }
         }
-        assert!(all_sequential.verify(&mut test_rng(), &Sequential));
-        assert!(all_parallel.verify(&mut test_rng(), &parallel));
+        assert!(verify(&vectors, &Sequential));
+        assert!(verify(&vectors, &parallel));
     }
 }

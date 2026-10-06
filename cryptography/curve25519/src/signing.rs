@@ -10,7 +10,7 @@
 //! - The scalar component `s` must be canonical (`s < L`), ruling out signature malleability.
 //! - The verification equation is cofactored: `[8](s*B - R - H(R || A || M)*A) == identity`.
 //!
-//! [`VerifyingKey::verify`] and [`BatchVerifier::verify`] apply the same criteria.
+//! [`VerifyingKey::verify`] and [`VerifyingKey::verify_batch`] apply the same criteria.
 //! A non-empty batch of at most `u32::MAX` signatures is always accepted when every signature
 //! verifies individually. Because batch verification checks a randomized linear combination, an
 //! invalid batch may be accepted with probability about `2^-128`, provided each verification
@@ -27,7 +27,6 @@ use crate::curve::G;
 use ::core::{
     fmt::{self, Debug, Display},
     hash::{Hash, Hasher},
-    ops::Range,
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -324,6 +323,86 @@ impl VerifyingKey {
     pub(crate) fn verify_raw(&self, msg: &[u8], sig: &Signature) -> bool {
         self.verify_message(msg, sig)
     }
+
+    /// Checks all the signatures projected from `items`, per the [module's validation
+    /// criteria](self). The projection receives each item's index in `items` and must return the
+    /// same entry for a given index and item.
+    ///
+    /// Empty batches and batches containing more than `u32::MAX` signatures are rejected. Within
+    /// that limit, a non-empty batch is always accepted when every signature verifies individually.
+    /// Because this checks a randomized linear combination, an invalid batch may be accepted when
+    /// the random weights make the combined equation hold, an event of negligible probability
+    /// (about `2^-128`).
+    ///
+    /// This bound requires an RNG unpredictable to whoever assembled the batch. A predictable
+    /// `rng` lets an attacker construct an invalid batch that passes verification.
+    ///
+    /// Rejecting an invalid batch can cost as much as accepting a valid batch of the same size.
+    /// Bound the number of signatures and the size of messages taken from untrusted sources.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a namespace is longer than `u32::MAX` bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_cryptography_curve25519::signing::{BatchEntry, SigningKey, VerifyingKey};
+    /// use commonware_math::algebra::Random;
+    /// use commonware_parallel::Sequential;
+    /// use commonware_utils::test_rng;
+    ///
+    /// let key = SigningKey::random(test_rng());
+    /// let verifying_key = key.verifying_key();
+    /// let namespace = b"example";
+    /// let records = [(b"message".as_slice(), key.sign(namespace, b"message"))];
+    /// assert!(VerifyingKey::verify_batch(
+    ///     &mut test_rng(),
+    ///     &records,
+    ///     |_, (message, signature)| BatchEntry {
+    ///         namespace,
+    ///         message,
+    ///         verifying_key: &verifying_key,
+    ///         signature,
+    ///     },
+    ///     &Sequential,
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn verify_batch<'a, T>(
+        rng: &mut impl CryptoRng,
+        items: &'a [T],
+        project: impl Fn(usize, &'a T) -> BatchEntry<'a>,
+        strategy: &impl Strategy,
+    ) -> bool {
+        let items: Vec<_> = items
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let entry = project(i, item);
+                entry.signature.batch_item(
+                    &entry.verifying_key.bytes,
+                    Some(entry.namespace),
+                    entry.message,
+                )
+            })
+            .collect();
+        core::verify_batch_bytes(rng, &items, strategy)
+    }
+
+    /// Batch-verifies unframed messages for raw Ed25519 test-vector checks.
+    #[cfg(test)]
+    pub(crate) fn verify_batch_raw(
+        rng: &mut impl CryptoRng,
+        items: &[(&Self, &Signature, &[u8])],
+        strategy: &impl Strategy,
+    ) -> bool {
+        let items: Vec<_> = items
+            .iter()
+            .map(|&(key, signature, message)| signature.batch_item(&key.bytes, None, message))
+            .collect();
+        core::verify_batch_bytes(rng, &items, strategy)
+    }
 }
 
 /// An Ed25519 signature.
@@ -337,6 +416,26 @@ impl VerifyingKey {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Signature {
     bytes: [u8; 64],
+}
+
+impl Signature {
+    /// Borrows this signature's `R` and `s` encodings with the signer's key and message as a
+    /// batch item.
+    const fn batch_item<'a>(
+        &'a self,
+        key: &'a core::VerifyingKeyBytes,
+        namespace: Option<&'a [u8]>,
+        message: &'a [u8],
+    ) -> core::Item<'a> {
+        let halves = self.bytes.as_chunks::<32>().0;
+        core::Item {
+            key,
+            r: &halves[0],
+            s: &halves[1],
+            namespace,
+            message,
+        }
+    }
 }
 
 impl Debug for Signature {
@@ -386,107 +485,23 @@ impl arbitrary::Arbitrary<'_> for Signature {
     }
 }
 
-/// Inputs retained for batch verification.
-///
-/// The encoded key is the batch pipeline's authoritative identity. Its optional decoded point is
-/// an individual-verification cache and is not part of the queued state.
-struct BatchItem {
-    /// The message's range in [`BatchVerifier::messages`].
-    message: Range<usize>,
-    public_key: core::VerifyingKeyBytes,
-    signature: core::Signature,
-}
-
-/// A batch verification context.
-pub struct BatchVerifier {
-    items: Vec<BatchItem>,
-    /// Every queued message, back to back. One buffer keeps queueing and dropping a batch free of
-    /// per-signature allocations.
-    messages: Vec<u8>,
-}
-
-impl BatchVerifier {
-    /// Creates a verifier with space for `capacity` signatures.
-    ///
-    /// `capacity` is a trusted allocation hint. Bound externally supplied counts before passing
-    /// them here.
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            items: Vec::with_capacity(capacity),
-            messages: Vec::new(),
-        }
-    }
-
-    /// Queues a signature for verification over the namespaced message.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `namespace` is longer than `u32::MAX` bytes.
-    pub fn add(
-        &mut self,
-        namespace: &[u8],
-        message: &[u8],
-        public_key: &VerifyingKey,
-        signature: &Signature,
-    ) {
-        // The same framing as `union_unique`, written in place.
-        let start = self.messages.len();
-        namespace.len().write(&mut self.messages);
-        self.messages.extend_from_slice(namespace);
-        self.messages.extend_from_slice(message);
-        self.items.push(BatchItem {
-            message: start..self.messages.len(),
-            public_key: public_key.bytes,
-            signature: core::Signature::from_bytes(signature.bytes),
-        });
-    }
-
-    /// Queues an unframed message for raw Ed25519 test-vector checks.
-    #[cfg(test)]
-    pub(crate) fn add_raw(
-        &mut self,
-        message: &[u8],
-        public_key: &VerifyingKey,
-        signature: &Signature,
-    ) {
-        let start = self.messages.len();
-        self.messages.extend_from_slice(message);
-        self.items.push(BatchItem {
-            message: start..self.messages.len(),
-            public_key: public_key.bytes,
-            signature: core::Signature::from_bytes(signature.bytes),
-        });
-    }
-
-    /// Checks all the signatures in the batch.
-    ///
-    /// Empty batches and batches containing more than `u32::MAX` signatures are rejected. Within
-    /// that limit, a non-empty batch is always accepted when every signature verifies individually
-    /// under the [module's validation criteria](self). Because this checks a randomized linear
-    /// combination, an invalid batch may be accepted when the random weights make the combined
-    /// equation hold, an event of negligible probability (about `2^-128`).
-    ///
-    /// This bound requires an RNG unpredictable to whoever assembled the batch. A predictable
-    /// `rng` lets an attacker construct an invalid batch that passes verification.
-    ///
-    /// Rejecting an invalid batch can cost as much as accepting a valid batch of the same size.
-    /// Bound the number of signatures and the size of messages queued from untrusted sources.
-    #[must_use]
-    pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
-        let items = self.items.iter().map(|item| {
-            (
-                &item.public_key,
-                &item.signature,
-                &self.messages[item.message.clone()],
-            )
-        });
-        core::verify_batch_bytes(rng, items, strategy)
-    }
+/// A borrowed view of one signature and the message it authenticates, for
+/// [`VerifyingKey::verify_batch`].
+#[derive(Clone, Copy)]
+pub struct BatchEntry<'a> {
+    /// The namespace used during signing.
+    pub namespace: &'a [u8],
+    /// The message used during signing.
+    pub message: &'a [u8],
+    /// The signer's verifying key.
+    pub verifying_key: &'a VerifyingKey,
+    /// The signature to verify.
+    pub signature: &'a Signature,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchItem, BatchVerifier, SigningKey, VerifyingKey};
+    use super::{BatchEntry, SigningKey, VerifyingKey};
     use commonware_codec::{Copying, DecodeExt, Encode};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
@@ -494,37 +509,38 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn batch_items_do_not_retain_decoded_key_cache() {
-        assert_eq!(
-            core::mem::size_of::<BatchItem>(),
-            core::mem::size_of::<(core::ops::Range<usize>, [u8; 32], super::core::Signature)>(),
-        );
-    }
-
-    #[test]
-    fn queued_messages_use_union_unique_framing() {
-        // The signature is never checked. The pairs include an empty namespace and message, and
-        // a 200-byte namespace whose length prefix takes two bytes.
-        let key =
-            <SigningKey as commonware_math::algebra::Random>::random(test_rng()).verifying_key();
-        let signature = super::Signature { bytes: [0; 64] };
-        let mut verifier = BatchVerifier::new(3);
-        let queued = [
+    fn batch_entries_use_union_unique_framing() {
+        // Signing frames each message with `union_unique`. The pairs include an empty namespace
+        // and message, and a 200-byte namespace whose length prefix takes two bytes.
+        let signer = SigningKey::from_seed([3; 32]);
+        let key = signer.verifying_key();
+        let pairs = [
             (&b""[..], &b""[..]),
             (b"ns", b"message"),
             (&[7; 200][..], b"m"),
         ];
-        for (namespace, message) in queued {
-            verifier.add(namespace, message, &key, &signature);
-        }
+        let signed: Vec<_> = pairs
+            .iter()
+            .map(|&(namespace, message)| (namespace, message, signer.sign(namespace, message)))
+            .collect();
+        let verify = |entries: &[(&[u8], &[u8], super::Signature)]| {
+            VerifyingKey::verify_batch(
+                &mut test_rng(),
+                entries,
+                |_, (namespace, message, signature)| BatchEntry {
+                    namespace,
+                    message,
+                    verifying_key: &key,
+                    signature,
+                },
+                &Sequential,
+            )
+        };
+        assert!(verify(&signed));
 
-        // Each item's range into the shared buffer must hold exactly `union_unique`'s bytes.
-        for (item, (namespace, message)) in verifier.items.iter().zip(queued) {
-            assert_eq!(
-                verifier.messages[item.message.clone()],
-                commonware_utils::union_unique(namespace, message)
-            );
-        }
+        // Moving bytes from the message into the namespace changes the framed message.
+        let (_, _, signature) = signed[1].clone();
+        assert!(!verify(&[(&b"nsm"[..], &b"essage"[..], signature)]));
     }
 
     /// Equality, ordering, and hashing follow the encoding: a decoded copy equals the original
@@ -563,7 +579,13 @@ mod tests {
 
     #[test]
     fn empty_batch_is_invalid() {
-        assert!(!BatchVerifier::new(0).verify(&mut test_rng(), &Sequential));
+        let empty: [(); 0] = [];
+        assert!(!VerifyingKey::verify_batch(
+            &mut test_rng(),
+            &empty,
+            |_, _| unreachable!(),
+            &Sequential
+        ));
     }
 
     #[test]
