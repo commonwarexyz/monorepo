@@ -13,6 +13,11 @@
 //! Driver-owned permit waits use [`Waker::wake`] directly. Their readiness stays
 //! in the driver's acquisition queue and remains available after mailbox closure.
 //!
+//! The pool's inject queue also wakes a parked worker with [`Waker::wake`]
+//! alone, publishing nothing. An idle spin therefore watches
+//! [`Waker::signalled`] as well as the sequence, and clears a wake it saw with
+//! [`Waker::consume_signal`].
+//!
 //! The packed atomic state combines:
 //! - bit 0: waiting on futex
 //! - bit 1: waiting on eventfd
@@ -163,6 +168,8 @@ struct WakerInner {
 /// - Arm a `submit_and_wait` blocking section via [`Waker::arm`]
 /// - Drain `eventfd` readiness on wake CQEs via [`Waker::acknowledge`]
 /// - Re-arm the multishot poll request when needed via [`Waker::reinstall`]
+/// - Test for and clear a wake an idle spin saw via [`Waker::signalled`] and
+///   [`Waker::consume_signal`]
 ///
 /// This type intentionally separates:
 /// - sequence publication (`state` high bits)
@@ -230,8 +237,9 @@ impl Waker {
     /// Signal the current wait target, or latch a wake until the loop next arms.
     ///
     /// The first caller to set `WAKE_SIGNALLED_BIT` in the current epoch performs
-    /// the wake. Later callers do nothing until the loop disarms and clears it.
-    /// This coalesces delayed signals from previously consumed batches.
+    /// the wake. Later callers do nothing until the loop disarms and clears it,
+    /// or a spin consumes it. This coalesces delayed signals from previously
+    /// consumed batches.
     pub fn wake(&self) {
         // Claim one signal for the target observed by this atomic transition.
         let prev = self
@@ -281,6 +289,23 @@ impl Waker {
         // Fast path: the loop is not waiting, or another publisher already
         // claimed the wake for the current armed epoch.
         waiting != 0 && (prev & WAKE_SIGNALLED_BIT) == 0
+    }
+
+    /// Whether a wake was signalled since the last wait was cleared. A pool
+    /// push wakes a parked worker this way without publishing a message, so
+    /// an idle spin watches this bit as well as the sequence.
+    #[inline]
+    pub fn signalled(&self) -> bool {
+        self.inner.state.load(Ordering::Acquire) & WAKE_SIGNALLED_BIT != 0
+    }
+
+    /// Clear a signalled wake that a spin observed, so the next wait blocks
+    /// until a fresh one. A completed wait clears it with its wait state.
+    #[inline]
+    pub fn consume_signal(&self) {
+        self.inner
+            .state
+            .fetch_and(!WAKE_SIGNALLED_BIT, Ordering::Acquire);
     }
 
     /// Return whether any published submissions are still pending relative to
