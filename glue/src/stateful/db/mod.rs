@@ -591,8 +591,9 @@ pub struct SyncEngineConfig {
     /// Number of operations applied per local apply step.
     pub apply_batch_size: NonZeroU64,
 
-    /// Maximum number of outstanding source requests. The request for the pinned nodes counts
-    /// toward it.
+    /// Maximum number of outstanding requests for operations. Requests for pinned nodes are
+    /// outstanding beyond it: one for the current target and, while target updates are deferred,
+    /// up to two for deferred targets.
     pub max_outstanding_requests: NonZeroUsize,
 
     /// Capacity of per-database target-update channels.

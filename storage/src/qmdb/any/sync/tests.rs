@@ -31,7 +31,7 @@ use commonware_utils::{
     sync::{AsyncRwLock, Mutex},
 };
 use futures::{FutureExt, pin_mut};
-use rand::Rng as _;
+use rand::{Rng as _, RngExt as _};
 use std::{
     collections::BTreeSet,
     num::{NonZeroU64, NonZeroUsize},
@@ -2543,6 +2543,436 @@ where
     });
 }
 
+/// Test that target updates received while the boundary request is the last one outstanding
+/// wait for the current target, which is reported before any update is adopted. The boundary reply
+/// arrives only after `updates` updates that each move the lower bound, so an engine that adopted
+/// one of them would cancel the boundary request and report nothing.
+pub(crate) fn test_sync_reports_target_when_boundary_outlasts_updates<H: SyncTestHarness>(
+    updates: usize,
+) where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut db = H::init_db(context.child("source")).await;
+        db = H::apply_ops(db, H::create_ops(64)).await;
+        let floor = db.sync_boundary();
+        db = db.prune(floor).await.unwrap();
+        assert!(floor > Location::new(0));
+        let first = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(floor, db.bounds().end),
+        };
+        let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+        let log = Arc::new(Mutex::new(GateLog {
+            open: false,
+            held: Vec::new(),
+            served: Vec::new(),
+        }));
+
+        // One request covers every operation of a target, so only the boundary is left.
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let (reached_tx, mut reached_rx) = mpsc::channel(16);
+        let (finish_tx, finish_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            target: first.clone(),
+            source: GatedSource {
+                inner: source_db.clone(),
+                log: log.clone(),
+            },
+            fetch_batch_size: NZU64!(1024),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: NZUsize!(4),
+            update_rx: Some(update_rx),
+            finish_rx: Some(finish_rx),
+            reached_target_tx: Some(reached_tx),
+        };
+
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // Answer operations requests until only the boundary request is held.
+            loop {
+                context.sleep(Duration::from_millis(10)).await;
+                let mut log = log.lock();
+                let (boundary, operations): (Vec<_>, Vec<_>) = std::mem::take(&mut log.held)
+                    .into_iter()
+                    .partition(|(request, _)| matches!(request, Request::Boundary { .. }));
+                log.held = boundary;
+                if operations.is_empty() && !log.held.is_empty() {
+                    break;
+                }
+                for (_, release) in operations {
+                    let _ = release.send(());
+                }
+            }
+
+            // Send updates that each move the lower bound, committing until it moves.
+            let stuck = Request::Boundary {
+                size: first.range.end(),
+                start: first.range.start(),
+            };
+            let mut seed = 1;
+            let mut next = first.clone();
+            for _ in 0..updates {
+                next = loop {
+                    let mut guard = source_db.write().await;
+                    let db =
+                        H::apply_ops(guard.take().unwrap(), H::create_ops_seeded(1, seed)).await;
+                    seed += 1;
+                    let candidate = Target {
+                        root: H::sync_target_root(&db),
+                        range: non_empty_range!(db.sync_boundary(), db.bounds().end),
+                    };
+                    *guard = Some(db);
+                    if candidate.range.start() > next.range.start() {
+                        break candidate;
+                    }
+                    assert!(seed < 1000, "lower bound must move");
+                };
+                update_tx.send(next.clone()).await.unwrap();
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Release the first target's boundary only after every update is queued. The first
+            // target is reported before any update is adopted.
+            let held = {
+                let mut log = log.lock();
+                let (first_boundary, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut log.held)
+                    .into_iter()
+                    .partition(|(request, _)| *request == stuck);
+                log.held = rest;
+                first_boundary
+            };
+            assert_eq!(
+                held.len(),
+                1,
+                "the first boundary must still be outstanding"
+            );
+            for (_, release) in held {
+                let _ = release.send(());
+            }
+            context.sleep(Duration::from_millis(10)).await;
+            let mut reports = Vec::new();
+            while let Ok(reached) = reached_rx.try_recv() {
+                reports.push(reached);
+            }
+            assert_eq!(
+                reports.first(),
+                Some(&first),
+                "the first target must be reported before an update is adopted"
+            );
+
+            // Serve every request and finish at the updated target.
+            let held = {
+                let mut log = log.lock();
+                log.open = true;
+                std::mem::take(&mut log.held)
+            };
+            for (_, release) in held {
+                let _ = release.send(());
+            }
+            while !reports.contains(&next) {
+                reports.push(reached_rx.recv().await.expect("sync must report"));
+            }
+            finish_tx.send(()).await.unwrap();
+            next
+        };
+        let (synced, target) = futures::join!(sync, drive);
+        assert_eq!(synced.root(), target.root);
+
+        synced.destroy().await.unwrap();
+        let db = source_db.write().await.take().unwrap();
+        db.destroy().await.unwrap();
+    });
+}
+
+/// Test that a deferred update is adopted when the boundary request it waits behind never
+/// completes and no later update arrives. The engine fetches the deferred update's own boundary
+/// and adopts the update once it arrives.
+pub(crate) fn test_sync_adopts_deferred_update_when_boundary_never_completes<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let mut db = H::init_db(context.child("source")).await;
+        db = H::apply_ops(db, H::create_ops(64)).await;
+        let floor = db.sync_boundary();
+        db = db.prune(floor).await.unwrap();
+        assert!(floor > Location::new(0));
+        let first = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(floor, db.bounds().end),
+        };
+        let stuck = Request::Boundary {
+            size: first.range.end(),
+            start: first.range.start(),
+        };
+        let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+        let log = Arc::new(Mutex::new(GateLog {
+            open: false,
+            held: Vec::new(),
+            served: Vec::new(),
+        }));
+
+        // One request covers every operation of a target, so only the boundary is left.
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let (reached_tx, mut reached_rx) = mpsc::channel(16);
+        let (finish_tx, finish_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            target: first.clone(),
+            source: GatedSource {
+                inner: source_db.clone(),
+                log: log.clone(),
+            },
+            fetch_batch_size: NZU64!(1024),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: NZUsize!(4),
+            update_rx: Some(update_rx),
+            finish_rx: Some(finish_rx),
+            reached_target_tx: Some(reached_tx),
+        };
+
+        // Serves every held request except the first target's boundary, which never completes.
+        let release_all_but_stuck = || {
+            let mut log = log.lock();
+            let (kept, released): (Vec<_>, Vec<_>) = std::mem::take(&mut log.held)
+                .into_iter()
+                .partition(|(request, _)| *request == stuck);
+            log.held = kept;
+            for (_, release) in released {
+                let _ = release.send(());
+            }
+        };
+
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // Answer the operations requests until only the stuck boundary is held.
+            loop {
+                context.sleep(Duration::from_millis(10)).await;
+                let only_stuck = {
+                    let log = log.lock();
+                    log.held.len() == 1 && log.held[0].0 == stuck
+                };
+                if only_stuck {
+                    break;
+                }
+                release_all_but_stuck();
+            }
+
+            // Commit until the lower bound moves, send a single update, and close the channel.
+            let mut seed = 1;
+            let next = loop {
+                let mut guard = source_db.write().await;
+                let db = H::apply_ops(guard.take().unwrap(), H::create_ops_seeded(1, seed)).await;
+                seed += 1;
+                let next = Target {
+                    root: H::sync_target_root(&db),
+                    range: non_empty_range!(db.sync_boundary(), db.bounds().end),
+                };
+                *guard = Some(db);
+                if next.range.start() > first.range.start() {
+                    break next;
+                }
+                assert!(seed < 1000, "lower bound must move");
+            };
+            update_tx.send(next.clone()).await.unwrap();
+            drop(update_tx);
+
+            // Serve everything but the stuck boundary until the update is reached.
+            let deadline = context.current() + Duration::from_secs(60);
+            loop {
+                release_all_but_stuck();
+                if let Ok(reached) = reached_rx.try_recv() {
+                    assert_eq!(reached, next, "only the update can be reached");
+                    break;
+                }
+                assert!(
+                    context.current() < deadline,
+                    "the deferred update must be adopted"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            finish_tx.send(()).await.unwrap();
+            next
+        };
+        let (synced, target) = futures::join!(sync, drive);
+        assert_eq!(synced.root(), target.root);
+
+        synced.destroy().await.unwrap();
+        let db = source_db.write().await.take().unwrap();
+        db.destroy().await.unwrap();
+    });
+}
+
+/// Test that sync converges at the last target under seeded random interleavings of source
+/// commits, target updates, replies in any order, and source pruning, and that every report is a
+/// target that was sent and advances the previous one. The source prunes only up to the lower
+/// bound of a target the engine reported reached, as a peer that retains every target the engine
+/// may still request.
+pub(crate) fn test_sync_follows_random_target_updates<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    const STEPS: usize = 60;
+    for seed in 0..4 {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let mut rng = commonware_utils::TestRng::new(seed);
+            let mut db = H::init_db(context.child("source")).await;
+            db = H::apply_ops(db, H::create_ops(48)).await;
+            let floor = db.sync_boundary();
+            db = db.prune(floor).await.unwrap();
+            let mut target = Target {
+                root: H::sync_target_root(&db),
+                range: non_empty_range!(floor, db.bounds().end),
+            };
+            let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+            let log = Arc::new(Mutex::new(GateLog {
+                open: false,
+                held: Vec::new(),
+                served: Vec::new(),
+            }));
+
+            let (update_tx, update_rx) = mpsc::channel(4);
+            let (reached_tx, mut reached_rx) = mpsc::channel(64);
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let config = Config {
+                context: context.child("client"),
+                db_config: H::config(&context.next_u64().to_string(), &context),
+                target: target.clone(),
+                source: GatedSource {
+                    inner: source_db.clone(),
+                    log: log.clone(),
+                },
+                fetch_batch_size: NZU64!(4),
+                apply_batch_size: NZU64!(16),
+                max_outstanding_requests: NZUsize!(3),
+                update_rx: Some(update_rx),
+                finish_rx: Some(finish_rx),
+                reached_target_tx: Some(reached_tx),
+            };
+
+            let sync = async {
+                sync::sync::<DbOf<H>, _>(config)
+                    .await
+                    .expect("sync must complete")
+            };
+            let drive = async {
+                let mut op_seed = 1_000 * (seed + 1);
+                let mut reached_floor = floor;
+                let mut last_reached: Option<Target<H::Family, Digest>> = None;
+                let mut sent = vec![target.clone()];
+                let check = |reached: &Target<H::Family, Digest>,
+                             last: &Option<Target<H::Family, Digest>>,
+                             sent: &[Target<H::Family, Digest>]| {
+                    assert!(
+                        sent.contains(reached),
+                        "reported a target that was never sent"
+                    );
+                    assert!(
+                        last.as_ref().is_none_or(|last| reached.advances(last)),
+                        "reports must advance"
+                    );
+                };
+                for _ in 0..STEPS {
+                    while let Ok(reached) = reached_rx.try_recv() {
+                        check(&reached, &last_reached, &sent);
+                        reached_floor = reached_floor.max(reached.range.start());
+                        last_reached = Some(reached);
+                    }
+                    match rng.random_range(0..4u8) {
+                        // Answer one held request, chosen at random.
+                        0 | 1 => {
+                            let release = {
+                                let mut log = log.lock();
+                                if log.held.is_empty() {
+                                    None
+                                } else {
+                                    let index = rng.random_range(0..log.held.len());
+                                    Some(log.held.swap_remove(index).1)
+                                }
+                            };
+                            if let Some(release) = release {
+                                let _ = release.send(());
+                            }
+                        }
+                        // Commit to the source and send the new target.
+                        2 => {
+                            let mut guard = source_db.write().await;
+                            let db = H::apply_ops(
+                                guard.take().unwrap(),
+                                H::create_ops_seeded(rng.random_range(1..4), op_seed),
+                            )
+                            .await;
+                            op_seed += 1;
+                            target = Target {
+                                root: H::sync_target_root(&db),
+                                range: non_empty_range!(db.sync_boundary(), db.bounds().end),
+                            };
+                            *guard = Some(db);
+                            drop(guard);
+                            sent.push(target.clone());
+                            update_tx.send(target.clone()).await.unwrap();
+                        }
+                        // Prune the source up to the lower bound of a reached target.
+                        _ => {
+                            let mut guard = source_db.write().await;
+                            let db = guard.take().unwrap().prune(reached_floor).await.unwrap();
+                            *guard = Some(db);
+                        }
+                    }
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+
+                // Answer everything and finish at the last target.
+                let held = {
+                    let mut log = log.lock();
+                    log.open = true;
+                    std::mem::take(&mut log.held)
+                };
+                for (_, release) in held {
+                    let _ = release.send(());
+                }
+                while last_reached.as_ref() != Some(&target) {
+                    let reached = reached_rx.recv().await.expect("sync must report");
+                    check(&reached, &last_reached, &sent);
+                    last_reached = Some(reached);
+                }
+                finish_tx.send(()).await.unwrap();
+                target
+            };
+            let (synced, target) = futures::join!(sync, drive);
+            assert_eq!(synced.root(), target.root);
+
+            synced.destroy().await.unwrap();
+            let db = source_db.write().await.take().unwrap();
+            db.destroy().await.unwrap();
+        });
+    }
+}
+
 /// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
 /// floor.
 pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
@@ -3458,6 +3888,26 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_completes_after_stalled_tip() {
                 super::test_sync_completes_after_stalled_tip::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_reports_target_when_boundary_outlasts_update() {
+                super::test_sync_reports_target_when_boundary_outlasts_updates::<$harness>(1);
+            }
+
+            #[test_traced]
+            fn test_sync_reports_target_when_boundary_outlasts_several_updates() {
+                super::test_sync_reports_target_when_boundary_outlasts_updates::<$harness>(3);
+            }
+
+            #[test_traced]
+            fn test_sync_adopts_deferred_update_when_boundary_never_completes() {
+                super::test_sync_adopts_deferred_update_when_boundary_never_completes::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_sync_follows_random_target_updates() {
+                super::test_sync_follows_random_target_updates::<$harness>();
             }
 
             #[test_traced]

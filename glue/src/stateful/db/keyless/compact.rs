@@ -447,6 +447,8 @@ mod tests {
         source: Arc<FixedDb>,
         stale_target: sync::CompactTarget<mmr::Family, Digest>,
         stale_request_tx: mpsc::Sender<()>,
+        /// Another target size whose requests never complete.
+        also_stalled: Option<Location<mmr::Family>>,
     }
 
     impl sync::Source for SupersedingCompactSource {
@@ -460,9 +462,121 @@ mod tests {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
+            if Some(request.size()) == self.also_stalled {
+                return futures::future::pending().await;
+            }
 
             self.source.serve(request).await
         }
+    }
+
+    /// Serves every target but the stale one after a delay.
+    struct SlowAvailableCompactSource {
+        inner: SupersedingCompactSource,
+        context: deterministic::Context,
+    }
+
+    impl Clone for SlowAvailableCompactSource {
+        fn clone(&self) -> Self {
+            Self {
+                inner: self.inner.clone(),
+                context: self.context.child("clone"),
+            }
+        }
+    }
+
+    impl sync::Source for SlowAvailableCompactSource {
+        type Family = mmr::Family;
+        type Digest = Digest;
+        type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
+        type Error = <Arc<FixedDb> as sync::Source>::Error;
+
+        async fn serve(&self, request: sync::Request<Self::Family>) -> source::Result<Self> {
+            if request.size() != self.inner.stale_target.size {
+                self.context.sleep(Duration::from_millis(250)).await;
+            }
+            self.inner.serve(request).await
+        }
+    }
+
+    /// A stale initial target does not keep sync from reaching a newer target when updates arrive
+    /// faster than responses.
+    #[test]
+    fn stale_compact_tail_makes_progress_with_responses_slower_than_two_updates() {
+        deterministic::Runner::timed(Duration::from_secs(20)).start(|context| async move {
+            let mut source = FixedDb::init(
+                context.child("source"),
+                fixed_config(&context, "stale-tail-source"),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut targets = Vec::new();
+            for value in 1..=32u64 {
+                let floor = source.inactivity_floor_loc();
+                let batch = source
+                    .new_batch()
+                    .append(U64::new(value))
+                    .merkleize(&source, Some(U64::new(value)), floor)
+                    .await
+                    .unwrap();
+                (source, _) = source.apply_batch(batch).await.unwrap();
+                source = source.sync().await.unwrap();
+                targets.push(source.target());
+            }
+            let initial = targets.remove(0);
+            let stale_size = initial.size;
+            let (stale_tx, mut stale_rx) = mpsc::channel(1);
+            let delayed = SlowAvailableCompactSource {
+                inner: SupersedingCompactSource {
+                    source: Arc::new(source),
+                    stale_target: initial.clone(),
+                    stale_request_tx: stale_tx,
+                    also_stalled: None,
+                },
+                context: context.child("source_delay"),
+            };
+            let (update_tx, update_rx) = mpsc::channel(32);
+            let (reached_tx, mut reached_rx) = mpsc::channel(32);
+            let _sync = context.child("sync").spawn(move |context| async move {
+                <FixedDb as StateSyncDb<_, SlowAvailableCompactSource>>::sync_db(
+                    context.child("client"),
+                    fixed_config(&context, "stale-tail-client"),
+                    delayed,
+                    initial,
+                    update_rx,
+                    None,
+                    Some(reached_tx),
+                    sync_config(),
+                )
+                .await
+                .expect("sync should not fail");
+            });
+            stale_rx
+                .recv()
+                .await
+                .expect("initial target should be requested");
+
+            let _updates = context.child("updates").spawn(move |context| async move {
+                for target in targets {
+                    context.sleep(Duration::from_millis(100)).await;
+                    if update_tx.send(target).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // Newer targets take 250 ms to serve, longer than two 100 ms update intervals.
+            select! {
+                reached = reached_rx.recv() => {
+                    let reached = reached.expect("sync must report an available target");
+                    assert_ne!(reached.size, stale_size);
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("continuous updates cancelled every available boundary response");
+                },
+            }
+        });
     }
 
     fn fixed_config(context: &impl BufferPooler, suffix: &str) -> fixed::CompactConfig<Sequential> {
@@ -829,6 +943,7 @@ mod tests {
                 source: Arc::new(source),
                 stale_target: unservable_target.clone(),
                 stale_request_tx,
+                also_stalled: None,
             };
 
             let (update_tx, update_rx) = mpsc::channel(1);
@@ -886,8 +1001,24 @@ mod tests {
         });
     }
 
+    /// A stale compact boundary that never completes is superseded by the only update, which is
+    /// adopted once its own boundary arrives, and sync completes at its target.
     #[test]
     fn state_sync_supersedes_in_flight_stale_compact_target() {
+        supersede_stale_compact_target(false);
+    }
+
+    /// A stale compact boundary that never completes holds back an update the source cannot
+    /// serve. A later update is adopted once its own boundary arrives, and sync completes at its
+    /// target.
+    #[test]
+    fn state_sync_supersedes_stale_compact_target_after_deferred_update() {
+        supersede_stale_compact_target(true);
+    }
+
+    /// Syncs toward a stale compact target whose boundary never completes, then sends the latest
+    /// target, preceded by a middle target when `middle` is set.
+    fn supersede_stale_compact_target(middle: bool) {
         deterministic::Runner::default().start(|context| async move {
             let source = FixedDb::init(
                 context.child("source"),
@@ -911,6 +1042,17 @@ mod tests {
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
+                .append(U64::new(6))
+                .merkleize(&source, Some(U64::new(11)), floor)
+                .await
+                .unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
+            let middle_target = source.target();
+
+            let floor = source.inactivity_floor_loc();
+            let batch = source
+                .new_batch()
                 .append(U64::new(8))
                 .merkleize(&source, Some(U64::new(10)), floor)
                 .await
@@ -924,6 +1066,7 @@ mod tests {
                 source: Arc::new(source),
                 stale_target: stale_target.clone(),
                 stale_request_tx,
+                also_stalled: middle.then_some(middle_target.size),
             };
 
             let (update_tx, update_rx) = mpsc::channel(1);
@@ -947,6 +1090,12 @@ mod tests {
                 })
                 .await
                 .expect("sync should request the stale target first");
+
+            // A middle update, which the source cannot serve either, waits behind the stale
+            // boundary. Either way the last update is adopted when its own boundary arrives.
+            if middle {
+                update_tx.send(middle_target).await.unwrap();
+            }
             update_tx.send(latest_target.clone()).await.unwrap();
 
             let synced = context

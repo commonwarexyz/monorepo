@@ -524,6 +524,8 @@ mod tests {
         source: Arc<FullFixedDb>,
         stale_target: sync::CompactTarget<mmr::Family, Digest>,
         stale_request_tx: mpsc::Sender<()>,
+        /// Another target size whose requests never complete.
+        also_stalled: Option<Location<mmr::Family>>,
     }
 
     impl sync::Source for SupersedingCompactSource {
@@ -535,6 +537,9 @@ mod tests {
         async fn serve(&self, request: sync::Request<Self::Family>) -> source::Result<Self> {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
+                return futures::future::pending().await;
+            }
+            if Some(request.size()) == self.also_stalled {
                 return futures::future::pending().await;
             }
 
@@ -768,6 +773,7 @@ mod tests {
                 source: Arc::new(source),
                 stale_target: unservable_target.clone(),
                 stale_request_tx,
+                also_stalled: None,
             };
 
             let (update_tx, update_rx) = mpsc::channel(1);
@@ -825,8 +831,24 @@ mod tests {
         });
     }
 
+    /// A stale compact boundary that never completes is superseded by the only update, which is
+    /// adopted once its own boundary arrives, and sync completes at its target.
     #[test]
     fn state_sync_supersedes_in_flight_stale_compact_target() {
+        supersede_stale_compact_target(false);
+    }
+
+    /// A stale compact boundary that never completes holds back an update the source cannot
+    /// serve. A later update is adopted once its own boundary arrives, and sync completes at its
+    /// target.
+    #[test]
+    fn state_sync_supersedes_stale_compact_target_after_deferred_update() {
+        supersede_stale_compact_target(true);
+    }
+
+    /// Syncs toward a stale compact target whose boundary never completes, then sends the latest
+    /// target, preceded by a middle target when `middle` is set.
+    fn supersede_stale_compact_target(middle: bool) {
         deterministic::Runner::default().start(|context| async move {
             let source = FullFixedDb::init(
                 context.child("source"),
@@ -853,6 +875,20 @@ mod tests {
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
+                .set(Sha256::hash(&[&[5]]), Sha256::hash(&[&[6]]))
+                .merkleize(&source, Some(Sha256::hash(&[&[11]])), floor)
+                .await
+                .unwrap();
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = source.sync().await.unwrap();
+            let middle_target = sync::CompactTarget {
+                root: source.root(),
+                size: source.bounds().end,
+            };
+
+            let floor = source.inactivity_floor_loc();
+            let batch = source
+                .new_batch()
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .merkleize(&source, Some(Sha256::hash(&[&[10]])), floor)
                 .await
@@ -869,6 +905,7 @@ mod tests {
                 source: Arc::new(source),
                 stale_target: stale_target.clone(),
                 stale_request_tx,
+                also_stalled: middle.then_some(middle_target.size),
             };
 
             let (update_tx, update_rx) = mpsc::channel(1);
@@ -892,6 +929,12 @@ mod tests {
                 })
                 .await
                 .expect("sync should request the stale target first");
+
+            // A middle update, which the source cannot serve either, waits behind the stale
+            // boundary. Either way the last update is adopted when its own boundary arrives.
+            if middle {
+                update_tx.send(middle_target).await.unwrap();
+            }
             update_tx.send(latest_target.clone()).await.unwrap();
 
             let synced = context

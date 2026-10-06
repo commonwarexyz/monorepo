@@ -741,33 +741,41 @@ where
             finish_rx: None,
             reached_target_tx: None,
         };
-        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
+        let mut client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
-        // Hold a real boundary proof until the engine has processed the first update.
-        let client = {
+        // Hold a real boundary proof until the engine has processed the first update. Operations
+        // requests complete meanwhile.
+        let mut requested_rx = requested_rx;
+        let mut client = loop {
             let mut step = pin!(client.step());
-            select! {
-                requested = requested_rx => requested.unwrap(),
-                _ = step.as_mut() => panic!("the boundary response must remain pending"),
+            let stepped = select! {
+                requested = &mut requested_rx => {
+                    requested.unwrap();
+                    None
+                },
+                next = step.as_mut() => Some(next.unwrap()),
+            };
+            match stepped {
+                Some(NextStep::Continue(next)) => client = next,
+                Some(NextStep::Complete(_)) => panic!("client should not be complete"),
+                None => {
+                    update_tx.send(next_target).await.unwrap();
+                    let NextStep::Continue(client) = step.await.unwrap() else {
+                        panic!("client should not be complete");
+                    };
+                    break client;
+                }
             }
-            update_tx.send(next_target).await.unwrap();
-            match step.await.unwrap() {
+        };
+
+        // Release the boundary response requested against the first root, which then applies.
+        release_tx.send(()).unwrap();
+        while Contiguous::bounds(client.journal()).end == *start {
+            client = match client.step().await.unwrap() {
                 NextStep::Continue(client) => client,
                 NextStep::Complete(_) => panic!("client should not be complete"),
-            }
-        };
-
-        // Release the boundary response requested against the first root.
-        release_tx.send(()).unwrap();
-        let client = match client.step().await.unwrap() {
-            NextStep::Continue(client) => client,
-            NextStep::Complete(_) => panic!("client should not be complete"),
-        };
-        assert_eq!(
-            Contiguous::bounds(client.journal()).end,
-            *start + 1,
-            "the retained boundary response must apply"
-        );
+            };
+        }
 
         // The boundary is now verified and applied. Move to a later target before finishing.
         update_tx.send(final_target.clone()).await.unwrap();

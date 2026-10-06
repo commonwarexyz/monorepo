@@ -23,8 +23,130 @@ use std::{
     collections::BTreeMap,
     fmt::Debug,
     num::{NonZeroU64, NonZeroUsize},
+    ops::Range,
     sync::Arc,
 };
+
+/// Number of newer updates after which the first escape is replaced. Each replacement doubles it.
+const ESCAPE_UPDATES: usize = 2;
+
+/// What handling a fetch result leaves the engine to do.
+enum Fetched<DB: Database> {
+    /// A request for the current target completed, or a request was cancelled.
+    Current,
+    /// A deferred update's boundary request failed, or its boundary arrived once nothing below its
+    /// lower bound was outstanding.
+    Unused,
+    /// A deferred update's boundary arrived while a request below its lower bound was
+    /// outstanding. The update is adopted with the operation and pinned nodes at its lower bound.
+    Adopt(Target<DB::Family, DB::Digest>, DB::Op, Vec<DB::Digest>),
+}
+
+/// Target updates deferred until the current target is reached.
+///
+/// It keeps the newest update and an older one, the escape. While they wait behind a request below
+/// their lower bounds, the engine also fetches their boundaries, and adopts an update whose
+/// boundary arrives while that request is still outstanding. Each newer update replaces the newest
+/// one. An escape whose boundary has not arrived after `lifetime` updates is replaced by the
+/// previous newest update, and the lifetime doubles, so an escape's boundary request eventually
+/// outlives any round trip. Adopting an update resets the lifetime.
+enum Deferred<F: Family, D: Digest> {
+    /// No update is deferred.
+    Empty,
+    /// One update is deferred, and it is the escape.
+    One(Target<F, D>),
+    /// The escape and a newer update are deferred.
+    Two {
+        escape: Target<F, D>,
+        latest: Target<F, D>,
+        /// Number of updates deferred since the escape.
+        age: usize,
+        /// Number of newer updates after which the escape is replaced.
+        lifetime: usize,
+    },
+}
+
+impl<F: Family, D: Digest> Deferred<F, D> {
+    /// Returns the newest deferred update.
+    const fn latest(&self) -> Option<&Target<F, D>> {
+        match self {
+            Self::Empty => None,
+            Self::One(latest) | Self::Two { latest, .. } => Some(latest),
+        }
+    }
+
+    /// Returns the escape and the newer update, if deferred.
+    const fn kept(&self) -> [Option<&Target<F, D>>; 2] {
+        match self {
+            Self::Empty => [None, None],
+            Self::One(escape) => [Some(escape), None],
+            Self::Two { escape, latest, .. } => [Some(escape), Some(latest)],
+        }
+    }
+
+    /// Defers `update` as the newest update.
+    const fn push(&mut self, update: Target<F, D>) {
+        *self = match std::mem::replace(self, Self::Empty) {
+            Self::Empty => Self::One(update),
+            Self::One(escape) => Self::Two {
+                escape,
+                latest: update,
+                age: 1,
+                lifetime: ESCAPE_UPDATES,
+            },
+            // The previous newest update arrived one update ago.
+            Self::Two {
+                latest,
+                age,
+                lifetime,
+                ..
+            } if age + 1 >= lifetime => Self::Two {
+                escape: latest,
+                latest: update,
+                age: 1,
+                lifetime: lifetime.saturating_mul(2),
+            },
+            Self::Two {
+                escape,
+                age,
+                lifetime,
+                ..
+            } => Self::Two {
+                escape,
+                latest: update,
+                age: age + 1,
+                lifetime,
+            },
+        };
+    }
+
+    /// Removes and returns the newest update with lower bound `start`, with every older update.
+    fn take_at(&mut self, start: Location<F>) -> Option<Target<F, D>> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::One(update) | Self::Two { latest: update, .. }
+                if update.range.start() == start =>
+            {
+                Some(update)
+            }
+            Self::Two { escape, latest, .. } if escape.range.start() == start => {
+                *self = Self::One(latest);
+                Some(escape)
+            }
+            unchanged => {
+                *self = unchanged;
+                None
+            }
+        }
+    }
+
+    /// Removes every update and returns the newest.
+    const fn take_latest(&mut self) -> Option<Target<F, D>> {
+        match std::mem::replace(self, Self::Empty) {
+            Self::Empty => None,
+            Self::One(latest) | Self::Two { latest, .. } => Some(latest),
+        }
+    }
+}
 
 /// Type alias for sync engine errors
 type Error<DB, S> =
@@ -161,8 +283,9 @@ where
     /// The engine only verifies source data against this commitment and does not select or
     /// authenticate the target.
     pub target: Target<DB::Family, DB::Digest>,
-    /// Maximum number of outstanding requests. The boundary request for the pinned nodes counts
-    /// toward it.
+    /// Maximum number of outstanding operations requests. Boundary requests are outstanding beyond
+    /// it: one for the current target's pinned nodes and, while updates are deferred, up to two for
+    /// deferred updates.
     ///
     /// Sync requests no operations starting `2 * max_outstanding_requests * fetch_batch_size` or
     /// more past the journal tip, which bounds how many fetched operations wait in memory.
@@ -177,13 +300,26 @@ where
     ///
     /// The caller selects targets before sending updates. The engine adopts only strictly
     /// advancing targets and discards the rest.
+    ///
+    /// Once every remaining operation is fetched or requested, the engine defers updates until the
+    /// current target is reached, then adopts the newest. While deferred updates wait behind a
+    /// request below their lower bounds, the engine also fetches the boundaries of the newest and
+    /// of one older update, and adopts an update whose boundary arrives while that request is
+    /// still outstanding. Each newer update replaces the newest one's request. The older one's
+    /// request is replaced after two updates, and each replacement doubles how many updates the
+    /// next one is kept for. A failed request for a deferred update's boundary does not fail
+    /// sync, and is retried later. Requests below the lower bound of the newest target sent may
+    /// never be answered, but the source must keep serving every request at or beyond it.
     pub update_rx: Option<mpsc::Receiver<Target<DB::Family, DB::Digest>>>,
-    /// Channel that requests sync completion once the current target is reached.
+    /// Channel that requests sync completion once the current target is reached. Updates are
+    /// still handled after the request, and sync completes at the first target it reaches.
     ///
     /// When `None`, sync completes as soon as the target is reached.
     pub finish_rx: Option<mpsc::Receiver<()>>,
     /// Channel used to notify an observer once the current target is reached.
-    /// The engine sends at most one notification for each target.
+    /// The engine sends at most one notification for each target it reaches, before it adopts a
+    /// later one. A target left for a deferred update whose boundary arrived first is not
+    /// reported.
     ///
     /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
     /// drained by the observer. The engine awaits send capacity on this channel before
@@ -212,6 +348,9 @@ where
 
     /// The current sync target (root digest and operation bounds)
     target: Target<DB::Family, DB::Digest>,
+
+    /// Target updates deferred until the current target is reached.
+    deferred: Deferred<DB::Family, DB::Digest>,
 
     /// Maximum number of parallel outstanding requests
     max_outstanding_requests: NonZeroUsize,
@@ -246,7 +385,8 @@ where
     finish_rx: Option<mpsc::Receiver<()>>,
 
     /// Channel used to notify an observer once the current target is reached.
-    /// The engine sends at most one notification for each target.
+    /// The engine sends at most one notification for each target it reaches, before it adopts a
+    /// later one.
     ///
     /// When `reached_target_tx` is `Some(...)`, this receiver must be actively
     /// drained by the observer. The engine awaits send capacity on this channel before
@@ -318,6 +458,7 @@ where
             fetched_operations: BTreeMap::new(),
             pinned_nodes,
             target: config.target.clone(),
+            deferred: Deferred::Empty,
             max_outstanding_requests: config.max_outstanding_requests,
             fetch_batch_size: config.fetch_batch_size,
             apply_batch_size: config.apply_batch_size,
@@ -337,10 +478,9 @@ where
         Ok(engine)
     }
 
-    /// Track `request` and spawn its fetch against the shared source.
-    fn spawn_fetch(&mut self, request: Request<DB::Family>) {
+    /// Track `request` and spawn its fetch against the shared source, verified against `root`.
+    fn spawn_fetch(&mut self, request: Request<DB::Family>, root: DB::Digest) {
         let source = Arc::clone(&self.source);
-        let root = self.target.root;
         self.outstanding_requests
             .insert(request, move |id| async move {
                 let result: Result<_, S::Error> = async {
@@ -370,6 +510,29 @@ where
             });
     }
 
+    /// Returns the outstanding requests for the current target, in ascending order of start. A
+    /// boundary request at any other lower bound belongs to a deferred update.
+    fn current_requests(&self) -> impl Iterator<Item = Request<DB::Family>> + '_ {
+        let start = self.target.range.start();
+        self.outstanding_requests.requests().filter(move |request| {
+            !matches!(request, Request::Boundary { .. }) || request.start() == start
+        })
+    }
+
+    /// Returns the first range of the current target that is neither fetched nor requested.
+    fn next_gap(&self) -> Option<Range<Location<DB::Family>>> {
+        crate::qmdb::sync::gaps::find_next(
+            Location::new(self.journal.size())..self.target.range.end(),
+            self.fetched_operations.iter().map(|(&start, operations)| {
+                start..start.checked_add(operations.len() as u64).unwrap()
+            }),
+            self.current_requests().map(|request| {
+                let start = request.start();
+                start..start.checked_add(request.max_ops().get()).unwrap()
+            }),
+        )
+    }
+
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
     ///
     /// Only operations within twice the in-flight capacity of the journal tip are requested, so a
@@ -389,30 +552,29 @@ where
                 size: target_size,
                 start: self.target.range.start(),
             };
-            self.spawn_fetch(request);
+            self.spawn_fetch(request, self.target.root);
         }
 
-        // Calculate the maximum number of requests to make
+        // Calculate the maximum number of requests to make. Boundary requests do not count toward
+        // the maximum, so operations keep arriving while one is outstanding.
+        let operations = self
+            .outstanding_requests
+            .requests()
+            .filter(|request| matches!(request, Request::Operations { .. }))
+            .count();
         let num_requests = self
             .max_outstanding_requests
             .get()
-            .saturating_sub(self.outstanding_requests.len());
+            .saturating_sub(operations);
 
         let lookahead = (self.max_outstanding_requests.get() as u64)
             .saturating_mul(2)
             .saturating_mul(self.fetch_batch_size.get());
-        let log_size = self.journal.size();
-        let lookahead_end = log_size.saturating_add(lookahead);
+        let lookahead_end = self.journal.size().saturating_add(lookahead);
 
         for _ in 0..num_requests {
             // Find the next gap in the sync range that needs to be fetched.
-            let Some(gap_range) = crate::qmdb::sync::gaps::find_next(
-                Location::new(log_size)..self.target.range.end(),
-                self.fetched_operations.iter().map(|(&start, operations)| {
-                    start..start.checked_add(operations.len() as u64).unwrap()
-                }),
-                self.outstanding_requests.ranges(),
-            ) else {
+            let Some(gap_range) = self.next_gap() else {
                 break; // No more gaps to fill
             };
             if *gap_range.start >= lookahead_end {
@@ -430,15 +592,41 @@ where
                 start: gap_range.start,
                 max_ops: batch_size,
             };
-            self.spawn_fetch(request);
+            self.spawn_fetch(request, self.target.root);
+        }
+    }
+
+    /// Returns whether a request of the current target below `start` is outstanding.
+    fn blocks(&self, start: Location<DB::Family>) -> bool {
+        self.current_requests()
+            .next()
+            .is_some_and(|request| request.start() < start)
+    }
+
+    /// Fetch the boundary of each kept deferred update that waits behind a request below its lower
+    /// bound, so it is adopted even if that request never completes.
+    ///
+    /// Requests are tracked by start location, so an operations request of the current target at
+    /// the same location replaces a deferred boundary request, which is issued again once that
+    /// request completes. A failed request is issued again once another request completes or an
+    /// update is deferred or adopted.
+    fn fetch_deferred_boundaries(&mut self) {
+        let kept = self.deferred.kept().map(|update| {
+            update.map(|update| (update.range.start(), update.range.end(), update.root))
+        });
+        for (start, size, root) in kept.into_iter().flatten() {
+            if self.blocks(start) && !self.outstanding_requests.contains(&start) {
+                self.spawn_fetch(Request::Boundary { size, start }, root);
+            }
         }
     }
 
     /// Reset sync state for a target update.
     ///
     /// Keeps fetched operations. Keeps pinned nodes only while the lower bound is unchanged.
-    /// Keeps outstanding requests, whatever target size they were issued for, except those at or
-    /// below a moved lower bound. Each request verifies against the root it was issued with.
+    /// Keeps outstanding requests, whatever target size they were issued for, except those below a
+    /// moved lower bound and operations requests at it. Each request verifies against the root it
+    /// was issued with.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
@@ -449,12 +637,15 @@ where
             self.pinned_nodes = None;
         }
 
-        // A source may prune up to the new lower bound, so a request at or below a moved bound
-        // may never be answered. Requests are also tracked by start location, so one kept at the
-        // new bound would block the boundary request there.
+        // A source may prune up to the new lower bound, so a request below a moved bound may
+        // never be answered. Requests are also tracked by start location, so an operations request
+        // kept at the new bound would block the boundary request there.
         let new_start = new_target.range.start();
-        self.outstanding_requests
-            .retain(|request| !start_moved || request.start() > new_start);
+        self.outstanding_requests.retain(|request| {
+            !start_moved
+                || request.start() > new_start
+                || (request.start() == new_start && matches!(request, Request::Boundary { .. }))
+        });
 
         self.target = new_target;
         self.reached_current_target_reported = false;
@@ -608,22 +799,38 @@ where
         Ok(self.is_at_target()? && self.pinned_nodes_ready())
     }
 
+    /// Returns whether a target update waits for the current target to be reached.
+    ///
+    /// Updates wait while the current target is not reached, every remaining operation is fetched
+    /// or requested, and a request is outstanding to complete it.
+    fn defers_updates(&self) -> Result<bool, Error<DB, S>> {
+        Ok(!self.is_ready_to_complete()?
+            && self.next_gap().is_none()
+            && self.current_requests().next().is_some())
+    }
+
     /// Handle the result of a fetch operation.
     fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, S::Error>,
-    ) -> Result<(), Error<DB, S>> {
+    ) -> Result<Fetched<DB>, Error<DB, S>> {
         // A target update can retire a request before its completed result is handled.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
-            return Ok(());
+            return Ok(Fetched::Current);
         };
 
-        let response = fetch_result
-            .result
-            .map_err(SyncError::Source)?
-            .ok_or(SyncError::Engine(EngineError::InvalidResponse))?;
-
+        // A boundary request at another lower bound is for a deferred update. It is speculative,
+        // so its failure does not fail sync.
         let start_loc = request.start();
+        let speculative =
+            matches!(request, Request::Boundary { .. }) && start_loc != self.target.range.start();
+        let response = match fetch_result.result {
+            Ok(Some(response)) => response,
+            Ok(None) | Err(_) if speculative => return Ok(Fetched::Unused),
+            Ok(None) => return Err(SyncError::Engine(EngineError::InvalidResponse)),
+            Err(err) => return Err(SyncError::Source(err)),
+        };
+
         match response {
             Response::Operations { operations, .. } => {
                 self.store_operations(start_loc, operations);
@@ -631,16 +838,38 @@ where
             Response::Boundary {
                 op, pinned_nodes, ..
             } => {
-                // A tracked boundary request is at the current lower bound. A fetched batch
-                // there already holds its operation.
-                self.pinned_nodes = Some(pinned_nodes);
-                self.fetched_operations
-                    .entry(start_loc)
-                    .or_insert_with(|| vec![op]);
+                if !speculative {
+                    // A fetched batch at the current lower bound already holds its operation.
+                    self.pinned_nodes = Some(pinned_nodes);
+                    self.fetched_operations
+                        .entry(start_loc)
+                        .or_insert_with(|| vec![op]);
+                } else if self.blocks(start_loc)
+                    && let Some(update) = self.deferred.take_at(start_loc)
+                {
+                    return Ok(Fetched::Adopt(update, op, pinned_nodes));
+                } else {
+                    return Ok(Fetched::Unused);
+                }
             }
         }
 
-        Ok(())
+        Ok(Fetched::Current)
+    }
+
+    /// Returns whether `update` advances `latest`. An advancing update with the same root is
+    /// impossible for an append-only log and indicates a caller bug.
+    fn admits(
+        latest: &Target<DB::Family, DB::Digest>,
+        update: &Target<DB::Family, DB::Digest>,
+    ) -> Result<bool, Error<DB, S>> {
+        if !update.advances(latest) {
+            return Ok(false);
+        }
+        if update.root == latest.root {
+            return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
+        }
+        Ok(true)
     }
 
     /// Handle a sync event and return the next engine state.
@@ -650,16 +879,33 @@ where
     ) -> Result<NextStep<Self, DB>, Error<DB, S>> {
         match event {
             Event::TargetUpdate(new_target) => {
-                // A non-advancing update is discarded.
-                if !new_target.advances(&self.target) {
+                // An update that does not advance the latest target, deferred or current, is
+                // discarded.
+                if !Self::admits(self.deferred.latest().unwrap_or(&self.target), &new_target)? {
                     return Ok(NextStep::Continue(self));
                 }
-                // A same-root update that advances is impossible for an append-only log and
-                // indicates a caller bug.
-                if new_target.root == self.target.root {
-                    return Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged));
+
+                // A deferred update waits for the current target to be reached. Boundary requests
+                // of updates it replaces are cancelled.
+                if self.defers_updates()? {
+                    self.deferred.push(new_target);
+                    let current = self.target.range.start();
+                    let kept = self
+                        .deferred
+                        .kept()
+                        .map(|update| update.map(|update| update.range.start()));
+                    self.outstanding_requests.retain(|request| {
+                        !matches!(request, Request::Boundary { .. })
+                            || request.start() == current
+                            || kept.contains(&Some(request.start()))
+                    });
+                    self.fetch_deferred_boundaries();
+                    return Ok(NextStep::Continue(self));
                 }
 
+                // Deferred updates' boundary requests are at or below the new lower bound, so the
+                // reset cancels them or keeps one at it as the new target's.
+                self.deferred = Deferred::Empty;
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress();
                 updated_self.schedule_requests();
@@ -677,14 +923,32 @@ where
             Event::FinishChannelClosed => Err(SyncError::Engine(EngineError::FinishChannelClosed)),
             Event::BatchReceived(fetch_result) => {
                 // An aborted request carries no result, but still wakes the loop to reschedule.
-                if let Ok(fetch_result) = fetch_result {
-                    self.handle_fetch_result(fetch_result)?;
+                let fetched = match fetch_result {
+                    Ok(fetch_result) => self.handle_fetch_result(fetch_result)?,
+                    Err(Aborted) => Fetched::Current,
+                };
+
+                // Adopt a deferred update now rather than wait on the request below its lower
+                // bound, which may never complete. A newer deferred update stays deferred.
+                let unused = matches!(fetched, Fetched::Unused);
+                if let Fetched::Adopt(update, op, pinned_nodes) = fetched {
+                    let start = update.range.start();
+                    self = self.reset_for_target_update(update).await?;
+                    self.pinned_nodes = Some(pinned_nodes);
+                    self.fetched_operations
+                        .entry(start)
+                        .or_insert_with(|| vec![op]);
                 }
                 // Schedule after applying. Measured from the journal tip before the apply, the
                 // lookahead could leave nothing in flight once the tip request lands, and sync
                 // would stall.
                 let mut engine = self.apply_operations().await?;
                 engine.schedule_requests();
+                // An unused deferred boundary request is not issued again here, so a source that
+                // fails it at once is not asked in a loop.
+                if !unused {
+                    engine.fetch_deferred_boundaries();
+                }
                 engine.record_progress();
                 Ok(NextStep::Continue(engine))
             }
@@ -707,26 +971,28 @@ where
 
         // Check if sync is complete
         if self.is_ready_to_complete()? {
-            // Take a queued target update before completing at the old target, unless the
-            // caller already asked to finish. Updates that do not advance the target are
-            // discarded.
+            self.report_reached_target().await;
+
+            // Take the newest deferred or queued target update before completing at the reached
+            // target, unless the caller already asked to finish. Updates that do not advance the
+            // newest one taken so far are discarded.
             if !self.finish_requested {
+                let mut update = self.deferred.take_latest();
                 while let Some(update_rx) = self.update_rx.as_mut() {
                     match update_rx.try_recv() {
                         Ok(new_target) => {
-                            if new_target.advances(&self.target) {
-                                return self.handle_event(Event::TargetUpdate(new_target)).await;
+                            if Self::admits(update.as_ref().unwrap_or(&self.target), &new_target)? {
+                                update = Some(new_target);
                             }
                         }
                         Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            self.update_rx = None;
-                        }
+                        Err(TryRecvError::Disconnected) => self.update_rx = None,
                     }
                 }
+                if let Some(target) = update {
+                    return self.handle_event(Event::TargetUpdate(target)).await;
+                }
             }
-
-            self.report_reached_target().await;
 
             if self.finish_rx.is_some() {
                 let event = wait_for_event(
@@ -1089,10 +1355,10 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
             let mut engine = Engine::new(config).await.unwrap();
+            engine.outstanding_requests.retain(|_| false);
 
             // Track a pending boundary request and an operation request at the first target
             // size.
-            assert!(engine.outstanding_requests.contains(&Location::new(5)));
             insert_pending_request(
                 &mut engine,
                 Request::Boundary {
@@ -1209,12 +1475,13 @@ mod tests {
             let mut engine = engine.reset_for_target_update(next).await.unwrap();
             engine.schedule_requests();
 
-            // Both requests are cancelled and the boundary request at the new lower bound is
-            // the only one outstanding.
+            // Both requests are cancelled. Scheduling issues the boundary request at the new lower
+            // bound and, beside it, the next operation.
             assert!(engine.outstanding_requests.remove(operation_id).is_none());
             assert!(!engine.outstanding_requests.contains(&Location::new(5)));
             assert!(engine.outstanding_requests.contains(&Location::new(6)));
-            assert_eq!(engine.outstanding_requests.len(), 1);
+            assert!(engine.outstanding_requests.contains(&Location::new(7)));
+            assert_eq!(engine.outstanding_requests.len(), 2);
         });
     }
 
@@ -1307,14 +1574,19 @@ mod tests {
         });
     }
 
+    /// A target reached with updates queued is reported before the newest advancing update is
+    /// taken.
     #[test]
-    fn step_takes_queued_update_before_completing() {
+    fn step_reports_reached_target_before_taking_queued_update() {
         deterministic::Runner::default().start(|context| async move {
-            let (update_tx, update_rx) = mpsc::channel(2);
+            let (update_tx, update_rx) = mpsc::channel(3);
+            let (reached_tx, mut reached_rx) = mpsc::channel(1);
             let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            let reached = config.target.clone();
             config.update_rx = Some(update_rx);
-            // Queue a stale update and an advancing one. The stale one is discarded and
-            // the advancing one retargets the engine instead of completing.
+            config.reached_target_tx = Some(reached_tx);
+            // Queue a stale update and two advancing ones. The stale one is discarded and the
+            // newest retargets the engine instead of completing.
             let stale = Target {
                 root: sha256::Digest::from([2u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(10)),
@@ -1323,14 +1595,53 @@ mod tests {
                 root: sha256::Digest::from([3u8; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(12)),
             };
+            let newest = Target {
+                root: sha256::Digest::from([4u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(14)),
+            };
             update_tx.send(stale).await.unwrap();
-            update_tx.send(advancing.clone()).await.unwrap();
+            update_tx.send(advancing).await.unwrap();
+            update_tx.send(newest.clone()).await.unwrap();
 
             let engine = Engine::new(config).await.unwrap();
             let NextStep::Continue(engine) = engine.step().await.unwrap() else {
                 panic!("engine should retarget instead of completing");
             };
-            assert_eq!(engine.target, advancing);
+            assert_eq!(engine.target, newest);
+            assert_eq!(reached_rx.try_recv().unwrap(), reached);
+        });
+    }
+
+    /// An update received with the journal at the target end and the boundary request still
+    /// outstanding waits for the current target instead of cancelling the boundary.
+    #[test]
+    fn update_waits_for_boundary_when_journal_is_complete() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            let current = config.target.clone();
+            let mut engine = Engine::new(config).await.unwrap();
+            engine.pinned_nodes = None;
+            insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(10),
+                    start: Location::new(5),
+                },
+            );
+
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(7), Location::new(12)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(update))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert_eq!(engine.target, current);
+            assert!(engine.outstanding_requests.contains(&Location::new(5)));
         });
     }
 
@@ -1355,6 +1666,749 @@ mod tests {
             let NextStep::Complete(_) = engine.step().await.unwrap() else {
                 panic!("a requested finish must win over a queued update");
             };
+        });
+    }
+
+    /// Returns an engine at target [5, 10) whose pending requests cover every remaining operation,
+    /// and the operation request's ID. With `pinned`, pinned nodes are held and the operation
+    /// request covers [5, 10). Otherwise a boundary request at 5 is pending and the operation
+    /// request covers [6, 10).
+    async fn tail_engine(
+        config: Config<TestDb, TestSource>,
+        pinned: bool,
+    ) -> (Engine<TestDb, TestSource>, RequestId) {
+        let mut engine = Engine::new(config).await.unwrap();
+        engine.outstanding_requests.retain(|_| false);
+        let start = if pinned {
+            engine.pinned_nodes = Some(Vec::new());
+            5
+        } else {
+            insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(10),
+                    start: Location::new(5),
+                },
+            );
+            6
+        };
+        let id = insert_pending_request(
+            &mut engine,
+            Request::Operations {
+                size: Location::new(10),
+                start: Location::new(start),
+                max_ops: NonZeroU64::new(10 - start).unwrap(),
+            },
+        );
+        (engine, id)
+    }
+
+    /// Updates received while every remaining operation is requested and pinned nodes are held
+    /// wait for the current target. The engine reports the reached target, then adopts the
+    /// newest update.
+    #[test]
+    fn tail_defers_newest_update_until_target_is_reported() {
+        deterministic::Runner::default().start(|context| async move {
+            let (reached_tx, mut reached_rx) = mpsc::channel(1);
+            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let reached = config.target.clone();
+            config.reached_target_tx = Some(reached_tx);
+            let (engine, id) = tail_engine(config, true).await;
+
+            // An update in the tail waits.
+            let first = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(first.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert_eq!(engine.target, reached);
+            assert_eq!(engine.deferred.latest(), Some(&first));
+
+            // A newer update waits too, and an older one is discarded.
+            let newest = Target {
+                root: sha256::Digest::from([3; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(14)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(newest.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            let NextStep::Continue(mut engine) = engine
+                .handle_event(Event::TargetUpdate(first.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a discarded update must not complete sync");
+            };
+            assert_eq!(engine.target, reached);
+            assert_eq!(engine.deferred.latest(), Some(&newest));
+            assert!(reached_rx.try_recv().is_err());
+
+            // The response reaches the current target. The next step reports it, then adopts
+            // the newest update.
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Operations {
+                        proof: Proof {
+                            leaves: Location::new(10),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        operations: vec![1, 2, 3, 4, 5],
+                    })),
+                })
+                .unwrap();
+            let engine = engine.apply_operations().await.unwrap();
+            let NextStep::Continue(engine) = engine.step().await.unwrap() else {
+                panic!("engine should adopt the deferred update instead of completing");
+            };
+            assert_eq!(reached_rx.try_recv().unwrap(), reached);
+            assert_eq!(engine.target, newest);
+            assert!(engine.deferred.latest().is_none());
+        });
+    }
+
+    /// Updates received while the boundary request is outstanding and every remaining operation is
+    /// requested wait for the current target, however far their lower bounds move. The newest and
+    /// an older one, the escape, fetch their boundaries. After two updates the escape is replaced
+    /// by the previous newest, which is then kept for four. The current boundary is kept, and the
+    /// escape's arrival adopts it.
+    #[test]
+    fn boundary_tail_keeps_boundary_across_updates() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let (mut engine, _) = tail_engine(config, false).await;
+            let current = engine.target.clone();
+            let update = |n: u64| Target {
+                root: sha256::Digest::from([n as u8; 32]),
+                range: non_empty_range!(Location::new(n), Location::new(2 * n)),
+            };
+
+            // Each update moves the lower bound and waits behind the boundary at 5. The update at
+            // 7 is the escape until the one at 9 replaces it with the one at 8.
+            for n in 7..=11 {
+                let NextStep::Continue(next) = engine
+                    .handle_event(Event::TargetUpdate(update(n)))
+                    .await
+                    .unwrap()
+                else {
+                    panic!("a deferred update must not complete sync");
+                };
+                engine = next;
+                let escape = if n < 9 { 7 } else { 8 };
+                assert_eq!(engine.target, current);
+                assert_eq!(engine.deferred.kept()[0], Some(&update(escape)));
+                assert_eq!(engine.deferred.latest(), Some(&update(n)));
+                for start in 5..=12 {
+                    // The current boundary is at 5 and the operations request at 6.
+                    let kept = start <= 6 || start == escape || start == n;
+                    assert_eq!(
+                        engine.outstanding_requests.contains(&Location::new(start)),
+                        kept,
+                        "boundary at {start} after update {n}"
+                    );
+                }
+            }
+
+            // The boundary at 8 arrives. Its update is adopted and the newest becomes the escape.
+            let id = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(16),
+                    start: Location::new(8),
+                },
+            );
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::BatchReceived(Ok(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Boundary {
+                        proof: Proof {
+                            leaves: Location::new(16),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        op: 8,
+                        pinned_nodes: vec![],
+                    })),
+                })))
+                .await
+                .unwrap()
+            else {
+                panic!("the adopted target is not reached");
+            };
+            assert_eq!(engine.target, update(8));
+            assert_eq!(engine.pinned_nodes, Some(vec![]));
+            assert_eq!(engine.deferred.kept()[0], Some(&update(11)));
+            assert_eq!(engine.deferred.latest(), Some(&update(11)));
+            assert!(!engine.outstanding_requests.contains(&Location::new(5)));
+
+            // The new escape's boundary does not take the adopted target's only request slot.
+            assert_eq!(engine.journal.size(), 9);
+            assert!(engine.outstanding_requests.contains(&Location::new(9)));
+            assert!(engine.outstanding_requests.contains(&Location::new(11)));
+        });
+    }
+
+    /// A deferred update with no outstanding request below its lower bound fetches no boundary.
+    #[test]
+    fn deferred_update_without_request_below_floor_fetches_no_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 7, Arc::new(AtomicUsize::new(0)));
+            let mut engine = Engine::new(config).await.unwrap();
+            engine.outstanding_requests.retain(|_| false);
+            engine.pinned_nodes = Some(Vec::new());
+            insert_pending_request(
+                &mut engine,
+                Request::Operations {
+                    size: Location::new(10),
+                    start: Location::new(7),
+                    max_ops: NZU64!(3),
+                },
+            );
+
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(12)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(update.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert_eq!(engine.deferred.latest(), Some(&update));
+            assert!(!engine.outstanding_requests.contains(&Location::new(6)));
+        });
+    }
+
+    /// Adopting a deferred update keeps its boundary request, whose response then supplies the
+    /// adopted target's pinned nodes.
+    #[test]
+    fn adoption_keeps_boundary_at_new_lower_bound() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let (engine, id) = tail_engine(config, true).await;
+
+            // An update behind the operations request at 5 fetches its boundary at 11, past the
+            // current target's end.
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(11), Location::new(14)),
+            };
+            let NextStep::Continue(mut engine) = engine
+                .handle_event(Event::TargetUpdate(update.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            let boundary = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(14),
+                    start: Location::new(11),
+                },
+            );
+
+            // The current target is reached, and the next step adopts the update.
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Operations {
+                        proof: Proof {
+                            leaves: Location::new(10),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        operations: vec![1, 2, 3, 4, 5],
+                    })),
+                })
+                .unwrap();
+            let engine = engine.apply_operations().await.unwrap();
+            let NextStep::Continue(mut engine) = engine.step().await.unwrap() else {
+                panic!("engine should adopt the deferred update instead of completing");
+            };
+            assert_eq!(engine.target, update);
+            assert!(engine.pinned_nodes.is_none());
+
+            // The boundary request issued for the deferred update still completes.
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id: boundary,
+                    result: Ok(Some(Response::Boundary {
+                        proof: Proof {
+                            leaves: Location::new(14),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        op: 11,
+                        pinned_nodes: vec![],
+                    })),
+                })
+                .unwrap();
+            assert_eq!(engine.pinned_nodes, Some(vec![]));
+        });
+    }
+
+    /// An operation request below the lower bound of a deferred update stays outstanding when newer
+    /// updates replace the deferred ones.
+    #[test]
+    fn tail_keeps_request_below_deferred_floor_across_updates() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let (mut engine, _) = tail_engine(config, true).await;
+            let current = engine.target.clone();
+            for (root, start, end) in [(2u8, 7u64, 12u64), (3, 8, 14), (4, 9, 16)] {
+                let update = Target {
+                    root: sha256::Digest::from([root; 32]),
+                    range: non_empty_range!(Location::new(start), Location::new(end)),
+                };
+                let NextStep::Continue(next) = engine
+                    .handle_event(Event::TargetUpdate(update.clone()))
+                    .await
+                    .unwrap()
+                else {
+                    panic!("a deferred update must not complete sync");
+                };
+                engine = next;
+                assert_eq!(engine.target, current);
+                assert_eq!(engine.deferred.latest(), Some(&update));
+                assert!(engine.outstanding_requests.contains(&Location::new(5)));
+            }
+        });
+    }
+
+    /// A requested finish completes at the reached target and drops the deferred update.
+    #[test]
+    fn finish_drops_deferred_update() {
+        deterministic::Runner::default().start(|context| async move {
+            let (finish_tx, finish_rx) = mpsc::channel(1);
+            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+
+            // TestDb's root.
+            config.target.root = sha256::Digest::from([0u8; 32]);
+            config.finish_rx = Some(finish_rx);
+            let (engine, id) = tail_engine(config, true).await;
+
+            // An update in the tail waits.
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            let NextStep::Continue(mut engine) = engine
+                .handle_event(Event::TargetUpdate(update.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert_eq!(engine.deferred.latest(), Some(&update));
+
+            // The caller asks to finish, and the response reaches the current target.
+            finish_tx.send(()).await.unwrap();
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Operations {
+                        proof: Proof {
+                            leaves: Location::new(10),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        operations: vec![1, 2, 3, 4, 5],
+                    })),
+                })
+                .unwrap();
+            let engine = engine.apply_operations().await.unwrap();
+            let NextStep::Complete(_) = engine.step().await.unwrap() else {
+                panic!("a requested finish must win over a deferred update");
+            };
+        });
+    }
+
+    /// A finish requested before the current target is reached keeps the deferred update and its
+    /// boundary request, whose arrival adopts the update.
+    #[test]
+    fn finish_before_reaching_target_keeps_deferred_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let (engine, _) = tail_engine(config, false).await;
+
+            // An update behind the boundary at 5 is deferred and fetches its own boundary at 7.
+            let deferred = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(7), Location::new(12)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(deferred.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            let NextStep::Continue(mut engine) =
+                engine.handle_event(Event::FinishRequested).await.unwrap()
+            else {
+                panic!("the current target is not reached");
+            };
+            assert_eq!(engine.deferred.kept()[0], Some(&deferred));
+            assert!(engine.outstanding_requests.contains(&Location::new(7)));
+
+            // Replace it with a request whose response the test delivers.
+            let id = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(12),
+                    start: Location::new(7),
+                },
+            );
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::BatchReceived(Ok(IndexedFetchResult {
+                    id,
+                    result: Ok(Some(Response::Boundary {
+                        proof: Proof {
+                            leaves: Location::new(12),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        op: 7,
+                        pinned_nodes: vec![],
+                    })),
+                })))
+                .await
+                .unwrap()
+            else {
+                panic!("the adopted target is not reached");
+            };
+            assert_eq!(engine.target, deferred);
+            assert!(engine.deferred.latest().is_none());
+            assert!(!engine.outstanding_requests.contains(&Location::new(5)));
+            assert!(!engine.outstanding_requests.contains(&Location::new(7)));
+        });
+    }
+
+    /// The escape is replaced by the previous newest update after two updates, then after four,
+    /// then after eight.
+    #[test]
+    fn escape_lifetime_doubles_after_each_replacement() {
+        let target = |n: u64| Target::<MmrFamily, sha256::Digest> {
+            root: sha256::Digest::from([n as u8; 32]),
+            range: non_empty_range!(Location::new(n), Location::new(n + 1)),
+        };
+        let mut deferred = Deferred::Empty;
+        let mut escapes = Vec::new();
+        for n in 1..=15 {
+            deferred.push(target(n));
+            let escape = *deferred.kept()[0].unwrap().range.start();
+            if escapes.last().is_none_or(|&(_, last)| last != escape) {
+                escapes.push((n, escape));
+            }
+            assert_eq!(deferred.latest(), Some(&target(n)));
+        }
+        assert_eq!(escapes, vec![(1, 1), (3, 2), (6, 5), (13, 12)]);
+
+        // The escape's arrival adopts it, the newest update becomes the escape, and the lifetime
+        // returns to two.
+        assert_eq!(deferred.take_at(Location::new(12)), Some(target(12)));
+        assert_eq!(deferred.kept()[0], Some(&target(15)));
+        deferred.push(target(16));
+        deferred.push(target(17));
+        assert_eq!(deferred.kept()[0], Some(&target(16)));
+        assert_eq!(deferred.take_latest(), Some(target(17)));
+        assert!(deferred.latest().is_none());
+    }
+
+    /// When the escape and the newest update share a lower bound, the boundary's arrival adopts the
+    /// newest.
+    #[test]
+    fn take_at_prefers_newest_update_at_lower_bound() {
+        let target = |root: u8, end: u64| Target::<MmrFamily, sha256::Digest> {
+            root: sha256::Digest::from([root; 32]),
+            range: non_empty_range!(Location::new(7), Location::new(end)),
+        };
+        let mut deferred = Deferred::Empty;
+        deferred.push(target(1, 10));
+        deferred.push(target(2, 12));
+        assert_eq!(deferred.take_at(Location::new(7)), Some(target(2, 12)));
+        assert!(deferred.latest().is_none());
+    }
+
+    /// A boundary response at `start` for a request at `size`.
+    fn boundary_result(
+        id: RequestId,
+        size: u64,
+        start: u64,
+    ) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, Infallible> {
+        IndexedFetchResult {
+            id,
+            result: Ok(Some(Response::Boundary {
+                proof: Proof {
+                    leaves: Location::new(size),
+                    inactive_peaks: 0,
+                    digests: vec![],
+                },
+                op: start as i32,
+                pinned_nodes: vec![],
+            })),
+        }
+    }
+
+    /// A deferred update's boundary that arrives once no request below its lower bound is
+    /// outstanding is dropped, and the update stays deferred.
+    #[test]
+    fn deferred_boundary_is_dropped_once_unblocked() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut config = test_engine_config(context, 15, Arc::new(AtomicUsize::new(0)));
+            config.target.range = non_empty_range!(Location::new(5), Location::new(20));
+            let mut engine = Engine::new(config).await.unwrap();
+            let current = engine.target.clone();
+            let boundary = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(20),
+                    start: Location::new(5),
+                },
+            );
+            insert_pending_request(
+                &mut engine,
+                Request::Operations {
+                    size: Location::new(20),
+                    start: Location::new(15),
+                    max_ops: NZU64!(5),
+                },
+            );
+
+            // An update behind the boundary at 5 fetches its own boundary at 10.
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(10), Location::new(30)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(update.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert!(engine.outstanding_requests.contains(&Location::new(10)));
+
+            // The boundary at 5 arrives, leaving only the request at 15, beyond the update's
+            // lower bound. The update's boundary then arrives and is dropped.
+            let NextStep::Continue(mut engine) = engine
+                .handle_event(Event::BatchReceived(Ok(boundary_result(boundary, 20, 5))))
+                .await
+                .unwrap()
+            else {
+                panic!("the current target is not reached");
+            };
+            let id = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(30),
+                    start: Location::new(10),
+                },
+            );
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::BatchReceived(Ok(boundary_result(id, 30, 10))))
+                .await
+                .unwrap()
+            else {
+                panic!("the current target is not reached");
+            };
+            assert_eq!(engine.target, current);
+            assert_eq!(engine.deferred.latest(), Some(&update));
+            assert!(!engine.outstanding_requests.contains(&Location::new(10)));
+        });
+    }
+
+    /// A failed request for a deferred update's boundary does not fail sync. The update stays
+    /// deferred, and its boundary is requested again when another update arrives.
+    #[test]
+    fn failed_deferred_boundary_is_retried_on_next_update() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let (engine, _) = tail_engine(config, false).await;
+            let first = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(7), Location::new(12)),
+            };
+            let NextStep::Continue(mut engine) = engine
+                .handle_event(Event::TargetUpdate(first.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+
+            // The source has no response for the boundary at 7.
+            let id = insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(12),
+                    start: Location::new(7),
+                },
+            );
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::BatchReceived(Ok(IndexedFetchResult {
+                    id,
+                    result: Ok(None),
+                })))
+                .await
+                .unwrap()
+            else {
+                panic!("the current target is not reached");
+            };
+            assert_eq!(engine.deferred.latest(), Some(&first));
+            assert!(!engine.outstanding_requests.contains(&Location::new(7)));
+
+            // The next update requests both boundaries.
+            let next = Target {
+                root: sha256::Digest::from([3; 32]),
+                range: non_empty_range!(Location::new(8), Location::new(14)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(next))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert!(engine.outstanding_requests.contains(&Location::new(7)));
+            assert!(engine.outstanding_requests.contains(&Location::new(8)));
+        });
+    }
+
+    /// An outstanding boundary request does not count toward the request limit, so with a limit of
+    /// one, operations are still requested while the pinned nodes are pending.
+    #[test]
+    fn boundary_request_leaves_room_for_operations() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let engine = Engine::new(config).await.unwrap();
+            let requests = engine.outstanding_requests.requests().collect::<Vec<_>>();
+            assert!(matches!(
+                requests[..],
+                [Request::Boundary { .. }, Request::Operations { .. }]
+            ));
+        });
+    }
+
+    /// A deferred update whose lower bound holds an operations request of the current target
+    /// fetches its boundary once that request completes.
+    #[test]
+    fn deferred_boundary_is_requested_once_its_lower_bound_is_free() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let (engine, operations) = tail_engine(config, false).await;
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(6), Location::new(12)),
+            };
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::TargetUpdate(update.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert_eq!(engine.deferred.latest(), Some(&update));
+
+            // The operations request at 6 completes, while the boundary at 5 stays outstanding.
+            let NextStep::Continue(engine) = engine
+                .handle_event(Event::BatchReceived(Ok(IndexedFetchResult {
+                    id: operations,
+                    result: Ok(Some(Response::Operations {
+                        proof: Proof {
+                            leaves: Location::new(10),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        operations: vec![6, 7, 8, 9],
+                    })),
+                })))
+                .await
+                .unwrap()
+            else {
+                panic!("the current target is not reached");
+            };
+            let at_update = engine
+                .outstanding_requests
+                .requests()
+                .find(|request| request.start() == Location::new(6));
+            assert!(matches!(at_update, Some(Request::Boundary { .. })));
+        });
+    }
+
+    /// An operations request of the current target at a deferred update's lower bound replaces
+    /// that update's boundary request.
+    #[test]
+    fn operations_request_replaces_deferred_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut config = test_engine_config(context, 9, Arc::new(AtomicUsize::new(0)));
+            config.target.range = non_empty_range!(Location::new(8), Location::new(16));
+            config.max_outstanding_requests = NZUsize!(4);
+            let mut engine = Engine::new(config).await.unwrap();
+            engine.outstanding_requests.retain(|_| false);
+            engine.pinned_nodes = Some(Vec::new());
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(11), Location::new(22)),
+            };
+            engine.deferred.push(update.clone());
+            insert_pending_request(
+                &mut engine,
+                Request::Boundary {
+                    size: Location::new(22),
+                    start: Location::new(11),
+                },
+            );
+
+            // The deferred boundary does not cover the current target's operation at 11.
+            engine.schedule_requests();
+            let at_update = engine
+                .outstanding_requests
+                .requests()
+                .find(|request| request.start() == Location::new(11));
+            assert!(matches!(at_update, Some(Request::Operations { .. })));
+            assert_eq!(engine.deferred.latest(), Some(&update));
+        });
+    }
+
+    /// A queued update that advances the reached target with an unchanged root fails sync, even
+    /// when a later queued update supersedes it.
+    #[test]
+    fn step_rejects_queued_update_with_unchanged_root() {
+        deterministic::Runner::default().start(|context| async move {
+            let (update_tx, update_rx) = mpsc::channel(2);
+            let mut config = test_engine_config(context, 10, Arc::new(AtomicUsize::new(0)));
+            config.update_rx = Some(update_rx);
+            let unchanged_root = Target {
+                root: config.target.root,
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            let later = Target {
+                root: sha256::Digest::from([3; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(14)),
+            };
+            update_tx.send(unchanged_root).await.unwrap();
+            update_tx.send(later).await.unwrap();
+
+            let engine = Engine::new(config).await.unwrap();
+            assert!(matches!(
+                engine.step().await,
+                Err(SyncError::Engine(EngineError::SyncTargetRootUnchanged))
+            ));
         });
     }
 
