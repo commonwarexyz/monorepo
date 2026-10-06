@@ -2,9 +2,14 @@
 //! with field multiplication built on IFMA's 52-bit multiply-accumulates.
 
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, WithBackend, msm,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, WithBackend, WithSingle,
+    msm,
 };
 use core::arch::x86_64::*;
+
+// One point packed across a 256-bit register, for single-signature verification and fixed-base
+// multiplication.
+mod single;
 
 /// One field element per lane, as five limb rows.
 type Regs = [__m512i; 5];
@@ -26,9 +31,12 @@ const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
 pub(super) struct Backend(());
 
 /// Feature set this backend requires: AVX-512F for the 512-bit integer add/shift/mask operations,
-/// and AVX-512 IFMA for the 52x52-bit multiply-accumulates.
+/// AVX-512 IFMA for the 52x52-bit multiply-accumulates, and AVX-512VL for the 256-bit forms of
+/// both, which the single-point operations use.
 fn available() -> bool {
-    is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512ifma")
+    is_x86_feature_detected!("avx512f")
+        && is_x86_feature_detected!("avx512vl")
+        && is_x86_feature_detected!("avx512ifma")
 }
 
 /// Loads 5 rows of 8 packed `u64` limbs into zmm registers.
@@ -583,6 +591,12 @@ impl Backend {
         }
     }
 
+    /// Runs a single-point computation with AVX-512 enabled for the entire entry point.
+    #[target_feature(enable = "avx512f,avx512vl,avx512ifma")]
+    fn call_single<C: WithSingle>(self, computation: C) -> C::Output {
+        computation.call(single::Packed::new(self))
+    }
+
     /// Runs a native-lane computation with AVX-512 enabled for the entire entry point.
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn call_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
@@ -693,11 +707,10 @@ impl Backend {
 }
 
 impl super::Backend for Backend {
-    /// One lane-wise square-root chain covers both encodings, costing less than two scalar
-    /// chains.
-    fn decompress_pair(self, encodings: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
-        let points = GAffine::decompress_batch(self, &core::array::from_fn(|i| *encodings[i % 2]));
-        Some([points[0]?, points[1]?])
+    #[inline(always)]
+    fn with_single<C: WithSingle>(self, computation: C) -> C::Output {
+        // SAFETY: Backend construction checks AVX-512F, AVX-512VL, and AVX-512 IFMA support.
+        unsafe { self.call_single(computation) }
     }
 }
 

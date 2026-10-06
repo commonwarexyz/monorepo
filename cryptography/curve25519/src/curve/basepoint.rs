@@ -12,12 +12,12 @@
 //!
 //! [Ed25519, section 4]: https://ed25519.cr.yp.to/ed25519-20110926.pdf
 
-use super::{F, G, GAffine, Niels};
+use super::{Backend, F, G, GAffine, Niels, Single, WithBackend, WithSingle, with_backend};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use zeroize::Zeroizing;
 
 /// `TABLE[j][k]` is `(k + 1) * 256^j * B` for the Ed25519 basepoint `B`.
-static TABLE: [[Niels; 8]; 32] = table();
+pub(super) static TABLE: [[Niels; 8]; 32] = table();
 
 /// Width of the non-adjacent forms whose digits select entries of [`ODD_MULTIPLES`].
 pub const ODD_MULTIPLES_NAF_WIDTH: usize = 8;
@@ -47,24 +47,58 @@ impl G {
     /// operations, selecting table entries with masks rather than secret-dependent branches or
     /// indexing.
     pub fn mul_base_secret(scalar: &[u8; 32]) -> Self {
-        let digits = Zeroizing::new(digits(scalar));
-        let pairs = digits.as_chunks::<2>().0;
-
-        // Pair `j` holds digits `e[2j]` and `e[2j+1]`, both read from row `j`. Adding the odd
-        // digits, multiplying by 16 with four doublings, and then adding the even digits gives
-        // `sum (16 * e[2j+1] + e[2j]) * 256^j * B`, which is `sum e[i] * 16^i * B`.
-        let mut result = Self::IDENTITY;
-        for (row, pair) in TABLE.iter().zip(pairs) {
-            result = result.add_niels(select(row, pair[1]));
-        }
-        for _ in 0..4 {
-            result = result.double();
-        }
-        for (row, pair) in TABLE.iter().zip(pairs) {
-            result = result.add_niels(select(row, pair[0]));
-        }
-        result
+        with_backend(MulBase(scalar))
     }
+}
+
+/// A secret scalar for [`G::mul_base_secret`], multiplied with the selected backend's
+/// single-point operations.
+struct MulBase<'a>(&'a [u8; 32]);
+
+impl WithBackend for MulBase<'_> {
+    type Output = G;
+
+    fn call<B: Backend>(self, backend: B) -> G {
+        backend.with_single(self)
+    }
+}
+
+impl WithSingle for MulBase<'_> {
+    type Output = G;
+
+    // Inlined so the algorithm compiles inside the backend's target-feature entry, where its
+    // point operations can inline.
+    #[inline(always)]
+    fn call<S: Single>(self, single: S) -> G {
+        mul_base(single, &Zeroizing::new(digits(self.0)))
+    }
+}
+
+/// Returns `sum e[i] * 16^i * B` for the radix-16 digits `e` of [`digits`].
+///
+/// Pair `j` holds digits `e[2j]` and `e[2j+1]`, both read from row `j`. Adding the odd digits,
+/// multiplying by 16 with four doublings, and then adding the even digits gives
+/// `sum (16 * e[2j+1] + e[2j]) * 256^j * B`. Every digit costs one constant-time
+/// [`Single::add_selected`].
+#[inline(always)]
+fn mul_base<S: Single>(single: S, digits: &[i8; 64]) -> G {
+    let pairs = digits.as_chunks::<2>().0;
+    let mut result = single.identity();
+    for (row, pair) in TABLE.iter().zip(pairs) {
+        result = single.to_extended(single.add_selected(result, row, pair[1]));
+    }
+
+    // Only the last doubling feeds an addition, which reads `T`.
+    let mut multiple = single.project(result);
+    for _ in 0..3 {
+        multiple = single.to_projective(single.double(multiple));
+    }
+    result = single.to_extended(single.double(multiple));
+
+    for (row, pair) in TABLE.iter().zip(pairs) {
+        result = single.to_extended(single.add_selected(result, row, pair[0]));
+    }
+    single.store(result)
 }
 
 /// Recodes a scalar below `2^255` as `sum e[i] * 16^i`, with `e[i]` in `[-8, 7]` for `i < 63`
@@ -95,7 +129,7 @@ fn digits(scalar: &[u8; 32]) -> [i8; 64] {
 /// Every entry is read and combined with a mask, so neither the access pattern nor the control
 /// flow depends on `digit`.
 #[inline]
-fn select(row: &[Niels; 8], digit: i8) -> Niels {
+pub(super) fn select(row: &[Niels; 8], digit: i8) -> Niels {
     // The sign bit, and `|digit|` computed with the two's complement identity.
     let negative = (digit as u8) >> 7;
     let magnitude = ((digit as u8) ^ 0u8.wrapping_sub(negative)).wrapping_add(negative);

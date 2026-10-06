@@ -531,6 +531,7 @@ impl G {
     }
 
     /// Adds a point in [`Niels`] form: [`G::add`] specialized to an operand whose `Z` is one.
+    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
     #[inline(always)]
     const fn add_niels(self, rhs: Niels) -> Self {
         // The steps of `G::add` with `Z2 = 1`. The Niels form supplies `Y2 - X2`, `Y2 + X2`, and
@@ -653,13 +654,6 @@ pub struct GProjective {
 }
 
 impl GProjective {
-    /// The neutral element, `(0, 1)` in affine coordinates.
-    pub const IDENTITY: Self = Self {
-        x: F::ZERO,
-        y: F::ONE,
-        z: F::ONE,
-    };
-
     /// Doubles this point with the steps of [`G::double`] up to its final products.
     #[inline(always)]
     pub const fn double(self) -> GCompleted {
@@ -680,6 +674,7 @@ impl GProjective {
     }
 
     /// Multiplies this point by the curve's cofactor (8).
+    #[cfg(test)]
     pub fn mul_by_cofactor(mut self) -> Self {
         for _ in 0..3 {
             self = self.double().to_projective();
@@ -754,7 +749,11 @@ impl GCompleted {
 }
 
 /// An affine point `(x, y)` stored as `(y + x, y - x, 2d*x*y)`.
+///
+/// The coordinates are laid out as 15 consecutive limbs, so backends can load them straight into
+/// registers.
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub struct Niels {
     sum: F,
     diff: F,
@@ -984,11 +983,9 @@ fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
 
 /// Abstracts over field and group operations.
 pub trait Backend: MBackend + 'static {
-    /// Decompresses both encodings as [`GAffine::decompress`] does, returning `None` if either
-    /// does not decode.
-    fn decompress_pair(self, [first, second]: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
-        Some([GAffine::decompress(first)?, GAffine::decompress(second)?])
-    }
+    /// Runs a computation over one chain of point operations, with the backend's native point
+    /// types and inside its target features.
+    fn with_single<C: WithSingle>(self, computation: C) -> C::Output;
 }
 
 /// A computation which can run over an arbitrary [`Backend`].
@@ -1013,6 +1010,11 @@ pub use basepoint::{ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH};
 
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;
+
+// Operations for one chain of point additions and doublings, for single-signature verification
+// and fixed-base multiplication.
+mod single;
+pub use single::{Formulas, Single, WithSingle};
 
 // Backend kernels for MSM. Signing owns digit recoding and scheduling.
 pub mod msm;

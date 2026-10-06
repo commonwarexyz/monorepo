@@ -1,7 +1,8 @@
 //! Property suites shared by field and group backends.
 
 use super::{
-    Backend, F, FBackend, FVec, G, GAffine, LANES, MASK_51, WithBackend,
+    Backend, F, FBackend, FVec, Formulas, G, GAffine, GCompleted, GProjective, LANES, MASK_51,
+    Niels, Single, WithBackend, WithSingle,
     msm::{self, WithLanes},
 };
 #[cfg(test)]
@@ -18,6 +19,8 @@ pub enum Plan {
     Field,
     /// Check group arithmetic identities.
     Group,
+    /// Check single-point operations against the scalar formulas.
+    Single,
 }
 
 impl Plan {
@@ -41,6 +44,7 @@ impl Plan {
                         fuzz_group(self.u, backend)?;
                         fuzz_group_matches_portable(self.u, backend)
                     }
+                    Plan::Single => fuzz_single_matches_formulas(self.u, backend),
                 }
             }
         }
@@ -700,71 +704,589 @@ fn completed_point_operations_match_extended() {
         });
 }
 
-/// [`Backend::decompress_pair`] matches decompressing each encoding on its own, whichever of the
-/// two encodings fails to decode.
+/// Re-represents a field element with large limbs, all below `2^52`: its canonical limbs plus `p`
+/// limb-wise when `choice` is odd, and otherwise with `2^51` moved down from each limb whose
+/// bit of `choice` is set.
+fn spread_limbs(value: F, choice: u8) -> F {
+    let mut limbs = canonical(value.0);
+    if choice & 1 == 1 {
+        let p = [MASK_51 - 18, MASK_51, MASK_51, MASK_51, MASK_51];
+        for (limb, p) in limbs.iter_mut().zip(p) {
+            *limb += p;
+        }
+    } else {
+        for i in 0..4 {
+            if (choice >> (i + 1)) & 1 == 1 && limbs[i + 1] > 0 {
+                limbs[i] += 1 << 51;
+                limbs[i + 1] -= 1;
+            }
+        }
+    }
+    F(limbs)
+}
+
+/// Scales every coordinate by `scale`, which keeps the point, and spreads the limbs.
+fn rescale(point: G, scale: F, choice: u8) -> G {
+    G {
+        x: spread_limbs(point.x.mul(scale), choice),
+        y: spread_limbs(point.y.mul(scale), choice.rotate_left(1)),
+        t: spread_limbs(point.t.mul(scale), choice.rotate_left(2)),
+        z: spread_limbs(point.z.mul(scale), choice.rotate_left(3)),
+    }
+}
+
+/// Asserts that two extended points have the same coordinates modulo `p`, and that `actual` is
+/// within the field bound. The coordinates need not form a curve point.
+fn assert_g_same(actual: G, expected: G, property: &str) {
+    for (actual, expected, coordinate) in [
+        (actual.x, expected.x, "X"),
+        (actual.y, expected.y, "Y"),
+        (actual.z, expected.z, "Z"),
+        (actual.t, expected.t, "T"),
+    ] {
+        assert!(
+            actual.0.iter().all(|&limb| limb < 1 << 52),
+            "{property}: a limb is outside the field bound"
+        );
+        assert_eq!(
+            canonical(actual.0),
+            canonical(expected.0),
+            "{property}: {coordinate}"
+        );
+    }
+}
+
+/// Asserts that two projective points have the same coordinates modulo `p`.
+fn assert_projective_same(actual: GProjective, expected: GProjective, property: &str) {
+    for (actual, expected, coordinate) in [
+        (actual.x, expected.x, "X"),
+        (actual.y, expected.y, "Y"),
+        (actual.z, expected.z, "Z"),
+    ] {
+        assert!(
+            actual.0.iter().all(|&limb| limb < 1 << 52),
+            "{property}: a limb is outside the field bound"
+        );
+        assert_eq!(
+            canonical(actual.0),
+            canonical(expected.0),
+            "{property}: {coordinate}"
+        );
+    }
+}
+
+/// Returns the affine [`Niels`] form of a point.
+const fn niels(point: G) -> Niels {
+    let affine = point.to_affine();
+    Niels {
+        sum: affine.y.add(affine.x),
+        diff: affine.y.sub(affine.x),
+        t2d: affine.t2d,
+    }
+}
+
+/// A field element with arbitrary limbs below `2^52`.
+fn arbitrary_f(u: &mut Unstructured<'_>) -> arbitrary::Result<F> {
+    let limbs: [u64; 5] = u.arbitrary()?;
+    Ok(F(limbs.map(|limb| limb & MASK_52)))
+}
+
+/// The most operations a fuzzed chain of single-point operations takes.
+const MAX_STEPS: usize = 16;
+
+/// Checks a backend's single-point operations, alone and in a chain, against [`Formulas`] on
+/// arbitrary points with low-order components, rescaled projective coordinates, and spread limbs,
+/// and on points, affine operands, and table rows with arbitrary limbs below `2^52`, which the
+/// contract admits whether or not they are on the curve.
+fn fuzz_single_matches_formulas<B: Backend>(
+    u: &mut Unstructured<'_>,
+    backend: B,
+) -> arbitrary::Result<()> {
+    let encodings: [[u8; 32]; 2] = u.arbitrary()?;
+    let order_four = GAffine::decompress(&[0; 32]).unwrap().to_extended();
+    let point = |u: &mut Unstructured<'_>| -> arbitrary::Result<G> {
+        let encoding: [u8; 32] = u.arbitrary()?;
+        let point = GAffine::decompress(&encoding)
+            .unwrap_or(GAffine::BASEPOINT)
+            .to_extended();
+        let torsion = (0..u.int_in_range(0..=3)?).fold(G::IDENTITY, |sum, _| sum.add(order_four));
+        let mut scale = F::from_bytes(&u.arbitrary()?);
+        if scale.is_zero() {
+            scale = F::ONE;
+        }
+        Ok(rescale(point.add(torsion), scale, u.arbitrary()?))
+    };
+
+    // Points and affine operands with arbitrary limbs, almost never on the curve.
+    let coordinates = |u: &mut Unstructured<'_>| -> arbitrary::Result<G> {
+        Ok(G {
+            x: arbitrary_f(u)?,
+            y: arbitrary_f(u)?,
+            t: arbitrary_f(u)?,
+            z: arbitrary_f(u)?,
+        })
+    };
+    let affine = |u: &mut Unstructured<'_>| -> arbitrary::Result<Niels> {
+        Ok(Niels {
+            sum: arbitrary_f(u)?,
+            diff: arbitrary_f(u)?,
+            t2d: arbitrary_f(u)?,
+        })
+    };
+    let p = if u.arbitrary()? {
+        coordinates(u)?
+    } else {
+        point(u)?
+    };
+    let q = match u.int_in_range(0..=4)? {
+        0 => point(u)?,
+        1 => coordinates(u)?,
+        2 => p,
+        3 => p.negate(),
+        _ => G::IDENTITY,
+    };
+    let niels = if u.arbitrary()? { affine(u)? } else { niels(q) };
+    let row = if u.arbitrary()? {
+        let mut row = [Niels::IDENTITY; 8];
+        for entry in &mut row {
+            *entry = affine(u)?;
+        }
+        row
+    } else {
+        super::basepoint::TABLE[u.int_in_range(0..=31)?]
+    };
+    let odd = u.int_in_range(0..=127)?;
+    let mut chain = Vec::new();
+    for _ in 0..u.int_in_range(0..=MAX_STEPS)? {
+        chain.push(u.arbitrary()?);
+    }
+    backend.with_single(SingleMatches {
+        p,
+        q,
+        niels,
+        row,
+        odd,
+        chain,
+        encodings,
+    });
+    Ok(())
+}
+
+/// A decompressed point's encoding and `2d*x*y`, for comparing decompression results.
+fn key(point: Option<GAffine>) -> Option<([u8; 32], [u8; 32])> {
+    point.map(|point| (point.compress(), point.t2d.to_bytes()))
+}
+
+/// Asserts that [`Single::decompress_pair`] returns both scalar decompressions, or `None` when
+/// either fails.
+fn assert_pair_matches<S: Single>(single: S, first: &[u8; 32], second: &[u8; 32]) {
+    let expected = GAffine::decompress(first).zip(GAffine::decompress(second));
+    assert_eq!(
+        single
+            .decompress_pair([first, second])
+            .map(|[a, b]| (key(Some(a)), key(Some(b)))),
+        expected.map(|(a, b)| (key(Some(a)), key(Some(b)))),
+        "decompress pair"
+    );
+}
+
+/// The number of caches a chain of single-point operations saves addition operands in.
+const CACHES: usize = 2;
+
+/// One operation of a chain that feeds each native result into the next operation.
+#[derive(Clone, Copy, Debug)]
+enum Step {
+    /// Doubles the point, finishing the previous result in projective coordinates, or in
+    /// extended coordinates and then projecting it when `extended` is set.
+    Double { extended: bool },
+    /// Prepares the point as an addition operand and saves it in cache `slot`.
+    Cache { slot: usize },
+    /// Adds the operand saved in cache `slot`, negated when `negate` is set.
+    Add { slot: usize, negate: bool },
+    /// Adds the affine operand, negated when `negate` is set.
+    AddNiels { negate: bool },
+    /// Adds the row's entry that `digit` selects, negated when `digit` is negative, or the
+    /// identity when `digit` is zero.
+    AddSelected { digit: i8 },
+}
+
+impl<'a> Arbitrary<'a> for Step {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(match u.int_in_range(0..=4)? {
+            0 => Self::Double {
+                extended: u.arbitrary()?,
+            },
+            1 => Self::Cache {
+                slot: u.int_in_range(0..=CACHES - 1)?,
+            },
+            2 => Self::Add {
+                slot: u.int_in_range(0..=CACHES - 1)?,
+                negate: u.arbitrary()?,
+            },
+            3 => Self::AddNiels {
+                negate: u.arbitrary()?,
+            },
+            _ => Self::AddSelected {
+                digit: u.int_in_range(-8..=8)?,
+            },
+        })
+    }
+}
+
+/// A chain's current point, in a backend's native representation and as [`Formulas`] computes
+/// it.
+enum Link<S: Single> {
+    /// A point in extended coordinates.
+    Extended(S::Extended, G),
+    /// The result of an addition or doubling, before its final multiplications.
+    Completed(S::Completed, GCompleted),
+}
+
+impl<S: Single> Link<S> {
+    /// Finishes the point in extended coordinates, asserting that the native point stores as the
+    /// formulas' point.
+    fn extended(self, single: S, property: &str) -> (S::Extended, G) {
+        match self {
+            Self::Extended(actual, expected) => (actual, expected),
+            Self::Completed(actual, expected) => {
+                let actual = single.to_extended(actual);
+                let expected = Formulas.to_extended(expected);
+                assert_g_same(single.store(actual), expected, property);
+                (actual, expected)
+            }
+        }
+    }
+
+    /// Finishes or projects the point in projective coordinates, asserting that the native point
+    /// stores as the formulas' point.
+    fn projective(self, single: S, property: &str) -> (S::Projective, GProjective) {
+        let (actual, expected) = match self {
+            Self::Extended(actual, expected) => {
+                (single.project(actual), Formulas.project(expected))
+            }
+            Self::Completed(actual, expected) => (
+                single.to_projective(actual),
+                Formulas.to_projective(expected),
+            ),
+        };
+        assert_projective_same(single.store_projective(actual), expected, property);
+        (actual, expected)
+    }
+}
+
+/// Inputs for comparing every [`Single`] operation with [`Formulas`].
+struct SingleMatches {
+    /// The point every operation starts from.
+    p: G,
+    /// The operand of additions in extended form.
+    q: G,
+    /// An affine operand.
+    niels: Niels,
+    /// The row that fixed-base additions select from: a row of the fixed-base table or arbitrary
+    /// entries.
+    row: [Niels; 8],
+    /// An entry of the flattened verification table, below 128.
+    odd: usize,
+    /// The operations of a chain starting from `p`.
+    chain: Vec<Step>,
+    /// Point encodings, valid or not.
+    encodings: [[u8; 32]; 2],
+}
+
+impl WithSingle for SingleMatches {
+    type Output = ();
+
+    fn call<S: Single>(self, single: S) {
+        let formulas = Formulas;
+        let p = single.load(&self.p);
+        let q = single.load(&self.q);
+        assert_g_same(single.store(p), self.p, "load and store");
+        assert_g_same(single.store(single.identity()), G::IDENTITY, "identity");
+
+        // Each operation's completed point matches in both finished forms.
+        let check = |actual: S::Completed, expected: GCompleted, property: &str| {
+            assert_g_same(
+                single.store(single.to_extended(actual)),
+                expected.to_extended(),
+                property,
+            );
+            assert_projective_same(
+                single.store_projective(single.to_projective(actual)),
+                expected.to_projective(),
+                property,
+            );
+        };
+        check(
+            single.double(single.project(p)),
+            formulas.double(formulas.project(self.p)),
+            "double",
+        );
+        for negate in [false, true] {
+            check(
+                single.add(p, single.cache(q), negate),
+                formulas.add(self.p, formulas.cache(self.q), negate),
+                "add",
+            );
+            for niels in [&self.niels, &super::ODD_MULTIPLES.as_flattened()[self.odd]] {
+                check(
+                    single.add_niels(p, niels, negate),
+                    formulas.add_niels(self.p, niels, negate),
+                    "add Niels",
+                );
+            }
+        }
+        for digit in -8..=8 {
+            check(
+                single.add_selected(p, &self.row, digit),
+                formulas.add_selected(self.p, &self.row, digit),
+                &format!("add selected, digit {digit}"),
+            );
+        }
+
+        // The chain feeds each native result into the next operation, as the algorithms do,
+        // finishing it in the coordinates that operation reads, and compares every finished point
+        // with the formulas. Each cache starts as `q`.
+        let mut caches = [(single.cache(q), formulas.cache(self.q)); CACHES];
+        let mut link = Link::<S>::Extended(p, self.p);
+        for (index, &step) in self.chain.iter().enumerate() {
+            let property = format!("chain input of step {index}, {step:?}");
+            link = match step {
+                Step::Double { extended: false } => {
+                    let (actual, expected) = link.projective(single, &property);
+                    Link::Completed(single.double(actual), formulas.double(expected))
+                }
+                Step::Double { extended: true } => {
+                    let (actual, expected) = link.extended(single, &property);
+                    Link::Completed(
+                        single.double(single.project(actual)),
+                        formulas.double(formulas.project(expected)),
+                    )
+                }
+                Step::Cache { slot } => {
+                    let (actual, expected) = link.extended(single, &property);
+                    caches[slot] = (single.cache(actual), formulas.cache(expected));
+                    Link::Extended(actual, expected)
+                }
+                Step::Add { slot, negate } => {
+                    let (actual, expected) = link.extended(single, &property);
+                    let (cached, expected_cached) = caches[slot];
+                    Link::Completed(
+                        single.add(actual, cached, negate),
+                        formulas.add(expected, expected_cached, negate),
+                    )
+                }
+                Step::AddNiels { negate } => {
+                    let (actual, expected) = link.extended(single, &property);
+                    Link::Completed(
+                        single.add_niels(actual, &self.niels, negate),
+                        formulas.add_niels(expected, &self.niels, negate),
+                    )
+                }
+                Step::AddSelected { digit } => {
+                    let (actual, expected) = link.extended(single, &property);
+                    Link::Completed(
+                        single.add_selected(actual, &self.row, digit),
+                        formulas.add_selected(expected, &self.row, digit),
+                    )
+                }
+            };
+        }
+        if let Link::Completed(actual, expected) = link {
+            check(actual, expected, "chain result");
+        }
+
+        // Decompression agrees with the scalar path, including for invalid encodings.
+        let [first, second] = &self.encodings;
+        assert_eq!(
+            key(single.decompress(first)),
+            key(GAffine::decompress(first))
+        );
+        assert_pair_matches(single, first, second);
+        assert_pair_matches(single, second, first);
+    }
+}
+
 #[cfg(test)]
 #[test]
-fn decompress_pair_matches_scalar() {
-    /// Checks every ordered pair of encodings with the given backend.
-    struct Check<'a>(&'a [[u8; 32]]);
+fn minifuzz_single() {
+    // Fully inlined point formulas can exceed the test harness's default stack in debug builds.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            commonware_invariants::minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(400)
+                .test(|u| Plan::Single.run(u));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
 
-    impl WithBackend for Check<'_> {
+/// Checks the selected backend's single-point operations against [`Formulas`] on the identity,
+/// every ZIP215 point (each low-order point among them), sums with the basepoint, equal and
+/// opposite operands, every row of the fixed-base table with reduced and with spread limbs, and
+/// coordinates and table entries at or near the field bound, each with every digit and through a
+/// chain of every transition between operations.
+#[cfg(test)]
+#[test]
+fn single_point_operations_match_formulas() {
+    struct Run(Vec<SingleMatches>);
+
+    impl WithBackend for Run {
         type Output = ();
 
         fn call<B: Backend>(self, backend: B) {
-            let key = |point: GAffine| (point.compress(), point.t2d.to_bytes());
-            for first in self.0 {
-                for second in self.0 {
-                    let expected = GAffine::decompress(first)
-                        .zip(GAffine::decompress(second))
-                        .map(|(first, second)| [key(first), key(second)]);
-                    let actual = backend
-                        .decompress_pair([first, second])
-                        .map(|points| points.map(key));
-                    assert_eq!(actual, expected);
+            for check in self.0 {
+                backend.with_single(check);
+            }
+        }
+    }
+
+    // Doublings finished in both coordinate systems after doublings and additions, caches of
+    // finished results reused under both signs, and signed affine and selected additions.
+    const CHAIN: [Step; 18] = [
+        Step::Double { extended: false },
+        Step::Double { extended: false },
+        Step::Double { extended: true },
+        Step::Cache { slot: 0 },
+        Step::Add {
+            slot: 0,
+            negate: false,
+        },
+        Step::AddNiels { negate: true },
+        Step::Double { extended: false },
+        Step::Add {
+            slot: 0,
+            negate: true,
+        },
+        Step::Add {
+            slot: 1,
+            negate: false,
+        },
+        Step::AddSelected { digit: -8 },
+        Step::Cache { slot: 1 },
+        Step::Double { extended: true },
+        Step::AddSelected { digit: 5 },
+        Step::Add {
+            slot: 1,
+            negate: true,
+        },
+        Step::AddNiels { negate: false },
+        Step::Double { extended: true },
+        Step::AddSelected { digit: 0 },
+        Step::Double { extended: false },
+    ];
+
+    let base = GAffine::BASEPOINT.to_extended();
+    let mut points = vec![G::IDENTITY, base, base.add(base)];
+    for encoding in &ZIP215_POINTS {
+        let point = GAffine::decompress(encoding).unwrap().to_extended();
+        points.extend([point, base.add(point)]);
+    }
+
+    // Every row of the fixed-base table, then each again with its limbs spread.
+    let table = &super::basepoint::TABLE;
+    let mut rows = table.to_vec();
+    for (j, row) in table.iter().enumerate() {
+        let choice = j as u8;
+        rows.push(row.map(|entry| Niels {
+            sum: spread_limbs(entry.sum, choice),
+            diff: spread_limbs(entry.diff, choice.rotate_left(1)),
+            t2d: spread_limbs(entry.t2d, choice.rotate_left(2)),
+        }));
+    }
+
+    let encodings = [ZIP215_POINTS[0], [0xff; 32]];
+    let mut checks = Vec::new();
+    for (i, &p) in points.iter().enumerate() {
+        let p = rescale(p, F::from_bytes(&[i as u8 + 2; 32]), i as u8);
+        for q in [points[(i + 1) % points.len()], p, p.negate(), G::IDENTITY] {
+            let n = checks.len();
+            checks.push(SingleMatches {
+                p,
+                q,
+                niels: niels(q),
+                row: rows[n % rows.len()],
+                odd: n % 128,
+                chain: CHAIN.to_vec(),
+                encodings,
+            });
+        }
+    }
+
+    // Coordinates at the field bound need not form a curve point; the formulas still must match
+    // coordinate-wise. The table entries near the bound are distinct, so selecting the wrong
+    // entry fails too.
+    let max = F([MASK_52; 5]);
+    let bound = G {
+        x: max,
+        y: max,
+        t: max,
+        z: max,
+    };
+    let near = |offset: usize| F([MASK_52 - offset as u64; 5]);
+    checks.push(SingleMatches {
+        p: bound,
+        q: bound,
+        niels: Niels {
+            sum: max,
+            diff: max,
+            t2d: max,
+        },
+        row: array::from_fn(|k| Niels {
+            sum: near(3 * k),
+            diff: near(3 * k + 1),
+            t2d: near(3 * k + 2),
+        }),
+        odd: 127,
+        chain: CHAIN.to_vec(),
+        encodings,
+    });
+    super::with_backend(Run(checks));
+}
+
+/// Checks the selected backend's paired decompression against two scalar decompressions for
+/// every ordered pair of ZIP215 points, the basepoint, and undecodable encodings, so that the
+/// first, the second, both, or neither fail.
+#[cfg(test)]
+#[test]
+fn decompress_pair_matches_scalar() {
+    struct Check(Vec<[u8; 32]>);
+
+    impl WithBackend for Check {
+        type Output = ();
+
+        fn call<B: Backend>(self, backend: B) {
+            backend.with_single(self);
+        }
+    }
+
+    impl WithSingle for Check {
+        type Output = ();
+
+        fn call<S: Single>(self, single: S) {
+            for first in &self.0 {
+                for second in &self.0 {
+                    assert_pair_matches(single, first, second);
                 }
             }
         }
     }
 
-    fn check(encodings: &[[u8; 32]]) {
-        Check(encodings).call(super::portable::Backend::new());
-        super::with_backend(Check(encodings));
-    }
-
-    // A `y` with no matching `x`, under both sign bits.
+    // The ZIP215 points, the basepoint, and the first encodings that do not decode.
+    let mut encodings = ZIP215_POINTS.to_vec();
+    encodings.push(GAffine::BASEPOINT.compress());
     let undecodable = (2u8..)
         .map(|y| {
-            let mut encoding = [0u8; 32];
+            let mut encoding = [0; 32];
             encoding[0] = y;
             encoding
         })
-        .find(|encoding| GAffine::decompress(encoding).is_none())
-        .unwrap();
-    let mut negative = undecodable;
-    negative[31] |= 0x80;
-
-    let mut encodings = ZIP215_POINTS.to_vec();
-    encodings.extend([undecodable, negative]);
-    check(&encodings);
-
-    // Arbitrary encodings, about half of which decode, next to random multiples of the basepoint
-    // and an undecodable encoding.
-    let base = GAffine::BASEPOINT.to_extended();
-    commonware_invariants::minifuzz::Builder::default()
-        .with_seed(0)
-        .with_search_limit(64)
-        .test(|u| {
-            let arbitrary: [[u8; 32]; 2] = u.arbitrary()?;
-            let valid = arbitrary.map(|scalar| {
-                let bits = scalar
-                    .into_iter()
-                    .flat_map(|byte| (0..8).map(move |i| byte >> i & 1 == 1));
-                base.scalar_mul(bits).compress()
-            });
-            check(&[arbitrary[0], arbitrary[1], valid[0], valid[1], undecodable]);
-            Ok(())
-        });
+        .filter(|encoding| GAffine::decompress(encoding).is_none())
+        .take(3);
+    encodings.extend(undecodable);
+    super::with_backend(Check(encodings));
 }
 
 /// Checks the runtime dispatch path as one multi-operation computation.

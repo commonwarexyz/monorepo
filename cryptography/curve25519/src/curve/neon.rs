@@ -10,6 +10,10 @@
 use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, msm};
 use core::arch::aarch64::*;
 
+// Single-point operations with paired products on a NEON tile, for single-signature verification
+// and fixed-base multiplication.
+mod single;
+
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
 const EDWARDS_D2: FVec = FVec::splat(F::EDWARDS_D2);
 
@@ -678,7 +682,11 @@ fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
     ]
 }
 
-impl super::Backend for Backend {}
+impl super::Backend for Backend {
+    fn with_single<C: super::WithSingle>(self, computation: C) -> C::Output {
+        computation.call(single::Hybrid)
+    }
+}
 
 /// Adds a signed affine point to each of two extended points.
 ///

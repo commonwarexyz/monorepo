@@ -1,6 +1,6 @@
 //! Plain-Rust lane adapter over scalar field and group arithmetic.
 
-use super::{F, FBackend, FVec, G, GAffine, msm};
+use super::{F, FBackend, FVec, Formulas, G, GAffine, WithSingle, msm};
 use core::array;
 
 /// The portable backend token.
@@ -54,7 +54,11 @@ impl FBackend for Backend {
     }
 }
 
-impl super::Backend for Backend {}
+impl super::Backend for Backend {
+    fn with_single<C: WithSingle>(self, computation: C) -> C::Output {
+        computation.call(Formulas)
+    }
+}
 
 impl super::msm::Backend for Backend {
     // One stripe per physical mixed-addition lane. Scalar arithmetic has one, so the fold has no
