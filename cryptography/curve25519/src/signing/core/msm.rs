@@ -46,14 +46,11 @@ const fn num_buckets(width: u32) -> usize {
 /// windows mean fewer bucket-fill passes over the terms (the input-proportional cost) but a
 /// bigger bucket array for every fill/fold instance to initialize, fold, and keep cache-resident.
 ///
-/// Fit to a measured sweep (width 6-10 x batch 1k-64k signatures x 1/32 threads, AMD EPYC 9354P,
-/// AVX-512): the optimum grows at almost exactly half a bit of width per bit of batch size,
-/// shallower than the textbook `log2(terms) - 4` rule, because the wide-window penalty on real
-/// hardware includes the AVX-512 bucket array (`8 * 2^(width-1)` points, ~320KB at width 9)
-/// spilling L2, not just the fold-count arithmetic. Parallel runs want one step narrower than
+/// The width grows by half a bit per bit of batch size, more slowly than the textbook
+/// `log2(terms) - 4` rule, because a wide bucket array (`8 * 2^(width-1)` points on AVX-512)
+/// also costs L2 misses, not just fold arithmetic. Parallel runs use one step narrower than
 /// serial: every worker holds its own bucket array, and a window cut into several tiles is folded
-/// once per tile. Every prediction below matched the sweep's measured optimum (or a runner-up
-/// within ~0.5%): serial 7/8/9/10 and parallel 7/8/9/9 for 1k/4k/16k/64k-signature batches.
+/// once per tile.
 pub(super) fn width_for(terms: usize, parallel: bool) -> u32 {
     let bits = terms.max(2).ilog2();
     if parallel {
@@ -128,7 +125,7 @@ fn pieces<'a>(
 /// the digits of a short scalar such as a 128-bit batch coefficient), that is *most* of the
 /// buckets. Computed as a standalone prescan over the recoded digits (cheap: two byte-sized loads
 /// and a compare per term, no point arithmetic) rather than tracked inside the bucket-fill loop,
-/// which measurably slows the fill's hot wave prologue.
+/// which keeps that work out of the fill's hot wave prologue.
 fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> usize {
     pieces(chunks, start, end)
         .flatten()
@@ -524,9 +521,9 @@ mod tests {
     }
 
     #[test]
-    fn width_for_matches_measured_optima() {
-        // The sweep's measured optima (see `width_for`'s doc comment), as (signatures, parallel,
-        // width): terms per batch are ~2 * signatures + 1.
+    fn width_for_matches_tuned_widths() {
+        // The tuned widths, as (signatures, parallel, width), for batches of 2 * signatures + 1
+        // terms.
         for (sigs, parallel, expected) in [
             (1024, true, 7),
             (4096, true, 8),

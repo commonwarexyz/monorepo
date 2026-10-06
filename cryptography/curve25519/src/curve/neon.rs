@@ -58,7 +58,7 @@ fn store(regs: Regs, limbs: &mut [[u64; LANES]; 5], tile: usize) {
 ///
 /// The explicit instruction sequence prevents LLVM from recognizing a packed `u64` multiplication
 /// and scalarizing it through general-purpose registers. NEON has no packed `u64` multiply, while
-/// these shifts and additions stay in vector registers and measured better on Apple M-series CPUs.
+/// these shifts and additions stay in vector registers.
 #[inline(always)]
 fn mul19(z: uint64x2_t) -> uint64x2_t {
     #[cfg(miri)]
