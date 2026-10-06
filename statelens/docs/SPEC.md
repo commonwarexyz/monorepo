@@ -756,7 +756,7 @@ prefixed with `statelens:`.
 | `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it. A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
 | `targets` | `targets [--profile P] [--match GLOB]...`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary. `--match` keeps the targets a shell pattern names, by variant name or by the original target's, and is what `just fuzz <profile> --targets GLOB` passes | 0 done, 1 a pattern that names no target |
 | `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands, then, for a profile that has them, the component tests, which are reported and not gated. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 gate passed, 1 no profile, 4 gate failed |
-| `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]` (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
+| `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]`; a `PATH` is a file or a directory (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD` | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
 | `campaign` | `campaign [--agent A] [--profile P] [--stop-after STEP]`, where `P` is `simplex` (default), `marshal` or `qmdb` | 0 ready (the StateLens targets are built and the test gate passed) or stopped after a step, 1 usage, 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed; codes 5 and 6 are no longer used (D23) |
 
@@ -920,7 +920,7 @@ reference, keyed by a symbol string that tells a field from a same-named method.
 -- and `just code-index [--subsystem S]` builds it. There is one index at a time, of the
 crate the last build indexed. Without `--subsystem` a build indexes the crate of the
 campaign in the checkout, else the crate the current index describes, else consensus, so
-the `just code-index` a query advises after instrumentation edits keeps the crate. Its paths are relative to that crate, whose directory the
+a `just code-index` run in a campaign's checkout keeps the crate. Its paths are relative to that crate, whose directory the
 index records as its project root (`Metadata.project_root`), so the loader reads the crate
 from the index and makes every path relative to the repository; an index without one is
 taken to be of consensus. The figures below were measured on consensus.
@@ -964,8 +964,12 @@ comparing the snapshot with the tree before any result is chosen, not while hits
 because otherwise the statement would depend on which files a query happened to touch: a query
 that matched nothing, which is the answer most likely to be wrong on a moved tree, would have
 reported a clean one. Reading the snapshotted text costs about a tenth of a second for this
-crate, against seconds to diff it, so only the line maps stay lazy. `just code-index` is the
-remedy in every case.
+crate, against seconds to diff it, so only the line maps stay lazy. Outside a campaign the
+statement ends by advising `just code-index`, the remedy in every case. In a campaign's
+checkout, changed and added files are the campaign's own instrumentation, which the rebase
+exists to absorb, so the statement says that and advises no rebuild: advising one sent an
+agent to report a working index as a tooling problem. A file that is gone or has no
+snapshot is not an instrumentation edit, and still gets the advice.
 
 **Reading it.** The index is protobuf, read with the standard library alone rather than a
 package, so the subproject keeps its stdlib-only rule (D44). Five fields carry the answers;
@@ -1018,6 +1022,9 @@ agent to read those sites rather than take them for reads, since `push`, `insert
 are transitions as much as an assignment is. `--writes-only` keeps them. For the same
 reason a field and a method of one name are one spelling to the tree (D46). Identity comes
 from the index, which also says which two or three files to parse rather than all of them.
+A `PATH` given to either query may be a file or a directory, which stands for every `.rs`
+file under it, so an actor's directory can be passed whole; a path that is neither is a
+usage error.
 
 **Macro bodies.** This command parses source, and parsing does not expand macros, so the body
 of a macro invocation is one unstructured token tree: it holds the tokens but no expressions.

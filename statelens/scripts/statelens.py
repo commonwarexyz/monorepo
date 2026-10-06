@@ -3289,9 +3289,9 @@ def index_short(symbol, names):
 def index_subsystem(sl_dir):
     """The subsystem `code build` indexes when none is named (SPEC section 5.7).
 
-    The campaign's profile when this checkout has one, so the advice to rebuild that a
-    query prints after instrumentation edits keeps the crate the campaign instruments;
-    else a profile of the crate the current index describes; else simplex.
+    The campaign's profile when this checkout has one, so a rebuild in a campaign's
+    checkout keeps the crate the campaign instruments; else a profile of the crate the
+    current index describes; else simplex.
     """
     profile = campaign_profile(sl_dir)
     if profile in PROFILES:
@@ -3524,6 +3524,9 @@ class Rebaser:
 
     def __init__(self, repo, sl_dir):
         self.repo = repo
+        # A campaign builds the index before it instruments and rebases through its own
+        # edits rather than rebuilding (D43), so in its checkout an edit is expected.
+        self.campaign = campaign_profile(sl_dir) is not None
         self.maps = {}
         self.changed = set()
         self.missing = set()
@@ -3671,6 +3674,11 @@ class Rebaser:
             )
         if not parts:
             return None
+        if self.campaign and not (self.missing or self.unsnapshotted):
+            return "; ".join(parts) + (
+                ". These are the campaign's own instrumentation edits, which rebasing "
+                "absorbs, so the index needs no rebuild during the campaign."
+            )
         return "; ".join(parts) + ". Rebuild with `just code-index`."
 
 
@@ -3999,6 +4007,26 @@ def ast_notes(path, pattern):
     return blocks
 
 
+def ast_paths(repo, paths):
+    """The Rust files the PATH arguments of an `ast` query name.
+
+    A file stands for itself and a directory for every `.rs` file under it, so an
+    actor's directory can be passed whole. A path that names neither is a usage error
+    rather than a traceback.
+    """
+    files = []
+    for one in paths:
+        path = Path(one)
+        full = repo / path
+        if full.is_dir():
+            files += [path / child.relative_to(full) for child in sorted(full.rglob("*.rs"))]
+        elif full.is_file():
+            files.append(path)
+        else:
+            raise Abort(1, f"{one}: no such file or directory")
+    return files
+
+
 def ast_files(repo, sl_dir, name, explicit):
     """Which files to parse: the ones given, else the ones the index names.
 
@@ -4006,7 +4034,7 @@ def ast_files(repo, sl_dir, name, explicit):
     which two or three files mention the entity, so scope narrows to those.
     """
     if explicit:
-        return [Path(one) for one in explicit]
+        return ast_paths(repo, explicit)
     index = index_path(sl_dir)
     if not index.exists():
         say("no code index, so every subsystem source is parsed; pass paths to narrow it")
@@ -4032,7 +4060,7 @@ def cmd_ast(args):
         )
         return 1
     if args.query == "notes":
-        targets = [Path(one) for one in args.paths] if args.paths else None
+        targets = ast_paths(repo, args.paths) if args.paths else None
         if targets is None:
             targets = []
             for subsystem in SUBSYSTEMS:
@@ -6646,7 +6674,9 @@ def main(argv):
         ),
     )
     ast_sites.add_argument("name", metavar="NAME", help="a field or variable name")
-    ast_sites.add_argument("paths", nargs="*", metavar="PATH", help="files to parse")
+    ast_sites.add_argument(
+        "paths", nargs="*", metavar="PATH", help="files or directories to parse"
+    )
     ast_sites.add_argument("--tests", action="store_true", help="include test code")
     ast_sites.add_argument(
         "--writes-only",
@@ -6661,7 +6691,9 @@ def main(argv):
         default=AST_NOTE_DEFAULT,
         help="case-insensitive regular expression (default: the beacon words)",
     )
-    ast_notes_parser.add_argument("paths", nargs="*", metavar="PATH", help="files to parse")
+    ast_notes_parser.add_argument(
+        "paths", nargs="*", metavar="PATH", help="files or directories to parse"
+    )
     ast_notes_parser.add_argument("--tests", action="store_true", help="include test code")
     campaign = commands.add_parser(
         "campaign",

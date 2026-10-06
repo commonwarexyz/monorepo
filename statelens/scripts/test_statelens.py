@@ -357,6 +357,61 @@ class SyntaxSites(unittest.TestCase):
         self.assertNotIn("read", text)
         self.assertNotIn("init", text)
 
+    def test_a_directory_stands_for_its_rust_files(self):
+        # The beacon prompt works one actor directory at a time, and both queries
+        # raised IsADirectoryError when given one.
+        saved = sl.repo_root
+        sl.repo_root = lambda: self.tmp
+        self.addCleanup(setattr, sl, "repo_root", saved)
+        actor = self.tmp / "actor"
+        (actor / "round").mkdir(parents=True, exist_ok=True)
+        (actor / "round" / "state.rs").write_text(
+            "struct R { armed: bool }\n"
+            "impl R {\n"
+            "    // A race with the timer is recovered from the journal.\n"
+            "    fn arm(&mut self) { self.armed = true; }\n"
+            "}\n"
+        )
+        (actor / "README.md").write_text("// race, but not Rust\n")
+        notes = argparse.Namespace(
+            query="notes", pattern="race", paths=["actor"], tests=True
+        )
+        sites = argparse.Namespace(
+            query="sites", name="armed", paths=["actor"], tests=True, writes_only=True
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(sl.cmd_ast(notes), 0)
+            self.assertEqual(sl.cmd_ast(sites), 0)
+        text = out.getvalue()
+        self.assertIn("actor/round/state.rs:3  FN@", text)
+        self.assertIn("1 comment block(s)", text)
+        self.assertIn("write  actor/round/state.rs:4", text)
+        self.assertNotIn("README", text)
+
+
+class AstPaths(unittest.TestCase):
+    """What the PATH arguments of the `ast` queries name, without parsing anything."""
+
+    def setUp(self):
+        self.repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        for relative in ("src/a.rs", "src/b/c.rs", "src/b/notes.md", "lib.rs"):
+            (self.repo / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / relative).write_text("")
+
+    def test_a_directory_expands_to_its_rust_files_in_order(self):
+        self.assertEqual(
+            sl.ast_paths(self.repo, ["src", "lib.rs"]),
+            [pathlib.Path("src/a.rs"), pathlib.Path("src/b/c.rs"), pathlib.Path("lib.rs")],
+        )
+
+    def test_a_missing_path_is_a_usage_error(self):
+        with self.assertRaises(sl.Abort) as raised:
+            sl.ast_paths(self.repo, ["src/gone.rs"])
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("src/gone.rs", str(raised.exception))
+
 
 class Rebasing(unittest.TestCase):
     """Instrumentation moves lines, so an indexed line is not a current line."""
@@ -421,6 +476,20 @@ class Rebasing(unittest.TestCase):
     def test_missing_snapshot_is_announced(self):
         sl.snapshot_path(self.sl_dir).unlink()
         self.assertIn("no source snapshot", self.rebaser().report())
+
+    def test_a_campaign_is_told_its_own_edits_need_no_rebuild(self):
+        # A campaign builds the index once and rebases through its own instrumentation
+        # (D43). Advising a rebuild made its agent report the index as broken.
+        (self.sl_dir / "campaign").mkdir()
+        (self.sl_dir / "campaign" / "meta.json").write_text(json.dumps({"profile": "simplex"}))
+        self.file.write_text(self.ORIGINAL.replace("impl Round {", "impl Round {\n", 1))
+        report = self.rebaser().report()
+        self.assertIn("1 indexed file(s) have changed", report)
+        self.assertIn("the campaign's own instrumentation", report)
+        self.assertNotIn("Rebuild", report)
+        # A file that is gone is not an instrumentation edit, so the advice stays.
+        self.file.unlink()
+        self.assertIn("Rebuild with `just code-index`", self.rebaser().report())
 
     def test_test_boundary_uses_the_rebased_line(self):
         # production code above, `#[cfg(test)]` below; a hit on the last
