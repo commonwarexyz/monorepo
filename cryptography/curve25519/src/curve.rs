@@ -542,7 +542,7 @@ impl G {
     }
 
     /// Doubles this point using the dedicated `dbl-2008-hwcd` formula.
-    #[inline]
+    #[inline(always)]
     pub fn double(self) -> Self {
         let a = self.x.square();
         let b = self.y.square();
@@ -761,112 +761,6 @@ impl GAffine {
     }
 }
 
-/// Points on the twisted Edwards curve `-x^2 + y^2 = 1 + d*x^2*y^2` in extended homogeneous
-/// coordinates `(X : Y : Z : T)`.
-///
-/// The affine point is `(X/Z, Y/Z)`, and `T` carries the product `X*Y/Z`, giving the invariant
-/// `X*Y = T*Z`. Scaling all four coordinates by any nonzero factor represents the same point.
-/// The affine curve equation, scaled by `Z^2`, is `-X^2 + Y^2 = Z^2 + d*T^2`.
-#[derive(Clone, Copy)]
-pub struct GVec {
-    /// The extended homogeneous X coordinate.
-    pub x: FVec,
-    /// The extended homogeneous Y coordinate.
-    pub y: FVec,
-    /// The extended homogeneous T coordinate.
-    pub t: FVec,
-    /// The extended homogeneous Z coordinate.
-    pub z: FVec,
-}
-
-impl GVec {
-    /// Transposes scalar points into backend lanes.
-    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
-    pub fn transpose(lanes: [G; LANES]) -> Self {
-        Self {
-            x: FVec::transpose(lanes.map(|point| point.x)),
-            y: FVec::transpose(lanes.map(|point| point.y)),
-            t: FVec::transpose(lanes.map(|point| point.t)),
-            z: FVec::transpose(lanes.map(|point| point.z)),
-        }
-    }
-
-    /// Untransposes backend lanes into scalar points.
-    pub fn untranspose(self) -> [G; LANES] {
-        let x = self.x.untranspose();
-        let y = self.y.untranspose();
-        let t = self.t.untranspose();
-        let z = self.z.untranspose();
-        array::from_fn(|i| G {
-            x: x[i],
-            y: y[i],
-            t: t[i],
-            z: z[i],
-        })
-    }
-
-    /// Returns every lane set to `point`.
-    pub const fn splat(point: G) -> Self {
-        Self {
-            x: FVec::splat(point.x),
-            y: FVec::splat(point.y),
-            t: FVec::splat(point.t),
-            z: FVec::splat(point.z),
-        }
-    }
-
-    /// Returns the identity in every lane.
-    pub const fn identity() -> Self {
-        Self::splat(G::IDENTITY)
-    }
-
-    #[cfg(any(test, all(target_arch = "x86_64", feature = "std")))]
-    #[inline(always)]
-    fn add_pairs<const COUNT: usize>(sums: [G; LANES], backend: impl GBackend) -> [G; LANES] {
-        let mut left = [G::IDENTITY; LANES];
-        let mut right = [G::IDENTITY; LANES];
-        for i in 0..COUNT / 2 {
-            left[i] = sums[2 * i];
-            right[i] = sums[2 * i + 1];
-        }
-        backend
-            .g_add(Self::transpose(left), Self::transpose(right))
-            .untranspose()
-    }
-
-    /// Sums all eight lanes with a vector addition tree.
-    #[cfg(any(test, all(target_arch = "x86_64", feature = "std")))]
-    pub fn sum_lanes<B: GBackend>(self, backend: B) -> G {
-        let sums = Self::add_pairs::<LANES>(self.untranspose(), backend);
-        let sums = Self::add_pairs::<{ LANES / 2 }>(sums, backend);
-        Self::add_pairs::<{ LANES / 4 }>(sums, backend)[0]
-    }
-}
-
-/// Like `GVec`, but assuming that the point is in affine representation.
-///
-/// Tests and fuzzing use it to compare each backend's full-width [`GBackend::g_add_mixed`]
-/// with the portable reference.
-#[cfg(any(test, feature = "fuzz"))]
-#[derive(Clone, Copy)]
-pub struct GAffineVec {
-    pub x: FVec,
-    pub y: FVec,
-    pub t2d: FVec,
-}
-
-#[cfg(any(test, feature = "fuzz"))]
-impl GAffineVec {
-    /// Transposes scalar affine points into backend lanes.
-    pub fn transpose(lanes: [GAffine; LANES]) -> Self {
-        Self {
-            x: FVec::transpose(lanes.map(|point| point.x)),
-            y: FVec::transpose(lanes.map(|point| point.y)),
-            t2d: FVec::transpose(lanes.map(|point| point.t2d)),
-        }
-    }
-}
-
 /// Raises every lane to `2^250 - 1` using the standard addition chain.
 fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
     let a = backend.square(value);
@@ -887,27 +781,6 @@ fn pow_2_250_minus_1<B: FBackend>(backend: B, value: FVec) -> FVec {
 /// Raises every lane to `(p - 5) / 8 = 2^252 - 3` for point decompression.
 fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
     backend.mul(value, backend.pow2k(pow_2_250_minus_1(backend, value), 2))
-}
-
-/// Abstracts over group operations.
-pub trait GBackend: FBackend {
-    /// Add two points together.
-    ///
-    /// This method must work for all points, including the identity point, equal points, and a
-    /// point plus its negation. The Ed25519 curve admits complete addition formulas because
-    /// `a = -1` and `d` is non-square.
-    fn g_add(self, a: GVec, b: GVec) -> GVec;
-
-    /// Add two points together, assuming one is in its affine representation.
-    ///
-    /// This can be faster than [`Self::g_add`].
-    #[cfg(any(test, feature = "fuzz"))]
-    fn g_add_mixed(self, a: GVec, b: GAffineVec) -> GVec;
-
-    /// Add a point to itself.
-    fn g_double(self, a: GVec) -> GVec {
-        self.g_add(a, a)
-    }
 }
 
 /// Abstracts over field and group operations.

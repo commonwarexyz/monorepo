@@ -3,12 +3,12 @@
 //! Backends own the bucket geometry and native lane arithmetic. Digit recoding, range
 //! partitioning, and scheduling remain independent of that choice.
 
-use super::{G, GAffine, GBackend, GVec};
+use super::{FBackend, G, GAffine};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 
 /// Bucket filling, window recombination, and native lane dispatch for public scalar digits.
-pub trait Backend: GBackend + Send + Sync {
+pub trait Backend: FBackend + Send + Sync {
     /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`.
     ///
     /// Must be nonzero.
@@ -29,27 +29,13 @@ pub trait Backend: GBackend + Send + Sync {
     /// Sums `(window, point)` partials, then Horner-folds the windows with `width` doublings.
     ///
     /// Window indices must be less than `windows`. Partials are added in their iteration order.
-    /// The default runs the chain in every vector lane at once and keeps lane 0. A backend that
-    /// computes its vector lanes separately should run [`combine_windows`] on scalar points
-    /// instead, which computes each point once.
+    /// [`combine_windows`] implements the chain for any point arithmetic.
     fn combine_windows(
         self,
         partials: impl IntoIterator<Item = (usize, G)>,
         windows: usize,
         width: u32,
-    ) -> G {
-        combine_windows(
-            GVec::identity(),
-            |a, b| self.g_add(a, b),
-            |a| self.g_double(a),
-            partials
-                .into_iter()
-                .map(|(window, partial)| (window, GVec::splat(partial))),
-            windows,
-            width,
-        )
-        .untranspose()[0]
-    }
+    ) -> G;
 
     /// Runs a computation with the backend's native lane width and required CPU features.
     fn with_lanes<C: WithLanes>(self, computation: C) -> C::Output;
@@ -77,6 +63,9 @@ pub trait Lanes<const N: usize>: Copy {
 
     /// Loads one extended point per lane.
     fn load_extended(self, points: [&G; N]) -> Self::Point;
+
+    /// Returns the extended point in each lane.
+    fn store(self, point: Self::Point) -> [G; N];
 
     /// Adds an affine point to each extended lane.
     fn add_mixed(self, point: Self::Point, affine: Self::Affine) -> Self::Point;
@@ -262,6 +251,7 @@ pub fn fill_buckets<const STRIPES: usize, T>(
 /// doublings.
 ///
 /// Window indices must be less than `windows`. Partials are added in their iteration order.
+#[inline(always)]
 pub fn combine_windows<P: Copy>(
     identity: P,
     add: impl Fn(P, P) -> P,

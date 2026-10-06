@@ -7,11 +7,7 @@
 //! only while multiplying. Loose input digits can each occupy 26 bits. The surrounding group
 //! formulas keep their compact five-limb representation.
 
-#[cfg(any(test, feature = "fuzz"))]
-use super::GAffineVec;
-use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GBackend, GVec, LANES, MASK_51, msm,
-};
+use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, msm};
 use core::arch::aarch64::*;
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
@@ -682,84 +678,6 @@ fn add_mixed_regs(p: [Regs; 4], q: [Regs; 3]) -> [Regs; 4] {
     ]
 }
 
-impl GBackend for Backend {
-    /// Fused point addition, processed two lanes at a time to keep the working set in registers.
-    #[inline(always)]
-    fn g_add(self, mut p: GVec, q: GVec) -> GVec {
-        // Tiles hold disjoint pairs of lanes, so each tile's result can overwrite its slice of
-        // `p` without affecting the inputs of later tiles.
-        for tile in 0..TILES {
-            let [x, y, t, z] = add_regs(
-                [
-                    load(&p.x.limbs, tile),
-                    load(&p.y.limbs, tile),
-                    load(&p.t.limbs, tile),
-                    load(&p.z.limbs, tile),
-                ],
-                [
-                    load(&q.x.limbs, tile),
-                    load(&q.y.limbs, tile),
-                    load(&q.t.limbs, tile),
-                    load(&q.z.limbs, tile),
-                ],
-            );
-            store(x, &mut p.x.limbs, tile);
-            store(y, &mut p.y.limbs, tile);
-            store(t, &mut p.t.limbs, tile);
-            store(z, &mut p.z.limbs, tile);
-        }
-        p
-    }
-
-    /// Fused mixed point addition, processed two lanes at a time.
-    #[cfg(any(test, feature = "fuzz"))]
-    #[inline(always)]
-    fn g_add_mixed(self, mut p: GVec, q: GAffineVec) -> GVec {
-        // Tiles hold disjoint pairs of lanes, so each tile's result can overwrite its slice of
-        // `p` without affecting the inputs of later tiles.
-        for tile in 0..TILES {
-            let [x, y, t, z] = add_mixed_regs(
-                [
-                    load(&p.x.limbs, tile),
-                    load(&p.y.limbs, tile),
-                    load(&p.t.limbs, tile),
-                    load(&p.z.limbs, tile),
-                ],
-                [
-                    load(&q.x.limbs, tile),
-                    load(&q.y.limbs, tile),
-                    load(&q.t2d.limbs, tile),
-                ],
-            );
-            store(x, &mut p.x.limbs, tile);
-            store(y, &mut p.y.limbs, tile);
-            store(t, &mut p.t.limbs, tile);
-            store(z, &mut p.z.limbs, tile);
-        }
-        p
-    }
-
-    /// Fused point doubling using the dedicated `dbl-2008-hwcd` formula.
-    #[inline(always)]
-    fn g_double(self, mut p: GVec) -> GVec {
-        // Tiles hold disjoint pairs of lanes, so each tile's result can overwrite its slice of
-        // `p` without affecting the inputs of later tiles.
-        for tile in 0..TILES {
-            let [x, y, t, z] = double_regs([
-                load(&p.x.limbs, tile),
-                load(&p.y.limbs, tile),
-                load(&p.t.limbs, tile),
-                load(&p.z.limbs, tile),
-            ]);
-            store(x, &mut p.x.limbs, tile);
-            store(y, &mut p.y.limbs, tile);
-            store(t, &mut p.t.limbs, tile);
-            store(z, &mut p.z.limbs, tile);
-        }
-        p
-    }
-}
-
 impl super::Backend for Backend {}
 
 /// Adds a signed affine point to each of two extended points.
@@ -873,6 +791,17 @@ impl msm::Lanes<WIDTH> for Backend {
     }
 
     #[inline(always)]
+    fn store(self, [x, y, t, z]: Point) -> [G; WIDTH] {
+        let [x, y, t, z] = [x, y, t, z].map(unpack_pair);
+        core::array::from_fn(|lane| G {
+            x: x[lane],
+            y: y[lane],
+            t: t[lane],
+            z: z[lane],
+        })
+    }
+
+    #[inline(always)]
     fn add_mixed(self, point: Point, affine: Self::Affine) -> Point {
         add_mixed_regs(point, affine)
     }
@@ -933,34 +862,15 @@ impl msm::Lanes<WIDTH> for Backend {
     }
 
     #[inline(always)]
-    fn sum(self, [x, y, t, z]: Point) -> G {
-        // The shared doubling chain leaves one sum per physical lane. Unpack each point
-        // once and combine the two sums with scalar addition.
-        let [x, y, t, z] = [
-            unpack_pair(x),
-            unpack_pair(y),
-            unpack_pair(t),
-            unpack_pair(z),
-        ];
-        let first = G {
-            x: x[0],
-            y: y[0],
-            t: t[0],
-            z: z[0],
-        };
-        let second = G {
-            x: x[1],
-            y: y[1],
-            t: t[1],
-            z: z[1],
-        };
+    fn sum(self, point: Point) -> G {
+        // Unpack both lanes once and combine them with scalar addition.
+        let [first, second] = self.store(point);
         first.add(second)
     }
 }
 
 #[test]
-fn mixed_pair_matches_full_width() {
-    let reference = super::portable::Backend::new();
+fn mixed_pair_matches_scalar() {
     let torsion = GAffine::decompress(&[0; 32]).unwrap();
     let mixed = GAffine::decompress(
         &GAffine::BASEPOINT
@@ -1000,34 +910,21 @@ fn mixed_pair_matches_full_width() {
                 ([loose, current[1]], [loose_affine, incoming[1]]),
             ] {
                 for negative in [[false, false], [false, true], [true, false], [true, true]] {
-                    // The full-width reference negates `x` and `t2d` of each subtracted point
-                    // before its mixed addition.
-                    let mut packed_current = [G::IDENTITY; LANES];
-                    let mut packed_incoming = [GAffine::IDENTITY; LANES];
-                    packed_current[..WIDTH].copy_from_slice(&current);
-                    for (packed, (mut point, subtract)) in packed_incoming
-                        .iter_mut()
-                        .zip(incoming.into_iter().zip(negative))
-                    {
-                        if subtract {
+                    let actual = g_add_mixed_pair(current, incoming, negative);
+                    for lane in 0..WIDTH {
+                        // The scalar reference negates `x` and `t2d` of a subtracted point before
+                        // its mixed addition.
+                        let mut point = incoming[lane];
+                        if negative[lane] {
                             point.x = point.x.neg();
                             point.t2d = point.t2d.neg();
                         }
-                        *packed = point;
-                    }
-                    let expected = reference
-                        .g_add_mixed(
-                            GVec::transpose(packed_current),
-                            GAffineVec::transpose(packed_incoming),
-                        )
-                        .untranspose();
-                    let actual = g_add_mixed_pair(current, incoming, negative);
-                    for lane in 0..2 {
+                        let expected = current[lane].add_mixed(point);
                         for (actual, expected) in [
-                            (actual[lane].x, expected[lane].x),
-                            (actual[lane].y, expected[lane].y),
-                            (actual[lane].t, expected[lane].t),
-                            (actual[lane].z, expected[lane].z),
+                            (actual[lane].x, expected.x),
+                            (actual[lane].y, expected.y),
+                            (actual[lane].t, expected.t),
+                            (actual[lane].z, expected.z),
                         ] {
                             super::test::assert_f_eq(
                                 FVec::splat(actual),

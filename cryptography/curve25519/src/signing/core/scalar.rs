@@ -192,8 +192,11 @@ impl Scalar {
     /// Returns the base-`2^width` digit at position `index`, i.e. bits `[index*width,
     /// index*width+width)` of this scalar's canonical representative, as an unsigned integer.
     ///
-    /// `width` must be below 32.
+    /// # Panics
+    ///
+    /// Panics if `width` is 32 or more.
     pub const fn window(&self, index: usize, width: u32) -> u32 {
+        assert!(width < 32);
         let bit_start = index * width as usize;
         if bit_start >= 256 {
             return 0;

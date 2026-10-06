@@ -1,8 +1,6 @@
 //! Plain-Rust lane adapter over scalar field and group arithmetic.
 
-use super::{F, FBackend, FVec, G, GAffine, GBackend, GVec, msm};
-#[cfg(any(test, feature = "fuzz"))]
-use super::{GAffineVec, LANES};
+use super::{F, FBackend, FVec, G, GAffine, msm};
 use core::array;
 
 /// The portable backend token.
@@ -34,18 +32,6 @@ fn map2_f(a: FVec, b: FVec, f: impl Fn(F, F) -> F) -> FVec {
     FVec::transpose(array::from_fn(|i| f(a[i], b[i])))
 }
 
-/// Applies a scalar group operation independently to every lane.
-fn map_g(a: GVec, f: impl Fn(G) -> G) -> GVec {
-    GVec::transpose(a.untranspose().map(f))
-}
-
-/// Applies a scalar group operation independently to every pair of lanes.
-fn map2_g(a: GVec, b: GVec, f: impl Fn(G, G) -> G) -> GVec {
-    let a = a.untranspose();
-    let b = b.untranspose();
-    GVec::transpose(array::from_fn(|i| f(a[i], b[i])))
-}
-
 impl FBackend for Backend {
     fn add(self, a: FVec, b: FVec) -> FVec {
         map2_f(a, b, F::add)
@@ -68,39 +54,7 @@ impl FBackend for Backend {
     }
 }
 
-impl GBackend for Backend {
-    fn g_add(self, p: GVec, q: GVec) -> GVec {
-        map2_g(p, q, G::add)
-    }
-
-    #[cfg(any(test, feature = "fuzz"))]
-    fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
-        let a = p.untranspose();
-        let b = q.untranspose();
-        GVec::transpose(array::from_fn(|i| a[i].add_mixed(b[i])))
-    }
-
-    fn g_double(self, p: GVec) -> GVec {
-        map_g(p, G::double)
-    }
-}
-
 impl super::Backend for Backend {}
-
-#[cfg(any(test, feature = "fuzz"))]
-impl GAffineVec {
-    /// Untransposes backend lanes into scalar affine points.
-    fn untranspose(self) -> [GAffine; LANES] {
-        let x = self.x.untranspose();
-        let y = self.y.untranspose();
-        let t2d = self.t2d.untranspose();
-        array::from_fn(|i| GAffine {
-            x: x[i],
-            y: y[i],
-            t2d: t2d[i],
-        })
-    }
-}
 
 impl super::msm::Backend for Backend {
     // One stripe per physical mixed-addition lane. Scalar arithmetic has one, so the fold has no
@@ -168,6 +122,11 @@ impl msm::Lanes<1> for Backend {
     }
 
     #[inline(always)]
+    fn store(self, point: G) -> [G; 1] {
+        [point]
+    }
+
+    #[inline(always)]
     fn add_mixed(self, point: G, affine: GAffine) -> G {
         point.add_mixed(affine)
     }
@@ -198,6 +157,7 @@ impl msm::Lanes<1> for Backend {
 
     #[inline(always)]
     fn sum(self, point: G) -> G {
+        let [point] = self.store(point);
         point
     }
 }

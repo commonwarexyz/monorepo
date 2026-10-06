@@ -1,11 +1,8 @@
 //! The AVX-512 backend: all eight lanes of an [`super::FVec`] limb row in one 512-bit register,
 //! with field multiplication built on IFMA's 52-bit multiply-accumulates.
 
-#[cfg(any(test, feature = "fuzz"))]
-use super::GAffineVec;
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GBackend, GVec, LANES, MASK_51,
-    WithBackend, msm,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, WithBackend, msm,
 };
 use core::arch::x86_64::*;
 
@@ -249,27 +246,6 @@ fn identity() -> Point {
     let mut one = zero;
     one[0] = _mm512_set1_epi64(1);
     [zero, one, zero, one]
-}
-
-#[target_feature(enable = "avx512f")]
-fn load_point(p: &GVec) -> Point {
-    [
-        load(&p.x.limbs),
-        load(&p.y.limbs),
-        load(&p.t.limbs),
-        load(&p.z.limbs),
-    ]
-}
-
-#[inline]
-#[target_feature(enable = "avx512f")]
-fn store_point([x, y, t, z]: Point) -> GVec {
-    GVec {
-        x: FVec { limbs: store(x) },
-        y: FVec { limbs: store(y) },
-        t: FVec { limbs: store(t) },
-        z: FVec { limbs: store(z) },
-    }
 }
 
 /// Mixed addition of an affine point using its precomputed `2d*x*y` coordinate.
@@ -545,23 +521,6 @@ impl Backend {
         }
     }
 
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn add_points(self, p: GVec, q: GVec) -> GVec {
-        store_point(self.add_lanes(load_point(&p), load_point(&q)))
-    }
-
-    #[cfg(any(test, feature = "fuzz"))]
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn add_mixed_points(self, p: GVec, q: GAffineVec) -> GVec {
-        let q = [load(&q.x.limbs), load(&q.y.limbs), load(&q.t2d.limbs)];
-        store_point(add_mixed_regs(load_point(&p), q))
-    }
-
-    #[target_feature(enable = "avx512f,avx512ifma")]
-    fn double_points(self, p: GVec) -> GVec {
-        store_point(<Self as msm::Lanes<LANES>>::double(self, load_point(&p)))
-    }
-
     /// Adds each term's signed affine point to the bucket its digit selects, one wave of
     /// [`LANES`] terms at a time.
     ///
@@ -627,6 +586,59 @@ impl Backend {
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn call_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
         computation.call::<Self, LANES>(self)
+    }
+
+    /// Returns the sum of every lane of `point`.
+    #[inline(never)]
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn sum_lanes(self, mut point: Point) -> G {
+        // Each round moves lanes `half..2 * half` onto lanes `0..half` and adds them in, so lane 0
+        // ends with the sum of every lane.
+        let mut half = LANES / 2;
+        while half > 0 {
+            let lanes = <Self as msm::Lanes<LANES>>::store(self, point);
+            let upper = <Self as msm::Lanes<LANES>>::load_extended(
+                self,
+                core::array::from_fn(|lane| {
+                    if lane < half {
+                        &lanes[lane + half]
+                    } else {
+                        &G::IDENTITY
+                    }
+                }),
+            );
+            point = self.add_lanes(point, upper);
+            half /= 2;
+        }
+        <Self as msm::Lanes<LANES>>::store(self, point)[0]
+    }
+
+    /// Runs the window recombination chain in lane 0 with AVX-512 enabled for the whole chain.
+    #[target_feature(enable = "avx512f,avx512ifma")]
+    fn combine_lanes(
+        self,
+        partials: impl IntoIterator<Item = (usize, G)>,
+        windows: usize,
+        width: u32,
+    ) -> G {
+        // Each partial enters lane 0, and the other lanes hold the identity.
+        let in_lane_zero = |point: &G| {
+            <Self as msm::Lanes<LANES>>::load_extended(
+                self,
+                core::array::from_fn(|lane| if lane == 0 { point } else { &G::IDENTITY }),
+            )
+        };
+        let chain = msm::combine_windows(
+            identity(),
+            |a, b| self.add_lanes(a, b),
+            |point| <Self as msm::Lanes<LANES>>::double(self, point),
+            partials
+                .into_iter()
+                .map(|(window, partial)| (window, in_lane_zero(&partial))),
+            windows,
+            width,
+        );
+        <Self as msm::Lanes<LANES>>::store(self, chain)[0]
     }
 
     // Field operations require inputs within FVec's limb bound. This keeps raw field
@@ -696,6 +708,19 @@ impl super::msm::Backend for Backend {
         unsafe { self.fill(buckets, nb, terms, term) }
     }
 
+    /// Runs the chain in lane 0 of the native lanes. One eight-lane IFMA operation is cheaper
+    /// than the scalar formula, so the idle lanes cost nothing.
+    #[inline(always)]
+    fn combine_windows(
+        self,
+        partials: impl IntoIterator<Item = (usize, G)>,
+        windows: usize,
+        width: u32,
+    ) -> G {
+        // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.
+        unsafe { self.combine_lanes(partials, windows, width) }
+    }
+
     #[inline(always)]
     fn with_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
         // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.
@@ -732,6 +757,15 @@ impl msm::Lanes<LANES> for Backend {
         // SAFETY: Backend construction checks the CPU features, and every pointer is a live point
         // supplied by the caller.
         unsafe { load_points(points.map(core::ptr::from_ref)) }
+    }
+
+    #[inline(always)]
+    fn store(self, point: Point) -> [G; LANES] {
+        let mut points = [G::IDENTITY; LANES];
+        // SAFETY: Backend construction checks AVX-512F support, and every pointer is an element of
+        // `points`, valid for writes.
+        unsafe { store_points(point, points.each_mut().map(core::ptr::from_mut), 0xff) };
+        points
     }
 
     #[inline(always)]
@@ -851,27 +885,6 @@ impl msm::Lanes<LANES> for Backend {
     #[inline(always)]
     fn sum(self, point: Point) -> G {
         // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.
-        unsafe { store_point(point) }.sum_lanes(self)
-    }
-}
-
-impl GBackend for Backend {
-    #[inline(always)]
-    fn g_add(self, p: GVec, q: GVec) -> GVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
-        unsafe { self.add_points(p, q) }
-    }
-
-    #[cfg(any(test, feature = "fuzz"))]
-    #[inline(always)]
-    fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
-        unsafe { self.add_mixed_points(p, q) }
-    }
-
-    #[inline(always)]
-    fn g_double(self, p: GVec) -> GVec {
-        // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.
-        unsafe { self.double_points(p) }
+        unsafe { self.sum_lanes(point) }
     }
 }
