@@ -1907,6 +1907,22 @@ mod loom_tests {
         }
     }
 
+    /// A future that completes once `signal` is set, counting its drop.
+    fn signaled(
+        signal: Arc<AtomicBool>,
+        drops: &Arc<AtomicUsize>,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        let guard = DropCount(drops.clone());
+        poll_fn(move |_| {
+            let _ = &guard;
+            if signal.load(Ordering::Acquire) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+
     /// A future that never completes, counting its drop.
     fn pending(drops: &Arc<AtomicUsize>) -> impl Future<Output = ()> + Send + 'static {
         let guard = DropCount(drops.clone());
@@ -1956,10 +1972,10 @@ mod loom_tests {
     }
 
     /// A foreign wake racing the poll path, by value or by reference, is never
-    /// lost, even when it arrives after the task woke itself during its first
-    /// poll: the task completes in a poll its runnable runs, first or
-    /// requeued, or in the poll of the runnable the wake delivers through the
-    /// mailbox. No reference leaks.
+    /// lost, even one that finds the task already notified by an earlier wake
+    /// from the same thread: the task completes in a poll its runnable runs,
+    /// first or requeued, or in the poll of a runnable a wake delivers through
+    /// the mailbox. No reference leaks.
     #[test]
     fn test_foreign_wake_racing_the_poll_path_is_never_lost() {
         for by_value in [false, true] {
@@ -1968,34 +1984,18 @@ mod loom_tests {
                 let set = Tasks::with_shards(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
-
-                // The future wakes itself during its first poll, so the
-                // foreign wake can also find the task already notified. It
-                // completes once signaled.
-                let future = {
-                    let signal = signal.clone();
-                    let guard = DropCount(drops.clone());
-                    let mut woken = false;
-                    poll_fn(move |cx| {
-                        let _ = &guard;
-                        if !woken {
-                            woken = true;
-                            cx.waker().wake_by_ref();
-                        }
-                        if signal.load(Ordering::Acquire) {
-                            Poll::Ready(())
-                        } else {
-                            Poll::Pending
-                        }
-                    })
-                };
-                let (task, runnable) = Task::new(future, &set, std::sync::Arc::downgrade(&mailbox));
+                let (task, runnable) = Task::new(
+                    signaled(signal.clone(), &drops),
+                    &set,
+                    std::sync::Arc::downgrade(&mailbox),
+                );
                 assert!(set.insert(task.clone()).is_ok());
                 let waker = Waker::clone(&task.waker());
 
-                // Another thread signals the future and wakes it while this
-                // one polls.
+                // Another thread wakes the task, then signals the future and
+                // wakes it again, while this one polls.
                 let waking = thread::spawn(move || {
+                    waker.wake_by_ref();
                     signal.store(true, Ordering::Release);
                     if by_value {
                         waker.wake();
