@@ -38,13 +38,16 @@ struct Read {
 /// One completed read, sent to the stream as soon as the kernel reports it.
 type Completion = Result<(usize, IoBufsMut), Error>;
 
-/// The blob's `O_DIRECT` descriptor on its inode, opened by the first submission that needs
-/// it and shared by every later one. `None` when the filesystem rejects direct I/O, which
-/// the blob remembers, or when the open fails for a reason that may not recur, such as a
-/// descriptor limit, which leaves the cell empty for the next submission to try again.
+/// The blob's `O_DIRECT` descriptor on its inode, opened by the first submission or aligned
+/// uncached read that needs it and shared by every later one. `None` when the filesystem
+/// rejects direct I/O, which the blob remembers, or when the open fails for a reason that may
+/// not recur, such as a descriptor limit, which leaves the cell empty for the next read to try
+/// again.
 pub(super) fn direct(file: &Shared) -> Option<&File> {
     file.direct
         .get_or_try_init(|| {
+            // Reopening through procfs yields an independent open file description, so the
+            // `O_DIRECT` flag does not affect reads and writes through the original descriptor.
             let path = format!("/proc/self/fd/{}", file.as_raw_fd());
             let mut options = std::fs::OpenOptions::new();
             options.read(true).custom_flags(libc::O_DIRECT);

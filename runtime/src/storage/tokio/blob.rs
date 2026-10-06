@@ -1,7 +1,7 @@
 #[cfg(target_os = "linux")]
 use crate::storage::{preadv2, pwritev2};
 use crate::{
-    Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    Buf, BufferPool, Error, Handle, IoBufMut, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
     storage::{
         Generation, Pending, Sender, Tracker,
         hold::{Held, Hold},
@@ -23,6 +23,7 @@ use std::sync::mpsc;
 use std::{
     fs::File,
     io::IoSlice,
+    num::NonZeroUsize,
     ops::Deref,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
@@ -38,6 +39,12 @@ const IOVEC_BATCH_SIZE: usize = 1024;
 
 #[cfg(target_os = "linux")]
 mod aio;
+
+/// Alignment of the offset, length, and buffer address that uncached reads need to bypass the page
+/// cache with `O_DIRECT`: one blob page, which covers devices with 512-byte and 4 KiB logical
+/// blocks.
+#[cfg(target_os = "linux")]
+const DIRECT_ALIGNMENT: usize = crate::BLOB_PAGE_SIZE as usize;
 
 /// Page-cache policy for one positioned I/O request.
 enum Cache {
@@ -90,9 +97,9 @@ struct Shared {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
-    /// Descriptor for direct I/O on the same inode, opened by the first batched read. `None`
-    /// once the filesystem has rejected direct I/O on this file. Empty until an open succeeds
-    /// or is rejected (see [aio::direct]).
+    /// Descriptor for direct I/O on the same inode, opened by the first batched read or aligned
+    /// uncached read. `None` once the filesystem has rejected direct I/O on this file. Empty
+    /// until an open succeeds or is rejected (see [aio::direct]).
     #[cfg(target_os = "linux")]
     direct: once_cell::sync::OnceCell<Option<File>>,
     #[cfg(test)]
@@ -304,6 +311,94 @@ impl Blob {
         self.shared.tracker.skipped()
     }
 
+    /// Whether a read of `len` bytes at file offset `offset` with `options` can bypass the page
+    /// cache with direct I/O, given an aligned buffer.
+    #[allow(clippy::missing_const_for_fn)]
+    fn direct_eligible(offset: u64, len: usize, options: ReadOptions) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            options.contains(ReadOptions::DONT_CACHE)
+                && len > 0
+                && offset.is_multiple_of(DIRECT_ALIGNMENT as u64)
+                && len.is_multiple_of(DIRECT_ALIGNMENT)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (offset, len, options);
+            false
+        }
+    }
+
+    /// An empty buffer of capacity `len` aligned for direct I/O.
+    fn aligned_buffer(len: usize) -> IoBufMut {
+        #[cfg(target_os = "linux")]
+        let alignment = NonZeroUsize::new(DIRECT_ALIGNMENT).expect("nonzero");
+        #[cfg(not(target_os = "linux"))]
+        let alignment = NonZeroUsize::MIN;
+        IoBufMut::with_alignment(len, alignment)
+    }
+
+    /// Read `buf.len()` bytes at `offset` through the `O_DIRECT` descriptor, bypassing the page
+    /// cache entirely. Returns `false` without reading if the offset, length, or buffer address is
+    /// not [DIRECT_ALIGNMENT]-aligned, or no direct descriptor is available (see [aio::direct]).
+    #[cfg(target_os = "linux")]
+    fn read_direct_at(file: &Shared, buf: &mut [u8], offset: u64) -> Result<bool, Error> {
+        let align = DIRECT_ALIGNMENT as u64;
+        if !offset.is_multiple_of(align)
+            || !buf.len().is_multiple_of(DIRECT_ALIGNMENT)
+            || !buf.as_ptr().addr().is_multiple_of(DIRECT_ALIGNMENT)
+        {
+            return Ok(false);
+        }
+        let Some(direct) = aio::direct(file) else {
+            return Ok(false);
+        };
+
+        let mut done = 0;
+        while done < buf.len() {
+            let pos = offset
+                .checked_add(done as u64)
+                .and_then(|pos| libc::off_t::try_from(pos).ok())
+                .ok_or(Error::OffsetOverflow)?;
+            let remaining = &mut buf[done..];
+            // SAFETY: `direct` owns a valid fd for this call, and `remaining` is an exclusive
+            // writable slice borrowed for the duration of the syscall.
+            let ret = unsafe {
+                libc::pread(
+                    direct.as_raw_fd(),
+                    remaining.as_mut_ptr().cast(),
+                    remaining.len(),
+                    pos,
+                )
+            };
+            if ret < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+
+                // A device whose blocks are larger than `DIRECT_ALIGNMENT` rejects the request
+                // before reading anything, so the caller can still read it another way.
+                if done == 0 && err.raw_os_error() == Some(libc::EINVAL) {
+                    return Ok(false);
+                }
+                return Err(err.into());
+            }
+            if ret == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into());
+            }
+            done += ret as usize;
+
+            // A short read stops at end of file, where the remainder is no longer aligned. Read
+            // it through the page cache, which reports the same end of file.
+            if done < buf.len() && !done.is_multiple_of(DIRECT_ALIGNMENT) {
+                file.read_exact_at(&mut buf[done..], offset + done as u64)?;
+                break;
+            }
+        }
+        Ok(true)
+    }
+
     #[cfg(target_os = "linux")]
     fn read_exact_at(
         mut cache: Cache,
@@ -311,6 +406,11 @@ impl Blob {
         mut buf: &mut [u8],
         mut offset: u64,
     ) -> Result<(), Error> {
+        // Aligned uncached reads skip the page cache entirely rather than populating and then
+        // dropping it.
+        if matches!(cache, Cache::Disabled) && Self::read_direct_at(file, buf, offset)? {
+            return Ok(());
+        }
         if !cache.is_disabled(&file.dont_cache_supported) {
             file.read_exact_at(buf, offset)?;
             return Ok(());
@@ -447,8 +547,15 @@ impl crate::Blob for Blob {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.read_at_buf(offset, len, self.pool.alloc(len), options)
-            .await
+        // Pooled buffers are not aligned for direct I/O, so a read that can bypass the page cache
+        // gets an aligned buffer of its own.
+        let buf = match offset.checked_add(self.data_offset) {
+            Some(file_offset) if Self::direct_eligible(file_offset, len, options) => {
+                Self::aligned_buffer(len)
+            }
+            _ => self.pool.alloc(len),
+        };
+        self.read_at_buf(offset, len, buf, options).await
     }
 
     async fn read_at_buf(
@@ -469,6 +576,7 @@ impl crate::Blob for Blob {
         }
         let file = self.shared.clone();
         let pool = self.pool.clone();
+        let direct = Self::direct_eligible(offset, len, options);
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled
         } else {
@@ -480,8 +588,13 @@ impl crate::Blob for Blob {
                 Self::read_exact_at(cache, &file, buf.as_mut(), offset)?;
             } else {
                 // Read into a temporary contiguous buffer and copy back to preserve structure.
+                let mut temp = if direct {
+                    Self::aligned_buffer(len)
+                } else {
+                    pool.alloc(len)
+                };
                 // SAFETY: `len` bytes are filled via read_exact_at below.
-                let mut temp = unsafe { pool.alloc_len(len) };
+                unsafe { temp.set_len(len) };
                 Self::read_exact_at(cache, &file, temp.as_mut(), offset)?;
                 bufs.copy_from_slice(temp.as_ref());
             }
@@ -1538,6 +1651,57 @@ mod tests {
             Err(Error::BlobCorrupt(_, _, _))
         ));
         assert_eq!(std::fs::read(&path).unwrap(), raw);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_uncached_reads_match_written_bytes() {
+        // Aligned uncached reads go through `O_DIRECT` where the filesystem supports it, and every
+        // other shape takes the page-cache path. Both must return the written bytes and report
+        // end of file the same way.
+        let (storage, directory) =
+            storage_for_reopen_test("uncached_reads", Layout::V1..=Layout::V1);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let align = DIRECT_ALIGNMENT;
+        let data: Vec<u8> = (0..5 * align + 100).map(|i| (i % 251) as u8).collect();
+        blob.write_at(0, crate::IoBuf::from(data.clone()), WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+
+        // Aligned reads, a read ending in the final partial block, and unaligned offsets and
+        // lengths.
+        for (offset, len) in [
+            (0, align),
+            (align, 3 * align),
+            (0, 5 * align),
+            (4 * align, align + 100),
+            (1, align),
+            (100, 300),
+            (align, 17),
+        ] {
+            let read = blob
+                .read_at(offset as u64, len, ReadOptions::DONT_CACHE)
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), &data[offset..offset + len], "{offset}+{len}");
+        }
+
+        // The aligned reads attempted direct I/O.
+        assert!(blob.shared.direct.get().is_some());
+
+        // An aligned read running past the end of the blob fails.
+        assert!(
+            blob.read_at((4 * align) as u64, 2 * align, ReadOptions::DONT_CACHE)
+                .await
+                .is_err()
+        );
+
+        drop(blob);
         storage.remove("partition", None).await.unwrap();
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
