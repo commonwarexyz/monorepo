@@ -212,6 +212,13 @@ pub fn neon<N: Neon, E: Neon>(n: N, e: E, u: &mut Unstructured<'_>) -> arbitrary
 }
 
 #[cfg(not(miri))]
+fn words128<S: IceLake>(s: S, value: S::U32x4) -> [u32; 6] {
+    let mut output = [0xa5a5_a5a5; 6];
+    s.u32x4_store(value, &mut output[1..]);
+    output
+}
+
+#[cfg(not(miri))]
 pub fn ice_lake<N: IceLake, E: IceLake>(
     n: N,
     e: E,
@@ -223,6 +230,33 @@ pub fn ice_lake<N: IceLake, E: IceLake>(
         bytes(n, n.u8_gf_mul(n.u8_load(&a), n.u8_load(&b))),
         bytes(e, e.u8_gf_mul(e.u8_load(&a), e.u8_load(&b)))
     );
+    assert_eq!(
+        bytes(n, n.u8_shuffle128(n.u8_load(&a), n.u8_load(&b))),
+        bytes(e, e.u8_shuffle128(e.u8_load(&a), e.u8_load(&b)))
+    );
+    let a: [u32; 5] = u.arbitrary()?;
+    let b: [u32; 5] = u.arbitrary()?;
+    let k: [u32; 5] = u.arbitrary()?;
+    let na = n.u32x4_load(&a[1..]);
+    let nb = n.u32x4_load(&b[1..]);
+    let nk = n.u32x4_load(&k[1..]);
+    let ea = e.u32x4_load(&a[1..]);
+    let eb = e.u32x4_load(&b[1..]);
+    let ek = e.u32x4_load(&k[1..]);
+    macro_rules! narrow {
+        ($method:ident($($arg:expr),*); ($($earg:expr),*)) => {
+            assert_eq!(words128(n, n.$method($($arg),*)), words128(e, e.$method($($earg),*)));
+        };
+    }
+    assert_eq!(words128(n, na), words128(e, ea));
+    narrow!(u32x4_add(na, nb); (ea, eb));
+    narrow!(sha256_rounds2(na, nb, nk); (ea, eb, ek));
+    narrow!(sha256_msg1(na, nb); (ea, eb));
+    narrow!(sha256_msg2(na, nb); (ea, eb));
+    macro_rules! shuffles128 { ($($m:literal),*) => { $(
+        assert_eq!(words128(n, n.u32x4_shuffle::<$m>(na)), words128(e, e.u32x4_shuffle::<$m>(ea)));
+    )* }; }
+    shuffles128!(0, 14, 27, 177, 255);
     let a: [u64; 8] = u.arbitrary()?;
     let b: [u64; 8] = u.arbitrary()?;
     let acc: [u64; 8] = u.arbitrary()?;
@@ -312,6 +346,18 @@ pub fn ice_lake<N: IceLake, E: IceLake>(
         words(n, n.u32_unpacklo64(na, nb)),
         words(e, e.u32_unpacklo64(ea, eb))
     );
+    assert_eq!(words(n, n.u32_unpackhi64(na, nb)), words(e, e.u32_unpackhi64(ea, eb)));
+    let c: [u32; 16] = u.arbitrary()?;
+    let nc = n.u32_load(&c);
+    let ec = e.u32_load(&c);
+    macro_rules! ternary { ($($m:literal),*) => { $(
+        assert_eq!(words(n, n.u32_ternary::<$m>(na, nb, nc)), words(e, e.u32_ternary::<$m>(ea, eb, ec)));
+    )* }; }
+    ternary!(0, 255, 0x96, 0xca, 0xe8, 0xf0, 0xcc, 0xaa);
+    macro_rules! groups { ($($m:literal),*) => { $(
+        assert_eq!(words(n, n.u32_shuffle_groups::<$m>(na, nb)), words(e, e.u32_shuffle_groups::<$m>(ea, eb)));
+    )* }; }
+    groups!(0, 255, 0x44, 0xee, 0x88, 0xdd);
     Ok(())
 }
 

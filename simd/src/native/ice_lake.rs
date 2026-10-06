@@ -5,7 +5,7 @@ use core::arch::x86_64::*;
 
 /// Native Ice Lake execution token with 64 byte, 16 u32, and eight u64 lanes.
 ///
-/// Construction checks AVX-512F, AVX-512BW, GFNI, and AVX-512IFMA. AVX-512BW
+/// Construction checks AVX-512F, AVX-512BW, GFNI, AVX-512IFMA, and SHA. AVX-512BW
 /// supplies byte-masked memory operations, byte broadcasts, and word shifts used
 /// to implement independent byte shifts. Copies preserve the feature guarantee.
 /// No CPU vendor or model is required.
@@ -22,17 +22,19 @@ impl NativeIceLake {
         let supported = std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("avx512bw")
             && std::arch::is_x86_feature_detected!("gfni")
-            && std::arch::is_x86_feature_detected!("avx512ifma");
+            && std::arch::is_x86_feature_detected!("avx512ifma")
+            && std::arch::is_x86_feature_detected!("sha");
         #[cfg(not(feature = "std"))]
         let supported = cfg!(target_feature = "avx512f")
             && cfg!(target_feature = "avx512bw")
             && cfg!(target_feature = "gfni")
-            && cfg!(target_feature = "avx512ifma");
+            && cfg!(target_feature = "avx512ifma")
+            && cfg!(target_feature = "sha");
         supported.then_some(Self(()))
     }
 
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,gfni,avx512ifma")]
+    #[target_feature(enable = "avx512f,avx512bw,gfni,avx512ifma,sha")]
     unsafe fn execute_ice_lake<O: Operation>(self, operation: O) -> O::Output {
         operation.ice_lake(self)
     }
@@ -333,6 +335,79 @@ impl Simd for NativeIceLake {
 }
 
 impl IceLake for NativeIceLake {
+    type U32x4 = __m128i;
+
+    #[inline]
+    fn u32x4_load(self, input: &[u32]) -> __m128i {
+        assert!(input.len() >= 4);
+        // SAFETY: x86_64 supports SSE2; the slice has 16 readable bytes and the load is unaligned.
+        unsafe { _mm_loadu_si128(input.as_ptr().cast()) }
+    }
+
+    #[inline]
+    fn u32x4_store(self, value: __m128i, output: &mut [u32]) {
+        assert!(output.len() >= 4);
+        // SAFETY: x86_64 supports SSE2; the slice has 16 writable bytes and the store is unaligned.
+        unsafe { _mm_storeu_si128(output.as_mut_ptr().cast(), value) }
+    }
+
+    #[inline]
+    fn u32x4_add(self, a: __m128i, b: __m128i) -> __m128i {
+        // SAFETY: SSE2 is part of the x86_64 baseline.
+        unsafe { _mm_add_epi32(a, b) }
+    }
+
+    #[inline]
+    fn u32x4_shuffle<const MASK: i32>(self, value: __m128i) -> __m128i {
+        assert!((0..256).contains(&MASK));
+        // SAFETY: SSE2 is part of the x86_64 baseline.
+        unsafe { _mm_shuffle_epi32::<MASK>(value) }
+    }
+
+    #[inline]
+    fn sha256_rounds2(self, a: __m128i, b: __m128i, k: __m128i) -> __m128i {
+        // SAFETY: Token construction established SHA support.
+        unsafe { _mm_sha256rnds2_epu32(a, b, k) }
+    }
+
+    #[inline]
+    fn sha256_msg1(self, a: __m128i, b: __m128i) -> __m128i {
+        // SAFETY: Token construction established SHA support.
+        unsafe { _mm_sha256msg1_epu32(a, b) }
+    }
+
+    #[inline]
+    fn sha256_msg2(self, a: __m128i, b: __m128i) -> __m128i {
+        // SAFETY: Token construction established SHA support.
+        unsafe { _mm_sha256msg2_epu32(a, b) }
+    }
+
+    #[inline]
+    fn u32_ternary<const MASK: i32>(self, a: __m512i, b: __m512i, c: __m512i) -> __m512i {
+        assert!((0..256).contains(&MASK));
+        // SAFETY: Token construction established AVX-512F support.
+        unsafe { _mm512_ternarylogic_epi32::<MASK>(a, b, c) }
+    }
+
+    #[inline]
+    fn u8_shuffle128(self, value: __m512i, indices: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512BW support.
+        unsafe { _mm512_shuffle_epi8(value, indices) }
+    }
+
+    #[inline]
+    fn u32_shuffle_groups<const MASK: i32>(self, a: __m512i, b: __m512i) -> __m512i {
+        assert!((0..256).contains(&MASK));
+        // SAFETY: Token construction established AVX-512F support.
+        unsafe { _mm512_shuffle_i32x4::<MASK>(a, b) }
+    }
+
+    #[inline]
+    fn u32_unpackhi64(self, a: __m512i, b: __m512i) -> __m512i {
+        // SAFETY: Token construction established AVX-512F support.
+        unsafe { _mm512_unpackhi_epi64(a, b) }
+    }
+
     #[inline]
     fn u8_gf_mul(self, a: __m512i, b: __m512i) -> __m512i {
         // SAFETY: Token construction established all required instruction features.

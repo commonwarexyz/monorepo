@@ -15,8 +15,8 @@
 //! `Simd` and target the following deployment platforms:
 //!
 //! - `IceLake`: 512-bit AVX-512F and AVX-512BW operations, GFNI byte arithmetic, and AVX-512
-//!   IFMA's 52-bit multiply-accumulates. This is a crate-defined bundle; AVX-512F alone does not imply GFNI
-//!   or IFMA support. Any additional AVX-512 subsets required by modeled operations must also
+//!   IFMA's 52-bit multiply-accumulates, and SHA-NI on separate 128-bit vectors. This is a crate-defined bundle; AVX-512F alone does not imply GFNI,
+//!   IFMA, or SHA support. Any additional AVX-512 subsets required by modeled operations must also
 //!   be documented and checked.
 //! - `ArmV9`: Baseline NEON plus SVE and SVE2 explicitly required. Logical vectors have
 //!   128 bits; native instructions use the low 128 bits of SVE registers. Optional SVE2
@@ -92,7 +92,7 @@
 //! }
 //!
 //! pub trait IceLake: Simd {
-//!     // AVX-512, GFNI, and IFMA profile instructions.
+//!     // AVX-512, GFNI, IFMA, and SHA-NI profile instructions.
 //! }
 //!
 //! pub trait ArmV9: Neon {

@@ -235,9 +235,64 @@ pub trait Simd: Copy {
 ///
 /// This profile models 512-bit vectors with 64 unsigned byte lanes, 16 unsigned
 /// 32-bit lanes, and eight unsigned 64-bit lanes. Native implementations require
-/// AVX-512F, AVX-512BW, GFNI, and AVX-512 IFMA.
+/// AVX-512F, AVX-512BW, GFNI, AVX-512 IFMA, and SHA.
 /// The name identifies an instruction bundle, not a required CPU vendor or model.
 pub trait IceLake: Simd {
+    /// Four unsigned 32-bit lanes for 128-bit SHA instructions.
+    type U32x4: Copy;
+
+    /// Loads the first four elements in order, requiring only `u32` alignment.
+    /// Ignores remaining elements. Panics if the input has fewer than four elements.
+    fn u32x4_load(self, input: &[u32]) -> Self::U32x4;
+
+    /// Stores four lanes in order, requiring only `u32` alignment.
+    /// Leaves remaining elements unchanged. Panics before writing if output is too short.
+    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]);
+
+    /// Adds corresponding lanes, wrapping modulo `2^32`.
+    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
+
+    /// Selects each output lane with successive two-bit fields of `MASK`.
+    /// Requires `0 <= MASK < 256`; invalid constants may be rejected at compile time
+    /// or panic when emulated.
+    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4;
+
+    /// Performs Intel SHA256RNDS2: two SHA-256 rounds with `a = [H,G,D,C]`,
+    /// `b = [F,E,B,A]`, and message-plus-constant sums in `k[0]` and `k[1]`.
+    /// Returns updated `[F,E,B,A]`; ignores the upper two lanes of `k`.
+    fn sha256_rounds2(self, a: Self::U32x4, b: Self::U32x4, k: Self::U32x4) -> Self::U32x4;
+
+    /// Performs Intel SHA256MSG1: returns `a[i] + sigma0(next[i])` modulo `2^32`,
+    /// where `next = [a[1],a[2],a[3],b[0]]` and
+    /// `sigma0(x) = rotr7(x) ^ rotr18(x) ^ (x >> 3)`.
+    fn sha256_msg1(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
+
+    /// Performs Intel SHA256MSG2: sets `r[0..2] = a[0..2] + sigma1(b[2..4])`,
+    /// then `r[2..4] = a[2..4] + sigma1(r[0..2])`, all modulo `2^32`.
+    /// Here `sigma1(x) = rotr17(x) ^ rotr19(x) ^ (x >> 10)`.
+    fn sha256_msg2(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
+
+    /// Applies a three-input bit truth table, selecting bit `4*a + 2*b + c`
+    /// of `MASK` for each corresponding input bit (Intel VPTERNLOGD).
+    /// Requires `0 <= MASK < 256`; invalid constants may be rejected at compile time
+    /// or panic when emulated.
+    fn u32_ternary<const MASK: i32>(self, a: Self::U32, b: Self::U32, c: Self::U32) -> Self::U32;
+
+    /// Shuffles bytes independently within each 128-bit group (Intel VPSHUFB).
+    /// An index with bit 7 set produces zero; otherwise its low four bits select
+    /// a byte in the corresponding group, ignoring bits 4 through 6.
+    fn u8_shuffle128(self, value: Self::U8, indices: Self::U8) -> Self::U8;
+
+    /// Selects four 128-bit groups (Intel VSHUFI32X4). Successive two-bit fields
+    /// of `MASK` select any source group: output groups 0/1 use `a` and
+    /// output groups 2/3 use `b`.
+    /// Requires `0 <= MASK < 256`; invalid constants may be rejected at compile time
+    /// or panic when emulated.
+    fn u32_shuffle_groups<const MASK: i32>(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
+    /// Interleaves each 128-bit group's high 64-bit halves: `[a2,a3,b2,b3]`.
+    fn u32_unpackhi64(self, a: Self::U32, b: Self::U32) -> Self::U32;
+
     /// Multiplies corresponding byte lanes in GF(256) with AES modulus `0x11b`.
     fn u8_gf_mul(self, a: Self::U8, b: Self::U8) -> Self::U8;
 
