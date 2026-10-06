@@ -258,10 +258,13 @@ divide `-fork` between them rather than giving each the whole machine. `--skip-c
 fuzzes the targets a campaign already built in this checkout, whatever its result -- the way
 to keep going after a campaign that built its targets and then stopped, since a new campaign
 refuses an instrumented checkout. Each target starts from whatever corpus its directory
-holds, as without the flag:
+holds, as without the flag. `--targets GLOB`, which you may repeat, keeps only the targets a
+shell pattern names, by the variant's name or the original target's; a pattern that names
+none stops before the campaign, listing what the profile builds:
 
 ```
 just fuzz simplex --tmux -- -fork=5
+just fuzz simplex --tmux --targets "simplex_cert_mock_twins_*" -- -fork=4
 just fuzz marshal --skip-campaign --parallel --tmux
 just fuzz simplex --parallel -- -max_total_time=600 -fork=5
 STATELENS_JOBS=4 just fuzz marshal --parallel -- -max_total_time=600

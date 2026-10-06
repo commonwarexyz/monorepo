@@ -15,6 +15,7 @@ import contextlib
 import datetime
 import difflib
 import fcntl
+import fnmatch
 import hashlib
 import json
 import math
@@ -4328,14 +4329,42 @@ def coverage_report(llvm_cov, out, name, objects, data, sources, uninstrumented)
     (out / f"{name}.workspace.txt").write_text(workspace)
 
 
+def select_targets(targets, patterns):
+    """The targets a shell pattern names, by variant name or by the original target's.
+
+    `simplex_cert_mock_twins_*` and `simplex_cert_mock_twins_mutator` both name
+    `simplex_cert_mock_twins_mutator_statelens`; no pattern names every target.
+    """
+    if not patterns:
+        return list(targets)
+    return [
+        target
+        for target in targets
+        if any(
+            fnmatch.fnmatchcase(target, pattern)
+            or fnmatch.fnmatchcase(target.removesuffix("_statelens"), pattern)
+            for pattern in patterns
+        )
+    ]
+
+
 def cmd_targets(args):
     """The StateLens targets a profile builds, one per line (SPEC section 5.5).
 
     `just fuzz <profile>` reads this rather than parsing a campaign summary, so
-    the recipe and the campaign cannot disagree about what was built.
+    the recipe and the campaign cannot disagree about what was built. `--match`
+    narrows them, and a pattern that names none is an error, not an empty run.
     """
     repo = repo_root()
-    for target in profile_targets(repo, args.profile):
+    targets = profile_targets(repo, args.profile)
+    chosen = select_targets(targets, args.match or [])
+    if not chosen:
+        raise Abort(
+            1,
+            f"no {args.profile} target matches {' or '.join(args.match)}; the profile "
+            f"builds: {', '.join(targets)}",
+        )
+    for target in chosen:
         print(target)
     return 0
 
@@ -6591,6 +6620,12 @@ def main(argv):
         choices=sorted(PROFILES),
         default="simplex",
         help="profile whose targets to list (default: simplex)",
+    )
+    targets.add_argument(
+        "--match",
+        action="append",
+        metavar="GLOB",
+        help="only the targets this shell pattern names, by variant or original name (repeatable)",
     )
     ast = commands.add_parser(
         "ast",

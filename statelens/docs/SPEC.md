@@ -531,14 +531,15 @@ run target *args:
         cd ../consensus/fuzz && just run "$@" ;;
     esac
 
-# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--skip-campaign] [--parallel] [--tmux] [-- -fork=8]
+# Campaign, then fuzz: just fuzz <target|simplex|marshal|qmdb> [--targets GLOB]... [--skip-campaign] [--parallel] [--tmux] [-- -fork=8]
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    # A profile name runs every target the profile builds; a target name runs
-    # that one. Every StateLens variant is derived from a target of its own
-    # package, so it keeps that package's prefix, and a name that is neither is
-    # refused rather than sent to another profile by default.
+    # A profile name runs every target the profile builds, or with --targets the
+    # ones a shell pattern names; a target name runs that one. Every StateLens
+    # variant is derived from a target of its own package, so it keeps that
+    # package's prefix, and a name that is neither is refused rather than sent to
+    # another profile by default.
     target="$1"
     shift
     # Leading flags are ours; everything after them, or after `--`, is libFuzzer's.
@@ -547,11 +548,16 @@ fuzz target *args:
     parallel=no
     windows=no
     campaign=yes
+    narrowed=no
+    patterns=()
     while [ $# -gt 0 ]; do
       case "$1" in
         --skip-campaign)        campaign=no; shift ;;
         --parallel|--parallels) parallel=yes; shift ;;
         --tmux)                 parallel=yes; windows=yes; shift ;;
+        --targets=*)            narrowed=yes; patterns+=(--match "${1#--targets=}"); shift ;;
+        --targets)              [ $# -ge 2 ] || { echo "just fuzz: --targets needs a pattern" >&2; exit 1; }
+                                narrowed=yes; patterns+=(--match "$2"); shift 2 ;;
         --)                     shift; break ;;
         *)                      break ;;
       esac
@@ -566,6 +572,23 @@ fuzz target *args:
       *) echo "just fuzz: $target is not a profile or a simplex_/marshal_/qmdb_ target" >&2
          exit 1 ;;
     esac
+    if [ "$every" = no ] && [ "$narrowed" = yes ]; then
+        echo "just fuzz: --targets narrows a profile; name simplex, marshal or qmdb" >&2
+        exit 1
+    fi
+    # The targets are listed before the campaign runs, so that a pattern naming
+    # none fails at once rather than after it. A read loop, not `mapfile`: that is
+    # bash 4, and macOS ships bash 3.2, which also calls an empty array unbound.
+    names=()
+    if [ "$every" = yes ]; then
+        if ! listing=$(python3 scripts/statelens.py targets --profile "$profile" ${patterns[@]+"${patterns[@]}"}); then
+            echo "$listing" >&2
+            exit 1
+        fi
+        while IFS= read -r name; do
+            [ -n "$name" ] && names+=("$name")
+        done <<< "$listing"
+    fi
     if [ "$campaign" = yes ]; then
         just campaign --profile "$profile"
     fi
@@ -573,11 +596,6 @@ fuzz target *args:
         just run "$target" "$@"
         exit 0
     fi
-    # A read loop, not `mapfile`: that is bash 4, and macOS ships bash 3.2.
-    names=()
-    while IFS= read -r name; do
-        [ -n "$name" ] && names+=("$name")
-    done < <(python3 scripts/statelens.py targets --profile "$profile")
     here="$(pwd)"
     cores=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 
@@ -736,7 +754,7 @@ prefixed with `statelens:`.
 | `lint-prompts` | `lint-prompts [--write]`; compares every file in `prompts/` with its copy in section 13. `--write` refreshes the copies from the files and reports what it could not fix | 0 clean, 3 problems |
 | `code` | `code build [--subsystem S]`, and `code defs|refs|callers|callees NAME [--tests] [--all]` (section 5.7) | 0 done, 1 usage, no index, or no symbol matching NAME |
 | `coverage` | `coverage [--profile P] [TARGET...]`; replays the corpus of each StateLens target under coverage instrumentation and writes an HTML report per target plus a merged one (section 7.13). A positional name is a profile or a target, as `just fuzz` reads it. A target with no corpus is skipped | 0 done, 1 usage or an unknown target, 2 no corpus anywhere, no `llvm-tools-preview`, or a failed coverage run |
-| `targets` | `targets [--profile P]`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary | 0 done |
+| `targets` | `targets [--profile P] [--match GLOB]...`; the StateLens targets `P` builds, one per line, which is what `just fuzz <profile>` reads rather than parsing a campaign summary. `--match` keeps the targets a shell pattern names, by variant name or by the original target's, and is what `just fuzz <profile> --targets GLOB` passes | 0 done, 1 a pattern that names no target |
 | `test-gate` | `test-gate [--profile P]`; runs the test gate's command (section 7.7) on the checkout as it stands, then, for a profile that has them, the component tests, which are reported and not gated. With no `--profile` it takes the profile from `SL/campaign/meta.json` | 0 gate passed, 1 no profile, 4 gate failed |
 | `ast` | `ast sites NAME [PATH...] [--writes-only] [--tests]`, `ast notes [--pattern RE] [PATH...] [--tests]` (section 5.8) | 0 done, including no sites, 1 usage or rust-analyzer absent |
 | `clean` | `clean [--yes]`; without `--yes` it prints what it would undo and changes nothing. Files a campaign or an instrumenter added are deleted and paths that exist in `HEAD` are restored from it, the two told apart by asking `git ls-tree` rather than by reading a status code. Status is asked with `--untracked-files=all`, so a wholly untracked directory is named as its files rather than collapsed to one entry that is not a file to delete, and a directory that is left empty is removed while nothing in it is deleted unseen. With `--yes` it checks afterwards that nothing in scope still differs from `HEAD` | 0 done, including a preview, which is not a failure; 1 something in scope still differs from `HEAD`, so the checkout is not reusable |
@@ -1546,7 +1564,8 @@ NIGHTLY_VERSION=<fuzz toolchain> just run simplex_cert_mock_twins_mutator_statel
 ~~~
 
 `just fuzz <profile>` (section 5.3) runs every target of a profile this way, in turn, in
-parallel batches or in tmux windows, and `just fuzz <target>` runs one.
+parallel batches or in tmux windows, `--targets GLOB` narrows it to the targets a shell
+pattern names, and `just fuzz <target>` runs one.
 
 - The operator chooses which targets to run and adds libFuzzer arguments as needed, for
   example `-fork=<N>` to use N cores, or `-max_total_time=<s>` to bound the run.

@@ -3892,6 +3892,27 @@ class IndexRebuildProfile(unittest.TestCase):
         self.index("storage")
         self.assertEqual(self.build("--subsystem", "marshal", campaign="qmdb"), "marshal")
 
+class TargetSelection(unittest.TestCase):
+    """`just fuzz <profile> --targets GLOB` runs the targets a pattern names."""
+
+    TARGETS = [
+        "simplex_cert_mock_statelens",
+        "simplex_cert_mock_twins_campaign_statelens",
+        "simplex_cert_mock_twins_mutator_statelens",
+    ]
+
+    def test_a_pattern_names_targets_by_variant_or_original_name(self):
+        self.assertEqual(sl.select_targets(self.TARGETS, ["simplex_cert_mock_twins_*"]), self.TARGETS[1:])
+        self.assertEqual(sl.select_targets(self.TARGETS, ["simplex_cert_mock"]), self.TARGETS[:1])
+        self.assertEqual(sl.select_targets(self.TARGETS, ["*_mutator_statelens"]), self.TARGETS[2:])
+
+    def test_several_patterns_add_up_and_none_keeps_every_target(self):
+        both = sl.select_targets(self.TARGETS, ["*_campaign", "simplex_cert_mock"])
+        self.assertEqual(both, [self.TARGETS[0], self.TARGETS[1]])
+        self.assertEqual(sl.select_targets(self.TARGETS, []), self.TARGETS)
+        self.assertEqual(sl.select_targets(self.TARGETS, ["nothing_*"]), [])
+
+
 class JustfileProfiles(unittest.TestCase):
     """`just fuzz` and `just run` decide by name which profile and which package a
     target belongs to, so each profile must be known to both recipes."""
