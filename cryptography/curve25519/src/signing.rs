@@ -468,6 +468,9 @@ impl BatchVerifier {
     ///
     /// This bound requires an RNG unpredictable to whoever assembled the batch. A predictable
     /// `rng` lets an attacker construct an invalid batch that passes verification.
+    ///
+    /// Rejecting an invalid batch can cost as much as accepting a valid batch of the same size.
+    /// Bound the number of signatures and the size of messages queued from untrusted sources.
     #[must_use]
     pub fn verify(self, rng: &mut impl CryptoRng, strategy: &impl Strategy) -> bool {
         let items = self.items.iter().map(|item| {

@@ -356,6 +356,10 @@ fn verify_batch_inner<B: Backend>(
 ///
 /// Returns `Err` if any `s` is non-canonical or any `R` or `A` fails to decompress, which
 /// stops the pipeline before the MSM, and otherwise whether the batch equation holds.
+///
+/// Step 1 finishes every unit of both tasks even after a failure. Signatures that are well
+/// formed but wrong already reach the MSM, so stopping step 1 early would not bound the work an
+/// adversary can cause.
 fn verify_pipeline<B: Backend>(
     backend: B,
     items: &[(&VerifyingKeyBytes, &Signature, &[u8])],
