@@ -790,6 +790,7 @@ mod test {
     use core::{future::Future, hash::BuildHasher};
     use futures::FutureExt as _;
     use rand::RngExt as _;
+    use rstest::rstest;
     use std::{
         cell::Cell,
         collections::BTreeSet,
@@ -1438,107 +1439,84 @@ mod test {
         });
     }
 
-    /// Rewriting the first key of a collision bucket reads that key's update and the floor's
-    /// moves, not every key in the bucket.
-    #[test_traced("WARN")]
-    fn test_store_collision_head_rewrite_reads() {
-        for count in [8u64, 64] {
-            deterministic::Runner::default().start(move |context| async move {
-                let db = create_test_store(context.child("store")).await;
-                let keys: Vec<_> = (0..count)
-                    .map(|i| {
-                        let mut bytes = [0u8; 32];
-                        bytes[..2].copy_from_slice(&[0xa5, 0x5a]);
-                        bytes[24..].copy_from_slice(&i.to_be_bytes());
-                        Digest::from(bytes)
-                    })
-                    .collect();
-                let writes = keys
-                    .iter()
-                    .enumerate()
-                    .map(|(i, key)| (*key, Some(vec![i as u8; 4096])));
-                let (db, _) = apply_entries(db, writes).await;
-                assert_eq!(*db.inactivity_floor_loc(), 2);
-                assert_eq!(
-                    db.snapshot.get(&keys[0]).next().copied(),
-                    Some(Location::new(count + 1))
-                );
-
-                // A head-key match reads one update; the proportional walk reads its two moves.
-                let before = counter(&context, "log_items_read_total");
-                let (db, _) = apply_entries(db, [(keys[0], Some(vec![255; 4096]))]).await;
-                let reads = counter(&context, "log_items_read_total") - before;
-                assert_eq!(reads, 3);
-                assert_eq!(*db.inactivity_floor_loc(), 4);
-                assert_eq!(db.active_keys, count as usize);
-                for (i, key) in keys.iter().enumerate() {
-                    let value = if i == 0 { 255 } else { i as u8 };
-                    assert_eq!(db.get(key).await.unwrap(), Some(vec![value; 4096]));
-                }
-                drop(db.commit().await.unwrap());
-                let db = create_test_store(context.child("reopened")).await;
-                assert_eq!(db.get(&keys[0]).await.unwrap(), Some(vec![255; 4096]));
-                db.destroy().await.unwrap();
-            });
-        }
-    }
-
     /// Each round of a batch's key resolution reads as many locations from a collision bucket, in
-    /// bucket order, as the bucket has unresolved keys. The proportional walk then reads the
-    /// updates it reaches.
+    /// bucket order, as the bucket has unresolved keys, independent of the bucket's size. The
+    /// proportional walk then reads the updates it reaches.
+    ///
+    /// Each case rewrites the keys at `positions` of a bucket of `count` keys and expects the
+    /// bucket's reads, the walk's reads, and the floor after the batch.
+    #[rstest]
+    // A head-key match reads one update; the proportional walk reads its two moves.
+    #[case::head_of_8(8, &[0], 1, 2, 4, 4096)]
+    #[case::head_of_64(64, &[0], 1, 2, 4, 4096)]
+    // A key at position 5 resolves in the sixth round, each reading one location.
+    #[case::sixth(8, &[5], 6, 2, 4, 1)]
+    // The first round reads positions 0..3 and resolves two keys. The second reads position 3
+    // and resolves the last.
+    #[case::two_rounds(8, &[1, 2, 3], 4, 4, 9, 1)]
+    // Rounds of three, three, and two locations read the whole bucket.
+    #[case::whole_bucket(8, &[5, 6, 7], 8, 4, 6, 1)]
     #[test_traced("WARN")]
-    fn test_store_collision_bucket_reads() {
-        // Each case rewrites the keys at the given bucket positions and expects the bucket's reads
-        // and the walk's reads.
-        let cases: [(&[usize], u64, u64); 3] = [
-            // A key at position 5 resolves in the sixth round, each reading one location.
-            (&[5], 6, 2),
-            // The first round reads positions 0..3 and resolves two keys. The second reads
-            // position 3 and resolves the last.
-            (&[1, 2, 3], 4, 4),
-            // Rounds of three, three, and two locations read the whole bucket.
-            (&[5, 6, 7], 8, 4),
-        ];
-        for (positions, bucket_reads, walk_reads) in cases {
-            deterministic::Runner::default().start(move |context| async move {
-                let db = create_test_store(context.child("store")).await;
-                let keys: Vec<_> = (0..8u64)
-                    .map(|i| {
-                        let mut bytes = [0u8; 32];
-                        bytes[..2].copy_from_slice(&[0xa5, 0x5a]);
-                        bytes[24..].copy_from_slice(&i.to_be_bytes());
-                        Digest::from(bytes)
-                    })
-                    .collect();
-                let writes = keys.iter().zip(0u8..).map(|(key, i)| (*key, Some(vec![i])));
-                let (db, _) = apply_entries(db, writes).await;
+    fn test_store_collision_reads(
+        #[case] count: u64,
+        #[case] positions: &'static [usize],
+        #[case] bucket_reads: u64,
+        #[case] walk_reads: u64,
+        #[case] floor: u64,
+        #[case] value_len: usize,
+    ) {
+        deterministic::Runner::default().start(move |context| async move {
+            let db = create_test_store(context.child("store")).await;
+            let keys: Vec<_> = (0..count)
+                .map(|i| {
+                    let mut bytes = [0u8; 32];
+                    bytes[..2].copy_from_slice(&[0xa5, 0x5a]);
+                    bytes[24..].copy_from_slice(&i.to_be_bytes());
+                    Digest::from(bytes)
+                })
+                .collect();
+            let writes = keys
+                .iter()
+                .zip(0u8..)
+                .map(|(key, i)| (*key, Some(vec![i; value_len])));
+            let (db, _) = apply_entries(db, writes).await;
 
-                // The keys lie at 1..9 in key order. The previous commit's entry moves the first
-                // to 9 in place, so the bucket lists it first and the rest by position.
-                let bucket: Vec<_> = db.snapshot.get(&keys[0]).map(|loc| **loc).collect();
-                assert_eq!(bucket, [9, 2, 3, 4, 5, 6, 7, 8]);
-                assert_eq!(*db.inactivity_floor_loc(), 2);
+            // The keys lie at 1..count + 1 in key order. The previous commit's entry moves the
+            // first to count + 1 in place, so the bucket lists it first and the rest by position.
+            let bucket: Vec<_> = db.snapshot.get(&keys[0]).map(|loc| **loc).collect();
+            let expected: Vec<_> = std::iter::once(count + 1).chain(2..=count).collect();
+            assert_eq!(bucket, expected);
+            assert_eq!(*db.inactivity_floor_loc(), 2);
 
-                // The walk has one entry per rewrite plus one for the previous commit, and every
-                // update it reaches lies below the batch.
-                assert_eq!(walk_reads, positions.len() as u64 + 1);
-                let before = counter(&context, "log_items_read_total");
-                let writes = positions.iter().map(|i| (keys[*i], Some(vec![0xff])));
-                let (db, _) = apply_entries(db, writes).await;
-                let reads = counter(&context, "log_items_read_total") - before;
-                assert_eq!(reads, bucket_reads + walk_reads, "positions={positions:?}");
-                for (i, key) in keys.iter().enumerate() {
-                    let value = if positions.contains(&i) {
-                        0xff
-                    } else {
-                        i as u8
-                    };
-                    assert_eq!(db.get(key).await.unwrap(), Some(vec![value]));
-                }
-                assert_bitmap_consistent(&db).await;
-                db.destroy().await.unwrap();
-            });
-        }
+            // The walk has one entry per rewrite plus one for the previous commit, and every
+            // update it reaches lies below the batch.
+            assert_eq!(walk_reads, positions.len() as u64 + 1);
+            let before = counter(&context, "log_items_read_total");
+            let writes = positions
+                .iter()
+                .map(|i| (keys[*i], Some(vec![0xff; value_len])));
+            let (db, _) = apply_entries(db, writes).await;
+            let reads = counter(&context, "log_items_read_total") - before;
+            assert_eq!(reads, bucket_reads + walk_reads);
+            assert_eq!(*db.inactivity_floor_loc(), floor);
+            assert_eq!(db.active_keys, count as usize);
+            for (i, key) in keys.iter().enumerate() {
+                let value = if positions.contains(&i) {
+                    0xff
+                } else {
+                    i as u8
+                };
+                assert_eq!(db.get(key).await.unwrap(), Some(vec![value; value_len]));
+            }
+            assert_bitmap_consistent(&db).await;
+            drop(db.commit().await.unwrap());
+            let db = create_test_store(context.child("reopened")).await;
+            assert_eq!(
+                db.get(&keys[positions[0]]).await.unwrap(),
+                Some(vec![0xff; value_len])
+            );
+            db.destroy().await.unwrap();
+        });
     }
 
     #[test_traced("DEBUG")]
@@ -1709,108 +1687,141 @@ mod test {
         db
     }
 
-    /// Every batch of [`churn`] keeps the size at most `3 * n + 1` operations past the floor for
-    /// `n` live keys.
+    /// Every batch of [`churn`], or of [`randomized_churn`] under `seed`, keeps the size at most
+    /// `3 * n + 1` operations past the floor for `n` live keys.
+    #[rstest]
+    #[case::churn(None)]
+    #[case::seed_0(Some(0))]
+    #[case::seed_1(Some(1))]
+    #[case::seed_7(Some(7))]
+    #[case::seed_5133(Some(0x5133))]
     #[test_traced("WARN")]
-    fn test_store_floor_bound() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+    fn test_store_floor_bound(#[case] seed: Option<u64>) {
+        let executor = seed.map_or_else(
+            deterministic::Runner::default,
+            deterministic::Runner::seeded,
+        );
+        executor.start(move |mut context| async move {
             let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
             let value = |i: u64| i.to_be_bytes().to_vec();
             let db = create_test_store(context.child("store")).await;
-            let db = churn(db, key, value, bounded).await;
+            let db = match seed {
+                None => churn(db, key, value, bounded).await,
+                Some(_) => randomized_churn(&mut context, db, key, value, bounded).await,
+            };
+            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }
 
-    /// Every batch of [`randomized_churn`] keeps the size at most `3 * n + 1` operations past the
-    /// floor for `n` live keys.
+    /// A proportional batch has one entry for each operation it makes inactive: one for each
+    /// update it supersedes, two for each delete (itself and the update it supersedes), and one
+    /// for its previous commit. Its walk moves updates, including the batch's own written updates,
+    /// and passes its own deletes up to the tip its writes reached. A custom policy with
+    /// proportional limits (`scripted`) moves the same updates without deciding one.
+    ///
+    /// Each case seeds `n` keys with a held or proportional floor, writes `writes` (a seed index
+    /// and a new value, or `None` to delete), and expects the batch's range, its floor, and the
+    /// seed indices of the updates the walk moves, in order.
+    #[rstest]
+    // The deletes lie at 23..28 in key order. Their 2 * 5 entries and the previous commit's entry
+    // move the updates at 2..13 to 28..39, so the commit at 39 records the floor 13.
+    #[case::delete_first_and_last_four(
+        20,
+        false,
+        vec![(0, None), (16, None), (17, None), (18, None), (19, None)],
+        23..40,
+        13,
+        (1..12).collect(),
+    )]
+    // The 19 deletes lie at 23..42. The walk keeps the survivor, moving it to 42, and passes every
+    // delete, so the commit at 43 records the floor 42, 2 operations below the size.
+    #[case::delete_all_but_first(20, false, (1..20).map(|i| (i, None)).collect(), 23..44, 42, vec![0])]
+    // Over six held updates at 1..7, two updates and a delete make four operations inactive, so
+    // with the previous commit the walk moves five updates between the writes and the commit:
+    // the three remaining seed updates and the two written updates. The floor ends past the last
+    // written update, at 11.
+    #[case::update_delete_update(
+        6,
+        true,
+        vec![(0, Some(200)), (1, None), (2, Some(202))],
+        8..17,
+        11,
+        vec![3, 4, 5, 0, 2],
+    )]
     #[test_traced("WARN")]
-    fn test_store_randomized_floor_bound() {
-        for seed in [0, 1, 7, 0x5133] {
-            deterministic::Runner::seeded(seed).start(|mut context| async move {
-                let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
-                let value = |i: u64| i.to_be_bytes().to_vec();
-                let db = create_test_store(context.child("store")).await;
-                let db = randomized_churn(&mut context, db, key, value, bounded).await;
-                assert_bitmap_consistent(&db).await;
-                db.destroy().await.unwrap();
-            });
-        }
-    }
+    fn test_store_proportional_entries(
+        #[case] n: u64,
+        #[case] held: bool,
+        #[case] writes: Vec<(usize, Option<u64>)>,
+        #[case] range: Range<u64>,
+        #[case] floor: u64,
+        #[case] moved: Vec<usize>,
+        #[values(false, true)] scripted: bool,
+    ) {
+        deterministic::Runner::default().start(move |context| async move {
+            let db = open(context.child("store"), "proportional").await;
+            let seed = seed(n);
+            let db = if held {
+                apply(db, seed.clone(), &mut Hold).await.0
+            } else {
+                // Seed 20 keys in key order at 1..21. The previous commit's entry moves the first
+                // update to 21, and the commit lies at 22.
+                let (db, _) = apply(db, seed.clone(), &mut Proportional).await;
+                assert_eq!((*db.inactivity_floor_loc(), *db.size()), (2, 23));
+                db
+            };
 
-    /// A proportional batch that deletes 19 of 20 keys has two entries per delete, keeps the
-    /// survivor, and passes its own deletes to the tip its writes reached. The size ends 2
-    /// operations past the floor, within the `3 * n + 1` bound.
-    #[test_traced("WARN")]
-    fn test_store_proportional_deletes_reach_post_write_tip() {
-        deterministic::Runner::default().start(|context| async move {
-            let key = |i: u64| Blake3::hash(&[&i.to_be_bytes()]);
-            let mut live = BTreeMap::new();
-            let db = create_test_store(context.child("store")).await;
-
-            // Seed 20 keys at 1..21. The previous commit's entry moves the first update to 21,
-            // and the commit lies at 22.
-            let writes: Vec<_> = (0..20).map(|i| (key(i), Some(vec![i as u8]))).collect();
-            let db = bounded(db, &mut live, &writes).await;
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (2, 23));
-
-            // The 19 deletes lie at 23..42. The walk keeps the survivor, moving it to 42, and
-            // passes every delete, so the commit at 43 records the floor 42.
-            let deletes: Vec<_> = (1..20).map(|i| (key(i), None)).collect();
-            let db = bounded(db, &mut live, &deletes).await;
-            assert_eq!(live.len(), 1);
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (42, 44));
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// A proportional batch has one entry for each operation it makes inactive. A delete makes
-    /// two inactive, itself and the update it supersedes, so five deletes and the previous commit
-    /// move eleven of the fifteen survivors.
-    #[test_traced("WARN")]
-    fn test_store_proportional_delete_entries() {
-        deterministic::Runner::default().start(|context| async move {
-            // Seed 20 keys in key order at 1..21. The previous commit's entry moves the first
-            // update to 21, and the commit lies at 22.
-            let db = open(context.child("store"), "delete-entries").await;
-            let writes = seed(20);
-            let (db, _) = apply(db, writes.clone(), &mut Proportional).await;
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (2, 23));
-
-            // Delete the first key, at 21, and the last four keys, at 17..21. The deletes lie at
-            // 23..28 in key order. Their 2 * 5 entries and the previous commit's entry move the
-            // updates at 2..13 to 28..39, so the commit at 39 records the floor 13.
-            let deleted: Vec<_> = std::iter::once(writes[0].0)
-                .chain(writes[16..].iter().map(|(key, _)| *key))
+            let writes: Vec<_> = writes
+                .iter()
+                .map(|&(i, value)| (seed[i].0, value.map(digest)))
                 .collect();
-            let (db, range) = apply(
-                db,
-                deleted.iter().map(|key| (*key, None)),
-                &mut Proportional,
-            )
-            .await;
-            assert_eq!(*range.start..*range.end, 23..40);
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (13, 40));
-            for (loc, key) in (23..).zip(&deleted) {
-                assert_eq!(
-                    db.get_op(Location::new(loc)).await.unwrap(),
-                    Operation::Delete(*key)
-                );
-            }
-            for (loc, (key, value)) in (28..39).zip(&writes[1..12]) {
-                assert_eq!(
-                    db.get_op(Location::new(loc)).await.unwrap(),
-                    Operation::Update(Update(*key, value.unwrap())),
-                );
+            let (db, r) = if scripted {
+                let mut policy = Script::proportional(|_: &sha256::Digest| -> Choice {
+                    unreachable!("decided under proportional limits")
+                });
+                apply(db, writes.clone(), &mut policy).await
+            } else {
+                apply(db, writes.clone(), &mut Proportional).await
+            };
+            assert_eq!(*r.start..*r.end, range);
+            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (floor, range.end));
+
+            // The batch appends its writes in key order, the updates its walk moves with their
+            // latest values, and its commit.
+            let value = |i: usize| {
+                writes
+                    .iter()
+                    .find(|(key, _)| *key == seed[i].0)
+                    .map_or(seed[i].1, |(_, value)| *value)
+            };
+            let expected: Vec<_> = writes
+                .iter()
+                .map(|&(key, value)| {
+                    value.map_or(Operation::Delete(key), |value| {
+                        Operation::Update(Update(key, value))
+                    })
+                })
+                .chain(
+                    moved
+                        .iter()
+                        .map(|&i| Operation::Update(Update(seed[i].0, value(i).unwrap()))),
+                )
+                .chain([Operation::CommitFloor(None, Location::new(floor))])
+                .collect();
+            assert_eq!(expected.len() as u64, range.end - range.start);
+            for (loc, op) in range.zip(expected) {
+                assert_eq!(db.get_op(Location::new(loc)).await.unwrap(), op);
             }
 
-            // The fifteen survivors keep their seeded values.
-            assert_eq!(db.active_keys, 15);
-            for (key, value) in &writes {
-                let expected = if deleted.contains(key) { None } else { *value };
-                assert_eq!(db.get(key).await.unwrap(), expected);
+            // The survivors keep their latest values.
+            let mut active = 0;
+            for (i, (key, _)) in seed.iter().enumerate() {
+                let value = value(i);
+                active += usize::from(value.is_some());
+                assert_eq!(db.get(key).await.unwrap(), value);
             }
+            assert_eq!(db.active_keys, active);
             assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
@@ -2214,36 +2225,6 @@ mod test {
         });
     }
 
-    /// A policy with proportional limits moves one update for each update the batch supersedes,
-    /// each delete it appends, and its previous commit, without deciding an update.
-    #[test_traced("WARN")]
-    fn test_store_policy_proportional() {
-        deterministic::Runner::default().start(|context| async move {
-            // Seed six updates at 1..7 with a held floor.
-            let seed = seed(6);
-            let db = open(context.child("store"), "proportional").await;
-            let (db, _) = apply(db, seed.clone(), &mut Hold).await;
-
-            // Two updates and a delete make four operations inactive, so with the previous commit
-            // the walk moves five updates between the writes and the commit: the three remaining
-            // seed updates and the two written updates. The floor ends past the last written
-            // update, at 11.
-            let writes = [
-                (seed[0].0, Some(digest(200))),
-                (seed[1].0, None),
-                (seed[2].0, Some(digest(202))),
-            ];
-            let mut policy = Script::proportional(|_: &sha256::Digest| -> Choice {
-                unreachable!("decided under proportional limits")
-            });
-            let (db, range) = apply(db, writes, &mut policy).await;
-            assert_eq!(*range.end - *range.start, 9);
-            assert_eq!(*db.inactivity_floor_loc(), 11);
-            assert_bitmap_consistent(&db).await;
-            db.destroy().await.unwrap();
-        });
-    }
-
     /// A proportional move probes the snapshot index once, when it rewrites the update's slot.
     #[test_traced("WARN")]
     fn test_store_proportional_probes_snapshot_once() {
@@ -2525,58 +2506,57 @@ mod test {
         });
     }
 
-    /// A batch whose evictions empty the store moves the floor to its commit.
-    #[test_traced("WARN")]
-    fn test_store_policy_empty() {
-        deterministic::Runner::default().start(|context| async move {
-            // Seed one update at 1 with a held floor.
-            let db = open(context.child("store"), "empty").await;
-            let (db, _) = apply(db, seed(1), &mut Hold).await;
-
-            // The policy passes the initial commit and evicts the update. The empty store moves
-            // the floor to the commit that follows the delete.
-            let mut policy = Script::new(1, 1, |_: &sha256::Digest| Choice::Evict);
-            let (db, range) = apply(db, [], &mut policy).await;
-            assert_eq!(policy.locations(), [Location::new(1)]);
-            assert!(db.is_empty());
-            assert_eq!(*range.start..*range.end, 3..5);
-            assert_eq!(*db.inactivity_floor_loc(), 4);
-            assert_bitmap_consistent(&db).await;
-            db.destroy().await.unwrap();
-        });
-    }
-
     /// The Store's walk reads only the candidates its limits let it reach, a stricter bound than
     /// the [`Policy`] contract's window. Candidates in the batch's own writes are already in
     /// memory, so a batch without writes reads at most the updates it reaches, and a policy that
     /// keeps every update it is offered reads each of them exactly once.
+    ///
+    /// Each case seeds `n` keys and then rewrites every `step`th key in each of `rounds` batches,
+    /// all with a held floor, leaving the active updates at `active` and the size at `tip`. Each
+    /// pair of `entries` and `skips` runs on a fresh store with that layout.
+    #[rstest]
+    // Seed 100 updates at 1..101, then rewrite every fourth key at 102..127.
+    #[case::sparse(
+        100,
+        4,
+        1,
+        (1..101).filter(|loc| loc % 4 != 1).chain(102..127).collect(),
+        128,
+        &[0, 1, 10, 74, 75, 100, 200],
+        &[0, 1, 2, 5, 30, u64::MAX],
+    )]
+    // Rewrite one key 19 times. The log holds the initial commit at 0, superseded updates and
+    // commits at 1..39, the only active update at 39, and a commit at 40.
+    #[case::long_gap(1, 1, 19, vec![39], 41, &[0, 1, 2], &[0, 1, 38, 39, 40, u64::MAX])]
     #[test_traced("WARN")]
-    fn test_store_policy_reads_reached_candidates() {
-        deterministic::Runner::default().start(|context| async move {
+    fn test_store_policy_reads_reached_candidates(
+        #[case] n: u64,
+        #[case] step: usize,
+        #[case] rounds: usize,
+        #[case] active: Vec<u64>,
+        #[case] tip: u64,
+        #[case] entries: &'static [usize],
+        #[case] skips: &'static [u64],
+    ) {
+        deterministic::Runner::default().start(move |context| async move {
             let reads = || counter(&context, "log_items_read_total");
             let child = |index| context.child("store").with_attribute("index", index);
-
-            // Seed 100 updates at 1..101, then rewrite every fourth key at 102..127 with a held
-            // floor. The batch under test has no writes, so its tip is the size, 128.
-            let seed = seed(100);
+            let seed = seed(n);
             let rewrites: Vec<_> = seed
                 .iter()
-                .step_by(4)
+                .step_by(step)
                 .map(|(key, _)| (*key, Some(digest(500))))
                 .collect();
-            let superseded: BTreeSet<u64> = (1..101).step_by(4).collect();
-            let active: Vec<u64> = (1..101)
-                .filter(|loc| !superseded.contains(loc))
-                .chain(102..127)
-                .collect();
             let mut trial = 0;
-            for entries in [0, 1, 10, 74, 75, 100, 200] {
-                for skips in [0, 1, 2, 5, 30, u64::MAX] {
-                    let db = open(child(trial), &format!("reached-{trial}")).await;
+            for &entries in entries {
+                for &skips in skips {
+                    let mut db = open(child(trial), &format!("reached-{trial}")).await;
                     trial += 1;
-                    let (db, _) = apply(db, seed.clone(), &mut Hold).await;
-                    let (db, _) = apply(db, rewrites.clone(), &mut Hold).await;
-                    assert_eq!(*db.size(), 128);
+                    (db, _) = apply(db, seed.clone(), &mut Hold).await;
+                    for _ in 0..rounds {
+                        (db, _) = apply(db, rewrites.clone(), &mut Hold).await;
+                    }
+                    assert_eq!(*db.size(), tip);
 
                     // The walk decides and reaches what [`walk_model`] predicts, and reads each
                     // update it decides once.
@@ -2584,7 +2564,7 @@ mod test {
                     let mut policy = Script::new(entries, skips, keep);
                     let (db, _) = apply(db, [], &mut policy).await;
                     let read = reads() - before;
-                    let (floor, decided) = walk_model(&active, 0, 128, entries, skips, &[]);
+                    let (floor, decided) = walk_model(&active, 0, tip, entries, skips, &[]);
                     assert_eq!(
                         read,
                         decided.len() as u64,
@@ -2779,65 +2759,6 @@ mod test {
             let (db, _) = apply(db, [], &mut policy).await;
             assert_eq!(policy.visited, [(Location::new(10), key(5), written(5))]);
             assert_eq!(*db.inactivity_floor_loc(), 11);
-            db.destroy().await.unwrap();
-        });
-    }
-
-    /// A walk reads no location past its inherited floor plus its skips and entries.
-    #[test_traced("WARN")]
-    fn test_store_policy_reads_within_limits() {
-        deterministic::Runner::default().start(|context| async move {
-            // Rewrite one key with a held floor. The log holds the initial commit at 0, superseded
-            // updates and commits at 1..39, the only active update at 39, and a commit at 40.
-            let mut db = open(context.child("store"), "reads").await;
-            let key = digest(0);
-            for i in 0..20 {
-                (db, _) = apply(db, [(key, Some(digest(100 + i)))], &mut Hold).await;
-            }
-            assert_eq!((*db.inactivity_floor_loc(), *db.size()), (0, 41));
-
-            // A walk without skips passes no inactive location and reads no operation.
-            let reads = || counter(&context, "log_items_read_total");
-            let before = reads();
-            let mut policy = Compact {
-                entries: 1,
-                skips: 0,
-            };
-            let (db, _) = apply(db, [], &mut policy).await;
-            assert_eq!(*db.inactivity_floor_loc(), 0);
-            assert_eq!(reads() - before, 0);
-
-            // A walk whose skips end one short of the active update reads no location: every
-            // location below the update is inactive.
-            let before = reads();
-            let mut policy = Compact {
-                entries: 1,
-                skips: 38,
-            };
-            let (db, _) = apply(db, [], &mut policy).await;
-            assert_eq!(*db.inactivity_floor_loc(), 38);
-            assert_eq!(reads() - before, 0);
-
-            // Including the active update in the read window reads it once and passes its gap.
-            let before = reads();
-            let mut policy = Compact {
-                entries: 1,
-                skips: 1,
-            };
-            let (db, _) = apply(db, [], &mut policy).await;
-            assert_eq!(*db.inactivity_floor_loc(), 40);
-            assert_eq!(reads() - before, 1);
-
-            // Zero entries leave even unlimited skips unspent and read no candidate.
-            let before = reads();
-            let mut policy = Compact {
-                entries: 0,
-                skips: u64::MAX,
-            };
-            let (db, _) = apply(db, [], &mut policy).await;
-            assert_eq!(*db.inactivity_floor_loc(), 40);
-            assert_eq!(reads() - before, 0);
-            assert_bitmap_consistent(&db).await;
             db.destroy().await.unwrap();
         });
     }

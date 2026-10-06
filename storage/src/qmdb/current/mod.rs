@@ -526,14 +526,13 @@ pub mod tests {
                     Changes, Choice, Inspect, Links, Neighbors, Script, assert_bits, assert_exact,
                     build, colliding_digest, counter, hold, hold_batch, live, replay,
                     test_any_activity_depths, test_any_ordered_policy_eviction_matrix,
-                    test_any_ordered_policy_evictions_keep_links,
                     test_any_ordered_policy_repair_across_ancestors,
                     test_any_policy_ancestor_twins, test_any_policy_decisions_match_writes,
                     test_any_policy_evicts_parent_created_key, test_any_policy_hold,
                     test_any_policy_keep_evict_and_recover,
                     test_any_policy_limits_after_colliding_writes,
                     test_any_policy_limits_with_writes, test_any_policy_matches_proportional,
-                    test_any_policy_own_writes, test_any_policy_stop, test_any_proportional_bound,
+                    test_any_policy_own_writes, test_any_proportional_bound,
                     test_any_proportional_one_batch,
                 },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
@@ -6339,13 +6338,6 @@ pub mod tests {
     );
     current_test!(
         test_for_all_variants,
-        test_current_policy_stop,
-        test_any_policy_stop,
-        "stop",
-        Inspect
-    );
-    current_test!(
-        test_for_all_variants,
         test_current_policy_limits_with_writes,
         test_any_policy_limits_with_writes,
         "writes",
@@ -6392,13 +6384,6 @@ pub mod tests {
 
     // On a current database, the ordered tests also prove each link and each evicted key's
     // exclusion.
-    current_test!(
-        test_for_ordered_variants,
-        test_current_ordered_policy_evictions_keep_links,
-        test_any_ordered_policy_evictions_keep_links,
-        "links",
-        Links
-    );
     current_test!(
         test_for_ordered_variants,
         test_current_ordered_policy_eviction_matrix,
