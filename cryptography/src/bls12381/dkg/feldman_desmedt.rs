@@ -3295,6 +3295,7 @@ mod test {
     use crate::{bls12381::primitives::variant::MinPk, ed25519};
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
+    use commonware_codec::{DecodeExt, FixedSize};
     use commonware_invariants::minifuzz;
     use commonware_utils::{N3f1, TestRng, test_rng};
     use core::num::NonZeroI32;
@@ -4183,6 +4184,59 @@ mod test {
         }
         assert!(matches!(
             check_pre_verify_log(&fixture.info, &dealer.key, &log),
+            Err(DealerLogError::Fault(FaultReason::ExcessiveReveals))
+        ));
+    }
+
+    #[test]
+    fn dealer_log_prioritizes_excessive_reveals() {
+        let fixture = PreVerifyFixture::new();
+        let dealer_sk = ed25519::PrivateKey::from_seed(0);
+        let dealer_pk = dealer_sk.public_key();
+        let dealer = fixture
+            .dealers
+            .iter()
+            .find(|dealer| dealer.key == dealer_pk)
+            .expect("fixture should contain the dealer");
+        let mut log = dealer.valid.clone();
+
+        // The dealer can authenticate a log containing a malformed player acknowledgement.
+        let DealerResult::Ok(results) = &mut log.results else {
+            panic!("valid fixture should contain player results");
+        };
+        let AckOrReveal::Ack(ack) = &mut results.values_mut()[0] else {
+            panic!("valid fixture should contain acknowledgements");
+        };
+        ack.sig = ed25519::Signature::decode(vec![u8::MAX; ed25519::Signature::SIZE])
+            .expect("signature decoding accepts fixed-size bytes");
+        let (_, mut log) = SignedDealerLog::sign(&dealer_sk, &fixture.info, log)
+            .check(&fixture.info)
+            .expect("dealer signature should authenticate the log");
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer_pk, &log),
+            Err(DealerLogError::Fault(FaultReason::InvalidAck))
+        ));
+
+        // The reveal limit takes precedence even when the malformed acknowledgement is first.
+        let DealerResult::Ok(results) = &mut log.results else {
+            panic!("authenticated log should contain player results");
+        };
+        let excessive_reveals = usize::try_from(fixture.info.max_reveals::<N3f1>())
+            .expect("maximum reveals exceed usize::MAX")
+            + 1;
+        for result in results
+            .values_mut()
+            .iter_mut()
+            .skip(1)
+            .take(excessive_reveals)
+        {
+            *result = AckOrReveal::Reveal(DealerPrivMsg::new(Scalar::one()));
+        }
+        let (_, log) = SignedDealerLog::sign(&dealer_sk, &fixture.info, log)
+            .check(&fixture.info)
+            .expect("dealer signature should authenticate the log");
+        assert!(matches!(
+            check_pre_verify_log(&fixture.info, &dealer_pk, &log),
             Err(DealerLogError::Fault(FaultReason::ExcessiveReveals))
         ));
     }
