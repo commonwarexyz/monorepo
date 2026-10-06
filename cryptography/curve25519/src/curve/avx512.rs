@@ -1,9 +1,11 @@
 //! The AVX-512 backend: all eight lanes of an [`super::FVec`] limb row in one 512-bit register,
 //! with field multiplication built on IFMA's 52-bit multiply-accumulates.
 
+#[cfg(any(test, feature = "fuzz"))]
+use super::GAffineVec;
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES,
-    MASK_51, WithBackend, msm,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GBackend, GVec, LANES, MASK_51,
+    WithBackend, msm,
 };
 use core::arch::x86_64::*;
 
@@ -548,6 +550,7 @@ impl Backend {
         store_point(self.add_lanes(load_point(&p), load_point(&q)))
     }
 
+    #[cfg(any(test, feature = "fuzz"))]
     #[target_feature(enable = "avx512f,avx512ifma")]
     fn add_mixed_points(self, p: GVec, q: GAffineVec) -> GVec {
         let q = [load(&q.x.limbs), load(&q.y.limbs), load(&q.t2d.limbs)];
@@ -856,6 +859,7 @@ impl GBackend for Backend {
         unsafe { self.add_points(p, q) }
     }
 
+    #[cfg(any(test, feature = "fuzz"))]
     #[inline(always)]
     fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
         // SAFETY: `Backend` construction checks AVX-512F and AVX-512 IFMA support.

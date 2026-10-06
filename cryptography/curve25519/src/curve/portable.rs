@@ -1,6 +1,8 @@
 //! Plain-Rust lane adapter over scalar field and group arithmetic.
 
-use super::{F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES, msm};
+use super::{F, FBackend, FVec, G, GAffine, GBackend, GVec, msm};
+#[cfg(any(test, feature = "fuzz"))]
+use super::{GAffineVec, LANES};
 use core::array;
 
 /// The portable backend token.
@@ -71,6 +73,7 @@ impl GBackend for Backend {
         map2_g(p, q, G::add)
     }
 
+    #[cfg(any(test, feature = "fuzz"))]
     fn g_add_mixed(self, p: GVec, q: GAffineVec) -> GVec {
         let a = p.untranspose();
         let b = q.untranspose();
@@ -84,6 +87,7 @@ impl GBackend for Backend {
 
 impl super::Backend for Backend {}
 
+#[cfg(any(test, feature = "fuzz"))]
 impl GAffineVec {
     /// Untransposes backend lanes into scalar affine points.
     fn untranspose(self) -> [GAffine; LANES] {
@@ -99,7 +103,42 @@ impl GAffineVec {
 }
 
 impl super::msm::Backend for Backend {
-    const STRIPES: usize = LANES;
+    // One stripe per physical mixed-addition lane. Scalar arithmetic has one, so the fold has no
+    // stripes to merge.
+    const STRIPES: usize = 1;
+
+    fn fill_buckets<T>(
+        self,
+        buckets: &mut [G],
+        nb: usize,
+        terms: &[T],
+        term: impl Fn(&T) -> (&GAffine, i16),
+    ) {
+        msm::fill_buckets::<1, T>(
+            |[current], [mut incoming], [negative]| {
+                // Subtracting a point adds its negation, which negates `x` and `t2d`.
+                if negative {
+                    incoming.x = incoming.x.neg();
+                    incoming.t2d = incoming.t2d.neg();
+                }
+                [current.add_mixed(incoming)]
+            },
+            buckets,
+            nb,
+            terms,
+            term,
+        );
+    }
+
+    /// Scalar recombination computes each point once rather than once per emulated lane.
+    fn combine_windows(
+        self,
+        partials: impl IntoIterator<Item = (usize, G)>,
+        windows: usize,
+        width: u32,
+    ) -> G {
+        msm::combine_windows(G::IDENTITY, G::add, G::double, partials, windows, width)
+    }
 
     fn with_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
         computation.call::<Self, 1>(self)
@@ -109,6 +148,9 @@ impl super::msm::Backend for Backend {
 impl msm::Lanes<1> for Backend {
     type Point = G;
     type Affine = GAffine;
+
+    // A group is a single term, so every term whose digits are all zero skips its table.
+    const SKIP_ZERO_GROUPS: bool = true;
 
     #[inline(always)]
     fn identity(self) -> G {

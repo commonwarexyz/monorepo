@@ -7,12 +7,11 @@
 //! only while multiplying. Loose input digits can each occupy 26 bits. The surrounding group
 //! formulas keep their compact five-limb representation.
 
+#[cfg(any(test, feature = "fuzz"))]
+use super::GAffineVec;
 use super::{
-    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GAffineVec, GBackend, GVec, LANES,
-    MASK_51, msm,
+    BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, GBackend, GVec, LANES, MASK_51, msm,
 };
-#[cfg(not(feature = "std"))]
-use alloc::vec;
 use core::arch::aarch64::*;
 
 /// `2d` in every lane, for the `C = 2d*T1*T2` term of point addition.
@@ -713,6 +712,7 @@ impl GBackend for Backend {
     }
 
     /// Fused mixed point addition, processed two lanes at a time.
+    #[cfg(any(test, feature = "fuzz"))]
     #[inline(always)]
     fn g_add_mixed(self, mut p: GVec, q: GAffineVec) -> GVec {
         // Tiles hold disjoint pairs of lanes, so each tile's result can overwrite its slice of
@@ -830,18 +830,7 @@ impl msm::Backend for Backend {
         windows: usize,
         width: u32,
     ) -> G {
-        let mut window_sums = vec![G::IDENTITY; windows];
-        for (window, partial) in partials {
-            window_sums[window] = window_sums[window].add(partial);
-        }
-        let mut result = G::IDENTITY;
-        for window in window_sums.iter().rev() {
-            for _ in 0..width {
-                result = result.double();
-            }
-            result = result.add(*window);
-        }
-        result
+        msm::combine_windows(G::IDENTITY, G::add, G::double, partials, windows, width)
     }
 
     fn with_lanes<C: msm::WithLanes>(self, computation: C) -> C::Output {
@@ -1009,20 +998,25 @@ fn mixed_pair_matches_full_width() {
                 ([loose, current[1]], [loose_affine, incoming[1]]),
             ] {
                 for negative in [[false, false], [false, true], [true, false], [true, true]] {
+                    // The full-width reference negates `x` and `t2d` of each subtracted point
+                    // before its mixed addition.
                     let mut packed_current = [G::IDENTITY; LANES];
                     let mut packed_incoming = [GAffine::IDENTITY; LANES];
-                    let mut packed_negative = [false; LANES];
                     packed_current[..WIDTH].copy_from_slice(&current);
-                    packed_incoming[..WIDTH].copy_from_slice(&incoming);
-                    packed_negative[..WIDTH].copy_from_slice(&negative);
+                    for (packed, (mut point, subtract)) in packed_incoming
+                        .iter_mut()
+                        .zip(incoming.into_iter().zip(negative))
+                    {
+                        if subtract {
+                            point.x = point.x.neg();
+                            point.t2d = point.t2d.neg();
+                        }
+                        *packed = point;
+                    }
                     let expected = reference
                         .g_add_mixed(
                             GVec::transpose(packed_current),
-                            GAffineVec::from_signed_lanes(
-                                reference,
-                                &packed_incoming,
-                                &packed_negative,
-                            ),
+                            GAffineVec::transpose(packed_incoming),
                         )
                         .untranspose();
                     let actual = g_add_mixed_pair(current, incoming, negative);

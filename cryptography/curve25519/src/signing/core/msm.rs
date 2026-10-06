@@ -682,7 +682,14 @@ mod tests {
                         let bytes = expand(u)?;
                         let u = &mut Unstructured::new(&bytes);
                         for width in [6, 8, 10] {
-                            let terms = arbitrary_terms(u, 383, width)?;
+                            let mut terms = arbitrary_terms(u, 383, width)?;
+
+                            // Terms 8 through 16 have scalar zero, like the padding in batch
+                            // verification's units, so every lane width sees whole groups
+                            // without a nonzero digit.
+                            for term in &mut terms[8..17] {
+                                *term = Term::zero(term.point);
+                            }
 
                             // Counts on both sides of multiples of `LANES`, up to the largest
                             // batch that serial runs hand to Straus.

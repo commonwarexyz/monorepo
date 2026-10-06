@@ -392,21 +392,6 @@ impl FVec {
     pub fn untranspose(self) -> [F; LANES] {
         array::from_fn(|i| F(array::from_fn(|limb| self.limbs[limb][i])))
     }
-
-    /// Selects `other` in lanes whose corresponding mask is true.
-    ///
-    /// Variable-time, so the mask must be public.
-    fn select_lanes(self, other: Self, select_other: &[bool; LANES]) -> Self {
-        let masks = select_other.map(|select| 0u64.wrapping_sub(select as u64));
-        Self {
-            limbs: array::from_fn(|limb| {
-                array::from_fn(|lane| {
-                    (self.limbs[limb][lane] & !masks[lane])
-                        | (other.limbs[limb][lane] & masks[lane])
-                })
-            }),
-        }
-    }
 }
 
 /// Abstracts over base field operations.
@@ -796,6 +781,7 @@ pub struct GVec {
 
 impl GVec {
     /// Transposes scalar points into backend lanes.
+    #[cfg(any(test, feature = "fuzz", not(target_arch = "aarch64")))]
     pub fn transpose(lanes: [G; LANES]) -> Self {
         Self {
             x: FVec::transpose(lanes.map(|point| point.x)),
@@ -859,9 +845,9 @@ impl GVec {
 
 /// Like `GVec`, but assuming that the point is in affine representation.
 ///
-/// When we deserialize a point from bytes, this is what we naturally get.
-/// Operations are faster taking this into account, so we want to make sure to
-/// exploit that when we can, by using [`GBackend::g_add_mixed`] and cousins.
+/// Tests and fuzzing use it to compare each backend's full-width [`GBackend::g_add_mixed`]
+/// with the portable reference.
+#[cfg(any(test, feature = "fuzz"))]
 #[derive(Clone, Copy)]
 pub struct GAffineVec {
     pub x: FVec,
@@ -869,6 +855,7 @@ pub struct GAffineVec {
     pub t2d: FVec,
 }
 
+#[cfg(any(test, feature = "fuzz"))]
 impl GAffineVec {
     /// Transposes scalar affine points into backend lanes.
     pub fn transpose(lanes: [GAffine; LANES]) -> Self {
@@ -876,26 +863,6 @@ impl GAffineVec {
             x: FVec::transpose(lanes.map(|point| point.x)),
             y: FVec::transpose(lanes.map(|point| point.y)),
             t2d: FVec::transpose(lanes.map(|point| point.t2d)),
-        }
-    }
-
-    /// Packs affine points, negating the selected lanes.
-    ///
-    /// Variable-time, so the lane signs must be public.
-    pub fn from_signed_lanes<B: FBackend>(
-        backend: B,
-        lanes: &[GAffine; LANES],
-        negative: &[bool; LANES],
-    ) -> Self {
-        let packed = Self::transpose(*lanes);
-        if !negative.iter().any(|&value| value) {
-            return packed;
-        }
-
-        Self {
-            x: packed.x.select_lanes(backend.neg(packed.x), negative),
-            y: packed.y,
-            t2d: packed.t2d.select_lanes(backend.neg(packed.t2d), negative),
         }
     }
 }
@@ -934,6 +901,7 @@ pub trait GBackend: FBackend {
     /// Add two points together, assuming one is in its affine representation.
     ///
     /// This can be faster than [`Self::g_add`].
+    #[cfg(any(test, feature = "fuzz"))]
     fn g_add_mixed(self, a: GVec, b: GAffineVec) -> GVec;
 
     /// Add a point to itself.

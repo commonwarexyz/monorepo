@@ -3,21 +3,17 @@
 //! Backends own the bucket geometry and native lane arithmetic. Digit recoding, range
 //! partitioning, and scheduling remain independent of that choice.
 
-use super::{G, GAffine, GAffineVec, GBackend, GVec};
+use super::{G, GAffine, GBackend, GVec};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 /// Bucket filling, window recombination, and native lane dispatch for public scalar digits.
-///
-/// The bucket defaults use one stripe per logical lane and vector point arithmetic. Backends
-/// with narrower physical tiles can override these kernels without changing MSM scheduling.
 pub trait Backend: GBackend + Send + Sync {
     /// Independent bucket stripes, indexed by `stripe * nb + abs(digit) - 1`.
     ///
-    /// Must be nonzero. The default fill requires [`super::LANES`] stripes. Override it for other
-    /// geometries.
+    /// Must be nonzero.
     const STRIPES: usize;
 
     /// Adds the projected points and signed digits to `Self::STRIPES * nb` buckets.
@@ -30,43 +26,31 @@ pub trait Backend: GBackend + Send + Sync {
         nb: usize,
         terms: &[T],
         term: impl Fn(&T) -> (&GAffine, i16),
-    ) {
-        fill_buckets(
-            |current, incoming, negative| {
-                self.g_add_mixed(
-                    GVec::transpose(current),
-                    GAffineVec::from_signed_lanes(self, &incoming, &negative),
-                )
-                .untranspose()
-            },
-            buckets,
-            nb,
-            terms,
-            term,
-        );
-    }
+    );
 
     /// Sums `(window, point)` partials, then Horner-folds the windows with `width` doublings.
     ///
     /// Window indices must be less than `windows`. Partials are added in their iteration order.
+    /// The default runs the chain in every vector lane at once and keeps lane 0. A backend that
+    /// computes its vector lanes separately should run [`combine_windows`] on scalar points
+    /// instead, which computes each point once.
     fn combine_windows(
         self,
         partials: impl IntoIterator<Item = (usize, G)>,
         windows: usize,
         width: u32,
     ) -> G {
-        let mut window_sums = vec![GVec::identity(); windows];
-        for (window, partial) in partials {
-            window_sums[window] = self.g_add(window_sums[window], GVec::splat(partial));
-        }
-        let mut result = GVec::identity();
-        for window in window_sums.iter().rev() {
-            for _ in 0..width {
-                result = self.g_double(result);
-            }
-            result = self.g_add(result, *window);
-        }
-        result.untranspose()[0]
+        combine_windows(
+            GVec::identity(),
+            |a, b| self.g_add(a, b),
+            |a| self.g_double(a),
+            partials
+                .into_iter()
+                .map(|(window, partial)| (window, GVec::splat(partial))),
+            windows,
+            width,
+        )
+        .untranspose()[0]
     }
 
     /// Runs a computation with the backend's native lane width and required CPU features.
@@ -274,6 +258,32 @@ pub fn fill_buckets<const STRIPES: usize, T>(
             }
         }
     }
+}
+
+/// Sums `(window, point)` partials with `add`, then Horner-folds the windows with `width`
+/// doublings.
+///
+/// Window indices must be less than `windows`. Partials are added in their iteration order.
+pub fn combine_windows<P: Copy>(
+    identity: P,
+    add: impl Fn(P, P) -> P,
+    double: impl Fn(P) -> P,
+    partials: impl IntoIterator<Item = (usize, P)>,
+    windows: usize,
+    width: u32,
+) -> P {
+    let mut window_sums = vec![identity; windows];
+    for (window, partial) in partials {
+        window_sums[window] = add(window_sums[window], partial);
+    }
+    let mut result = identity;
+    for window in window_sums.iter().rev() {
+        for _ in 0..width {
+            result = double(result);
+        }
+        result = add(result, *window);
+    }
+    result
 }
 
 /// Returns the sum of all stripes, weighting each bucket by its index plus one.
