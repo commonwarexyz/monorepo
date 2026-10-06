@@ -197,8 +197,7 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// The projection receives each item's original slice index and a reference
         /// to that item. It may be called repeatedly and concurrently, and must
-        /// return the same entry each time for a given index and item. Projections
-        /// that use only the index may use a slice of `()` values.
+        /// return the same entry each time for a given index and item.
         ///
         /// Messages should not be hashed before calling this function. Any hashing
         /// required by the signature scheme is performed internally.
