@@ -2,8 +2,8 @@
 
 set positional-arguments := true
 
-# Turn sources into invariants: just extract [--registry R] [--number N] <kind> <source>...
-extract *args:
+# Turn sources into invariants: just extract-invariants [--registry R] [--number N] <kind> <source>...
+extract-invariants *args:
     python3 scripts/statelens.py extract "$@"
 
 # Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P]

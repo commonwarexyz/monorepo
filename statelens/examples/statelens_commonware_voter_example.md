@@ -46,7 +46,7 @@ probes. Here those are separate jobs:
 
 | The example's step | Who does it here | Reads |
 |---|---|---|
-| Seed discovery from comments, deriving invariants (sections 3 to 25) | the invariant analyst, `just extract comment <path>` | `prompts/analyst.md` + `prompts/analyst-comment.md` |
+| Seed discovery from comments, deriving invariants (sections 3 to 25) | the invariant analyst, `just extract-invariants comment <path>` | `prompts/analyst.md` + `prompts/analyst-comment.md` |
 | Choosing states and transitions, probe synthesis (sections 26 to 28) | the instrumenter's beacon step, inside `just campaign` | `prompts/instrument.md` + `prompts/instrument-beacons.md` |
 | Binding an invariant to assertion sites | the instrumenter's invariant step, inside `just campaign` | `prompts/instrument.md` + `prompts/instrument-invariants.md` |
 
@@ -63,7 +63,7 @@ and leaves it for Phase 1.
 | Beacon Summary, State Report | no artifact: the instrumenter holds this in its own context and records the result as a row of the plan's beacon table |
 | Iterative State Discovery | not adopted. There is no call-graph, data-flow or AST tool; tracing is search and reading, and a finding's own citations name the files and symbols (`R-AG-2`) |
 | Probe Synthesis, Probe Validation | step 3 of a campaign, then `cargo check`, the sanitizer build with up to three agent repairs, and the test gate |
-| `INV-A1`, `INV-B2`, and the other family labels | local labels for this document only. A registry invariant has a global `INV-NNNN` id that `just extract` assigns |
+| `INV-A1`, `INV-B2`, and the other family labels | local labels for this document only. A registry invariant has a global `INV-NNNN` id that `just extract-invariants` assigns |
 | `STATE_PROBE!` with a struct of fields | `sl_probe!(me, "label", a, b)`, which records exactly one pair; section 27 shows how several values become a pair |
 
 **The knowledge base is real.** `STATELENS_KB` names one or more corpus roots outside this
@@ -103,7 +103,7 @@ Repository + Developer Artifacts -> LLM agent -> Beacon Summary
 The same work in this repository:
 
 ```text
-PHASE 1  just extract <kind> <source>
+PHASE 1  just extract-invariants <kind> <source>
            source artifact -> invariant analyst -> invariants/<subsystem>/INV-NNNN.md
                                                   (committed, human-reviewed)
 
@@ -499,9 +499,9 @@ Two test executions may enter both certificate handlers, but the critical questi
 # 9. Derived Invariant Family A -- Certificate/Cancellation Semantics
 
 The labels `INV-A1`, `INV-A2` and so on are local to this document. A real invariant goes into
-`invariants/simplex/` with a global `INV-NNNN` id that `just extract` assigns, an EARS
-statement that names no Rust identifier, and its source recorded. Deriving these is Phase 1
-work; the Phase 2 beacon step never writes one.
+`invariants/simplex/` with a global `INV-NNNN` id that `just extract-invariants` assigns, an
+EARS statement that names no Rust identifier, and its source recorded. Deriving these is
+Phase 1 work; the Phase 2 beacon step never writes one.
 
 The agent now writes candidate invariants in natural language first.
 

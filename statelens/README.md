@@ -7,10 +7,10 @@ campaign profile: Simplex consensus (`consensus/src/simplex`: the voter, batcher
 resolver actors), marshal (`consensus/src/marshal`: the core, standard and coding
 components) and qmdb (`storage/src/qmdb`: the log-based databases and their sync
 engine). It works in three phases: an LLM agent (Claude Code or Codex) discovers
-invariants in issues, design documents, code comments, formal specifications and papers
-(Phase 1); a campaign lets the agent instrument the code and generates the StateLens fuzz
-targets (Phase 2); and you run those targets (Phase 3). See [PRD.md](docs/PRD.md) for the
-goals and [SPEC.md](docs/SPEC.md) for the details.
+invariants in issues, design documents, code comments, formal specifications, papers and
+knowledge-base findings (Phase 1); a campaign lets the agent instrument the code and
+generates the StateLens fuzz targets (Phase 2); and you run those targets (Phase 3). See
+[PRD.md](docs/PRD.md) for the goals and [SPEC.md](docs/SPEC.md) for the details.
 
 ## Run campaigns safely
 
@@ -54,18 +54,18 @@ git ignores.
 ## Phase 1: discover invariants
 
 ```
-just extract issue https://github.com/commonwarexyz/monorepo/issues/2070
-just extract design docs/blogs/pipelining-simplex.md#how-optimism-stays-safe
-just extract comment consensus/src/simplex/actors/voter/round.rs
-just extract spec <spec>.qnt:34
-just extract paper https://eprint.iacr.org/2023/463.pdf#page=7
-just extract --registry marshal comment consensus/src/marshal/mod.rs
-just extract --registry marshal issue commonwarexyz/monorepo#<N>
-just extract --registry qmdb comment storage/src/qmdb/mod.rs storage/src/qmdb/current/mod.rs
-just extract --registry qmdb --number 10 comment storage/src/qmdb/mod.rs
-just extract --registry qmdb --number 10 kb /path/to/commonware-findings
-just extract --registry qmdb kb                # the corpus STATELENS_KB names
-just extract --agent codex issue https://github.com/commonwarexyz/monorepo/issues/2070
+just extract-invariants issue https://github.com/commonwarexyz/monorepo/issues/2070
+just extract-invariants design docs/blogs/pipelining-simplex.md#how-optimism-stays-safe
+just extract-invariants comment consensus/src/simplex/actors/voter/round.rs
+just extract-invariants spec <spec>.qnt:34
+just extract-invariants paper https://eprint.iacr.org/2023/463.pdf#page=7
+just extract-invariants --registry marshal comment consensus/src/marshal/mod.rs
+just extract-invariants --registry marshal issue commonwarexyz/monorepo#<N>
+just extract-invariants --registry qmdb comment storage/src/qmdb/mod.rs storage/src/qmdb/current/mod.rs
+just extract-invariants --registry qmdb --number 10 comment storage/src/qmdb/mod.rs
+just extract-invariants --registry qmdb --number 10 kb /path/to/commonware-findings
+just extract-invariants --registry qmdb kb                # the corpus STATELENS_KB names
+just extract-invariants --agent codex issue https://github.com/commonwarexyz/monorepo/issues/2070
 ```
 
 | Kind | Source |
@@ -117,9 +117,9 @@ an excerpt section that no longer matches its citations.
 
 A campaign's beacon step can consult a knowledge base of developer artifacts while it
 instruments: the findings reported against this workspace, plus the curated documents beside
-them. `just extract kb` also turns its findings into local invariants (Phase 1). Point
-`STATELENS_KB` at one or more corpus roots, separated by `:`, in `config.local.env` or in
-the environment, never in the tracked `config.env`.
+them. `just extract-invariants kb` also turns its findings into local invariants (Phase 1).
+Point `STATELENS_KB` at one or more corpus roots, separated by `:`, in `config.local.env` or
+in the environment, never in the tracked `config.env`.
 
 ```
 export STATELENS_KB=/path/to/commonware-findings

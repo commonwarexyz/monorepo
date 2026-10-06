@@ -1256,7 +1256,7 @@ def check_comment_sources(repo, registry, sources):
         if not inside_repo(repo, target):
             hint = (
                 "; to extract from knowledge-base findings, run "
-                f"`just extract --registry {registry} kb {source}`"
+                f"`just extract-invariants --registry {registry} kb {source}`"
             )
         raise Abort(
             1,

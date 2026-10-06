@@ -868,7 +868,7 @@ class ExtractionInputs(unittest.TestCase):
         self.addCleanup(shutil.rmtree, corpus, True)
         with self.assertRaises(sl.Abort) as caught:
             sl.check_comment_sources(self.REPO, "qmdb", ["storage/src/qmdb/mod.rs", str(corpus)])
-        self.assertIn(f"just extract --registry qmdb kb {corpus}", str(caught.exception))
+        self.assertIn(f"just extract-invariants --registry qmdb kb {corpus}", str(caught.exception))
 
     def test_ids_and_bindings_span_the_local_registry(self):
         sl_dir = pathlib.Path(tempfile.mkdtemp())

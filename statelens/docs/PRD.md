@@ -18,7 +18,7 @@ Build an invariant-driven, state-aware fuzzing workflow for the Simplex consensu
 
 The workflow has three phases:
 
-1. **Discover invariants and beacons.** Humans own a registry of invariants written in English, one per subsystem. Invariants are long-term properties of the protocol and of a correct replica. They are not tied to a particular implementation. They come from humans or from LLMs that read GitHub issues, design documents, code comments, formal specifications, and papers. Every invariant records where it came from (the source). Every file in a registry is active: the next campaign that covers its subsystem uses it.
+1. **Discover invariants.** Humans own a registry of invariants written in English, one per subsystem. Invariants are long-term properties of the protocol, of a correct replica, or of a database. They are not tied to a particular implementation. They come from humans or from LLMs that read GitHub issues, design documents, code comments, formal specifications, papers, and knowledge-base findings. Every invariant records where it came from (the source). Every file in a registry is active: the next campaign that covers its subsystem uses it.
 
 2. **Instrument the code and generate fuzz targets.** A campaign runs in place in the operator's fresh clone of the repository, where StateLens lives; StateLens does not make another clone. The campaign's profile, `simplex`, `marshal` or `qmdb`, selects the subsystems it covers. An LLM coding agent reads the invariants and the current code, and instruments the code with:
    1. assertions that check the invariants;
@@ -110,7 +110,7 @@ qmdb:
 | Invariant author (developer or security engineer) | Writes invariants by hand. Reviews, edits or deletes LLM-written ones before the next campaign, because every file in a registry is used (R-P1-5). |
 | Analyst agent (`claude` or `codex`) | Phase 1: reads sources and writes invariant entries in the reference format. |
 | Instrumenter agent (`claude` or `codex`) | Phase 2: reads the invariants of the profile's registries and the code of its subsystems, and queries the knowledge base while it works; writes assertions, probes and ghost state into the checkout. |
-| Fuzz operator | Runs Phase 1: `just extract`, naming the registry, then `just check-invariants`. Sets `STATELENS_KB` for the campaign. Clones the repository on a dedicated machine or container and starts a campaign in that clone (Phase 2), then runs the StateLens fuzz targets the campaign built (Phase 3). Investigates the instrumented checkout when something panics, then discards it. |
+| Fuzz operator | Runs Phase 1: `just extract-invariants`, naming the registry, then `just check-invariants`. Sets `STATELENS_KB` for the campaign. Clones the repository on a dedicated machine or container and starts a campaign in that clone (Phase 2), then runs the StateLens fuzz targets the campaign built (Phase 3). Investigates the instrumented checkout when something panics, then discards it. |
 
 ---
 
@@ -153,7 +153,7 @@ qmdb:
 ```
 PHASE 1: DISCOVER INVARIANTS  (repeatable, any time, committed to the repo)
 
-  operator: just extract [--registry simplex|marshal|qmdb] [--number N] <kind> <source>...
+  operator: just extract-invariants [--registry simplex|marshal|qmdb] [--number N] <kind> <source>...
 
   source (issue | design doc | code comments | spec | paper | knowledge-base findings)
         |
@@ -358,7 +358,7 @@ R-KB-8. **Every finding state is usable.** A finding's state and remediation sta
 
 R-P1-1. Invariant extraction is a single agent invocation per source (set of similar sources, e.g. set of files).
 It is parameterized by the agent (`claude|codex`), the registry (`simplex`, `marshal` or `qmdb`), the source kind, the source reference, and optionally the number of invariants to write. Interface, run in `statelens/`:
-`just extract [--registry simplex|marshal|qmdb] [--number N] <kind> <source>...`, e.g. `just extract issue <url>`. The registry defaults to `simplex`. The agent comes from `config.env`, the `STATELENS_AGENT` environment variable, or `--agent`.
+`just extract-invariants [--registry simplex|marshal|qmdb] [--number N] <kind> <source>...`, e.g. `just extract-invariants issue <url>`. The registry defaults to `simplex`. The agent comes from `config.env`, the `STATELENS_AGENT` environment variable, or `--agent`.
 
 R-P1-2. Each source kind has one prompt file, `prompts/analyst-<kind>.md`, appended to the shared `prompts/analyst.md`, which includes the registry's part, `prompts/subsystems/<subsystem>-analyst.md`. Every prompt:
 - casts the agent as an analyst for that source kind;
@@ -522,7 +522,7 @@ AC-1. `templates/invariant.md`, `prompts/analyst.md`, and the five per-kind anal
 
 AC-2. On `main`, `just check-fmt`, `just lint`, `just test -p commonware-consensus`, `just test -p commonware-storage`, and the CI fuzz matrix behave exactly as before this project (G6).
 
-AC-3. **Invariant registries.** `just check-invariants` reports no problem. `invariants/simplex/` holds INV-0001 to INV-0018, and `false-invariants/simplex/` holds FALSE-0001. `just extract --registry marshal comment consensus/src/marshal/mod.rs` writes files into `invariants/marshal/`, numbered from the next global ID.
+AC-3. **Invariant registries.** `just check-invariants` reports no problem. `invariants/simplex/` holds INV-0001 to INV-0018, and `false-invariants/simplex/` holds FALSE-0001. `just extract-invariants --registry marshal comment consensus/src/marshal/mod.rs` writes files into `invariants/marshal/`, numbered from the next global ID.
 
 AC-14. **Knowledge base.** With `STATELENS_KB` pointing at the findings repository, the `kb` commands answer from the index: `modules` lists the module values in scope, `find` and `cites` return only findings whose `module` is in the subsystem's filter, `cites` maps a component directory to the findings that name files under it, and `show` refuses a section that is not state-bearing.
 
@@ -532,7 +532,7 @@ AC-16. **Audit pass.** A campaign whose first pass leaves a commit site unchecke
 
 AC-17. **Subproject checks.** `just check-plan` exits 0 on a plan whose claims match its ledger and the instrumented code, and 3 naming the section when a `bound` leaves a commit site unchecked or a site it calls checked asserts nothing there. `just check-prompts` exits 0 when section 13 of the specification quotes every prompt verbatim, and 3 naming the file otherwise.
 
-AC-21. **Findings extraction.** With `STATELENS_KB` set, `just extract --registry qmdb --number 3 kb` writes at most three new invariants, all in `invariants.local/qmdb/`, none of which git lists, and all lint-clean; a `comment` extraction given the corpus root refuses it and names the `kb` command.
+AC-21. **Findings extraction.** With `STATELENS_KB` set, `just extract-invariants --registry qmdb --number 3 kb` writes at most three new invariants, all in `invariants.local/qmdb/`, none of which git lists, and all lint-clean; a `comment` extraction given the corpus root refuses it and names the `kb` command.
 
 ## 8. StateLens for Simplex
 
@@ -1074,7 +1074,7 @@ reproduces the same panic.
 
 | Risk | Mitigation |
 |---|---|
-| The qmdb registry starts empty, so a first campaign adds beacon probes only. | Phase 1 fills it: `just extract --registry qmdb comment storage/src/qmdb/...` and the other source kinds. |
+| The qmdb registry starts empty, so a first campaign adds beacon probes only. | Phase 1 fills it: `just extract-invariants --registry qmdb comment storage/src/qmdb/...` and the other source kinds. |
 | Several databases share one run, and history keyed carelessly merges them or loses a reopened database's past. | R-Q-INS-2 is in the prompt, and the plan names the key of every ghost field. |
 | There is no worked analysis of qmdb for the agents to consult. | The prompts carry the method, and the Simplex and marshal analyses show it applied. Writing one is future work. |
 | The storage targets other than `qmdb_*` (journals, archives, Merkle structures) get no variant, although qmdb builds on that code. | Accepted: the profile instruments qmdb code only (Non-Goals). |

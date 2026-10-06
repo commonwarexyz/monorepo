@@ -405,9 +405,9 @@ STATELENS_TEST_TOOLCHAIN=stable
 # .github/workflows/slow.yml.
 STATELENS_FUZZ_TOOLCHAIN=
 
-# Knowledge base roots for beacon extraction and for `just extract kb`, separated
-# by `:`. Empty disables both; nothing else depends on it. Leave it empty here: a
-# corpus root is a path on one machine and may name a private repository of
+# Knowledge base roots for beacon extraction and for `just extract-invariants kb`,
+# separated by `:`. Empty disables both; nothing else depends on it. Leave it empty
+# here: a corpus root is a path on one machine and may name a private repository of
 # findings, so it belongs in config.local.env or in the environment, never in this
 # tracked file.
 STATELENS_KB=
@@ -457,8 +457,8 @@ campaign warns and continues. `just coverage` (section 7.13) needs the fuzz tool
 
 set positional-arguments := true
 
-# Turn sources into invariants: just extract [--registry R] [--number N] <kind> <source>...
-extract *args:
+# Turn sources into invariants: just extract-invariants [--registry R] [--number N] <kind> <source>...
+extract-invariants *args:
     python3 scripts/statelens.py extract "$@"
 
 # Instrument this checkout and build the StateLens targets: just campaign [--agent A] [--profile P]
@@ -3212,9 +3212,9 @@ source proves, what the tools prove, what a finding explains, and what you are g
 
 | AC | Procedure | Pass condition |
 |---|---|---|
-| AC-1 | For each agent: `just extract issue <URL of a real Simplex bug>`. | At least one new `invariants/simplex/INV-*.md`; `just check-invariants` reports no problem for it. |
+| AC-1 | For each agent: `just extract-invariants issue <URL of a real Simplex bug>`. | At least one new `invariants/simplex/INV-*.md`; `just check-invariants` reports no problem for it. |
 | AC-2 | On `main` with the subproject committed: `git ls-files statelens` contains no `Cargo.toml`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; `just test -p commonware-storage`; the CI fuzz target listings for `consensus/fuzz/simplex`, `consensus/fuzz/marshal` and `storage/fuzz`. | All behave exactly as without the subproject. |
-| AC-3 | `just check-invariants`; `git ls-files statelens/invariants statelens/false-invariants`; then `just extract --registry marshal comment consensus/src/marshal/mod.rs`. | No lint problem. Every invariant file is in a subsystem directory. The new files are in `invariants/marshal/`, numbered from the next global ID. |
+| AC-3 | `just check-invariants`; `git ls-files statelens/invariants statelens/false-invariants`; then `just extract-invariants --registry marshal comment consensus/src/marshal/mod.rs`. | No lint problem. Every invariant file is in a subsystem directory. The new files are in `invariants/marshal/`, numbered from the next global ID. |
 | AC-4 | With at least one simplex invariant: `just campaign`, then the printed `run` command. | Materialize, instrument, plan, build and test gate complete, the result is `READY`, and the `run` command starts the fuzzer. |
 | AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_cert_mock_twins_mutator_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
 | AC-6 | `STATELENS_FALSE_INVARIANTS=1 just campaign`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
@@ -3224,7 +3224,7 @@ source proves, what the tools prove, what a finding explains, and what you are g
 | AC-15 | `STATELENS_KB=` with a campaign. | The campaign warns that there is no knowledge base, renders the beacon step with no query commands, and still reaches `READY`. |
 | AC-16 | A campaign with an invariant whose action is committed in a handler, then the same campaign with `STATELENS_AUDIT=0`. | With the pass: the invariant's `Sites` ledger names the commit site, the `Status` matches the ledger, and the `audit` and `plan` lines report it. Without it: no `audit` line, and the campaign still reaches `READY`. |
 | AC-17 | `just check-plan` on a plan whose `bound` section leaves a commit site unchecked, and on a clean one; `just check-prompts` after editing a prompt, and after `--write`. | Exit 3 naming the section or the prompt, and exit 0 when clean. |
-| AC-21 | With `STATELENS_KB` set to a findings corpus: `just extract --registry qmdb --number 3 kb`; then `just extract --registry qmdb comment <corpus root>`. | The first writes at most 3 new files, all in `invariants.local/qmdb/`, which `git status` does not list, and `just check-invariants` reports no problem for them. The second exits 1 and names the `kb` command instead. |
+| AC-21 | With `STATELENS_KB` set to a findings corpus: `just extract-invariants --registry qmdb --number 3 kb`; then `just extract-invariants --registry qmdb comment <corpus root>`. | The first writes at most 3 new files, all in `invariants.local/qmdb/`, which `git status` does not list, and `just check-invariants` reports no problem for them. The second exits 1 and names the `kb` command instead. |
 | R-NF-3 | Same duration and flags: `simplex_cert_mock_twins_mutator_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
 
 Section 8.6 gives the procedures for AC-9 to AC-13, and for R-NF-3 on the marshal
@@ -3433,8 +3433,8 @@ give them to the agent.
 ### 17.6 Known limitations
 
 - The qmdb registry starts empty, so a first campaign adds beacon probes only. Phase 1 fills
-  it: `just extract --registry qmdb comment storage/src/qmdb/...`, and the other source
-  kinds.
+  it: `just extract-invariants --registry qmdb comment storage/src/qmdb/...`, and the other
+  source kinds.
 - There is no worked analysis of qmdb in `examples/`. The binding and beacon prompts name the
   Simplex and marshal ones as reference for the method.
 - Every database of a run shares one `Global`. A binding that does not key its history per
@@ -4211,9 +4211,9 @@ Workflow test, see SPEC.md section 14.
    model and effort of the agent CLI, which are the CLI's own defaults unless pinned;
    rust-analyzer for the code index, and that its `ERROR` lines in
    `extract/code-index.log` are expected (section 5.7).
-4. Phase 1a: `just extract [--registry simplex|marshal|qmdb] <kind> <source>...` with one
-   example per kind, then review: every file in a registry is used by the next campaign
-   that binds it; edit or delete drafts; `just check-invariants`.
+4. Phase 1: `just extract-invariants [--registry simplex|marshal|qmdb] <kind> <source>...`
+   with one example per kind, then review: every file in a registry is used by the next
+   campaign that binds it; edit or delete drafts; `just check-invariants`.
 5. The knowledge base: what `STATELENS_KB` points at, that a campaign's beacon step queries
    it while instrumenting, and the `kb` commands an operator can run by hand.
 6. Phase 2: `just campaign`, `just campaign --profile marshal`,

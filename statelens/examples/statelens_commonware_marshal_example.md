@@ -59,7 +59,7 @@ probes. Here those are separate jobs:
 
 | The example's step | Who does it here | Reads |
 |---|---|---|
-| The semantic scan and the candidate invariants M1 to M9 (sections 1 to 31) | the invariant analyst, `just extract --registry marshal comment consensus/src/marshal/standard/deferred.rs` | `prompts/analyst.md` + `prompts/analyst-comment.md` |
+| The semantic scan and the candidate invariants M1 to M9 (sections 1 to 31) | the invariant analyst, `just extract-invariants --registry marshal comment consensus/src/marshal/standard/deferred.rs` | `prompts/analyst.md` + `prompts/analyst-comment.md` |
 | State dimensions and probe sites (sections 32 to 34) | the instrumenter's beacon step for `marshal.standard`, inside `just campaign --profile marshal` | `prompts/instrument.md` + `prompts/instrument-beacons.md` |
 | Binding an invariant to assertion sites | the instrumenter's invariant step | `prompts/instrument.md` + `prompts/instrument-invariants.md` |
 
@@ -78,7 +78,7 @@ this component sees only the findings whose `module` names marshal.
 | Paper term used below | Here |
 |---|---|
 | Beacon Summary (section 10), reconstructed state machine (section 30) | no artifact: the agent holds this in its own context and records the result as rows of the plan's beacon table |
-| `M1` to `M9` | local labels for this document. A registry invariant has a global `INV-NNNN` id that `just extract` assigns, and an EARS statement that names no Rust identifier |
+| `M1` to `M9` | local labels for this document. A registry invariant has a global `INV-NNNN` id that `just extract-invariants` assigns, and an EARS statement that names no Rust identifier |
 | `QUERY_KB: "free text"` | one of five commands, shown below |
 | the uppercase state values in sections 33 and 34, such as `MATCH`, `READY_VALID`, `GATE_LOST` | this document's own vocabulary for coverage cells, not code identifiers. A probe records small integers, so section 33 shows how such a cell is encoded |
 | a tuple of three to six fields | `sl_probe!(me, "label", a, b)` records exactly **one pair**; section 33 shows the packing |
@@ -705,9 +705,9 @@ eligible_to_finalize
 # 15. Candidate Invariant M1 -- Certification Cannot Bypass Application Validity
 
 `M1` to `M9` are labels local to this document. A real invariant goes into
-`invariants/marshal/` with a global `INV-NNNN` id that `just extract` assigns and a statement
-that names no Rust identifier; deriving them is Phase 1 work, and the beacon step never writes
-one.
+`invariants/marshal/` with a global `INV-NNNN` id that `just extract-invariants` assigns and a
+statement that names no Rust identifier; deriving them is Phase 1 work, and the beacon step
+never writes one.
 
 The agent derives:
 
