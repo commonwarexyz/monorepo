@@ -429,53 +429,44 @@ impl<const N: usize> BitMap<N> {
         self.len += Self::CHUNK_SIZE_BITS;
     }
 
-    /// Append every bit of `other`, in order, in one pass over its bytes rather than one push
-    /// per bit.
+    /// Append every bit of `other` (of any chunk size), in order.
     pub fn extend_from_bitmap<const M: usize>(&mut self, other: &BitMap<M>) {
-        let total = other.len();
-        let mut next = 0;
-
         // Push single bits until the end of this bitmap is chunk aligned.
-        while next < total && !self.is_chunk_aligned() {
+        let mut next = 0;
+        while next < other.len() && !self.is_chunk_aligned() {
             self.push(other.get(next));
             next += 1;
         }
 
-        // Stream `other`'s bytes from bit `next`, shifting each output byte into alignment, and
-        // push whole chunks.
-        let whole = (total - next) / Self::CHUNK_SIZE_BITS;
-        if whole > 0 {
-            self.chunks.reserve(whole as usize);
-            let (front, back) = other.chunks.as_slices();
-            let mut bytes = front
-                .as_flattened()
-                .iter()
-                .chain(back.as_flattened())
-                .copied()
-                .skip((next / 8) as usize);
-            let shift = (next % 8) as u32;
-            let mut current = bytes.next().unwrap_or(0);
-            for _ in 0..whole {
-                let mut chunk = [0u8; N];
-                for out in &mut chunk {
-                    let following = bytes.next().unwrap_or(0);
-                    *out = if shift == 0 {
-                        current
-                    } else {
-                        (current >> shift) | (following << (8 - shift))
-                    };
-                    current = following;
-                }
-                self.push_chunk(&chunk);
+        // Append the remaining bits a chunk at a time. Each new byte holds the next 8 bits of
+        // `other`: a copy of one of its bytes when `next` is byte aligned, otherwise assembled
+        // from the two bytes those bits span. Bits past the end of `other` are zero, so the last
+        // chunk keeps every bit past the new length clear.
+        let remaining = other.len() - next;
+        let new_chunks = remaining.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        self.chunks.reserve(new_chunks);
+        let (front, back) = other.chunks.as_slices();
+        let mut bytes = front
+            .as_flattened()
+            .iter()
+            .chain(back.as_flattened())
+            .copied()
+            .skip((next / 8) as usize);
+        let shift = next % 8;
+        let mut current = bytes.next().unwrap_or(0);
+        for _ in 0..new_chunks {
+            self.chunks.push_back(Self::EMPTY_CHUNK);
+            for out in self.chunks.back_mut().unwrap() {
+                let following = bytes.next().unwrap_or(0);
+                *out = if shift == 0 {
+                    current
+                } else {
+                    (u16::from_le_bytes([current, following]) >> shift) as u8
+                };
+                current = following;
             }
-            next += whole * Self::CHUNK_SIZE_BITS;
         }
-
-        // Push the bits that do not fill a chunk.
-        while next < total {
-            self.push(other.get(next));
-            next += 1;
-        }
+        self.len += remaining;
     }
 
     /* Invariant Maintenance */
@@ -1561,7 +1552,8 @@ mod tests {
     #[test]
     fn test_extend_from_bitmap_matches_push() {
         // Every destination length within the first chunk and a range of source lengths, over
-        // equal, wider, and narrower source chunks, must match pushing the source bit by bit.
+        // equal, wider, and narrower source chunks, must match pushing the source bit by bit,
+        // whether the source's chunks are contiguous or wrap around the end of its ring buffer.
         fn check<const N: usize, const M: usize>() {
             let mut rng = test_rng();
             let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
@@ -1573,6 +1565,17 @@ mod tests {
                     for _ in 0..len {
                         src.push(rng.random_bool(0.5));
                     }
+
+                    // Store the first half of the chunks at the end of a ring buffer that holds
+                    // the second half at its start.
+                    let half = src.chunks.len() / 2;
+                    let mut chunks: VecDeque<_> = src.chunks.range(half..).copied().collect();
+                    for chunk in src.chunks.range(..half).rev() {
+                        chunks.push_front(*chunk);
+                    }
+                    assert_eq!(chunks.as_slices().1.is_empty(), half == 0);
+                    let wrapped = BitMap { chunks, len };
+
                     let mut dst: BitMap<N> = BitMap::new();
                     for _ in 0..prefix {
                         dst.push(rng.random_bool(0.5));
@@ -1581,8 +1584,11 @@ mod tests {
                     for bit in src.iter() {
                         expected.push(bit);
                     }
-                    dst.extend_from_bitmap(&src);
-                    assert_eq!(dst, expected, "N={N} M={M} prefix={prefix} len={len}");
+                    for source in [&src, &wrapped] {
+                        let mut actual = dst.clone();
+                        actual.extend_from_bitmap(source);
+                        assert_eq!(actual, expected, "N={N} M={M} prefix={prefix} len={len}");
+                    }
                 }
             }
         }
@@ -1594,40 +1600,6 @@ mod tests {
         check::<12, 5>();
         check::<32, 1>();
         check::<32, 8>();
-    }
-
-    #[test]
-    fn test_extend_from_bitmap_wrapped_source() {
-        // A source whose chunks wrap around its ring buffer is read in order across both
-        // halves.
-        let mut rng = test_rng();
-        let mut chunks: VecDeque<[u8; 8]> = VecDeque::with_capacity(16);
-        let capacity = chunks.capacity();
-        for _ in 0..capacity / 2 {
-            chunks.push_back([0; 8]);
-        }
-        for _ in 0..capacity / 2 {
-            chunks.pop_front();
-        }
-        for _ in 0..capacity {
-            chunks.push_back(rng.random());
-        }
-        let src: BitMap<8> = BitMap {
-            chunks,
-            len: capacity as u64 * 64,
-        };
-        assert!(!src.chunks.as_slices().1.is_empty());
-
-        for prefix in [0, 3, 32] {
-            let mut dst: BitMap<4> = BitMap::new();
-            dst.extend_to(prefix);
-            let mut expected = dst.clone();
-            for bit in src.iter() {
-                expected.push(bit);
-            }
-            dst.extend_from_bitmap(&src);
-            assert_eq!(dst, expected, "prefix={prefix}");
-        }
     }
 
     #[test]
