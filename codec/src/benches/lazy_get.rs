@@ -1,10 +1,19 @@
 use crate::tx::{MemoTx, Tx};
 use bytes::Bytes;
-use commonware_codec::{Copying, DecodeExt as _, Encode, Read, types::lazy::Lazy};
+use commonware_codec::{Copying, DecodeExt as _, Encode, FixedSize, Read, types::lazy::Lazy};
 use criterion::{BatchSize, Criterion, criterion_group};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{hint::black_box, thread};
 
 const TXS: usize = 100_000;
+
+fn encoded_transactions(mut rng: impl Rng) -> impl Iterator<Item = Bytes> {
+    (0..TXS).map(move |_| {
+        let mut bytes = vec![0; Tx::SIZE];
+        rng.fill_bytes(&mut bytes);
+        Bytes::from(bytes)
+    })
+}
 
 /// Decodes every value, splitting `items` into `conc` contiguous chunks, one per thread.
 fn run<T: Sync>(items: &[T], conc: usize, f: impl Fn(&T) + Sync) {
@@ -75,7 +84,7 @@ fn bench_shared<T: Read<Cfg = ()> + Encode + Sync + Send>(
 }
 
 fn bench_lazy_get(c: &mut Criterion) {
-    let encoded: Vec<Bytes> = (0..TXS as u64).map(|i| Tx::sample(i).encode()).collect();
+    let encoded: Vec<Bytes> = encoded_transactions(StdRng::seed_from_u64(0)).collect();
     let shared = slices_of_one_buffer(&encoded);
 
     // Clone each private value once so every arm starts with a shared (non-promotable) handle.
@@ -126,19 +135,22 @@ fn bench_lazy_get_values(c: &mut Criterion) {
     bench_shared(
         c,
         "memo_tx",
-        (0..TXS as u64).map(|i| MemoTx {
-            tx: Tx::sample(i),
-            memo: Bytes::from(vec![i as u8; 16]),
-        }),
+        encoded_transactions(StdRng::seed_from_u64(0))
+            .enumerate()
+            .map(|(i, bytes)| MemoTx {
+                tx: Tx::decode(bytes).unwrap(),
+                memo: Bytes::from(vec![i as u8; 16]),
+            }),
     );
 
     // A small fixed-size value, like a public key.
+    let mut rng = StdRng::seed_from_u64(0);
     bench_shared(
         c,
         "key33",
-        (0..TXS as u64).map(|i| {
-            let mut key = [3u8; 33];
-            key[1..9].copy_from_slice(&i.to_be_bytes());
+        (0..TXS).map(|_| {
+            let mut key = [0u8; 33];
+            rng.fill_bytes(&mut key);
             key
         }),
     );

@@ -1,7 +1,7 @@
-//! A transaction-shaped value (~147 encoded bytes) shared by the codec benchmarks.
+//! A transaction-shaped value shared by the codec benchmarks.
 
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, RangeCfg, Read, ReadExt as _, Write};
 
 #[derive(Clone)]
 pub struct Tx {
@@ -13,38 +13,19 @@ pub struct Tx {
     pub signature: [u8; 64],
 }
 
-impl Tx {
-    pub fn sample(i: u64) -> Self {
-        let mut sender = [0u8; 32];
-        sender[..8].copy_from_slice(&i.to_be_bytes());
-        let mut recipient = [7u8; 32];
-        recipient[24..].copy_from_slice(&i.wrapping_mul(31).to_be_bytes());
-        Self {
-            nonce: i,
-            sender,
-            recipient,
-            amount: 1_000_000 + i,
-            fee: 20_000 + (i % 1000),
-            signature: [i as u8; 64],
-        }
-    }
-}
-
 impl Write for Tx {
     fn write(&self, buf: &mut impl BufMut) {
         self.nonce.write(buf);
         self.sender.write(buf);
         self.recipient.write(buf);
         self.amount.write(buf);
-        UInt(self.fee).write(buf);
+        self.fee.write(buf);
         self.signature.write(buf);
     }
 }
 
-impl EncodeSize for Tx {
-    fn encode_size(&self) -> usize {
-        8 + 32 + 32 + 8 + UInt(self.fee).encode_size() + 64
-    }
+impl FixedSize for Tx {
+    const SIZE: usize = 3 * u64::SIZE + 2 * <[u8; 32]>::SIZE + <[u8; 64]>::SIZE;
 }
 
 impl Read for Tx {
@@ -56,7 +37,7 @@ impl Read for Tx {
             sender: <[u8; 32]>::read(buf)?,
             recipient: <[u8; 32]>::read(buf)?,
             amount: u64::read(buf)?,
-            fee: UInt::<u64>::read(buf)?.into(),
+            fee: u64::read(buf)?,
             signature: <[u8; 64]>::read(buf)?,
         })
     }
