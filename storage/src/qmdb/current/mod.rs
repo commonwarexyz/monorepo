@@ -522,11 +522,24 @@ pub mod tests {
             any::{
                 ValueEncoding,
                 operation::update,
-                test::{Inspect, Links, assert_exact, build, colliding_digest, live},
+                test::{
+                    Changes, Choice, Inspect, Links, Neighbors, Script, assert_bits, assert_exact,
+                    build, colliding_digest, counter, hold, hold_batch, live, replay,
+                    test_any_activity_depths, test_any_ordered_policy_eviction_matrix,
+                    test_any_ordered_policy_evictions_keep_links,
+                    test_any_ordered_policy_repair_across_ancestors,
+                    test_any_policy_ancestor_twins, test_any_policy_decisions_match_writes,
+                    test_any_policy_evicts_parent_created_key, test_any_policy_hold,
+                    test_any_policy_keep_evict_and_recover,
+                    test_any_policy_limits_after_colliding_writes,
+                    test_any_policy_limits_with_writes, test_any_policy_matches_proportional,
+                    test_any_policy_own_writes, test_any_policy_stop, test_any_proportional_bound,
+                    test_any_proportional_one_batch,
+                },
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             chain::Bounds,
-            floor::{Compact, Proportional},
+            floor::{Compact, Hold, Proportional},
             store::tests::{TestKey, TestValue},
             verify_proof,
         },
@@ -546,6 +559,7 @@ pub mod tests {
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
         ops::Range,
+        pin::Pin,
         sync::Arc,
     };
     use tracing::warn;
@@ -5074,6 +5088,1015 @@ pub mod tests {
         });
     }
 
+    /// A child policy over a pending parent replaces and evicts applied updates and passes the
+    /// update the parent superseded. The applied chain proves the results.
+    #[test_traced("INFO")]
+    fn test_current_ordered_policy_replace_and_ancestor_proofs() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let partition = "current-ordered-policy-ancestor";
+            let db: OrderedFixedDb = OrderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>(partition, &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Seed three keys in key order with a held floor.
+            let mut keys = [key(1), key(2), key(3)];
+            keys.sort();
+            let seed = keys
+                .into_iter()
+                .enumerate()
+                .fold(db.new_batch(), |batch, (i, key)| {
+                    batch.write(key, Some(val(i as u64)))
+                });
+            let seed = seed.merkleize(&db, None, &mut Hold).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // A pending ancestor supersedes the middle base operation.
+            let parent = db
+                .new_batch()
+                .write(keys[1], Some(val(11)))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // The child passes the initial commit, replaces the oldest key, passes the update the
+            // parent superseded, and evicts the last base key. The parent's update lies past the
+            // remaining skips.
+            let oldest = keys[0];
+            let mut policy = Script::new(usize::MAX, 2, move |key: &Digest| {
+                if *key == oldest {
+                    Choice::Replace(val(10))
+                } else {
+                    Choice::Evict
+                }
+            });
+            let child = parent
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            let first = policy.visited[0].0;
+            assert_eq!(
+                policy.visited,
+                [
+                    (first, keys[0], val(0)),
+                    (Location::new(*first + 2), keys[2], val(2)),
+                ]
+            );
+            assert_eq!(child.bounds().inactivity_floor, Location::new(*first + 3));
+
+            // The applied chain matches the speculative root, proves the live keys and their
+            // links, and proves the evicted key excluded.
+            let speculative_root = child.root();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
+            let root = db.root();
+            assert_eq!(root, speculative_root);
+            let proof = db.key_value_proof(keys[0]).await.unwrap();
+            assert_eq!(proof.next_key, keys[1]);
+            assert!(
+                proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
+                    keys[0],
+                    val(10),
+                    &root
+                )
+            );
+            let proof = db.key_value_proof(keys[1]).await.unwrap();
+            assert_eq!(proof.next_key, keys[0]);
+            assert!(
+                proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
+                    keys[1],
+                    val(11),
+                    &root
+                )
+            );
+            let exclusion = db.exclusion_proof(&keys[2]).await.unwrap();
+            assert!(exclusion.verify::<Sha256>(&keys[2], &root));
+
+            // The state survives reopen.
+            let db = db.sync().await.unwrap();
+            assert_eq!(db.root(), root);
+            drop(db);
+            let reopened: OrderedFixedDb = OrderedFixedDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>(partition, &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), root);
+            assert!(
+                reopened
+                    .exclusion_proof(&keys[2])
+                    .await
+                    .unwrap()
+                    .verify::<Sha256>(&keys[2], &root)
+            );
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// Evicting the only key empties an ordered database. The empty database proves the key's
+    /// exclusion through the commit.
+    #[test_traced("INFO")]
+    fn test_current_ordered_policy_to_empty_proves_exclusion() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let db: OrderedFixedDb = OrderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("current-ordered-policy-empty", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Seed one key.
+            let k = key(7);
+            let seed = db
+                .new_batch()
+                .write(k, Some(val(7)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            assert!(!db.is_empty());
+
+            // Evict the only key.
+            let mut policy = Script::new(usize::MAX, u64::MAX, |_: &Digest| Choice::Evict);
+            let batch = db
+                .new_batch()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(policy.visited.len(), 1);
+            assert_eq!((policy.visited[0].1, policy.visited[0].2), (k, val(7)));
+
+            // The empty database proves exclusion through the commit.
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&k).await.unwrap(), None);
+            assert!(db.is_empty());
+            let proof = db.exclusion_proof(&k).await.unwrap();
+            assert!(matches!(
+                proof,
+                ordered::proof::constant::ExclusionProof::Commit(..)
+            ));
+            assert!(proof.verify::<Sha256>(&k, &db.root()));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// The speculative bitmap lets a child policy pass applied updates that an unapplied parent
+    /// superseded without reading them.
+    #[test_traced("INFO")]
+    fn test_current_policy_skips_updates_superseded_by_pending_parent() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("current-policy-speculative-skip", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Commit ten keys in key order after the initial commit.
+            let mut keys: Vec<_> = (40..50).map(key).collect();
+            keys.sort();
+            let seed = keys
+                .iter()
+                .enumerate()
+                .fold(db.new_batch(), |batch, (i, key)| {
+                    batch.write(*key, Some(val(i as u64)))
+                })
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // An unapplied parent supersedes every applied key except the last.
+            let parent = keys[..9]
+                .iter()
+                .fold(db.new_batch(), |batch, key| {
+                    batch.write(*key, Some(val(100)))
+                })
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // The child's policy reads only the surviving applied update before deciding it.
+            let items_read = || counter(&context, "log_journal_items_read_total");
+            let before = items_read();
+            let mut reads = Vec::new();
+            let mut policy = Script::new(1, u64::MAX, |_: &Digest| {
+                reads.push(items_read());
+                Choice::Keep
+            });
+            let child = parent
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, &mut policy)
+                .await
+                .unwrap();
+            assert_eq!(policy.visited.len(), 1);
+            assert_eq!(policy.visited[0].1, keys[9]);
+            assert_eq!(reads, [before + 1]);
+
+            drop((child, parent));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A staged proportional walk over a pending parent continues into the parent's operations
+    /// over a pruned bitmap when the applied candidates run out before its entries do. The staged
+    /// batch matches the unstaged one and a twin merkleized after the parent is applied.
+    #[test_traced("INFO")]
+    fn test_current_staged_walk_continues_past_applied_candidates() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let mut db: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("current-staged-walk", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            // Rewrite one key until the floor passes a bitmap chunk, then prune the chunks below
+            // it. Each rewrite's walk moves the written update, so the floor ends at the moved
+            // update.
+            let rounds = CHUNK_BITS / 2;
+            for i in 0..rounds {
+                let batch = db
+                    .new_batch()
+                    .write(key(0), Some(val(i)))
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+            }
+            let db = db.commit().await.unwrap();
+            let floor = db.inactivity_floor_loc();
+            let db = db
+                .prune(Location::new(*floor / CHUNK_BITS * CHUNK_BITS))
+                .await
+                .unwrap();
+            assert!(db.pruned_bits() > 0);
+
+            // Seed four more keys in key order with a held floor, and rewrite them all in a
+            // pending parent, so the only applied update the parent leaves active is the
+            // rewritten key's.
+            let mut keys: Vec<_> = (1..5).map(key).collect();
+            keys.sort();
+            let seed = keys
+                .iter()
+                .fold(db.new_batch(), |batch, k| batch.write(*k, Some(val(1))))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let parent = keys
+                .iter()
+                .fold(db.new_batch(), |batch, k| batch.write(*k, Some(val(2))))
+                .merkleize(&db, None, &mut Hold)
+                .await
+                .unwrap();
+
+            // A child that stages and rewrites the parent's first key has two entries, one for
+            // the update it supersedes and one for the previous commit. The walk spends them on
+            // the applied update at the floor and the parent's update of the second key.
+            let (_, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&[&keys[0]], &db)
+                .await
+                .unwrap();
+            let staged = staged
+                .merkleize(
+                    vec![(0, Some(val(3)))],
+                    Vec::new(),
+                    None,
+                    &db,
+                    &mut Proportional,
+                )
+                .await
+                .unwrap();
+            let direct = parent
+                .new_batch::<Sha256>()
+                .write(keys[0], Some(val(3)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(staged.root(), direct.root());
+            let (_, operations) = staged.operations();
+            assert_eq!(
+                operations[1..3],
+                [
+                    Operation::Update(update::Unordered(key(0), val(rounds - 1))),
+                    Operation::Update(update::Unordered(keys[1], val(2))),
+                ]
+            );
+
+            // A twin merkleized after the parent is applied produces the same root.
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let twin = db
+                .new_batch()
+                .write(keys[0], Some(val(3)))
+                .merkleize(&db, None, &mut Proportional)
+                .await
+                .unwrap();
+            assert_eq!(twin.root(), staged.root());
+            drop((staged, direct, twin));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Proof checks for one current DB kind.
+    trait Proves {
+        /// Assert that each key in `live` proves its value against the canonical root, and that
+        /// each key in `evicted` is absent.
+        async fn assert_proves(&self, live: &BTreeMap<Digest, Digest>, evicted: &[Digest]);
+    }
+
+    /// Implement [`Proves`] for unordered current DB kinds.
+    macro_rules! unordered_proves {
+        ($($db:ty),+) => {$(
+            impl Proves for $db {
+                async fn assert_proves(&self, live: &BTreeMap<Digest, Digest>, evicted: &[Digest]) {
+                    let root = self.root();
+                    for (key, value) in live {
+                        let proof = self.key_value_proof(*key).await.unwrap();
+                        assert!(
+                            Self::verify_key_value_proof(*key, *value, &proof, &root),
+                            "{key} fails to prove its value",
+                        );
+                    }
+                    for key in evicted {
+                        assert_eq!(self.get(key).await.unwrap(), None, "{key} is live");
+                        assert!(matches!(
+                            self.key_value_proof(*key).await,
+                            Err(Error::KeyNotFound)
+                        ));
+                    }
+                }
+            }
+        )+};
+    }
+
+    /// Implement [`Proves`] for ordered current DB kinds. Each live key also proves its link to
+    /// the next live key in key order, and each evicted key proves its exclusion.
+    macro_rules! ordered_proves {
+        ($($db:ty),+) => {$(
+            impl Proves for $db {
+                async fn assert_proves(&self, live: &BTreeMap<Digest, Digest>, evicted: &[Digest]) {
+                    let keys: Vec<_> = live.keys().copied().collect();
+                    for (i, (key, value)) in live.iter().enumerate() {
+                        self.assert_link(*key, *value, keys[(i + 1) % keys.len()])
+                            .await;
+                    }
+                    for key in evicted {
+                        self.assert_absent(*key).await;
+                    }
+                }
+            }
+        )+};
+    }
+
+    unordered_proves!(UnorderedFixedDb, UnorderedFixedMmbDb);
+    ordered_proves!(OrderedFixedDb, OrderedFixedMmbDb);
+
+    /// Instantiate the policy consistency test for one current DB kind.
+    ///
+    /// A child over a pending parent evicts an applied update and an update of the parent,
+    /// replaces another update of the parent, and keeps, replaces, and evicts its own writes,
+    /// including a key it creates. Its operations complete the bitmap's first chunk. The layered
+    /// bitmap before apply and the database's bitmap after apply mark exactly the final live
+    /// updates and the commit, live keys prove against the canonical root, evicted keys are
+    /// absent, and the root survives reopen. A twin merkleized after the parent applies makes the
+    /// same decisions, operations, and root.
+    macro_rules! policy_consistency_test {
+        ($name:ident, $db:ty) => {
+            #[test_traced("WARN")]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    let ctx = context.child("db");
+                    let partition = stringify!($name);
+                    let mut db: $db = <$db>::init(
+                        ctx.child("storage"),
+                        fixed_config::<OneCap>(partition, &ctx),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+
+                    // Seed seven policy keys and ten fillers, then rewrite the fillers with a
+                    // held floor until the log ends 6 locations short of the first chunk's end.
+                    let keys: Vec<Digest> = (0..7).map(key).collect();
+                    let created = [key(7), key(8)];
+                    let fillers: Vec<Digest> = (100..110).map(key).collect();
+                    let mut values = BTreeMap::new();
+                    let mut round = 0;
+                    while *db.size() + 11 <= CHUNK_BITS - 6 {
+                        let writes: Vec<Digest> = if round == 0 {
+                            keys.iter().chain(&fillers).copied().collect()
+                        } else {
+                            fillers.clone()
+                        };
+                        let batch = writes
+                            .iter()
+                            .fold(db.new_batch(), |batch, key| {
+                                batch.write(*key, Some(val(round)))
+                            })
+                            .merkleize(&db, None, &mut Hold)
+                            .await
+                            .unwrap();
+                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        for key in writes {
+                            values.insert(key, val(round));
+                        }
+                        round += 1;
+                    }
+                    assert_eq!(*db.size(), CHUNK_BITS - 6);
+
+                    // A pending parent rewrites two policy keys with a held floor.
+                    let parent_writes = [(keys[2], val(1002)), (keys[3], val(1003))];
+                    let parent = parent_writes
+                        .iter()
+                        .fold(db.new_batch(), |batch, (key, value)| {
+                            batch.write(*key, Some(*value))
+                        })
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    values.extend(parent_writes);
+
+                    // The child rewrites three policy keys and creates two.
+                    let child_writes = [
+                        (keys[4], val(2004)),
+                        (keys[5], val(2005)),
+                        (keys[6], val(2006)),
+                        (created[0], val(2007)),
+                        (created[1], val(2008)),
+                    ];
+                    let write = |batch: <$db as crate::qmdb::any::traits::BatchableDb>::Batch| {
+                        child_writes
+                            .iter()
+                            .fold(batch, |batch, (key, value)| batch.write(*key, Some(*value)))
+                    };
+                    values.extend(child_writes);
+
+                    // The policy evicts an applied update, an update of the parent, a rewrite of
+                    // its own, and a key it creates. It replaces an update of the parent and a
+                    // rewrite of its own, and keeps every other update.
+                    let evict = [keys[0], keys[2], keys[6], created[0]];
+                    let replace = [(keys[3], val(3003)), (keys[5], val(3005))];
+                    let choose = move |key: &Digest| {
+                        if evict.contains(key) {
+                            Choice::Evict
+                        } else if let Some((_, value)) = replace.iter().find(|(k, _)| k == key) {
+                            Choice::Replace(*value)
+                        } else {
+                            Choice::Keep
+                        }
+                    };
+
+                    // A held twin locates the child's writes. The policy decides every update
+                    // live after them, in location order, and the floor reaches the tip of the
+                    // writes, past the first chunk's end.
+                    let mut live = db.live().await;
+                    let (start, ops) = parent.operations();
+                    replay(&mut live, start, &ops);
+                    let held = write(parent.new_batch::<Sha256>())
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    let (start, ops) = held.operations();
+                    let tip = start + (ops.len() as u64 - 1);
+                    assert!(*parent.bounds().tip.size < CHUNK_BITS && CHUNK_BITS < *tip);
+                    let mut written = live.clone();
+                    replay(&mut written, start, &ops);
+                    let mut expected: Vec<_> = written
+                        .iter()
+                        .map(|(key, loc)| (*loc, *key, values[key]))
+                        .collect();
+                    expected.sort();
+                    drop(held);
+                    let mut policy = Script::new(usize::MAX, u64::MAX, choose);
+                    let child = write(parent.new_batch::<Sha256>())
+                        .merkleize(&db, None, &mut policy)
+                        .await
+                        .unwrap();
+                    assert_eq!(policy.visited, expected);
+                    assert_eq!(child.bounds().inactivity_floor, tip);
+
+                    // Before apply, the layered bitmap marks exactly the final live updates and
+                    // the commit, and the batch serves the final values.
+                    let mut model = values.clone();
+                    for key in &evict {
+                        model.remove(key);
+                    }
+                    model.extend(replace);
+                    let (start, ops) = child.operations();
+                    replay(&mut live, start, &ops);
+                    assert!(live.keys().eq(model.keys()));
+                    assert_eq!(Readable::<32>::len(&child.bitmap), *child.bounds().tip.size);
+                    assert_bits(&child.bitmap, &live);
+                    for key in values.keys() {
+                        assert_eq!(db.read(&child, key).await, model.get(key).copied());
+                    }
+
+                    // A twin merkleized after the parent applies makes the same decisions,
+                    // operations, floor, and root.
+                    let root = child.root();
+                    let (db, _) = db.apply_batch(parent).await.unwrap();
+                    let mut twin_policy = Script::new(usize::MAX, u64::MAX, choose);
+                    let twin = write(db.new_batch())
+                        .merkleize(&db, None, &mut twin_policy)
+                        .await
+                        .unwrap();
+                    assert_eq!(twin_policy.visited, policy.visited);
+                    assert_eq!(twin.operations(), child.operations());
+                    assert_eq!(twin.bounds().inactivity_floor, tip);
+                    assert_eq!(twin.root(), root);
+                    assert_bits(&twin.bitmap, &live);
+                    drop(twin);
+
+                    // After apply, the database's bitmap matches the same state, live keys prove
+                    // against the canonical root, and evicted keys are absent.
+                    let (db, _) = db.apply_batch(child).await.unwrap();
+                    assert_eq!(db.root(), root);
+                    assert_eq!(db.inactivity_floor_loc(), tip);
+                    assert_eq!(db.live().await, live);
+                    assert_bits(db.bitmap(), &live);
+                    db.assert_exact().await;
+                    db.assert_proves(&model, &evict).await;
+
+                    // The canonical root and the proofs survive reopen.
+                    let db = db.sync().await.unwrap();
+                    drop(db);
+                    let db: $db = <$db>::init(
+                        ctx.child("reopen"),
+                        fixed_config::<OneCap>(partition, &ctx),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(db.root(), root);
+                    assert_bits(db.bitmap(), &live);
+                    db.assert_exact().await;
+                    db.assert_proves(&model, &evict).await;
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    policy_consistency_test!(
+        test_current_unordered_policy_bits_and_proofs,
+        UnorderedFixedDb
+    );
+    policy_consistency_test!(test_current_ordered_policy_bits_and_proofs, OrderedFixedDb);
+
+    /// Instantiate the policy pruning test for one current DB kind of Merkle family `$family`.
+    /// Once the grandparent below applies, the log ends one location past the third bitmap chunk,
+    /// and `$pending` complete chunks remain ungrafted: MMB grafts chunk `k` only once the log
+    /// reaches `256 * k + 383` operations, while MMR grafts each chunk as it completes. After the
+    /// child applies, prune can remove `$pruned` chunks: MMB holds its boundary until the
+    /// height-9 subtree over the youngest pruned chunk pair is born, and chunks 2 and 3 have none
+    /// below 1279 operations.
+    ///
+    /// A child of a pending parent, whose own parent (the grandparent) applies and is freed before
+    /// the child merkleizes, evicts and replaces applied updates, updates of both ancestors, and
+    /// its own writes, and stops at its last write. It decides every update live after its writes
+    /// up to that stop, in location order, and makes the same operations, floor, and root as a
+    /// twin merkleized over both pending ancestors. Applying it grafts every complete chunk. After
+    /// sync, prune to the sync boundary, and reopen, the root survives, the activity bitmap marks
+    /// exactly the model's live updates, live keys prove their values against the canonical root,
+    /// and evicted keys are absent.
+    macro_rules! policy_prune_test {
+        ($name:ident, $db:ty, $family:ty, $pending:literal, $pruned:literal) => {
+            #[test_traced("WARN")]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    let ctx = context.child("db");
+                    let partition = stringify!($name);
+                    let mut db: $db = <$db>::init(
+                        ctx.child("storage"),
+                        fixed_config::<OneCap>(partition, &ctx),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+
+                    // Seed eight policy keys and 120 fillers at 1..129, then rewrite at most ten
+                    // fillers per batch with a held floor until the log ends at 760, 8 locations
+                    // short of the third chunk's end.
+                    let keys: Vec<Digest> = (0..8).map(key).collect();
+                    let created = [key(8), key(9)];
+                    let fillers: Vec<Digest> = (100..220).map(key).collect();
+                    let start = 3 * CHUNK_BITS - 8;
+                    let mut values = BTreeMap::new();
+                    let mut round = 0;
+                    while *db.size() < start {
+                        let writes: Vec<Digest> = if round == 0 {
+                            keys.iter().chain(&fillers).copied().collect()
+                        } else {
+                            fillers[..(start - *db.size() - 1).min(10) as usize].to_vec()
+                        };
+                        let batch = writes
+                            .iter()
+                            .fold(db.new_batch(), |batch, key| {
+                                batch.write(*key, Some(val(round)))
+                            })
+                            .merkleize(&db, None, &mut Hold)
+                            .await
+                            .unwrap();
+                        (db, _) = db.apply_batch(batch).await.unwrap();
+                        for key in writes {
+                            values.insert(key, val(round));
+                        }
+                        round += 1;
+                    }
+                    assert_eq!(*db.size(), start);
+
+                    // A pending grandparent rewrites two policy keys and six fillers at 760..768
+                    // and commits at 768. A pending parent rewrites two more policy keys.
+                    let grand_writes: Vec<_> = [keys[1], keys[2]]
+                        .iter()
+                        .chain(&fillers[10..16])
+                        .zip(1000..)
+                        .map(|(key, i)| (*key, val(i)))
+                        .collect();
+                    let parent_writes = [(keys[3], val(2003)), (keys[7], val(2007))];
+                    let grandparent = grand_writes
+                        .iter()
+                        .fold(db.new_batch(), |batch, (key, value)| {
+                            batch.write(*key, Some(*value))
+                        })
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    let parent = parent_writes
+                        .iter()
+                        .fold(grandparent.new_batch::<Sha256>(), |batch, (key, value)| {
+                            batch.write(*key, Some(*value))
+                        })
+                        .merkleize(&db, None, &mut Hold)
+                        .await
+                        .unwrap();
+                    values.extend(grand_writes.iter().copied());
+                    values.extend(parent_writes);
+
+                    // The child rewrites three policy keys and creates two. Each of its three
+                    // twins is created while both ancestors are pending.
+                    let child_writes = [
+                        (keys[4], val(3004)),
+                        (keys[5], val(3005)),
+                        (keys[6], val(3006)),
+                        (created[0], val(3008)),
+                        (created[1], val(3009)),
+                    ];
+                    values.extend(child_writes);
+                    let [held, pending, child] = [(); 3].map(|_| {
+                        child_writes
+                            .iter()
+                            .fold(parent.new_batch::<Sha256>(), |batch, (key, value)| {
+                                batch.write(*key, Some(*value))
+                            })
+                    });
+
+                    // A held twin locates the child's writes and the updates live after them.
+                    let mut live = db.live().await;
+                    for batch in [&grandparent, &parent] {
+                        let (start, ops) = batch.operations();
+                        replay(&mut live, start, &ops);
+                    }
+                    let held = held.merkleize(&db, None, &mut Hold).await.unwrap();
+                    let (child_start, ops) = held.operations();
+                    let mut written = live.clone();
+                    replay(&mut written, child_start, &ops);
+                    drop(held);
+
+                    // The policy evicts the seeded update of the first policy key and the
+                    // ancestors' updates of the third and fourth, and replaces the ancestors'
+                    // updates of the second and eighth. Of the child's writes, in location order,
+                    // it evicts the first and third, replaces the second, keeps the fourth, and
+                    // stops at the fifth.
+                    let mut own: Vec<_> = child_writes
+                        .iter()
+                        .map(|(key, _)| (written[key], *key))
+                        .collect();
+                    own.sort();
+                    let (stopped, stop) = own[4];
+                    let choices: BTreeMap<Digest, Choice> = [
+                        (keys[0], Choice::Evict),
+                        (keys[2], Choice::Evict),
+                        (keys[3], Choice::Evict),
+                        (keys[1], Choice::Replace(val(4001))),
+                        (keys[7], Choice::Replace(val(4007))),
+                        (own[0].1, Choice::Evict),
+                        (own[1].1, Choice::Replace(val(4100))),
+                        (own[2].1, Choice::Evict),
+                        (stop, Choice::Stop),
+                    ]
+                    .into_iter()
+                    .collect();
+                    for key in [keys[0], keys[1], keys[2], keys[3], keys[7]] {
+                        assert!(written[&key] < child_start, "the child rewrites {key}");
+                    }
+                    let choose = |key: &Digest| choices.get(key).copied().unwrap_or(Choice::Keep);
+
+                    // The walk decides every update live after the writes, up to the stop, and
+                    // leaves the floor at the stopped write.
+                    let mut expected: Vec<_> = written
+                        .iter()
+                        .filter(|(_, loc)| **loc <= stopped)
+                        .map(|(key, loc)| (*loc, *key, values[key]))
+                        .collect();
+                    expected.sort();
+                    let mut policy = Script::new(usize::MAX, u64::MAX, choose);
+                    let pending = pending.merkleize(&db, None, &mut policy).await.unwrap();
+                    assert_eq!(policy.visited, expected);
+                    assert_eq!(pending.bounds().inactivity_floor, stopped);
+
+                    // The grandparent applies and is freed. It completes the third chunk, which
+                    // MMB cannot graft yet.
+                    let ungrafted = |db: &$db| {
+                        let complete = db.bitmap().complete_chunks() as u64;
+                        let graftable = grafting::graftable_chunks::<$family>(
+                            *db.size(),
+                            grafting::height::<32>(),
+                        );
+                        complete - graftable.min(complete)
+                    };
+                    let freed = Arc::downgrade(&grandparent.inner);
+                    let (db, _) = db.apply_batch(grandparent).await.unwrap();
+                    assert!(freed.upgrade().is_none());
+                    assert_eq!(*db.size(), 3 * CHUNK_BITS + 1);
+                    assert_eq!(ungrafted(&db), $pending);
+
+                    // The child merkleized over the applied grandparent matches its pending twin.
+                    let mut policy = Script::new(usize::MAX, u64::MAX, choose);
+                    let child = child.merkleize(&db, None, &mut policy).await.unwrap();
+                    assert_eq!(policy.visited, expected);
+                    assert_eq!(child.operations(), pending.operations());
+                    assert_eq!(child.bounds().inactivity_floor, stopped);
+                    let root = child.root();
+                    assert_eq!(pending.root(), root);
+                    drop(pending);
+
+                    // The model applies the decisions to the written values.
+                    let mut model = values.clone();
+                    let mut evicted = Vec::new();
+                    for (key, choice) in &choices {
+                        match choice {
+                            Choice::Evict => {
+                                model.remove(key);
+                                evicted.push(*key);
+                            }
+                            Choice::Replace(value) => {
+                                model.insert(*key, *value);
+                            }
+                            Choice::Keep | Choice::Stop => {}
+                        }
+                    }
+                    let (start, ops) = child.operations();
+                    replay(&mut live, start, &ops);
+                    assert!(live.keys().eq(model.keys()));
+
+                    // Applying the child with its parent still pending grafts every complete
+                    // chunk, and the state matches the model.
+                    let (db, _) = db.apply_batch(child).await.unwrap();
+                    drop(parent);
+                    assert_eq!(db.root(), root);
+                    assert_eq!(db.inactivity_floor_loc(), stopped);
+                    assert_eq!(db.bitmap().complete_chunks(), 3);
+                    assert_eq!(ungrafted(&db), 0);
+                    assert_eq!(db.live().await, live);
+                    assert_bits(db.bitmap(), &live);
+                    db.assert_exact().await;
+                    db.assert_proves(&model, &evicted).await;
+
+                    // Sync and prune whole chunks without changing the root or the state.
+                    let db = db.sync().await.unwrap();
+                    let boundary = db.sync_boundary();
+                    assert_eq!(*boundary, $pruned * CHUNK_BITS);
+                    let db = db.prune(boundary).await.unwrap();
+                    assert_eq!(db.pruned_bits(), *boundary);
+                    assert!(*db.bounds().start > 0 && db.bounds().start <= boundary);
+                    assert_eq!(db.root(), root);
+                    assert_eq!(db.live().await, live);
+                    assert_bits(db.bitmap(), &live);
+                    db.assert_exact().await;
+                    db.assert_proves(&model, &evicted).await;
+
+                    // The pruned state survives reopen.
+                    let bounds = db.bounds();
+                    drop(db);
+                    let db: $db = <$db>::init(
+                        ctx.child("reopen"),
+                        fixed_config::<OneCap>(partition, &ctx),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(db.root(), root);
+                    assert_eq!(db.bounds(), bounds);
+                    assert_eq!(db.inactivity_floor_loc(), stopped);
+                    assert_eq!(db.pruned_bits(), *boundary);
+                    assert_eq!(db.live().await, live);
+                    assert_bits(db.bitmap(), &live);
+                    db.assert_exact().await;
+                    db.assert_proves(&model, &evicted).await;
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    policy_prune_test!(
+        test_current_unordered_policy_prune,
+        UnorderedFixedDb,
+        mmr::Family,
+        0,
+        3
+    );
+    policy_prune_test!(
+        test_current_ordered_policy_prune,
+        OrderedFixedDb,
+        mmr::Family,
+        0,
+        3
+    );
+    policy_prune_test!(
+        test_current_unordered_mmb_policy_prune,
+        UnorderedFixedMmbDb,
+        mmb::Family,
+        1,
+        2
+    );
+    policy_prune_test!(
+        test_current_ordered_mmb_policy_prune,
+        OrderedFixedMmbDb,
+        mmb::Family,
+        1,
+        2
+    );
+
+    /// Over the same history and a pending parent that supersedes applied updates, `any` and
+    /// `current` decide the same updates, reach the same floors, and merkleize the same operations.
+    /// This holds for policies that keep, evict, replace, stop, or mix those choices, under
+    /// unbounded limits and under entry, skip, combined, and zero-entry limits.
+    async fn assert_policy_matches_any<M, A, C>(mut any: A, mut current: C)
+    where
+        M: merkle::Graftable,
+        A: Inspect<M>,
+        C: Inspect<M, Update = A::Update>,
+        Operation<M, A::Update>: PartialEq + core::fmt::Debug,
+    {
+        // Apply the same held-floor history to both databases.
+        let seed: Vec<_> = (0..24).map(|i| (key(i), Some(val(i)))).collect();
+        let churn: Vec<_> = (0..24)
+            .step_by(4)
+            .map(|i| (key(i), Some(val(i + 100))))
+            .collect();
+        for writes in [&seed, &churn] {
+            any = hold(any, writes).await;
+            current = hold(current, writes).await;
+        }
+
+        // Each database's pending parent supersedes a third of its applied updates.
+        let parent: Vec<_> = (1..24)
+            .step_by(3)
+            .map(|i| (key(i), Some(val(i + 200))))
+            .collect();
+        let any_parent = hold_batch(&any, any.new_batch(), &parent).await;
+        let current_parent = hold_batch(&current, current.new_batch(), &parent).await;
+
+        // The stopping policy keeps every update before key 5's, which the parent leaves in
+        // place, and the mixed policy chooses by the key's first byte.
+        let stop = key(5);
+        let choose = |action: usize| {
+            move |k: &Digest| match action {
+                0 => Choice::Keep,
+                1 => Choice::Evict,
+                2 => Choice::Replace(val(1000)),
+                3 if *k == stop => Choice::Stop,
+                3 => Choice::Keep,
+                _ => match k.as_ref()[0] % 3 {
+                    0 => Choice::Keep,
+                    1 => Choice::Evict,
+                    _ => Choice::Replace(val(1001)),
+                },
+            }
+        };
+        for (entries, skips) in [
+            (usize::MAX, u64::MAX),
+            (5, u64::MAX),
+            (usize::MAX, 6),
+            (3, 2),
+            (0, 4),
+        ] {
+            for action in 0..5 {
+                let label = format!("action={action} entries={entries} skips={skips}");
+                let mut any_policy = Script::new(entries, skips, choose(action));
+                let any_batch = A::child(&any_parent)
+                    .merkleize(&any, None, &mut any_policy)
+                    .await
+                    .unwrap();
+                let mut current_policy = Script::new(entries, skips, choose(action));
+                let current_batch = C::child(&current_parent)
+                    .merkleize(&current, None, &mut current_policy)
+                    .await
+                    .unwrap();
+                assert_eq!(any_policy.visited, current_policy.visited, "{label}");
+                assert_eq!(
+                    A::span(&any_batch).inactivity_floor,
+                    C::span(&current_batch).inactivity_floor,
+                    "{label}"
+                );
+                assert_eq!(A::ops(&any_batch), C::ops(&current_batch), "{label}");
+
+                // Without limits, the stopping policy stops at key 5 and the mixed policy makes
+                // every choice.
+                if (entries, skips) == (usize::MAX, u64::MAX) {
+                    let keys: Vec<_> = any_policy.visited.iter().map(|(_, k, _)| *k).collect();
+                    match action {
+                        3 => assert_eq!(keys.last(), Some(&stop)),
+                        4 => assert!((0..3).all(|r| keys.iter().any(|k| k.as_ref()[0] % 3 == r))),
+                        _ => assert_eq!(keys.len(), 24),
+                    }
+                }
+            }
+        }
+
+        drop((any_parent, current_parent));
+        any.destroy().await.unwrap();
+        current.destroy().await.unwrap();
+    }
+
+    /// [`assert_policy_matches_any`] on unordered and ordered databases.
+    #[test_traced("INFO")]
+    fn test_current_policy_matches_any() {
+        type UnorderedAny = crate::qmdb::any::unordered::fixed::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            Digest,
+            Sha256,
+            OneCap,
+            Sequential,
+        >;
+        type OrderedAny = crate::qmdb::any::ordered::fixed::Db<
+            mmr::Family,
+            Context,
+            Digest,
+            Digest,
+            Sha256,
+            OneCap,
+            Sequential,
+        >;
+
+        deterministic::Runner::default().start(|context| async move {
+            let any_config =
+                |name: &str| crate::qmdb::any::test::fixed_db_config::<OneCap>(name, &context);
+            let any = UnorderedAny::init(
+                context.child("unordered_any"),
+                any_config("unordered-any"),
+                None,
+            )
+            .await
+            .unwrap();
+            let current = UnorderedFixedDb::init(
+                context.child("unordered_current"),
+                fixed_config::<OneCap>("unordered-current", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_policy_matches_any(any, current).await;
+
+            let any = OrderedAny::init(
+                context.child("ordered_any"),
+                any_config("ordered-any"),
+                None,
+            )
+            .await
+            .unwrap();
+            let current = OrderedFixedDb::init(
+                context.child("ordered_current"),
+                fixed_config::<OneCap>("ordered-current", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_policy_matches_any(any, current).await;
+        });
+    }
+
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -5133,6 +6156,10 @@ pub mod tests {
             live(&self.any).await
         }
 
+        fn child(batch: &Self::Merkleized) -> Self::Batch {
+            batch.new_batch::<Sha256>()
+        }
+
         fn span(batch: &Self::Merkleized) -> &Bounds<F, Digest> {
             batch.bounds()
         }
@@ -5176,4 +6203,216 @@ pub mod tests {
             );
         }
     }
+
+    impl<F, C, I, V, const N: usize, S> Neighbors<F>
+        for db::Db<F, Context, C, I, Sha256, update::Ordered<Digest, V>, N, S>
+    where
+        F: merkle::Graftable,
+        C: Mutable<Item = Operation<F, update::Ordered<Digest, V>>>,
+        I: OrderedIndex<Value = Location<F>> + 'static,
+        V: ValueEncoding<Value = Digest>,
+        S: Strategy,
+        Operation<F, update::Ordered<Digest, V>>: Codec,
+        Self: Links<F>
+            + DbAny<
+                F,
+                Merkleized = Arc<
+                    batch::MerkleizedBatch<F, Digest, update::Ordered<Digest, V>, N, S>,
+                >,
+            >,
+    {
+        async fn neighbors(
+            &self,
+            batch: Option<&Self::Merkleized>,
+            key: &Digest,
+        ) -> (Option<Digest>, Option<Digest>) {
+            match batch {
+                Some(batch) => (
+                    batch.get_next_key(key, self).await.unwrap(),
+                    batch.get_prev_key(key, self).await.unwrap(),
+                ),
+                None => (
+                    self.get_next_key(key).await.unwrap(),
+                    self.get_prev_key(key).await.unwrap(),
+                ),
+            }
+        }
+    }
+
+    /// Open a current database in `partition` with `context` and return it with a function that
+    /// reopens it.
+    async fn current_db<C, F, Fut>(
+        context: Context,
+        open_db: F,
+        partition: &'static str,
+    ) -> (
+        C,
+        impl Fn(Context) -> Pin<Box<dyn Future<Output = C> + Send>> + Clone,
+    )
+    where
+        F: Fn(Context, String) -> Fut + Clone + Send + 'static,
+        Fut: Future<Output = C> + Send + 'static,
+    {
+        let db = open_db(context, partition.into()).await;
+        let reopen = move |ctx: Context| -> Pin<Box<dyn Future<Output = C> + Send>> {
+            Box::pin(open_db(ctx, partition.into()))
+        };
+        (db, reopen)
+    }
+
+    /// Define `$name` to run the Any test `$any` on a current database bounded by `$bound`
+    /// and opened in `$partition`, for each variant `$variants` selects. With `reopen`, the
+    /// test also receives a function that reopens the database.
+    macro_rules! current_test {
+        ($variants:ident, $name:ident, $any:ident, $partition:literal, $bound:ident) => {
+            current_test!(@define $variants, $name, $partition, $bound, |context, db, _| {
+                $any(context, db, val)
+            });
+        };
+        ($variants:ident, $name:ident, $any:ident, $partition:literal, $bound:ident, reopen) => {
+            current_test!(@define $variants, $name, $partition, $bound, |context, db, reopen| {
+                $any(context, db, reopen, val)
+            });
+        };
+        (@define $variants:ident, $name:ident, $partition:literal, $bound:ident, $run:expr) => {
+            async fn $name<M, C, F, Fut>(context: Context, open_db: F)
+            where
+                M: merkle::Graftable,
+                C: $bound<M>,
+                C::Merkleized: Clone,
+                Operation<M, C::Update>: Codec,
+                F: Fn(Context, String) -> Fut + Clone + Send + 'static,
+                Fut: Future<Output = C> + Send + 'static,
+            {
+                let (db, reopen) = current_db(context.child("db"), open_db, $partition).await;
+                ($run)(context, db, reopen).await;
+            }
+
+            $variants!($name, "WARN");
+        };
+    }
+
+    // Each Any test also runs on every current variant, whose walks draw candidates from the
+    // speculative bitmap.
+    current_test!(
+        test_for_all_variants,
+        test_current_activity_depths,
+        test_any_activity_depths,
+        "activity",
+        Inspect,
+        reopen
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_proportional_bound,
+        test_any_proportional_bound,
+        "bound",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_matches_proportional,
+        test_any_policy_matches_proportional,
+        "proportional",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_decisions_match_writes,
+        test_any_policy_decisions_match_writes,
+        "decisions",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_limits_after_colliding_writes,
+        test_any_policy_limits_after_colliding_writes,
+        "colliding",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_hold,
+        test_any_policy_hold,
+        "hold",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_stop,
+        test_any_policy_stop,
+        "stop",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_limits_with_writes,
+        test_any_policy_limits_with_writes,
+        "writes",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_proportional_one_batch,
+        test_any_proportional_one_batch,
+        "one-batch",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_own_writes,
+        test_any_policy_own_writes,
+        "own",
+        Inspect,
+        reopen
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_evicts_parent_created_key,
+        test_any_policy_evicts_parent_created_key,
+        "parent-created",
+        Changes,
+        reopen
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_ancestor_twins,
+        test_any_policy_ancestor_twins,
+        "twins",
+        Inspect
+    );
+    current_test!(
+        test_for_all_variants,
+        test_current_policy_keep_evict_and_recover,
+        test_any_policy_keep_evict_and_recover,
+        "recover",
+        Inspect,
+        reopen
+    );
+
+    // On a current database, the ordered tests also prove each link and each evicted key's
+    // exclusion.
+    current_test!(
+        test_for_ordered_variants,
+        test_current_ordered_policy_evictions_keep_links,
+        test_any_ordered_policy_evictions_keep_links,
+        "links",
+        Links
+    );
+    current_test!(
+        test_for_ordered_variants,
+        test_current_ordered_policy_eviction_matrix,
+        test_any_ordered_policy_eviction_matrix,
+        "matrix",
+        Neighbors,
+        reopen
+    );
+    current_test!(
+        test_for_ordered_variants,
+        test_current_ordered_policy_repair_across_ancestors,
+        test_any_ordered_policy_repair_across_ancestors,
+        "repair",
+        Neighbors,
+        reopen
+    );
 }
