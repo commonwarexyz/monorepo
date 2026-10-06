@@ -120,7 +120,8 @@ where
             return Some(false);
         }
 
-        // Reconstructing the parent's state from `blocks` is the only work shared across requests.
+        // Missing ancestors are replayed once per block digest, shared with concurrent proposals
+        // and verifications. Replayed state is not a verdict, so `block` is still verified below.
         let batches = match self
             .execution
             .prepare_batches(
@@ -129,10 +130,10 @@ where
                 blocks.clone(),
                 parent.clone(),
                 verification,
-                Some(ReplayTracking {
+                ReplayTracking {
                     flights: &self.replays,
-                    progress,
-                }),
+                    progress: Some(progress),
+                },
             )
             .await
         {
