@@ -1,14 +1,78 @@
-//! Scalar execution with one unsigned 64-bit lane.
+//! Scalar execution with single-lane common vectors and four-word registers.
 
 use crate::{Operation, Simd};
 
-/// Scalar execution token with one lane of each element type.
+/// Scalar execution token with one lane of each common element type.
+/// Fixed four-word registers retain four lanes.
 ///
 /// Executes the portable operation path.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmulatedScalar;
 
 impl Simd for EmulatedScalar {
+    type U32x4 = [u32; 4];
+
+    #[inline]
+    fn u32x4_load(self, input: &[u32]) -> Self::U32x4 {
+        input[..4].try_into().unwrap()
+    }
+
+    #[inline]
+    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]) {
+        output[..4].copy_from_slice(&value);
+    }
+
+    #[inline]
+    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        core::array::from_fn(|i| a[i].wrapping_add(b[i]))
+    }
+
+    #[inline]
+    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4 {
+        assert!((0..256).contains(&MASK));
+        core::array::from_fn(|i| value[((MASK >> (2 * i)) & 3) as usize])
+    }
+
+    #[inline]
+    fn u32x4_load_be(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..16];
+        core::array::from_fn(|i| u32::from_be_bytes(input[4 * i..4 * i + 4].try_into().unwrap()))
+    }
+
+    #[inline]
+    fn u32x4_load_be2(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..8];
+        [
+            u32::from_be_bytes(input[..4].try_into().unwrap()),
+            u32::from_be_bytes(input[4..8].try_into().unwrap()),
+            0,
+            0,
+        ]
+    }
+
+    #[inline]
+    fn u32x4_store_be(self, value: Self::U32x4, output: &mut [u8]) {
+        let output = &mut output[..16];
+        for (word, bytes) in value.into_iter().zip(output.as_chunks_mut::<4>().0) {
+            bytes.copy_from_slice(&word.to_be_bytes());
+        }
+    }
+
+    #[inline]
+    fn u32x4_align<const N: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..=4).contains(&N));
+        core::array::from_fn(|i| {
+            let j = N as usize + i;
+            if j < 4 { a[j] } else { b[j - 4] }
+        })
+    }
+
+    #[inline]
+    fn u32x4_blend<const MASK: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..16).contains(&MASK));
+        core::array::from_fn(|i| if MASK & (1 << i) != 0 { b[i] } else { a[i] })
+    }
+
     type U8 = [u8; 1];
     const U8_LANES: usize = 1;
 

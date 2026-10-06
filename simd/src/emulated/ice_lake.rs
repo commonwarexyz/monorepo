@@ -9,6 +9,69 @@ use crate::{IceLake, Operation, Simd};
 pub struct EmulatedIceLake;
 
 impl Simd for EmulatedIceLake {
+    type U32x4 = [u32; 4];
+
+    #[inline]
+    fn u32x4_load(self, input: &[u32]) -> Self::U32x4 {
+        input[..4].try_into().unwrap()
+    }
+
+    #[inline]
+    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]) {
+        output[..4].copy_from_slice(&value);
+    }
+
+    #[inline]
+    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        core::array::from_fn(|i| a[i].wrapping_add(b[i]))
+    }
+
+    #[inline]
+    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4 {
+        assert!((0..256).contains(&MASK));
+        core::array::from_fn(|i| value[((MASK >> (2 * i)) & 3) as usize])
+    }
+
+    #[inline]
+    fn u32x4_load_be(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..16];
+        core::array::from_fn(|i| u32::from_be_bytes(input[4 * i..4 * i + 4].try_into().unwrap()))
+    }
+
+    #[inline]
+    fn u32x4_load_be2(self, input: &[u8]) -> Self::U32x4 {
+        let input = &input[..8];
+        [
+            u32::from_be_bytes(input[..4].try_into().unwrap()),
+            u32::from_be_bytes(input[4..8].try_into().unwrap()),
+            0,
+            0,
+        ]
+    }
+
+    #[inline]
+    fn u32x4_store_be(self, value: Self::U32x4, output: &mut [u8]) {
+        let output = &mut output[..16];
+        for (word, bytes) in value.into_iter().zip(output.as_chunks_mut::<4>().0) {
+            bytes.copy_from_slice(&word.to_be_bytes());
+        }
+    }
+
+    #[inline]
+    fn u32x4_align<const N: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..=4).contains(&N));
+        core::array::from_fn(|i| {
+            let j = N as usize + i;
+            if j < 4 { a[j] } else { b[j - 4] }
+        })
+    }
+
+    #[inline]
+    fn u32x4_blend<const MASK: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
+        assert!((0..16).contains(&MASK));
+        core::array::from_fn(|i| if MASK & (1 << i) != 0 { b[i] } else { a[i] })
+    }
+
     type U8 = [u8; 64];
     const U8_LANES: usize = 64;
 
@@ -251,27 +314,18 @@ impl Simd for EmulatedIceLake {
 }
 
 impl IceLake for EmulatedIceLake {
-    type U32x4 = [u32; 4];
-
     #[inline]
-    fn u32x4_load(self, input: &[u32]) -> Self::U32x4 {
-        input[..4].try_into().unwrap()
-    }
-
-    #[inline]
-    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]) {
-        output[..4].copy_from_slice(&value);
-    }
-
-    #[inline]
-    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4 {
-        core::array::from_fn(|i| a[i].wrapping_add(b[i]))
-    }
-
-    #[inline]
-    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4 {
-        assert!((0..256).contains(&MASK));
-        core::array::from_fn(|i| value[((MASK >> (2 * i)) & 3) as usize])
+    fn u32_load_be(self, input: &[u8]) -> Self::U32 {
+        assert!(input.len() >= 64);
+        core::array::from_fn(|i| {
+            let offset = 4 * i;
+            u32::from_be_bytes([
+                input[offset],
+                input[offset + 1],
+                input[offset + 2],
+                input[offset + 3],
+            ])
+        })
     }
 
     #[inline]
@@ -467,33 +521,73 @@ mod tests {
         vec::Vec,
     };
 
-    fn ice<S: IceLake>(s: S) {
+    fn load_be<S: IceLake>(simd: S) {
+        let original: [u8; 128] = core::array::from_fn(|i| (i as u8).wrapping_mul(37));
+        for offset in 0..64 {
+            let mut input = original;
+            let expected: Vec<u32> = input[offset..offset + 64]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| {
+                    word.iter()
+                        .fold(0u32, |acc, &byte| (acc << 8) | u32::from(byte))
+                })
+                .collect();
+            assert_eq!(words(simd, simd.u32_load_be(&input[offset..])), expected);
+            assert_eq!(input, original);
+            input[offset + 64..].fill(0xff);
+            assert_eq!(words(simd, simd.u32_load_be(&input[offset..])), expected);
+            assert_eq!(
+                words(simd, simd.u32_load_be(&input[offset..offset + 64])),
+                expected
+            );
+        }
+        for len in 0..64 {
+            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_load_be(&original[..len]))).is_err());
+        }
+    }
+
+    #[test]
+    fn big_endian_load() {
+        load_be(EmulatedIceLake);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(miri)))]
+    #[test]
+    fn native_big_endian_load() {
+        if let Some(simd) = crate::native::NativeIceLake::new() {
+            load_be(simd);
+        }
+    }
+
+    fn ice<S: IceLake>(simd: S) {
         let a: Vec<u32> = (0..16).map(|i| 0xa000_0000 + i * 0x10101).collect();
         let b: Vec<u32> = (0..16).map(|i| 0xb000_0000 + i * 0x30303).collect();
-        let av = s.u32_load(&a);
-        let bv = s.u32_load(&b);
+        let av = simd.u32_load(&a);
+        let bv = simd.u32_load(&b);
         macro_rules! masks { ($($m:literal),*) => { $(
             let expected: Vec<u32> = (0..16).map(|i| {
                 let source = if i < 8 { &a } else { &b };
                 source[(($m >> (2 * (i / 4))) & 3) * 4 + i % 4]
             }).collect();
-            assert_eq!(words(s, s.u32_shuffle_groups::<$m>(av, bv)), expected);
-            let c = s.u32_splat(0xaaaa_aaaa);
+            assert_eq!(words(simd, simd.u32_shuffle_groups::<$m>(av, bv)), expected);
+            let c = simd.u32_splat(0xaaaa_aaaa);
             let expected: Vec<u32> = (0..16).map(|i| {
                 (0..32).fold(0u32, |acc, bit| {
                     let index = 4 * ((a[i] >> bit) & 1) + 2 * ((b[i] >> bit) & 1) + ((0xaaaa_aaaau32 >> bit) & 1);
                     acc | ((($m as u32 >> index) & 1) << bit)
                 })
             }).collect();
-            assert_eq!(words(s, s.u32_ternary::<$m>(av, bv, c)), expected);
-            let x = s.u32x4_load(&a);
+            assert_eq!(words(simd, simd.u32_ternary::<$m>(av, bv, c)), expected);
+            let x = simd.u32x4_load(&a);
             let mut out = [0; 4];
-            s.u32x4_store(s.u32x4_shuffle::<$m>(x), &mut out);
+            simd.u32x4_store(simd.u32x4_shuffle::<$m>(x), &mut out);
             assert_eq!(out, core::array::from_fn(|i| a[($m >> (2 * i)) & 3]));
             let expected:Vec<u32>=(0..16).map(|i| a[i/4*4 + (($m >> (2*(i%4))) & 3)]).collect();
-            assert_eq!(words(s,s.u32_shuffle128::<$m>(av)),expected);
+            assert_eq!(words(simd,simd.u32_shuffle128::<$m>(av)),expected);
             let expected:Vec<u32>=(0..16).map(|i| { let source=if i%4 < 2 { &a } else { &b }; source[i/4*4 + (($m >> (2*(i%4))) & 3)] }).collect();
-            assert_eq!(words(s,s.u32_shuffle2_128::<$m>(av,bv)),expected);
+            assert_eq!(words(simd,simd.u32_shuffle2_128::<$m>(av,bv)),expected);
         )* }; }
         masks!(
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
@@ -513,29 +607,29 @@ mod tests {
         );
         macro_rules! blends { ($($m:literal),*) => { $(
             let mask: u32 = $m;
-            assert_eq!(words(s,s.u32_blend128::<$m>(av,bv)),(0..16).map(|i| if mask & (1 << (i%4)) != 0 { b[i] } else { a[i] }).collect::<Vec<_>>());
+            assert_eq!(words(simd,simd.u32_blend128::<$m>(av,bv)),(0..16).map(|i| if mask & (1 << (i%4)) != 0 { b[i] } else { a[i] }).collect::<Vec<_>>());
         )* }; }
         blends!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
         for (actual, pattern) in [
             (
-                s.u32_unpacklo32(av, bv),
+                simd.u32_unpacklo32(av, bv),
                 [(false, 0), (true, 0), (false, 1), (true, 1)],
             ),
             (
-                s.u32_unpackhi32(av, bv),
+                simd.u32_unpackhi32(av, bv),
                 [(false, 2), (true, 2), (false, 3), (true, 3)],
             ),
             (
-                s.u32_unpacklo64(av, bv),
+                simd.u32_unpacklo64(av, bv),
                 [(false, 0), (false, 1), (true, 0), (true, 1)],
             ),
             (
-                s.u32_unpackhi64(av, bv),
+                simd.u32_unpackhi64(av, bv),
                 [(false, 2), (false, 3), (true, 2), (true, 3)],
             ),
         ] {
             assert_eq!(
-                words(s, actual),
+                words(simd, actual),
                 (0..16)
                     .map(|i| {
                         let (second, lane) = pattern[i % 4];
@@ -548,14 +642,14 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
-        assert!(catch_unwind(AssertUnwindSafe(|| s.u32_blend128::<-1>(av, bv))).is_err());
-        assert!(catch_unwind(AssertUnwindSafe(|| s.u32_blend128::<16>(av, bv))).is_err());
-        assert_eq!(words(s, av), a);
-        assert_eq!(words(s, bv), b);
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_blend128::<-1>(av, bv))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_blend128::<16>(av, bv))).is_err());
+        assert_eq!(words(simd, av), a);
+        assert_eq!(words(simd, bv), b);
     }
     #[test]
     fn sha256_schedule_and_rounds() {
-        let s = EmulatedIceLake;
+        let simd = EmulatedIceLake;
         const K: [u32; 64] = [
             0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
             0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -600,10 +694,11 @@ mod tests {
                     .wrapping_add(sigma1);
             }
             for i in (16..64).step_by(4) {
-                let partial = s.sha256_msg1(s.u32x4_load(&w[i - 16..]), s.u32x4_load(&w[i - 12..]));
-                let partial = s.u32x4_add(partial, s.u32x4_load(&w[i - 7..]));
+                let partial =
+                    simd.sha256_msg1(simd.u32x4_load(&w[i - 16..]), simd.u32x4_load(&w[i - 12..]));
+                let partial = simd.u32x4_add(partial, simd.u32x4_load(&w[i - 7..]));
                 assert_eq!(
-                    s.sha256_msg2(partial, s.u32x4_load(&w[i - 4..])),
+                    simd.sha256_msg2(partial, simd.u32x4_load(&w[i - 4..])),
                     w[i..i + 4]
                 );
             }
@@ -617,7 +712,7 @@ mod tests {
                     0xdeadbeef,
                     u32::MAX,
                 ];
-                let result = s.sha256_rounds2(cdgh, abef, wk);
+                let result = simd.sha256_rounds2(cdgh, abef, wk);
                 for j in i..i + 2 {
                     let [a, b, c, d, e, f, g, h] = state;
                     let choice = g ^ (e & (f ^ g));
@@ -659,32 +754,32 @@ mod tests {
 
     #[test]
     fn four_lane_and_byte_shuffle_contracts() {
-        let s = EmulatedIceLake;
-        assert_eq!(s.u32x4_load(&[1, 2, 3, 4, 5]), [1, 2, 3, 4]);
-        assert_eq!(s.u32x4_add([u32::MAX; 4], [1, 2, 3, 4]), [0, 1, 2, 3]);
+        let simd = EmulatedIceLake;
+        assert_eq!(simd.u32x4_load(&[1, 2, 3, 4, 5]), [1, 2, 3, 4]);
+        assert_eq!(simd.u32x4_add([u32::MAX; 4], [1, 2, 3, 4]), [0, 1, 2, 3]);
         let mut output = [9; 5];
-        s.u32x4_store([1, 2, 3, 4], &mut output);
+        simd.u32x4_store([1, 2, 3, 4], &mut output);
         assert_eq!(output, [1, 2, 3, 4, 9]);
         for len in 0..4 {
-            assert!(catch_unwind(|| s.u32x4_load(&[0; 4][..len])).is_err());
+            assert!(catch_unwind(|| simd.u32x4_load(&[0; 4][..len])).is_err());
             let mut output = [9; 4];
             assert!(
                 catch_unwind(AssertUnwindSafe(
-                    || s.u32x4_store([1; 4], &mut output[..len])
+                    || simd.u32x4_store([1; 4], &mut output[..len])
                 ))
                 .is_err()
             );
             assert_eq!(output, [9; 4]);
         }
-        assert!(catch_unwind(|| s.u32x4_shuffle::<-1>([0; 4])).is_err());
-        assert!(catch_unwind(|| s.u32x4_shuffle::<256>([0; 4])).is_err());
-        assert!(catch_unwind(|| s.u32_ternary::<-1>([0; 16], [0; 16], [0; 16])).is_err());
-        assert!(catch_unwind(|| s.u32_ternary::<256>([0; 16], [0; 16], [0; 16])).is_err());
-        assert!(catch_unwind(|| s.u32_shuffle_groups::<-1>([0; 16], [0; 16])).is_err());
-        assert!(catch_unwind(|| s.u32_shuffle_groups::<256>([0; 16], [0; 16])).is_err());
+        assert!(catch_unwind(|| simd.u32x4_shuffle::<-1>([0; 4])).is_err());
+        assert!(catch_unwind(|| simd.u32x4_shuffle::<256>([0; 4])).is_err());
+        assert!(catch_unwind(|| simd.u32_ternary::<-1>([0; 16], [0; 16], [0; 16])).is_err());
+        assert!(catch_unwind(|| simd.u32_ternary::<256>([0; 16], [0; 16], [0; 16])).is_err());
+        assert!(catch_unwind(|| simd.u32_shuffle_groups::<-1>([0; 16], [0; 16])).is_err());
+        assert!(catch_unwind(|| simd.u32_shuffle_groups::<256>([0; 16], [0; 16])).is_err());
         let bytes = core::array::from_fn(|i| i as u8);
         for index in 0..=255u8 {
-            let actual = s.u8_shuffle128(bytes, [index; 64]);
+            let actual = simd.u8_shuffle128(bytes, [index; 64]);
             assert_eq!(
                 actual,
                 core::array::from_fn(|i| if index & 128 != 0 {
@@ -706,31 +801,37 @@ mod tests {
     fn profile_contracts() {
         ice(EmulatedIceLake);
         // Native providers may reject invalid shuffle immediates at compile time.
-        let s = EmulatedIceLake;
-        let a = s.u32_load(&(0..16).collect::<Vec<_>>());
-        let b = s.u32_load(&(16..32).collect::<Vec<_>>());
+        let simd = EmulatedIceLake;
+        let a = simd.u32_load(&(0..16).collect::<Vec<_>>());
+        let b = simd.u32_load(&(16..32).collect::<Vec<_>>());
         macro_rules! invalid_shuffle { ($($m:literal),*) => { $(
-            assert!(catch_unwind(AssertUnwindSafe(|| s.u32_shuffle128::<$m>(a))).is_err());
-            assert!(catch_unwind(AssertUnwindSafe(|| s.u32_shuffle2_128::<$m>(a,b))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shuffle128::<$m>(a))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| simd.u32_shuffle2_128::<$m>(a,b))).is_err());
         )* }; }
         invalid_shuffle!(-1, 256);
-        assert_eq!(words(s, a), (0..16).collect::<Vec<_>>());
-        assert_eq!(words(s, b), (16..32).collect::<Vec<_>>());
+        assert_eq!(words(simd, a), (0..16).collect::<Vec<_>>());
+        assert_eq!(words(simd, b), (16..32).collect::<Vec<_>>());
     }
 
     #[test]
     fn ifma_truncation_and_accumulator_wrap() {
-        let s = EmulatedIceLake;
+        let simd = EmulatedIceLake;
         let values = [0, 1, (1 << 52) - 1, 1 << 52, u64::MAX];
         let mask = (1u128 << 52) - 1;
         for a in values {
             for b in values {
                 for accumulator in values {
                     let product = (a as u128 & mask) * (b as u128 & mask);
-                    let lo =
-                        s.u64_madd52lo(s.u64_splat(accumulator), s.u64_splat(a), s.u64_splat(b));
-                    let hi =
-                        s.u64_madd52hi(s.u64_splat(accumulator), s.u64_splat(a), s.u64_splat(b));
+                    let lo = simd.u64_madd52lo(
+                        simd.u64_splat(accumulator),
+                        simd.u64_splat(a),
+                        simd.u64_splat(b),
+                    );
+                    let hi = simd.u64_madd52hi(
+                        simd.u64_splat(accumulator),
+                        simd.u64_splat(a),
+                        simd.u64_splat(b),
+                    );
                     assert_eq!(lo, [accumulator.wrapping_add((product & mask) as u64); 8]);
                     assert_eq!(hi, [accumulator.wrapping_add((product >> 52) as u64); 8]);
                 }
@@ -740,7 +841,7 @@ mod tests {
 
     #[test]
     fn gfni_all_byte_products() {
-        let s = EmulatedIceLake;
+        let simd = EmulatedIceLake;
         for a in 0..=255u8 {
             for b in 0..=255u8 {
                 // Polynomial multiplication followed by long division by x^8+x^4+x^3+x+1.
@@ -756,7 +857,7 @@ mod tests {
                     }
                 }
                 assert_eq!(
-                    s.u8_gf_mul(s.u8_splat(a), s.u8_splat(b)),
+                    simd.u8_gf_mul(simd.u8_splat(a), simd.u8_splat(b)),
                     [product as u8; 64]
                 );
             }

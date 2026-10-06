@@ -311,7 +311,9 @@ fn test_selected_profile() {
     let selected = expected_backend();
     std::eprintln!("instruction differential backend: {selected:?}");
     #[cfg(target_arch = "aarch64")]
-    if std::arch::is_aarch64_feature_detected!("neon") {
+    if std::arch::is_aarch64_feature_detected!("neon")
+        && std::arch::is_aarch64_feature_detected!("sha2")
+    {
         assert!(matches!(selected.0, Path::Neon | Path::ArmV9));
     }
     if selected.0 == Path::Portable {

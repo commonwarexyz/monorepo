@@ -46,6 +46,77 @@
 /// }
 /// ```
 pub trait Simd: Copy {
+    /// Four unsigned 32-bit lanes, independent of [`Self::U32_LANES`].
+    type U32x4: Copy;
+
+    /// `r[i] = input[i]`.
+    ///
+    /// - **Alignment:** `align_of::<u32>()`.
+    /// - **Reads:** `input[0..4]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input.len() < 4`.
+    fn u32x4_load(self, input: &[u32]) -> Self::U32x4;
+
+    /// `output[i] = value[i]`.
+    ///
+    /// - **Alignment:** `align_of::<u32>()`.
+    /// - **Writes:** `output[0..4]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics before writing if `output.len() < 4`.
+    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]);
+
+    /// `r[i] = (a[i] + b[i]) mod 2^32`.
+    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
+
+    /// `r[i] = value[(MASK >> (2*i)) & 3]`.
+    ///
+    /// - **Immediate:** `0 <= MASK < 256`; invalid values may be rejected at compile time or panic.
+    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4;
+
+    /// Loads four big-endian words: `r[i] = sum_{j=0..3} input[4*i+j] * 2^(8*(3-j))`.
+    ///
+    /// - **Alignment:** `align_of::<u8>()`.
+    /// - **Reads:** `input[0..16]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input.len() < 16`.
+    fn u32x4_load_be(self, input: &[u8]) -> Self::U32x4;
+
+    /// Loads two big-endian words; `r[2] = r[3] = 0`.
+    ///
+    /// - **Alignment:** `align_of::<u8>()`.
+    /// - **Reads:** `input[0..8]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input.len() < 8`.
+    fn u32x4_load_be2(self, input: &[u8]) -> Self::U32x4;
+
+    /// Stores four big-endian words: `output[4*i+j] = (value[i] >> (8*(3-j))) mod 256`.
+    ///
+    /// - **Alignment:** `align_of::<u8>()`.
+    /// - **Writes:** `output[0..16]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics before writing if `output.len() < 16`.
+    fn u32x4_store_be(self, value: Self::U32x4, output: &mut [u8]);
+
+    /// `r[i] = [a, b][N+i]` for `0 <= i < 4`.
+    ///
+    /// - **Immediate:** `0 <= N <= 4`; invalid values may be rejected at compile time or panic.
+    fn u32x4_align<const N: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
+
+    /// `r[i] = b[i]` if `bit(MASK, i) = 1`, otherwise `r[i] = a[i]`.
+    ///
+    /// - **Immediate:** `0 <= MASK < 16`; invalid values may be rejected at compile time or panic.
+    fn u32x4_blend<const MASK: i32>(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
+
     /// Vector of [`Self::U8_LANES`] unsigned 8-bit lanes.
     type U8: Copy;
 
@@ -315,41 +386,20 @@ pub trait Simd: Copy {
 ///
 /// This profile models 512-bit vectors with 64 unsigned byte lanes, 16 unsigned
 /// 32-bit lanes, and eight unsigned 64-bit lanes. Native implementations require
-/// AVX-512F, AVX-512BW, GFNI, AVX-512 IFMA, and SHA.
+/// AVX-512F, AVX-512BW, GFNI, AVX-512 IFMA, SHA, SSSE3, and SSE4.1.
 /// The name identifies an instruction bundle, not a required CPU vendor or model.
 ///
 /// Instruction contracts use the [notation defined by `Simd`](Simd#instruction-notation).
 pub trait IceLake: Simd {
-    /// Four unsigned 32-bit lanes for 128-bit SHA instructions.
-    type U32x4: Copy;
-
-    /// `r[i] = input[i]`.
+    /// `r[i] = sum_{j=0..3} input[4*i+j] * 2^(8*(3-j))` for `0 <= i < 16`.
     ///
-    /// - **Alignment:** `align_of::<u32>()`.
-    /// - **Reads:** `input[0..4]`.
+    /// - **Alignment:** `align_of::<u8>()`.
+    /// - **Reads:** `input[0..64]`.
     ///
     /// # Panics
     ///
-    /// Panics if `input.len() < 4`.
-    fn u32x4_load(self, input: &[u32]) -> Self::U32x4;
-
-    /// `output[i] = value[i]`.
-    ///
-    /// - **Alignment:** `align_of::<u32>()`.
-    /// - **Writes:** `output[0..4]`.
-    ///
-    /// # Panics
-    ///
-    /// Panics before writing if `output.len() < 4`.
-    fn u32x4_store(self, value: Self::U32x4, output: &mut [u32]);
-
-    /// `r[i] = (a[i] + b[i]) mod 2^32`.
-    fn u32x4_add(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
-
-    /// `r[i] = value[(MASK >> (2*i)) & 3]`.
-    ///
-    /// - **Immediate:** `0 <= MASK < 256`; invalid values may be rejected at compile time or panic.
-    fn u32x4_shuffle<const MASK: i32>(self, value: Self::U32x4) -> Self::U32x4;
+    /// Panics if `input.len() < 64`.
+    fn u32_load_be(self, input: &[u8]) -> Self::U32;
 
     /// Two SHA-256 rounds (SHA256RNDS2), with all additions modulo `2^32`.
     ///
@@ -439,7 +489,7 @@ pub trait IceLake: Simd {
 
 /// Armv9-A with SVE2 instruction profile implemented by native and emulated backend tokens.
 ///
-/// Requires baseline NEON plus SVE and SVE2 explicitly; an Armv9 architecture label
+/// Requires NEON, SHA2, SVE, and SVE2 explicitly; an Armv9 architecture label
 /// alone does not establish their availability. Logical vectors retain NEON's 128-bit
 /// shape. Native providers use the low 128 bits of SVE registers, independently of
 /// the thread's full SVE vector length. Optional SVE2 extensions require separate checks.
@@ -454,14 +504,40 @@ pub trait ArmV9: Neon {
     fn u32_xor_rotate_right<const N: u32>(self, a: Self::U32, b: Self::U32) -> Self::U32;
 }
 
-/// AArch64 NEON instruction profile implemented by native and emulated backend tokens.
+/// AArch64 NEON with SHA2 instruction profile implemented by native and emulated backend tokens.
 ///
-/// This profile models 128-bit vectors with 16 unsigned byte lanes, four unsigned
-/// 32-bit lanes, and two unsigned 64-bit lanes. Its narrowing and widening primitives
+/// Requires NEON and SHA2. This profile models 128-bit vectors with 16 unsigned byte
+/// lanes, four unsigned 32-bit lanes, and two unsigned 64-bit lanes. SHA states use
+/// `[A, B, C, D]` and `[E, F, G, H]` lane order. Its narrowing and widening primitives
 /// use a separate half-width vector with two unsigned 32-bit lanes.
 ///
 /// Instruction contracts use the [notation defined by `Simd`](Simd#instruction-notation).
 pub trait Neon: Simd {
+    /// Four SHA-256 rounds, returning `[A, B, C, D]` (SHA256H).
+    ///
+    /// For each `wk[t]`, compute `T1 = H + Sigma1(E) + Ch(E,F,G) + wk[t]` and
+    /// `T2 = Sigma0(A) + Maj(A,B,C)`, then simultaneously update
+    /// `(A,B,C,D,E,F,G,H) = (T1+T2,A,B,C,D+T1,E,F,G)` modulo `2^32`.
+    /// `Sigma0(x) = rotr_32(x,2) ^ rotr_32(x,13) ^ rotr_32(x,22)`,
+    /// `Sigma1(x) = rotr_32(x,6) ^ rotr_32(x,11) ^ rotr_32(x,25)`,
+    /// `Ch(x,y,z) = (x & y) ^ (!x & z)`, and
+    /// `Maj(x,y,z) = (x & y) ^ (x & z) ^ (y & z)`.
+    fn sha256_h(self, abcd: Self::U32x4, efgh: Self::U32x4, wk: Self::U32x4) -> Self::U32x4;
+
+    /// The same four rounds as [`Self::sha256_h`], returning `[E, F, G, H]` (SHA256H2).
+    /// Both state arguments contain the state before these rounds.
+    fn sha256_h2(self, efgh: Self::U32x4, abcd: Self::U32x4, wk: Self::U32x4) -> Self::U32x4;
+
+    /// `r[i] = (a[i] + sigma0([a[1],a[2],a[3],b[0]][i])) mod 2^32` (SHA256SU0).
+    /// `sigma0(x) = rotr_32(x,7) ^ rotr_32(x,18) ^ (x >> 3)`.
+    fn sha256_su0(self, a: Self::U32x4, b: Self::U32x4) -> Self::U32x4;
+
+    /// Let `t[i] = a[i] + [b[1],b[2],b[3],c[0]][i]` modulo `2^32`.
+    /// `r[i] = t[i] + sigma1(c[i+2])` for `i < 2`, and
+    /// `r[i] = t[i] + sigma1(r[i-2])` for `i >= 2`, modulo `2^32` (SHA256SU1).
+    /// `sigma1(x) = rotr_32(x,17) ^ rotr_32(x,19) ^ (x >> 10)`.
+    fn sha256_su1(self, a: Self::U32x4, b: Self::U32x4, c: Self::U32x4) -> Self::U32x4;
+
     /// Eight unsigned 16-bit lanes corresponding to one half of a byte vector.
     type U16: Copy;
 
