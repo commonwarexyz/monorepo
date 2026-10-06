@@ -79,6 +79,7 @@ kb find TERM...               findings whose summary or tags match, with the cod
 kb cites PATH                 findings that cite a file under PATH  <- start here
 kb grep TEXT                  snippets of the state-bearing sections
 kb show IDENTIFIER [SECTION]  one claim block, or one state-bearing section
+kb search QUESTION            snippets ranked by meaning: findings, documents, comments, docs
 ```
 
 The fictional KB entries below stand in for real findings. A real one carries the same kind

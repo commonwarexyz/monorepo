@@ -11,17 +11,22 @@ Python 3.9 or later.
 
 import argparse
 import collections
+import contextlib
 import datetime
 import difflib
+import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 # Subproject root, relative to the repository root.
@@ -117,6 +122,7 @@ CONFIG_KEYS = (
     "STATELENS_TEST_TOOLCHAIN",
     "STATELENS_FUZZ_TOOLCHAIN",
     "STATELENS_KB",
+    "STATELENS_SEARCH_MODEL",
     "STATELENS_BEACONS",
     "STATELENS_AUDIT",
 )
@@ -1266,7 +1272,7 @@ def extract_values(repo, sl_dir, kind, registry, sources, number=None):
         "REGISTRY": registry,
         "DESTINATION": str(extraction_destination(kind, registry)),
         "COUNT": extraction_count(number),
-        "QUERY": kb_query_help(registry),
+        "QUERY": kb_query_help(registry, search=search_ready(sl_dir)),
         "CONTEXT": subsystem_prompt(sl_dir, registry, "analyst"),
         "SOURCE_ROOT": SOURCES[registry],
         # The commit every line the agent cites is pinned to (lint rule 10).
@@ -1792,6 +1798,9 @@ def reference_lines(entry):
 
 def cmd_kb(args):
     """The retrieval interface of SPEC section 5.6, used by the beacon agent."""
+    if args.query == "search":
+        # The search index covers this repository too, so it answers without a corpus.
+        return cmd_kb_search(args)
     repo = repo_root()
     sl_dir = repo / SL
     config = load_config(sl_dir)
@@ -1920,11 +1929,28 @@ def cmd_kb(args):
     return 0
 
 
-def kb_query_help(registry):
-    """The QUERY placeholder: the concrete command line of every query (SPEC 6.3)."""
+def kb_query_help(registry, kb=True, search=False):
+    """The QUERY placeholder: the concrete command line of every query (SPEC 6.3).
+
+    The search line appears whenever a search index exists, which a campaign builds
+    even without a knowledge base; the other five need the knowledge base.
+    """
     base = f"python3 {SL}/scripts/statelens.py kb"
+    lines = []
+    if search:
+        lines += [
+            f"- `{base} search --registry {registry} [--path PATH] QUESTION`",
+            f"  up to {SEARCH_LIMIT} snippets ranked by meaning and by words, from the findings",
+            "  in scope, the design documents, and this repository's comments, doc comments and",
+            "  Markdown documentation. Each names where it is: a finding and its section, or",
+            "  `path:line@commit` and the item a comment documents. Ask in plain words; `--path`",
+            "  narrows the code and the documentation to a directory.",
+        ]
+    if not kb:
+        return "\n".join(lines)
     return "\n".join(
-        [
+        lines
+        + [
             f"- `{base} modules --registry {registry}`",
             "  every `module` value in scope, with a count.",
             f"- `{base} find --registry {registry} TERM...`",
@@ -1942,6 +1968,926 @@ def kb_query_help(registry):
             "  " + ", ".join(KB_STATE_SECTIONS) + ".",
         ]
     )
+
+
+# SPEC section 5.10: semantic search over the knowledge base and over this repository's
+# comments, doc comments and documentation, ranked by meaning and by words together. The
+# index lives in extract/search/, which git ignores, and a query never uses the network.
+SEARCH_DIR = "extract/search"
+# Beside the index directory, which a publication empties, so that it is never deleted.
+SEARCH_LOCK = "extract/search.lock"
+SEARCH_DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Design documents live in kb/ and context/; config/ holds the corpus's own settings.
+SEARCH_KB_DOC_DIRS = ("kb", "context")
+SEARCH_SOURCES = ("finding", "kb", "code", "doc")
+# A chunk stays within what a small model reads at once: MiniLM stops at 256 word pieces.
+SEARCH_CHUNK_CHARS = 1000
+SEARCH_MIN_CHARS = 24
+SEARCH_LIMIT = 10
+SEARCH_MAX_LIMIT = 40
+# How many of each ranking's best enter the fusion, and the constant of reciprocal rank
+# fusion, which weighs a rank r as 1 / (SEARCH_RRF_K + r).
+SEARCH_POOL = 200
+SEARCH_RRF_K = 60
+SEARCH_BATCH = 512
+SEARCH_SNIPPET_LINES = 4
+SEARCH_STOPWORDS = frozenset(
+    "a an and are as at be but by can do does for from has have how if in into is it its "
+    "may must not of on or so that the then there this to was were what when where which "
+    "while who why will with".split()
+)
+SEARCH_WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]+")
+SEARCH_PART = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+SEARCH_ITEM = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|const|unsafe|extern\s+\"[^\"]*\")\s+)*"
+    r"(fn|struct|enum|trait|type|const|static|mod|union|macro_rules!)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+SEARCH_IMPL = re.compile(
+    r"^\s*(?:unsafe\s+)?impl\b(?:\s*<.*?>)?\s+(?:[A-Za-z_][\w:]*(?:<.*?>)?\s+for\s+)?"
+    r"(?:[A-Za-z_]\w*::)*([A-Za-z_]\w*)"
+)
+SEARCH_CONTAINERS = ("fn", "mod", "trait", "struct", "enum", "union", "macro_rules!")
+SEARCH_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+
+
+def search_tokens(text):
+    """Lower-case words of `text`, each identifier followed by its parts.
+
+    `CertifyState` and `try_propose` are words a question may use whole or in
+    pieces, so both forms count.
+    """
+    tokens = []
+    for word in SEARCH_WORD.findall(text):
+        lower = word.lower()
+        if len(lower) > 1 and lower not in SEARCH_STOPWORDS:
+            tokens.append(lower)
+        parts = [part.lower() for piece in word.split("_") for part in SEARCH_PART.findall(piece)]
+        if len(parts) > 1:
+            tokens += [part for part in parts if len(part) > 1 and part not in SEARCH_STOPWORDS]
+    return tokens
+
+
+def search_wrap(text, limit):
+    """`text` cut at spaces into parts of at most `limit` characters; a longer word is cut."""
+    parts = []
+    while len(text) > limit:
+        cut = text.rfind(" ", 0, limit + 1)
+        if cut <= 0:
+            cut = limit
+        parts.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        parts.append(text)
+    return parts
+
+
+def search_pieces(numbered, head="", fits=None):
+    """(first line, last line, text) chunks of whole paragraphs from (line, text) pairs.
+
+    A chunk closes at a paragraph once it holds SEARCH_CHUNK_CHARS, a longer paragraph
+    is cut between lines, and a longer line between words, each part keeping its line
+    number, so a citation still holds. With `fits`, the model's own test of whether a
+    text fits its window, a chunk is halved until its heading and text fit together:
+    characters say little about tokens in identifier-heavy text. A chunk with too
+    little text is dropped.
+    """
+    if fits is not None and not fits(f"{head}\nx"):
+        # A heading that fills the window alone leaves nothing a cut could save.
+        fits = None
+    paragraphs, current = [], []
+    for number, text in numbered:
+        text = text.rstrip()
+        if not text.strip():
+            if current:
+                paragraphs.append(current)
+                current = []
+            continue
+        current += [(number, part) for part in search_wrap(text, SEARCH_CHUNK_CHARS)]
+    if current:
+        paragraphs.append(current)
+
+    def size(lines):
+        return sum(len(text) + 1 for _, text in lines)
+
+    def split(piece):
+        body = "\n".join(text for _, text in piece)
+        if fits is None or fits(f"{head}\n{body}"):
+            return [piece]
+        if len(piece) > 1:
+            middle = len(piece) // 2
+            return split(piece[:middle]) + split(piece[middle:])
+        number, text = piece[0]
+        words = text.split(" ")
+        if len(words) < 2:
+            return [piece]
+        middle = len(words) // 2
+        return split([(number, " ".join(words[:middle]))]) + split(
+            [(number, " ".join(words[middle:]))]
+        )
+
+    groups, piece = [], []
+    for paragraph in paragraphs:
+        if piece and size(piece) + size(paragraph) > SEARCH_CHUNK_CHARS:
+            groups.append(piece)
+            piece = []
+        for line in paragraph:
+            if piece and size(piece) + len(line[1]) > SEARCH_CHUNK_CHARS:
+                groups.append(piece)
+                piece = []
+            piece.append(line)
+    if piece:
+        groups.append(piece)
+    pieces = []
+    for group in groups:
+        if sum(char.isalnum() for _, text in group for char in text) < SEARCH_MIN_CHARS:
+            continue
+        for part in split(group):
+            pieces.append((part[0][0], part[-1][0], "\n".join(text for _, text in part)))
+    return pieces
+
+
+def search_module_name(path):
+    """The module a Rust file is: consensus/src/simplex/mod.rs is consensus::simplex."""
+    parts = [part for part in path[: -len(".rs")].split("/") if part != "src"]
+    if parts and parts[-1] in ("mod", "lib", "main"):
+        parts = parts[:-1]
+    return "::".join(parts)
+
+
+def search_context(lines, index):
+    """The names of the items around `lines[index]`, outermost first.
+
+    Read from indentation, which is what a comment's place in the code looks like
+    without a parser: walking up, a less indented `impl`, `fn`, `struct` and the like
+    encloses it, and any other less indented line, such as `loop {` or the `) {` of a
+    signature, narrows the search without naming anything.
+    """
+    line = lines[index]
+    limit = len(line) - len(line.lstrip())
+    chain = []
+    number = index - 1
+    while number >= 0 and limit > 0:
+        text = lines[number]
+        number -= 1
+        stripped = text.strip()
+        if not stripped or stripped.startswith(("//", "#[", "/*", "*")):
+            continue
+        indent = len(text) - len(text.lstrip())
+        if indent >= limit:
+            continue
+        impl = SEARCH_IMPL.match(text)
+        found = SEARCH_ITEM.match(text)
+        if impl:
+            chain.append(impl.group(1))
+            limit = indent
+        elif found and found.group(1) in SEARCH_CONTAINERS:
+            chain.append(found.group(2))
+            limit = indent
+        else:
+            limit = min(limit, indent + 1)
+    return chain[::-1]
+
+
+def search_documented(lines, index):
+    """What a doc comment ending just before `lines[index]` documents, with its container."""
+    while index < len(lines) and (
+        not lines[index].strip() or lines[index].lstrip().startswith(("#[", "#!["))
+    ):
+        index += 1
+    if index >= len(lines):
+        return ""
+    line = lines[index]
+    found = SEARCH_ITEM.match(line)
+    impl = SEARCH_IMPL.match(line)
+    if found:
+        name = found.group(2)
+    elif impl:
+        name = impl.group(1)
+    else:
+        field = re.match(r"^\s*(?:pub(?:\([^)]*\))?\s+)?([A-Za-z_][A-Za-z0-9_]*)", line)
+        name = field.group(1) if field else ""
+    return "::".join(search_context(lines, index) + ([name] if name else []))
+
+
+def search_cfg_test(line):
+    """What follows a test-only `#[cfg(...)]` that opens `line`, or None.
+
+    Test-only means `test`, or an `all(...)` that requires it: `cfg(all(test,
+    feature = "loom"))` is test code, while `cfg(any(test, feature = "fuzz"))` is
+    compiled into feature builds too and is not.
+    """
+    stripped = line.lstrip()
+    if not stripped.startswith("#[cfg("):
+        return None
+    depth = 0
+    for end, char in enumerate(stripped):
+        depth += {"[": 1, "]": -1}.get(char, 0)
+        if char == "]" and depth == 0:
+            break
+    else:
+        return None
+    expression = stripped[len("#[cfg(") : end - 1].strip()
+    if expression != "test":
+        if not (expression.startswith("all(") and expression.endswith(")")):
+            return None
+        arguments, nested, start = [], 0, 4
+        for position, char in enumerate(expression[4:-1], 4):
+            nested += {"(": 1, ")": -1}.get(char, 0)
+            if char == "," and nested == 0:
+                arguments.append(expression[start:position].strip())
+                start = position + 1
+        arguments.append(expression[start:-1].strip())
+        if "test" not in arguments:
+            return None
+    return stripped[end + 1 :]
+
+
+def search_test_modules(texts):
+    """The files that test-only module declarations name, as paths and directory prefixes.
+
+    `texts` maps each Rust path to its text. `#[cfg(test)] mod name;` in `mod.rs`,
+    `lib.rs` or `main.rs` names `name.rs` or `name/` beside it, and in `x.rs` names them
+    under `x/`; a `#[path = "..."]` between the two names the file outright, relative to
+    the declaring file's directory. Everything such a file declares is test code too.
+    """
+    named = set()
+    for path, text in texts.items():
+        folder, _, filename = path.rpartition("/")
+        stem = filename[: -len(".rs")]
+        base = folder if stem in ("mod", "lib", "main") else f"{folder}/{stem}"
+        lines = text.split("\n")
+        for index, line in enumerate(lines):
+            rest = search_cfg_test(line)
+            if rest is None:
+                continue
+            explicit = None
+            following = [rest] + lines[index + 1 :]
+            for candidate in following:
+                candidate = candidate.strip()
+                attribute = re.match(r'#\[path\s*=\s*"([^"]+)"\]\s*(.*)$', candidate)
+                if attribute:
+                    explicit = attribute.group(1)
+                    candidate = attribute.group(2).strip()
+                if not candidate or (candidate.startswith("#[") and not attribute):
+                    continue
+                declared = re.match(r"^(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_]\w*)\s*;", candidate)
+                if declared:
+                    name = declared.group(1)
+                    if explicit:
+                        named.add(f"{folder}/{explicit}" if folder else explicit)
+                    else:
+                        named.update({f"{base}/{name}.rs", f"{base}/{name}/"})
+                break
+    return named
+
+
+def search_test_ranges(path, text, test_modules=()):
+    """The (first, last) line ranges of a Rust file that are test code.
+
+    The whole file when its path is test support or test code (`mocks`, `tests/`,
+    `benches/`), when a test-only declaration names it, or when it opens with
+    `#![cfg(test)]`. Otherwise each item under a test-only `#[cfg(...)]`, from the
+    documentation and attributes above it to its end, which is the brace that closes
+    it or the `;` or `,` that ends it, counted with comments and literals blanked.
+    """
+    lines = text.split("\n")
+    parts = Path(path).parts
+    named = any(
+        path == entry or (entry.endswith("/") and path.startswith(entry)) for entry in test_modules
+    )
+    if (
+        named
+        or "mocks" in parts
+        or Path(path).stem == "mocks"
+        or "tests" in parts
+        or "benches" in parts
+        or any(re.match(r"^\s*#!\[cfg\(\s*test\s*\)\]", line) for line in lines)
+    ):
+        return [(1, len(lines))]
+    code = None
+    ranges = []
+    for index, line in enumerate(lines):
+        if search_cfg_test(line) is None:
+            continue
+        if code is None:
+            code = blank_inert(text, strings=True).split("\n")
+        start = index
+        while start > 0 and lines[start - 1].lstrip().startswith(("///", "#[")):
+            start -= 1
+        braces = nested = 0
+        opened = False
+        end = len(lines) - 1
+        for number in range(index, len(code)):
+            row = code[number]
+            if number == index:
+                row = row[row.index("]") + 1 :] if "]" in row else ""
+            done = False
+            for char in row:
+                if char in "([":
+                    nested += 1
+                elif char in ")]":
+                    nested -= 1
+                elif nested == 0 and char == "{":
+                    braces += 1
+                    opened = True
+                elif nested == 0 and char == "}":
+                    braces -= 1
+                    done = (opened and braces == 0) or braces < 0
+                elif nested == 0 and braces == 0 and char in ";,":
+                    done = True
+                if done:
+                    break
+            if done:
+                end = number
+                break
+        ranges.append((start + 1, end + 1))
+    return ranges
+
+
+def search_rust_chunks(path, text, commit, test_modules=(), fits=None):
+    """The comment and doc-comment chunks of a Rust file, each with the item it belongs to.
+
+    A `//!` block documents its module, a `///` block the item after it, and a plain
+    comment the function or item it sits in. Lines marked `[statelens]` are
+    instrumentation, never indexed, and a chunk in test code says so.
+    """
+    lines = text.split("\n")
+    tests = search_test_ranges(path, text, test_modules)
+    module = search_module_name(path)
+    chunks = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].lstrip()
+        if not stripped.startswith("//") or "[statelens]" in stripped:
+            index += 1
+            continue
+        start = index
+        if stripped.startswith("//!"):
+            kind = "module"
+        elif stripped.startswith("///") and not stripped.startswith("////"):
+            kind = "doc"
+        else:
+            kind = "comment"
+        body = []
+        while index < len(lines):
+            current = lines[index].lstrip()
+            if not current.startswith("//") or "[statelens]" in current:
+                break
+            body.append((index + 1, re.sub(r"^//[/!]?\s?", "", current)))
+            index += 1
+        if kind == "module":
+            item = module
+        elif kind == "doc":
+            item = search_documented(lines, index) or module
+        else:
+            item = "::".join(search_context(lines, start)) or module
+        test = any(first <= start + 1 <= last for first, last in tests)
+        for first, last, piece in search_pieces(body, head=item, fits=fits):
+            chunks.append(
+                {
+                    "source": "code",
+                    "path": path,
+                    "commit": commit,
+                    "lines": [first, last],
+                    "kind": kind,
+                    "item": item,
+                    "test": test,
+                    "head": item,
+                    "text": piece,
+                }
+            )
+    return chunks
+
+
+def search_markdown_chunks(text, fits=None):
+    """Chunks of a Markdown text, each inside one section and carrying its headings."""
+    headings, numbered, chunks = [], [], []
+
+    def close():
+        title = " > ".join(headings)
+        for first, last, piece in search_pieces(numbered, head=title, fits=fits):
+            chunks.append({"section": title, "lines": [first, last], "head": title, "text": piece})
+
+    fence = False
+    for number, line in enumerate(text.split("\n"), 1):
+        if line.lstrip().startswith(("```", "~~~")):
+            fence = not fence
+        heading = None if fence else SEARCH_HEADING.match(line)
+        if heading:
+            close()
+            numbered = []
+            headings = headings[: len(heading.group(1)) - 1] + [heading.group(2)]
+            continue
+        numbered.append((number, line))
+    close()
+    return chunks
+
+
+def search_kb_chunks(entries, fits=None):
+    """Chunks of the knowledge base: findings' state-bearing sections and design documents.
+
+    A finding is cut only along the sections `kb show` serves, so the search reaches
+    nothing the other commands withhold (R-KB-4), and each chunk carries the files and
+    symbols the finding cites.
+    """
+    chunks = []
+    for entry in entries:
+        origin = Path(entry["root"]).name
+        if entry["kind"] == "finding":
+            text = kb_text(entry)
+            claim = entry.get("claim") or {}
+            refs = entry.get("refs") or {}
+            for section in KB_STATE_SECTIONS:
+                span = (entry.get("sections") or {}).get(section)
+                if not span:
+                    continue
+                first = text.count("\n", 0, span[0]) + 1
+                body = text[span[0] : span[1]].split("\n")
+                numbered = [(first + offset, line) for offset, line in enumerate(body)]
+                head = f"{claim.get('summary', '')}\n{section}"
+                for start, last, piece in search_pieces(numbered, head=head, fits=fits):
+                    chunks.append(
+                        {
+                            "source": "finding",
+                            "root": entry["root"],
+                            "origin": origin,
+                            "identifier": entry["identifier"],
+                            "path": entry["path"],
+                            "section": section,
+                            "lines": [start, last],
+                            "state": entry["state"],
+                            "modules": entry["modules"],
+                            "severity": claim.get("severity_current", ""),
+                            "remediation": claim.get("remediation_status", ""),
+                            "files": (refs.get("paths") or [])[:KB_REF_SHOWN],
+                            "symbols": (refs.get("symbols") or [])[:KB_REF_SHOWN],
+                            "head": head,
+                            "text": piece,
+                        }
+                    )
+        elif entry["path"].split("/", 1)[0] in SEARCH_KB_DOC_DIRS:
+            for chunk in search_markdown_chunks(kb_text(entry), fits=fits):
+                chunk.update(
+                    source="kb",
+                    root=entry["root"],
+                    origin=origin,
+                    identifier=entry["identifier"],
+                    path=entry["path"],
+                )
+                chunks.append(chunk)
+    return chunks
+
+
+def search_head_files(repo):
+    """The commit at HEAD and its Rust and Markdown files outside statelens/, with blob ids."""
+    commit = git(repo, "rev-parse", "--short=12", "HEAD").strip()
+    files = []
+    for record in git(repo, "ls-tree", "-r", "-z", "HEAD").split("\0"):
+        meta, _, path = record.partition("\t")
+        if not path or path.startswith(f"{SL}/") or not path.endswith((".rs", ".md")):
+            continue
+        _mode, kind, blob = meta.split()
+        if kind == "blob":
+            files.append((path, blob))
+    return commit, files
+
+
+def search_blobs(repo, blobs):
+    """The text of every blob, read through one `git cat-file --batch`."""
+    if not blobs:
+        return {}
+    output = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        cwd=repo,
+        input="".join(f"{blob}\n" for blob in blobs).encode(),
+        capture_output=True,
+        check=True,
+    ).stdout
+    texts, position = {}, 0
+    for blob in blobs:
+        end = output.index(b"\n", position)
+        header = output[position:end].split()
+        if len(header) < 3:
+            position = end + 1
+            continue
+        size = int(header[2])
+        texts[blob] = output[end + 1 : end + 1 + size].decode("utf-8", "replace")
+        position = end + 1 + size + 1
+    return texts
+
+
+def search_text(chunk):
+    """What is embedded and matched for a chunk: its item or headings, then its text."""
+    return f"{chunk['head']}\n{chunk['text']}"
+
+
+@contextlib.contextmanager
+def search_lock(sl_dir, exclusive):
+    """The index's lock: exclusive while a generation is published, shared while one is read.
+
+    A publication renames, switches and deletes generations, so two at once could each
+    delete what the other made current, and either could delete the generation a query
+    has chosen and not yet read. Writers therefore take turns, and a writer waits for the
+    readers. The lock is advisory, and the kernel releases it if its holder dies; a
+    thread holding it must not ask for it again.
+    """
+    path = sl_dir / SEARCH_LOCK
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def search_manifest(sl_dir):
+    """The manifest of the index, naming the generation that is current, or None."""
+    try:
+        manifest = json.loads((sl_dir / SEARCH_DIR / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return None
+    generation = manifest.get("generation") if isinstance(manifest, dict) else None
+    if not isinstance(generation, str) or not re.fullmatch(r"generation-\d+", generation):
+        return None
+    return manifest
+
+
+def search_ready(sl_dir):
+    with search_lock(sl_dir, exclusive=False):
+        manifest = search_manifest(sl_dir)
+        return manifest is not None and (
+            sl_dir / SEARCH_DIR / manifest["generation"] / "chunks.jsonl"
+        ).is_file()
+
+
+def search_load(sl_dir):
+    """The index as (manifest, chunks, vector bytes), or (None, [], b"") without one.
+
+    A build writes a whole generation, its chunks and their vectors, and only then
+    switches the manifest to it, so the manifest always names a finished one; a
+    generation that does not add up all the same is no index at all, never a mix.
+    """
+    with search_lock(sl_dir, exclusive=False):
+        manifest = search_manifest(sl_dir)
+        if manifest is None:
+            return None, [], b""
+        folder = sl_dir / SEARCH_DIR / manifest["generation"]
+        try:
+            chunks = [
+                json.loads(line)
+                for line in (folder / "chunks.jsonl").read_text().splitlines()
+                if line
+            ]
+            vectors = (folder / "vectors.f32").read_bytes() if manifest.get("model") else b""
+        except (OSError, ValueError):
+            return None, [], b""
+    width = int(manifest.get("dim") or 0) * 4
+    if len(chunks) != manifest.get("chunks") or (
+        manifest.get("model") and len(vectors) != len(chunks) * width
+    ):
+        return None, [], b""
+    return manifest, chunks, vectors
+
+
+def search_publish(sl_dir, chunks, rows, manifest):
+    """Writes a new generation of the index, then makes it current.
+
+    The chunks and their vectors go to a staging directory, which is renamed into
+    place whole, and only then does the manifest switch to it, itself by an atomic
+    rename. An interruption anywhere before the switch leaves the previous
+    generation current and complete; the next build removes what it left behind.
+    All of it holds the exclusive lock, so no other publication or query is in the
+    middle of a generation this one deletes.
+    """
+    base = sl_dir / SEARCH_DIR
+    with search_lock(sl_dir, exclusive=True):
+        base.mkdir(parents=True, exist_ok=True)
+        generation = f"generation-{time.time_ns()}"
+        staging = base / f"{generation}.tmp"
+        staging.mkdir()
+        (staging / "chunks.jsonl").write_text(
+            "".join(json.dumps(chunk, sort_keys=True) + "\n" for chunk in chunks)
+        )
+        if rows:
+            with (staging / "vectors.f32").open("wb") as out:
+                for row in rows:
+                    out.write(row)
+        os.replace(staging, base / generation)
+        manifest = dict(manifest, generation=generation)
+        pending = base / "manifest.json.tmp"
+        pending.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+        os.replace(pending, base / "manifest.json")
+        for entry in base.iterdir():
+            if entry.name in ("manifest.json", generation):
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+    return manifest
+
+
+def search_embedder(model, offline):
+    """A function turning texts into unit vectors on the CPU, or (None, why not).
+
+    The model is a Hugging Face name or a local directory. A build may download it once;
+    a query runs with the hub offline, so it uses what is on disk or nothing. A GPU is
+    never needed: a small model embeds about 1,500 chunks a second on a laptop CPU.
+    """
+    if offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        return None, "the sentence-transformers package is not installed"
+    try:
+        # Loading prints a progress bar per weight, which floods an agent's log.
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.disable_progress_bar()
+        transformers_logging.set_verbosity_error()
+    except ImportError:
+        pass
+    def why(error):
+        first = str(error).strip().splitlines()[0] if str(error).strip() else ""
+        return first or type(error).__name__
+
+    try:
+        # From disk first: a model already here needs no network, even for a build.
+        loaded = SentenceTransformer(model, device="cpu", local_files_only=True)
+    except Exception as error:  # any failure to load leaves ranking by words
+        if offline:
+            return None, f"{model} is not on disk ({why(error)}); run `just search-index`"
+        say(f"search-index: {model} is not on disk; downloading it")
+        try:
+            loaded = SentenceTransformer(model, device="cpu")
+        except Exception as error:  # any failure to load leaves ranking by words
+            return None, f"cannot load {model}: {why(error)}"
+
+    def embed(texts):
+        return loaded.encode(
+            list(texts),
+            batch_size=64,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+            convert_to_numpy=True,
+        )
+
+    # The model reads at most `max_seq_length` tokens and ignores the rest, so a chunk is
+    # cut until it fits by the model's own tokenizer, special tokens included.
+    window = int(getattr(loaded, "max_seq_length", 0) or 256)
+    tokenizer = loaded.tokenizer
+
+    def fits(text):
+        ids = tokenizer(text, add_special_tokens=True, truncation=False, verbose=False)
+        return len(ids["input_ids"]) <= window
+
+    embed.fits = fits
+    return embed, None
+
+
+def search_pack(vector):
+    """A vector as little-endian 32-bit floats."""
+    if hasattr(vector, "astype"):
+        return vector.astype("<f4").tobytes()
+    return struct.pack(f"<{len(vector)}f", *vector)
+
+
+def search_build(repo, sl_dir, config, rebuild=False, embed=None):
+    """Builds or updates the search index and returns its manifest (SPEC section 5.10).
+
+    The code and the documentation are read at HEAD, so every line a hit cites is
+    `path:line@commit` and a checkout's uncommitted edits, instrumentation included,
+    never reach the index. The model is loaded first, because its tokenizer decides
+    where a chunk must be cut to fit what the model reads. A chunk whose text is
+    unchanged keeps its vector, so an update embeds only what changed; a different
+    model, or `rebuild`, embeds all. The result is published as a new generation
+    (`search_publish`), so an interrupted build never leaves a mixed index.
+    """
+    model = (config.get("STATELENS_SEARCH_MODEL") or "").strip() or SEARCH_DEFAULT_MODEL
+    started = time.monotonic()
+    reason = None
+    if embed is None:
+        embed, reason = search_embedder(model, offline=False)
+    fits = getattr(embed, "fits", None)
+    commit, files = search_head_files(repo)
+    texts = search_blobs(repo, sorted({blob for _, blob in files}))
+    test_modules = search_test_modules(
+        {path: texts.get(blob, "") for path, blob in files if path.endswith(".rs")}
+    )
+    chunks = []
+    for path, blob in files:
+        if path.endswith(".rs"):
+            chunks += search_rust_chunks(path, texts.get(blob, ""), commit, test_modules, fits)
+            continue
+        for chunk in search_markdown_chunks(texts.get(blob, ""), fits=fits):
+            chunk.update(source="doc", path=path, commit=commit)
+            chunks.append(chunk)
+    try:
+        roots = kb_roots(repo, config)
+    except Abort as error:
+        roots = []
+        say(f"search-index: no knowledge base ({error}); indexing this repository only")
+    if roots:
+        entries, _ = kb_index(sl_dir, roots)
+        chunks += search_kb_chunks(entries, fits=fits)
+    for number, chunk in enumerate(chunks):
+        chunk["id"] = number
+        chunk["hash"] = hashlib.sha1(search_text(chunk).encode()).hexdigest()
+        chunk["ntok"] = len(search_tokens(search_text(chunk)))
+    previous, old_chunks, old_vectors = search_load(sl_dir)
+    reuse = {}
+    if previous and old_vectors and not rebuild and previous.get("model") == model:
+        width = int(previous["dim"]) * 4
+        for index, chunk in enumerate(old_chunks):
+            reuse[chunk["hash"]] = old_vectors[index * width : (index + 1) * width]
+    fresh = {}
+    if embed is not None:
+        missing = list({chunk["hash"]: chunk for chunk in chunks if chunk["hash"] not in reuse}.values())
+        if missing:
+            say(f"search-index: embedding {len(missing)} of {len(chunks)} chunk(s) with {model} on the CPU")
+        for start in range(0, len(missing), SEARCH_BATCH):
+            batch = missing[start : start + SEARCH_BATCH]
+            for chunk, vector in zip(batch, embed([search_text(item) for item in batch])):
+                fresh[chunk["hash"]] = search_pack(vector)
+    sample = next(iter(fresh.values()), None) or next(iter(reuse.values()), None)
+    dim = len(sample) // 4 if embed is not None and sample else 0
+    rows = [fresh.get(chunk["hash"]) or reuse[chunk["hash"]] for chunk in chunks] if dim else []
+    sources = collections.Counter(chunk["source"] for chunk in chunks)
+    manifest = search_publish(
+        sl_dir,
+        chunks,
+        rows,
+        {
+            "model": model if dim else None,
+            "dim": dim,
+            "commit": commit,
+            "built": utc_now().isoformat(timespec="seconds"),
+            "chunks": len(chunks),
+            "sources": dict(sorted(sources.items())),
+            "embedded": len(fresh),
+            "reason": None if dim else (reason or "nothing was embedded"),
+        },
+    )
+    counts = ", ".join(f"{count} {name}" for name, count in sorted(sources.items()))
+    how = f"{len(fresh)} embedded with {model}" if dim else f"ranked by words only: {manifest['reason']}"
+    say(
+        f"search-index: {len(chunks)} chunk(s) of commit {commit} ({counts}); {how}; "
+        f"{time.monotonic() - started:.0f}s"
+    )
+    return manifest
+
+
+def search_bm25(chunks, candidates, question):
+    """The candidates sharing a word with `question`, best BM25 score first."""
+    terms = list(dict.fromkeys(search_tokens(question)))
+    if not terms or not candidates:
+        return []
+    wanted = set(terms)
+    average = sum(chunks[index]["ntok"] for index in candidates) / len(candidates) or 1.0
+    counts = {}
+    for index in candidates:
+        text = search_text(chunks[index])
+        lowered = text.lower()
+        if any(term in lowered for term in terms):
+            counter = collections.Counter(token for token in search_tokens(text) if token in wanted)
+            if counter:
+                counts[index] = counter
+    frequency = collections.Counter(term for counter in counts.values() for term in counter)
+    total = len(candidates)
+    scores = {}
+    for index, counter in counts.items():
+        length = chunks[index]["ntok"] or 1
+        score = 0.0
+        for term, seen in counter.items():
+            idf = math.log(1 + (total - frequency[term] + 0.5) / (frequency[term] + 0.5))
+            score += idf * seen * 2.2 / (seen + 1.2 * (0.25 + 0.75 * length / average))
+        scores[index] = score
+    return sorted(scores, key=lambda index: (-scores[index], index))
+
+
+def search_cosine(vectors, dim, candidates, query):
+    """Each candidate's similarity to `query`: the dot product of unit vectors."""
+    try:
+        import numpy
+    except ImportError:
+        numpy = None
+    if numpy is not None:
+        matrix = numpy.frombuffer(vectors, dtype="<f4").reshape(-1, dim)
+        return (matrix[candidates] @ numpy.asarray(query, dtype="<f4").reshape(dim)).tolist()
+    values = list(query)
+    return [
+        sum(a * b for a, b in zip(struct.unpack_from(f"<{dim}f", vectors, index * dim * 4), values))
+        for index in candidates
+    ]
+
+
+def search_rank(chunks, vectors, dim, question, embed, keep):
+    """(chunk indices best first, fused scores, chunks in scope, how they were ranked).
+
+    BM25 and embedding similarity each rank the chunks `keep` admits, and reciprocal
+    rank fusion merges the two: a small model misses exact identifiers that BM25
+    finds, and BM25 misses the paraphrase the model finds. Without a model, BM25
+    ranks alone.
+    """
+    candidates = [index for index, chunk in enumerate(chunks) if keep(chunk)]
+    rankings = [search_bm25(chunks, candidates, question)]
+    if embed is not None and vectors and candidates:
+        query = embed([question])[0]
+        scores = search_cosine(vectors, dim, candidates, query)
+        order = sorted(range(len(candidates)), key=lambda at: (-scores[at], candidates[at]))
+        rankings.append([candidates[at] for at in order])
+    fused = collections.defaultdict(float)
+    for ranking in rankings:
+        for rank, index in enumerate(ranking[:SEARCH_POOL], 1):
+            fused[index] += 1.0 / (SEARCH_RRF_K + rank)
+    order = sorted(fused, key=lambda index: (-fused[index], index))
+    return order, fused, len(candidates), len(rankings) == 2
+
+
+def search_hit(rank, chunk):
+    """One hit, as the agent reads it: where it is, then the start of its text."""
+    first, last = chunk["lines"]
+    lines = f"{first}" if first == last else f"{first}-{last}"
+    source = chunk["source"]
+    section = f" ## {chunk['section']}" if chunk.get("section") else ""
+    if source == "finding":
+        head = f"{chunk['identifier']} ({chunk['origin']}){section}"
+    elif source == "kb":
+        head = f"{chunk['path']}:{lines} ({chunk['origin']}){section}"
+    elif source == "code":
+        test = "  (test code)" if chunk.get("test") else ""
+        head = f"{chunk['path']}:{lines}@{chunk['commit']}  {chunk['item']}{test}"
+    else:
+        head = f"{chunk['path']}:{lines}@{chunk['commit']}{section}"
+    out = [f"{rank}. {source}  {head}"]
+    if source == "finding":
+        out.append(
+            f"    state={chunk['state']} module={', '.join(chunk['modules'])} "
+            f"severity={chunk.get('severity') or '?'} remediation={chunk.get('remediation') or '?'}"
+        )
+    text = [line.strip() for line in chunk["text"].split("\n") if line.strip()]
+    for line in text[:SEARCH_SNIPPET_LINES]:
+        out.append("    " + (line if len(line) <= 160 else line[:157] + "..."))
+    if len(text) > SEARCH_SNIPPET_LINES:
+        out.append(f"    ... {len(text) - SEARCH_SNIPPET_LINES} more line(s)")
+    for name, label in (("files", "files"), ("symbols", "symbols")):
+        if chunk.get(name):
+            out.append(f"    {label}: {', '.join(chunk[name])}")
+    return "\n".join(out)
+
+
+def cmd_kb_search(args):
+    """`kb search`: ranked snippets for a question in plain words (SPEC section 5.10)."""
+    sl_dir = repo_root() / SL
+    manifest, chunks, vectors = search_load(sl_dir)
+    if manifest is None:
+        raise Abort(1, "there is no search index yet; build it with `just search-index`")
+    question = " ".join(args.question).strip()
+    if not question:
+        raise Abort(1, "kb search needs a question")
+    sources = set(args.source or SEARCH_SOURCES)
+    prefixes = [prefix.rstrip("/") for prefix in args.path or []]
+    registry = args.registry
+
+    def keep(chunk):
+        if chunk["source"] not in sources:
+            return False
+        if chunk["source"] == "finding":
+            return any(module_matches(module, registry) for module in chunk.get("modules") or [])
+        if chunk["source"] == "code" and chunk.get("test") and not args.tests:
+            return False
+        if prefixes and chunk["source"] in ("code", "doc"):
+            return any(chunk["path"] == p or chunk["path"].startswith(p + "/") for p in prefixes)
+        return True
+
+    embed, reason = None, manifest.get("reason") or "the index has no vectors"
+    if manifest.get("model") and vectors:
+        embed, reason = search_embedder(manifest["model"], offline=True)
+    order, _scores, pool, dense = search_rank(
+        chunks, vectors, int(manifest.get("dim") or 0), question, embed, keep
+    )
+    limit = max(1, min(args.limit, SEARCH_MAX_LIMIT))
+    for rank, index in enumerate(order[:limit], 1):
+        print(search_hit(rank, chunks[index]))
+    how = f"by meaning and by words ({manifest['model']})" if dense else f"by words only ({reason})"
+    print(
+        f"\n{min(len(order), limit)} hit(s) of {pool} chunk(s) in scope, ranked {how}; "
+        f"code and documentation as of commit {manifest.get('commit')}"
+    )
+    return 0
+
+
+def cmd_search_index(args):
+    """`just search-index`: build or update the search index (SPEC section 5.10)."""
+    repo = repo_root()
+    manifest = search_build(repo, repo / SL, load_config(repo / SL), rebuild=args.rebuild)
+    return 0 if manifest.get("model") else 2
 
 
 def campaign_artifacts(repo):
@@ -2247,7 +3193,12 @@ def index_test_ranges(repo, relative):
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
-    lines = text.splitlines()
+    number = cfg_test_module_line(text.splitlines())
+    return [(number, None)] if number else []
+
+
+def cfg_test_module_line(lines):
+    """The line of a `#[cfg(test)] mod`, which runs to the end of its file, or None."""
     for number, line in enumerate(lines, 1):
         if not line.startswith("#[cfg(test)]"):
             continue
@@ -2258,8 +3209,8 @@ def index_test_ranges(repo, relative):
             "",
         )
         if following.lstrip().startswith(("mod ", "pub mod ")):
-            return [(number, None)]
-    return []
+            return number
+    return None
 
 
 def index_is_test(repo, ranges, relative, line):
@@ -4430,6 +5381,8 @@ class Campaign:
     # stale. Class defaults, because `finish` reads them whichever step aborted.
     audit_content = None
     stale = None
+    # Whether `kb search` has an index to answer from (SPEC section 5.10).
+    search = False
     # Bindings a later audit batch's edits escaped: id -> (batch, files).
     unreviewed = None
 
@@ -4710,6 +5663,13 @@ class Campaign:
             entries, _ = kb_index(self.sl_dir, self.kb)
             findings = sum(1 for entry in entries if entry["kind"] == "finding")
             say(f"campaign: knowledge base indexed, {findings} finding(s)")
+        # SPEC section 5.10: the search index, refreshed before anything is instrumented.
+        # It reads the code at HEAD, so it never sees instrumentation either way.
+        try:
+            search_build(self.repo, self.sl_dir, self.config)
+        except (Abort, OSError, subprocess.CalledProcessError) as error:
+            say(f"warning: search index not refreshed: {error}")
+        self.search = search_ready(self.sl_dir)
         self.targets = profile_targets(self.repo, self.profile_name)
         ids = [path.stem for path in paths]
         meta = {
@@ -4833,7 +5793,7 @@ class Campaign:
                 self.common_values(),
                 ACTOR=actor,
                 ACTOR_DIR=actor_dir,
-                QUERY=kb_query_help(subsystem) if self.kb else "",
+                QUERY=kb_query_help(subsystem, kb=bool(self.kb), search=self.search),
                 SUBSYSTEM_RULES=subsystem_prompt(self.sl_dir, subsystem, "instrument"),
             )
             prompt = compose(self.sl_dir, "instrument.md", "instrument-beacons.md", values)
@@ -5524,6 +6484,34 @@ def main(argv):
     kb_show_parser.add_argument("identifier", metavar="IDENTIFIER")
     # Section names contain spaces ("Root Cause"), so accept them unquoted too.
     kb_show_parser.add_argument("section", nargs="*", metavar="SECTION")
+    kb_search_parser = queries.add_parser(
+        "search",
+        help="snippets ranked by meaning and words: findings, design documents, comments, docs",
+    )
+    kb_search_parser.add_argument("question", nargs="+", metavar="QUESTION", help="plain words")
+    kb_search_parser.add_argument(
+        "--path", action="append", metavar="PATH", help="only code and docs under PATH (repeatable)"
+    )
+    kb_search_parser.add_argument(
+        "--source", action="append", choices=SEARCH_SOURCES, help="only these sources (repeatable)"
+    )
+    kb_search_parser.add_argument("--tests", action="store_true", help="include test code")
+    kb_search_parser.add_argument(
+        "-k", "--limit", type=int, default=SEARCH_LIMIT, help=f"hits to print (default {SEARCH_LIMIT})"
+    )
+    search_index = commands.add_parser(
+        "search-index",
+        help="build or update the search index of `kb search`",
+        description=(
+            "Indexes the findings' state-bearing sections, the kb/ and context/ documents of "
+            "the knowledge base, and the comments, doc comments and Markdown of this "
+            "repository at HEAD, in extract/search/ (SPEC section 5.10). Downloads the model "
+            "when it is not on disk yet; embeds on the CPU."
+        ),
+    )
+    search_index.add_argument(
+        "--rebuild", action="store_true", help="embed every chunk again instead of updating"
+    )
     code = commands.add_parser(
         "code",
         help="identify entities in the code: definitions, references, callers, callees",
@@ -5669,6 +6657,8 @@ def main(argv):
             return cmd_extract(args)
         if args.command == "kb":
             return cmd_kb(args)
+        if args.command == "search-index":
+            return cmd_search_index(args)
         if args.command == "targets":
             return cmd_targets(args)
         if args.command == "test-gate":

@@ -27,7 +27,7 @@ You run from the root of the repository, so bind the script once:
     python3 $SL ast sites <NAME>      # write / maybe / init / read, per site
     python3 $SL ast notes [PATH]      # comments on races and recovery
 
-    python3 $SL kb find|cites|grep|show
+    python3 $SL kb search|find|cites|grep|show
 
 plus reading files and `rg`. All of `code` and `ast` hide test code unless given `--tests`,
 because nearly three quarters of this crate is test code sharing files with the code it exercises.
@@ -50,9 +50,11 @@ it knows what has gone wrong in it.
 
 Semantic -- why does nullification preserve this where finalization clears it, why must these
 two rules agree, what property does this state implement -- is what `kb` is for. Reach for it
-when you can say exactly what you know and exactly what you cannot explain. The source
-establishes what the code does; a finding explains why it matters, and may be older than the
-code.
+when you can say exactly what you know and exactly what you cannot explain, and start with
+`kb search`, which takes that question in plain words and ranks snippets by meaning from the
+findings, the design documents, and the repository's comments and documentation. The source
+establishes what the code does; a finding or a comment explains why it matters, and may be
+older than the code.
 
 ### The loop
 

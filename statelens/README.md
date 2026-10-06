@@ -37,6 +37,8 @@ with network access.
   campaign warns and continues without an index.
 - For issues: `gh` (logged in) or network access for `curl`. For PDF papers: `pdftotext`
   or the Python `pypdf` module; without either, the agent gets the PDF as is.
+- For `kb search`, the Python packages numpy and sentence-transformers. No GPU is needed;
+  `just search-index` downloads the embedding model the first time.
 - For the `qmdb` profile, an open-file limit well above 256, the macOS default. One test of
   its gate opens more files than that and fails with `Too many open files`, with or without
   instrumentation. Raise the limit in the shell that runs `just campaign`, `just fuzz` or
@@ -139,6 +141,7 @@ python3 scripts/statelens.py kb find --registry marshal certification
 python3 scripts/statelens.py kb cites --registry marshal consensus/src/marshal/core
 python3 scripts/statelens.py kb grep --registry marshal "availability waiters"
 python3 scripts/statelens.py kb show <identifier> "Root Cause"
+python3 scripts/statelens.py kb search --registry marshal "why can the floor move while backfill is in flight"
 ```
 
 `kb cites` is the one to start from: it turns a path in this repository into the findings
@@ -146,6 +149,27 @@ about that code, with the files and symbols each one names. Queries see only the
 whose `module` belongs to the subsystem being instrumented, and only the state-bearing
 sections of each; the impact, exploitation, reachability and fix sections are not reachable
 through the interface.
+
+`kb search` answers a question in plain words. It ranks snippets by meaning as well as by
+the words you chose, from four sources: the findings in scope, the design documents in the
+knowledge base's `kb/` and `context/`, and the comments, doc comments and Markdown of this
+repository. A code hit names `path:line@commit` and the item the comment documents or sits
+in; test code is left out unless you pass `--tests`, and `--path` narrows the code and
+documentation to a directory. It answers from an index you build or update with
+
+```
+just search-index              # update: embeds only what changed since the last build
+just search-index --rebuild    # embed everything again
+just search "add_nullification"                    # ask it, as the agent does
+just search --registry qmdb --path storage/src/qmdb "stale batch"
+```
+
+The index lives in the git-ignored `extract/search/`. It reads this repository at HEAD, so
+a hit's line holds at that commit even in an instrumented checkout. It embeds on the CPU with
+the model `STATELENS_SEARCH_MODEL` names, which it downloads the first time; a query never
+uses the network. A first build takes about a minute, an update about ten seconds, and a
+campaign updates the index before it instruments. Without a knowledge base the index holds
+the repository alone, and without the model `kb search` ranks by words only.
 
 A finding is evidence, never a property: it can aim a probe, and never becomes an assertion.
 Without `STATELENS_KB` a campaign still runs, with beacons mined from the code alone.

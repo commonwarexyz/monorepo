@@ -24,10 +24,14 @@ happens to certification when it is: that is a query, not a guess.
 {{QUERY}}
 
 The knowledge base holds findings reported against this workspace, each with a summary, the
-state it concerns, and the files and symbols it cites. `kb cites {{ACTOR_DIR}}` is the
-fastest way to see which of them are about the code in front of you, and what they name.
-When nothing is listed above, there is no knowledge base configured: work from the code
-alone.
+state it concerns, and the files and symbols it cites, and the design documents beside them.
+`kb cites {{ACTOR_DIR}}` is the fastest way to see which findings are about the code in front
+of you, and what they name. `kb search` takes a question in plain words and ranks by meaning
+as well as by the words you chose, across the findings, the design documents, and the
+comments, doc comments and Markdown of the whole repository. Ask it what the source raises
+and does not answer -- why an assumption holds, what happens when it fails -- and read the
+code a hit points at before you rely on it. When nothing is listed above, there is neither a
+knowledge base nor a search index: work from the code alone.
 
 A finding tells you which states have gone wrong before, so a state it describes is worth
 probing even when the code looks unremarkable. It never tells you to add an assertion: a

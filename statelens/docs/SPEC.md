@@ -88,6 +88,17 @@ cargo-fuzz, and one temporary probe at the start of the batcher gave the guard a
   logs `amnesia_restart(node=0)` before the panic.
 - In the same mode, the Standard and Chaos variants ran 503 and 127 inputs without it.
 
+`kb search` (section 5.10) was exercised on this checkout at commit `7b5ab24d1f10`, without an
+agent: a first build, an update with nothing changed, and queries about Simplex
+certification, qmdb batches, findings and design documents, each with relevant hits. After a
+review on 2026-10-06, no chunk of the rebuilt index exceeds the model's window by its
+tokenizer, every chunk of the files that test-only declarations name is test code, and an
+update interrupted before its manifest switch leaves the previous generation intact. Two
+refreshes run at once, with a query between them, left one current and consistent
+generation. The script tests of section 5.9 cover chunking, test code, updates,
+interruption, overlapping refreshes and scope. No campaign has run with the search index
+yet.
+
 The knowledge base and the audit pass were first exercised with a real agent on 2026-10-05,
 at commit `86eed8302c`, with Claude:
 
@@ -141,9 +152,9 @@ them; the last column names the PRD requirement.
 | D23 | A campaign does not run the fuzzer, in any profile. It ends after the test gate with the result `READY`, and prints, for each StateLens target, the command that runs it and the command that replays a crash. The operator runs the targets with `just run`, and chooses which ones, for how long, and with which libFuzzer arguments. The campaign passes no arguments to libFuzzer. Exit codes 5 and 6 are retired. | R-P2-2 step 7, R-P2-3, R-P3-1 |
 | D31 | Beacon discovery happens inside the campaign's beacon step, not as a separate phase with its own artifact. The knowledge base is private and an instrumented checkout is never pushed, so nothing has to cross a reviewed boundary between them. | R-FB-4 |
 | D32 | The knowledge base stays outside this repository and is read-only. `STATELENS_KB` names its roots, and an empty value disables beacon extraction and `extract kb` without affecting anything else. | R-KB-1 to R-KB-3 |
-| D33 | Retrieval is a structured index over the findings' claim fields plus full-text search of their prose sections. No vector store and no embedding service. | R-KB-4 |
+| D33 | Retrieval is a structured index over the findings' claim fields plus full-text search of their prose sections, and, for `kb search`, a local vector index (D58). No vector database and no hosted embedding service. | R-KB-4, R-KB-9 |
 | D37 | A finding's state and remediation status are shown to the instrumenter, not used to filter findings out. Weak evidence costs coverage, not correctness. | R-KB-8 |
-| D42 | The beacon step is an agent loop over actions (read code, the five `kb` queries, add a probe), not a fixed procedure. Reading code leads, and a query is what the agent does when its hypothesis needs developer context. How long to spend on a candidate is the agent's judgment; there is no step budget. | R-FB-4 |
+| D42 | The beacon step is an agent loop over actions (read code, the six `kb` queries, add a probe), not a fixed procedure. Reading code leads, and a query is what the agent does when its hypothesis needs developer context. How long to spend on a candidate is the agent's judgment; there is no step budget. | R-FB-4 |
 | D43 | Entities are identified from a SCIP index built once before instrumentation, not from a language server queried during it, and startup is paid for one campaign rather than one query. Instrumentation moves the lines the index names, so the build snapshots the sources it indexed and each query rebases its hits through a diff instead of rebuilding: a diff of a file of this crate's median size costs a few milliseconds, against about eight minutes for an index. | R-AG-4 |
 | D44 | The SCIP protobuf is decoded with the standard library, not a protobuf package, so the subproject keeps its stdlib-only rule. Only the five fields the four queries need are read. | R-AG-4, R-LAYOUT-2 |
 | D45 | Sites in test code are hidden unless asked for. Nearly three quarters of the crate is test code sharing files with the code it exercises, so the unfiltered answer is mostly noise. | R-AG-4 |
@@ -152,6 +163,7 @@ them; the last column names the PRD requirement.
 | D55 | Invariants derived from knowledge-base findings (`extract kb`) are written to a local registry, `SL/invariants.local/<subsystem>/`, which git ignores and campaigns bind like the tracked one. A finding is private and the repository is public, so nothing derived from one is committed (R-KB-6); an operator who wants such an invariant shared rewrites it without the finding's detail and moves it by hand. IDs stay global across both. | R-KB-6, R-P1-7 |
 | D56 | `extract --number N` bounds an extraction: the prompt asks for the N invariants the sources justify best and allows fewer, never more, and the script reports more than N as a problem. A quota would make the agent invent invariants to reach it. | R-P1-7 |
 | D57 | The simplex profile derives a variant from every `simplex_*` target, as the marshal and qmdb profiles do, rather than from a curated list. Every runner that runs a real engine under a Byzantine identity therefore publishes that identity: the Twins runner (edit 6), and the ByzzFuzz, Chaos-Twins, audited Standard and Mallory runners (edits 9 to 12, Appendix B.5). The other drivers run none: Standard and FaultyNet make their Byzantine nodes `Disrupter`s, Mallory's Byzantine roles are adversary actors, and Chaos has no Byzantine node. Mallory's Honest-role node becomes Byzantine only through an amnesia restart, which its hook publishes. | G4, G5, R-S-NF-2 |
+| D58 | `kb search` fuses two rankings by reciprocal rank: BM25 over words and identifier parts, and the cosine similarity of embeddings from a small pretrained model run on the CPU, all-MiniLM-L6-v2 unless `STATELENS_SEARCH_MODEL` names another. A small model misses exact identifiers, which BM25 finds, and BM25 misses paraphrase, which the model finds. The vectors are one flat file of 32-bit floats searched by brute force, which answers in milliseconds at this size, so there is no vector database. The script still imports with the standard library alone: numpy and sentence-transformers are loaded only to embed, and without them the search ranks by words. The index reads the code and the documentation at HEAD through git, so a hit's `path:line@commit` holds in an instrumented checkout and instrumentation never enters the index. | R-KB-9 |
 | D48 | The instrument step ends with an audit pass over its own bindings, after the beacon probes so that no agent edits the audited tree, by the same agent and under the same rules, and the plan carries a `Sites` ledger the pass and `lint-plan` both read. A first pass writes a binding and its own status in one go, and nothing there compares the two, so a binding that watches where an action is decided rather than where it is committed passes as `bound`. | R-INS-8, R-P2-2 |
 
 D24 to D30 concern marshal only; they are in section 8.2. D49 to D54 concern qmdb only; they
@@ -436,6 +448,11 @@ STATELENS_FUZZ_TOOLCHAIN=
 # tracked file.
 STATELENS_KB=
 
+# Embedding model of `kb search`: a Hugging Face name or a local directory. `just
+# search-index` downloads it when it is not on disk yet and embeds on the CPU; a
+# query never uses the network.
+STATELENS_SEARCH_MODEL=sentence-transformers/all-MiniLM-L6-v2
+
 # Audit pass over the bindings, after the beacon step: 0 skips it. It costs one
 # agent run per batch and is what keeps a plan's Status honest.
 STATELENS_AUDIT=1
@@ -473,7 +490,9 @@ network access for `curl`. Phase 1 with PDF papers uses `pdftotext` or the Pytho
 one readable corpus root. The code index (section 5.7) needs `rust-analyzer`; without it a
 campaign warns and continues. `just coverage` (section 7.13) needs the fuzz toolchain's
 `llvm-tools-preview` component. The `qmdb` test gate needs an open-file soft limit well above
-256, the macOS default (section 17.6).
+256, the macOS default (section 17.6). `kb search` (section 5.10) needs the Python packages
+numpy and sentence-transformers to rank by meaning, and ranks by words without them;
+`just search-index` downloads its model the first time. No GPU is needed.
 
 ### 5.3 `justfile` (verbatim)
 
@@ -654,6 +673,14 @@ coverage *args:
 code-index *args:
     python3 scripts/statelens.py code build "$@"
 
+# Build or update the search index of `kb search`: just search-index [--rebuild]
+search-index *args:
+    python3 scripts/statelens.py search-index "$@"
+
+# Ask the search index a question: just search [--registry R] [--path P] QUESTION...
+search *args:
+    python3 scripts/statelens.py kb search "$@"
+
 # Identify an entity in the code: just code <defs|refs|callers|callees> <NAME>
 code query name *args:
     python3 scripts/statelens.py code "$@"
@@ -702,7 +729,8 @@ prefixed with `statelens:`.
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
 | `excerpts` | `excerpts [--check] [PATH...]`; writes the Source excerpts section of each invariant file (default: every registry file) from its pinned citations (section 4.3). With `--check` it writes nothing and lists the files whose section is missing or stale | 0 done, 3 stale files under `--check` |
 | `extract` | `extract [--agent A] [--registry R] [--number N] KIND [SOURCE...]`, where `R` is `simplex` (default), `marshal` or `qmdb`; `N` bounds how many invariants the run writes (D56); `kb` reads knowledge-base findings and writes to the local registry (D55) | 0 done (including zero files), 1 usage, 2 agent failed, 3 problems: a lint problem, an existing invariant modified, a write outside the registry, or a change anywhere else in the worktree |
-| `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, a section that is not state-bearing, or a section asked of a document, 2 no readable corpus root |
+| `kb` | `kb modules [--registry R]`, `kb find [--registry R] TERM...`, `kb grep [--registry R] TEXT`, `kb cites [--registry R] PATH`, `kb show [--registry R] IDENTIFIER [SECTION]` (section 5.6), and `kb search [--registry R] [--path P]... [--source S]... [--tests] [-k N] QUESTION...` (section 5.10) | 0 done, including no hits, 1 usage, an identifier out of the registry's scope, a section that is not state-bearing, a section asked of a document, or no search index, 2 no readable corpus root, for every query but `search` |
+| `search-index` | `search-index [--rebuild]`; builds or updates the index of `kb search` (section 5.10) | 0 built with the model, 2 built without it, so that `kb search` ranks by words only |
 | `lint-examples` | `lint-examples [PATH...]`; with no path it checks every `*.md` in `examples/` | 0 clean, 3 problems |
 | `lint-plan` | `lint-plan [--profile P] [PATH...]`; with no path it checks `SL/campaign/plan.md`, and with no `--profile` it takes the profile from `SL/campaign/meta.json`, else `simplex`, so the bare command the audit prompt gives checks the campaign's own registries. A section per registry invariant of the profile; a valid `Status`; the fields that status needs (section 11); a `Sites` ledger whose entries each name a source and say `checked` or `not checked`, and leave nothing unchecked when the status is `bound`; an assertion naming the invariant in the function of every entry marked `checked`; and, for every invariant the plan claims to bind, an `sl_assert!` or `sl_implies!` call in the instrumented code that names it. It judges the claims the plan makes; a commit site the ledger never names is what the audit pass (section 7.3) is for | 0 clean, 3 problems |
 | `lint-prompts` | `lint-prompts [--write]`; compares every file in `prompts/` with its copy in section 13. `--write` refreshes the copies from the files and reports what it could not fix | 0 clean, 3 problems |
@@ -800,6 +828,7 @@ repository root, and gets back only what they print (D33):
 | `kb grep TEXT` | Up to 40 snippets from the state-bearing sections and the documents, each with its identifier or path, the section name, and three lines of context, kept inside the section the hit is in |
 | `kb cites PATH` | Up to 20 findings that cite a file under `PATH`, most citations first; per hit the identifier, state, how many citations, remediation status, `summary`, which of its files fall under `PATH`, and its symbols |
 | `kb show IDENTIFIER [SECTION]` | One finding's claim block, the files and symbols it cites and the names of its state-bearing sections, or one of those sections. For a document, whose identifier is its path and which has neither, the whole text; a section asked of a document is refused |
+| `kb search QUESTION` | Up to 10 snippets, or up to 40 with `-k`, ranked by meaning and by words, from the findings in scope, the `kb/` and `context/` documents, and this repository's comments, doc comments and Markdown (section 5.10) |
 
 Each is `python3 statelens/scripts/statelens.py kb <subcommand>`. The
 `--registry` flag defaults to `simplex`, so the command lines rendered into the prompt pass
@@ -823,7 +852,7 @@ reachable through the interface at all. Every command prints the corpus root of 
 because one identifier can occur in two roots.
 
 **Retrieval is an action, not a prologue.** The prompt gives the agent a loop rather than a
-procedure: at each step it chooses between reading code, one of the five `kb` queries, and
+procedure: at each step it chooses between reading code, one of the six `kb` queries, and
 writing a beacon. Reading code leads, because a candidate announces itself there as an enum, a
 `debug_assert!`, a per-view flag or a comment about a race. A query is what the agent does
 when its hypothesis needs context the source does not carry: what an assumption means, why it
@@ -1015,9 +1044,96 @@ read a syntax tree skip when rust-analyzer is absent. Two classes cover claims r
 mechanics: `PlanClaims`, a plan whose `Status` promises more than its own `Sites` ledger or
 the instrumented code supports, and `PromptCopies`, a prompt that has drifted from its
 verbatim copy in section 13. `QmdbProfile` materializes the qmdb profile against the
-checkout itself, without writing, and checks that it touches storage only. Tests write to
+checkout itself, without writing, and checks that it touches storage only. `SemanticSearch`
+builds an index with a fake embedder, so no model is needed, and checks what each source
+contributes, what an update embeds again, and what a query may reach. Tests write to
 temporary directories only, never to `SL/`, and their fixture repositories commit unsigned,
 so a global signing configuration cannot fail them.
+
+### 5.10 Semantic search
+
+`kb search` is the paper's on-demand retrieval: a question in plain words, answered with
+ranked snippets that connect it to files and functions (R-KB-9, D58). It answers from an index
+that `just search-index` builds in `SL/extract/search/`, which git ignores.
+
+**What is indexed.** Four sources, cut along paragraphs into chunks of at most 1,000
+characters, and a longer line between words, each part keeping its line number. With the
+model loaded, a chunk is also halved until its heading and text together fit the model's
+window, measured by its own tokenizer: 256 tokens for MiniLM. Characters say little about
+tokens in identifier-heavy text, and the model ignores whatever lies past its window.
+
+| Source | Chunks | Each carries |
+|---|---|---|
+| `finding` | The state-bearing sections of every finding, the only ones `kb show` serves | Identifier, section, state, modules, severity, remediation status, cited files and symbols |
+| `kb` | The Markdown of each corpus root's `kb/` and `context/`, by heading; `config/` is not indexed | Path, heading, lines |
+| `code` | Every comment block of every Rust file at HEAD: `//!` documents its module, `///` the item after it, and a plain comment the function or item it sits in | `path:line@commit`, the item, and whether it is test code |
+| `doc` | Every Markdown file at HEAD outside `SL/`, by heading | `path:line@commit`, heading |
+
+Lines marked `[statelens]` are never indexed. The code and the documentation are read from
+the commit at HEAD through `git cat-file`, not from the worktree, so a hit's citation holds in
+an instrumented checkout, and instrumentation never reaches the index. The item of a comment
+comes from indentation rather than a parser: walking up, a less indented `impl`, `fn`,
+`struct` or the like encloses it.
+
+**Test code.** A file is test code when its path is test support (`mocks`, a `tests/` or
+`benches/` directory), when a test-only declaration names it, `#[cfg(test)] mod name;` with
+its `#[path]` if it has one, or when it opens with `#![cfg(test)]`. In any other file, each
+item under a test-only `#[cfg(...)]` is test code, from the documentation and attributes
+above it to the brace, `;` or `,` that ends it. Test-only means `test`, or an `all(...)` that
+requires it; `any(test, ...)` is compiled into feature builds too and is not. A file merely
+named `tests.rs` is not test code by its name.
+
+**Files.** A build writes a new generation, a directory `generation-<n>/` holding
+`chunks.jsonl`, each chunk with its text, its metadata and a hash of what is embedded, and
+`vectors.f32`, one row of little-endian 32-bit floats per chunk. It writes the generation
+under a temporary name and renames it into place whole; only then does it switch
+`manifest.json` to name it, by an atomic rename, and remove every other generation. The
+manifest records the generation, the model, the dimension, the commit, the count per
+source, and why there are no vectors when there are none. An interrupted build leaves the
+previous generation current and complete, and a generation whose files do not add up to
+its manifest reads as no index, never as text paired with another text's vector.
+Publication holds `SL/extract/search.lock` exclusively from staging to cleanup, and a query
+holds it shared while it reads the manifest and the generation it names. Two refreshes at
+once, a campaign's and a manual one, therefore take turns, and neither deletes the
+generation the other made current or one a query is reading. The lock is advisory, lives
+beside the index directory so that cleanup never removes it, and is released by the kernel
+if its holder dies.
+
+**Building and updating.** `just search-index` reads every source, reuses the vector of every
+chunk whose embedded text is unchanged, and embeds the rest on the CPU. `--rebuild`, or a
+model other than the one the manifest names, embeds everything again. The model is
+`STATELENS_SEARCH_MODEL`, a Hugging Face name or a local directory. It is loaded from disk
+first and downloaded only when it is not there, so a build that has the model needs no
+network. Without numpy and sentence-transformers, or without the model, the index holds the
+chunks without vectors and the command exits 2. A campaign updates the index during setup,
+where it refreshes the knowledge-base index (section 7.4), before anything is instrumented,
+and continues with a warning when it cannot.
+
+**Querying.** `kb search --registry R QUESTION...` keeps the findings whose `module` passes the
+registry's filter (R-KB-5), the documents, and the code and documentation, without test code
+unless `--tests` is given. `--path` narrows the code and documentation to directories, and
+`--source` narrows the search to some of the four sources. BM25 over words and identifier
+parts ranks the chunks, and so does the cosine similarity of their embeddings to the
+question's; reciprocal rank fusion merges the best 200 of each (D58). A query loads the model
+with the hub offline, so it never uses the network; without vectors or the model it ranks by
+words alone and says why. Ties keep index order, so one index gives one answer.
+
+**Output.** Per hit: its source and where it is, which is a finding's identifier and section,
+a document's path and lines, or a code or documentation `path:line@commit` with the item;
+then up to four lines of its text, and for a finding its state, modules, severity,
+remediation status and cited files and symbols. A last line gives the number of chunks in
+scope, how they were ranked, and the commit of the code and documentation.
+
+**Cost.** Measured on this checkout at commit `7b5ab24d1f10`, with all-MiniLM-L6-v2 on a laptop
+CPU:
+
+| | |
+|---|---|
+| Chunks | 41,172: 36,337 code, 1,270 doc, 3,357 finding, 208 kb |
+| Index size | 63 MB of vectors and 22 MB of chunks |
+| First build | 61 s, embedding 39,810 distinct chunks |
+| Update with nothing changed | 12 s, embedding none; about 5 s of it measures chunks against the window |
+| One query | about 3 s, most of it loading the model |
 
 ---
 
@@ -1249,8 +1365,10 @@ about a race, and it queries the knowledge base when a candidate needs developer
 source does not carry: what an assumption means, why it matters, whether it has failed
 before, or which code manages the transition. The campaign resolves the corpus roots during
 setup (section 7.1) and refreshes the index before the first agent step, so a query costs no
-corpus walk. When `STATELENS_KB` names no readable root, the campaign says so, `QUERY` is
-empty and the step proceeds from the code alone.
+corpus walk. It also updates the search index of section 5.10 there, and `QUERY` carries the
+`kb search` line whenever that index exists. When `STATELENS_KB` names no readable root, the
+campaign says so, `QUERY` holds the `kb search` line at most, and the step proceeds from the
+code and the search index.
 
 ### 7.5 Step 4: finalize the plan and check scope
 
@@ -2512,10 +2630,14 @@ happens to certification when it is: that is a query, not a guess.
 {{QUERY}}
 
 The knowledge base holds findings reported against this workspace, each with a summary, the
-state it concerns, and the files and symbols it cites. `kb cites {{ACTOR_DIR}}` is the
-fastest way to see which of them are about the code in front of you, and what they name.
-When nothing is listed above, there is no knowledge base configured: work from the code
-alone.
+state it concerns, and the files and symbols it cites, and the design documents beside them.
+`kb cites {{ACTOR_DIR}}` is the fastest way to see which findings are about the code in front
+of you, and what they name. `kb search` takes a question in plain words and ranks by meaning
+as well as by the words you chose, across the findings, the design documents, and the
+comments, doc comments and Markdown of the whole repository. Ask it what the source raises
+and does not answer -- why an assumption holds, what happens when it fails -- and read the
+code a hit points at before you rely on it. When nothing is listed above, there is neither a
+knowledge base nor a search index: work from the code alone.
 
 A finding tells you which states have gone wrong before, so a state it describes is worth
 probing even when the code looks unremarkable. It never tells you to add an assertion: a
@@ -2983,7 +3105,7 @@ You run from the root of the repository, so bind the script once:
     python3 $SL ast sites <NAME>      # write / maybe / init / read, per site
     python3 $SL ast notes [PATH]      # comments on races and recovery
 
-    python3 $SL kb find|cites|grep|show
+    python3 $SL kb search|find|cites|grep|show
 
 plus reading files and `rg`. All of `code` and `ast` hide test code unless given `--tests`,
 because nearly three quarters of this crate is test code sharing files with the code it exercises.
@@ -3006,9 +3128,11 @@ it knows what has gone wrong in it.
 
 Semantic -- why does nullification preserve this where finalization clears it, why must these
 two rules agree, what property does this state implement -- is what `kb` is for. Reach for it
-when you can say exactly what you know and exactly what you cannot explain. The source
-establishes what the code does; a finding explains why it matters, and may be older than the
-code.
+when you can say exactly what you know and exactly what you cannot explain, and start with
+`kb search`, which takes that question in plain words and ranks snippets by meaning from the
+findings, the design documents, and the repository's comments and documentation. The source
+establishes what the code does; a finding or a comment explains why it matters, and may be
+older than the code.
 
 ### The loop
 
@@ -3252,7 +3376,7 @@ source proves, what the tools prove, what a finding explains, and what you are g
 | AC-6 | `STATELENS_FALSE_INVARIANTS=1 just campaign`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
 | AC-7 | In an instrumented checkout, for each simplex variant: `STATELENS_BYZANTINE=panic just run <variant> -- -max_total_time=120`, then the same without the variable. `simplex_cert_mock_statelens`, whose `Standard` driver runs no engine under a Byzantine identity, is the negative control. | With the variable, the variants whose adversary runs a real Simplex engine (PRD section 8.4) panic with `[statelens][BYZANTINE]`, `simplex_cert_mock_audit_statelens` only once an input draws the RejectView choice and `simplex_cert_mock_mallory_statelens` only after an amnesia restart, and no other variant does. Without it, none does. `[statelens] participant index mismatch` never appears. Verified for the Twins runner at the reference commit, and for the hooks of Appendix B.5 with a temporary probe (section 1.2). |
 | AC-8 | `just run simplex_cert_mock_twins_mutator_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
-| AC-14 | With `STATELENS_KB` set to a findings corpus, run the queries of section 5.6 by hand for each registry: `kb modules`, `kb find`, `kb cites <a component directory>`, `kb grep`, `kb show`. | Every command answers from the index; `find` and `cites` return only findings whose `module` is in that subsystem's filter; `cites` returns the findings that name files under the directory, with those files listed; `show` refuses a section that is not state-bearing and an identifier out of scope. |
+| AC-14 | With `STATELENS_KB` set to a findings corpus, run the queries of section 5.6 by hand for each registry: `kb modules`, `kb find`, `kb cites <a component directory>`, `kb grep`, `kb show`; then `just search-index` and `kb search` with a question. | Every command answers from the index; `find` and `cites` return only findings whose `module` is in that subsystem's filter; `cites` returns the findings that name files under the directory, with those files listed; `show` refuses a section that is not state-bearing and an identifier out of scope; `search` returns hits from the findings in scope, the documents, the code and the Markdown, never a finding out of scope or a section `show` refuses, and names `path:line@commit` and the item for a code hit. |
 | AC-15 | `STATELENS_KB=` with a campaign. | The campaign warns that there is no knowledge base, renders the beacon step with no query commands, and still reaches `READY`. |
 | AC-16 | A campaign with an invariant whose action is committed in a handler, then the same campaign with `STATELENS_AUDIT=0`. | With the pass: the invariant's `Sites` ledger names the commit site, the `Status` matches the ledger, and the `audit` and `plan` lines report it. Without it: no `audit` line, and the campaign still reaches `READY`. |
 | AC-17 | `just check-plan` on a plan whose `bound` section leaves a commit site unchecked, and on a clean one; `just check-prompts` after editing a prompt, and after `--write`. | Exit 3 naming the section or the prompt, and exit 0 when clean. |
@@ -3330,6 +3454,14 @@ variants. Section 17.5 gives AC-18 to AC-20 for the qmdb profile.
   Appendix B.5; without one, the guard checks that replica as an honest one.
 - The runtime module relies on the deterministic runtime running tasks on the calling
   thread (`Runner::start` calls `start_and_recover` on the same thread).
+- `kb search` uses a small general-purpose model by default. Its window of 256 word pieces
+  makes chunks short, it ranks identifiers poorly, which BM25 makes up for, and it knows
+  nothing of Rust. A comment's item comes from indentation, so an unusual layout can name
+  the wrong container, and a word longer than the window is left whole and truncated.
+- The search index describes the commit it was built at. A hit's line holds at that
+  commit, and the code index (section 5.7) says where the item is now.
+- The index lock is a POSIX advisory `flock`, so the index belongs on a local file system,
+  where every process that builds or queries it honors the lock.
 
 ---
 

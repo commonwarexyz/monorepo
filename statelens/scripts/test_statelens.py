@@ -17,9 +17,11 @@ import importlib.util
 import json
 import pathlib
 import shutil
+import struct
 import subprocess
 import tempfile
 import sys
+import threading
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -3183,6 +3185,401 @@ class PlanProfile(unittest.TestCase):
     def test_an_unknown_campaign_profile_is_refused(self):
         code, _output = self.lint(profile="nonsense")
         self.assertEqual(code, 1)
+
+def fake_embed(texts):
+    """Unit vectors of letter counts: deterministic, and no model to load."""
+    import math
+
+    rows = []
+    for text in texts:
+        row = [0.0] * 8
+        for char in text.lower():
+            if char.isalpha():
+                row[ord(char) % 8] += 1.0
+        norm = math.sqrt(sum(value * value for value in row)) or 1.0
+        rows.append([value / norm for value in row])
+    return rows
+
+
+class SemanticSearch(unittest.TestCase):
+    """`kb search` and its index (SPEC section 5.10): what is chunked, what each chunk says
+    it belongs to, what an update re-embeds, and what a query may reach."""
+
+    RUST = (
+        "//! Module docs explain the voter state machine and its rounds.\n"
+        "use std::fmt;\n"
+        "\n"
+        "/// The state of one round of the voter state machine.\n"
+        "pub struct Round {\n"
+        "    /// The view this round belongs to, set once at creation.\n"
+        "    view: u64,\n"
+        "}\n"
+        "\n"
+        "impl Round {\n"
+        "    /// Records the proposal and broadcasts it to every peer.\n"
+        "    #[inline]\n"
+        "    pub fn propose(&mut self) {\n"
+        "        loop {\n"
+        "            // Wait until the leader has proposed before voting here.\n"
+        "            break;\n"
+        "        }\n"
+        "        // [statelens] INV-0001\n"
+        "        let _ = 1;\n"
+        "    }\n"
+        "}\n"
+        "\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    // Builds a round by hand and checks that proposing twice is refused.\n"
+        "    fn t() {}\n"
+        "}\n"
+    )
+    FINDING = (
+        "# {identifier}\n\n```claim\nmodule: {module}\nsummary: {summary}\n"
+        "severity_current: low\nremediation_status: fixed\n```\n\n"
+        "## Root Cause\n\n{cause}\n\n## Impact\n\nexploit detail the search must never reach\n"
+    )
+
+    def test_rust_chunks_name_the_item_they_belong_to(self):
+        chunks = sl.search_rust_chunks("consensus/src/simplex/actors/voter/round.rs", self.RUST, "c0ffee")
+
+        def chunk(start):
+            return next(item for item in chunks if item["text"].startswith(start))
+
+        self.assertEqual(chunk("Module docs")["item"], "consensus::simplex::actors::voter::round")
+        self.assertEqual(chunk("Module docs")["kind"], "module")
+        self.assertEqual(chunk("Module docs")["lines"], [1, 1])
+        self.assertEqual(chunk("The state")["item"], "Round")
+        self.assertEqual(chunk("The view")["item"], "Round::view")
+        self.assertEqual(chunk("Records")["item"], "Round::propose")
+        self.assertEqual(chunk("Wait")["item"], "Round::propose")
+        self.assertEqual(chunk("Wait")["kind"], "comment")
+        self.assertEqual(chunk("Wait")["lines"], [15, 15])
+        self.assertFalse(chunk("Wait")["test"])
+        self.assertTrue(chunk("Builds")["test"])
+        self.assertNotIn("INV-0001", "".join(item["text"] for item in chunks))
+        self.assertTrue(all(item["commit"] == "c0ffee" for item in chunks))
+
+    def test_markdown_chunks_carry_their_headings_and_skip_fences(self):
+        text = (
+            "# Guide\n\nThe guide explains how replicas agree on blocks.\n\n"
+            "## Safety\n\n```\n# not a heading inside a fence\n```\n"
+            "The safety argument relies on quorum intersection.\n"
+        )
+        chunks = sl.search_markdown_chunks(text)
+        self.assertEqual([chunk["section"] for chunk in chunks], ["Guide", "Guide > Safety"])
+        self.assertIn("# not a heading", chunks[1]["text"])
+        self.assertEqual(chunks[0]["lines"], [3, 3])
+
+    def test_long_text_is_cut_between_paragraphs(self):
+        numbered = [(number, f"line {number} " + "x" * 300) for number in range(1, 9)]
+        pieces = sl.search_pieces(numbered)
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(all(len(text) <= sl.SEARCH_CHUNK_CHARS for _, _, text in pieces))
+        self.assertEqual(pieces[0][0], 1)
+        self.assertEqual(pieces[-1][1], 8)
+
+    GATED = (
+        "/// Production helper, documented for every build.\n"
+        "pub fn live() {\n"
+        "    // A production comment that the search should offer by default.\n"
+        "}\n"
+        "\n"
+        "/// Returns whether certification was aborted, for tests only.\n"
+        "#[cfg(test)]\n"
+        "pub fn is_aborted(&self) -> bool {\n"
+        "    // Reads the flag that the tests set by hand before asserting.\n"
+        "    true\n"
+        "}\n"
+        "\n"
+        "/// Back in production once the gated item has ended.\n"
+        "pub fn after() {}\n"
+    )
+
+    def test_gated_items_and_test_files_are_test_code(self):
+        chunks = sl.search_rust_chunks("consensus/src/simplex/actors/voter/state.rs", self.GATED, "c")
+        test = {chunk["text"].split()[0]: chunk["test"] for chunk in chunks}
+        self.assertEqual(test, {"Production": False, "A": False, "Returns": True, "Reads": True, "Back": False})
+        declared = sl.search_test_modules({
+            "storage/src/qmdb/any/sync/mod.rs": "#[cfg(test)]\npub(crate) mod tests;\n",
+            "runtime/src/iouring/runtime.rs": '#[cfg(test)]\n#[path = "tests.rs"]\nmod tests;\n',
+            "consensus/src/x/mod.rs": "#[cfg(test)]\nmod fixtures;\npub mod live;\n",
+            "consensus/src/x/y.rs": "#[cfg(all(test, feature = \"std\"))]\npub(crate) mod helpers;\n",
+            "math/src/lib.rs": "#[cfg(any(test, feature = \"arbitrary\"))]\npub mod test;\n",
+        })
+        for path in ("storage/src/qmdb/any/sync/tests.rs", "runtime/src/iouring/tests.rs",
+                     "consensus/src/x/fixtures.rs", "consensus/src/x/fixtures/mod.rs",
+                     "consensus/src/x/fixtures/deep.rs", "consensus/src/x/y/helpers.rs"):
+            chunk = sl.search_rust_chunks(path, self.GATED, "c", test_modules=declared)
+            self.assertTrue(all(item["test"] for item in chunk), path)
+        # Compiled into feature builds as well, so not test code; nor is a file merely
+        # named tests.rs that no test-only declaration names.
+        for path in ("math/src/test.rs", "consensus/src/x/live.rs", "tools/src/tests.rs"):
+            chunk = sl.search_rust_chunks(path, self.GATED, "c", test_modules=declared)
+            self.assertFalse(chunk[0]["test"], path)
+
+    def test_long_lines_are_split_and_keep_their_line(self):
+        numbered = [(7, " ".join(["word"] * 900))]
+        pieces = sl.search_pieces(numbered)
+        self.assertGreater(len(pieces), 1)
+        self.assertTrue(all(len(text) <= sl.SEARCH_CHUNK_CHARS for _, _, text in pieces))
+        self.assertTrue(all((first, last) == (7, 7) for first, last, _ in pieces))
+
+    def test_chunks_fit_the_model_window_with_their_heading(self):
+        def fits(text):
+            return len(text.split()) <= 40
+
+        numbered = [(number, f"line {number} " + "alpha beta gamma " * 6) for number in range(1, 13)]
+        pieces = sl.search_pieces(numbered, head="Heading words here", fits=fits)
+        self.assertTrue(all(fits(f"Heading words here\n{text}") for _, _, text in pieces))
+        self.assertEqual(pieces[0][0], 1)
+        self.assertEqual(pieces[-1][1], 12)
+        self.assertEqual(" ".join(" ".join(text.split()) for _, _, text in pieces),
+                         " ".join(" ".join(text.split()) for _, text in numbered))
+
+    def test_identifiers_count_whole_and_in_parts(self):
+        tokens = sl.search_tokens("The CertifyState of try_propose")
+        for token in ("certifystate", "certify", "state", "try_propose", "try", "propose"):
+            self.assertIn(token, tokens)
+        self.assertNotIn("the", tokens)
+
+    def setUp(self):
+        self.repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.corpus = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.corpus, True)
+        self.sl_dir = self.repo / sl.SL
+        self.sl_dir.mkdir()
+        (self.sl_dir / "README.md").write_text("# StateLens\n\nTooling, never indexed by its own search.\n")
+        source = self.repo / "consensus/src/simplex/actors/voter/round.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text(self.RUST)
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs/design.md").write_text(
+            "# Design\n\nA nullification lets replicas skip a view whose leader is slow.\n"
+        )
+        for args in (("init", "-q", "."), ("config", "user.email", "t@example.invalid"),
+                     ("config", "user.name", "t"), ("config", "commit.gpgsign", "false"),
+                     ("add", "-A"), ("commit", "-qm", "base")):
+            subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
+        for state, identifier, module, cause in (
+            ("valid", "SIMPLEX-1", "consensus/simplex", "The voter signs a nullify vote after a finalize vote."),
+            ("valid", "QMDB-1", "storage/qmdb/any", "A stale batch is applied after a fork."),
+        ):
+            path = self.corpus / "findings" / state / f"{identifier}.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.FINDING.format(identifier=identifier, module=module,
+                                                summary=identifier.lower(), cause=cause))
+        for directory, text in (("kb", "Design decision: votes are journaled before they are sent."),
+                                ("context", "Context: the voter, batcher and resolver actors."),
+                                ("config", "Settings of the corpus tooling, never indexed.")):
+            (self.corpus / directory).mkdir()
+            (self.corpus / directory / "note.md").write_text(f"# Note\n\n{text}\n")
+        self.config = {"STATELENS_KB": str(self.corpus), "STATELENS_SEARCH_MODEL": "fake-model"}
+        saved = {name: getattr(sl, name) for name in ("say", "repo_root", "search_embedder")}
+        self.addCleanup(lambda: [setattr(sl, name, value) for name, value in saved.items()])
+        sl.say = lambda message: None
+        sl.repo_root = lambda: self.repo
+        sl.search_embedder = lambda model, offline: (fake_embed, None)
+
+    def calls(self):
+        seen = []
+
+        def embed(texts):
+            seen.extend(texts)
+            return fake_embed(texts)
+
+        return seen, embed
+
+    def test_build_indexes_every_source_and_never_the_tooling_or_config(self):
+        seen, embed = self.calls()
+        manifest = sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        self.assertEqual(manifest["model"], "fake-model")
+        self.assertEqual(set(manifest["sources"]), {"code", "doc", "finding", "kb"})
+        _manifest, chunks, vectors = sl.search_load(self.sl_dir)
+        self.assertEqual(len(vectors), len(chunks) * manifest["dim"] * 4)
+        text = "\n".join(chunk["text"] for chunk in chunks)
+        self.assertNotIn("never indexed", text)
+        self.assertNotIn("exploit detail", text)
+        self.assertIn("journaled before they are sent", text)
+        self.assertIn("the voter, batcher and resolver actors", text)
+        self.assertEqual(len(seen), len({sl.search_text(chunk) for chunk in chunks}))
+
+    def test_an_update_embeds_only_what_changed(self):
+        seen, embed = self.calls()
+        sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        seen.clear()
+        sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        self.assertEqual(seen, [], "an unchanged tree embeds nothing")
+        (self.repo / "docs/design.md").write_text(
+            "# Design\n\nA finalization makes certification below it obsolete.\n"
+        )
+        subprocess.run(["git", "commit", "-qam", "edit"], cwd=self.repo, check=True)
+        sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        self.assertEqual(len(seen), 1)
+        self.assertIn("certification below it obsolete", seen[0])
+        seen.clear()
+        sl.search_build(self.repo, self.sl_dir, self.config, rebuild=True, embed=embed)
+        self.assertGreater(len(seen), 1, "a rebuild embeds every chunk again")
+
+    def test_the_index_reads_the_code_at_head_not_the_worktree(self):
+        _seen, embed = self.calls()
+        source = self.repo / "consensus/src/simplex/actors/voter/round.rs"
+        source.write_text("// [statelens] beacon:x\n// An uncommitted edit, invisible to the index.\n")
+        sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        _manifest, chunks, _vectors = sl.search_load(self.sl_dir)
+        self.assertNotIn("uncommitted edit", "\n".join(chunk["text"] for chunk in chunks))
+
+    def search(self, *question, **flags):
+        args = argparse.Namespace(
+            question=list(question), registry=flags.get("registry", "simplex"),
+            source=flags.get("source"), path=flags.get("path"),
+            tests=flags.get("tests", False), limit=flags.get("limit", 40),
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(sl.cmd_kb_search(args), 0)
+        return output.getvalue()
+
+    def test_a_query_reaches_only_what_is_in_scope(self):
+        _seen, embed = self.calls()
+        sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        found = self.search("voter nullify finalize vote")
+        self.assertIn("SIMPLEX-1", found)
+        self.assertNotIn("QMDB-1", found, "a finding outside the registry's modules")
+        self.assertNotIn("proposing twice", found, "test code is hidden by default")
+        self.assertIn("proposing twice", self.search("proposing twice refused", tests=True))
+        self.assertIn("ranked by meaning and by words (fake-model)", found)
+        code = self.search("leader proposed voting", path=["docs"])
+        self.assertNotIn("round.rs", code, "--path narrows the code")
+        self.assertIn("consensus/src/simplex/actors/voter/round.rs:15@", self.search("leader proposed voting"))
+
+    def test_without_vectors_a_query_ranks_by_words(self):
+        sl.search_embedder = lambda model, offline: (None, "no model here")
+        manifest = sl.search_build(self.repo, self.sl_dir, self.config)
+        self.assertIsNone(manifest["model"])
+        folder = self.sl_dir / sl.SEARCH_DIR / manifest["generation"]
+        self.assertTrue((folder / "chunks.jsonl").is_file())
+        self.assertFalse((folder / "vectors.f32").exists())
+        found = self.search("stale batch applied fork", registry="qmdb")
+        self.assertIn("QMDB-1", found)
+        self.assertIn("ranked by words only (no model here)", found)
+
+    def assert_vectors_match_texts(self):
+        manifest, chunks, vectors = sl.search_load(self.sl_dir)
+        dim = manifest["dim"]
+        for index, chunk in enumerate(chunks):
+            stored = struct.unpack_from(f"<{dim}f", vectors, index * dim * 4)
+            expected = fake_embed([sl.search_text(chunk)])[0]
+            self.assertTrue(
+                all(abs(a - b) < 1e-5 for a, b in zip(stored, expected)),
+                f"chunk {index} has another text's vector: {chunk['text'][:50]!r}",
+            )
+
+    def test_an_interrupted_update_leaves_a_consistent_index(self):
+        _seen, embed = self.calls()
+        sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        (self.repo / "docs/design.md").write_text(
+            "# Design\n\nA finalization makes certification below it obsolete.\n"
+        )
+        subprocess.run(["git", "commit", "-qam", "edit"], cwd=self.repo, check=True)
+        replace, calls = os.replace, []
+
+        def failing(source, target):
+            calls.append(target)
+            if len(calls) == 2:
+                raise OSError("injected write failure")
+            return replace(source, target)
+
+        os.replace = failing
+        try:
+            with self.assertRaises(OSError):
+                sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        finally:
+            os.replace = replace
+        self.assert_vectors_match_texts()
+        sl.search_build(self.repo, self.sl_dir, self.config, embed=embed)
+        self.assert_vectors_match_texts()
+
+    MANIFEST = {"chunks": 1, "dim": 0, "model": None}
+
+    def test_overlapping_publications_take_turns(self):
+        # Two refreshes at once, say a campaign's and a manual one: without a lock, the
+        # first one's cleanup deleted the generation the second had just made current.
+        sl.search_publish(self.sl_dir, [{"text": "initial"}], [], self.MANIFEST)
+        switched, release, b_done, errors = threading.Event(), threading.Event(), threading.Event(), []
+        replace = os.replace
+
+        def pausing(source, target):
+            replace(source, target)
+            if threading.current_thread().name == "a" and pathlib.Path(target).name == "manifest.json":
+                switched.set()
+                release.wait(10)
+
+        def publish(text, done=None):
+            try:
+                sl.search_publish(self.sl_dir, [{"text": text}], [], self.MANIFEST)
+            except Exception as error:  # reported by the assertion below
+                errors.append(error)
+            if done is not None:
+                done.set()
+
+        os.replace = pausing
+        try:
+            first = threading.Thread(target=publish, args=("generation A",), name="a")
+            first.start()
+            self.assertTrue(switched.wait(10))
+            second = threading.Thread(target=publish, args=("generation B", b_done), name="b")
+            second.start()
+            self.assertFalse(b_done.wait(0.5), "a second publication must wait for the first")
+            release.set()
+            first.join(10)
+            second.join(10)
+        finally:
+            release.set()
+            os.replace = replace
+        self.assertEqual(errors, [])
+        manifest, chunks, _ = sl.search_load(self.sl_dir)
+        self.assertIsNotNone(manifest, "the current generation must exist")
+        self.assertEqual(chunks[0]["text"], "generation B")
+
+    def test_a_query_keeps_its_generation_while_an_update_waits(self):
+        # A refresh used to delete the generation a query had selected and not yet read.
+        sl.search_publish(self.sl_dir, [{"text": "generation A"}], [], self.MANIFEST)
+        read, b_done, errors, threads = sl.search_manifest, threading.Event(), [], []
+
+        def publish():
+            try:
+                sl.search_publish(self.sl_dir, [{"text": "generation B"}], [], self.MANIFEST)
+            except Exception as error:  # reported by the assertion below
+                errors.append(error)
+            b_done.set()
+
+        def selecting(sl_dir):
+            selected = read(sl_dir)
+            if not threads:
+                threads.append(threading.Thread(target=publish))
+                threads[0].start()
+                self.assertFalse(b_done.wait(0.5), "an update must wait for a query reading")
+            return selected
+
+        sl.search_manifest = selecting
+        try:
+            manifest, chunks, _ = sl.search_load(self.sl_dir)
+        finally:
+            sl.search_manifest = read
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(errors, [])
+        self.assertIsNotNone(manifest)
+        self.assertEqual(chunks[0]["text"], "generation A")
+        self.assertEqual(sl.search_load(self.sl_dir)[1][0]["text"], "generation B")
+
+    def test_no_index_is_an_error_that_names_the_command(self):
+        with self.assertRaises(sl.Abort) as caught:
+            self.search("anything")
+        self.assertIn("just search-index", str(caught.exception))
+
 
 class SimplexProfile(unittest.TestCase):
     """The simplex profile derives a variant from every simplex target, as marshal and

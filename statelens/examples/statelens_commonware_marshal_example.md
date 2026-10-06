@@ -79,7 +79,7 @@ this component sees only the findings whose `module` names marshal.
 |---|---|
 | Beacon Summary (section 10), reconstructed state machine (section 30) | no artifact: the agent holds this in its own context and records the result as rows of the plan's beacon table |
 | `M1` to `M9` | local labels for this document. A registry invariant has a global `INV-NNNN` id that `just extract-invariants` assigns, and an EARS statement that names no Rust identifier |
-| `QUERY_KB: "free text"` | one of five commands, shown below |
+| `QUERY_KB: "free text"` | `kb search` with a question in plain words, one of the six commands shown below |
 | the uppercase state values in sections 33 and 34, such as `MATCH`, `READY_VALID`, `GATE_LOST` | this document's own vocabulary for coverage cells, not code identifiers. A probe records small integers, so section 33 shows how such a cell is encoded |
 | a tuple of three to six fields | `sl_probe!(me, "label", a, b)` records exactly **one pair**; section 33 shows the packing |
 
@@ -96,6 +96,7 @@ kb find TERM...               findings whose summary or tags match, with the cod
 kb cites PATH                 findings that cite a file under PATH  <- start here
 kb grep TEXT                  snippets of the state-bearing sections
 kb show IDENTIFIER [SECTION]  one claim block, or one state-bearing section
+kb search QUESTION            snippets ranked by meaning: findings, documents, comments, docs
 ```
 
 The mock KB results below stand in for real findings. `consensus/src/marshal/standard` is
