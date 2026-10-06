@@ -595,11 +595,167 @@ impl G {
     pub fn is_identity(&self) -> bool {
         self.x.is_zero() && self.y.eq(&self.z)
     }
+
+    /// Drops the `T` coordinate, which doubling does not read.
+    #[inline(always)]
+    pub const fn to_projective(self) -> GProjective {
+        GProjective {
+            x: self.x,
+            y: self.y,
+            z: self.z,
+        }
+    }
+
+    /// Prepares this point for repeated additions with [`G::add_projective_niels`].
+    #[inline(always)]
+    pub const fn to_projective_niels(self) -> ProjectiveNiels {
+        ProjectiveNiels {
+            sum: self.y.add(self.x),
+            diff: self.y.sub(self.x),
+            z: self.z,
+            t2d: self.t.mul(F::EDWARDS_D2),
+        }
+    }
+
+    /// Adds a point in [`Niels`] form, deferring the final multiplications to the conversion of
+    /// the returned completed point.
+    #[inline(always)]
+    pub const fn add_niels_completed(self, rhs: Niels) -> GCompleted {
+        // The steps of `G::add_niels` up to its final products.
+        let a = self.y.sub(self.x).mul(rhs.diff);
+        let b = self.y.add(self.x).mul(rhs.sum);
+        let c = self.t.mul(rhs.t2d);
+        let d = self.z.add(self.z);
+        GCompleted::from_products(a, b, c, d)
+    }
+
+    /// Adds a point in [`ProjectiveNiels`] form, deferring the final multiplications to the
+    /// conversion of the returned completed point.
+    #[inline(always)]
+    pub const fn add_projective_niels(self, rhs: ProjectiveNiels) -> GCompleted {
+        // The steps of `G::add` up to its final products, with `2d*T2` precomputed.
+        let a = self.y.sub(self.x).mul(rhs.diff);
+        let b = self.y.add(self.x).mul(rhs.sum);
+        let c = self.t.mul(rhs.t2d);
+        let zz = self.z.mul(rhs.z);
+        GCompleted::from_products(a, b, c, zz.add(zz))
+    }
+}
+
+/// A point in projective coordinates `(X:Y:Z)`, the affine point `(X/Z, Y/Z)`.
+///
+/// Doubling reads only these coordinates, so a chain of doublings can skip computing `T`.
+#[derive(Clone, Copy, Debug)]
+pub struct GProjective {
+    x: F,
+    y: F,
+    z: F,
+}
+
+impl GProjective {
+    /// The neutral element, `(0, 1)` in affine coordinates.
+    pub const IDENTITY: Self = Self {
+        x: F::ZERO,
+        y: F::ONE,
+        z: F::ONE,
+    };
+
+    /// Doubles this point with the steps of [`G::double`] up to its final products.
+    #[inline(always)]
+    pub const fn double(self) -> GCompleted {
+        let a = self.x.square();
+        let b = self.y.square();
+        let c = self.z.square();
+        let c = c.add(c);
+        let e = self.x.add(self.y).square().sub(a).sub(b);
+        let g = b.sub(a);
+        let f = g.sub(c);
+        let h = a.neg().sub(b);
+        GCompleted {
+            x: e,
+            y: h,
+            z: g,
+            t: f,
+        }
+    }
+
+    /// Multiplies this point by the curve's cofactor (8).
+    pub fn mul_by_cofactor(mut self) -> Self {
+        for _ in 0..3 {
+            self = self.double().to_projective();
+        }
+        self
+    }
+
+    /// Returns whether this point represents the identity.
+    pub fn is_identity(&self) -> bool {
+        self.x.is_zero() && self.y.eq(&self.z)
+    }
+
+    /// Converts this point to extended coordinates.
+    #[cfg(test)]
+    pub const fn to_extended(self) -> G {
+        G {
+            x: self.x.mul(self.z),
+            y: self.y.mul(self.z),
+            t: self.x.mul(self.y),
+            z: self.z.square(),
+        }
+    }
+}
+
+/// A point `((X:Z), (Y:T))`, the affine point `(X/Z, Y/T)`, as an addition or doubling leaves it
+/// before its final multiplications.
+///
+/// Converting to [`GProjective`] takes three multiplications and to [`G`] four, so each
+/// operation can compute only the coordinates the next one reads.
+#[derive(Clone, Copy, Debug)]
+pub struct GCompleted {
+    x: F,
+    y: F,
+    z: F,
+    t: F,
+}
+
+impl GCompleted {
+    /// Finishes the complete addition formula of [`G::add`] from its products `A`, `B`, and `C`
+    /// and `D = 2*Z1*Z2`.
+    #[inline(always)]
+    const fn from_products(a: F, b: F, c: F, d: F) -> Self {
+        // In `G::add`'s notation, `X3/Z3 = E/G` and `Y3/Z3 = H/F`.
+        Self {
+            x: b.sub(a),
+            y: b.add(a),
+            z: d.add(c),
+            t: d.sub(c),
+        }
+    }
+
+    /// Converts this point to projective coordinates.
+    #[inline(always)]
+    pub const fn to_projective(self) -> GProjective {
+        GProjective {
+            x: self.x.mul(self.t),
+            y: self.z.mul(self.y),
+            z: self.t.mul(self.z),
+        }
+    }
+
+    /// Converts this point to extended coordinates.
+    #[inline(always)]
+    pub const fn to_extended(self) -> G {
+        G {
+            x: self.x.mul(self.t),
+            y: self.z.mul(self.y),
+            t: self.x.mul(self.y),
+            z: self.t.mul(self.z),
+        }
+    }
 }
 
 /// An affine point `(x, y)` stored as `(y + x, y - x, 2d*x*y)`.
 #[derive(Clone, Copy)]
-struct Niels {
+pub struct Niels {
     sum: F,
     diff: F,
     t2d: F,
@@ -612,6 +768,39 @@ impl Niels {
         diff: F::ONE,
         t2d: F::ZERO,
     };
+
+    /// Negates this point, which swaps `y + x` with `y - x` and negates `2d*x*y`.
+    #[inline(always)]
+    pub const fn negate(self) -> Self {
+        Self {
+            sum: self.diff,
+            diff: self.sum,
+            t2d: self.t2d.neg(),
+        }
+    }
+}
+
+/// A point `(X:Y:Z:T)` in extended coordinates stored as `(Y + X, Y - X, Z, 2d*T)`, so adding it
+/// with [`G::add_projective_niels`] skips the multiplication by `2d`.
+#[derive(Clone, Copy)]
+pub struct ProjectiveNiels {
+    sum: F,
+    diff: F,
+    z: F,
+    t2d: F,
+}
+
+impl ProjectiveNiels {
+    /// Negates this point, which swaps `Y + X` with `Y - X` and negates `2d*T`.
+    #[inline(always)]
+    pub const fn negate(self) -> Self {
+        Self {
+            sum: self.diff,
+            diff: self.sum,
+            z: self.z,
+            t2d: self.t2d.neg(),
+        }
+    }
 }
 
 /// A compact affine point prepared for mixed addition.
@@ -794,7 +983,13 @@ fn pow_p58<B: FBackend>(backend: B, value: FVec) -> FVec {
 }
 
 /// Abstracts over field and group operations.
-pub trait Backend: MBackend + 'static {}
+pub trait Backend: MBackend + 'static {
+    /// Decompresses both encodings as [`GAffine::decompress`] does, returning `None` if either
+    /// does not decode.
+    fn decompress_pair(self, [first, second]: [&[u8; 32]; 2]) -> Option<[GAffine; 2]> {
+        Some([GAffine::decompress(first)?, GAffine::decompress(second)?])
+    }
+}
 
 /// A computation which can run over an arbitrary [`Backend`].
 ///
@@ -811,8 +1006,10 @@ pub trait WithBackend {
     fn call<B: Backend>(self, backend: B) -> Self::Output;
 }
 
-// Constant-time multiplication of the Ed25519 basepoint, for key generation and signing.
+// Precomputed multiples of the Ed25519 basepoint: constant-time multiplication for key
+// generation and signing, and odd-multiple tables for verification.
 mod basepoint;
+pub use basepoint::{ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH};
 
 // Scalar multiplication on the Montgomery form of the curve, for X25519.
 pub mod montgomery;

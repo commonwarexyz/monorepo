@@ -3,7 +3,10 @@
 mod msm;
 mod scalar;
 
-use crate::curve::{Backend, G, GAffine, LANES, WithBackend, with_backend};
+use crate::curve::{
+    Backend, G, GAffine, GProjective, LANES, ODD_MULTIPLES, ODD_MULTIPLES_NAF_WIDTH, WithBackend,
+    with_backend,
+};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_codec::Write as _;
@@ -538,47 +541,66 @@ fn verify_pipeline<B: Backend>(
     Ok(result.mul_by_cofactor().is_identity())
 }
 
-/// Width of the non-adjacent forms [`straus`] recodes its scalars into.
+/// Width of the non-adjacent forms [`straus`] recodes its variable-base scalars into.
 const NAF_WIDTH: usize = 5;
 
-/// Computes `sum(scalar*point)` over `terms` with Straus's method: one doubling chain shared by
-/// every term, adding `digit*point` at each nonzero digit of the scalars' non-adjacent forms from
-/// a per-term table of odd multiples `point, 3*point, ..., 15*point`.
+/// Computes `base[0]*B + base[1]*2^128*B + sum(scalar*point)` over `terms` with Straus's
+/// method: one doubling chain shared by every term, adding `digit*point` at each nonzero digit
+/// of the scalars' non-adjacent forms from a table of odd multiples of each point.
 ///
 /// Variable-time, so the points and scalars must be public.
-fn straus<const N: usize>(terms: [(G, Scalar); N]) -> G {
-    // Width-5 non-adjacent form: every nonzero digit is odd with magnitude at most 15, and at
-    // least four zeros separate nonzero digits, so few positions need an addition.
+fn straus<const N: usize>(base: [Scalar; 2], terms: [(G, Scalar); N]) -> GProjective {
+    // The basepoint multiples come from static tables, which afford a wider window and so fewer
+    // additions than the per-call tables. In a width-`w` non-adjacent form every nonzero digit
+    // is odd with magnitude below `2^(w-1)`, and at least `w - 1` zeros separate nonzero digits.
+    let base_digits = base.map(|scalar| scalar.naf::<ODD_MULTIPLES_NAF_WIDTH>());
     let digits = terms.map(|(_, scalar)| scalar.naf::<NAF_WIDTH>());
 
     // Each table holds the odd multiples `point, 3*point, ..., 15*point`, built by repeatedly
     // adding `2*point`, so a digit `d` selects entry `|d| / 2`.
     let tables = terms.map(|(point, _)| {
-        let double = point.double();
-        let mut table = [point; 1 << (NAF_WIDTH - 2)];
+        let double = point
+            .to_projective()
+            .double()
+            .to_extended()
+            .to_projective_niels();
+        let mut table = [point.to_projective_niels(); 1 << (NAF_WIDTH - 2)];
         let mut multiple = point;
         for entry in &mut table[1..] {
-            multiple = multiple.add(double);
-            *entry = multiple;
+            multiple = multiple.add_projective_niels(double).to_extended();
+            *entry = multiple.to_projective_niels();
         }
         table
     });
 
     // The shared doubling chain starts at the highest nonzero digit of any scalar. If every
     // scalar is zero, so is the sum.
-    let Some(top) = digits
+    let Some(top) = base_digits
         .iter()
+        .chain(&digits)
         .filter_map(|digits| digits.iter().rposition(|&digit| digit != 0))
         .max()
     else {
-        return G::IDENTITY;
+        return GProjective::IDENTITY;
     };
 
     // Horner's rule over digit positions, most significant first: double the running sum once
     // per position, then add each term's selected multiple, negated for a negative digit.
-    let mut sum = G::IDENTITY;
+    // Doublings and additions leave a completed point, converted to extended coordinates only
+    // when an addition, which reads `T`, comes next.
+    let mut sum = GProjective::IDENTITY;
     for i in (0..=top).rev() {
-        sum = sum.double();
+        let mut step = sum.double();
+        for (digits, table) in base_digits.iter().zip(&ODD_MULTIPLES) {
+            let digit = digits[i];
+            if digit != 0 {
+                let mut multiple = table[usize::from(digit.unsigned_abs()) / 2];
+                if digit < 0 {
+                    multiple = multiple.negate();
+                }
+                step = step.to_extended().add_niels_completed(multiple);
+            }
+        }
         for (digits, table) in digits.iter().zip(&tables) {
             let digit = digits[i];
             if digit != 0 {
@@ -586,23 +608,24 @@ fn straus<const N: usize>(terms: [(G, Scalar); N]) -> G {
                 if digit < 0 {
                     multiple = multiple.negate();
                 }
-                sum = sum.add(multiple);
+                step = step.to_extended().add_projective_niels(multiple);
             }
         }
+        sum = step.to_projective();
     }
     sum
 }
 
-/// `2^128` times the Ed25519 basepoint, the base for the high half of `u*s` in [`verify`].
-const BASEPOINT_128: G = {
-    let mut point = GAffine::BASEPOINT.to_extended();
-    let mut doubling = 0;
-    while doubling < 128 {
-        point = point.add(point);
-        doubling += 1;
+/// Decompresses two encodings with [`Backend::decompress_pair`].
+struct DecompressPair<'a>([&'a [u8; 32]; 2]);
+
+impl WithBackend for DecompressPair<'_> {
+    type Output = Option<[GAffine; 2]>;
+
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        backend.decompress_pair(self.0)
     }
-    point
-};
+}
 
 /// Verifies one signature per the [module's validation criteria](super).
 ///
@@ -616,17 +639,15 @@ pub fn verify(
     let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
         return false;
     };
-    let Some(r) = GAffine::decompress(&sig.r) else {
+    let points = a_point.map_or_else(
+        || {
+            with_backend(DecompressPair([&sig.r, a_bytes.as_bytes()]))
+                .map(|[r, a]| (r, a.to_extended()))
+        },
+        |point| GAffine::decompress(&sig.r).map(|r| (r, *point)),
+    );
+    let Some((r, a)) = points else {
         return false;
-    };
-    let a = match a_point {
-        Some(point) => *point,
-        None => {
-            let Some(point) = GAffine::decompress(a_bytes.as_bytes()) else {
-                return false;
-            };
-            point.to_extended()
-        }
     };
     let h = Scalar::from_bytes_mod_order_wide(&Sha512::hash(&[&sig.r, a_bytes.as_bytes(), msg]).0);
 
@@ -639,12 +660,10 @@ pub fn verify(
     let a = if u < 0 { a } else { a.negate() };
     let u = Scalar::from_u128(u.unsigned_abs());
     let (low, high) = s.mul_mod_l(&u).halves();
-    straus([
-        (GAffine::BASEPOINT.to_extended(), Scalar::from_u128(low)),
-        (BASEPOINT_128, Scalar::from_u128(high)),
-        (r.to_extended().negate(), u),
-        (a, Scalar::from_u128(v)),
-    ])
+    straus(
+        [Scalar::from_u128(low), Scalar::from_u128(high)],
+        [(r.to_extended().negate(), u), (a, Scalar::from_u128(v))],
+    )
     .mul_by_cofactor()
     .is_identity()
 }
@@ -768,14 +787,20 @@ mod tests {
     #[test]
     fn straus_matches_double_and_add() {
         // With every scalar zero, no digit is nonzero, which takes the early return.
-        assert!(straus([(GAffine::BASEPOINT.to_extended(), Scalar::ZERO)]).is_identity());
+        let basepoint = GAffine::BASEPOINT.to_extended();
+        assert!(straus([Scalar::ZERO; 2], [(basepoint, Scalar::ZERO)]).is_identity());
 
-        // Each point gains a low-order component, and the difference from double-and-add must be
-        // exactly the identity, so the torsion part is checked too.
+        // Each variable point gains a low-order component, and the difference from
+        // double-and-add must be exactly the identity, so the torsion part is checked too.
+        let bases = [
+            basepoint,
+            basepoint.scalar_mul((0..=128).map(|bit| bit == 0)),
+        ];
         Builder::default()
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| {
+                let base: [Scalar; 2] = u.arbitrary()?;
                 let mut terms = [(G::IDENTITY, Scalar::ZERO); 4];
                 for term in &mut terms {
                     let encoding: [u8; 32] = u.arbitrary()?;
@@ -785,10 +810,19 @@ mod tests {
                         .to_extended();
                     *term = (point.to_extended().add(torsion), u.arbitrary()?);
                 }
-                let expected = terms.iter().fold(G::IDENTITY, |sum, (point, scalar)| {
-                    sum.add(point.scalar_mul(scalar.bits_be()))
-                });
-                assert!(straus(terms).add(expected.negate()).is_identity());
+                let expected = bases
+                    .iter()
+                    .zip(&base)
+                    .chain(terms.iter().map(|(point, scalar)| (point, scalar)))
+                    .fold(G::IDENTITY, |sum, (point, scalar)| {
+                        sum.add(point.scalar_mul(scalar.bits_be()))
+                    });
+                assert!(
+                    straus(base, terms)
+                        .to_extended()
+                        .add(expected.negate())
+                        .is_identity()
+                );
                 Ok(())
             });
     }
