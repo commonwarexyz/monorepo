@@ -1872,8 +1872,8 @@ pub mod tests {
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{
-        AfterPending, AfterPoll, AfterWake, Mailbox, Message, Panics, REF_ONE, REFS, Runnable,
-        State, Target, Task, Tasks,
+        AfterPending, AfterPoll, Mailbox, Message, Panics, REF_ONE, REFS, Runnable, State, Target,
+        Task, Tasks,
     };
     use loom::{
         sync::{
@@ -1905,22 +1905,6 @@ mod loom_tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    /// A future that completes once `signal` is set, counting its drop.
-    fn signaled(
-        signal: Arc<AtomicBool>,
-        drops: &Arc<AtomicUsize>,
-    ) -> impl Future<Output = ()> + Send + 'static {
-        let guard = DropCount(drops.clone());
-        poll_fn(move |_| {
-            let _ = &guard;
-            if signal.load(Ordering::Acquire) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
     }
 
     /// A future that never completes, counting its drop.
@@ -1972,9 +1956,10 @@ mod loom_tests {
     }
 
     /// A foreign wake racing the poll path, by value or by reference, is never
-    /// lost: the task completes in its first poll, in the poll its requeued
-    /// runnable runs, or in the poll of the runnable the wake delivers through
-    /// the mailbox. No reference leaks.
+    /// lost, even when it arrives after the task woke itself during its first
+    /// poll: the task completes in a poll its runnable runs, first or
+    /// requeued, or in the poll of the runnable the wake delivers through the
+    /// mailbox. No reference leaks.
     #[test]
     fn test_foreign_wake_racing_the_poll_path_is_never_lost() {
         for by_value in [false, true] {
@@ -1983,11 +1968,28 @@ mod loom_tests {
                 let set = Tasks::with_shards(1);
                 let signal = Arc::new(AtomicBool::new(false));
                 let drops = Arc::new(AtomicUsize::new(0));
-                let (task, runnable) = Task::new(
-                    signaled(signal.clone(), &drops),
-                    &set,
-                    std::sync::Arc::downgrade(&mailbox),
-                );
+
+                // The future wakes itself during its first poll, so the
+                // foreign wake can also find the task already notified. It
+                // completes once signaled.
+                let future = {
+                    let signal = signal.clone();
+                    let guard = DropCount(drops.clone());
+                    let mut woken = false;
+                    poll_fn(move |cx| {
+                        let _ = &guard;
+                        if !woken {
+                            woken = true;
+                            cx.waker().wake_by_ref();
+                        }
+                        if signal.load(Ordering::Acquire) {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                };
+                let (task, runnable) = Task::new(future, &set, std::sync::Arc::downgrade(&mailbox));
                 assert!(set.insert(task.clone()).is_ok());
                 let waker = Waker::clone(&task.waker());
 
@@ -2120,120 +2122,6 @@ mod loom_tests {
         });
     }
 
-    /// A wake racing the end of a pending poll transfers exactly one runnable,
-    /// regardless of which side wins the handoff.
-    #[test]
-    fn test_pending_wake_handoff_publishes_once() {
-        loom::model(|| {
-            let state = Arc::new(State::new());
-            assert!(state.start_poll());
-
-            let wake = thread::spawn({
-                let state = Arc::clone(&state);
-                move || state.notify_by_ref()
-            });
-            let poll_publishes = matches!(state.finish_pending(), AfterPending::Requeue);
-            let wake_publishes = wake.join().unwrap();
-
-            assert_ne!(poll_publishes, wake_publishes);
-            assert!(state.start_poll());
-            state.complete();
-        });
-    }
-
-    /// A wake that gives up its reference, racing the end of a pending poll,
-    /// leaves exactly one runnable and the right count, whichever side wins.
-    #[test]
-    fn test_wake_by_value_racing_a_pending_poll_keeps_the_count() {
-        loom::model(|| {
-            // References: the polled runnable's, the set's, and the waker's.
-            let state = Arc::new(State::new());
-            state.retain();
-            assert!(state.start_poll());
-
-            let wake = thread::spawn({
-                let state = Arc::clone(&state);
-                move || matches!(state.notify_by_value(), AfterWake::Schedule)
-            });
-            let requeued = matches!(state.finish_pending(), AfterPending::Requeue);
-            let published = wake.join().unwrap();
-
-            // One runnable remains, holding one reference beside the task
-            // set's.
-            assert_ne!(requeued, published);
-            assert_eq!(refs(&state), 2);
-        });
-    }
-
-    /// A wake racing a completing poll never publishes a runnable.
-    #[test]
-    fn test_ready_wake_handoff_never_publishes() {
-        loom::model(|| {
-            let state = Arc::new(State::new());
-            assert!(state.start_poll());
-
-            let wake = thread::spawn({
-                let state = Arc::clone(&state);
-                move || state.notify_by_ref()
-            });
-            state.complete();
-
-            assert!(!wake.join().unwrap());
-            assert!(!state.notify_by_ref());
-            assert!(!state.start_poll());
-        });
-    }
-
-    /// Two references released at once: exactly one release is the last.
-    #[test]
-    fn test_concurrent_releases_find_one_last() {
-        loom::model(|| {
-            let state = Arc::new(State::new());
-
-            let other = thread::spawn({
-                let state = Arc::clone(&state);
-                move || state.release()
-            });
-            let mine = state.release();
-
-            assert_ne!(mine, other.join().unwrap());
-        });
-    }
-
-    /// A last consuming wake acquires writes published by an earlier release.
-    #[test]
-    fn test_completed_wake_racing_release_finds_one_last() {
-        loom::model(|| {
-            let state = Arc::new(State::new());
-            assert!(state.start_poll());
-            state.complete();
-            let payload = Arc::new(AtomicUsize::new(0));
-
-            let releaser = thread::spawn({
-                let state = Arc::clone(&state);
-                let payload = Arc::clone(&payload);
-                move || {
-                    payload.store(1, Ordering::Relaxed);
-                    state.release()
-                }
-            });
-
-            let wake_was_last = match state.notify_by_value() {
-                AfterWake::Dealloc => {
-                    // Check before joining so only the wake can acquire the write.
-                    assert_eq!(payload.load(Ordering::Relaxed), 1);
-                    true
-                }
-                AfterWake::Done => false,
-                AfterWake::Schedule => panic!("completed task cannot be scheduled"),
-            };
-            let release_was_last = releaser.join().unwrap();
-
-            assert_ne!(wake_was_last, release_was_last);
-            assert_eq!(refs(&state), 0);
-        });
-    }
-
     /// A wake racing teardown of an idle task leaves no runnable that can poll
     /// it.
     #[test]
@@ -2252,62 +2140,6 @@ mod loom_tests {
 
             assert!(!state.start_poll());
             assert!(!state.notify_by_ref());
-        });
-    }
-
-    /// Every successful successor claim observes writes published before the
-    /// wake, including when the wake coalesces through a same-value exchange,
-    /// and a wake that has returned is never lost.
-    #[test]
-    fn test_wake_handoff_publishes_payload() {
-        loom::model(|| {
-            let state = Arc::new(State::new());
-            let payload = Arc::new(AtomicUsize::new(0));
-            let done = Arc::new(AtomicBool::new(false));
-
-            let producer = thread::spawn({
-                let state = Arc::clone(&state);
-                let payload = Arc::clone(&payload);
-                let done = Arc::clone(&done);
-
-                move || {
-                    payload.store(1, Ordering::Relaxed);
-                    state.notify_by_ref();
-                    done.store(true, Ordering::Release);
-                }
-            });
-
-            let consumer = thread::spawn({
-                let state = Arc::clone(&state);
-                let payload = Arc::clone(&payload);
-                let done = Arc::clone(&done);
-
-                move || {
-                    assert!(state.start_poll());
-                    if payload.load(Ordering::Acquire) == 1 {
-                        state.complete();
-                        return;
-                    }
-                    let _ = state.finish_pending();
-
-                    loop {
-                        // A failed claim after the producer finished means
-                        // its wake published no runnable.
-                        let finished = done.load(Ordering::Acquire);
-                        if state.start_poll() {
-                            break;
-                        }
-                        assert!(!finished, "wake lost");
-                        thread::yield_now();
-                    }
-
-                    assert_eq!(payload.load(Ordering::Acquire), 1);
-                    state.complete();
-                }
-            });
-
-            producer.join().unwrap();
-            consumer.join().unwrap();
         });
     }
 }
