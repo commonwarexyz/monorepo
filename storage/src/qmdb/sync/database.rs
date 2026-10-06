@@ -67,12 +67,13 @@ pub trait Database: Sized + Send {
     > + Send;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
+    /// `pinned_nodes` is empty when the range starts at zero.
     fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         journal: Self::Journal,
         state: Self::SyncState,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        pinned_nodes: Vec<Self::Digest>,
         range: NonEmptyRange<Location<Self::Family>>,
         apply_batch_size: NonZeroU64,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;

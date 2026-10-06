@@ -742,7 +742,8 @@ where
             self.config,
             self.journal,
             self.sync_state,
-            self.pinned_nodes,
+            // None only when the target starts at zero, where nothing is pinned.
+            self.pinned_nodes.unwrap_or_default(),
             self.target.range.clone(),
             self.apply_batch_size,
         )
@@ -873,7 +874,7 @@ mod tests {
             _config: Self::Config,
             _journal: Self::Journal,
             _state: Self::SyncState,
-            _pinned_nodes: Option<Vec<Self::Digest>>,
+            _pinned_nodes: Vec<Self::Digest>,
             _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
             _apply_batch_size: NonZeroU64,
         ) -> Result<Self, qmdb::Error<Self::Family>> {

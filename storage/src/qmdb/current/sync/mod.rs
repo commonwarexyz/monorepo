@@ -68,7 +68,7 @@ async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     log: J,
     translator: I::Translator,
     state: authenticated::Import<F, E, H::Digest, S>,
-    pinned_nodes: Option<Vec<H::Digest>>,
+    pinned_nodes: Vec<H::Digest>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
     init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
@@ -96,7 +96,7 @@ where
         log,
         qmdb::hasher::<H>(),
         range.start(),
-        pinned_nodes.unwrap_or_default(),
+        pinned_nodes,
         apply_batch_size,
     )
     .await?;
@@ -231,7 +231,7 @@ where
         config: Self::Config,
         log: Self::Journal,
         state: Self::SyncState,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        pinned_nodes: Vec<Self::Digest>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, qmdb::Error<F>> {

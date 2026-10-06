@@ -1604,7 +1604,7 @@ where
             db_config,
             journal,
             state,
-            local_pins,
+            local_pins.unwrap(),
             target.range,
             NZU64!(1024),
         )
@@ -1688,7 +1688,7 @@ where
             sync_db_config,
             journal,
             state,
-            Some(pinned_nodes),
+            pinned_nodes,
             non_empty_range!(sync_lower_bound, sync_upper_bound),
             NZU64!(1024),
         )
@@ -1755,7 +1755,7 @@ where
             new_db_config,
             journal,
             state,
-            Some(pinned_nodes),
+            pinned_nodes,
             non_empty_range!(lower_bound, upper_bound),
             NZU64!(1024),
         )
@@ -1806,7 +1806,7 @@ where
             new_db_config,
             journal,
             state,
-            None,
+            Vec::new(),
             non_empty_range!(Location::new(0), Location::new(1)),
             NZU64!(1024),
         )

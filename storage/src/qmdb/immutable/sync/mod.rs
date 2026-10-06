@@ -71,7 +71,7 @@ where
         db_config: Self::Config,
         log: Self::Journal,
         state: Self::SyncState,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        pinned_nodes: Vec<Self::Digest>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
@@ -81,7 +81,7 @@ where
             log,
             qmdb::hasher::<H>(),
             range.start(),
-            pinned_nodes.unwrap_or_default(),
+            pinned_nodes,
             apply_batch_size,
         )
         .await?;
@@ -169,7 +169,7 @@ where
         config: Self::Config,
         log: Self::Journal,
         _state: Self::SyncState,
-        pinned_nodes: Option<Vec<Self::Digest>>,
+        pinned_nodes: Vec<Self::Digest>,
         range: NonEmptyRange<Location<F>>,
         _apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
