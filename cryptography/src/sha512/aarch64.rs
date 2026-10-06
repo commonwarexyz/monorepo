@@ -29,12 +29,15 @@ pub(super) fn hash(messages: &[&[u8]; LANES]) -> [Digest; LANES] {
             &[block(messages[0], index), block(messages[1], index)],
         );
     }
+
+    // At most one message has blocks past `shared`, and it finishes them one lane wide.
     for ((words, message), count) in state.iter_mut().zip(messages).zip(counts) {
         for index in shared..count {
             compress512(words, &[block(message, index)]);
         }
     }
 
+    // Each digest is its state's words in big-endian order.
     let mut out = [Digest([0; DIGEST_LENGTH]); LANES];
     for (digest, words) in out.iter_mut().zip(state) {
         for (bytes, word) in digest.0.as_chunks_mut::<8>().0.iter_mut().zip(words) {

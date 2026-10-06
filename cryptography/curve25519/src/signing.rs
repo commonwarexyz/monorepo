@@ -503,6 +503,8 @@ mod tests {
 
     #[test]
     fn queued_messages_use_union_unique_framing() {
+        // The signature is never checked. The pairs include an empty namespace and message, and
+        // a 200-byte namespace whose length prefix takes two bytes.
         let key =
             <SigningKey as commonware_math::algebra::Random>::random(test_rng()).verifying_key();
         let signature = super::Signature { bytes: [0; 64] };
@@ -515,6 +517,8 @@ mod tests {
         for (namespace, message) in queued {
             verifier.add(namespace, message, &key, &signature);
         }
+
+        // Each item's range into the shared buffer must hold exactly `union_unique`'s bytes.
         for (item, (namespace, message)) in verifier.items.iter().zip(queued) {
             assert_eq!(
                 verifier.messages[item.message.clone()],

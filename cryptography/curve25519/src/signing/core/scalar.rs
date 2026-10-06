@@ -267,12 +267,18 @@ impl Scalar {
         let mut carry = 0;
         let mut position = 0;
         while position < 256 {
+            // The `W` bits at `position`, which can straddle two limbs, plus the pending carry.
             let (index, bit) = (position / 64, position % 64);
             let mut bits = limbs[index] >> bit;
             if bit + W > 64 {
                 bits |= limbs[index + 1] << (64 - bit);
             }
             let window = (bits & (width - 1)) + carry;
+
+            // An even window makes a zero digit, and the carry moves up with the position. An odd
+            // window becomes the odd digit of its residue mod `2^W` with magnitude below
+            // `2^(W-1)`. That digit clears the window, so the next `W - 1` digits are zero, and a
+            // negative digit carries `+1` into bit `position + W`.
             if window & 1 == 0 {
                 position += 1;
                 continue;
@@ -545,8 +551,13 @@ mod tests {
             });
     }
 
+    /// Checks that `scalar`'s width-`W` non-adjacent form reconstructs it, and that its nonzero
+    /// digits are odd, below `2^(W-1)` in magnitude, and at least `W` positions apart.
     fn check_naf<const W: usize>(scalar: &Scalar) {
         let digits = scalar.naf::<W>();
+
+        // Horner's rule from the most significant digit, so `previous` is the next nonzero digit
+        // above `position`.
         let mut reconstructed = Scalar::ZERO;
         let mut previous = None;
         for (position, &digit) in digits.iter().enumerate().rev() {
@@ -563,6 +574,8 @@ mod tests {
                 assert!(previous - position >= W, "W={W} position={position}");
             }
             previous = Some(position);
+
+            // Add the signed digit as its residue mod `L`.
             let magnitude = Scalar::from_u128(u128::from(digit.unsigned_abs()));
             let term = if digit < 0 {
                 magnitude.neg_mod_l()
@@ -597,6 +610,8 @@ mod tests {
             assert_ne!(u, 0);
             assert!(u.unsigned_abs() < 1 << 127);
             assert!(v < 1 << 126);
+
+            // Map the signed `u` to its residue mod `L` to check `u*scalar = v (mod L)`.
             let magnitude = Scalar::from_u128(u.unsigned_abs());
             let u = if u < 0 {
                 magnitude.neg_mod_l()
@@ -606,6 +621,9 @@ mod tests {
             assert_eq!(u.mul_mod_l(&scalar).0, Scalar::from_u128(v).0);
         };
 
+        // Values below `2^126` skip the reduction loop. From `2^126` through `2^128`, the first
+        // quotient, `L` divided by the input, has more than 100 bits. `2^251` and `L - 1` reach
+        // the top of the range.
         for value in [0, 1, 3, (1 << 126) - 1, 1 << 126, 1 << 127, u128::MAX] {
             check(Scalar::from_u128(value));
         }

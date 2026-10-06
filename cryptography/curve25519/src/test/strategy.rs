@@ -5,6 +5,9 @@ use commonware_utils::sync::Mutex;
 use core::{any::type_name, cmp::Ordering, future::Future, num::NonZeroUsize};
 use std::{panic::panic_any, sync::Arc};
 
+/// Sequential implementations of the [`Strategy`] methods neither probe observes. The
+/// verification paths under test leave scheduling to the strategy, so they never ask for
+/// [`Strategy::manual`].
 macro_rules! sequential_operations {
     () => {
         fn manual(&self) -> Manual<Self> {
@@ -103,6 +106,7 @@ impl Strategy for Recording {
         SEQ: FnOnce() -> R + Send,
         PAR: FnOnce() -> R + Send,
     {
+        // An infallible operation always completes its work.
         let result = if self.parallel { parallel() } else { serial() };
         self.samples.lock().push(true);
         result
@@ -115,6 +119,7 @@ impl Strategy for Recording {
         SEQ: FnOnce() -> Result<R, E> + Send,
         PAR: FnOnce() -> Result<R, E> + Send,
     {
+        // As in the adaptive policy, only a successful operation counts as complete work.
         let result = if self.parallel { parallel() } else { serial() };
         self.samples.lock().push(result.is_ok());
         result
@@ -127,6 +132,7 @@ pub(crate) struct Assembly {
     pub(crate) outputs: Arc<Mutex<Vec<&'static str>>>,
 }
 
+/// The panic payload with which [`Assembly`] stops an operation.
 #[derive(Debug)]
 pub(crate) struct AssemblyBoundary;
 
@@ -139,6 +145,7 @@ impl Strategy for Assembly {
         SEQ: FnOnce() -> R + Send,
         PAR: FnOnce() -> R + Send,
     {
+        // Take the parallel body, which always reaches `run_batches` or `run_tiles`.
         parallel()
     }
 
@@ -149,6 +156,7 @@ impl Strategy for Assembly {
         SEQ: FnOnce() -> Result<R, E> + Send,
         PAR: FnOnce() -> Result<R, E> + Send,
     {
+        // Take the parallel body, which always reaches `run_batches` or `run_tiles`.
         parallel()
     }
 
@@ -164,6 +172,7 @@ impl Strategy for Assembly {
         E: Send,
         F: for<'scope> FnOnce(Batches<'scope, Self>) -> Result<R, E> + Send,
     {
+        // Record the type the callback must assemble, then stop without running it.
         self.outputs.lock().push(type_name::<R>());
         panic_any(AssemblyBoundary)
     }
@@ -180,6 +189,7 @@ impl Strategy for Assembly {
         R: Send,
         F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
     {
+        // Record the type the callback must assemble, then stop without running it.
         self.outputs.lock().push(type_name::<R>());
         panic_any(AssemblyBoundary)
     }

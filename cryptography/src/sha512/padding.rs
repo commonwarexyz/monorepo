@@ -47,12 +47,16 @@ pub(super) const fn block_count(len: usize) -> usize {
 /// loads of it stall on store forwarding.
 #[inline(always)]
 pub(super) fn block(message: &[u8], index: usize) -> [u8; BLOCK_LENGTH] {
+    // A block wholly inside the message is a plain copy.
     let start = index * BLOCK_LENGTH;
     let rest = message.get(start..).unwrap_or_default();
     if let Some(block) = rest.first_chunk() {
         return *block;
     }
 
+    // Any other block starts with what remains of the message. The block holding the message's
+    // end appends `0x80`, and the last block ends with the message length in bits. A tail too
+    // long to leave room for the length pushes it into one more block.
     let mut bytes = [0u8; BLOCK_LENGTH];
     bytes[..rest.len()].copy_from_slice(rest);
     if start <= message.len() {
@@ -82,6 +86,8 @@ mod tests {
             for index in 0..block_count(len) {
                 compress512(&mut state, &[block(message, index)]);
             }
+
+            // The digest is the final state's words in big-endian order.
             let mut digest = [0u8; DIGEST_LENGTH];
             for (bytes, word) in digest.as_chunks_mut::<8>().0.iter_mut().zip(state) {
                 *bytes = word.to_be_bytes();

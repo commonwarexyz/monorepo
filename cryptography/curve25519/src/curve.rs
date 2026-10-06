@@ -538,6 +538,8 @@ impl G {
     /// Adds a point in [`Niels`] form: [`G::add`] specialized to an operand whose `Z` is one.
     #[inline(always)]
     const fn add_niels(self, rhs: Niels) -> Self {
+        // The steps of `G::add` with `Z2 = 1`. The Niels form supplies `Y2 - X2`, `Y2 + X2`, and
+        // `2d*T2`, so `C` takes one multiplication and `D = 2*Z1` takes none.
         let a = self.y.sub(self.x).mul(rhs.diff);
         let b = self.y.add(self.x).mul(rhs.sum);
         let c = self.t.mul(rhs.t2d);

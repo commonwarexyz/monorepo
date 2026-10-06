@@ -84,6 +84,7 @@ impl Hasher for Sha512 {
     }
 
     fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+        // With AVX-512F, hash up to eight messages per kernel call, one per lane.
         #[cfg(target_arch = "x86_64")]
         if has_avx512f::get() {
             let mut digests = Vec::with_capacity(messages.len());
@@ -93,12 +94,16 @@ impl Hasher for Sha512 {
                     *lane = message.as_ref();
                 }
 
+                // A short final chunk passes only its own messages, and the zero digests of the
+                // unused lanes are dropped.
                 // SAFETY: AVX-512F support was just detected.
                 let chunk_digests = unsafe { avx512::hash(&lanes[..chunk.len()]) };
                 digests.extend_from_slice(&chunk_digests[..chunk.len()]);
             }
             return digests;
         }
+
+        // With the SHA-512 instructions, hash the messages in interleaved pairs.
         #[cfg(target_arch = "aarch64")]
         if has_sha3::get() {
             let mut digests = Vec::with_capacity(messages.len());
@@ -109,11 +114,15 @@ impl Hasher for Sha512 {
                 // SAFETY: Support for the SHA-512 instructions was just detected.
                 digests.extend_from_slice(&unsafe { aarch64::hash(&lanes) });
             }
+
+            // An odd last message has no partner to interleave with, so it is hashed alone.
             for message in remainder {
                 digests.push(Self::hash(&[message.as_ref()]));
             }
             return digests;
         }
+
+        // Without a multi-message kernel, hash each message alone.
         messages
             .iter()
             .map(|message| Self::hash(&[message.as_ref()]))
@@ -261,6 +270,8 @@ mod tests {
 
     #[test]
     fn test_known_answers_and_reset() {
+        // Every one-shot entry point gives the known digests of the empty message and `abc`,
+        // including when a message is split into parts around an empty one.
         assert_eq!(Sha512::hash(&[]).as_ref(), EMPTY_DIGEST);
         assert_eq!(Sha512::hash(&[b"abc"]).as_ref(), ABC_DIGEST);
         assert_eq!(Sha512::hash(&[b"a", b"", b"bc"]).as_ref(), ABC_DIGEST);
@@ -273,6 +284,8 @@ mod tests {
             [Digest(EMPTY_DIGEST), Digest(ABC_DIGEST)]
         );
 
+        // Stream each message a byte at a time and keep the hasher that `finalize` returns. Every
+        // digest after the first matches only if finalizing reset the hasher.
         let mut hasher = Sha512::default();
         for message in [b"abc".as_slice(), b"", b"abc", b""] {
             for byte in message {
@@ -310,6 +323,8 @@ mod tests {
             for count in 1..=20 {
                 let messages: Vec<Vec<u8>> = (0..count)
                     .map(|lane| {
+                        // Message `len % count` has length `len`, and the others take lengths
+                        // spread over `0..=300`.
                         let other = (len * 7 + lane * 37) % 301;
                         message(if lane == len % count { len } else { other }, lane)
                     })
@@ -322,12 +337,17 @@ mod tests {
     /// Overlapping and aliased messages borrowed from one buffer.
     #[test]
     fn test_hash_many_overlapping_messages() {
+        // Message `lane` starts at byte `lane` and spans `100 + 12 * lane` bytes, so the
+        // messages overlap and differ in length.
         let backing = message(400, 0);
         let messages: Vec<&[u8]> = (0..20)
             .map(|lane| &backing[lane..lane * 13 + 100])
             .collect();
         let digests: Vec<Digest> = messages.iter().map(|message| expected(message)).collect();
         assert_eq!(Sha512::hash_many(&messages), digests);
+
+        // Nine aliases of one buffer fill a group of eight lanes and spill into the next. For the
+        // paired kernel, they leave an odd message out.
         assert_eq!(
             Sha512::hash_many(&[&backing[..]; 9]),
             [expected(&backing); 9]
@@ -358,12 +378,15 @@ mod tests {
 
     #[test]
     fn test_codec_and_zeroize() {
+        // A digest round-trips as its raw bytes, and a truncated encoding fails to decode.
         let mut digest = Sha512::hash(&[b"abc"]);
         let encoded = digest.encode();
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
         assert_eq!(encoded.as_ref(), ABC_DIGEST);
         assert_eq!(Digest::decode(encoded).unwrap(), digest);
         assert!(Digest::decode(Copying(&ABC_DIGEST[..DIGEST_LENGTH - 1])).is_err());
+
+        // Zeroizing leaves the all-zero `EMPTY` digest.
         digest.zeroize();
         assert_eq!(digest, <Digest as crate::Digest>::EMPTY);
     }

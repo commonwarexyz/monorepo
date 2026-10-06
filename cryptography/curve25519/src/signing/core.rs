@@ -118,6 +118,8 @@ fn decompress_terms<B: Backend>(
     encodings: &[[u8; 32]; LANES],
     terms: &mut Vec<[Term; LANES]>,
 ) -> bool {
+    // An undecodable lane still gets a term, the identity, so every unit stays `LANES` wide and
+    // the failure travels in the returned flag.
     let mut valid = true;
     terms.push(GAffine::decompress_batch(backend, encodings).map(|point| {
         point.map_or_else(
@@ -145,6 +147,8 @@ fn signature_unit<B: Backend>(
     challenges: &mut Vec<u8>,
     partition: &mut Partition,
 ) -> bool {
+    // Signature `i` of the batch takes `z_i` (see `batch_coefficients`). A unit starts at a
+    // multiple of 4, so it derives only the blocks from `start / 4` that cover its items.
     let start = unit * UNIT;
     let lanes = &items[start..items.len().min(start + UNIT)];
     let mut z = [Scalar::ZERO; UNIT];
@@ -157,6 +161,10 @@ fn signature_unit<B: Backend>(
     {
         *coefficients = batch_coefficients(seed, (start / 4 + block) as u64);
     }
+
+    // `Sha512::hash_many` takes each message as one slice, so every lane's `R || A || M` is
+    // staged back to back in `challenges`, a buffer reused across units. Lanes past the last
+    // item keep the identity encoding for decompression.
     let mut encodings = [IDENTITY_ENCODING; LANES];
     challenges.clear();
     for (encoding, &(a_bytes, sig, msg)) in encodings.iter_mut().zip(lanes) {
@@ -165,6 +173,9 @@ fn signature_unit<B: Backend>(
         challenges.extend_from_slice(a_bytes.as_bytes());
         challenges.extend_from_slice(msg);
     }
+
+    // Cut the staged bytes back into one input per lane, and hash the unit's challenges in one
+    // multi-message call.
     let mut inputs: [&[u8]; UNIT] = [&[]; UNIT];
     let mut rest = challenges.as_slice();
     for (input, (a_bytes, sig, msg)) in inputs.iter_mut().zip(lanes) {
@@ -172,6 +183,9 @@ fn signature_unit<B: Backend>(
     }
     let digests = Sha512::hash_many(&inputs[..lanes.len()]);
 
+    // `z*h` is the signature's share of its signer's coalesced `A` scalar, and `z*s` accumulates
+    // into the partition's share of `sum(z*s)`. A non-canonical `s` fails the batch, leaving its
+    // lane's `z*h` zero, and the remaining lanes still finish.
     let mut valid = true;
     let mut zh = [Scalar::ZERO; UNIT];
     for (j, (_, sig, _)) in lanes.iter().enumerate() {
@@ -185,6 +199,8 @@ fn signature_unit<B: Backend>(
     }
     partition.zh.push(zh);
 
+    // Decompress the unit's `R` encodings in one backend batch, then give each item's term its
+    // `z`. An undecodable `R` fails the batch. Padding lanes keep identity terms of scalar zero.
     let offset = partition.terms.len();
     valid &= decompress_terms(backend, &encodings, &mut partition.terms);
     for (term, coefficient) in partition.terms[offset].iter_mut().zip(&z[..lanes.len()]) {
@@ -213,10 +229,15 @@ fn signature_phase<B: Backend>(
         MIN_UNITS_PER_BATCH,
         UNIT,
         |batches| {
+            // Every batch finishes all of its units even after a failure, and the phase returns
+            // `None` if any unit failed.
             batches
                 .map_collect_vec(
                     |ranges| ranges,
                     |range| {
+                        // A batch is a contiguous range of units, and its partition holds one
+                        // `terms` entry and one `zh` block per unit, in unit order. Partitions
+                        // return in batch order, so their flattened blocks are indexed by unit.
                         let mut partition = Partition {
                             terms: Vec::with_capacity(range.len()),
                             zh: Vec::with_capacity(range.len()),
@@ -260,6 +281,8 @@ where
     B: Backend,
     F: Fn(usize) -> [u8; 32] + Send + Sync,
 {
+    // Unit `u` holds worklist entries from `u * LANES`, and entries past `count` pad the final
+    // unit with the identity encoding.
     let unit = |unit: usize| -> [[u8; 32]; LANES] {
         core::array::from_fn(|lane| {
             let index = unit * LANES + lane;
@@ -275,6 +298,9 @@ where
         MIN_UNITS_PER_BATCH,
         LANES,
         |batches| {
+            // Each batch decompresses its contiguous range of units into its own vector, finishing
+            // every unit even after a failure. The vectors return in batch order, so together they
+            // follow the worklist, and the phase returns `None` if any encoding failed.
             batches
                 .map_collect_vec(
                     |ranges| ranges,
@@ -370,24 +396,33 @@ fn verify_pipeline<B: Backend>(
     let (signatures, (order, groups, a_terms)) = strategy.join(
         || signature_phase(backend, items, seed, width, strategy),
         || {
+            // Each key carries its signature's original index, which leads from a signer's run
+            // in `order` back to its signatures' `z*h`.
             let mut order: Vec<(VerifyingKeyBytes, u32)> = items
                 .iter()
                 .enumerate()
                 .map(|(i, (a_bytes, _, _))| (**a_bytes, i as u32))
                 .collect();
+
             // The signature phase occupies the pool meanwhile, so sort on this thread.
             order.sort_unstable_by_key(|&(key, _)| key);
             let groups = group_ranges(&order);
+
+            // Each signer's `A` decompresses once, from the key at the start of its run.
             let encoding = |i: usize| *order[groups[i].0 as usize].0.as_bytes();
             let a_terms = decompress_phase(backend, groups.len(), encoding, strategy);
             (order, groups, a_terms)
         },
     );
+
+    // Both tasks have finished every unit, and a non-canonical `s` or an undecodable `R` or `A`
+    // rejects the batch before the MSM.
     let (Some(signatures), Some(mut a_terms)) = (signatures, a_terms) else {
         return Err(());
     };
 
-    // A signer's coalesced scalar: the sum of `z*h` over its run of `order`.
+    // A signer's coalesced scalar: the sum of `z*h` over its run of `order`. Partitions hold
+    // consecutive units in batch order, so an original index selects its unit's block and lane.
     let blocks: Vec<&[Scalar; UNIT]> = signatures
         .iter()
         .flat_map(|partition| &partition.zh)
@@ -427,6 +462,8 @@ fn verify_pipeline<B: Backend>(
     // strategy's estimates for different batch sizes apart.
     let work_per_partition = (order.len() + groups.len()).div_ceil(a_work.len());
     strategy.map_collect_vec_with_multiplier(a_work, work_per_partition, |(terms, first)| {
+        // Unit `k` of a vector holds groups from `first + k * LANES`. Padding lanes in the final
+        // unit have no group and keep scalar zero.
         for (terms, groups) in terms.iter_mut().zip(groups[first..].chunks(LANES)) {
             // Summing a unit's groups before recoding any of them overlaps the scattered loads of
             // their summands.
@@ -446,6 +483,10 @@ fn verify_pipeline<B: Backend>(
         sum.add_mod_l(&partition.zs_sum)
     });
     let basepoint = [Term::new(GAffine::BASEPOINT, &s_sum.neg_mod_l(), width)];
+
+    // One MSM reads the `R` terms, the `A` terms, and the basepoint term in place. It sums
+    // `z*R + z*h*A - z*s*B` over every signature, so a valid batch's result is the identity once
+    // multiplied by the cofactor.
     let mut chunks: Vec<&[Term]> = signatures
         .iter()
         .map(|partition| &partition.terms)
@@ -625,6 +666,8 @@ mod tests {
 
     #[test]
     fn structural_rejection_does_not_record_complete_work() {
+        // A valid signature, copies with a non-canonical `s` (top bit set) and an undecodable
+        // `R`, and a key with an undecodable encoding.
         let signer = SigningKey::from_seed([7; 32]);
         let key = signer.verifying_key();
         let valid = signer.sign(b"resource", b"control");
@@ -634,6 +677,10 @@ mod tests {
         bad_r.bytes[..32].copy_from_slice(&undecodable());
         let bad_key =
             crate::signing::VerifyingKey::decode(Copying(undecodable().as_slice())).unwrap();
+
+        // The last sample comes from the batch's outer `try_run`, which counts complete work only
+        // when the pipeline reaches the batch equation. A signature over another message reaches
+        // it and fails there.
         for parallel in [false, true] {
             for (key, signature, message, valid, complete) in [
                 (&key, &valid, b"control".as_slice(), true, true),
@@ -682,7 +729,11 @@ mod tests {
     /// scalars of every size.
     #[test]
     fn straus_matches_double_and_add() {
+        // With every scalar zero, no digit is nonzero, which takes the early return.
         assert!(straus([(GAffine::BASEPOINT.to_extended(), Scalar::ZERO)]).is_identity());
+
+        // Each point gains a low-order component, and the difference from double-and-add must be
+        // exactly the identity, so the torsion part is checked too.
         Builder::default()
             .with_seed(0)
             .with_search_limit(64)
@@ -846,6 +897,8 @@ mod tests {
                 )
             })
             .collect();
+
+        // One repeated key plus one key per position not divisible by 3.
         let mut keys: Vec<_> = batch.iter().map(|(key, _, _)| *key).collect();
         keys.sort_unstable();
         keys.dedup();
@@ -922,6 +975,9 @@ mod tests {
                 .iter()
                 .flat_map(|partition| &partition.zh)
                 .collect();
+
+            // Recompute each signature's coefficient and scalars from its original index alone.
+            // Its `z*h` must sit at the unit and lane that index selects, whatever the partitions.
             let mut expected_sum = Scalar::ZERO;
             let mut expected_terms = Vec::with_capacity(batch.len());
             for (i, &(key, sig, msg)) in items.iter().enumerate() {
@@ -937,6 +993,9 @@ mod tests {
                 expected_sum = expected_sum.add_mod_l(&z.mul_mod_l(&s));
                 expected_terms.push(Term::new(GAffine::decompress(&sig.r).unwrap(), &z, width));
             }
+
+            // The partitions' `z*s` shares add up to the batch's sum, and the `R` terms carry the
+            // same coefficients. Padding lanes hold identity terms, which add nothing to the MSM.
             let actual_sum = partitions.iter().fold(Scalar::ZERO, |sum, partition| {
                 sum.add_mod_l(&partition.zs_sum)
             });
@@ -965,6 +1024,9 @@ mod tests {
                     .with_search_limit(1)
                     .test(|u| {
                         let batch = mixed_batch_with_repeats(u, 70)?;
+
+                        // Partial, exact, and several units, each under a serial, a forced
+                        // parallel, and an adaptive strategy.
                         for count in [1, UNIT - 1, UNIT, UNIT + 1, 4 * UNIT + 1, 70] {
                             check(backend, &Sequential, &batch[..count]);
                             check(backend, &parallel, &batch[..count]);
@@ -1082,6 +1144,9 @@ mod tests {
             .test(|u| {
                 let batch = mixed_batch_with_repeats(u, 70)?;
                 for (forged, control) in decode_only_forgeries() {
+                    // In place of one signature of a valid batch, the control keeps the batch
+                    // valid, so the forgery can fail only on its undecodable point. Alone, the
+                    // pair must behave the same.
                     for position in [0, 7, 8, 15, 16, 39, 69] {
                         let mut accepted = batch.clone();
                         accepted[position] = control.clone();

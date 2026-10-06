@@ -74,6 +74,9 @@ pub trait Backend: GBackend + Send + Sync {
 }
 
 /// Native lane operations for variable-time multiplication of public scalar digits.
+///
+/// Point operations must work for all points in every lane, including the identity, equal
+/// points, a point plus its negation, and points with a torsion component.
 pub trait Lanes<const N: usize>: Copy {
     /// Extended points, one per native lane.
     type Point: Copy;
@@ -115,7 +118,10 @@ pub trait Lanes<const N: usize>: Copy {
     fn sum(self, point: Self::Point) -> G;
 }
 
-/// A computation generic over native lane widths and representations.
+/// A computation written once over [`Lanes`].
+///
+/// [`Backend::with_lanes`] runs it with the backend's native lane width and point types, inside
+/// the backend's target features.
 pub trait WithLanes {
     /// The result of the computation.
     type Output;

@@ -170,6 +170,8 @@ mod bucketed {
             window: usize,
             width: u32,
         ) {
+            // A range whose digits in this window are all zero adds nothing. Returning before the
+            // clear below also lets a tile with no nonzero digit finish without a fold.
             let used = super::used_buckets(chunks, start, end, window);
             if used == 0 {
                 return;
@@ -179,6 +181,9 @@ mod bucketed {
             if self.used == 0 {
                 self.buckets.fill(G::IDENTITY);
             }
+
+            // The range can span several chunks, so the backend fills one piece at a time. The
+            // tile's largest digit lets its fold skip the buckets above it.
             let nb = super::num_buckets(width);
             for piece in super::pieces(chunks, start, end) {
                 backend.fill_buckets(&mut self.buckets, nb, piece, |term| {
@@ -302,6 +307,8 @@ fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &im
     let windows = num_windows(width);
     let total = total_terms(chunks);
     strategy.run_tiles(windows, total, tile_cost::<B>(width), 1, |tiles| {
+        // Rows are windows in interleaved order, and columns are terms. Each worker reuses one set
+        // of bucket stripes across its tiles, and each tile yields a partial for its window.
         let partials = tiles.fill_collect_vec(
             || bucketed::Scratch::new(backend, width),
             |scratch, slot, range| {
@@ -313,6 +320,9 @@ fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &im
                 (window, scratch.finish(backend, width))
             },
         );
+
+        // A window cut into several tiles has several partials, which the backend sums before
+        // shifting each window into place.
         backend.combine_windows(partials, windows, width)
     })
 }
@@ -450,6 +460,8 @@ mod tests {
 
     #[test]
     fn canonical_edge_terms_match_bitwise_multiplication() {
+        // Zero, one, the largest 128-bit value, `2^252` and its two neighbors (all below `L`),
+        // and `L - 1`, each on the basepoint, a torsion point, and their sum.
         let mut top = [0u8; 32];
         top[31] = 0x10;
         let top = Scalar::from_canonical_bytes(&top).unwrap();
@@ -465,6 +477,9 @@ mod tests {
             one.neg_mod_l(),
         ];
         let backend = crate::curve::test_backend();
+
+        // One term is recoded at every width in turn, and both Straus and the bucket method must
+        // match bitwise double-and-add exactly.
         for scalar in scalars {
             for point in [
                 GAffine::BASEPOINT.to_extended(),
@@ -488,6 +503,9 @@ mod tests {
 
     #[test]
     fn strategy_callbacks_return_assembled_msm() {
+        // The first count takes parallel Straus through `run_batches`, and the second the bucket
+        // method through `run_tiles`. `Assembly` stops at that operation, which must assemble
+        // the final point rather than return partials.
         for count in [LANES + 1, PARALLEL_STRAUS_TERM_CUTOFF] {
             let terms =
                 vec![Term::new(GAffine::BASEPOINT, &Scalar::from_u128(1), MIN_WIDTH); count];
@@ -665,6 +683,9 @@ mod tests {
                         let u = &mut Unstructured::new(&bytes);
                         for width in [6, 8, 10] {
                             let terms = arbitrary_terms(u, 383, width)?;
+
+                            // Counts on both sides of multiples of `LANES`, up to the largest
+                            // batch that serial runs hand to Straus.
                             for n in [1, 7, 8, 9, 16, 17, 33, 383] {
                                 let expected =
                                     multiscalar_mul_terms_serial(backend, &[&terms[..n]], width);
@@ -804,6 +825,9 @@ mod tests {
                 for width in TEST_WIDTHS {
                     let scalar = Scalar::from_u128((1u128 << (2 * width)) | 1);
                     let terms = [Term::new(point, &scalar, width)];
+
+                    // The digits in windows 0, 1, and 2 are 1, 0, and 1. The zero window must not
+                    // fold the buckets window 0 left behind, and window 2 must clear them.
                     let mut scratch = bucketed::Scratch::new(backend, width);
                     for (window, expected) in
                         [point.to_extended(), G::IDENTITY, point.to_extended()]
@@ -851,6 +875,8 @@ mod tests {
 
                             let expected = multiscalar_mul_terms_serial(backend, &chunks, WIDTH);
 
+                            // Every window's sum is computed twice with one reused scratch: as two
+                            // tiles whose partials are added, and as one tile filled in two pieces.
                             let nw = num_windows(WIDTH);
                             let mut split = vec![G::IDENTITY; nw];
                             let mut pieced = vec![G::IDENTITY; nw];
@@ -866,6 +892,7 @@ mod tests {
                                 pieced[window] = scratch.finish(backend, WIDTH);
                             }
 
+                            // Positioning either set of window sums must reproduce the whole MSM.
                             for partials in [split, pieced] {
                                 assert!(points_equal(
                                     backend.combine_windows(

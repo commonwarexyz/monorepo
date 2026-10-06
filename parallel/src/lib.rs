@@ -269,10 +269,12 @@ commonware_macros::stability_scope!(BETA {
             FINISH: Fn(&mut T, usize) -> R + Send + Sync,
             R: Send,
         {
+            // An empty grid has no tiles, and `Shares` needs at least one cell to size its units.
             if self.rows == 0 || self.len == 0 {
                 return Vec::new();
             }
             match self.plan {
+                // One state fills every row in order, each row one tile in a single piece.
                 Plan::Serial => {
                     let mut state = init();
                     (0..self.rows)
@@ -282,6 +284,8 @@ commonware_macros::stability_scope!(BETA {
                         })
                         .collect()
                 }
+                // Each share is one task. An idle task can take the back half of another share, so
+                // a late-starting task or a costlier share does not hold up the run.
                 #[cfg(any(feature = "std", test))]
                 Plan::Shared { tile_cost, workers } => {
                     let shares = Shares::new(self.rows, self.len, tile_cost, workers);
@@ -344,6 +348,8 @@ commonware_macros::stability_scope!(BETA {
         /// and a share holding two of them can be split for free. Longer rows use units small
         /// enough to cut anywhere, claimed one tile's cost at a time.
         fn new(rows: usize, len: usize, tile_cost: usize, workers: usize) -> Self {
+            // At most `MAX_UNITS` units cover the grid. Short rows group whole rows into a unit, so
+            // moving a unit never cuts a row. Long rows claim the tile cost rounded up to units.
             let cells = rows * len;
             let (unit, claim, split_cost) = if len < tile_cost.saturating_mul(2) {
                 (len * rows.div_ceil(MAX_UNITS), 1, 0)
@@ -352,6 +358,9 @@ commonware_macros::stability_scope!(BETA {
                 (unit, tile_cost.div_ceil(unit), tile_cost)
             };
             let units = cells.div_ceil(unit);
+
+            // Use at least one worker and at most one per whole claim in the grid. Shares differ by
+            // at most one unit, the first `extra` taking the larger size.
             let workers = workers.min(units / claim).max(1);
             let (per_share, extra) = (units / workers, units % workers);
             let pending = (0..workers)
@@ -378,10 +387,14 @@ commonware_macros::stability_scope!(BETA {
 
         /// The midpoint and actual cell count of a share whose back half pays for a split.
         fn split(&self, word: usize) -> Option<(usize, usize)> {
+            // Each side of a split keeps at least one unit.
             let (start, end) = unpack(word);
             if end - start < 2 {
                 return None;
             }
+
+            // The last unit can run past the grid, so the back half's actual cells decide
+            // whether the split pays, and the share's actual cells rank it among victims.
             let middle = start + (end - start) / 2;
             let stop = end.saturating_mul(self.unit).min(self.cells);
             (stop - middle * self.unit > self.split_cost)
@@ -395,12 +408,16 @@ commonware_macros::stability_scope!(BETA {
             loop {
                 let (start, end) = unpack(word);
                 if start == end {
-                    // Only this worker refills its own empty share, so a plain store cannot lose
-                    // units.
+                    // Refill from a steal, or stop once no share is worth splitting. Only this
+                    // worker refills its own empty share, so a plain store cannot lose units.
                     word = self.steal(worker)?;
                     pending.store(word, AtomicOrdering::Relaxed);
                     continue;
                 }
+
+                // Take one claim from the front, clipped to the grid. Thieves only cut the back,
+                // so a failed exchange retries with the current range. Relaxed ordering suffices,
+                // since the word only divides units among workers and carries no other data.
                 let stop = start + self.claim.min(end - start);
                 match pending.compare_exchange_weak(
                     word,
@@ -419,10 +436,13 @@ commonware_macros::stability_scope!(BETA {
         /// Takes the back half of the largest share other than the thief's own, returning it
         /// packed.
         fn steal(&self, thief: usize) -> Option<usize> {
+            // No share can ever pay for a split (see `splittable`).
             if !self.splittable {
                 return None;
             }
             loop {
+                // Pick the largest other share whose back half pays for a split, if any.
+                // Halving the largest share keeps steals, and the tiles they add, few.
                 let (victim, word, middle, _) = (0..self.pending.len())
                     .filter(|&worker| worker != thief)
                     .filter_map(|worker| {
@@ -431,6 +451,9 @@ commonware_macros::stability_scope!(BETA {
                             .map(|(middle, cells)| (worker, word, middle, cells))
                     })
                     .max_by_key(|&(_, _, _, cells)| cells)?;
+
+                // Keep the victim's front half if its range is still the one scanned.
+                // A claim or another steal in between sends the thief back to scanning.
                 let (start, end) = unpack(word);
                 if self.pending[victim]
                     .0
@@ -462,6 +485,8 @@ commonware_macros::stability_scope!(BETA {
             // The row of the unfinished tile and the column that would continue it.
             let mut open = None;
             while let Some(cells) = self.claim(worker) {
+                // Cut the claimed cells at row ends. A piece that does not continue the open tile
+                // (another row, or cells from a stolen half) finishes that tile first.
                 let mut start = cells.start;
                 while start < cells.end {
                     let (row, column) = (start / len, start % len);
@@ -477,6 +502,8 @@ commonware_macros::stability_scope!(BETA {
                     start = end;
                 }
             }
+
+            // The last tile has no next piece to finish it.
             if let Some((row, _)) = open {
                 results.push(finish(state, row));
             }
@@ -1780,6 +1807,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             R: Send,
             F: for<'scope> FnOnce(Tiles<'scope, Self>) -> R + Send,
         {
+            // The policy picks the shape from the grid's estimated work.
+            // A parallel run dispatches its shares through the policy-free strategy:
+            // the policy would see only one item per share and could run them serially.
             self.execute(
                 rows.saturating_mul(len),
                 multiplier,
@@ -2785,6 +2815,8 @@ mod test {
             NonZeroUsize::new(tile_cost).unwrap(),
             1,
             |tiles| {
+                // Record each piece with its row. Finishing a tile takes every recorded piece,
+                // which must belong to that row, and leaves the state empty for the next tile.
                 tiles.fill_collect_vec(
                     Vec::new,
                     |pieces: &mut Vec<(usize, Range<usize>)>, row, columns| {
@@ -2822,6 +2854,8 @@ mod test {
 
     #[test]
     fn run_tiles_cover_every_cell_once() {
+        // Empty grids, one cell, rows too short to cut (30 x 63 and 30 x 100 at tile cost 64),
+        // and longer rows, the last two with more than `MAX_UNITS` cells and multi-cell units.
         let grids = [
             (0, 5, 1),
             (3, 0, 1),
@@ -2834,6 +2868,8 @@ mod test {
             (30, 32_769, 2_304),
             (44, 2_001, 288),
         ];
+
+        // Each grid runs serially, adaptively, and manually at 1 to 64 planned workers.
         for (rows, len, tile_cost) in grids {
             assert_covers(&tiles_of(&Sequential, rows, len, tile_cost), rows, len);
             assert_covers(
@@ -2857,6 +2893,7 @@ mod test {
 
     #[test]
     fn run_tiles_serial_runs_make_every_row_one_tile() {
+        // A single-worker manual run is serial too, and a grid without columns has no tiles.
         let whole: Vec<_> = (0..3)
             .map(|row| (row, core::iter::once(0..10).collect()))
             .collect();
@@ -2938,6 +2975,8 @@ mod test {
             },
         );
         assert_covers(&tiles, 1, len);
+
+        // The tile holding the stalled piece kept at most those three tile costs.
         let first: usize = tiles
             .iter()
             .find(|(_, pieces)| pieces[0].start == 0)
@@ -2946,6 +2985,11 @@ mod test {
         assert!(first <= 3 * tile_cost, "first tile kept {first} cells");
     }
 
+    /// Fills one row of `len` cells as four shares and asserts that no worker steals.
+    /// Workers on the last three shares pause at the claims starting at `wait_for` until
+    /// the first share's tile finishes. The first worker pauses at the claim starting at
+    /// `drain` until all three have paused, then empties its share. The tails left pending
+    /// must be too small to pay for a split, so the run ends with one tile per share.
     fn assert_no_cheap_steal(len: usize, tile_cost: usize, wait_for: [usize; 3], drain: usize) {
         let ready = AtomicUsize::new(0);
         let release = AtomicUsize::new(0);
@@ -2988,11 +3032,14 @@ mod test {
         assert_eq!(tiles.len(), 4, "len={len} tile_cost={tile_cost}");
     }
 
+    /// Shares of three claims each: a paused share's pending back half is exactly one tile cost.
     #[test]
     fn run_tiles_do_not_steal_equal_cost_tails() {
         assert_no_cheap_steal(120, 10, [30, 60, 90], 0);
     }
 
+    /// Two-cell units at a tile cost of three cells: the last share's pending back half
+    /// spans two units but only three cells before the grid ends.
     #[test]
     fn run_tiles_do_not_steal_clipped_tails_at_cost() {
         assert_no_cheap_steal(65_537, 3, [32_762, 49_146, 65_526], 16_384);
@@ -3000,6 +3047,7 @@ mod test {
 
     #[test]
     fn run_tiles_serial_runs_reuse_worker_state() {
+        // Weight each row differently, so a cell credited to the wrong row changes the totals.
         let rows = 7;
         let data: Vec<u64> = (0..1_000).collect();
         let weighted = |row: usize, columns: Range<usize>| -> u64 {

@@ -542,6 +542,8 @@ impl FBackend for Backend {
             load(&a.limbs, 2),
             load(&a.limbs, 3),
         ];
+
+        // The tiles hold disjoint pairs of lanes, so each round squares all four independently.
         for _ in 0..k {
             for tile in &mut tiles {
                 *tile = square_regs(*tile);
@@ -619,6 +621,12 @@ fn add_regs([x1, y1, t1, z1]: Point, [x2, y2, t2, z2]: Point) -> Point {
 /// Applies the dedicated `dbl-2008-hwcd` doubling formula to two independent register lanes.
 #[inline(always)]
 fn double_regs([x, y, _, z]: Point) -> Point {
+    // `dbl-2008-hwcd` for curve parameter `a = -1`, which folds `D = a*A` into `G` and `H`:
+    //
+    //   A = X1^2        E = (X1 + Y1)^2 - A - B        X3 = E*F
+    //   B = Y1^2        G = B - A                      Y3 = G*H
+    //   C = 2*Z1^2      F = G - C                      T3 = E*H
+    //                   H = -A - B                     Z3 = F*G
     let a = square_regs(x);
     let b = square_regs(y);
     let c0 = square_regs(z);
@@ -679,6 +687,8 @@ impl GBackend for Backend {
     /// Fused point addition, processed two lanes at a time to keep the working set in registers.
     #[inline(always)]
     fn g_add(self, mut p: GVec, q: GVec) -> GVec {
+        // Tiles hold disjoint pairs of lanes, so each tile's result can overwrite its slice of
+        // `p` without affecting the inputs of later tiles.
         for tile in 0..TILES {
             let [x, y, t, z] = add_regs(
                 [
@@ -705,6 +715,8 @@ impl GBackend for Backend {
     /// Fused mixed point addition, processed two lanes at a time.
     #[inline(always)]
     fn g_add_mixed(self, mut p: GVec, q: GAffineVec) -> GVec {
+        // Tiles hold disjoint pairs of lanes, so each tile's result can overwrite its slice of
+        // `p` without affecting the inputs of later tiles.
         for tile in 0..TILES {
             let [x, y, t, z] = add_mixed_regs(
                 [
@@ -730,6 +742,8 @@ impl GBackend for Backend {
     /// Fused point doubling using the dedicated `dbl-2008-hwcd` formula.
     #[inline(always)]
     fn g_double(self, mut p: GVec) -> GVec {
+        // Tiles hold disjoint pairs of lanes, so each tile's result can overwrite its slice of
+        // `p` without affecting the inputs of later tiles.
         for tile in 0..TILES {
             let [x, y, t, z] = double_regs([
                 load(&p.x.limbs, tile),
@@ -754,6 +768,8 @@ impl super::Backend for Backend {}
 /// Variable-time, so the signs must be public.
 #[inline(always)]
 fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
+    // Subtracting `q[i]` adds its negation, which negates `x` and `t2d` but keeps `y`. The
+    // negation is skipped entirely when both signs are positive.
     let mut x2 = pack_pair(q.map(|point| point.x));
     let mut t2d = pack_pair(q.map(|point| point.t2d));
     if negative.iter().any(|&sign| sign) {
@@ -763,6 +779,9 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
         x2 = neg_lanes(x2, mask);
         t2d = neg_lanes(t2d, mask);
     }
+
+    // Lane `i` of every register holds `p[i]` and the signed `q[i]`, so one mixed addition
+    // updates both points before each lane is unpacked into its result.
     let [x, y, t, z] = add_mixed_regs(
         [
             pack_pair(p.map(|point| point.x)),
@@ -893,6 +912,8 @@ impl msm::Lanes<WIDTH> for Backend {
                 }
             }
         }
+
+        // Lanes with negative digits subtract their entry by negating its `X` and `T`.
         let [x, y, t, z] = selected;
         let masks = [
             0u64.wrapping_sub(u64::from(digits[0] < 0)),
@@ -905,6 +926,8 @@ impl msm::Lanes<WIDTH> for Backend {
 
     #[inline(always)]
     fn select(self, point: Point, keep: [bool; WIDTH]) -> Point {
+        // Kept lanes get an all-ones mask, so the bitwise select takes `point`'s limbs there and
+        // the identity's limbs elsewhere.
         let masks = keep.map(|keep| 0u64.wrapping_sub(u64::from(keep)));
         let identity = identity_regs();
         // SAFETY: AArch64 targets provide NEON, and the mask array has two complete lanes.

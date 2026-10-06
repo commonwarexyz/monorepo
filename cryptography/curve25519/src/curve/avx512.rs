@@ -278,6 +278,11 @@ fn store_point([x, y, t, z]: Point) -> GVec {
 /// `2^63` bound, and every right operand of `sub_raw` is reduced below `2^52`.
 #[target_feature(enable = "avx512f,avx512ifma")]
 fn add_mixed_regs([x1, y1, t1, z1]: Point, [x2, y2, t2d]: Affine) -> Point {
+    // The steps of `add_lanes` with `Z2 = 1`: the affine operand supplies `2d*T2`, so `C`
+    // takes one multiplication and `D = 2*Z1` takes none.
+    //
+    // `B` and `D` are left unreduced: they appear only in sums and as the minuend of
+    // `sub_raw`, whose results are reduced before multiplying.
     let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
     let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
     let c = mul_regs(t1, t2d);
@@ -298,6 +303,9 @@ fn add_mixed_regs([x1, y1, t1, z1]: Point, [x2, y2, t2d]: Affine) -> Point {
 #[target_feature(enable = "avx512f")]
 fn transpose(r: [__m512i; 8]) -> [__m512i; 8] {
     // Interleave row pairs within each 128-bit block, then regroup 128-bit blocks twice.
+    //
+    // Block `b` of `t[2m]` holds column `2b` of rows `2m` and `2m + 1`, and block `b` of
+    // `t[2m + 1]` holds column `2b + 1` of the same rows.
     let t = [
         _mm512_unpacklo_epi64(r[0], r[1]),
         _mm512_unpackhi_epi64(r[0], r[1]),
@@ -308,6 +316,10 @@ fn transpose(r: [__m512i; 8]) -> [__m512i; 8] {
         _mm512_unpacklo_epi64(r[6], r[7]),
         _mm512_unpackhi_epi64(r[6], r[7]),
     ];
+
+    // Selector `0x88` takes blocks 0 and 2 of each source and `0xdd` takes blocks 1 and 3. For
+    // `k < 4`, `u[k]` holds column `k` in its even blocks and column `k + 4` in its odd blocks,
+    // from rows 0..4; `u[k + 4]` holds the same columns from rows 4..8.
     let u = [
         _mm512_shuffle_i64x2::<0x88>(t[0], t[2]),
         _mm512_shuffle_i64x2::<0x88>(t[1], t[3]),
@@ -318,6 +330,9 @@ fn transpose(r: [__m512i; 8]) -> [__m512i; 8] {
         _mm512_shuffle_i64x2::<0xdd>(t[4], t[6]),
         _mm512_shuffle_i64x2::<0xdd>(t[5], t[7]),
     ];
+
+    // Joining the even blocks of `u[k]` and `u[k + 4]` completes column `k` in row order, and
+    // joining their odd blocks completes column `k + 4`.
     [
         _mm512_shuffle_i64x2::<0x88>(u[0], u[4]),
         _mm512_shuffle_i64x2::<0x88>(u[1], u[5]),
@@ -350,6 +365,8 @@ unsafe fn load_points(points: [*const G; LANES]) -> Point {
     let mut b = a;
     let mut c = a;
 
+    // Lane `l`'s point fills row `l` of three 8x8 limb blocks: limbs 0..8 in `a`, 8..16 in `b`,
+    // and 16..20 in `c`.
     // SAFETY: `G` is 20 consecutive limbs (`x`, `y`, `t`, and `z`, five each), so each pointer is
     // valid for limbs 0..20. The final load masks off limbs 20..24.
     unsafe {
@@ -360,6 +377,9 @@ unsafe fn load_points(points: [*const G; LANES]) -> Point {
             c[lane] = _mm512_maskz_loadu_epi64(0x0f, p.add(16).cast());
         }
     }
+
+    // After transposing, row `i` of `a`, `b`, and `c` holds limb `i`, `8 + i`, and `16 + i` of
+    // every lane's point, so the 20 limb rows split into `x`, `y`, `t`, and `z` five at a time.
     let (a, b, c) = (transpose(a), transpose(b), transpose(c));
     [
         [a[0], a[1], a[2], a[3], a[4]],
@@ -376,10 +396,15 @@ unsafe fn load_points(points: [*const G; LANES]) -> Point {
 /// Every pointer whose lane `mask` selects must be valid for writes of a [`G`].
 #[target_feature(enable = "avx512f")]
 unsafe fn store_points([x, y, t, z]: Point, points: [*mut G; LANES], mask: __mmask8) {
+    // Transpose the 20 limb rows back into three 8x8 blocks whose row `l` holds limbs 0..8,
+    // 8..16, and 16..20 of lane `l`'s point. The zero padding in `c` lands on limbs 20..24,
+    // which the masked store skips.
     let zero = _mm512_setzero_si512();
     let a = transpose([x[0], x[1], x[2], x[3], x[4], y[0], y[1], y[2]]);
     let b = transpose([y[3], y[4], t[0], t[1], t[2], t[3], t[4], z[0]]);
     let c = transpose([z[1], z[2], z[3], z[4], zero, zero, zero, zero]);
+
+    // Pointers of unselected lanes need not be valid, so only the lanes in `mask` are written.
     for lane in 0..LANES {
         if mask & (1 << lane) != 0 {
             let p = points[lane].cast::<u64>();
@@ -405,6 +430,7 @@ unsafe fn load_affines(points: [*const GAffine; LANES]) -> Affine {
     let mut a = [_mm512_setzero_si512(); LANES];
     let mut b = a;
 
+    // Lane `l`'s point fills row `l` of two 8x8 limb blocks: limbs 0..8 in `a` and 8..15 in `b`.
     // SAFETY: `GAffine` is 15 consecutive limbs (`x`, `y`, and `t2d`, five each), so each pointer
     // is valid for limbs 0..15. The second load masks off limb 15.
     unsafe {
@@ -414,6 +440,9 @@ unsafe fn load_affines(points: [*const GAffine; LANES]) -> Affine {
             b[lane] = _mm512_maskz_loadu_epi64(0x7f, p.add(8).cast());
         }
     }
+
+    // After transposing, row `i` of `a` and `b` holds limb `i` and `8 + i` of every lane's
+    // point, so the 15 limb rows split into `x`, `y`, and `t2d` five at a time.
     let (a, b) = (transpose(a), transpose(b));
     [
         [a[0], a[1], a[2], a[3], a[4]],
@@ -492,6 +521,9 @@ impl Backend {
     fn add_lanes(self, [x1, y1, t1, z1]: Point, [x2, y2, t2, z2]: Point) -> Point {
         // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.
         unsafe {
+            // Every lane adds its own pair of points. `B` and `D` are left unreduced: they
+            // appear only in sums and as the minuend of `sub_raw`, whose results are reduced
+            // before multiplying.
             let two_d = load(&EDWARDS_D2.limbs);
             let a = mul_regs(reduce_regs(sub_raw(y1, x1)), reduce_regs(sub_raw(y2, x2)));
             let b = mul_regs_loose(reduce_regs(add_raw(y1, x1)), reduce_regs(add_raw(y2, x2)));
@@ -540,11 +572,17 @@ impl Backend {
         terms: &[T],
         term: impl Fn(&T) -> (&GAffine, i16),
     ) {
+        // The slot arithmetic below relies on one stripe of `nb` buckets per lane.
         assert_eq!(Some(buckets.len()), LANES.checked_mul(nb));
         let base = buckets.as_mut_ptr();
+
+        // Lanes without a nonzero digit load these identities, and their sums are never stored.
         let identity = G::IDENTITY;
         let affine_identity = GAffine::IDENTITY;
         for wave in terms.chunks(LANES) {
+            // Point each lane with a nonzero digit at its term's point and at the bucket the
+            // digit's magnitude selects in the lane's own stripe. The masks record which lanes
+            // are active and which subtract their point.
             let mut incoming = [&raw const affine_identity; LANES];
             let mut current = [&raw const identity; LANES];
             let mut slots = [core::ptr::null_mut(); LANES];
@@ -565,9 +603,14 @@ impl Backend {
                 active |= 1 << lane;
                 negative |= u8::from(digit < 0) << lane;
             }
+
+            // A wave whose digits are all zero changes no bucket.
             if active == 0 {
                 continue;
             }
+
+            // Load each lane's bucket and point, negate the subtracted points (negating `x`
+            // also negates `2d*x*y`), add, and store only the active lanes back.
             // SAFETY: every pointer is a bucket in `buckets`, a term's point, or a live local
             // point.
             let (p, [x, y, t2d]) = unsafe { (load_points(current), load_affines(incoming)) };
@@ -706,6 +749,16 @@ impl msm::Lanes<LANES> for Backend {
     fn double(self, [x, y, _, z]: Point) -> Point {
         // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.
         unsafe {
+            // `dbl-2008-hwcd` for curve parameter `a = -1`, which folds
+            // `D = a*A` into `G` and `H`:
+            //
+            //   A = X1^2        E = (X1 + Y1)^2 - A - B        X3 = E*F
+            //   B = Y1^2        G = B - A                      Y3 = G*H
+            //   C = 2*Z1^2      F = G - C                      T3 = E*H
+            //                   H = -A - B                     Z3 = F*G
+            //
+            // `Z1^2` and `(X1 + Y1)^2` skip the carry pass because each is reduced right after
+            // its addition or subtraction.
             let a = square_regs(x);
             let b = square_regs(y);
             let c0 = square_regs_loose(z);
@@ -743,6 +796,8 @@ impl msm::Lanes<LANES> for Backend {
         // offsets has eight i64s, and every entry is below table.len(), so each lane's
         // offset plus the row stays inside table.
         unsafe {
+            // Gather one limb row at a time. Lane `l` reads lane `l` of that row in entry
+            // `|digits[l]|`, so `selected` holds each lane's own table entry.
             let offsets = _mm512_loadu_si512(offsets.as_ptr().cast());
             let base = table.as_ptr().cast::<i64>();
             let mut selected: Point = [[_mm512_setzero_si512(); 5]; 4];
@@ -754,6 +809,8 @@ impl msm::Lanes<LANES> for Backend {
                     );
                 }
             }
+
+            // Lanes with negative digits subtract their entry by negating its `X` and `T`.
             let [x, y, t, z] = selected;
             self.add_lanes(
                 point,
@@ -764,6 +821,8 @@ impl msm::Lanes<LANES> for Backend {
 
     #[inline(always)]
     fn select(self, point: Point, keep: [bool; LANES]) -> Point {
+        // Bit `l` of the mask is set when lane `l` is kept. The blend takes `point`'s limbs for
+        // set bits and the identity's limbs for clear bits.
         let mask = keep
             .iter()
             .enumerate()

@@ -19,6 +19,9 @@ pub(super) const LANES: usize = 8;
 /// `messages` must hold at most [`LANES`] messages.
 #[target_feature(enable = "avx512f")]
 pub(super) fn hash(messages: &[&[u8]]) -> [Digest; LANES] {
+    // Lanes run in lockstep while at least two have blocks left. `longest` is the first lane
+    // with the most blocks and `shared` the largest count among the others, so only `longest`
+    // has blocks past `shared`. Lanes past `messages.len()` have no blocks.
     let mut counts = [0usize; LANES];
     for (count, message) in counts.iter_mut().zip(messages) {
         *count = block_count(message.len());
@@ -35,12 +38,16 @@ pub(super) fn hash(messages: &[&[u8]]) -> [Digest; LANES] {
         .max()
         .unwrap_or(0);
 
+    // Register `r` of `state` holds state word `r` of every lane, and row `j` of `words` holds
+    // word `j` of every lane's current block, read big-endian as FIPS 180-4 specifies.
     let mut state = [_mm512_setzero_si512(); 8];
     for (reg, word) in state.iter_mut().zip(IV) {
         *reg = _mm512_set1_epi64(word as i64);
     }
     let mut words = [[0u64; LANES]; 16];
     for index in 0..shared {
+        // A lane with no block at `index` keeps stale words in `words`, but leaving it out of
+        // `active` keeps its state unchanged.
         let mut active: __mmask8 = 0;
         for (lane, message) in messages.iter().enumerate() {
             if index < counts[lane] {
@@ -54,12 +61,16 @@ pub(super) fn hash(messages: &[&[u8]]) -> [Digest; LANES] {
         compress(&mut state, &words, active);
     }
 
+    // Spill the state to rows indexed by state word, then by lane.
     let mut rows = [[0u64; LANES]; 8];
     for (row, reg) in rows.iter_mut().zip(state) {
         // SAFETY: `row` is `[u64; 8]`, exactly one zmm register's worth of packed u64 lanes, and
         // `storeu` places no alignment requirement on the destination.
         unsafe { _mm512_storeu_si512(row.as_mut_ptr().cast(), reg) };
     }
+
+    // The `longest` lane finishes its remaining blocks one lane wide. It is a real message
+    // unless `messages` is empty, since every message has at least one block.
     if let Some(message) = messages.get(longest) {
         let mut tail = [0u64; 8];
         for (word, row) in tail.iter_mut().zip(&rows) {
@@ -72,6 +83,9 @@ pub(super) fn hash(messages: &[&[u8]]) -> [Digest; LANES] {
             row[longest] = word;
         }
     }
+
+    // Each digest is its lane's state words in big-endian order. Lanes past `messages.len()`
+    // stay zero.
     let mut out = [Digest([0u8; DIGEST_LENGTH]); LANES];
     for (lane, digest) in out.iter_mut().enumerate().take(messages.len()) {
         for (bytes, row) in digest.0.as_chunks_mut::<8>().0.iter_mut().zip(&rows) {
@@ -110,6 +124,9 @@ fn round(s: [__m512i; 8], kw: __m512i) -> [__m512i; 8] {
     // Maj(a, b, c) = (a & b) ^ (a & c) ^ (b & c).
     let maj = _mm512_ternarylogic_epi64::<0xe8>(a, b, c);
     let t2 = _mm512_add_epi64(sigma0, maj);
+
+    // `T1 + T2` becomes the new `a` and `d + T1` the new `e`, while the other words shift
+    // down one place.
     [
         _mm512_add_epi64(t1, t2),
         a,
@@ -126,6 +143,9 @@ fn round(s: [__m512i; 8], kw: __m512i) -> [__m512i; 8] {
 /// (FIPS 180-4, section 6.4.2, step 1), where `w` holds `W[t-16..t]` with `W[u]` at `w[u % 16]`.
 #[target_feature(enable = "avx512f")]
 fn schedule(w: &mut [__m512i; 16], j: usize) {
+    // With `j = t % 16`, the ring holds `W[t-15]` at `j + 1`, `W[t-7]` at `j + 9`, and
+    // `W[t-2]` at `j + 14` (mod 16). `s0` and `s1` are the lowercase sigma functions of
+    // FIPS 180-4, section 4.1.3.
     let w15 = w[(j + 1) % 16];
     let w2 = w[(j + 14) % 16];
     let s0 = xor3(
@@ -148,6 +168,8 @@ fn schedule(w: &mut [__m512i; 16], j: usize) {
 /// `state`, updating only the lanes set in `active`.
 #[target_feature(enable = "avx512f")]
 fn compress(state: &mut [__m512i; 8], words: &[[u64; LANES]; 16], active: __mmask8) {
+    // Register `j` of `w` starts as `W[j]` for every lane, and the working variables `s` start
+    // as the state (FIPS 180-4, section 6.4.2, step 2).
     let mut w = [_mm512_setzero_si512(); 16];
     for (reg, row) in w.iter_mut().zip(words) {
         // SAFETY: `row` is `[u64; 8]`, exactly one zmm register's worth of packed u64 lanes, and
@@ -168,12 +190,18 @@ fn compress(state: &mut [__m512i; 8], words: &[[u64; LANES]; 16], active: __mmas
             s = round(s, _mm512_add_epi64(w[$j], _mm512_set1_epi64($k[$j] as i64)));
         )*};
     }
+
+    // Rounds 0 to 15 use the block's words directly, and each later round `t` first replaces
+    // `W[t-16]` in the ring with `W[t]`. Chunk `i` of `K` holds the constants for rounds
+    // `16 * i` through `16 * i + 15`.
     let (chunks, _) = K.as_chunks::<16>();
     rounds!(chunks[0], false);
     for k in &chunks[1..] {
         rounds!(k, true);
     }
 
+    // Add the working variables into the state (FIPS 180-4, section 6.4.2, step 4) only in the
+    // active lanes, so other lanes keep their state.
     for (reg, working) in state.iter_mut().zip(s) {
         *reg = _mm512_mask_add_epi64(*reg, active, *reg, working);
     }
