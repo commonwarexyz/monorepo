@@ -652,7 +652,7 @@ mod tests {
     /// Signing and verifying through the `commonware-cryptography` traits match the inherent
     /// methods.
     #[test]
-    fn cryptography_traits_match_inherent_methods() {
+    fn sign_and_verify() {
         fn sign<S: PrivateKey>(
             signer: &S,
             namespace: &[u8],
