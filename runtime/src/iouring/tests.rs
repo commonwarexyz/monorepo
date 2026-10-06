@@ -1,17 +1,19 @@
-//! Runtime configuration, task placement, worker reservations, and cleanup tests.
+//! Runtime configuration, task placement, worker reservations, pool, and cleanup tests.
 
 use super::{
     super::{
         driver::tests::fail_after_completion,
         operation::Operation,
         request::{RecvRequest, Request},
+        task::{Task, tests::cancelled},
         tasks::tests::AFTER_INSERT,
+        waker::tests::state_bits,
     },
     *,
 };
 use crate::{
-    Blob as _, IoBufMut, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
-    Storage as _, WriteOptions,
+    Blob as _, IoBufMut, Listener as _, Metrics as _, Network as _, ReadOptions, Resolver as _,
+    Runner as _, Sink as _, Storage as _, Stream as _, WriteOptions,
     utils::{extract_panic_message, reschedule},
 };
 use futures::{
@@ -21,18 +23,20 @@ use futures::{
     task::{ArcWake, waker},
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::HashSet,
     fs::{self, File},
     future::{Pending, Ready},
     io::{self, Write as _},
-    os::unix::net::UnixStream,
+    os::{fd::OwnedFd, unix::net::UnixStream},
     panic::panic_any,
     sync::{
+        OnceLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     task::Wake,
-    thread,
+    thread::{self, ThreadId},
 };
 
 /// Bound individual synchronous channel waits within the test process.
@@ -41,6 +45,22 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 thread_local! {
     /// Whether the current test root requires progress without entering the idle path.
     static FORBID_PARK: Cell<bool> = const { Cell::new(false) };
+    /// Pool worker whose startup fails, and whether its thread launch fails instead.
+    static POOL_FAIL_AT: Cell<Option<(usize, bool)>> = const { Cell::new(None) };
+    /// Shared services of the runner whose pool last started, to observe their release.
+    static POOL_SHARED: RefCell<Weak<Shared>> = const { RefCell::new(Weak::new()) };
+}
+
+/// Fail pool worker `index`'s startup after the workers before it have started.
+pub fn before_pool_worker(shared: &Arc<Shared>, index: usize) -> Option<impl Drop> {
+    let (fail_at, launch) = POOL_FAIL_AT.get()?;
+    POOL_SHARED.with(|slot| *slot.borrow_mut() = Arc::downgrade(shared));
+    if index != fail_at {
+        return None;
+    }
+    POOL_FAIL_AT.set(None);
+    assert!(!launch, "injected pool thread launch failure");
+    Some(inject_worker_fault(&shared.workers, WorkerFault::Startup))
 }
 
 /// Clear the current thread's parking assertion when its test root finishes or unwinds.
@@ -242,6 +262,66 @@ fn forbid_park() -> ParkGuard {
 /// Fail at the idle boundary if this test root still requires runnable work.
 pub fn before_park() {
     assert!(!FORBID_PARK.get(), "callback work reached the idle path");
+}
+
+/// A point in a pool worker's park sequence where a test hook runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParkPoint {
+    /// After the worker's last readiness check, before it publishes itself
+    /// idle.
+    BeforeIdle,
+    /// After the worker publishes itself idle and finds the inject queue
+    /// empty, before it waits.
+    BeforeWait,
+}
+
+/// A callback for one pool worker's next park, keyed by the pool's address,
+/// the worker's index, and the point.
+type ParkHook = (usize, u32, ParkPoint, Box<dyn FnOnce() + Send>);
+
+/// Whether a park hook was ever installed, so parks otherwise skip the lock.
+static PARK_HOOKS_ARMED: AtomicBool = AtomicBool::new(false);
+
+/// Callbacks each run once by one pool worker at one point of its park.
+static PARK_HOOKS: Mutex<Vec<ParkHook>> = Mutex::new(Vec::new());
+
+/// Run `hook` on worker `index` of `pool` when it next reaches `point`.
+fn on_next_park(pool: &Table, index: u32, point: ParkPoint, hook: impl FnOnce() + Send + 'static) {
+    PARK_HOOKS
+        .lock()
+        .push((ptr::from_ref(pool).addr(), index, point, Box::new(hook)));
+    PARK_HOOKS_ARMED.store(true, Ordering::Release);
+}
+
+/// Run the hook installed for this worker at this point of its park, if any.
+pub fn at_park(pool: &Table, index: u32, point: ParkPoint) {
+    if !PARK_HOOKS_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let key = ptr::from_ref(pool).addr();
+    let hook = {
+        let mut hooks = PARK_HOOKS.lock();
+        hooks
+            .iter()
+            .position(|hook| hook.0 == key && hook.1 == index && hook.2 == point)
+            .map(|at| hooks.swap_remove(at).3)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+thread_local! {
+    /// Callback run once by this thread's runner after its root completes and
+    /// before worker zero closes the pool.
+    static AFTER_ROOT: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+}
+
+/// Run the callback a test installed for the window after the root.
+pub fn after_root() {
+    if let Some(callback) = AFTER_ROOT.with(RefCell::take) {
+        callback();
+    }
 }
 
 /// Count destruction before injecting a task-disposal panic.
@@ -603,8 +683,8 @@ fn test_execution_modes_share_ordinary_descendants() {
                 .spawn(move |context| async move {
                     let parent = thread::current().id();
 
-                    // Ordinary children return to the original worker even when
-                    // their parent owns a dedicated or blocking worker.
+                    // Ordinary children run on the pool, here its only worker,
+                    // even when their parent owns a dedicated or blocking worker.
                     for explicit in [false, true] {
                         let child = context.child("ordinary_child");
                         let child = if explicit { child.shared(false) } else { child };
@@ -800,8 +880,8 @@ fn test_aborted_context_skips_factories_for_every_placement() {
 fn test_closed_task_set_skips_local_and_foreign_factories() {
     for foreign in [false, true] {
         Runner::new(config()).start(|context| async move {
-            // Close only the set, leaving the worker and its mailbox open, so
-            // the refusal comes from the spawn's check of the set.
+            // Close only the set, leaving the worker and the inject queue open,
+            // so the refusal comes from the spawn's check of the set.
             context.shared.tasks.close();
 
             // Spawn from the worker's thread and from another thread.
@@ -1694,8 +1774,8 @@ fn test_shutdown_cancels_tasks_before_destruction() {
     enum Placement {
         /// Registered locally but never polled.
         Local,
-        /// Registered from another thread, with its first runnable not taken
-        /// from the mailbox.
+        /// Registered from another thread, with its first runnable still in
+        /// the inject queue.
         Foreign,
         /// Polled once and suspended before shutdown.
         Pending,
@@ -1737,15 +1817,13 @@ fn test_shutdown_cancels_tasks_before_destruction() {
                         tree.clone(),
                     );
                     let shared = context.shared.clone();
-                    let origin = context.origin.clone();
+                    let pool = Arc::downgrade(&shared.pool);
                     if matches!(placement, Placement::Foreign) {
-                        thread::spawn(move || {
-                            assert!(shared.tasks.register(future, origin).is_ok())
-                        })
-                        .join()
-                        .unwrap();
+                        thread::spawn(move || assert!(shared.tasks.register(future, pool).is_ok()))
+                            .join()
+                            .unwrap();
                     } else {
-                        assert!(shared.tasks.register(future, origin).is_ok());
+                        assert!(shared.tasks.register(future, pool).is_ok());
                     }
 
                     handles.push(handle);
@@ -1777,7 +1855,7 @@ fn test_shutdown_cancels_tasks_before_destruction() {
     }
 }
 
-/// A foreign spawn's task joins the set before its worker takes the first
+/// A foreign spawn's task joins the set before a worker takes the first
 /// runnable, and leaves it on completion.
 #[test]
 fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
@@ -1785,8 +1863,8 @@ fn test_foreign_spawn_joins_the_task_set_before_its_worker_runs() {
         // Only the runner's service task is registered.
         assert_eq!(context.shared.tasks.live(), 1);
 
-        // The root has not yielded, so the worker has not taken the first
-        // runnable from its mailbox, yet the set already retains the task.
+        // The root has not yielded, so no worker has taken the first runnable
+        // from the inject queue, yet the set already retains the task.
         let remote = context.child("foreign");
         let handle = thread::spawn(move || remote.spawn(|_| async {}))
             .join()
@@ -1813,7 +1891,7 @@ fn test_shutdown_between_registration_and_first_runnable_clears_the_task() {
         let (inserted, inserting) = oneshot::channel();
         let publisher = thread::spawn(move || {
             // Pause this thread's registration once the set holds the task,
-            // before its first runnable reaches the worker.
+            // before its first runnable reaches the pool.
             AFTER_INSERT.set(Some(Box::new(move || {
                 inserted.send(()).unwrap();
                 released.recv_timeout(TEST_TIMEOUT).unwrap();
@@ -1833,8 +1911,8 @@ fn test_shutdown_between_registration_and_first_runnable_clears_the_task() {
     assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert!(!polled.load(Ordering::Relaxed));
 
-    // The worker is gone, so delivery discards the runnable, and the handle is
-    // already closed.
+    // The pool's inject queue has closed, so delivery discards the runnable,
+    // and the handle is already closed.
     release.send(()).unwrap();
     let handle = publisher.join().unwrap();
     assert!(matches!(handle.now_or_never(), Some(Err(Error::Closed))));
@@ -2171,7 +2249,7 @@ fn test_worker_releases_storage_and_durable_io_before_tracking_ends() {
 }
 
 #[test]
-// Retain the task handle to check its result after the runner closes its mailbox.
+// Retain the task handle to check its result after the runner closes the pool.
 #[allow(clippy::async_yields_async)]
 fn test_queued_foreign_task_disposal_is_contained_at_shutdown() {
     for catch in [false, true] {
@@ -2182,7 +2260,7 @@ fn test_queued_foreign_task_disposal_is_contained_at_shutdown() {
             let remote = context.child("queued_foreign");
 
             // Joining only the publisher leaves its accepted task in the
-            // mailbox when this root completes its first poll.
+            // inject queue when this root completes its first poll.
             thread::spawn(move || {
                 remote.spawn(move |_| async move {
                     let _payload = payload;
@@ -2648,4 +2726,1174 @@ fn test_foreign_tls_destructor_can_wake_after_current_key_destruction() {
     });
 
     assert!(!panicked, "ordinary wake accessed destroyed runtime TLS");
+}
+
+/// Spin on the calling thread until `started` holds a thread, then return it.
+/// Called from the root, this keeps worker zero from polling anything else.
+fn wait_started(started: &Mutex<Option<ThreadId>>) -> ThreadId {
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        if let Some(thread) = *started.lock() {
+            return thread;
+        }
+        assert!(Instant::now() < deadline, "task never started");
+        std::hint::spin_loop();
+    }
+}
+
+/// Spawn `f` from a thread outside the pool, so its first runnable goes to the
+/// inject queue, and block the calling worker until another worker has started
+/// it. Returns the task's handle and the thread that started it.
+fn spawn_elsewhere<T, Fut>(context: &Context, f: Fut) -> (Handle<T>, ThreadId)
+where
+    T: Send + 'static,
+    Fut: Future<Output = T> + Send + 'static,
+{
+    let started = Arc::new(Mutex::new(None));
+    let child = context.child("elsewhere");
+    let handle = thread::spawn({
+        let started = started.clone();
+        move || {
+            child.spawn(move |_| async move {
+                *started.lock() = Some(thread::current().id());
+                f.await
+            })
+        }
+    })
+    .join()
+    .unwrap();
+    let thread = wait_started(&started);
+    assert_ne!(thread, thread::current().id(), "task started on the caller");
+    (handle, thread)
+}
+
+#[test]
+fn test_tasks_spread_across_workers_and_complete() {
+    for count in [1, 2, 4] {
+        let borrowed = Rc::new(Cell::new(0));
+        let state = &borrowed;
+        let cfg = config().with_worker_threads(count);
+        assert_eq!(cfg.worker_threads(), count);
+        Runner::new(cfg).start(|context| async move {
+            let root = thread::current().id();
+            let started = Arc::new(AtomicUsize::new(0));
+            let mut tasks = Vec::new();
+            for _ in 0..count * 3 {
+                let started = started.clone();
+                tasks.push(context.child("worker").spawn(move |_| async move {
+                    started.fetch_add(1, Ordering::SeqCst);
+                    thread::current().id()
+                }));
+            }
+
+            // Worker zero keeps the first spawn and injects the rest, so with
+            // other workers they start while the root holds this one.
+            if count > 1 {
+                let deadline = Instant::now() + TEST_TIMEOUT;
+                while started.load(Ordering::SeqCst) < count * 3 - 1 {
+                    assert!(Instant::now() < deadline, "injected tasks never started");
+                    std::hint::spin_loop();
+                }
+            }
+
+            let mut ids = Vec::new();
+            for task in tasks {
+                ids.push(task.await.unwrap());
+            }
+            let distinct = ids.iter().collect::<HashSet<_>>();
+            assert!(distinct.len() <= count);
+            if count == 1 {
+                assert!(ids.iter().all(|id| *id == root));
+            } else {
+                assert_eq!(ids[0], root, "a quiet worker keeps its spawn");
+                assert!(ids[1..].iter().all(|id| *id != root));
+            }
+            state.set(1);
+        });
+        assert_eq!(borrowed.get(), 1);
+        assert!(Local::current().is_none());
+    }
+}
+
+#[test]
+fn test_chatty_pair_converges_onto_one_worker() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let (request, mut requests) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
+        let (response, mut responses) = commonware_utils::channel::mpsc::channel::<ThreadId>(1);
+
+        // The responder starts on the other worker, the requester here.
+        let (responder, responder_first) = spawn_elsewhere(&context, async move {
+            let mut seen = Vec::new();
+            while let Some(requester) = requests.recv().await {
+                seen.push((requester, thread::current().id()));
+                response.send(thread::current().id()).await.unwrap();
+            }
+            seen
+        });
+        let requester = context.child("requester").spawn(move |_| async move {
+            let first = thread::current().id();
+            let mut seen = Vec::new();
+            for _ in 0..200 {
+                // Record where the request was sent from. The reply may arrive
+                // after this task has moved to the responder's worker.
+                let sent_from = thread::current().id();
+                request.send(sent_from).await.unwrap();
+                let responder = responses.recv().await.unwrap();
+                seen.push((sent_from, responder));
+            }
+            (first, seen)
+        });
+
+        let (requester_first, requester_seen) = requester.await.unwrap();
+        let responder_seen = responder.await.unwrap();
+        assert_ne!(requester_first, responder_first);
+
+        // Each wake moves its task to the waker's worker, so after the first
+        // exchanges the pair runs on one thread and stays there.
+        let settled = &requester_seen[20..];
+        let home = settled[0].0;
+        assert!(
+            settled.iter().all(|(a, b)| *a == home && *b == home),
+            "pair did not converge"
+        );
+        assert!(
+            responder_seen[20..]
+                .iter()
+                .all(|(a, b)| *a == home && *b == home)
+        );
+    });
+}
+
+#[test]
+fn test_ordinary_spawns_from_dedicated_and_foreign_threads_use_the_pool() {
+    for dedicated in [false, true] {
+        Runner::new(config().with_worker_threads(3)).start(|context| async move {
+            let producer = context.child("producer");
+            let spawn = move || {
+                let spawner = thread::current().id();
+                let tasks = (0..6)
+                    .map(|_| {
+                        context
+                            .child("child")
+                            .spawn(|_| async { thread::current().id() })
+                    })
+                    .collect::<Vec<_>>();
+                (spawner, tasks)
+            };
+            let (spawner, tasks) = if dedicated {
+                // Use a separate supervision node so its completion does not
+                // abort the ordinary children constructed by spawn.
+                producer
+                    .dedicated()
+                    .spawn(move |_| async move { spawn() })
+                    .await
+                    .unwrap()
+            } else {
+                thread::spawn(spawn).join().unwrap()
+            };
+            for task in tasks {
+                let ran_on = task.await.unwrap();
+                assert_ne!(ran_on, spawner, "ordinary task ran outside the pool");
+            }
+        });
+    }
+}
+
+#[test]
+fn test_shutdown_destroys_tasks_on_a_worker() {
+    struct OwnedDrop(Arc<AtomicUsize>);
+    impl Drop for OwnedDrop {
+        fn drop(&mut self) {
+            assert!(Local::current().is_some());
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    for panic_root in [false, true] {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = dropped.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config().with_worker_threads(4)).start(|context| async move {
+                let mut ready = Vec::new();
+                for _ in 0..12 {
+                    let (started, receiver) = oneshot::channel();
+                    ready.push(receiver);
+                    let dropped = dropped.clone();
+                    context.child("pending").spawn(move |context| async move {
+                        let _guard = OwnedDrop(dropped);
+                        let sleep = context.sleep(Duration::from_secs(3600));
+                        let mut sleep = pin!(sleep);
+                        assert!(futures::poll!(&mut sleep).is_pending());
+                        started.send(()).unwrap();
+                        sleep.await;
+                    });
+                }
+                for receiver in ready {
+                    receiver.await.unwrap();
+                }
+                assert!(!panic_root, "root failure");
+            });
+        }));
+        assert_eq!(result.is_err(), panic_root);
+        assert_eq!(observed.load(Ordering::Relaxed), 12);
+    }
+}
+
+#[test]
+fn test_partial_startup_failure_releases_all_workers() {
+    for launch in [false, true] {
+        for catch in [false, true] {
+            POOL_FAIL_AT.set(Some((2, launch)));
+            let called = Cell::new(false);
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                Runner::new(config().with_worker_threads(4).with_catch_panics(catch)).start(|_| {
+                    called.set(true);
+                    async {}
+                });
+            }));
+            let panic = result.expect_err("partial pool startup must fail");
+            assert!(extract_panic_message(&*panic).contains("injected"));
+            assert!(!called.get());
+            assert!(POOL_SHARED.with(|slot| slot.borrow().upgrade().is_none()));
+            assert!(Local::current().is_none());
+        }
+    }
+}
+
+#[test]
+fn test_worker_threads_outside_the_supported_range_are_rejected_before_startup() {
+    for workers in [0, MAX_WORKERS + 1] {
+        let cfg = config().with_worker_threads(workers);
+        let directory = cfg.storage_directory().clone();
+        assert!(catch_unwind(|| Runner::new(cfg).start(|_| async {})).is_err());
+        assert!(!directory.exists());
+    }
+}
+
+#[test]
+fn test_network_and_storage_on_multiple_workers() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let mut listener = context.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = context.child("server").spawn(move |_| async move {
+            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+            let received = stream.recv(4).await.unwrap();
+            assert_eq!(received.clone().coalesce().as_ref(), b"ping");
+            sink.send(received).await.unwrap();
+        });
+        let (client, _) = spawn_elsewhere(&context, {
+            let context = context.child("client");
+            async move {
+                let (mut sink, mut stream) = context.dial(address).await.unwrap();
+                sink.send(b"ping".to_vec()).await.unwrap();
+                let received = stream.recv(4).await.unwrap();
+                let (blob, _) = context.open("multi", b"blob").await.unwrap();
+                blob.write_at(0, received, WriteOptions::default())
+                    .await
+                    .unwrap();
+                blob.sync().await.unwrap();
+                let data = blob.read_at(0, 4, ReadOptions::default()).await.unwrap();
+                assert_eq!(data.coalesce().as_ref(), b"ping");
+            }
+        });
+        client.await.unwrap();
+        server.await.unwrap();
+    });
+}
+
+#[test]
+fn test_remote_task_panic_respects_policy() {
+    for catch in [false, true] {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(config().with_worker_threads(2).with_catch_panics(catch)).start(
+                |context| async move {
+                    let (task, _) = spawn_elsewhere(&context, async {
+                        panic!("remote ordinary task failed");
+                    });
+                    if catch {
+                        assert!(matches!(task.await, Err(Error::Exited)));
+                        let survivor = context.child("survivor").spawn(|_| async { 7 });
+                        assert_eq!(survivor.await.unwrap(), 7);
+                    } else {
+                        pending::<()>().await;
+                    }
+                },
+            );
+        }));
+        assert_eq!(result.is_err(), !catch);
+    }
+}
+
+#[test]
+fn test_shutdown_drains_queued_writes_on_every_ring() {
+    let cfg = config()
+        .with_worker_threads(4)
+        .with_ring_config(RingConfig {
+            size: 1,
+            ..Default::default()
+        });
+    Runner::new(cfg.clone()).start(|context| async move {
+        let mut writers = HashSet::new();
+        for actor in 0_u8..4 {
+            let write = {
+                let context = context.child("writer");
+                async move {
+                    let (blob, _) = context.open("retained", &[actor]).await.unwrap();
+                    for offset in 0..8 {
+                        let write = blob.write_at(offset, vec![actor + 1], WriteOptions::default());
+                        let mut write = pin!(write);
+                        // Dropping a registered write retains its kernel work,
+                        // including submissions queued behind the single slot.
+                        let _ = futures::poll!(&mut write);
+                    }
+                    pending::<()>().await;
+                }
+            };
+            // The first writer stays here, the others start on other workers.
+            if actor == 0 {
+                context.child("writer").spawn(move |_| write);
+            } else {
+                writers.insert(spawn_elsewhere(&context, write).1);
+            }
+        }
+        assert!(!writers.is_empty());
+        // The first writer runs once the root yields.
+        reschedule().await;
+    });
+    Runner::new(cfg).start(|context| async move {
+        for actor in 0_u8..4 {
+            let (blob, size) = context.open("retained", &[actor]).await.unwrap();
+            assert_eq!(size, 8);
+            let data = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
+            assert_eq!(data.coalesce().as_ref(), &[actor + 1; 8]);
+        }
+    });
+}
+
+#[test]
+fn test_remote_driver_failure_interrupts_root_even_when_task_panics_are_caught() {
+    let (socket, mut peer) = UnixStream::pair().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    peer.write_all(b"x").unwrap();
+    let request = Request::Recv(RecvRequest {
+        fd: Arc::new(socket.into()),
+        buf: IoBufMut::with_capacity(1),
+        offset: 0,
+        len: 1,
+        exact: true,
+        deadline: None,
+    });
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(2).with_catch_panics(true)).start(
+            |context| async move {
+                let _ = spawn_elsewhere(&context, async move {
+                    let _fault = fail_after_completion(
+                        Local::current().unwrap().borrow().driver.as_ref().unwrap(),
+                    );
+                    Operation::register(request).await.unwrap();
+                    pending::<()>().await;
+                });
+                pending::<()>().await;
+            },
+        );
+    }));
+    let panic = result.expect_err("losing a pool worker must interrupt the root");
+    assert!(extract_panic_message(&*panic).contains("injected service failure after completion"));
+    assert!(Local::current().is_none());
+}
+
+#[test]
+fn test_wake_from_another_runtime_stays_in_its_own_pool() {
+    // Runtime A owns the waiting task. Runtime B's worker performs the wake
+    // from inside one of its own task polls, so the current thread has a
+    // worker, but one of the wrong pool.
+    let (to_b, from_a) = mpsc::channel::<oneshot::Sender<()>>();
+    let (report, reports) = mpsc::channel::<(ThreadId, ThreadId)>();
+    let (to_a, from_b) = mpsc::channel::<ThreadId>();
+    let a = thread::spawn(move || {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let (wake, waiter) = oneshot::channel::<()>();
+            let task = context.child("waiter").spawn(|_| async move {
+                let before = thread::current().id();
+                waiter.await.unwrap();
+                (before, thread::current().id())
+            });
+            to_b.send(wake).unwrap();
+            report.send(task.await.unwrap()).unwrap();
+            to_a.send(thread::current().id()).unwrap();
+        });
+    });
+    let sender = Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let wake = from_a.recv().unwrap();
+        context
+            .child("sender")
+            .spawn(|_| async move {
+                wake.send(()).unwrap();
+                thread::current().id()
+            })
+            .await
+            .unwrap()
+    });
+    let (before, after) = reports.recv().unwrap();
+    let _ = from_b.recv().unwrap();
+    a.join().unwrap();
+    assert_ne!(after, sender, "task polled on another runtime's worker");
+    assert_ne!(before, sender);
+}
+
+#[test]
+fn test_worker_count_scales_default_buffer_pools() {
+    let cfg = config().with_worker_threads(4);
+    assert_eq!(
+        cfg.resolved_network_buffer_pool_config()
+            .parallelism()
+            .get(),
+        4
+    );
+    assert_eq!(
+        cfg.resolved_storage_buffer_pool_config()
+            .parallelism()
+            .get(),
+        4
+    );
+    let explicit = BufferPoolConfig::for_network().with_parallelism(NZUsize!(2));
+    let cfg = cfg.with_network_buffer_pool_config(explicit);
+    assert_eq!(
+        cfg.resolved_network_buffer_pool_config()
+            .parallelism()
+            .get(),
+        2
+    );
+}
+
+/// A task registers a receive and a sleep on worker zero, then a wake from
+/// another worker moves it there. Polled on that worker, both forward their
+/// results from worker zero, which holds the registrations.
+#[test]
+fn test_operation_and_sleep_follow_their_task_to_another_worker() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let (move_task, moved) = oneshot::channel::<()>();
+        let (release, released) = oneshot::channel::<()>();
+
+        // The task registers here, on worker zero, then waits for a wake.
+        let mover = context.child("mover").spawn(move |context| async move {
+            let registered = thread::current().id();
+            let fd: Arc<OwnedFd> = Arc::new(socket.into());
+            let mut recv = Operation::register(Request::Recv(RecvRequest {
+                fd,
+                buf: IoBufMut::with_capacity(1),
+                offset: 0,
+                len: 1,
+                exact: true,
+                deadline: None,
+            }));
+            let sleep = context.sleep(Duration::from_millis(20));
+            let mut sleep = pin!(sleep);
+            assert!(futures::poll!(&mut recv).is_pending());
+            assert!(futures::poll!(&mut sleep).is_pending());
+
+            // The wake comes from the other worker, which polls this task and
+            // forwards both registrations from worker zero.
+            moved.await.unwrap();
+            let polled = thread::current().id();
+            assert!(futures::poll!(&mut recv).is_pending());
+            assert!(futures::poll!(&mut sleep).is_pending());
+            released.await.unwrap();
+            let received = recv.await.unwrap();
+            sleep.await;
+            (registered, polled, received)
+        });
+        reschedule().await;
+
+        let (waker, other) = spawn_elsewhere(&context, async move {
+            move_task.send(()).unwrap();
+        });
+        waker.await.unwrap();
+        peer.write_all(b"x").unwrap();
+        release.send(()).unwrap();
+
+        let (registered, polled, received) = mover.await.unwrap();
+        assert_eq!(registered, thread::current().id());
+        assert_eq!(polled, other);
+        assert!(matches!(received, RequestOutput::Recv(Ok((_, 1)))));
+        drop(peer);
+    });
+}
+
+/// A wake on a pool worker queues the woken task on that worker, even while
+/// another worker is parked and could take it from the inject queue.
+#[test]
+fn test_wake_on_a_pool_worker_keeps_the_task_there() {
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        let (wake, woken) = oneshot::channel::<()>();
+        let polled_on = Arc::new(Mutex::new(None));
+
+        // The sleeper waits on worker zero until the wake.
+        let sleeper = context.child("sleeper").spawn({
+            let polled_on = polled_on.clone();
+            move |_| async move {
+                woken.await.unwrap();
+                *polled_on.lock() = Some(thread::current().id());
+            }
+        });
+        reschedule().await;
+
+        // The waker runs on another worker, wakes the sleeper, and keeps its
+        // worker busy while another worker stays parked.
+        let (waker, waker_thread) = spawn_elsewhere(&context, async move {
+            wake.send(()).unwrap();
+            let until = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < until {
+                std::hint::spin_loop();
+            }
+        });
+        waker.await.unwrap();
+        sleeper.await.unwrap();
+        assert_eq!(*polled_on.lock(), Some(waker_thread));
+    });
+}
+
+/// Start a task on worker one that holds a receive in its ring when
+/// `in_ring`, so worker one waits in its ring rather than on its futex.
+/// Returns worker one's thread and the receive's peer.
+fn occupy_worker_one(context: &Context, in_ring: bool) -> (ThreadId, Option<UnixStream>) {
+    if !in_ring {
+        return (spawn_elsewhere(context, async {}).1, None);
+    }
+    let (socket, peer) = UnixStream::pair().unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let (_, other) = spawn_elsewhere(context, async move {
+        let fd: Arc<OwnedFd> = Arc::new(socket.into());
+        let _ = Operation::register(Request::Recv(RecvRequest {
+            fd,
+            buf: IoBufMut::with_capacity(1),
+            offset: 0,
+            len: 1,
+            exact: true,
+            deadline: None,
+        }))
+        .await;
+    });
+    (other, Some(peer))
+}
+
+/// Spawn a task from a thread outside the pool that records the thread
+/// running it in `started`.
+fn spawn_foreign(context: Context, started: Arc<Mutex<Option<ThreadId>>>) {
+    thread::spawn(move || {
+        context.spawn(move |_| async move {
+            *started.lock() = Some(thread::current().id());
+        });
+    })
+    .join()
+    .unwrap();
+}
+
+/// A push after a worker's last readiness check, before it publishes itself
+/// idle, finds no idle bit and wakes nobody, so the worker's look at the
+/// inject queue after publishing must find it, in either wait. The worker
+/// then withdraws its idle bit.
+#[test]
+fn test_push_before_a_worker_publishes_itself_idle_is_found() {
+    for in_ring in [false, true] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let pool = context.shared.pool.clone();
+            let (other, _peer) = occupy_worker_one(&context, in_ring);
+
+            // Only worker one can start the target while the root holds this
+            // worker.
+            let started = Arc::new(Mutex::new(None));
+            let idle = Arc::new(AtomicBool::new(true));
+            on_next_park(&pool, 1, ParkPoint::BeforeIdle, {
+                let context = context.child("target");
+                let started = started.clone();
+                let idle = idle.clone();
+                let pool = pool.clone();
+                move || {
+                    thread::spawn(move || {
+                        context.spawn(move |_| async move {
+                            idle.store(pool.is_idle(1), Ordering::SeqCst);
+                            *started.lock() = Some(thread::current().id());
+                        });
+                    })
+                    .join()
+                    .unwrap();
+                }
+            });
+
+            // Waking worker one sends it through its loop to that park.
+            let _ = spawn_elsewhere(&context, async {});
+            assert_eq!(wait_started(&started), other);
+            assert!(
+                !idle.load(Ordering::SeqCst),
+                "busy worker left in the idle set"
+            );
+        });
+    }
+}
+
+/// A push after a worker publishes itself idle and finds the inject queue
+/// empty claims its idle bit and wakes it, in either wait.
+#[test]
+fn test_push_after_a_worker_publishes_itself_idle_wakes_it() {
+    for in_ring in [false, true] {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let pool = context.shared.pool.clone();
+            let (other, _peer) = occupy_worker_one(&context, in_ring);
+
+            // Only worker one can start the target while the root holds this
+            // worker.
+            let started = Arc::new(Mutex::new(None));
+            on_next_park(&pool, 1, ParkPoint::BeforeWait, {
+                let context = context.child("target");
+                let started = started.clone();
+                move || spawn_foreign(context, started)
+            });
+
+            // Waking worker one sends it through its loop to that park.
+            let _ = spawn_elsewhere(&context, async {});
+            assert_eq!(wait_started(&started), other);
+        });
+    }
+}
+
+/// A spin outlasting the test's timeout, so only a push's wake signal can end
+/// it, as no message is published.
+fn endless_spinner() -> SpinnerConfig {
+    SpinnerConfig {
+        budget_us: 60_000_000,
+        max_budget_us: 60_000_000,
+        quick_wake_us: 60_000_000,
+    }
+}
+
+/// A push into the inject queue ends a spinning worker's spin through its
+/// wake signal.
+#[test]
+fn test_push_ends_a_spin_through_the_wake_signal() {
+    let cfg = config()
+        .with_worker_threads(2)
+        .with_idle_spinner(endless_spinner());
+    Runner::new(cfg).start(|context| async move {
+        let (_, other) = spawn_elsewhere(&context, async {});
+        for _ in 0..20 {
+            let (_, thread) = spawn_elsewhere(&context, async {});
+            assert_eq!(thread, other);
+        }
+    });
+}
+
+/// A worker whose spin ended on a push's wake signal consumes it, so once idle
+/// again it spins out and sleeps on its futex rather than spinning on the
+/// stale signal forever.
+#[test]
+fn test_spinning_worker_sleeps_after_a_signalled_spin() {
+    let spinner = SpinnerConfig {
+        budget_us: 1_000,
+        max_budget_us: 1_000,
+        quick_wake_us: 1_000,
+    };
+    let cfg = config().with_worker_threads(2).with_idle_spinner(spinner);
+    Runner::new(cfg).start(|context| async move {
+        let pool = context.shared.pool.clone();
+        let (_, other) = spawn_elsewhere(&context, async {});
+        for _ in 0..5 {
+            let (_, thread) = spawn_elsewhere(&context, async {});
+            assert_eq!(thread, other);
+        }
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while state_bits(&pool.mailbox(1).waker) & 1 == 0 {
+            assert!(Instant::now() < deadline, "worker one never slept");
+            std::hint::spin_loop();
+        }
+    });
+}
+
+/// A spawn from outside the pool wakes a parked worker: each round lets every
+/// worker park, then the root holds its own worker until the task has run, so
+/// only a woken worker can run it.
+#[test]
+fn test_spawn_from_outside_the_pool_wakes_a_parked_worker() {
+    Runner::new(config().with_worker_threads(3)).start(|context| async move {
+        for _ in 0..20 {
+            context.sleep(Duration::from_millis(1)).await;
+            let _ = spawn_elsewhere(&context, async {});
+        }
+    });
+}
+
+/// A worker whose own queue never runs dry still takes from the inject queue
+/// every interval, and takes a share of it, so a burst of foreign wakes waits
+/// about one interval in all rather than one interval each.
+#[test]
+fn test_busy_worker_takes_a_share_of_the_inject_queue_every_interval() {
+    const BURST: usize = 64;
+    Runner::new(config()).start(|context| async move {
+        let stop = Arc::new(AtomicBool::new(false));
+        let yields = Arc::new(AtomicUsize::new(0));
+        let yielder = context.child("yielder").spawn({
+            let stop = stop.clone();
+            let yields = yields.clone();
+            move |_| async move {
+                while !stop.load(Ordering::Relaxed) {
+                    let count = yields.fetch_add(1, Ordering::Relaxed);
+                    assert!(count < 100_000, "inject queue starved");
+                    reschedule().await;
+                }
+            }
+        });
+
+        // Idle tasks waiting for a wake from outside the pool.
+        let lags = Arc::new(Mutex::new(Vec::new()));
+        let mut senders = Vec::new();
+        let mut waiters = Vec::new();
+        for _ in 0..BURST {
+            let (sender, receiver) = oneshot::channel::<usize>();
+            senders.push(sender);
+            let lags = lags.clone();
+            let yields = yields.clone();
+            waiters.push(context.child("waiter").spawn(move |_| async move {
+                let before = receiver.await.unwrap();
+                lags.lock().push(yields.load(Ordering::Relaxed) - before);
+            }));
+        }
+        for _ in 0..4 {
+            reschedule().await;
+        }
+
+        let before = yields.load(Ordering::Relaxed);
+        thread::spawn(move || {
+            for sender in senders {
+                sender.send(before).unwrap();
+            }
+        })
+        .join()
+        .unwrap();
+        for waiter in waiters {
+            waiter.await.unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        yielder.await.unwrap();
+
+        let lags = lags.lock();
+        assert_eq!(lags.len(), BURST);
+        let last = lags.iter().max().unwrap();
+        assert!(
+            *last <= 2 * INJECT_INTERVAL as usize,
+            "last foreign wake waited {last} polls"
+        );
+    });
+}
+
+/// A task that completes on a worker other than the one that spawned it
+/// leaves the task set there.
+#[test]
+fn test_task_completing_away_from_its_spawner_retires() {
+    Runner::new(config().with_worker_threads(2)).start(|context| async move {
+        let tasks = || context.shared.tasks.live();
+        let baseline = tasks();
+        let (finish, finished) = oneshot::channel::<()>();
+        let task = context.child("traveller").spawn(|_| async move {
+            let spawned_on = thread::current().id();
+            finished.await.unwrap();
+            (spawned_on, thread::current().id())
+        });
+        reschedule().await;
+        assert_eq!(tasks(), baseline + 1);
+
+        let (waker, other) = spawn_elsewhere(&context, async move {
+            finish.send(()).unwrap();
+        });
+        waker.await.unwrap();
+        let (spawned_on, completed_on) = task.await.unwrap();
+        assert_eq!(spawned_on, thread::current().id());
+        assert_eq!(completed_on, other);
+
+        // The handle resolves inside the final poll, and the worker removes
+        // the task once that poll returns.
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while tasks() != baseline {
+            assert!(Instant::now() < deadline, "completed task not retired");
+            reschedule().await;
+        }
+    });
+}
+
+/// Shutdown while a task's poll runs on another worker. That poll can still
+/// forward a sleep registered on worker zero, whose mailbox stays open until
+/// every pool worker has finished polling. Teardown leaves the future to the
+/// poller, which drops it on its own thread once the poll returns.
+#[test]
+fn test_shutdown_while_a_task_is_mid_poll_on_another_worker() {
+    struct Dropped(Arc<Mutex<Option<ThreadId>>>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            assert!(Local::current().is_some());
+            *self.0.lock() = Some(thread::current().id());
+        }
+    }
+
+    let dropped = Arc::new(Mutex::new(None));
+    let polled = Arc::new(Mutex::new(None));
+    let forwarded = Arc::new(Mutex::new(None::<String>));
+    Runner::new(config().with_worker_threads(2)).start(|context| {
+        let dropped = dropped.clone();
+        let polled = polled.clone();
+        let forwarded = forwarded.clone();
+        async move {
+            // Registered on worker zero by this first poll.
+            let mut sleep = Box::pin(context.sleep(Duration::from_secs(3600)));
+            assert!(futures::poll!(&mut sleep).is_pending());
+
+            // Registered without a handle, so no abort ends the task: only
+            // teardown's clear can, while the poll runs.
+            let shared = context.shared.clone();
+            let this: Arc<OnceLock<Task>> = Arc::new(OnceLock::new());
+            let future = {
+                let shared = shared.clone();
+                let this = this.clone();
+                let guard = Dropped(dropped);
+                let started = polled.clone();
+                poll_fn(move |_| {
+                    let _ = &guard;
+                    *started.lock() = Some(thread::current().id());
+                    let deadline = Instant::now() + TEST_TIMEOUT;
+                    while !shared.tasks.is_closed() {
+                        assert!(Instant::now() < deadline, "the runner never closed");
+                        std::hint::spin_loop();
+                    }
+
+                    // Give worker zero time to reach its drain, then poll the
+                    // sleep, which forwards from worker zero.
+                    thread::sleep(Duration::from_millis(20));
+                    let waker = futures::task::noop_waker();
+                    let poll = catch_unwind(AssertUnwindSafe(|| {
+                        sleep.as_mut().poll(&mut TaskContext::from_waker(&waker))
+                    }));
+                    *forwarded.lock() = Some(match poll {
+                        Ok(Poll::Pending) => "pending".into(),
+                        Ok(Poll::Ready(())) => "ready".into(),
+                        Err(panic) => extract_panic_message(&*panic),
+                    });
+
+                    // Return pending only once teardown has cleared the task
+                    // during this poll.
+                    while !cancelled(this.get().unwrap()) {
+                        assert!(Instant::now() < deadline, "teardown never cleared");
+                        std::hint::spin_loop();
+                    }
+                    Poll::<()>::Pending
+                })
+            };
+            let (task, runnable) = Task::new(future, &shared.tasks, Arc::downgrade(&shared.pool));
+            assert!(this.set(task.clone()).is_ok());
+            assert!(shared.tasks.insert(task).is_ok());
+
+            // From outside the pool, so the runnable goes to the inject queue
+            // and worker one starts it while the root holds this worker.
+            thread::spawn(move || runnable.spawn()).join().unwrap();
+            let other = wait_started(&polled);
+            assert_ne!(other, thread::current().id());
+        }
+    });
+    assert_eq!(forwarded.lock().as_deref(), Some("pending"));
+    let poller = polled.lock().expect("task polled");
+    assert_eq!(
+        *dropped.lock(),
+        Some(poller),
+        "future dropped off its poller"
+    );
+}
+
+/// Teardown clears two idle tasks whose destructors wake each other, so
+/// whichever is cleared first wakes the other while it is still idle, on a
+/// closing worker. The closing worker's wake goes to the closed inject queue,
+/// which discards it, rather than leaving a runnable in its own queue.
+#[test]
+fn test_wake_from_a_destructor_during_teardown_leaves_no_runnable() {
+    struct WakeOther(Arc<Mutex<Option<Waker>>>);
+    impl Drop for WakeOther {
+        fn drop(&mut self) {
+            if let Some(waker) = self.0.lock().take() {
+                waker.wake();
+            }
+        }
+    }
+    for workers in [1, 2] {
+        Runner::new(config().with_worker_threads(workers)).start(|context| async move {
+            let slots = [(); 2].map(|_| Arc::new(Mutex::new(None::<Waker>)));
+            for (own, other) in [(0, 1), (1, 0)] {
+                let own = slots[own].clone();
+                let guard = WakeOther(slots[other].clone());
+
+                // Registered without a handle, so no abort wakes it first.
+                let future = poll_fn(move |cx| {
+                    let _ = &guard;
+                    *own.lock() = Some(cx.waker().clone());
+                    Poll::<()>::Pending
+                });
+                let shared = context.shared.clone();
+                assert!(
+                    shared
+                        .tasks
+                        .register(future, Arc::downgrade(&shared.pool))
+                        .is_ok()
+                );
+            }
+            while slots.iter().any(|slot| slot.lock().is_none()) {
+                reschedule().await;
+            }
+        });
+    }
+}
+
+/// A waker whose wake reports through `failed` and then panics, so a timer
+/// expiring on its worker fails that worker through its callback batch.
+struct FailingWake(Arc<AtomicBool>);
+
+impl ArcWake for FailingWake {
+    fn wake_by_ref(this: &Arc<Self>) {
+        this.0.store(true, Ordering::SeqCst);
+        panic!("injected pool worker callback failure");
+    }
+}
+
+/// Start a task on another worker that registers a sleep there whose wake
+/// fails that worker once the sleep expires.
+fn fail_worker_one(context: &Context, failed: Arc<AtomicBool>) {
+    let (handle, _) = spawn_elsewhere(context, {
+        let context = context.child("faulty");
+        async move {
+            let sleep = context.sleep(Duration::from_millis(100));
+            let mut sleep = pin!(sleep);
+            let waker = waker(Arc::new(FailingWake(failed)));
+            assert!(
+                sleep
+                    .as_mut()
+                    .poll(&mut TaskContext::from_waker(&waker))
+                    .is_pending()
+            );
+            pending::<()>().await;
+        }
+    });
+    mem::forget(handle);
+}
+
+/// A pool worker that fails after the root has completed, before worker zero
+/// closes the pool, still fails the runner.
+#[test]
+fn test_pool_worker_failure_after_the_root_completes_fails_the_runner() {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(2)).start(|context| {
+            // Hold worker zero between its root and the pool's close until
+            // worker one has failed and reported.
+            let failed = Arc::new(AtomicBool::new(false));
+            AFTER_ROOT.with(|slot| {
+                let failed = failed.clone();
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    let deadline = Instant::now() + TEST_TIMEOUT;
+                    while !failed.load(Ordering::SeqCst) {
+                        assert!(Instant::now() < deadline, "worker one never failed");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }));
+            });
+            async move { fail_worker_one(&context, failed) }
+        });
+    }));
+    let panic = result.expect_err("a pool worker failure must fail the runner");
+    assert!(extract_panic_message(&*panic).contains("injected pool worker callback failure"));
+}
+
+/// A waker whose destruction panics, so releasing its timer fails the worker
+/// that holds it.
+struct PanicOnDrop;
+
+impl ArcWake for PanicOnDrop {
+    fn wake_by_ref(_: &Arc<Self>) {}
+}
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        if !thread::panicking() {
+            panic!("injected pool worker failure during shutdown");
+        }
+    }
+}
+
+/// A pool worker that fails during shutdown, after the pool has closed, still
+/// fails the runner.
+#[test]
+fn test_pool_worker_failure_during_shutdown_fails_the_runner() {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        Runner::new(config().with_worker_threads(2)).start(|context| async move {
+            let (handle, _) = spawn_elsewhere(&context, {
+                let context = context.child("faulty");
+                async move {
+                    let sleep = context.sleep(Duration::from_secs(3600));
+                    let mut sleep = pin!(sleep);
+                    let waker = waker(Arc::new(PanicOnDrop));
+                    assert!(
+                        sleep
+                            .as_mut()
+                            .poll(&mut TaskContext::from_waker(&waker))
+                            .is_pending()
+                    );
+                    drop(waker);
+                    pending::<()>().await;
+                }
+            });
+            mem::forget(handle);
+        });
+    }));
+    let panic = result.expect_err("a pool worker failure during shutdown must fail the runner");
+    assert!(
+        extract_panic_message(&*panic).contains("injected pool worker failure during shutdown")
+    );
+}
+
+/// A task panic published while the root's state is destroyed is not
+/// observed: task panics interrupt only a running root.
+#[test]
+fn test_task_panic_during_root_destruction_is_not_observed() {
+    struct PublishOnDrop(Option<Panicker>);
+    impl Future for PublishOnDrop {
+        type Output = u8;
+        fn poll(self: Pin<&mut Self>, _: &mut TaskContext<'_>) -> Poll<u8> {
+            Poll::Ready(7)
+        }
+    }
+    impl Drop for PublishOnDrop {
+        fn drop(&mut self) {
+            self.0
+                .take()
+                .unwrap()
+                .notify(Box::new("published during root destruction"));
+        }
+    }
+    for workers in [1, 2] {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            Runner::new(
+                config()
+                    .with_worker_threads(workers)
+                    .with_catch_panics(false),
+            )
+            .start(|context| PublishOnDrop(Some(context.shared.panicker.clone())))
+        }));
+        assert_eq!(
+            result.map_err(|panic| extract_panic_message(&*panic)),
+            Ok(7)
+        );
+    }
+}
+
+/// Wakes a stored task waker, which queues that task on the current worker,
+/// then panics, failing the worker with the task's runnable still queued.
+struct WakeThenPanic(Mutex<Option<Waker>>);
+
+impl ArcWake for WakeThenPanic {
+    fn wake_by_ref(this: &Arc<Self>) {
+        if let Some(waker) = this.0.lock().take() {
+            waker.wake();
+        }
+        panic!("injected pool worker callback failure");
+    }
+}
+
+/// A pool worker that fails while the pool is open, with a runnable still in
+/// its ready queue, interrupts the root, and shutdown discards that runnable
+/// once the pool has closed.
+#[test]
+fn test_failed_pool_worker_with_queued_runnables_shuts_down() {
+    for catch in [false, true] {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let cfg = config().with_worker_threads(2).with_catch_panics(catch);
+            Runner::new(cfg).start(|context| async move {
+                let (handle, _) = spawn_elsewhere(&context, {
+                    let context = context.child("faulty");
+                    async move {
+                        // Task A goes idle on this worker, leaving its waker.
+                        let trigger = Arc::new(WakeThenPanic(Mutex::new(None)));
+                        let a = context.child("a").spawn({
+                            let trigger = trigger.clone();
+                            move |_| {
+                                poll_fn(move |cx| {
+                                    *trigger.0.lock() = Some(cx.waker().clone());
+                                    Poll::<()>::Pending
+                                })
+                            }
+                        });
+                        reschedule().await;
+                        assert!(trigger.0.lock().is_some(), "a was not polled here");
+
+                        // The timer's callback wakes A into this worker's
+                        // ready queue, then fails the worker.
+                        let sleep = context.sleep(Duration::from_millis(20));
+                        let mut sleep = pin!(sleep);
+                        let waker = waker(trigger);
+                        assert!(
+                            sleep
+                                .as_mut()
+                                .poll(&mut TaskContext::from_waker(&waker))
+                                .is_pending()
+                        );
+                        let _ = a.await;
+                    }
+                });
+                let _ = handle.await;
+                pending::<()>().await;
+            });
+        }));
+        let panic = result.expect_err("a pool worker failure must fail the runner");
+        assert!(extract_panic_message(&*panic).contains("injected pool worker callback failure"));
+        assert!(Local::current().is_none());
+    }
+}
+
+/// Pending operations registered on several pool workers leave the aggregate
+/// gauge at zero once shutdown has retired them.
+#[test]
+fn test_pending_operations_gauge_returns_to_zero_across_workers() {
+    let mut peers = Vec::new();
+    let shared = Runner::new(config().with_worker_threads(4)).start(|context| {
+        let mut sockets = Vec::new();
+        for _ in 0..6 {
+            let (socket, peer) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            sockets.push(socket);
+            peers.push(peer);
+        }
+        async move {
+            for (index, socket) in sockets.into_iter().enumerate() {
+                let task = async move {
+                    let fd: Arc<OwnedFd> = Arc::new(socket.into());
+                    let _ = Operation::register(Request::Recv(RecvRequest {
+                        fd,
+                        buf: IoBufMut::with_capacity(1),
+                        offset: 0,
+                        len: 1,
+                        exact: true,
+                        deadline: None,
+                    }))
+                    .await;
+                };
+                if index == 0 {
+                    context.child("here").spawn(move |_| task);
+                    reschedule().await;
+                } else {
+                    let (handle, _) = spawn_elsewhere(&context, task);
+                    mem::forget(handle);
+                }
+            }
+
+            // Let every worker submit its receive.
+            context.sleep(Duration::from_millis(20)).await;
+            assert!(context.shared.pending_operations.get() > 0);
+            context.shared.clone()
+        }
+    });
+    assert_eq!(shared.pending_operations.get(), 0);
+    drop(peers);
 }

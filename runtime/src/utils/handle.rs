@@ -549,13 +549,22 @@ pub(crate) struct Panicked {
 
 impl Panicked {
     /// Polls a task that should be interrupted by a panic.
-    pub(crate) async fn interrupt<Fut>(self, task: Fut) -> Fut::Output
+    pub(crate) async fn interrupt<Fut>(mut self, task: Fut) -> Fut::Output
+    where
+        Fut: Future,
+    {
+        self.interrupt_ref(task).await
+    }
+
+    /// Polls a task that should be interrupted by a panic, keeping the
+    /// receiver, so a panic sent after the task completed stays available to
+    /// [`Self::try_take`].
+    pub(crate) async fn interrupt_ref<Fut>(&mut self, task: Fut) -> Fut::Output
     where
         Fut: Future,
     {
         // Wait for task to complete or panic
-        let panicked = self.receiver;
-        pin_mut!(panicked);
+        let panicked = &mut self.receiver;
         pin_mut!(task);
         match select(panicked, task).await {
             Either::Left((panic, task)) => match panic {
@@ -567,7 +576,7 @@ impl Panicked {
                 // and return the output
                 Err(_) => task.await,
             },
-            Either::Right((output, mut panicked)) => {
+            Either::Right((output, panicked)) => {
                 // A panic sent while the task completed wins over its output
                 if let Ok(panic) = panicked.try_recv() {
                     resume_unwind(panic);
@@ -575,6 +584,13 @@ impl Panicked {
                 output
             }
         }
+    }
+
+    /// Take a panic sent and not yet observed.
+    #[cfg(all(target_os = "linux", feature = "iouring"))]
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) fn try_take(&mut self) -> Option<Panic> {
+        self.receiver.try_recv().ok()
     }
 }
 
