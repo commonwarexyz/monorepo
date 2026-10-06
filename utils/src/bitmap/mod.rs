@@ -429,6 +429,46 @@ impl<const N: usize> BitMap<N> {
         self.len += Self::CHUNK_SIZE_BITS;
     }
 
+    /// Append every bit of `other` (of any chunk size), in order.
+    pub fn extend_from_bitmap<const M: usize>(&mut self, other: &BitMap<M>) {
+        // Push single bits until the end of this bitmap is chunk aligned.
+        let mut next = 0;
+        while next < other.len() && !self.is_chunk_aligned() {
+            self.push(other.get(next));
+            next += 1;
+        }
+
+        // Append the remaining bits a chunk at a time. Each new byte holds the next 8 bits of
+        // `other`: a copy of one of its bytes when `next` is byte aligned, otherwise assembled
+        // from the two bytes those bits span. Bits past the end of `other` are zero, so the last
+        // chunk keeps every bit past the new length clear.
+        let remaining = other.len() - next;
+        let new_chunks = remaining.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        self.chunks.reserve(new_chunks);
+        let (front, back) = other.chunks.as_slices();
+        let mut bytes = front
+            .as_flattened()
+            .iter()
+            .chain(back.as_flattened())
+            .copied()
+            .skip((next / 8) as usize);
+        let shift = next % 8;
+        let mut current = bytes.next().unwrap_or(0);
+        for _ in 0..new_chunks {
+            self.chunks.push_back(Self::EMPTY_CHUNK);
+            for out in self.chunks.back_mut().unwrap() {
+                let following = bytes.next().unwrap_or(0);
+                *out = if shift == 0 {
+                    current
+                } else {
+                    (u16::from_le_bytes([current, following]) >> shift) as u8
+                };
+                current = following;
+            }
+        }
+        self.len += remaining;
+    }
+
     /* Invariant Maintenance */
 
     /// Clear all bits in the last chunk that are >= self.len to maintain the invariant.
@@ -1507,6 +1547,59 @@ mod tests {
         for i in 8..16 {
             assert!(!bv.get(i as u64));
         }
+    }
+
+    #[test]
+    fn test_extend_from_bitmap_matches_push() {
+        // Every destination length within the first chunk and a range of source lengths, over
+        // equal, wider, and narrower source chunks, must match pushing the source bit by bit,
+        // whether the source's chunks are contiguous or wrap around the end of its ring buffer.
+        fn check<const N: usize, const M: usize>() {
+            let mut rng = test_rng();
+            let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+            let (short, long) = (chunk_bits - 1, 3 * chunk_bits + 11);
+            let lens = [0, 1, 7, 8, 9, short, chunk_bits, long];
+            for prefix in 0..=chunk_bits + 1 {
+                for len in lens {
+                    let mut src: BitMap<M> = BitMap::new();
+                    for _ in 0..len {
+                        src.push(rng.random_bool(0.5));
+                    }
+
+                    // Store the first half of the chunks at the end of a ring buffer that holds
+                    // the second half at its start.
+                    let half = src.chunks.len() / 2;
+                    let mut chunks: VecDeque<_> = src.chunks.range(half..).copied().collect();
+                    for chunk in src.chunks.range(..half).rev() {
+                        chunks.push_front(*chunk);
+                    }
+                    assert_eq!(chunks.as_slices().1.is_empty(), half == 0);
+                    let wrapped = BitMap { chunks, len };
+
+                    let mut dst: BitMap<N> = BitMap::new();
+                    for _ in 0..prefix {
+                        dst.push(rng.random_bool(0.5));
+                    }
+                    let mut expected = dst.clone();
+                    for bit in src.iter() {
+                        expected.push(bit);
+                    }
+                    for source in [&src, &wrapped] {
+                        let mut actual = dst.clone();
+                        actual.extend_from_bitmap(source);
+                        assert_eq!(actual, expected, "N={N} M={M} prefix={prefix} len={len}");
+                    }
+                }
+            }
+        }
+        check::<1, 1>();
+        check::<1, 8>();
+        check::<3, 8>();
+        check::<8, 8>();
+        check::<8, 3>();
+        check::<12, 5>();
+        check::<32, 1>();
+        check::<32, 8>();
     }
 
     #[test]
