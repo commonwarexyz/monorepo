@@ -43,7 +43,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                                 black_box(ed25519::Batch::verify(
                                     &mut verify_rng,
                                     &signatures,
-                                    |(msg, signature)| BatchEntry {
+                                    |_, (msg, signature)| BatchEntry {
                                         namespace,
                                         message: msg.as_slice(),
                                         public_key: &public_key,
@@ -55,7 +55,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                                 black_box(ed25519::Batch::verify(
                                     &mut verify_rng,
                                     &signatures,
-                                    |(msg, signature)| BatchEntry {
+                                    |_, (msg, signature)| BatchEntry {
                                         namespace,
                                         message: msg.as_slice(),
                                         public_key: &public_key,

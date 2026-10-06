@@ -65,14 +65,16 @@ fn gen_u128<R: CryptoRng>(mut rng: R) -> u128 {
     u128::from_le_bytes(bytes)
 }
 
-/// Verify projected signatures without copying message bytes.
+/// Verify a batch of projected signatures.
 ///
-/// A supplied namespace is framed identically to `union_unique`. `None` verifies
-/// a raw message. Rejects empty batches, invalid signatures, and namespace lengths
-/// that cannot be represented as a `u32`.
+/// With a namespace, the signed payload is the namespace's byte length encoded
+/// as an unsigned varint, followed by the namespace and message. `None` verifies
+/// the raw message. Rejects empty batches, invalid signatures, and namespace
+/// lengths that cannot be represented as a `u32`.
 ///
-/// The projection must return the same entry each time it is called for an item
-/// and may be called concurrently.
+/// The projection receives the item's original slice index. It must return the
+/// same entry each time it is called for that index and item, and may be called
+/// concurrently.
 pub fn verify_projected<'a, R, T, F>(
     rng: &mut R,
     items: &'a [T],
@@ -82,7 +84,7 @@ pub fn verify_projected<'a, R, T, F>(
 where
     R: CryptoRng,
     T: Sync,
-    F: Fn(&'a T) -> (&'a VerificationKey, Signature, Option<&'a [u8]>, &'a [u8]) + Sync,
+    F: Fn(usize, &'a T) -> (&'a VerificationKey, Signature, Option<&'a [u8]>, &'a [u8]) + Sync,
 {
     if items.is_empty() {
         return Err(Error::InvalidSignature);
@@ -101,12 +103,18 @@ where
         total,
         // Serial verification checks the whole batch as one equation, so
         // coalescing is global and no partition is needed.
-        || verify_shard(items.iter().map(&project), total, seeds[0]),
+        || {
+            verify_shard(
+                items.iter().enumerate().map(|(i, item)| project(i, item)),
+                total,
+                seeds[0],
+            )
+        },
         // Parallel verification partitions the batch so signatures
         // sharing a verification key coalesce within their shard, then
         // checks one equation per shard.
         || {
-            let order = partition(items, |item| project(item).0);
+            let order = partition(items, |i, item| project(i, item).0);
             let shard_size = total.div_ceil(shard_count);
             let shards: Vec<_> = order
                 .chunks(shard_size)
@@ -117,7 +125,7 @@ where
                 || (),
                 |_, (shard, seed)| {
                     verify_shard(
-                        shard.iter().map(|&idx| project(&items[idx])),
+                        shard.iter().map(|&idx| project(idx, &items[idx])),
                         shard.len(),
                         seed,
                     )
@@ -136,10 +144,13 @@ where
 /// split evenly across shards, and keys crafted to share a first byte
 /// just forfeit the grouping, costing no more than the unpartitioned
 /// order.
-fn partition<'a, T>(signatures: &'a [T], key: impl Fn(&'a T) -> &'a VerificationKey) -> Vec<usize> {
+fn partition<'a, T>(
+    signatures: &'a [T],
+    key: impl Fn(usize, &'a T) -> &'a VerificationKey,
+) -> Vec<usize> {
     let mut counts = [0; 256];
-    for item in signatures {
-        let vk = key(item);
+    for (i, item) in signatures.iter().enumerate() {
+        let vk = key(i, item);
         counts[vk.as_bytes()[0] as usize] += 1;
     }
     let mut offsets = [0; 256];
@@ -150,7 +161,7 @@ fn partition<'a, T>(signatures: &'a [T], key: impl Fn(&'a T) -> &'a Verification
     }
     let mut order = vec![0; signatures.len()];
     for (i, item) in signatures.iter().enumerate() {
-        let vk = key(item);
+        let vk = key(i, item);
         let bucket = vk.as_bytes()[0] as usize;
         order[offsets[bucket]] = i;
         offsets[bucket] += 1;
@@ -282,7 +293,7 @@ mod tests {
         verify_projected(
             &mut test_rng(),
             items,
-            |(vk, sig, message)| (vk, *sig, None, message.as_slice()),
+            |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
             strategy,
         )
         .is_ok()

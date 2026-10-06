@@ -97,7 +97,7 @@ fn fuzz(input: FuzzInput) {
                 let result = Ed25519Batch::verify(
                     &mut rng,
                     &ed25519_batch,
-                    |(namespace, message, public_key, signature)| BatchEntry {
+                    |_, (namespace, message, public_key, signature)| BatchEntry {
                         namespace,
                         message,
                         public_key,
@@ -122,7 +122,7 @@ fn fuzz(input: FuzzInput) {
     let ed25519_result = Ed25519Batch::verify(
         &mut rng,
         &ed25519_batch,
-        |(namespace, message, public_key, signature)| BatchEntry {
+        |_, (namespace, message, public_key, signature)| BatchEntry {
             namespace,
             message,
             public_key,

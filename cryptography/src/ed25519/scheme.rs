@@ -337,13 +337,13 @@ impl BatchVerifier for Batch {
     where
         R: CryptoRng,
         T: Sync,
-        F: Fn(&'a T) -> BatchEntry<'a, PublicKey> + Sync,
+        F: Fn(usize, &'a T) -> BatchEntry<'a, PublicKey> + Sync,
     {
         ed_core::batch::verify_projected(
             rng,
             items,
-            |item| {
-                let entry = project(item);
+            |i, item| {
+                let entry = project(i, item);
                 (
                     &entry.public_key.key,
                     ed_core::Signature::from(entry.signature.raw),
@@ -693,7 +693,7 @@ mod tests {
         ed_core::batch::verify_projected(
             &mut test_rng(),
             items,
-            |(_, public_key, message, signature)| {
+            |_, (_, public_key, message, signature)| {
                 (
                     &public_key.key,
                     ed_core::Signature::from(signature.raw),
@@ -724,7 +724,7 @@ mod tests {
         assert!(!Batch::verify(
             &mut test_rng(),
             &entries,
-            |entry| *entry,
+            |_, entry| *entry,
             &Sequential
         ));
     }
@@ -747,7 +747,7 @@ mod tests {
                     signature: &signature,
                 }];
                 assert_eq!(
-                    Batch::verify(&mut test_rng(), &entries, |entry| *entry, &Sequential),
+                    Batch::verify(&mut test_rng(), &entries, |_, entry| *entry, &Sequential),
                     supplied_namespace == namespace,
                 );
             }
@@ -764,7 +764,7 @@ mod tests {
                 assert!(!Batch::verify(
                     &mut test_rng(),
                     &entries,
-                    |entry| *entry,
+                    |_, entry| *entry,
                     &Sequential
                 ));
             }
@@ -782,11 +782,14 @@ mod tests {
             Batch::verify(
                 &mut test_rng(),
                 records,
-                |record| BatchEntry {
-                    namespace,
-                    message: &record.0,
-                    public_key: &publics[record.2],
-                    signature: &record.1,
+                |index, record| {
+                    assert!(core::ptr::eq(record, &records[index]));
+                    BatchEntry {
+                        namespace,
+                        message: &record.0,
+                        public_key: &publics[record.2],
+                        signature: &record.1,
+                    }
                 },
                 strategy,
             )
@@ -829,9 +832,57 @@ mod tests {
         assert!(!Batch::verify(
             &mut rng,
             &empty,
-            |entry| *entry,
+            |_, entry| *entry,
             &Sequential
         ));
+    }
+
+    #[test]
+    fn projected_batch_indexes_zero_sized_items() {
+        fn verify(
+            messages: &[Vec<u8>],
+            signatures: &[Signature],
+            public_keys: &[PublicKey],
+            strategy: &impl Strategy,
+        ) -> bool {
+            let items = vec![(); messages.len()];
+            Batch::verify(
+                &mut test_rng(),
+                &items,
+                |index, ()| BatchEntry {
+                    namespace: b"namespace",
+                    message: &messages[index],
+                    public_key: &public_keys[index % public_keys.len()],
+                    signature: &signatures[index],
+                },
+                strategy,
+            )
+        }
+
+        // Use an uneven batch whose unit items identify messages only by their original index.
+        let mut rng = test_rng();
+        let keys = [PrivateKey::random(&mut rng), PrivateKey::random(&mut rng)];
+        let public_keys = keys.each_ref().map(|key| key.public_key());
+        let mut messages: Vec<_> = (0..25).map(|i| vec![i as u8; 32]).collect();
+        let signatures: Vec<_> = messages
+            .iter()
+            .enumerate()
+            .map(|(i, message)| keys[i % keys.len()].sign(b"namespace", message))
+            .collect();
+        let rayon = Rayon::new(NZUsize!(4)).unwrap();
+        let parallel = rayon.manual();
+
+        // Both strategies must resolve each original index to the matching signed message.
+        assert!(verify(&messages, &signatures, &public_keys, &Sequential));
+        assert!(verify(&messages, &signatures, &public_keys, &parallel));
+
+        // Changing each indexed message in turn must fail the whole batch.
+        for index in 0..messages.len() {
+            messages[index][0] ^= 1;
+            assert!(!verify(&messages, &signatures, &public_keys, &Sequential));
+            assert!(!verify(&messages, &signatures, &public_keys, &parallel));
+            messages[index][0] ^= 1;
+        }
     }
 
     #[test]

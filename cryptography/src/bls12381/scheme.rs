@@ -386,13 +386,13 @@ impl BatchVerifier for Batch {
     where
         R: CryptoRng,
         T: Sync,
-        F: Fn(&'a T) -> BatchEntry<'a, Self::PublicKey> + Sync,
+        F: Fn(usize, &'a T) -> BatchEntry<'a, Self::PublicKey> + Sync,
     {
         let mut publics = Vec::with_capacity(items.len());
         let mut hms = Vec::with_capacity(items.len());
         let mut signatures = Vec::with_capacity(items.len());
-        for item in items {
-            let entry = project(item);
+        for (i, item) in items.iter().enumerate() {
+            let entry = project(i, item);
             publics.push(entry.public_key.key);
             hms.push(ops::hash_with_namespace::<MinPk>(
                 MinPk::MESSAGE,
@@ -486,7 +486,7 @@ mod tests {
         assert!(!Batch::verify(
             &mut test_rng(),
             &entries,
-            |entry| *entry,
+            |_, entry| *entry,
             &Sequential,
         ));
     }
@@ -507,7 +507,7 @@ mod tests {
         assert!(Batch::verify(
             &mut rng,
             &entries,
-            |entry| *entry,
+            |_, entry| *entry,
             &Sequential,
         ));
 
@@ -516,9 +516,42 @@ mod tests {
         assert!(!Batch::verify(
             &mut rng,
             &entries,
-            |entry| *entry,
+            |_, entry| *entry,
             &Sequential,
         ));
+    }
+
+    #[test]
+    fn projected_batch_indexes_zero_sized_items() {
+        // Unit items must resolve signature data by their original position.
+        let mut rng = test_rng();
+        let key = PrivateKey::random(&mut rng);
+        let public_key = key.public_key();
+        let messages = [b"first".as_slice(), b"second", b"third"];
+        let signatures = messages.map(|message| key.sign(b"namespace", message));
+        let items = vec![(); messages.len()];
+
+        // Verify the valid batch and reject a changed message at every index.
+        for invalid in [None, Some(0), Some(1), Some(2)] {
+            assert_eq!(
+                Batch::verify(
+                    &mut rng,
+                    &items,
+                    |index, ()| BatchEntry {
+                        namespace: b"namespace",
+                        message: if invalid == Some(index) {
+                            b"invalid"
+                        } else {
+                            messages[index]
+                        },
+                        public_key: &public_key,
+                        signature: &signatures[index],
+                    },
+                    &Sequential,
+                ),
+                invalid.is_none(),
+            );
+        }
     }
 
     #[cfg(feature = "arbitrary")]

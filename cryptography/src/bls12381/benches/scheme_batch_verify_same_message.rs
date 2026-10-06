@@ -33,7 +33,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                                 black_box(bls12381::Batch::verify(
                                     &mut verify_rng,
                                     &batch,
-                                    |(public_key, signature)| BatchEntry {
+                                    |_, (public_key, signature)| BatchEntry {
                                         namespace,
                                         message: &msg,
                                         public_key,
@@ -45,7 +45,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                                 black_box(bls12381::Batch::verify(
                                     &mut verify_rng,
                                     &batch,
-                                    |(public_key, signature)| BatchEntry {
+                                    |_, (public_key, signature)| BatchEntry {
                                         namespace,
                                         message: &msg,
                                         public_key,

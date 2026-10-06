@@ -899,7 +899,7 @@ impl<V: Variant, P: PublicKey> Info<V, P> {
                 }
             }
         }
-        if !B::verify(&mut *rng, &ack_batch, |entry| *entry, strategy) {
+        if !B::verify(&mut *rng, &ack_batch, |_, entry| *entry, strategy) {
             return Err(DealerLogError::Fault(FaultReason::InvalidAck));
         }
         let lhs = log.pub_msg.commitment.lin_comb_eval(

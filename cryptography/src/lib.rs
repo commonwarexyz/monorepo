@@ -203,13 +203,16 @@ commonware_macros::stability_scope!(BETA {
 
         /// Verify a slice of items through borrowed views of their signature data.
         ///
-        /// The projection must return the same entry whenever called for an item.
+        /// The projection receives the item's original index in the slice and a
+        /// reference to the item. It must return the same entry whenever called
+        /// for that index and item, even if verification reorders the batch.
         /// It may be called more than once and concurrently. Its references must
         /// point to data that remains available throughout this call. The message
-        /// must not be hashed before verification. Namespace framing follows
-        /// [commonware_utils::union_unique], matching individual verification.
+        /// must not be hashed before verification. Each namespace must match
+        /// the one used during signing, as in [Verifier::verify].
         ///
         /// Returns `false` if the slice is empty or any signature is invalid.
+        /// Projections that use only the index may use a slice of `()` values.
         ///
         /// # Examples
         ///
@@ -226,7 +229,7 @@ commonware_macros::stability_scope!(BETA {
         /// assert!(ed25519::Batch::verify(
         ///     &mut test_rng(),
         ///     &records,
-        ///     |(message, signature)| BatchEntry {
+        ///     |_, (message, signature)| BatchEntry {
         ///         namespace,
         ///         message,
         ///         public_key: &public_key,
@@ -239,8 +242,8 @@ commonware_macros::stability_scope!(BETA {
         /// # Why Randomness?
         ///
         /// Randomness prevents an attacker from constructing invalid signatures
-        /// whose errors cancel in the batch equation. The RNG must be unpredictable
-        /// to an adversary. See this [discussion](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
+        /// whose errors cancel in the batch equation. See this
+        /// [discussion](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
         fn verify<'a, R, T, F>(
             rng: &mut R,
             items: &'a [T],
@@ -250,7 +253,7 @@ commonware_macros::stability_scope!(BETA {
         where
             R: CryptoRng,
             T: Sync,
-            F: Fn(&'a T) -> BatchEntry<'a, Self::PublicKey> + Sync;
+            F: Fn(usize, &'a T) -> BatchEntry<'a, Self::PublicKey> + Sync;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests

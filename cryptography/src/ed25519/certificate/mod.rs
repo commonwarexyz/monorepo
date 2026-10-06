@@ -152,7 +152,7 @@ impl<N: Namespace> Generic<N> {
             && !Batch::verify(
                 rng,
                 &candidates,
-                |(attestation, public_key)| BatchEntry {
+                |_, (attestation, public_key)| BatchEntry {
                     namespace,
                     message: &message,
                     public_key,
@@ -259,7 +259,7 @@ impl<N: Namespace> Generic<N> {
         Batch::verify(
             rng,
             &entries,
-            |(public_key, signature)| BatchEntry {
+            |_, (public_key, signature)| BatchEntry {
                 namespace,
                 message: &message,
                 public_key,
@@ -302,7 +302,7 @@ impl<N: Namespace> Generic<N> {
         Batch::verify(
             rng,
             &entries,
-            |(index, public_key, signature)| BatchEntry {
+            |_, (index, public_key, signature)| BatchEntry {
                 namespace: messages[*index].0,
                 message: &messages[*index].1,
                 public_key,

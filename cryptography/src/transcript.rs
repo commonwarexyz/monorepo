@@ -851,13 +851,13 @@ mod test {
         assert!(ed25519::Batch::verify(
             &mut test_rng(),
             &summary_batch,
-            |entry| *entry,
+            |_, entry| *entry,
             &Sequential,
         ));
         assert!(ed25519::Batch::verify(
             &mut test_rng(),
             &transcript_batch,
-            |entry| *entry,
+            |_, entry| *entry,
             &Sequential,
         ));
     }
@@ -999,7 +999,7 @@ mod test {
                 ed25519::Batch::verify(
                     &mut transcript.noise(b"summary batch"),
                     &summary_batch,
-                    |entry| *entry,
+                    |_, entry| *entry,
                     &Sequential,
                 )
                 .encode(),
@@ -1018,7 +1018,7 @@ mod test {
                 ed25519::Batch::verify(
                     &mut transcript.noise(b"transcript batch"),
                     &transcript_batch,
-                    |entry| *entry,
+                    |_, entry| *entry,
                     &Sequential,
                 )
                 .encode(),

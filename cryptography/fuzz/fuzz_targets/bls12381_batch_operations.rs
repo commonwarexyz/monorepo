@@ -121,7 +121,7 @@ fuzz_target!(|data: &[u8]| {
     let result = Batch::verify(
         &mut rng,
         &state.batch,
-        |(namespace, message, public_key, signature)| BatchEntry {
+        |_, (namespace, message, public_key, signature)| BatchEntry {
             namespace,
             message,
             public_key,
