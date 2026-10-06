@@ -597,9 +597,7 @@ where
                     *inactivity_floor_loc,
                 );
                 guard.extend_to(*inactivity_floor_loc);
-                for is_active in activity.iter() {
-                    guard.push(is_active);
-                }
+                guard.extend_from_bitmap(&activity);
             }
 
             (inactivity_floor_loc, active_keys, bitmap)

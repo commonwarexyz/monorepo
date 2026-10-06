@@ -42,4 +42,15 @@ rand_core = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
+rand = { workspace = true, features = ["std", "std_rng"] }
+
+[lib]
+bench = false
+
+[[bench]]
+name = "codec"
+harness = false
+path = "src/benches/bench.rs"
+required-features = [ "std" ]

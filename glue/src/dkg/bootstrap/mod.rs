@@ -31,7 +31,7 @@ use commonware_consensus::{
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    BatchVerifier, Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
+    Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
     bls12381::{
         dkg::feldman_desmedt::Reveal,
         primitives::{
@@ -313,7 +313,6 @@ where
     SS: SecretStore,
     T: Strategy,
     D: Directory<ed25519::PublicKey>,
-    ed25519::Batch: BatchVerifier<PublicKey = ed25519::PublicKey> + Send + 'static,
 {
     /// Starts the engine and returns its handle and a receiver for its
     /// [`Completion`].
@@ -562,7 +561,6 @@ where
                 replay_buffer,
                 max_participants,
                 blocks_per_epoch: self.config.blocks_per_epoch,
-                batch_verifier: PhantomData::<ed25519::Batch>,
             },
             DkgConfig {
                 participants: self.config.participants.clone(),
