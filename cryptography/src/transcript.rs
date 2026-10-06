@@ -580,7 +580,10 @@ impl arbitrary::Arbitrary<'_> for Summary {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{BatchEntry, BatchVerifier, ed25519};
+    use crate::{
+        BatchEntry, BatchVerifier,
+        ed25519::{PrivateKey, PublicKey},
+    };
     use bytes::Buf as _;
     use commonware_codec::{DecodeExt as _, Encode};
     use commonware_parallel::Sequential;
@@ -809,7 +812,7 @@ mod test {
 
     #[test]
     fn test_summary_sign_verify_matches_transcript() {
-        let sk = ed25519::PrivateKey::from_seed(7);
+        let sk = PrivateKey::from_seed(7);
         let pk = sk.public_key();
         let mut transcript = v0(b"test");
         transcript.commit(b"DATA".as_slice());
@@ -824,7 +827,7 @@ mod test {
     #[test]
     fn test_summary_batch_verify_matches_transcript() {
         // Sign a transcript that commits to both a namespace and message data.
-        let sk = ed25519::PrivateKey::from_seed(7);
+        let sk = PrivateKey::from_seed(7);
         let pk = sk.public_key();
         let mut transcript = v0(b"test");
         transcript.commit(b"DATA".as_slice());
@@ -848,13 +851,13 @@ mod test {
         }];
 
         // Both batches must verify the same transcript signature.
-        assert!(ed25519::PublicKey::verify_batch(
+        assert!(PublicKey::verify_batch(
             &mut test_rng(),
             &summary_batch,
             |_, entry| *entry,
             &Sequential,
         ));
-        assert!(ed25519::PublicKey::verify_batch(
+        assert!(PublicKey::verify_batch(
             &mut test_rng(),
             &transcript_batch,
             |_, entry| *entry,
@@ -976,7 +979,7 @@ mod test {
             }
             log.extend(transcript.sample(b"sample", NZU64!(seed | 1)).encode());
 
-            let private_key = ed25519::PrivateKey::from_seed(seed);
+            let private_key = PrivateKey::from_seed(seed);
             let public_key = private_key.public_key();
             let summary = transcript.summarize();
             let summary_sig = summary.sign(&private_key);
@@ -996,7 +999,7 @@ mod test {
             }];
             log.extend(true.encode());
             log.extend(
-                ed25519::PublicKey::verify_batch(
+                PublicKey::verify_batch(
                     &mut transcript.noise(b"summary batch"),
                     &summary_batch,
                     |_, entry| *entry,
@@ -1015,7 +1018,7 @@ mod test {
             }];
             log.extend(true.encode());
             log.extend(
-                ed25519::PublicKey::verify_batch(
+                PublicKey::verify_batch(
                     &mut transcript.noise(b"transcript batch"),
                     &transcript_batch,
                     |_, entry| *entry,

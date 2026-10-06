@@ -1,4 +1,7 @@
-use commonware_cryptography::{BatchEntry, BatchVerifier, Signer as _, bls12381};
+use commonware_cryptography::{
+    BatchEntry, BatchVerifier, Signer as _,
+    bls12381::{PrivateKey, PublicKey},
+};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, TestRng, test_rng};
@@ -22,7 +25,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                         || {
                             (0..n_signers)
                                 .map(|_| {
-                                    let signer = bls12381::PrivateKey::random(&mut rng);
+                                    let signer = PrivateKey::random(&mut rng);
                                     (signer.public_key(), signer.sign(namespace, &msg))
                                 })
                                 .collect::<Vec<_>>()
@@ -30,7 +33,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                         |batch| {
                             #[allow(clippy::option_if_let_else)]
                             if let Some(rayon) = rayon.as_ref() {
-                                black_box(bls12381::PublicKey::verify_batch(
+                                black_box(PublicKey::verify_batch(
                                     &mut verify_rng,
                                     &batch,
                                     |_, (public_key, signature)| BatchEntry {
@@ -42,7 +45,7 @@ fn bench_scheme_batch_verify_same_message(c: &mut Criterion) {
                                     rayon,
                                 ))
                             } else {
-                                black_box(bls12381::PublicKey::verify_batch(
+                                black_box(PublicKey::verify_batch(
                                     &mut verify_rng,
                                     &batch,
                                     |_, (public_key, signature)| BatchEntry {

@@ -1,7 +1,10 @@
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier, bls12381};
+use commonware_cryptography::{
+    BatchEntry, BatchVerifier, Signer, Verifier,
+    bls12381::{PrivateKey, PublicKey, Signature},
+};
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
@@ -44,7 +47,7 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 }
 
 struct FuzzState {
-    batch: Vec<(Vec<u8>, Vec<u8>, bls12381::PublicKey, bls12381::Signature)>,
+    batch: Vec<(Vec<u8>, Vec<u8>, PublicKey, Signature)>,
     expected_result: Option<bool>,
 }
 
@@ -64,7 +67,7 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let private_key = bls12381::PrivateKey::from_seed(private_key_seed);
+            let private_key = PrivateKey::from_seed(private_key_seed);
             let public_key = private_key.public_key();
             let signature = private_key.sign(namespace.as_slice(), &message);
 
@@ -82,8 +85,8 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
             namespace,
             message,
         } => {
-            let private_key = bls12381::PrivateKey::from_seed(private_key_seed);
-            let wrong_private_key = bls12381::PrivateKey::from_seed(wrong_private_key_seed);
+            let private_key = PrivateKey::from_seed(private_key_seed);
+            let wrong_private_key = PrivateKey::from_seed(wrong_private_key_seed);
             let wrong_public_key = wrong_private_key.public_key();
             let signature = private_key.sign(namespace.as_slice(), &message);
 
@@ -115,7 +118,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let result = bls12381::PublicKey::verify_batch(
+    let result = PublicKey::verify_batch(
         &mut rng,
         &state.batch,
         |_, (namespace, message, public_key, signature)| BatchEntry {

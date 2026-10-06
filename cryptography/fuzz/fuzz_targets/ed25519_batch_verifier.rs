@@ -1,7 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier, ed25519};
+use commonware_cryptography::{
+    BatchEntry, BatchVerifier, Signer, Verifier,
+    ed25519::{PrivateKey, PublicKey},
+};
 use commonware_parallel::Sequential;
 use commonware_utils::TestRng;
 use libfuzzer_sys::fuzz_target;
@@ -57,7 +60,7 @@ fn fuzz(input: FuzzInput) {
                 namespace,
                 message,
             } => {
-                let private_key = ed25519::PrivateKey::from_seed(private_key_seed);
+                let private_key = PrivateKey::from_seed(private_key_seed);
                 let public_key = private_key.public_key();
                 let signature = private_key.sign(namespace.as_slice(), &message);
 
@@ -75,8 +78,8 @@ fn fuzz(input: FuzzInput) {
                 message,
             } => {
                 // Create signature with one key but verify with another
-                let private_key = ed25519::PrivateKey::from_seed(private_key_seed);
-                let wrong_private_key = ed25519::PrivateKey::from_seed(wrong_private_key_seed);
+                let private_key = PrivateKey::from_seed(private_key_seed);
+                let wrong_private_key = PrivateKey::from_seed(wrong_private_key_seed);
                 let wrong_public_key = wrong_private_key.public_key();
                 let signature = private_key.sign(namespace.as_slice(), &message);
 
@@ -91,7 +94,7 @@ fn fuzz(input: FuzzInput) {
             }
 
             BatchOperation::VerifyEd25519 => {
-                let result = ed25519::PublicKey::verify_batch(
+                let result = PublicKey::verify_batch(
                     &mut rng,
                     &ed25519_batch,
                     |_, (namespace, message, public_key, signature)| BatchEntry {
@@ -116,7 +119,7 @@ fn fuzz(input: FuzzInput) {
     }
 
     // Final verification of any remaining items
-    let ed25519_result = ed25519::PublicKey::verify_batch(
+    let ed25519_result = PublicKey::verify_batch(
         &mut rng,
         &ed25519_batch,
         |_, (namespace, message, public_key, signature)| BatchEntry {

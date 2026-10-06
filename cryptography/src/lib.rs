@@ -213,16 +213,19 @@ commonware_macros::stability_scope!(BETA {
         /// # Examples
         ///
         /// ```
-        /// use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, ed25519};
+        /// use commonware_cryptography::{
+        ///     BatchEntry, BatchVerifier, Signer,
+        ///     ed25519::{PrivateKey, PublicKey},
+        /// };
         /// use commonware_math::algebra::Random;
         /// use commonware_parallel::Sequential;
         /// use commonware_utils::test_rng;
         ///
-        /// let key = ed25519::PrivateKey::random(test_rng());
+        /// let key = PrivateKey::random(test_rng());
         /// let public_key = key.public_key();
         /// let namespace = b"example";
         /// let records = [(b"message".as_slice(), key.sign(namespace, b"message"))];
-        /// assert!(ed25519::PublicKey::verify_batch(
+        /// assert!(PublicKey::verify_batch(
         ///     &mut test_rng(),
         ///     &records,
         ///     |_, (message, signature)| BatchEntry {

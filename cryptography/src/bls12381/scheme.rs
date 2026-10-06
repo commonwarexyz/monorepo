@@ -163,19 +163,27 @@ impl BatchVerifier for PublicKey {
         T: Sync,
         F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
     {
-        let mut publics = Vec::with_capacity(items.len());
-        let mut hms = Vec::with_capacity(items.len());
-        let mut signatures = Vec::with_capacity(items.len());
-        for (i, item) in items.iter().enumerate() {
-            let entry = project(i, item);
-            publics.push(entry.public_key.key);
-            hms.push(ops::hash_with_namespace::<MinPk>(
-                MinPk::MESSAGE,
-                entry.namespace,
-                entry.message,
-            ));
-            signatures.push(entry.signature.signature);
-        }
+        // Keep each signature paired with its message hash and public key while preparing
+        // entries in input order. The serial branch fills the output vectors directly; the
+        // parallel branch uses the manual strategy so the execution choice made by `run` is not
+        // reconsidered.
+        let prepare = |(index, item): (usize, &'a T)| {
+            let entry = project(index, item);
+            let hm =
+                ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, entry.namespace, entry.message);
+            (entry.public_key.key, hm, entry.signature.signature)
+        };
+        let (publics, hms, signatures): (Vec<_>, Vec<_>, Vec<_>) = strategy.run(
+            items.len(),
+            || items.iter().enumerate().map(&prepare).collect(),
+            || {
+                strategy
+                    .manual()
+                    .map_collect_vec(items.iter().enumerate(), &prepare)
+                    .into_iter()
+                    .collect()
+            },
+        );
         MinPk::batch_verify(rng, &publics, &hms, &signatures, strategy).is_ok()
     }
 }
@@ -406,8 +414,8 @@ mod tests {
     use crate::{Verifier as _, bls12381};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
-    use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{NZUsize, test_rng};
 
     #[test]
     fn test_codec_private_key() {
@@ -518,35 +526,77 @@ mod tests {
 
     #[test]
     fn projected_batch_indexes_zero_sized_items() {
-        // Unit items must resolve signature data by their original position.
-        let mut rng = test_rng();
-        let key = PrivateKey::random(&mut rng);
-        let public_key = key.public_key();
-        let messages = [b"first".as_slice(), b"second", b"third"];
-        let signatures = messages.map(|message| key.sign(b"namespace", message));
-        let items = vec![(); messages.len()];
+        struct Batch {
+            namespaces: Vec<&'static [u8]>,
+            messages: Vec<Vec<u8>>,
+            signers: Vec<usize>,
+            public_keys: Vec<PublicKey>,
+            signatures: Vec<Signature>,
+        }
 
-        // Verify the valid batch and reject a changed message at every index.
-        for invalid in [None, Some(0), Some(1), Some(2)] {
-            assert_eq!(
+        impl Batch {
+            fn verify(&self, strategy: &impl Strategy) -> bool {
+                let items = vec![(); self.messages.len()];
                 PublicKey::verify_batch(
-                    &mut rng,
+                    &mut test_rng(),
                     &items,
                     |index, ()| BatchEntry {
-                        namespace: b"namespace",
-                        message: if invalid == Some(index) {
-                            b"invalid"
-                        } else {
-                            messages[index]
-                        },
-                        public_key: &public_key,
-                        signature: &signatures[index],
+                        namespace: self.namespaces[index],
+                        message: &self.messages[index],
+                        public_key: &self.public_keys[self.signers[index]],
+                        signature: &self.signatures[index],
                     },
-                    &Sequential,
-                ),
-                invalid.is_none(),
-            );
+                    strategy,
+                )
+            }
         }
+
+        // Build an uneven batch whose unit items identify their namespace, message, signer, and
+        // signature only by original index.
+        let mut rng = test_rng();
+        let keys: Vec<_> = (0..3).map(|_| PrivateKey::random(&mut rng)).collect();
+        let namespaces: Vec<&'static [u8]> = (0..9)
+            .map(|i| [b"".as_slice(), b"alpha", b"beta"][(i / 3) % 3])
+            .collect();
+        let messages: Vec<_> = (0..9).map(|i| vec![i as u8; i * 7]).collect();
+        let signers: Vec<_> = (0..9).map(|i| i % keys.len()).collect();
+        let signatures = (0..9)
+            .map(|i| keys[signers[i]].sign(namespaces[i], &messages[i]))
+            .collect();
+        let mut batch = Batch {
+            namespaces,
+            messages,
+            signers,
+            public_keys: keys.iter().map(|key| key.public_key()).collect(),
+            signatures,
+        };
+
+        // Check each expected verdict with both serial and forced parallel preparation.
+        let parallel = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let check = |batch: &Batch, expected: bool| {
+            assert_eq!(batch.verify(&Sequential), expected);
+            assert_eq!(batch.verify(&parallel), expected);
+        };
+        check(&batch, true);
+
+        // Changing the message, namespace, or signer at any index must fail the whole batch.
+        for index in 0..batch.messages.len() {
+            batch.messages[index].push(0);
+            check(&batch, false);
+            batch.messages[index].pop();
+
+            let namespace = core::mem::replace(&mut batch.namespaces[index], b"other");
+            check(&batch, false);
+            batch.namespaces[index] = namespace;
+
+            let signer = batch.signers[index];
+            batch.signers[index] = (signer + 1) % keys.len();
+            check(&batch, false);
+            batch.signers[index] = signer;
+        }
+
+        // Restoring every entry must verify again.
+        check(&batch, true);
     }
 
     #[cfg(feature = "arbitrary")]

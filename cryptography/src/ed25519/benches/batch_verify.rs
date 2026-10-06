@@ -1,4 +1,7 @@
-use commonware_cryptography::{BatchEntry, BatchVerifier, Signer as _, ed25519};
+use commonware_cryptography::{
+    BatchEntry, BatchVerifier, Signer as _,
+    ed25519::{PrivateKey, PublicKey, Signature},
+};
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
 use commonware_utils::{NZUsize, TestRng, test_rng};
@@ -9,14 +12,10 @@ use std::hint::black_box;
 const NAMESPACE: &[u8] = b"constantinople-tx";
 
 /// Signs `n` random `msg_len`-byte messages, each with a distinct signer.
-fn signed(
-    rng: &mut TestRng,
-    n: usize,
-    msg_len: usize,
-) -> Vec<(ed25519::PublicKey, Vec<u8>, ed25519::Signature)> {
+fn signed(rng: &mut TestRng, n: usize, msg_len: usize) -> Vec<(PublicKey, Vec<u8>, Signature)> {
     (0..n)
         .map(|_| {
-            let signer = ed25519::PrivateKey::random(&mut *rng);
+            let signer = PrivateKey::random(&mut *rng);
             let mut msg = vec![0u8; msg_len];
             rng.fill(&mut msg[..]);
             let sig = signer.sign(NAMESPACE, &msg);
@@ -45,7 +44,7 @@ fn bench_batch_verify(c: &mut Criterion) {
             |b| {
                 b.iter(|| {
                     if concurrency == 1 {
-                        black_box(ed25519::PublicKey::verify_batch(
+                        black_box(PublicKey::verify_batch(
                             &mut verify_rng,
                             &items,
                             |_, (public_key, message, signature)| BatchEntry {
@@ -57,7 +56,7 @@ fn bench_batch_verify(c: &mut Criterion) {
                             &Sequential,
                         ))
                     } else {
-                        black_box(ed25519::PublicKey::verify_batch(
+                        black_box(PublicKey::verify_batch(
                             &mut verify_rng,
                             &items,
                             |_, (public_key, message, signature)| BatchEntry {

@@ -206,13 +206,12 @@ fn verify_shard<'a>(
     // the usual method. However, when m = 1 and all signatures are from a
     // single verification key, this is nearly twice as fast.
 
-    // Group the signatures by verification key. hashbrown's map with the
-    // ahash hasher stands in for ahash::AHashMap, which wraps
-    // std::collections::HashMap and is unavailable in no_std builds.
+    // Group coefficients by the original key encoding, retaining borrowed
+    // cached points with them in first-seen order. hashbrown with ahash
+    // supports no_std builds.
     let mut key_indices: HashMap<&VerificationKeyBytes, usize, RandomState> =
         HashMap::with_capacity_and_hasher(n, RandomState::default());
-    let mut A_coeffs: Vec<Scalar> = Vec::with_capacity(n);
-    let mut As = Vec::with_capacity(n);
+    let mut A_terms: Vec<(Scalar, &EdwardsPoint)> = Vec::with_capacity(n);
     let mut R_coeffs = Vec::with_capacity(n);
     let mut Rs = Vec::with_capacity(n);
     let mut B_coeff = Scalar::ZERO;
@@ -241,16 +240,19 @@ fn verify_shard<'a>(
         Rs.push(R);
         R_coeffs.push(z);
         let index = *key_indices.entry(&vk.A_bytes).or_insert_with(|| {
-            As.push(-vk.minus_A);
-            A_coeffs.push(Scalar::ZERO);
-            As.len() - 1
+            A_terms.push((Scalar::ZERO, &vk.minus_A));
+            A_terms.len() - 1
         });
-        A_coeffs[index] += z * k;
+        A_terms[index].0 += z * k;
     }
 
     let check = EdwardsPoint::vartime_multiscalar_mul(
-        once(&B_coeff).chain(A_coeffs.iter()).chain(R_coeffs.iter()),
-        once(&B).chain(As.iter()).chain(Rs.iter()),
+        once(&B_coeff)
+            .chain(A_terms.iter().map(|(coeff, _)| coeff))
+            .chain(R_coeffs.iter()),
+        once(B)
+            .chain(A_terms.iter().map(|(_, point)| -*point))
+            .chain(Rs.iter().copied()),
     );
 
     if check.mul_by_cofactor().is_identity() {
