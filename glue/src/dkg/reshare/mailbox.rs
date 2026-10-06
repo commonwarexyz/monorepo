@@ -9,10 +9,7 @@ use commonware_actor::{
 };
 use commonware_consensus::{
     Reporter,
-    marshal::{
-        Update,
-        ancestry::{Ancestry, BoxedAncestry},
-    },
+    marshal::{Update, blocks::Blocks},
     types::Height,
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
@@ -44,8 +41,8 @@ where
     ///
     /// This is not evidence that a proposed payload is valid or invalid.
     Following,
-    /// The ancestry does not connect to the actor's finalized tip, or the actor
-    /// has stopped.
+    /// The selected range does not extend the actor's finalized tip or cannot
+    /// be acquired, or the actor has stopped.
     Unavailable,
 }
 
@@ -149,7 +146,7 @@ where
     /// [`Mailbox::epoch_info`]).
     EpochInfo {
         span: Span,
-        ancestry: BoxedAncestry<B>,
+        blocks: Blocks<B>,
         response: oneshot::Sender<EpochInfoResponse<V, C, B::Directory>>,
     },
 
@@ -256,21 +253,19 @@ where
 
     /// Requests the payload for an epoch's final block.
     ///
-    /// `ancestry` starts at the final block (verification) or at its parent
-    /// (proposal) and must extend the actor's finalized tip. Returns
-    /// [`EpochInfoResponse::Unavailable`] if it does not or if the actor has
-    /// stopped.
-    pub async fn epoch_info(
-        &mut self,
-        ancestry: impl Ancestry<B>,
-    ) -> EpochInfoResponse<V, C, B::Directory> {
+    /// `blocks` selects the branch through the final block's parent and must
+    /// extend the actor's finalized tip. The actor reads the inclusion range
+    /// lazily, so queued requests retain no block bodies. Returns
+    /// [`EpochInfoResponse::Unavailable`] if the range does not extend the
+    /// finalized tip or cannot be acquired, or if the actor has stopped.
+    pub async fn epoch_info(&mut self, blocks: Blocks<B>) -> EpochInfoResponse<V, C, B::Directory> {
         let (response_tx, response_rx) = oneshot::channel();
         let span = info_span!("dkg.reshare.mailbox.epoch_info");
         if !self
             .sender
             .enqueue(Message::EpochInfo {
                 span,
-                ancestry: BoxedAncestry::new(ancestry),
+                blocks,
                 response: response_tx,
             })
             .accepted()
@@ -320,39 +315,13 @@ mod tests {
     use super::*;
     use crate::dkg::tests::mocks::{self, TestBlock, TestBlsVariant};
     use commonware_actor::mailbox;
+    use commonware_consensus::Heightable as _;
     use commonware_cryptography::{Digestible as _, ed25519::PrivateKey};
     use commonware_runtime::{Runner, deterministic};
     use commonware_utils::{NZUsize, channel::oneshot};
     use futures::{FutureExt as _, StreamExt as _};
-    use std::{
-        pin::Pin,
-        task::{Context, Poll},
-    };
 
     type TestMessage = Message<TestBlock, TestBlsVariant, PrivateKey>;
-
-    #[derive(Clone)]
-    struct DelayedAncestry {
-        parent: Option<Arc<TestBlock>>,
-        gate: futures::future::Shared<oneshot::Receiver<()>>,
-    }
-
-    impl futures::Stream for DelayedAncestry {
-        type Item = Arc<TestBlock>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if self.gate.poll_unpin(cx).is_pending() {
-                return Poll::Pending;
-            }
-            Poll::Ready(self.parent.take())
-        }
-    }
-
-    impl Ancestry<TestBlock> for DelayedAncestry {
-        fn peek(&self) -> Option<&TestBlock> {
-            None
-        }
-    }
 
     #[test]
     fn next_log_returns_none_when_actor_gone() {
@@ -375,32 +344,45 @@ mod tests {
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
             let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
             let (release, gate) = oneshot::channel();
-            let ancestry = DelayedAncestry {
-                parent: Some(parent.clone()),
-                gate: gate.shared(),
-            };
-            let mut request = Box::pin(mailbox.epoch_info(ancestry));
+            let gate = gate.shared();
+            let source = mocks::blocks([parent.clone()]);
+            let blocks = Blocks::new(
+                parent.height(),
+                NZUsize!(8),
+                |_| None,
+                move |height| {
+                    let gate = gate.clone();
+                    let source = source.clone();
+                    async move {
+                        gate.await.ok()?;
+                        source.range(height..=height).next().await?.ok()
+                    }
+                },
+            );
+            let mut request = Box::pin(mailbox.epoch_info(blocks));
 
             assert!(request.as_mut().now_or_never().is_none());
             let message = receiver
                 .try_recv()
-                .expect("request should reach the actor without polling ancestry");
+                .expect("request should reach the actor without acquiring blocks");
             let Message::EpochInfo {
-                mut ancestry,
-                response,
-                ..
+                blocks, response, ..
             } = message
             else {
                 panic!("expected epoch info request");
             };
-            assert!(ancestry.next().now_or_never().is_none());
+            let mut range = blocks.range(parent.height()..=parent.height());
+            assert!(range.next().now_or_never().is_none());
 
-            release.send(()).expect("ancestry should still be waiting");
+            release
+                .send(())
+                .expect("acquisition should still be waiting");
             assert_eq!(
-                ancestry
+                range
                     .next()
                     .await
-                    .expect("parent should remain in ancestry")
+                    .expect("parent should be available")
+                    .expect("valid parent")
                     .digest(),
                 parent.digest()
             );
@@ -410,33 +392,50 @@ mod tests {
     }
 
     #[test]
-    fn canceled_epoch_info_closes_forwarded_response_without_polling_ancestry() {
+    fn canceled_epoch_info_closes_forwarded_response_without_acquiring_blocks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (sender, mut receiver) = mailbox::new::<TestMessage>(context, NZUsize!(1));
             let mut mailbox = Mailbox::<TestBlock, TestBlsVariant, PrivateKey>::new(sender);
             let parent = Arc::new(mocks::genesis_block(PrivateKey::from_seed(0).public_key()));
+            let retained = Arc::downgrade(&parent);
+            let source = mocks::blocks([parent.clone()]);
             let (release, gate) = oneshot::channel();
-            let ancestry = DelayedAncestry {
-                parent: Some(parent),
-                gate: gate.shared(),
-            };
-            let mut request = Box::pin(mailbox.epoch_info(ancestry));
+            let gate = gate.shared();
+            let blocks = Blocks::new(
+                parent.height(),
+                NZUsize!(8),
+                |_| None,
+                move |height| {
+                    let gate = gate.clone();
+                    let source = source.clone();
+                    async move {
+                        gate.await.ok()?;
+                        source.range(height..=height).next().await?.ok()
+                    }
+                },
+            );
+            drop(parent);
+            let mut request = Box::pin(mailbox.epoch_info(blocks));
 
             assert!(request.as_mut().now_or_never().is_none());
             let Message::EpochInfo {
-                ancestry, response, ..
+                blocks, response, ..
             } = receiver
                 .try_recv()
-                .expect("request should reach the actor without polling ancestry")
+                .expect("request should reach the actor without acquiring blocks")
             else {
                 panic!("expected epoch info request");
             };
+            assert!(
+                retained.upgrade().is_none(),
+                "queued source retained a block body"
+            );
             drop(request);
 
             assert!(response.is_closed());
             assert!(release.send(()).is_ok());
-            drop(ancestry);
+            drop(blocks);
         });
     }
 }

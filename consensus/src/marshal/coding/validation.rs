@@ -5,10 +5,7 @@
 
 use crate::{
     CertifiableBlock, Epochable,
-    marshal::{
-        ancestry::has_contiguous_height, application::validation::is_block_in_expected_epoch,
-        coding::types::hash_context,
-    },
+    marshal::{application::validation::is_block_in_expected_epoch, coding::types::hash_context},
     types::{Epocher, coding::Commitment},
 };
 use commonware_codec::{EncodeSize, Write};
@@ -96,7 +93,7 @@ where
     if block.parent() != parent.digest() {
         return Err(BlockError::ParentDigest);
     }
-    if !has_contiguous_height(parent.height(), block.height()) {
+    if block.height().previous() != Some(parent.height()) {
         return Err(BlockError::Height);
     }
     let block_context = block.context();

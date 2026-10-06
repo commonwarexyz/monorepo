@@ -6,14 +6,14 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock,
-    marshal::ancestry::Ancestry,
+    marshal::blocks::Blocks,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
 use commonware_runtime::{Clock, Metrics, Spawner, telemetry::traces::TracedExt as _};
 use commonware_utils::sequence::Unit;
 use rand_core::Rng;
-use std::{future, num::NonZeroU64};
+use std::{future, num::NonZeroU64, sync::Arc};
 use tracing::{debug, field};
 
 /// Per-proposal input handed to an application wrapped by [`Application`].
@@ -133,13 +133,10 @@ where
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         input: Self::Input,
     ) -> Option<Self::Block> {
-        let Some(parent) = ancestry.peek() else {
-            debug!("proposal rejected: missing parent ancestry");
-            return None;
-        };
         let height = parent.height().next();
         let phase = self.phase(height);
         let span = tracing::Span::current();
@@ -147,7 +144,7 @@ where
         span.record("phase", field::debug(phase));
 
         let (payload, log_reservation) = if self.final_block(height) {
-            match self.reshare.epoch_info(ancestry.clone()).await {
+            match self.reshare.epoch_info(blocks.clone()).await {
                 EpochInfoResponse::Available(payload) => (payload, None),
                 EpochInfoResponse::Pending => {
                     debug!("proposal skipped: final block epoch info is not ready");
@@ -176,7 +173,8 @@ where
             .inner
             .propose(
                 context,
-                ancestry,
+                parent,
+                blocks,
                 Input {
                     upstream: input,
                     payload,
@@ -204,11 +202,10 @@ where
     async fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        tip: Arc<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
     ) -> bool {
-        let Some(tip) = ancestry.peek().cloned() else {
-            return self.inner.verify(context, ancestry).await;
-        };
         let height = tip.height();
         let phase = self.phase(height);
         let tip_payload = tip.payload();
@@ -218,7 +215,7 @@ where
         span.record("has_payload", tip_payload.is_some());
 
         if self.final_block(height) {
-            match self.reshare.epoch_info(ancestry.clone()).await {
+            match self.reshare.epoch_info(blocks.clone()).await {
                 EpochInfoResponse::Available(derived) => {
                     if derived != tip_payload {
                         debug!("verification rejected: final block payload mismatch");
@@ -256,7 +253,7 @@ where
                 return false;
             }
         }
-        self.inner.verify(context, ancestry).await
+        self.inner.verify(context, tip, parent, blocks).await
     }
 }
 
@@ -271,7 +268,6 @@ mod tests {
     use commonware_actor::mailbox;
     use commonware_consensus::{
         CertifiableBlock, Heightable,
-        marshal::ancestry,
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
@@ -289,7 +285,7 @@ mod tests {
         sync::Mutex,
     };
     use futures::{
-        FutureExt, StreamExt,
+        FutureExt,
         future::{Either, select},
         pin_mut,
     };
@@ -371,10 +367,10 @@ mod tests {
         async fn propose(
             &mut self,
             (_, context): (E, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             input: Self::Input,
         ) -> Option<Self::Block> {
-            let parent = ancestry.peek()?.clone();
             self.proposed.lock().push(input.payload.clone());
             if let Some(entered) = self.proposal_entered.lock().take() {
                 let _ = entered.send(());
@@ -398,7 +394,13 @@ mod tests {
             })
         }
 
-        async fn verify(&mut self, _: (E, Self::Context), _: impl Ancestry<Self::Block>) -> bool {
+        async fn verify(
+            &mut self,
+            _: (E, Self::Context),
+            _: Arc<Self::Block>,
+            _: Arc<Self::Block>,
+            _: Blocks<Self::Block>,
+        ) -> bool {
             *self.verify_count.lock() += 1;
             self.verify_result
         }
@@ -553,7 +555,8 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent.clone())]),
+                    Arc::new(parent.clone()),
+                    mocks::blocks([Arc::new(parent.clone())]),
                     (),
                 )
                 .await;
@@ -566,7 +569,8 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app_retry"), block_context(&parent, 3)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    Arc::new(parent.clone()),
+                    mocks::blocks([Arc::new(parent)]),
                     (),
                 )
                 .await;
@@ -594,7 +598,8 @@ mod tests {
 
             let mut propose = Box::pin(app.propose(
                 (context.child("app"), block_context(&parent, 2)),
-                ancestry::from_iter([Arc::new(parent)]),
+                Arc::new(parent.clone()),
+                mocks::blocks([Arc::new(parent)]),
                 (),
             ));
             assert!(propose.as_mut().now_or_never().is_none());
@@ -647,7 +652,8 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 2)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    Arc::new(parent.clone()),
+                    mocks::blocks([Arc::new(parent)]),
                     (),
                 )
                 .await
@@ -680,7 +686,8 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    Arc::new(parent.clone()),
+                    mocks::blocks([Arc::new(parent)]),
                     (),
                 )
                 .await;
@@ -701,7 +708,8 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    Arc::new(parent.clone()),
+                    mocks::blocks([Arc::new(parent)]),
                     (),
                 )
                 .await
@@ -729,7 +737,8 @@ mod tests {
             let proposed = app
                 .propose(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([Arc::new(parent)]),
+                    Arc::new(parent.clone()),
+                    mocks::blocks([Arc::new(parent)]),
                     (),
                 )
                 .await
@@ -754,7 +763,9 @@ mod tests {
             let verified = app
                 .verify(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([tip, parent]),
+                    tip,
+                    parent.clone(),
+                    mocks::blocks([parent]),
                 )
                 .await;
 
@@ -770,7 +781,6 @@ mod tests {
             for response in [EpochInfoResponse::Following, EpochInfoResponse::Pending] {
                 let parent = Arc::new(mocks::genesis_block(leader().public_key()));
                 let tip = final_block(&parent, Some(epoch_payload(1)));
-                let expected_tip = tip.digest();
                 let expected_parent = parent.digest();
                 let inner = RecordingApp::accepting();
                 let (sender, mut receiver) = mailbox::new::<
@@ -781,34 +791,23 @@ mod tests {
                 let mut app = Application::new(inner.clone(), Mailbox::new(sender), NZU64!(2));
                 let mut verify = Box::pin(app.verify(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([tip, parent]),
+                    tip,
+                    parent.clone(),
+                    mocks::blocks([parent]),
                 ));
 
                 assert!(verify.as_mut().now_or_never().is_none());
                 let Some(Message::EpochInfo {
-                    mut ancestry,
+                    blocks,
                     response: reply,
                     ..
                 }) = receiver.recv().await
                 else {
                     panic!("verification should request final epoch info");
                 };
-                assert_eq!(
-                    ancestry
-                        .next()
-                        .await
-                        .expect("verification ancestry should retain the candidate")
-                        .digest(),
-                    expected_tip
-                );
-                assert_eq!(
-                    ancestry
-                        .next()
-                        .await
-                        .expect("candidate should be followed by its parent")
-                        .digest(),
-                    expected_parent
-                );
+                assert_eq!(blocks.tip(), Height::zero());
+                assert_eq!(blocks.digest(Height::zero()), Some(expected_parent));
+                assert_eq!(blocks.digest(Height::new(1)), None);
                 assert!(reply.send(response).is_ok());
                 assert!(
                     verify.as_mut().now_or_never().is_none(),
@@ -831,7 +830,9 @@ mod tests {
             let verified = app
                 .verify(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([tip, parent]),
+                    tip,
+                    parent.clone(),
+                    mocks::blocks([parent]),
                 )
                 .await;
 
@@ -853,7 +854,9 @@ mod tests {
             let verified = app
                 .verify(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([tip, parent]),
+                    tip,
+                    parent.clone(),
+                    mocks::blocks([parent]),
                 )
                 .await;
 
@@ -875,7 +878,9 @@ mod tests {
             let verified = app
                 .verify(
                     (context.child("app"), block_context(&parent, 1)),
-                    ancestry::from_iter([tip, parent]),
+                    tip,
+                    parent.clone(),
+                    mocks::blocks([parent]),
                 )
                 .await;
 
@@ -909,10 +914,13 @@ mod tests {
                 assert_eq!(app.phase(tip.height()), Some(phase));
                 assert!(!app.final_block(tip.height()));
 
+                let parent_block = Arc::new(parent);
                 let verified = app
                     .verify(
-                        (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        (context.child("app"), block_context(&parent_block, tip.height().get())),
+                        Arc::new(tip.clone()),
+                        parent_block.clone(),
+                        mocks::blocks([parent_block]),
                     )
                     .await;
                 assert!(!verified, "{phase:?} block carried epoch info");
@@ -971,10 +979,13 @@ mod tests {
                 assert!(!app.final_block(tip.height()));
 
                 let consulted = inner.verify_count();
+                let parent_block = Arc::new(parent);
                 let verified = app
                     .verify(
-                        (context.child("app"), block_context(&parent, tip.height().get())),
-                        ancestry::from_iter([Arc::new(tip.clone()), Arc::new(parent)]),
+                        (context.child("app"), block_context(&parent_block, tip.height().get())),
+                        Arc::new(tip.clone()),
+                        parent_block.clone(),
+                        mocks::blocks([parent_block]),
                     )
                     .await;
                 assert_eq!(verified, accepted, "{phase:?} block carried a dealer log");

@@ -12,10 +12,7 @@ use crate::stateful::{
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
     Heightable,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Mailbox as MarshalMailbox, Variant},
-    },
+    marshal::core::{Mailbox as MarshalMailbox, Variant},
     types::Height,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -169,7 +166,6 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     assert!(
         durability.needs_barrier(),
@@ -233,7 +229,6 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Serves requests until the mailbox closes or the actor stops.
     ///
@@ -328,10 +323,12 @@ where
                 Step::Message(Message::Propose {
                     span,
                     context,
-                    ancestry,
+                    parent,
+                    blocks,
                     upstream,
                     response,
                 }) => {
+                    let Some(parent) = parent.upgrade() else { continue; };
                     let process = info_span!(parent: &span, "stateful.actor.propose");
                     let input = Input {
                         upstream,
@@ -339,14 +336,13 @@ where
                     };
                     let verifier = self.processor.verifier();
                     let actor_context = self.context.as_present();
-                    let marshal = self.marshal.clone();
                     let proposal = self
                         .processor
                         .propose(
                             actor_context,
-                            marshal.clone(),
                             context,
-                            ancestry,
+                            parent,
+                            blocks,
                             input,
                             response,
                         )
@@ -512,11 +508,7 @@ mod tests {
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable as _, Reporter as _, Reporters,
-        marshal::{
-            Update,
-            ancestry::{self, Ancestry},
-            core::Processed,
-        },
+        marshal::{Update, blocks::Blocks, core::Processed},
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::Height,
     };
@@ -532,15 +524,13 @@ mod tests {
         channel::oneshot,
         sync::Mutex,
     };
-    use futures::{Stream, StreamExt as _, poll};
+    use futures::{StreamExt as _, poll};
     use std::{
         collections::VecDeque,
-        pin::Pin,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        task::{Context, Poll},
         time::Duration,
     };
 
@@ -577,7 +567,8 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -592,12 +583,12 @@ mod tests {
         async fn verify(
             &mut self,
             context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            _block: Arc<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             self.observed_contexts.lock().push(context.0.name());
-            let mut ancestry = Box::pin(ancestry);
-            let _block = ancestry.next().await?;
             let mut gate = self
                 .verify_gates
                 .lock()
@@ -663,7 +654,8 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -673,11 +665,11 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            block: Arc<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
-            let mut ancestry = Box::pin(ancestry);
-            let block = ancestry.next().await?;
             if block.height() != self.verify_gate_height {
                 return Some(TestMerkleized);
             }
@@ -752,7 +744,8 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
             _input: Input<Self::Input, Self::Provider>,
         ) -> Option<Proposed<Self, deterministic::Context>> {
@@ -762,7 +755,9 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, Self::Context),
-            _ancestry: impl Ancestry<Self::Block>,
+            _block: Arc<Self::Block>,
+            _parent: Arc<Self::Block>,
+            _blocks: Blocks<Self::Block>,
             _batches: TestUnmerkleized,
         ) -> Option<TestMerkleized> {
             self.verify_calls.fetch_add(1, Ordering::SeqCst);
@@ -1017,12 +1012,20 @@ mod tests {
             let first = context.child("first").spawn(move |task_context| {
                 let consensus_context = first_block.context();
                 async move {
-                    first_mailbox
-                        .verify(
+                    {
+                        let source_parent = Arc::new(first_genesis.clone());
+                        let source = fixtures::blocks(
+                            source_parent.height(),
+                            std::slice::from_ref(&source_parent),
+                        );
+                        first_mailbox.verify(
                             (task_context, consensus_context),
-                            ancestry::from_iter([Arc::new(first_block), Arc::new(first_genesis)]),
+                            Arc::new(first_block),
+                            source_parent,
+                            source,
                         )
-                        .await
+                    }
+                    .await
                 }
             });
             first_started
@@ -1033,12 +1036,20 @@ mod tests {
             let second = context.child("second").spawn(move |task_context| {
                 let consensus_context = second_block.context();
                 async move {
-                    mailbox
-                        .verify(
+                    {
+                        let source_parent = Arc::new(genesis.clone());
+                        let source = fixtures::blocks(
+                            source_parent.height(),
+                            std::slice::from_ref(&source_parent),
+                        );
+                        mailbox.verify(
                             (task_context, consensus_context),
-                            ancestry::from_iter([Arc::new(second_block), Arc::new(genesis)]),
+                            Arc::new(second_block),
+                            source_parent,
+                            source,
                         )
-                        .await
+                    }
+                    .await
                 }
             });
             select! {
@@ -1084,10 +1095,17 @@ mod tests {
                 .with_attribute("round", "request-round")
                 .with_attribute("owner", "request")
                 .with_attribute("shard", 4);
-            let mut verify = Box::pin(mailbox.verify(
-                (request_context, block_context),
-                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.verify(
+                    (request_context, block_context),
+                    Arc::new(block),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
             started.await.expect("verification should start");
 
@@ -1126,10 +1144,17 @@ mod tests {
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
             let block_context = block.context();
-            let mut verify = Box::pin(mailbox.verify(
-                (context.child("caller"), block_context),
-                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.verify(
+                    (context.child("caller"), block_context),
+                    Arc::new(block),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
             started.await.expect("application task should start");
 
@@ -1159,18 +1184,30 @@ mod tests {
 
             let genesis = TestBlock::new(0, 0);
             let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 2);
+            let block3 = TestBlock::child(&block2, 3);
+            let block4 = TestBlock::child(&block3, 4);
             let mut incomplete = Box::pin(mailbox.verify(
-                (context.child("empty"), block1.context()),
-                ancestry::from_iter([]),
+                (context.child("missing_history"), block3.context()),
+                Arc::new(block3.clone()),
+                Arc::new(block2.clone()),
+                fixtures::blocks(block2.height(), &[]),
             ));
             assert!(poll!(&mut incomplete).is_pending());
             context.sleep(Duration::from_millis(10)).await;
             drop(incomplete);
 
-            let mut first = Box::pin(mailbox.verify(
-                (context.child("first"), block1.context()),
-                ancestry::from_iter([Arc::new(block1.clone()), Arc::new(genesis)]),
-            ));
+            let mut first = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.verify(
+                    (context.child("first"), block1.context()),
+                    Arc::new(block1.clone()),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut first).is_pending());
             first_started
                 .await
@@ -1180,19 +1217,30 @@ mod tests {
                 .expect("later verification should remain active");
             assert!(first.await);
 
-            let block2 = TestBlock::child(&block1, 2);
+            let source_history = [Arc::new(block1.clone()), Arc::new(block3)];
+            let source_parent = source_history[1].clone();
+            let source = fixtures::blocks(source_parent.height(), &source_history);
             let mut incomplete = Box::pin(mailbox.verify(
-                (context.child("missing_parent"), block2.context()),
-                ancestry::from_iter([Arc::new(block2.clone())]),
+                (context.child("missing_intermediate"), block4.context()),
+                Arc::new(block4),
+                source_parent,
+                source,
             ));
             assert!(poll!(&mut incomplete).is_pending());
             context.sleep(Duration::from_millis(10)).await;
             drop(incomplete);
 
-            let mut second = Box::pin(mailbox.verify(
-                (context.child("second"), block2.context()),
-                ancestry::from_iter([Arc::new(block2), Arc::new(block1)]),
-            ));
+            let mut second = Box::pin({
+                let source_parent = Arc::new(block1.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.verify(
+                    (context.child("second"), block2.context()),
+                    Arc::new(block2),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut second).is_pending());
             second_started
                 .await
@@ -1220,10 +1268,17 @@ mod tests {
 
             let genesis = TestBlock::new(0, 0);
             let block = TestBlock::child(&genesis, 1);
-            let mut verify = Box::pin(mailbox.verify(
-                (context.child("verify"), block.context()),
-                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.verify(
+                    (context.child("verify"), block.context()),
+                    Arc::new(block),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
             started.await.expect("verification should start");
             release.send(()).expect("verification should remain active");
@@ -1284,12 +1339,20 @@ mod tests {
 
             // Verifying the child replays its missing parent through apply.
             assert!(
-                mailbox
-                    .verify(
+                {
+                    let source_parent = Arc::new(parent.clone());
+                    let source = fixtures::blocks(
+                        source_parent.height(),
+                        std::slice::from_ref(&source_parent),
+                    );
+                    mailbox.verify(
                         (context.child("verify_child"), child.context()),
-                        ancestry::from_iter([Arc::new(child), Arc::new(parent.clone())]),
+                        Arc::new(child),
+                        source_parent,
+                        source,
                     )
-                    .await
+                }
+                .await
             );
             assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
             assert_eq!(verify_calls.load(Ordering::SeqCst), 1);
@@ -1298,15 +1361,20 @@ mod tests {
             // parent asks the application once and then settles from the cache.
             for label in ["verify_parent", "verify_parent_again"] {
                 assert!(
-                    mailbox
-                        .verify(
+                    {
+                        let source_parent = Arc::new(genesis.clone());
+                        let source = fixtures::blocks(
+                            source_parent.height(),
+                            std::slice::from_ref(&source_parent),
+                        );
+                        mailbox.verify(
                             (context.child(label), parent.context()),
-                            ancestry::from_iter([
-                                Arc::new(parent.clone()),
-                                Arc::new(genesis.clone())
-                            ]),
+                            Arc::new(parent.clone()),
+                            source_parent,
+                            source,
                         )
-                        .await
+                    }
+                    .await
                 );
             }
             assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
@@ -1366,15 +1434,23 @@ mod tests {
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
 
-            // A parent that cannot be executed invalidates the child's ancestry
+            // A parent that cannot be executed invalidates the child's selected branch
             // before the application is asked to verify the child.
             assert!(
-                !mailbox
-                    .verify(
+                !{
+                    let source_parent = Arc::new(parent.clone());
+                    let source = fixtures::blocks(
+                        source_parent.height(),
+                        std::slice::from_ref(&source_parent),
+                    );
+                    mailbox.verify(
                         (context.child("verify_child"), child.context()),
-                        ancestry::from_iter([Arc::new(child), Arc::new(parent)]),
+                        Arc::new(child),
+                        source_parent,
+                        source,
                     )
-                    .await
+                }
+                .await
             );
             assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
             assert_eq!(verify_calls.load(Ordering::SeqCst), 0);
@@ -1408,12 +1484,20 @@ mod tests {
                 .expect("finalized block should be acknowledged");
 
             assert!(
-                !mailbox
-                    .verify(
+                !{
+                    let source_parent = Arc::new(genesis.clone());
+                    let source = fixtures::blocks(
+                        source_parent.height(),
+                        std::slice::from_ref(&source_parent),
+                    );
+                    mailbox.verify(
                         (context.child("verify"), conflicting.context()),
-                        ancestry::from_iter([Arc::new(conflicting), Arc::new(genesis)]),
+                        Arc::new(conflicting),
+                        source_parent,
+                        source,
                     )
-                    .await,
+                }
+                .await,
                 "conflicting block at the processed height must be rejected",
             );
             actor.abort();
@@ -1439,20 +1523,33 @@ mod tests {
             let mut verifier = mailbox.clone();
             let verify_genesis = genesis.clone();
             let consensus_context = block.context();
-            let mut verify = Box::pin(verifier.verify(
-                (context.child("verify"), consensus_context),
-                ancestry::from_iter([Arc::new(block), Arc::new(verify_genesis)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(verify_genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                verifier.verify(
+                    (context.child("verify"), consensus_context),
+                    Arc::new(block),
+                    source_parent,
+                    source,
+                )
+            });
             let subscriber = mailbox.clone();
             assert!(poll!(&mut verify).is_pending());
             verify_started.await.expect("verification should start");
 
             let proposal_context = TestBlock::child(&genesis, 2).context();
-            let mut proposal = Box::pin(mailbox.propose(
-                (context.child("propose"), proposal_context),
-                ancestry::from_iter([Arc::new(genesis)]),
-                (),
-            ));
+            let mut proposal = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.propose(
+                    (context.child("propose"), proposal_context),
+                    source_parent,
+                    source,
+                    (),
+                )
+            });
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
             let mut databases = Box::pin(subscriber.subscribe_databases());
@@ -1497,20 +1594,33 @@ mod tests {
             let genesis = TestBlock::new(0, 0);
             let proposal_context = TestBlock::child(&genesis, 1).context();
             let mut proposer = mailbox.clone();
-            let mut proposal = Box::pin(proposer.propose(
-                (context.child("propose"), proposal_context),
-                ancestry::from_iter([Arc::new(genesis.clone())]),
-                (),
-            ));
+            let mut proposal = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                proposer.propose(
+                    (context.child("propose"), proposal_context),
+                    source_parent,
+                    source,
+                    (),
+                )
+            });
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
 
             let block = TestBlock::child(&genesis, 2);
             let consensus_context = block.context();
-            let mut verify = Box::pin(mailbox.verify(
-                (context.child("verify"), consensus_context),
-                ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.verify(
+                    (context.child("verify"), consensus_context),
+                    Arc::new(block),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
             select! {
                 result = verify_started => {
@@ -1554,10 +1664,17 @@ mod tests {
             let losing_child = TestBlock::child(&losing_parent, 3);
 
             let mut parent_verifier = mailbox.clone();
-            let mut verify_parent = Box::pin(parent_verifier.verify(
-                (context.child("verify_parent"), losing_parent.context()),
-                ancestry::from_iter([Arc::new(losing_parent.clone()), Arc::new(genesis.clone())]),
-            ));
+            let mut verify_parent = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                parent_verifier.verify(
+                    (context.child("verify_parent"), losing_parent.context()),
+                    Arc::new(losing_parent.clone()),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_parent).is_pending());
             parent_started
                 .await
@@ -1568,22 +1685,35 @@ mod tests {
             assert!(verify_parent.await);
 
             let mut proposer = mailbox.clone();
-            let mut proposal = Box::pin(proposer.propose(
-                (
-                    context.child("propose"),
-                    TestBlock::child(&genesis, 4).context(),
-                ),
-                ancestry::from_iter([Arc::new(genesis)]),
-                (),
-            ));
+            let mut proposal = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                proposer.propose(
+                    (
+                        context.child("propose"),
+                        TestBlock::child(&genesis, 4).context(),
+                    ),
+                    source_parent,
+                    source,
+                    (),
+                )
+            });
             assert!(poll!(&mut proposal).is_pending());
             proposal_started.await.expect("proposal should start");
 
             let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), losing_child.context()),
-                ancestry::from_iter([Arc::new(losing_child), Arc::new(losing_parent)]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(losing_parent.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                child_verifier.verify(
+                    (context.child("verify_child"), losing_child.context()),
+                    Arc::new(losing_child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             child_started
                 .await
@@ -1642,10 +1772,17 @@ mod tests {
             let mut parent_verifier = mailbox.clone();
             let parent_genesis = genesis.clone();
             let parent_context = parent.context();
-            let mut verify_parent = Box::pin(parent_verifier.verify(
-                (context.child("verify_parent"), parent_context),
-                ancestry::from_iter([Arc::new(parent.clone()), Arc::new(parent_genesis)]),
-            ));
+            let mut verify_parent = Box::pin({
+                let source_parent = Arc::new(parent_genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                parent_verifier.verify(
+                    (context.child("verify_parent"), parent_context),
+                    Arc::new(parent.clone()),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_parent).is_pending());
             parent_started
                 .await
@@ -1657,10 +1794,17 @@ mod tests {
 
             let child_context = child.context();
             let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), child_context),
-                ancestry::from_iter([Arc::new(child), Arc::new(parent.clone())]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(parent.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                child_verifier.verify(
+                    (context.child("verify_child"), child_context),
+                    Arc::new(child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             child_started
                 .await
@@ -1700,10 +1844,17 @@ mod tests {
             let mut fork_verifier = mailbox.clone();
             let fork_genesis = genesis.clone();
             let fork_context = losing_parent.context();
-            let mut verify_fork = Box::pin(fork_verifier.verify(
-                (context.child("verify_fork"), fork_context),
-                ancestry::from_iter([Arc::new(losing_parent.clone()), Arc::new(fork_genesis)]),
-            ));
+            let mut verify_fork = Box::pin({
+                let source_parent = Arc::new(fork_genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                fork_verifier.verify(
+                    (context.child("verify_fork"), fork_context),
+                    Arc::new(losing_parent.clone()),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_fork).is_pending());
             fork_started.await.expect("fork verification should start");
             fork_release
@@ -1713,10 +1864,17 @@ mod tests {
 
             let child_context = losing_child.context();
             let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), child_context),
-                ancestry::from_iter([Arc::new(losing_child), Arc::new(losing_parent)]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(losing_parent.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                child_verifier.verify(
+                    (context.child("verify_child"), child_context),
+                    Arc::new(losing_child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             child_started
                 .await
@@ -1777,10 +1935,17 @@ mod tests {
             let losing_grandchild = TestBlock::child(&losing_child, 4);
 
             let mut parent_verifier = mailbox.clone();
-            let mut verify_parent = Box::pin(parent_verifier.verify(
-                (context.child("verify_parent"), losing_parent.context()),
-                ancestry::from_iter([Arc::new(losing_parent.clone()), Arc::new(genesis.clone())]),
-            ));
+            let mut verify_parent = Box::pin({
+                let source_parent = Arc::new(genesis.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                parent_verifier.verify(
+                    (context.child("verify_parent"), losing_parent.context()),
+                    Arc::new(losing_parent.clone()),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_parent).is_pending());
             parent_started
                 .await
@@ -1791,10 +1956,17 @@ mod tests {
             assert!(verify_parent.await);
 
             let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), losing_child.context()),
-                ancestry::from_iter([Arc::new(losing_child.clone()), Arc::new(losing_parent)]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(losing_parent.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                child_verifier.verify(
+                    (context.child("verify_child"), losing_child.context()),
+                    Arc::new(losing_child.clone()),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             child_started
                 .await
@@ -1805,13 +1977,20 @@ mod tests {
             assert!(verify_child.await);
 
             let mut grandchild_verifier = mailbox.clone();
-            let mut verify_grandchild = Box::pin(grandchild_verifier.verify(
-                (
-                    context.child("verify_grandchild"),
-                    losing_grandchild.context(),
-                ),
-                ancestry::from_iter([Arc::new(losing_grandchild), Arc::new(losing_child)]),
-            ));
+            let mut verify_grandchild = Box::pin({
+                let source_parent = Arc::new(losing_child.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                grandchild_verifier.verify(
+                    (
+                        context.child("verify_grandchild"),
+                        losing_grandchild.context(),
+                    ),
+                    Arc::new(losing_grandchild),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_grandchild).is_pending());
             grandchild_started
                 .await
@@ -1888,10 +2067,17 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let mut verifier = mailbox.clone();
-            let mut verify_child = Box::pin(verifier.verify(
-                (context.child("verify_child"), child.context()),
-                ancestry::from_iter([Arc::new(child), Arc::new(finalized.clone())]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(finalized.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                verifier.verify(
+                    (context.child("verify_child"), child.context()),
+                    Arc::new(child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             verify_started
                 .await
@@ -2020,12 +2206,20 @@ mod tests {
             let deferred = context.child("deferred").spawn(move |task_context| {
                 let consensus_context = block.context();
                 async move {
-                    mailbox
-                        .verify(
+                    {
+                        let source_parent = Arc::new(genesis.clone());
+                        let source = fixtures::blocks(
+                            source_parent.height(),
+                            std::slice::from_ref(&source_parent),
+                        );
+                        mailbox.verify(
                             (task_context, consensus_context),
-                            ancestry::from_iter([Arc::new(block), Arc::new(genesis)]),
+                            Arc::new(block),
+                            source_parent,
+                            source,
                         )
-                        .await
+                    }
+                    .await
                 }
             });
             let request = match receiver.recv().await {
@@ -2114,15 +2308,29 @@ mod tests {
 
             let consensus_context = first_child.context();
             let mut first_verifier = mailbox.clone();
-            let mut first = Box::pin(first_verifier.verify(
-                (context.child("first_verify"), consensus_context.clone()),
-                ancestry::from_iter([Arc::new(first_child), Arc::new(parent.clone())]),
-            ));
+            let mut first = Box::pin({
+                let source_parent = Arc::new(parent.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                first_verifier.verify(
+                    (context.child("first_verify"), consensus_context.clone()),
+                    Arc::new(first_child),
+                    source_parent,
+                    source,
+                )
+            });
             let mut second_verifier = mailbox.clone();
-            let mut second = Box::pin(second_verifier.verify(
-                (context.child("second_verify"), consensus_context),
-                ancestry::from_iter([Arc::new(second_child), Arc::new(parent.clone())]),
-            ));
+            let mut second = Box::pin({
+                let source_parent = Arc::new(parent.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                second_verifier.verify(
+                    (context.child("second_verify"), consensus_context),
+                    Arc::new(second_child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut first).is_pending());
             assert!(poll!(&mut second).is_pending());
             apply_started.await.expect("replay should start");
@@ -2213,21 +2421,36 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), child.context()),
-                ancestry::from_iter([Arc::new(child), Arc::new(finalized.clone())]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(finalized.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                child_verifier.verify(
+                    (context.child("verify_child"), child.context()),
+                    Arc::new(child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             replay_started.await.expect("winner replay should start");
 
             let mut winner_verifier = mailbox.clone();
             assert!(
-                winner_verifier
-                    .verify(
+                {
+                    let source_parent = Arc::new(genesis.clone());
+                    let source = fixtures::blocks(
+                        source_parent.height(),
+                        std::slice::from_ref(&source_parent),
+                    );
+                    winner_verifier.verify(
                         (context.child("verify_winner"), finalized.context()),
-                        ancestry::from_iter([Arc::new(finalized.clone()), Arc::new(genesis),]),
+                        Arc::new(finalized.clone()),
+                        source_parent,
+                        source,
                     )
-                    .await,
+                }
+                .await,
                 "independent winner verification should cache its batch",
             );
 
@@ -2307,11 +2530,21 @@ mod tests {
             };
             let actor = context.child("loop").spawn(move |_| processing.run());
 
+            let replay_history = Arc::new(first.clone());
             let mut child_verifier = mailbox.clone();
-            let mut verify_child = Box::pin(child_verifier.verify(
-                (context.child("verify_child"), child.context()),
-                ancestry::from_iter([Arc::new(child), Arc::new(second.clone())]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(second.clone());
+                let source = fixtures::blocks(
+                    source_parent.height(),
+                    &[replay_history.clone(), source_parent.clone()],
+                );
+                child_verifier.verify(
+                    (context.child("verify_child"), child.context()),
+                    Arc::new(child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             replay_started
                 .await
@@ -2319,12 +2552,20 @@ mod tests {
 
             let mut first_verifier = mailbox.clone();
             assert!(
-                first_verifier
-                    .verify(
+                {
+                    let source_parent = Arc::new(genesis.clone());
+                    let source = fixtures::blocks(
+                        source_parent.height(),
+                        std::slice::from_ref(&source_parent),
+                    );
+                    first_verifier.verify(
                         (context.child("verify_first"), first.context()),
-                        ancestry::from_iter([Arc::new(first.clone()), Arc::new(genesis)]),
+                        Arc::new(first.clone()),
+                        source_parent,
+                        source,
                     )
-                    .await,
+                }
+                .await,
                 "independent verification should cache the first finalized block",
             );
             let (gate, verify_started, verify_release) = application_gate();
@@ -2416,18 +2657,32 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.run());
 
             let mut first_verifier = mailbox.clone();
-            let mut first_attempt = Box::pin(first_verifier.verify(
-                (context.child("first_attempt"), losing.context()),
-                ancestry::from_iter([Arc::new(losing.clone()), Arc::new(first.clone())]),
-            ));
+            let mut first_attempt = Box::pin({
+                let source_parent = Arc::new(first.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                first_verifier.verify(
+                    (context.child("first_attempt"), losing.context()),
+                    Arc::new(losing.clone()),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut first_attempt).is_pending());
             replay_started.await.expect("winner replay should start");
 
             let mut retried_verifier = mailbox.clone();
-            let mut retried = Box::pin(retried_verifier.verify(
-                (context.child("retried"), losing.context()),
-                ancestry::from_iter([Arc::new(losing), Arc::new(first.clone())]),
-            ));
+            let mut retried = Box::pin({
+                let source_parent = Arc::new(first.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                retried_verifier.verify(
+                    (context.child("retried"), losing.context()),
+                    Arc::new(losing),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut retried).is_pending());
             context.sleep(Duration::from_millis(10)).await;
 
@@ -2551,10 +2806,17 @@ mod tests {
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
             let consensus_context = child.context();
-            let mut verify = Box::pin(mailbox.verify(
-                (context.child("verify"), consensus_context),
-                ancestry::from_iter([Arc::new(child), Arc::new(parent)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(parent.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                mailbox.verify(
+                    (context.child("verify"), consensus_context),
+                    Arc::new(child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
 
             select! {
@@ -2676,10 +2938,17 @@ mod tests {
             let (acknowledgement, waiter2) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(block2.clone()), acknowledgement));
             let mut verifier = mailbox.clone();
-            let mut verify = Box::pin(verifier.verify(
-                (context.child("verify"), losing.context()),
-                ancestry::from_iter([Arc::new(losing), Arc::new(block2)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(block2.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                verifier.verify(
+                    (context.child("verify"), losing.context()),
+                    Arc::new(losing),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
             verify_started
                 .await
@@ -2703,11 +2972,17 @@ mod tests {
             let _ = mailbox.report(Update::Block(Arc::new(winner.clone()), acknowledgement));
             let proposal_context = TestBlock::child(&winner, 5).context();
             let mut proposer = mailbox.clone();
-            let mut proposal = Box::pin(proposer.propose(
-                (context.child("propose"), proposal_context),
-                ancestry::from_iter([Arc::new(winner)]),
-                (),
-            ));
+            let mut proposal = Box::pin({
+                let source_parent = Arc::new(winner.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                proposer.propose(
+                    (context.child("propose"), proposal_context),
+                    source_parent,
+                    source,
+                    (),
+                )
+            });
             assert!(poll!(&mut proposal).is_pending());
             prune_release.send(()).expect("prune should remain active");
             proposal_started
@@ -2797,10 +3072,17 @@ mod tests {
             // application until the prune is waiting on durability.
             let consensus_context = block3.context();
             let mut verifier = mailbox.clone();
-            let mut verify = Box::pin(verifier.verify(
-                (context.child("verify"), consensus_context),
-                ancestry::from_iter([Arc::new(block3), Arc::new(block2)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(block2.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                verifier.verify(
+                    (context.child("verify"), consensus_context),
+                    Arc::new(block3),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
             verify_started
                 .await
@@ -3129,10 +3411,17 @@ mod tests {
             let tip = blocks.last().unwrap();
             let child = TestBlock::child(tip, (floor_height + 3).try_into().unwrap());
             let mut verifier = mailbox.clone();
-            let mut verify_child = Box::pin(verifier.verify(
-                (context.child("verify_child"), child.context()),
-                ancestry::from_iter([Arc::new(child), Arc::new(tip.clone())]),
-            ));
+            let mut verify_child = Box::pin({
+                let source_parent = Arc::new(tip.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                verifier.verify(
+                    (context.child("verify_child"), child.context()),
+                    Arc::new(child),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify_child).is_pending());
             verify_started
                 .await
@@ -3387,10 +3676,17 @@ mod tests {
             let block3 = TestBlock::child(&block2, 3);
             let consensus_context = block3.context();
             let mut verifier = mailbox.clone();
-            let mut verify = Box::pin(verifier.verify(
-                (context.child("verify"), consensus_context),
-                ancestry::from_iter([Arc::new(block3), Arc::new(block2)]),
-            ));
+            let mut verify = Box::pin({
+                let source_parent = Arc::new(block2.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                verifier.verify(
+                    (context.child("verify"), consensus_context),
+                    Arc::new(block3),
+                    source_parent,
+                    source,
+                )
+            });
             assert!(poll!(&mut verify).is_pending());
             verify_started
                 .await
@@ -3457,10 +3753,17 @@ mod tests {
 
             let block3 = TestBlock::child(&block2, 3);
             let mut verifier = mailbox.clone();
-            let verify = verifier.verify(
-                (context.child("verify"), block3.context()),
-                ancestry::from_iter([Arc::new(block3), Arc::new(block2)]),
-            );
+            let verify = {
+                let source_parent = Arc::new(block2.clone());
+                let source =
+                    fixtures::blocks(source_parent.height(), std::slice::from_ref(&source_parent));
+                verifier.verify(
+                    (context.child("verify"), block3.context()),
+                    Arc::new(block3),
+                    source_parent,
+                    source,
+                )
+            };
             futures::pin_mut!(verify);
             assert!(poll!(&mut verify).is_pending());
             verify_started
@@ -3678,60 +3981,85 @@ mod tests {
         });
     }
 
-    /// Ancestry that never yields a block and counts its clones (one per verification attempt).
-    struct PendingAncestry(Arc<AtomicUsize>);
-
-    impl Clone for PendingAncestry {
-        fn clone(&self) -> Self {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            Self(self.0.clone())
-        }
-    }
-
-    impl Stream for PendingAncestry {
-        type Item = Arc<TestBlock>;
-
-        fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Poll::Pending
-        }
-    }
-
-    impl Ancestry<TestBlock> for PendingAncestry {
-        fn peek(&self) -> Option<&TestBlock> {
-            None
-        }
-    }
-
-    /// A redelivered applied tip leaves a verification that is still acquiring its block running.
+    /// A redelivered applied tip leaves a verification that is still acquiring its history running.
     #[test]
     fn tip_redelivery_keeps_acquiring_verification() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let (mut mailbox, _control, _marshal, actor) =
-                spawn_processing(&context, "tip-redelivery-acquiring", None).await;
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let (mut mailbox, _control, _marshal, actor) = spawn_processing_with_gates(
+                &context,
+                "tip-redelivery-acquiring",
+                None,
+                VecDeque::from([verify_gate]),
+            )
+            .await;
 
-            // Start a verification whose ancestry never yields its block.
-            let clones = Arc::new(AtomicUsize::new(0));
-            let block = TestBlock::child(&TestBlock::new(0, 0), 1);
+            // Start a verification whose first missing ancestor is acquired behind a gate. Each
+            // verification attempt opens its own range, so acquisitions count attempts.
+            let genesis = TestBlock::new(0, 0);
+            let first = Arc::new(TestBlock::child(&genesis, 1));
+            let parent = Arc::new(TestBlock::child(&first, 2));
+            let block = TestBlock::child(&parent, 3);
+            let source = fixtures::blocks(parent.height(), &[first.clone(), parent.clone()]);
+            let metadata = source.clone();
+            let acquisitions = Arc::new(AtomicUsize::new(0));
+            let observed = acquisitions.clone();
+            let (started, acquiring) = oneshot::channel();
+            let started = Arc::new(Mutex::new(Some(started)));
+            let (release, gate) = oneshot::channel::<()>();
+            let gate = futures::FutureExt::shared(gate);
+            let blocks = Blocks::new(
+                parent.height(),
+                NZUsize!(8),
+                move |height| metadata.digest(height),
+                move |height| {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    if let Some(started) = started.lock().take() {
+                        let _ = started.send(());
+                    }
+                    let gate = gate.clone();
+                    let source = source.clone();
+                    async move {
+                        gate.await.ok()?;
+                        source.range(height..=height).next().await?.ok()
+                    }
+                },
+            );
             let mut verifier = mailbox.clone();
             let mut verify = Box::pin(verifier.verify(
                 (context.child("verify"), block.context()),
-                PendingAncestry(clones.clone()),
+                Arc::new(block),
+                parent.clone(),
+                blocks,
             ));
             assert!(poll!(&mut verify).is_pending());
-            drop(mailbox.subscribe_databases().await);
-            let attempts = clones.load(Ordering::SeqCst);
+            acquiring
+                .await
+                .expect("verification should acquire its missing ancestor");
+            assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
 
             // Redeliver the applied tip, then fence behind any requeued verification.
             let (ack, waiter) = Exact::handle();
-            mailbox.report(Update::Block(Arc::new(TestBlock::new(0, 0)), ack));
+            mailbox.report(Update::Block(Arc::new(genesis), ack));
             waiter.await.expect("redelivered tip must be acknowledged");
             drop(mailbox.subscribe_databases().await);
             assert_eq!(
-                clones.load(Ordering::SeqCst),
-                attempts,
+                acquisitions.load(Ordering::SeqCst),
+                1,
                 "tip redelivery must not restart an acquiring verification",
             );
             assert!(poll!(&mut verify).is_pending());
+
+            // The original attempt replays its history and verifies once acquisition is released.
+            release.send(()).expect("acquisition should remain active");
+            verify_started
+                .await
+                .expect("application verification should start");
+            verify_release
+                .send(())
+                .expect("application verification should remain active");
+            assert!(verify.await);
+            assert_eq!(acquisitions.load(Ordering::SeqCst), 1);
             actor.abort();
         });
     }

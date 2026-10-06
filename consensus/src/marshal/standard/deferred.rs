@@ -156,7 +156,6 @@ where
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
-    ancestor_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Deferred<E, S, A, B, ES>
@@ -176,7 +175,6 @@ where
             gates: self.gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
-            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
         }
     }
 }
@@ -209,12 +207,6 @@ where
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
-        let ancestor_fetch_histogram = context.histogram(
-            "ancestor_fetch_duration",
-            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::LOCAL,
-        );
-        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
             context: Arc::new(context),
@@ -225,7 +217,6 @@ where
 
             build_duration,
             proposal_parent_fetch_duration,
-            ancestor_fetch_duration,
         }
     }
 
@@ -248,11 +239,11 @@ where
         block: Arc<B>,
         parent_request: oneshot::Receiver<Arc<B>>,
         stage: Stage,
+        ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<GateOutcome> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let (mut tx, rx) = oneshot::channel();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let runtime_context = self
             .context
             .child("deferred_verify")
@@ -294,7 +285,7 @@ where
                         &mut application,
                         &marshal,
                         &mut tx,
-                        ancestor_fetch_duration,
+                        ancestry,
                     )
                     .await
                 };
@@ -317,6 +308,7 @@ where
         &mut self,
         round: Round,
         digest: B::Digest,
+        ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<bool> {
         // No in-progress task means we never verified this proposal locally. We can use the
         // block's embedded context to help complete finalization when Byzantine validators
@@ -397,6 +389,7 @@ where
                     block,
                     parent_request,
                     Stage::Certified,
+                    ancestry,
                 );
                 gates::forward(tx, verify_rx, |result| match result {
                     GateOutcome::Ready(result) => Some(result),
@@ -417,6 +410,7 @@ where
         round: Round,
         digest: B::Digest,
         task: oneshot::Receiver<GateOutcome>,
+        ancestry: Arc<[B::Digest]>,
     ) -> oneshot::Receiver<bool> {
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
@@ -429,7 +423,7 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             gates::drive(tx, task, round, digest, move || {
-                marshaled.certify_from_embedded_context(round, digest)
+                marshaled.certify_from_embedded_context(round, digest, ancestry)
             })
             .instrument(info_span!(
                 "marshal.deferred.certify.existing",
@@ -476,7 +470,7 @@ where
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
-        _ancestry: Arc<[Self::Digest]>,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -486,7 +480,6 @@ where
         // Metrics
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -596,18 +589,15 @@ where
                     return;
                 }
 
-                let ancestor_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
-                    ancestor_fetch_duration,
-                );
+                let blocks = marshal.blocks(parent.height(), ancestry);
                 let build_request = application
                     .propose(
                         (
                             runtime_context.child("app_propose"),
                             consensus_context.clone(),
                         ),
-                        ancestor_stream,
+                        parent,
+                        blocks,
                         (),
                     )
                     .instrument(info_span!(
@@ -659,7 +649,7 @@ where
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
-        _ancestry: Arc<[Self::Digest]>,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         let marshal = self.marshal.clone();
         let mut marshaled = self.clone();
@@ -776,7 +766,7 @@ where
                 // gate owns the deferred work. Nullification keeps that gate
                 // alive, while finalization drops it.
                 let deferred_rx = marshaled
-                    .deferred_verify(context, block, parent_request, Stage::Verified);
+                    .deferred_verify(context, block, parent_request, Stage::Verified, ancestry);
                 tx.send_lossy(true);
                 gates::forward(task_tx, deferred_rx, Some).await;
             }
@@ -810,17 +800,17 @@ where
         &mut self,
         round: Round,
         digest: Self::Digest,
-        _ancestry: Arc<[Self::Digest]>,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         self.gates.flush_unrelayed(&self.marshal, round, digest);
 
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.take(round, digest);
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, digest, task);
+            return self.certify_from_existing_task(round, digest, task, ancestry);
         }
 
-        self.certify_from_embedded_context(round, digest)
+        self.certify_from_embedded_context(round, digest, ancestry)
     }
 }
 
