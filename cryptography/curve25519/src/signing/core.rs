@@ -7,7 +7,7 @@ use crate::curve::{Backend, G, GAffine, LANES, WithBackend, with_backend};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use commonware_codec::Write as _;
-use commonware_cryptography::{Hasher as _, Sha512};
+use commonware_cryptography::{Hasher as _, Sha512, sha512::Digest};
 use commonware_parallel::{Sequential, Strategy};
 use core::num::NonZeroUsize;
 use msm::Term;
@@ -140,10 +140,57 @@ fn decompress_terms<B: Backend>(
     valid
 }
 
-/// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. The unit's
-/// challenge inputs `R || A || M`, with `M` the framed message, are laid out in `challenges` and
-/// hashed together, and its `R` encodings decompress in one backend batch. Lanes past the last
-/// item hold identity terms.
+/// Hashes the challenges `R || A || M` of unit `unit`, with `M` the framed message.
+///
+/// The unit's curve work cannot split, but long messages make its hashing worth spreading across
+/// workers, so the strategy decides from the challenges' size whether to split them.
+fn hash_unit(
+    items: &[Item<'_>],
+    unit: usize,
+    challenges: &mut Vec<u8>,
+    strategy: &impl Strategy,
+) -> Vec<Digest> {
+    // `Sha512::hash_many` takes each message as one slice, so every lane's `R || A || M` is
+    // staged back to back in `challenges`, a buffer reused across units, with the namespace
+    // framed before the message.
+    let start = unit * LANES;
+    let lanes = &items[start..items.len().min(start + LANES)];
+    let mut ends = [0; LANES];
+    challenges.clear();
+    for (end, item) in ends.iter_mut().zip(lanes) {
+        challenges.extend_from_slice(item.r);
+        challenges.extend_from_slice(item.key.as_bytes());
+        if let Some(namespace) = item.namespace {
+            namespace.len().write(challenges);
+            challenges.extend_from_slice(namespace);
+        }
+        challenges.extend_from_slice(item.message);
+        *end = challenges.len();
+    }
+
+    // Cut the staged bytes back into one input per lane, and hash them.
+    let mut inputs: [&[u8]; LANES] = [&[]; LANES];
+    let mut start = 0;
+    for (input, &end) in inputs.iter_mut().zip(&ends[..lanes.len()]) {
+        *input = &challenges[start..end];
+        start = end;
+    }
+    let inputs = &inputs[..lanes.len()];
+    strategy.run_batches(
+        inputs.len(),
+        NonZeroUsize::MIN,
+        challenges.len().div_ceil(inputs.len()),
+        |batches| {
+            batches
+                .map_collect_vec(|ranges| ranges, |range| Sha512::hash_many(&inputs[range]))
+                .concat()
+        },
+    )
+}
+
+/// Processes unit `unit` into `partition`, recoding its `R` terms at `width`. `digests` holds
+/// the unit's challenge hashes (see [`hash_unit`]), and its `R` encodings decompress in one
+/// backend batch. Lanes past the last item hold identity terms.
 ///
 /// Returns whether every signature in the unit has a canonical `s` and a decodable `R`.
 fn signature_unit<B: Backend>(
@@ -152,7 +199,7 @@ fn signature_unit<B: Backend>(
     seed: &[u8; 32],
     width: u32,
     unit: usize,
-    challenges: &mut Vec<u8>,
+    digests: &[Digest],
     partition: &mut Partition,
 ) -> bool {
     // Signature `i` of the batch takes `z_i` (see `batch_coefficients`). A unit starts at a
@@ -170,34 +217,11 @@ fn signature_unit<B: Backend>(
         *coefficients = batch_coefficients(seed, (start / 4 + block) as u64);
     }
 
-    // `Sha512::hash_many` takes each message as one slice, so every lane's `R || A || M` is
-    // staged back to back in `challenges`, a buffer reused across units, with the namespace
-    // framed before the message. Lanes past the last item keep the identity encoding for
-    // decompression.
+    // Lanes past the last item keep the identity encoding for decompression.
     let mut encodings = [IDENTITY_ENCODING; LANES];
-    let mut ends = [0; LANES];
-    challenges.clear();
-    for ((encoding, end), item) in encodings.iter_mut().zip(&mut ends).zip(lanes) {
+    for (encoding, item) in encodings.iter_mut().zip(lanes) {
         *encoding = *item.r;
-        challenges.extend_from_slice(item.r);
-        challenges.extend_from_slice(item.key.as_bytes());
-        if let Some(namespace) = item.namespace {
-            namespace.len().write(challenges);
-            challenges.extend_from_slice(namespace);
-        }
-        challenges.extend_from_slice(item.message);
-        *end = challenges.len();
     }
-
-    // Cut the staged bytes back into one input per lane, and hash the unit's challenges in one
-    // multi-message call.
-    let mut inputs: [&[u8]; LANES] = [&[]; LANES];
-    let mut start = 0;
-    for (input, &end) in inputs.iter_mut().zip(&ends[..lanes.len()]) {
-        *input = &challenges[start..end];
-        start = end;
-    }
-    let digests = Sha512::hash_many(&inputs[..lanes.len()]);
 
     // `z*h` is the signature's share of its signer's coalesced `A` scalar, and `z*s` accumulates
     // into the partition's share of `sum(z*s)`. A non-canonical `s` fails the batch, leaving its
@@ -231,8 +255,8 @@ fn signature_unit<B: Backend>(
 /// term recoded at `width`. Returns `None` if any `s` is non-canonical or any `R` fails to
 /// decompress.
 ///
-/// A strategy batch may hold a single unit, so a batch of a few units can still spread across
-/// workers, which matters when its messages are long.
+/// A strategy batch may hold a single unit, and a unit may spread its hashing further (see
+/// [`hash_unit`]), so a batch of a few long messages can still use every worker.
 ///
 /// The phase needs no `A` point and no grouping, so it runs while [`verify_pipeline`] sorts the
 /// keys.
@@ -265,13 +289,14 @@ fn signature_phase<B: Backend>(
                         let mut challenges = Vec::new();
                         let mut valid = true;
                         for unit in range {
+                            let digests = hash_unit(items, unit, &mut challenges, strategy);
                             valid &= signature_unit(
                                 backend,
                                 items,
                                 seed,
                                 width,
                                 unit,
-                                &mut challenges,
+                                &digests,
                                 &mut partition,
                             );
                         }
