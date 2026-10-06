@@ -631,7 +631,7 @@ mod tests {
                 let base = GAffine::BASEPOINT.to_extended();
                 let torsion = GAffine::decompress(&[0; 32]).unwrap();
                 let mixed =
-                    GAffine::decompress(&base.add(torsion.to_extended()).to_bytes()).unwrap();
+                    GAffine::decompress(&base.add(torsion.to_extended()).compress()).unwrap();
                 let points = [GAffine::BASEPOINT, torsion, GAffine::IDENTITY, mixed];
                 for width in TEST_WIDTHS {
                     let nb = num_buckets(width) as i16;

@@ -95,7 +95,7 @@ impl SigningKey {
         // Normalize before caching (see `VerifyingKey::point`).
         let point = G::mul_base_secret(&scalar_le_bytes).to_affine();
         let verifying_key = VerifyingKey {
-            bytes: core::VerifyingKeyBytes::new(point.to_bytes()),
+            bytes: core::VerifyingKeyBytes::new(point.compress()),
             point: Some(point.to_extended()),
         };
 
@@ -117,7 +117,7 @@ impl SigningKey {
         );
         let nonce = Zeroizing::new(Scalar::from_bytes_mod_order_wide(&nonce_digest));
         let nonce_bytes = Zeroizing::new(nonce.to_bytes());
-        let r_bytes = G::mul_base_secret(&nonce_bytes).to_bytes();
+        let r_bytes = G::mul_base_secret(&nonce_bytes).compress();
 
         let challenge_digest: [u8; 64] = sha2::Sha512::new()
             .chain(r_bytes)
@@ -546,8 +546,8 @@ mod tests {
                 .to_extended()
         };
         assert_eq!(
-            point(&canonical).to_bytes(),
-            point(&noncanonical).to_bytes()
+            point(&canonical).compress(),
+            point(&noncanonical).compress()
         );
         let canonical = VerifyingKey::decode(Copying(&canonical[..])).unwrap();
         let noncanonical = VerifyingKey::decode(Copying(&noncanonical[..])).unwrap();

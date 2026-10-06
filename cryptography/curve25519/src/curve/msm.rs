@@ -419,7 +419,7 @@ fn fill_matches_scalar_fill_for_edge_digits() {
         fn call<B: crate::curve::Backend>(self, backend: B) {
             let base = GAffine::BASEPOINT.to_extended();
             let torsion = GAffine::decompress(&[0; 32]).unwrap();
-            let mixed = GAffine::decompress(&base.add(torsion.to_extended()).to_bytes()).unwrap();
+            let mixed = GAffine::decompress(&base.add(torsion.to_extended()).compress()).unwrap();
             let points = [
                 GAffine::IDENTITY,
                 GAffine::BASEPOINT,

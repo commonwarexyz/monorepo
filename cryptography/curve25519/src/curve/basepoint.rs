@@ -271,8 +271,8 @@ mod tests {
         let base = GAffine::BASEPOINT.to_extended();
         for scalar in scalars {
             assert_eq!(
-                G::mul_base_secret(&scalar).to_bytes(),
-                base.scalar_mul(bits(&scalar)).to_bytes()
+                G::mul_base_secret(&scalar).compress(),
+                base.scalar_mul(bits(&scalar)).compress()
             );
         }
 
@@ -283,8 +283,8 @@ mod tests {
                 let mut scalar: [u8; 32] = u.arbitrary()?;
                 scalar[31] &= 0x7f;
                 assert_eq!(
-                    G::mul_base_secret(&scalar).to_bytes(),
-                    base.scalar_mul(bits(&scalar)).to_bytes()
+                    G::mul_base_secret(&scalar).compress(),
+                    base.scalar_mul(bits(&scalar)).compress()
                 );
                 Ok(())
             });

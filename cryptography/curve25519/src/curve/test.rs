@@ -494,8 +494,8 @@ fn fuzz_group_matches_portable<B: Backend>(
     let lanes = array::from_fn(|i| {
         let scalar = GAffine::decompress(&encodings[i]);
         assert_eq!(
-            decoded[i].map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
-            scalar.map(|point| (point.to_extended().to_bytes(), point.t2d.to_bytes())),
+            decoded[i].map(|point| (point.to_extended().compress(), point.t2d.to_bytes())),
+            scalar.map(|point| (point.to_extended().compress(), point.t2d.to_bytes())),
             "decompression lane {i}",
         );
         scalar.unwrap_or(GAffine::IDENTITY)
@@ -582,8 +582,8 @@ fn zip215_decompression_and_group_laws() {
                 let lanes = array::from_fn(|i| {
                     let scalar = GAffine::decompress(&bytes[i]);
                     assert_eq!(
-                        decoded[i].map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes())),
-                        scalar.map(|p| (p.to_extended().to_bytes(), p.t2d.to_bytes()))
+                        decoded[i].map(|p| (p.to_extended().compress(), p.t2d.to_bytes())),
+                        scalar.map(|p| (p.to_extended().compress(), p.t2d.to_bytes()))
                     );
                     scalar.unwrap_or(GAffine::IDENTITY)
                 });
@@ -622,7 +622,7 @@ fn basepoint_128_is_doubled_basepoint() {
     for _ in 0..128 {
         point = point.double();
     }
-    let expected = GAffine::decompress(&point.to_bytes()).unwrap();
+    let expected = GAffine::decompress(&point.compress()).unwrap();
     let actual = GAffine::BASEPOINT_128;
     assert_eq!(actual.x.to_bytes(), expected.x.to_bytes());
     assert_eq!(actual.y.to_bytes(), expected.y.to_bytes());
@@ -742,7 +742,7 @@ fn bucket_fill_matches_scalar_sum_for_every_geometry() {
             &GAffine::BASEPOINT
                 .to_extended()
                 .add(torsion.to_extended())
-                .to_bytes(),
+                .compress(),
         )
         .unwrap();
         let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];

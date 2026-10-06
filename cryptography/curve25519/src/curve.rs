@@ -472,7 +472,7 @@ impl G {
     };
 
     /// Compresses this point to its canonical Ed25519 encoding.
-    pub fn to_bytes(self) -> [u8; 32] {
+    pub fn compress(self) -> [u8; 32] {
         let z_inverse = self.z.invert();
         let x = self.x.mul(z_inverse);
         let mut bytes = self.y.mul(z_inverse).to_bytes();
@@ -703,7 +703,7 @@ impl GAffine {
     }
 
     /// Compresses this point to its canonical Ed25519 encoding.
-    pub fn to_bytes(self) -> [u8; 32] {
+    pub fn compress(self) -> [u8; 32] {
         let mut bytes = self.y.to_bytes();
         bytes[31] |= u8::from(self.x.is_odd()) << 7;
         bytes

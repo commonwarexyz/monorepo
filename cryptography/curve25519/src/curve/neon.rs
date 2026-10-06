@@ -952,7 +952,7 @@ fn mixed_pair_matches_full_width() {
         &GAffine::BASEPOINT
             .to_extended()
             .add(torsion.to_extended())
-            .to_bytes(),
+            .compress(),
     )
     .unwrap();
     let points = [GAffine::IDENTITY, GAffine::BASEPOINT, torsion, mixed];

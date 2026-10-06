@@ -682,7 +682,7 @@ mod tests {
             let mut point = base;
             let encodings: Vec<[u8; 32]> = (0..18 * LANES + 3)
                 .map(|_| {
-                    let encoding = point.to_bytes();
+                    let encoding = point.compress();
                     point = point.add(base);
                     encoding
                 })
@@ -718,7 +718,7 @@ mod tests {
                 let actual = msm::multiscalar_mul(backend, &chunks, width, &Sequential);
                 let total: u128 = (1..=count as u128).map(|i| i * i).sum();
                 let expected = base.scalar_mul(Scalar::from_u128(total).bits_be());
-                assert_eq!(actual.to_bytes(), expected.to_bytes(), "count {count}");
+                assert_eq!(actual.compress(), expected.compress(), "count {count}");
 
                 // An undecodable encoding in the first unit, the second unit, the middle, or the
                 // last unit rejects.
@@ -884,7 +884,7 @@ mod tests {
                 .collect();
             let actual = msm::multiscalar_mul(backend, &chunks, width, &Sequential);
             let expected = msm::multiscalar_mul(backend, &[&expected_terms], width, &Sequential);
-            assert_eq!(actual.to_bytes(), expected.to_bytes());
+            assert_eq!(actual.compress(), expected.compress());
         }
 
         struct Check;
@@ -982,7 +982,7 @@ mod tests {
         let invalid = undecodable();
         let mut identity = [0u8; 32];
         identity[0] = 1;
-        let basepoint = GAffine::BASEPOINT.to_extended().to_bytes();
+        let basepoint = GAffine::BASEPOINT.to_extended().compress();
         let message = b"decode only".to_vec();
         let item = |r: [u8; 32], key: [u8; 32], s: Scalar| {
             let mut bytes = [0u8; 64];
@@ -1004,7 +1004,7 @@ mod tests {
 
         // With `R = k*B` and `s = k`, the equation holds for `A` the identity.
         let k = Scalar::from_u128(0x1234_5678_9abc_def0);
-        let r = G::mul_base_secret(&k.to_bytes()).to_bytes();
+        let r = G::mul_base_secret(&k.to_bytes()).compress();
         [(bad_r, good_r), (item(r, invalid, k), item(r, identity, k))]
     }
 
