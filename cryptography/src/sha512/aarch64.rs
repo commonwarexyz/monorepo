@@ -17,6 +17,7 @@ pub(super) const LANES: usize = 2;
 /// digest of `messages[i]`.
 #[target_feature(enable = "sha3")]
 pub(super) fn hash(messages: &[&[u8]; LANES]) -> [Digest; LANES] {
+    // Both lanes start from the IV and are compressed together over the blocks both messages have.
     let counts = [
         block_count(messages[0].len()),
         block_count(messages[1].len()),

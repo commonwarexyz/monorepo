@@ -14,10 +14,22 @@ pub trait Backend: FBackend + Send + Sync {
     /// Must be nonzero.
     const STRIPES: usize;
 
+    /// Serial multi-scalar multiplications below this many terms use Straus's method, whose only
+    /// per-window fixed cost is the shared doublings, instead of the bucket method's per-window
+    /// fold. The crossover grows with the fold's cost of about `STRIPES + 1` additions per bucket
+    /// and depends on the backend's arithmetic.
+    const STRAUS_TERM_CUTOFF: usize;
+
+    /// Parallel multi-scalar multiplications below this many terms split Straus's method across
+    /// workers instead of running bucket tiles, which fold every window cut between workers and
+    /// keep a private bucket array per worker.
+    const PARALLEL_STRAUS_TERM_CUTOFF: usize;
+
     /// Adds the projected points and signed digits to `Self::STRIPES * nb` buckets.
     ///
-    /// Digits must have magnitude at most `nb`. Each wave assigns one term to each stripe,
-    /// so updates within a wave cannot collide.
+    /// `buckets` must hold exactly `Self::STRIPES * nb` points, and digits must have magnitude
+    /// at most `nb`. Each wave assigns one term to each stripe, so updates within a wave cannot
+    /// collide.
     fn fill_buckets<T>(
         self,
         buckets: &mut [G],
@@ -78,7 +90,7 @@ pub trait Lanes<const N: usize>: Copy {
 
     /// Adds each lane's signed table entry, indexed by its digit's magnitude.
     ///
-    /// Every magnitude must be less than `table.len()`. Negation changes X and T only.
+    /// Every magnitude must be less than `table.len()`.
     fn add_signed(self, point: Self::Point, table: &[Self::Point], digits: [i16; N])
     -> Self::Point;
 
@@ -260,10 +272,14 @@ pub fn combine_windows<P: Copy>(
     windows: usize,
     width: u32,
 ) -> P {
+    // Every partial of a window carries that window's weight, so the partials are summed per
+    // window first.
     let mut window_sums = vec![identity; windows];
     for (window, partial) in partials {
         window_sums[window] = add(window_sums[window], partial);
     }
+
+    // Descending Horner evaluation supplies each window's power of `2^width`.
     let mut result = identity;
     for window in window_sums.iter().rev() {
         for _ in 0..width {
@@ -336,6 +352,9 @@ fn fold<B: Lanes<N>, const N: usize>(
         return backend.sum(total);
     }
 
+    // Walk the bucket blocks from the top down, merging each block's stripes. Adding the running
+    // `sum` of the higher blocks into `rows` before `sum` takes the current block counts block
+    // `k` exactly `k` times in `rows`.
     let mut sum = backend.identity();
     let mut rows = backend.identity();
     for block in (0..used.div_ceil(N)).rev() {

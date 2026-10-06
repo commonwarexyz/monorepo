@@ -48,9 +48,9 @@ const fn num_buckets(width: u32) -> usize {
 ///
 /// The width grows by half a bit per bit of batch size, more slowly than the textbook
 /// `log2(terms) - 4` rule, because a wide bucket array (`8 * 2^(width-1)` points on AVX-512)
-/// also costs L2 misses, not just fold arithmetic. Parallel runs use one step narrower than
-/// serial: every worker holds its own bucket array, and a window cut into several tiles is folded
-/// once per tile.
+/// also costs L2 misses, not just fold arithmetic. A parallel run picks the width a serial run
+/// would pick for half as many terms, capped one below [`MAX_WIDTH`]: every worker holds its own
+/// bucket array, and a window cut into several tiles is folded once per tile.
 pub(super) fn width_for(terms: usize, parallel: bool) -> u32 {
     let bits = terms.max(2).ilog2();
     if parallel {
@@ -123,9 +123,9 @@ fn pieces<'a>(
 /// bucket at or above this is still the identity after a fill and would contribute nothing to
 /// the bucket fold. When the terms are a small or sparse range (a tiny batch or the windows above
 /// the digits of a short scalar such as a 128-bit batch coefficient), that is *most* of the
-/// buckets. Computed as a standalone prescan over the recoded digits (cheap: two byte-sized loads
-/// and a compare per term, no point arithmetic) rather than tracked inside the bucket-fill loop,
-/// which keeps that work out of the fill's hot wave prologue.
+/// buckets. Computed as a standalone prescan over the recoded digits (cheap: one digit load and a
+/// compare per term, no point arithmetic) rather than tracked inside the bucket-fill loop, which
+/// keeps that work out of the fill's hot wave prologue.
 fn used_buckets(chunks: &[&[Term]], start: usize, end: usize, window: usize) -> usize {
     pieces(chunks, start, end)
         .flatten()
@@ -261,14 +261,6 @@ fn multiscalar_mul_points_serial<B: Backend>(
     multiscalar_mul_terms_serial(backend, &[&terms], width)
 }
 
-/// Serial batches below this term count use Straus's method, whose only per-window fixed cost is
-/// the shared doublings, rather than the bucket method's per-window fold.
-const STRAUS_TERM_CUTOFF: usize = 384;
-
-/// Parallel batches below this term count split Straus across workers. Parallel bucket batches
-/// add a fold for every window they share, so Straus stays cheaper for longer there.
-const PARALLEL_STRAUS_TERM_CUTOFF: usize = 1024;
-
 /// Straus's method (see [`crate::curve::msm::straus`]) over `terms`.
 fn straus<B: Backend>(backend: B, terms: &[&Term], width: u32) -> G {
     backend.with_lanes(crate::curve::msm::Straus::new(
@@ -325,9 +317,10 @@ fn buckets<B: Backend>(backend: B, chunks: &[&[Term]], width: u32, strategy: &im
 }
 
 /// Computes the full MSM over `chunks`, whose terms were recoded at `width` (see [`width_for`] and
-/// [`Term::new`]). From [`PARALLEL_STRAUS_TERM_CUTOFF`] terms, [`buckets`] runs its tiles serially
-/// or in parallel. Below it, the strategy chooses between a serial body, which uses [`straus`]
-/// below [`STRAUS_TERM_CUTOFF`] and [`buckets`] above it, and Straus split across workers.
+/// [`Term::new`]). From [`Backend::PARALLEL_STRAUS_TERM_CUTOFF`] terms, [`buckets`] runs its tiles
+/// serially or in parallel. Below it, the strategy chooses between a serial body, which uses
+/// [`straus`] below [`Backend::STRAUS_TERM_CUTOFF`] and [`buckets`] above it, and Straus split
+/// across workers.
 pub(super) fn multiscalar_mul<B: Backend>(
     backend: B,
     chunks: &[&[Term]],
@@ -335,14 +328,14 @@ pub(super) fn multiscalar_mul<B: Backend>(
     strategy: &impl Strategy,
 ) -> G {
     let total = total_terms(chunks);
-    if total >= PARALLEL_STRAUS_TERM_CUTOFF {
+    if total >= B::PARALLEL_STRAUS_TERM_CUTOFF {
         return buckets(backend, chunks, width, strategy);
     }
     let terms = || -> Vec<&Term> { pieces(chunks, 0, total).flatten().collect() };
     strategy.run(
         total,
         || {
-            if total < STRAUS_TERM_CUTOFF {
+            if total < B::STRAUS_TERM_CUTOFF {
                 return straus(backend, &terms(), width);
             }
             buckets(backend, chunks, width, &Sequential)
@@ -500,10 +493,14 @@ mod tests {
 
     #[test]
     fn strategy_callbacks_return_assembled_msm() {
+        fn parallel_cutoff<B: Backend>(_: B) -> usize {
+            B::PARALLEL_STRAUS_TERM_CUTOFF
+        }
+
         // The first count takes parallel Straus through `run_batches`, and the second the bucket
         // method through `run_tiles`. `Assembly` stops at that operation, which must assemble
         // the final point rather than return partials.
-        for count in [LANES + 1, PARALLEL_STRAUS_TERM_CUTOFF] {
+        for count in [LANES + 1, parallel_cutoff(crate::curve::test_backend())] {
             let terms =
                 vec![Term::new(GAffine::BASEPOINT, &Scalar::from_u128(1), MIN_WIDTH); count];
             let strategy = Assembly::default();
@@ -648,7 +645,7 @@ mod tests {
                         let u = &mut Unstructured::new(&bytes);
                         for width in TEST_WIDTHS {
                             let terms = arbitrary_terms(u, 600, width)?;
-                            let cutoff = STRAUS_TERM_CUTOFF;
+                            let cutoff = B::STRAUS_TERM_CUTOFF;
                             for n in [0, 1, 2, 5, 32, cutoff - 1, cutoff, 600] {
                                 let chunks = split_terms(terms[..n].to_vec(), &[64, 64, 64, 64]);
                                 let chunks = refs(&chunks);
@@ -689,7 +686,7 @@ mod tests {
                             }
 
                             // Counts on both sides of multiples of `LANES`, up to the largest
-                            // batch that serial runs hand to Straus.
+                            // batch that any backend's serial run hands to Straus.
                             for n in [1, 7, 8, 9, 16, 17, 33, 383] {
                                 let expected =
                                     multiscalar_mul_terms_serial(backend, &[&terms[..n]], width);

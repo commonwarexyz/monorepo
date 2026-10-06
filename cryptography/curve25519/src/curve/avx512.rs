@@ -71,6 +71,7 @@ fn mul19(z: __m512i) -> __m512i {
     // when AVX-512VL is enabled for the whole build, which the assembler rejects.
     let _times16: __m512i;
     let _doubled: __m512i;
+
     // SAFETY: AVX-512F is enabled. The instructions only read their register input, write
     // their register outputs, preserve flags, and stay within the documented limb bound.
     unsafe {
@@ -695,6 +696,8 @@ impl super::Backend for Backend {}
 
 impl super::msm::Backend for Backend {
     const STRIPES: usize = LANES;
+    const STRAUS_TERM_CUTOFF: usize = 384;
+    const PARALLEL_STRAUS_TERM_CUTOFF: usize = 1024;
 
     #[inline(always)]
     fn fill_buckets<T>(
@@ -747,6 +750,7 @@ impl msm::Lanes<LANES> for Backend {
         for (row, point) in rows.iter_mut().zip(points) {
             *row = core::ptr::from_ref(point);
         }
+
         // SAFETY: Backend construction checks the CPU features, and every pointer is a live
         // affine point supplied by the caller.
         unsafe { load_affines(rows) }

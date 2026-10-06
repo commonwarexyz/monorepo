@@ -270,45 +270,55 @@ impl F {
 
     /// Returns `self * self` using one product for each pair of distinct limbs.
     #[inline(always)]
-    pub fn square(self) -> Self {
+    pub const fn square(self) -> Self {
         let limbs = self.0;
         let mut limbs_19 = limbs;
-        for limb in &mut limbs_19[3..] {
-            *limb *= 19;
+        let mut k = 3;
+        while k < LIMBS {
+            limbs_19[k] *= 19;
+            k += 1;
         }
 
         // Each product of distinct limbs occurs twice, so it takes its left factor from `limbs_2`.
         let mut limbs_2 = limbs;
-        for limb in &mut limbs_2[..LIMBS - 1] {
-            *limb *= 2;
+        let mut k = 0;
+        while k < LIMBS - 1 {
+            limbs_2[k] *= 2;
+            k += 1;
         }
 
         let mut c = [0u128; LIMBS];
-        for i in 0..limbs.len() {
-            for j in i..limbs.len() {
+        let mut i = 0;
+        while i < LIMBS {
+            let mut j = i;
+            while j < LIMBS {
                 let column = i + j;
-                let (column, rhs) = if column < limbs.len() {
+                let (column, rhs) = if column < LIMBS {
                     (column, limbs[j])
                 } else {
-                    (column - limbs.len(), limbs_19[j])
+                    (column - LIMBS, limbs_19[j])
                 };
                 let lhs = if i == j { limbs[i] } else { limbs_2[i] };
-                c[column] += u128::from(lhs) * u128::from(rhs);
+                c[column] += lhs as u128 * rhs as u128;
+                j += 1;
             }
+            i += 1;
         }
         Self::from_wide(c)
     }
 
     /// Squares `self` `k` times.
-    fn pow2k(mut self, k: u32) -> Self {
-        for _ in 0..k {
+    const fn pow2k(mut self, k: u32) -> Self {
+        let mut n = 0;
+        while n < k {
             self = self.square();
+            n += 1;
         }
         self
     }
 
     /// Raises `self` to `2^250 - 1` using the standard addition chain.
-    fn pow_2_250_minus_1(self) -> Self {
+    const fn pow_2_250_minus_1(self) -> Self {
         let a = self.square();
         let a2 = a.square().square();
         let b = self.mul(a2);
@@ -325,12 +335,12 @@ impl F {
     }
 
     /// Raises `self` to `(p - 5) / 8 = 2^252 - 3`.
-    fn pow_p58(self) -> Self {
+    const fn pow_p58(self) -> Self {
         self.mul(self.pow_2_250_minus_1().pow2k(2))
     }
 
     /// Returns the multiplicative inverse of `self`.
-    fn invert(self) -> Self {
+    const fn invert(self) -> Self {
         self.pow_p58().pow2k(3).mul(self.square().mul(self))
     }
 }
@@ -458,7 +468,7 @@ impl G {
     }
 
     /// Converts this point to affine representation.
-    pub fn to_affine(self) -> GAffine {
+    pub const fn to_affine(self) -> GAffine {
         let z_inverse = self.z.invert();
         let x = self.x.mul(z_inverse);
         let y = self.y.mul(z_inverse);
@@ -543,7 +553,7 @@ impl G {
 
     /// Doubles this point using the dedicated `dbl-2008-hwcd` formula.
     #[inline(always)]
-    pub fn double(self) -> Self {
+    pub const fn double(self) -> Self {
         let a = self.x.square();
         let b = self.y.square();
         let c = self.z.square();

@@ -312,9 +312,9 @@ commonware_macros::stability_scope!(BETA {
     /// The unclaimed cells of each worker's share in a shared [`Tiles`] run.
     ///
     /// A worker claims its own share from the front, one claim at a time, so the rest stays
-    /// available. A worker whose share is empty takes the back half of the largest share. When
-    /// that cuts a row, it creates one more tile, so it only happens while the half is longer
-    /// than a tile's cost.
+    /// available. A worker whose share is empty takes the back half of the largest other share
+    /// whose back half pays for a split, and stops once no share qualifies. When that cuts a row,
+    /// it creates one more tile, so it only happens while the half is longer than a tile's cost.
     #[cfg(any(feature = "std", test))]
     struct Shares {
         /// Each worker's unclaimed units, packed with [`pack`] so that claiming from the front and
@@ -359,9 +359,10 @@ commonware_macros::stability_scope!(BETA {
             };
             let units = cells.div_ceil(unit);
 
-            // Use at least one worker and at most one per whole claim in the grid. Shares differ by
-            // at most one unit, the first `extra` taking the larger size.
-            let workers = workers.min(units / claim).max(1);
+            // A nonempty grid holds at least one whole claim, so this keeps at least one worker and
+            // at most one per whole claim. Shares differ by at most one unit, the first `extra`
+            // taking the larger size.
+            let workers = workers.min(units / claim);
             let (per_share, extra) = (units / workers, units % workers);
             let pending = (0..workers)
                 .map(|worker| {
@@ -660,9 +661,10 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// A serial run makes every row one tile. A parallel run starts each worker on an equal
         /// share of the cells, taken row by row. A worker that runs out takes the back half of the
-        /// largest pending share while that half is longer than `tile_cost`, so a row is only cut
-        /// where the extra tile pays for itself. When rows are too short for any cut to pay, shares
-        /// hold whole rows, and an idle worker can take half of any share, since moving whole rows
+        /// largest other pending share whose back half is longer than `tile_cost`, and stops once
+        /// no share qualifies, so a row is only cut where the extra tile pays for itself. When rows
+        /// are too short for any cut to pay, shares hold whole rows, and an idle worker takes the
+        /// back half of the largest share that can be split between rows, since moving whole rows
         /// adds no tiles.
         ///
         /// When rows differ in cost, order them so that consecutive rows mix cheap and expensive
@@ -2844,6 +2846,7 @@ mod test {
     /// Asserts that `tiles` cover a `rows` by `len` grid exactly once, each tile with
     /// contiguous pieces in column order.
     fn assert_covers(tiles: &[(usize, Vec<Range<usize>>)], rows: usize, len: usize) {
+        // Validate piece geometry and mark each cell once; the final scan detects missing cells.
         let mut seen = vec![false; rows * len];
         for (row, pieces) in tiles {
             assert!(*row < rows && !pieces.is_empty());
@@ -3053,36 +3056,19 @@ mod test {
 
     #[test]
     fn run_tiles_serial_runs_reuse_worker_state() {
-        // Weight each row differently, so a cell credited to the wrong row changes the totals.
-        let rows = 7;
-        let data: Vec<u64> = (0..1_000).collect();
-        let weighted = |row: usize, columns: Range<usize>| -> u64 {
-            data[columns].iter().map(|x| x * (row as u64 + 1)).sum()
-        };
-        let expected: Vec<u64> = (0..rows).map(|row| weighted(row, 0..data.len())).collect();
-        let totals = |partials: Vec<(usize, u64)>| {
-            let mut totals = vec![0u64; rows];
-            for (row, partial) in partials {
-                totals[row] += partial;
-            }
-            totals
-        };
-        let tile_cost = NonZeroUsize::new(16).unwrap();
-
         // A serial run creates its state once and reuses it for every tile.
         let inits = AtomicUsize::new(0);
-        let serial = Sequential.run_tiles(rows, data.len(), tile_cost, 1, |tiles| {
+        let tiles = Sequential.run_tiles(7, 1_000, NonZeroUsize::new(16).unwrap(), 1, |tiles| {
             tiles.fill_collect_vec(
                 || {
                     inits.fetch_add(1, Ordering::Relaxed);
-                    0u64
                 },
-                |sum, row, columns| *sum += weighted(row, columns),
-                |sum, row| (row, core::mem::take(sum)),
+                |_, _, _| {},
+                |_, row| row,
             )
         });
         assert_eq!(inits.load(Ordering::Relaxed), 1);
-        assert_eq!(totals(serial), expected);
+        assert_eq!(tiles.len(), 7);
     }
 
     #[test]

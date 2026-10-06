@@ -2,10 +2,10 @@
 //!
 //! The generic field kernels stay entirely in NEON. A scalar-plus-NEON design only becomes useful
 //! when independent operations are scheduled across a complete point formula; dividing one
-//! [`super::FVec`] operation between both domains adds setup and synchronization costs on Apple
-//! M-series CPUs. Products split radix-`2^51` limbs into digits at alternating 26/25-bit offsets
-//! only while multiplying. Loose input digits can each occupy 26 bits. The surrounding group
-//! formulas keep their compact five-limb representation.
+//! [`super::FVec`] operation between both domains adds setup and synchronization costs. Products
+//! split radix-`2^51` limbs into digits at alternating 26/25-bit offsets only while multiplying.
+//! Loose input digits can each occupy 26 bits. The surrounding group formulas keep their compact
+//! five-limb representation.
 
 use super::{BIAS_16P as SUB_BIAS, F, FBackend, FVec, G, GAffine, LANES, MASK_51, msm};
 use core::arch::aarch64::*;
@@ -345,8 +345,8 @@ fn square_column_mac<const COLUMN: usize, const SCALE: u32, const DOUBLE: bool>(
 /// general-multiplication column, at worst `267 * (2^26 - 1)^2 < 2^61`.
 ///
 /// Keeping the 55 products explicit is deliberate: coefficients are applied while digits are
-/// still `u32`, avoiding packed-`u64` constant multiplications that LLVM scalarizes on Apple
-/// targets, while the independent columns expose enough instruction-level parallelism.
+/// still `u32`, avoiding packed-`u64` multiplications, for which NEON has no instruction, while
+/// the independent columns expose enough instruction-level parallelism.
 #[inline(always)]
 fn square_regs(a: Regs) -> Regs {
     let pairs = split_pairs(a);
@@ -730,6 +730,8 @@ impl Backend {
 impl msm::Backend for Backend {
     // One stripe per physical mixed-addition lane keeps wave updates independent.
     const STRIPES: usize = WIDTH;
+    const STRAUS_TERM_CUTOFF: usize = 152;
+    const PARALLEL_STRAUS_TERM_CUTOFF: usize = 256;
 
     fn fill_buckets<T>(
         self,

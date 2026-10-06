@@ -379,6 +379,7 @@ fn backend_at_bounds() {
         type Output = ();
 
         fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) {
+            // Maximal loose coordinates exercise formula bounds without requiring a curve point.
             let max = F([MASK_52; 5]);
             let point = G {
                 x: max,
@@ -393,6 +394,8 @@ fn backend_at_bounds() {
             };
             let loaded = lanes.load_extended([&point; N]);
             let mixed = lanes.load([&affine; N]);
+
+            // Compare every output coordinate with the scalar formula and its field bound.
             for (actual, expected) in [
                 (lanes.add(loaded, loaded), point.add(point)),
                 (lanes.add_mixed(loaded, mixed), point.add_mixed(affine)),
@@ -514,6 +517,9 @@ impl WithLanes for MatchesScalar {
 
     fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) {
         const { assert!(LANES.is_multiple_of(N)) };
+
+        // Each native group loads its points and the matching `affine` points, the latter in both
+        // extended and affine form.
         let extended = self.affine.map(GAffine::to_extended);
         for start in (0..LANES).step_by(N) {
             let point = lanes.load_extended(array::from_fn(|lane| &self.points[start + lane]));
@@ -522,6 +528,9 @@ impl WithLanes for MatchesScalar {
             let doubled = lanes.store(lanes.double(point));
             let added = lanes.store(lanes.add(point, rhs));
             let mixed = lanes.store(lanes.add_mixed(point, affine));
+
+            // Scalar doubling and full addition are the per-lane oracles, and both lane additions
+            // must match the full scalar sum.
             for lane in 0..N {
                 let point = self.points[start + lane];
                 let sum = point.add(extended[start + lane]);
@@ -584,6 +593,7 @@ fn zip215_decompression_and_group_laws() {
                     );
                     scalar.unwrap_or(GAffine::IDENTITY)
                 });
+
                 // Each point's successor doubles, adds the point, and adds it in mixed form.
                 backend.with_lanes(MatchesScalar {
                     points: array::from_fn(|i| lanes[(i + 1) % LANES].to_extended()),
@@ -726,9 +736,12 @@ fn lanes_store_and_sum_match_scalar() {
         type Output = ();
 
         fn call<L: msm::Lanes<N>, const N: usize>(self, lanes: L) {
+            // Include prime-order, torsion and mixed-order points, plus identity and negation.
             let base = GAffine::BASEPOINT.to_extended();
             let torsion = GAffine::decompress(&[0; 32]).unwrap().to_extended();
             let points = [G::IDENTITY, base, torsion, base.add(torsion), base.negate()];
+
+            // Rotate the fixtures through every active-lane mask.
             for offset in 0..points.len() {
                 for mask in 0..1usize << N {
                     let inputs: [G; N] = array::from_fn(|lane| {
@@ -739,6 +752,8 @@ fn lanes_store_and_sum_match_scalar() {
                         }
                     });
                     let loaded = lanes.load_extended(inputs.each_ref());
+
+                    // Storage must preserve the exact coordinates, including loose field values.
                     for (stored, input) in lanes.store(loaded).into_iter().zip(inputs) {
                         assert_eq!(
                             [stored.x.0, stored.y.0, stored.t.0, stored.z.0],
@@ -746,6 +761,8 @@ fn lanes_store_and_sum_match_scalar() {
                             "offset={offset} mask={mask:#x}"
                         );
                     }
+
+                    // Summation must preserve torsion as well as the prime-order component.
                     let expected = inputs.into_iter().fold(G::IDENTITY, G::add);
                     assert!(
                         lanes.sum(loaded).add(expected.negate()).is_identity(),

@@ -58,6 +58,7 @@ const DIGEST_LENGTH: usize = 64;
 
 #[cfg(target_arch = "x86_64")]
 cpufeatures::new!(has_avx512f, "avx512f");
+
 // Rust and cpufeatures group the Armv8.2 SHA-512 instructions with SHA-3's under `sha3`.
 #[cfg(target_arch = "aarch64")]
 cpufeatures::new!(has_sha3, "sha3");
@@ -302,8 +303,8 @@ mod tests {
         }
     }
 
-    /// Every message count up to 20 (two full lane groups and a partial one) at every length
-    /// in `0..=300`.
+    /// Every message count up to 20 (two full eight-lane AVX-512 groups and a partial one) at
+    /// every length in `0..=300`.
     #[test]
     fn test_hash_many_equal_lengths() {
         for len in 0..=300 {

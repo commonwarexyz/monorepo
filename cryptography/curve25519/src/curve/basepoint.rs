@@ -35,6 +35,10 @@ impl G {
     pub fn mul_base_secret(scalar: &[u8; 32]) -> Self {
         let digits = Zeroizing::new(digits(scalar));
         let pairs = digits.as_chunks::<2>().0;
+
+        // Pair `j` holds digits `e[2j]` and `e[2j+1]`, both read from row `j`. Adding the odd
+        // digits, multiplying by 16 with four doublings, and then adding the even digits gives
+        // `sum (16 * e[2j+1] + e[2j]) * 256^j * B`, which is `sum e[i] * 16^i * B`.
         let mut result = Self::IDENTITY;
         for (row, pair) in TABLE.iter().zip(pairs) {
             result = result.add_niels(select(row, pair[1]));
@@ -98,6 +102,7 @@ fn select(row: &[Niels; 8], digit: i8) -> Niels {
 /// The multiples are computed in extended coordinates, and every `Z` is then inverted with one
 /// shared inversion.
 const fn table() -> [[Niels; 8]; 32] {
+    // `points[8 * j + k]` is `(k + 1) * p` for `p = 256^j * B`, built by repeated addition.
     let mut p = GAffine::BASEPOINT.to_extended();
     let mut points = [G::IDENTITY; 256];
     let mut j = 0;
@@ -131,7 +136,7 @@ const fn table() -> [[Niels; 8]; 32] {
     }
 
     // On entry to each iteration, `inverse` inverts the product of the first `i` Z coordinates.
-    let mut inverse = invert(product);
+    let mut inverse = product.invert();
     let mut table = [[Niels::IDENTITY; 8]; 32];
     while i > 0 {
         i -= 1;
@@ -146,21 +151,6 @@ const fn table() -> [[Niels; 8]; 32] {
         };
     }
     table
-}
-
-/// Returns `a^(p - 2) = a^-1` by square-and-multiply, for use at compile time.
-const fn invert(a: F) -> F {
-    // `p - 2 = 2^255 - 21` has bits 254 through 5 set, and its low five bits are `01011`.
-    let mut result = F::ONE;
-    let mut bit = 255;
-    while bit > 0 {
-        bit -= 1;
-        result = result.mul(result);
-        if bit >= 5 || (0b01011 >> bit) & 1 == 1 {
-            result = result.mul(a);
-        }
-    }
-    result
 }
 
 #[cfg(test)]

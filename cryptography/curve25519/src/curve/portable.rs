@@ -60,6 +60,8 @@ impl super::msm::Backend for Backend {
     // One stripe per physical mixed-addition lane. Scalar arithmetic has one, so the fold has no
     // stripes to merge.
     const STRIPES: usize = 1;
+    const STRAUS_TERM_CUTOFF: usize = 88;
+    const PARALLEL_STRAUS_TERM_CUTOFF: usize = 160;
 
     fn fill_buckets<T>(
         self,

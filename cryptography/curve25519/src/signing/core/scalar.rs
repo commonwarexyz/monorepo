@@ -258,6 +258,7 @@ impl Scalar {
     ///
     /// The digits sum to this scalar with weights `2^i`. Every nonzero digit is odd with
     /// magnitude below `2^(W-1)`, and any `W` consecutive digits hold at most one nonzero digit.
+    /// This operation is variable-time, so the scalar must be public.
     pub const fn naf<const W: usize>(&self) -> [i8; 256] {
         const { assert!(2 <= W && W <= 8) };
 
@@ -350,6 +351,8 @@ fn limbs_bits(a: &[u64; 4]) -> u32 {
 
 /// Returns `a << shift` for `shift < 256`, discarding bits above `2^256`.
 fn limbs_shl(a: &[u64; 4], shift: u32) -> [u64; 4] {
+    // Whole limbs select the source word; a nonzero bit offset also carries the preceding
+    // word's high bits into it. The zero-offset case avoids a shift by 64.
     let words = (shift / 64) as usize;
     let bits = shift % 64;
     let mut out = [0u64; 4];

@@ -86,20 +86,16 @@ fn group_ranges(sorted: &[(VerifyingKeyBytes, u32)]) -> Vec<(u32, u32)> {
     out
 }
 
-/// Signatures per [`signature_phase`] unit: one per decompression lane, covering whole
-/// [`batch_coefficients`] blocks.
-const UNIT: usize = LANES;
-const _: () = assert!(UNIT.is_multiple_of(4));
-
-/// Minimum whole decompression units per strategy-supplied batch, amortizing per-batch scratch.
-const MIN_UNITS_PER_BATCH: NonZeroUsize = NonZeroUsize::new(2).unwrap();
+// A `signature_phase` unit holds one signature per decompression lane. Units cover whole
+// `batch_coefficients` blocks of four, so the lane count must be a multiple of 4.
+const _: () = assert!(LANES.is_multiple_of(4));
 
 /// One [`signature_phase`] partition's output: each unit's `R` terms and its signatures' `z*h`
 /// (their shares of their signers' coalesced `A` scalars), and the partition's share of
 /// `sum(z*s) mod L`.
 struct Partition {
     terms: Vec<[Term; LANES]>,
-    zh: Vec<[Scalar; UNIT]>,
+    zh: Vec<[Scalar; LANES]>,
     zs_sum: Scalar,
 }
 
@@ -149,9 +145,9 @@ fn signature_unit<B: Backend>(
 ) -> bool {
     // Signature `i` of the batch takes `z_i` (see `batch_coefficients`). A unit starts at a
     // multiple of 4, so it derives only the blocks from `start / 4` that cover its items.
-    let start = unit * UNIT;
-    let lanes = &items[start..items.len().min(start + UNIT)];
-    let mut z = [Scalar::ZERO; UNIT];
+    let start = unit * LANES;
+    let lanes = &items[start..items.len().min(start + LANES)];
+    let mut z = [Scalar::ZERO; LANES];
     for (block, coefficients) in z
         .as_chunks_mut::<4>()
         .0
@@ -176,7 +172,7 @@ fn signature_unit<B: Backend>(
 
     // Cut the staged bytes back into one input per lane, and hash the unit's challenges in one
     // multi-message call.
-    let mut inputs: [&[u8]; UNIT] = [&[]; UNIT];
+    let mut inputs: [&[u8]; LANES] = [&[]; LANES];
     let mut rest = challenges.as_slice();
     for (input, (a_bytes, sig, msg)) in inputs.iter_mut().zip(lanes) {
         (*input, rest) = rest.split_at(sig.r.len() + a_bytes.as_bytes().len() + msg.len());
@@ -187,7 +183,7 @@ fn signature_unit<B: Backend>(
     // into the partition's share of `sum(z*s)`. A non-canonical `s` fails the batch, leaving its
     // lane's `z*h` zero, and the remaining lanes still finish.
     let mut valid = true;
-    let mut zh = [Scalar::ZERO; UNIT];
+    let mut zh = [Scalar::ZERO; LANES];
     for (j, (_, sig, _)) in lanes.iter().enumerate() {
         let Some(s) = Scalar::from_canonical_bytes(&sig.s) else {
             valid = false;
@@ -209,11 +205,14 @@ fn signature_unit<B: Backend>(
     valid
 }
 
-/// The per-signature phase, parallel over [`UNIT`]-signature units in batch order: for each
+/// The per-signature phase, parallel over [`LANES`]-signature units in batch order: for each
 /// signature, derives `z` (see [`batch_coefficients`]), rejects a non-canonical `s`, computes the
 /// challenge `h = H(R || A || M)` and the scalars `z*h` and `z*s`, and decompresses `R` into a
 /// term recoded at `width`. Returns `None` if any `s` is non-canonical or any `R` fails to
 /// decompress.
+///
+/// A strategy batch may hold a single unit, so a batch of a few units can still spread across
+/// workers, which matters when its messages are long.
 ///
 /// The phase needs no `A` point and no grouping, so it runs while [`verify_pipeline`] sorts the
 /// keys.
@@ -225,9 +224,9 @@ fn signature_phase<B: Backend>(
     strategy: &impl Strategy,
 ) -> Option<Vec<Partition>> {
     strategy.run_batches(
-        items.len().div_ceil(UNIT),
-        MIN_UNITS_PER_BATCH,
-        UNIT,
+        items.len().div_ceil(LANES),
+        NonZeroUsize::MIN,
+        LANES,
         |batches| {
             // Every batch finishes all of its units even after a failure, and the phase returns
             // `None` if any unit failed.
@@ -293,30 +292,25 @@ where
             }
         })
     };
-    strategy.run_batches(
-        count.div_ceil(LANES),
-        MIN_UNITS_PER_BATCH,
-        LANES,
-        |batches| {
-            // Each batch decompresses its contiguous range of units into its own vector, finishing
-            // every unit even after a failure. The vectors return in batch order, so together they
-            // follow the worklist, and the phase returns `None` if any encoding failed.
-            batches
-                .map_collect_vec(
-                    |ranges| ranges,
-                    |range| {
-                        let mut terms = Vec::with_capacity(range.len());
-                        let mut valid = true;
-                        for index in range {
-                            valid &= decompress_terms(backend, &unit(index), &mut terms);
-                        }
-                        valid.then_some(terms)
-                    },
-                )
-                .into_iter()
-                .collect()
-        },
-    )
+    strategy.run_batches(count.div_ceil(LANES), NonZeroUsize::MIN, LANES, |batches| {
+        // Each batch decompresses its contiguous range of units into its own vector, finishing
+        // every unit even after a failure. The vectors return in batch order, so together they
+        // follow the worklist, and the phase returns `None` if any encoding failed.
+        batches
+            .map_collect_vec(
+                |ranges| ranges,
+                |range| {
+                    let mut terms = Vec::with_capacity(range.len());
+                    let mut valid = true;
+                    for index in range {
+                        valid &= decompress_terms(backend, &unit(index), &mut terms);
+                    }
+                    valid.then_some(terms)
+                },
+            )
+            .into_iter()
+            .collect()
+    })
 }
 
 /// A signer with more signatures than this sums their `z*h` scalars in parallel, this many per
@@ -328,8 +322,9 @@ const SUM_CHUNK: usize = 1024;
 /// The MSM window width is a per-batch choice (see [`msm::width_for`]) that every term must
 /// share, so it is fixed before any term is recoded. It counts one `R` and one `A` per signature
 /// and the basepoint, as if every signer were distinct, so the `R` terms can be recoded before
-/// the keys are grouped. Parallel runs want a narrower window than serial ones, so the
-/// strategy's choice between running the pipeline serially and in parallel also picks the width.
+/// the keys are grouped. A parallel run picks a window no wider than a serial run would (see
+/// [`msm::width_for`]), so the strategy's choice between running the pipeline serially and in
+/// parallel also picks the width.
 fn verify_batch_inner<B: Backend>(
     backend: B,
     rng: &mut impl CryptoRng,
@@ -423,13 +418,13 @@ fn verify_pipeline<B: Backend>(
 
     // A signer's coalesced scalar: the sum of `z*h` over its run of `order`. Partitions hold
     // consecutive units in batch order, so an original index selects its unit's block and lane.
-    let blocks: Vec<&[Scalar; UNIT]> = signatures
+    let blocks: Vec<&[Scalar; LANES]> = signatures
         .iter()
         .flat_map(|partition| &partition.zh)
         .collect();
     let sum = |run: &[(VerifyingKeyBytes, u32)]| {
         run.iter()
-            .map(|&(_, index)| blocks[index as usize / UNIT][index as usize % UNIT])
+            .map(|&(_, index)| blocks[index as usize / LANES][index as usize % LANES])
             .reduce(|total, zh| total.add_mod_l(&zh))
             .unwrap_or(Scalar::ZERO)
     };
@@ -593,7 +588,8 @@ pub fn verify(
     // With `v = u*h (mod L)`, `[8](u*s*B - u*R - v*A) = u*[8](s*B - R - h*A)` because `[8]`
     // maps every point into the prime-order subgroup. Since `0 < |u| < L`, one side is the
     // identity exactly when the other is. The combination below is `sign(u)` times the left
-    // side, with `u*s` split at bit 128 so that all four scalars are below `2^128`.
+    // side: it multiplies by `|u|`, negates `A` only when `u` is nonnegative, and splits
+    // `|u|*s (mod L)` at bit 128 so that all four scalars are below `2^128`.
     let (u, v) = h.half_size();
     let a = if u < 0 { a } else { a.negate() };
     let u = Scalar::from_u128(u.unsigned_abs());
@@ -986,7 +982,7 @@ mod tests {
                     &Sha512::hash(&[&sig.r, key.as_bytes(), msg]).0,
                 );
                 assert_eq!(
-                    zh[i / UNIT][i % UNIT].to_bytes(),
+                    zh[i / LANES][i % LANES].to_bytes(),
                     z.mul_mod_l(&h).to_bytes()
                 );
                 let s = Scalar::from_canonical_bytes(&sig.s).unwrap();
@@ -1027,7 +1023,7 @@ mod tests {
 
                         // Partial, exact, and several units, each under a serial, a forced
                         // parallel, and an adaptive strategy.
-                        for count in [1, UNIT - 1, UNIT, UNIT + 1, 4 * UNIT + 1, 70] {
+                        for count in [1, LANES - 1, LANES, LANES + 1, 4 * LANES + 1, 70] {
                             check(backend, &Sequential, &batch[..count]);
                             check(backend, &parallel, &batch[..count]);
                             check(backend, &adaptive, &batch[..count]);
