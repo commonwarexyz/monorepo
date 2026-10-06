@@ -40,9 +40,9 @@
 /// ```
 /// use commonware_simd::Simd;
 ///
-/// fn add<S: Simd>(s: S, a: &[u64], b: &[u64], output: &mut [u64]) {
-///     let sum = s.u64_add(s.u64_load(a), s.u64_load(b));
-///     s.u64_store(sum, output);
+/// fn add<S: Simd>(simd: S, a: &[u64], b: &[u64], output: &mut [u64]) {
+///     let sum = simd.u64_add(simd.u64_load(a), simd.u64_load(b));
+///     simd.u64_store(sum, output);
 /// }
 /// ```
 pub trait Simd: Copy {
@@ -289,6 +289,13 @@ pub trait Simd: Copy {
     /// target-feature scope. Emulated implementations require no corresponding hardware
     /// features.
     ///
+    /// Enter a whole SIMD kernel with `simd.execute(#[inline(always)] |simd| ...)`.
+    /// A kernel is a substantial SIMD computation that keeps intermediates in registers.
+    /// The closure body and hot shared SIMD helpers must inline into the target-feature scope;
+    /// annotate both with `#[inline(always)]`. Receiving a token alone does not give an
+    /// ordinary function those features. Scalar helpers and independently scoped kernels
+    /// may remain calls.
+    ///
     /// # Examples
     ///
     /// An ordinary generic function can execute a child operation without implementing
@@ -297,11 +304,11 @@ pub trait Simd: Copy {
     /// ```
     /// use commonware_simd::{Operation, Simd};
     ///
-    /// fn composed<S: Simd, O: Operation>(s: S, child: O) -> O::Output {
-    ///     s.execute(child)
+    /// fn composed<S: Simd, O: Operation<S>>(simd: S, child: O) -> O::Output {
+    ///     simd.execute(child)
     /// }
     /// ```
-    fn execute<O: Operation>(self, operation: O) -> O::Output;
+    fn execute<O: Operation<Self>>(self, operation: O) -> O::Output;
 }
 
 /// Ice Lake instruction profile implemented by native and emulated backend tokens.
@@ -521,52 +528,128 @@ pub trait Neon: Simd {
 ///
 /// The portable path is required. Accelerated paths default to it while preserving
 /// the supplied token, so child operations can still select specialized paths.
-/// Operations may capture owned inputs or borrowed mutable buffers.
+/// Operations may capture owned inputs, borrowed mutable buffers, or registers of `S`.
+/// Their outputs can also depend on `S`, including its register types.
+///
+/// Closures implementing `FnMut(S) -> R` are operations with output `R` and are invoked
+/// once per execution. They may own inputs and borrow mutable state; closures that only
+/// implement `FnOnce` are excluded. Use `simd.execute(#[inline(always)] |simd| ...)`
+/// to enter a whole kernel: a substantial SIMD computation that keeps intermediates in
+/// registers. Ordinary generic functions can compose leaves and return results directly.
+/// The closure body and hot shared SIMD helpers must inline
+/// into the kernel's target-feature scope, so annotate both with `#[inline(always)]`.
+/// Inlining the closure adapter alone does not force the body to inline. Passing a token to an
+/// ordinary function alone does not establish that scope. Scalar helpers and other
+/// independently scoped kernels may remain calls.
 ///
 /// # Examples
 ///
-/// A parent can implement only the portable path and call an ordinary generic function
-/// that executes a child. The child uses the original backend's operation path:
+/// Instruction leaves define local operation types for their equivalent paths. Ordinary
+/// generic functions compose them and return results directly:
 ///
 /// ```
-/// use commonware_simd::{Operation, Simd};
+/// use commonware_simd::{IceLake, Operation, Simd};
 ///
-/// fn composed<S: Simd, O: Operation>(s: S, child: O) -> O::Output {
-///     s.execute(child)
-/// }
+/// fn foo<S: Simd>(value: S::U32) -> impl Operation<S, Output = S::U32> {
+///     struct Foo<S: Simd>(S::U32);
+///     impl<S: Simd> Operation<S> for Foo<S> {
+///         type Output = S::U32;
 ///
-/// struct Parent<O>(O);
+///         fn portable(self, simd: S) -> S::U32 {
+///             simd.u32_xor(self.0, simd.u32_splat(1))
+///         }
 ///
-/// impl<O: Operation> Operation for Parent<O> {
-///     type Output = O::Output;
-///
-///     fn portable<S: Simd>(self, s: S) -> Self::Output {
-///         composed(s, self.0)
+///         fn ice_lake(self, simd: S) -> S::U32
+///         where
+///             S: IceLake,
+///         {
+///             simd.u32_ternary::<0x96>(self.0, simd.u32_splat(1), simd.u32_splat(0))
+///         }
 ///     }
+///     Foo::<S>(value)
+/// }
+///
+/// #[inline(always)]
+/// fn compose<S: Simd>(simd: S, value: S::U32) -> S::U32 {
+///     let value = simd.execute(foo::<S>(value));
+///     simd.u32_add(value, simd.u32_splat(1))
+/// }
+///
+/// fn kernel<S: Simd>(simd: S, input: u32) -> S::U32 {
+///     simd.execute(#[inline(always)] |simd: S| compose(simd, simd.u32_splat(input)))
 /// }
 /// ```
-pub trait Operation: Sized {
-    /// Result shared by all algorithm paths.
+///
+/// Register-capturing operations cannot execute on a different backend:
+///
+/// ```compile_fail
+/// use commonware_simd::{IceLake, Operation, Simd, emulated::{EmulatedIceLake, EmulatedNeon}};
+///
+/// fn foo<S: Simd>(value: S::U32) -> impl Operation<S, Output = S::U32> {
+///     struct Foo<S: Simd>(S::U32);
+///     impl<S: Simd> Operation<S> for Foo<S> {
+///         type Output = S::U32;
+///
+///         fn portable(self, simd: S) -> S::U32 {
+///             simd.u32_xor(self.0, simd.u32_splat(1))
+///         }
+///
+///         fn ice_lake(self, simd: S) -> S::U32
+///         where
+///             S: IceLake,
+///         {
+///             simd.u32_ternary::<0x96>(self.0, simd.u32_splat(1), simd.u32_splat(0))
+///         }
+///     }
+///     Foo::<S>(value)
+/// }
+///
+/// let value = EmulatedIceLake.u32_splat(1);
+/// EmulatedNeon.execute(foo::<EmulatedIceLake>(value));
+/// ```
+pub trait Operation<S: Simd>: Sized {
+    /// Result of every algorithm path for this backend.
     ///
-    /// Backend-specific vectors normally remain inside generic functions; operation
-    /// boundaries exchange buffers or scalar results.
+    /// May contain backend-specific registers. Runtime dispatch and consistency checks
+    /// require a common output type across the backends they execute.
     type Output;
 
     /// Executes using only common vector instructions and child operations.
-    fn portable<S: Simd>(self, s: S) -> Self::Output;
+    fn portable(self, simd: S) -> Self::Output;
 
     /// Executes the Ice Lake algorithm, defaulting to the portable algorithm.
-    fn ice_lake<S: IceLake>(self, s: S) -> Self::Output {
-        self.portable(s)
+    #[inline(always)]
+    fn ice_lake(self, simd: S) -> Self::Output
+    where
+        S: IceLake,
+    {
+        self.portable(simd)
     }
 
     /// Executes the Armv9 with SVE2 algorithm, defaulting to the portable algorithm.
-    fn arm_v9<S: ArmV9>(self, s: S) -> Self::Output {
-        self.portable(s)
+    #[inline(always)]
+    fn arm_v9(self, simd: S) -> Self::Output
+    where
+        S: ArmV9,
+    {
+        self.portable(simd)
     }
 
     /// Executes the NEON algorithm, defaulting to the portable algorithm.
-    fn neon<S: Neon>(self, s: S) -> Self::Output {
-        self.portable(s)
+    #[inline(always)]
+    fn neon(self, simd: S) -> Self::Output
+    where
+        S: Neon,
+    {
+        self.portable(simd)
+    }
+}
+
+impl<S: Simd, R, F: FnMut(S) -> R> Operation<S> for F {
+    type Output = R;
+
+    #[inline(always)]
+    fn portable(mut self, simd: S) -> R {
+        self(simd)
     }
 }

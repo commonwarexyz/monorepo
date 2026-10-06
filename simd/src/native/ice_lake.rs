@@ -35,7 +35,7 @@ impl NativeIceLake {
 
     #[inline]
     #[target_feature(enable = "avx512f,avx512bw,gfni,avx512ifma,sha")]
-    unsafe fn execute_ice_lake<O: Operation>(self, operation: O) -> O::Output {
+    unsafe fn execute_ice_lake<O: Operation<Self>>(self, operation: O) -> O::Output {
         operation.ice_lake(self)
     }
 }
@@ -328,7 +328,7 @@ impl Simd for NativeIceLake {
     }
 
     #[inline]
-    fn execute<O: Operation>(self, operation: O) -> O::Output {
+    fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         // SAFETY: Token construction established every feature enabled by this entry.
         unsafe { self.execute_ice_lake(operation) }
     }

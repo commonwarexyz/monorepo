@@ -255,7 +255,7 @@ impl Simd for EmulatedArmV9 {
 
     // Inline nested adapters across consumer code generation units.
     #[inline]
-    fn execute<O: Operation>(self, operation: O) -> O::Output {
+    fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         operation.arm_v9(self)
     }
 }

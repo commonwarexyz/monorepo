@@ -359,10 +359,10 @@ impl Simd for NativeNeon {
     }
 
     #[inline]
-    fn execute<O: Operation>(self, operation: O) -> O::Output {
+    fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         #[inline]
         #[target_feature(enable = "neon")]
-        unsafe fn execute_neon<O: Operation>(token: NativeNeon, operation: O) -> O::Output {
+        unsafe fn execute_neon<O: Operation<NativeNeon>>(token: NativeNeon, operation: O) -> O::Output {
             operation.neon(token)
         }
 
@@ -515,9 +515,9 @@ mod tests {
         unsafe { construct_vector(value) }
     }
 
-    fn output<S: Simd>(s: S, value: S::U64, sentinel: u64) -> [u64; 5] {
+    fn output<S: Simd>(simd: S, value: S::U64, sentinel: u64) -> [u64; 5] {
         let mut memory = Memory([sentinel; 5]);
-        s.u64_store(value, &mut memory.0[1..]);
+        simd.u64_store(value, &mut memory.0[1..]);
         memory.0
     }
 
@@ -570,12 +570,12 @@ mod tests {
     }
 
     #[cfg(test)]
-    fn check_short<S: Simd>(s: S, value: u64, len: usize) {
+    fn check_short<S: Simd>(simd: S, value: u64, len: usize) {
         let mut memory = Memory([value; 5]);
-        assert!(catch_unwind(AssertUnwindSafe(|| s.u64_load(&memory.0[1..1 + len]))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_load(&memory.0[1..1 + len]))).is_err());
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
-                s.u64_store(s.u64_splat(!value), &mut memory.0[1..1 + len]);
+                simd.u64_store(simd.u64_splat(!value), &mut memory.0[1..1 + len]);
             }))
             .is_err()
         );
@@ -585,33 +585,36 @@ mod tests {
     #[derive(Clone, Copy)]
     struct Child([u64; 2]);
 
-    impl Operation for Child {
+    impl<S: Simd> Operation<S> for Child {
         type Output = (bool, [u64; 2]);
 
-        fn portable<S: Simd>(self, _: S) -> Self::Output {
+        fn portable(self, _: S) -> Self::Output {
             (false, self.0)
         }
 
-        fn neon<S: Neon>(self, s: S) -> Self::Output {
-            let value = s.u64_add(s.u64_load(&self.0), s.u64_splat(1));
+        fn neon(self, simd: S) -> Self::Output
+        where
+            S: Neon,
+        {
+            let value = simd.u64_add(simd.u64_load(&self.0), simd.u64_splat(1));
             let mut result = [0; 2];
-            s.u64_store(value, &mut result);
+            simd.u64_store(value, &mut result);
             (true, result)
         }
     }
 
     struct Parent<O>(O);
 
-    impl<O: Operation> Operation for Parent<O> {
+    impl<S: Simd, O: Operation<S>> Operation<S> for Parent<O> {
         type Output = O::Output;
 
-        fn portable<S: Simd>(self, s: S) -> Self::Output {
-            execute_child(s, self.0)
+        fn portable(self, simd: S) -> Self::Output {
+            execute_child(simd, self.0)
         }
     }
 
-    fn execute_child<S: Simd, O: Operation>(s: S, child: O) -> O::Output {
-        s.execute(child)
+    fn execute_child<S: Simd, O: Operation<S>>(simd: S, child: O) -> O::Output {
+        simd.execute(child)
     }
 
     fn check_execute(native: NativeNeon, value: [u64; 2]) {
@@ -652,3 +655,4 @@ mod tests {
         }
     }
 }
+

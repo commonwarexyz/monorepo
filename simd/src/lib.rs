@@ -73,10 +73,32 @@
 //! without requiring those hardware features.
 //!
 //! Computations that expose alternative algorithm paths implement `Operation`, capturing their
-//! arguments and defining a common output type. The portable implementation is required.
+//! arguments and defining an output type for each backend. The portable implementation is required.
 //! Ice Lake, Armv9, and NEON methods have portable defaults, so an operation only overrides
 //! the paths it specializes. Each specialized algorithm is generic over its instruction profile and shared
 //! between native and emulated providers.
+//!
+//! ### Kernels
+//!
+//! A kernel is a substantial SIMD computation whose hot instructions should be optimized
+//! together, keeping intermediate values in registers where possible. Enter a kernel through
+//! `simd.execute(#[inline(always)] |simd| ...)`. Functions and closures implementing
+//! `FnMut(S) -> R` implement [`Operation`] through the portable path and are invoked once.
+//! They preserve the selected backend so instruction leaves can still specialize.
+//!
+//! The token proves CPU support and preserves register types; it does not give ordinary
+//! functions the backend's compiler target features. The closure body and small shared SIMD
+//! helpers must inline into the native execution wrapper to share its feature context. Use
+//! `#[inline(always)]` on the closure and hot generic helpers intended to join that context.
+//! A reusable kernel can return `impl Operation<S>` containing the annotated closure,
+//! allowing callers to write `simd.execute(kernel::<S>(arguments))`. The constructor
+//! only captures arguments and need not inline. Its computation and hot helpers still
+//! need to join the execution wrapper's feature context.
+//!
+//! Inlining the adapter does not force a large closure body to inline. A substantial helper
+//! can instead establish its own execution boundary and remain a separate call. Scalar helpers
+//! need neither. Inlining is a compiler hint, so verify important kernels with release assembly
+//! and benchmarks rather than assuming every call or register spill disappears.
 //!
 //! ```rust,ignore
 //! pub trait Simd: Copy {
@@ -88,7 +110,7 @@
 //!     fn u64_splat(self, value: u64) -> Self::U64;
 //!     fn u64_add(self, a: Self::U64, b: Self::U64) -> Self::U64;
 //!
-//!     fn execute<O: Operation>(self, operation: O) -> O::Output;
+//!     fn execute<O: Operation<Self>>(self, operation: O) -> O::Output;
 //! }
 //!
 //! pub trait IceLake: Simd {
@@ -103,21 +125,21 @@
 //!     // NEON profile instructions.
 //! }
 //!
-//! pub trait Operation: Sized {
+//! pub trait Operation<S: Simd>: Sized {
 //!     type Output;
 //!
-//!     fn portable<S: Simd>(self, s: S) -> Self::Output;
+//!     fn portable(self, simd: S) -> Self::Output;
 //!
-//!     fn ice_lake<S: IceLake>(self, s: S) -> Self::Output {
-//!         self.portable(s)
+//!     fn ice_lake(self, simd: S) -> Self::Output where S: IceLake {
+//!         self.portable(simd)
 //!     }
 //!
-//!     fn arm_v9<S: ArmV9>(self, s: S) -> Self::Output {
-//!         self.portable(s)
+//!     fn arm_v9(self, simd: S) -> Self::Output where S: ArmV9 {
+//!         self.portable(simd)
 //!     }
 //!
-//!     fn neon<S: Neon>(self, s: S) -> Self::Output {
-//!         self.portable(s)
+//!     fn neon(self, simd: S) -> Self::Output where S: Neon {
+//!         self.portable(simd)
 //!     }
 //! }
 //! ```
@@ -127,44 +149,53 @@
 //! operation entry point. The accelerated defaults call `portable` with that same token.
 //!
 //! Taking the operation by value permits owned inputs and borrowed mutable buffers without
-//! allocating. A module can keep its operation type private and expose an opaque constructor:
+//! allocating. Instruction leaves keep their operation type private inside an opaque constructor.
+//! Ordinary generic functions compose those leaves and return results directly:
 //!
-//! ```rust,ignore
-//! pub fn foo(input: &[u8]) -> impl Operation<Output = Output> + '_ {
-//!     Foo { input }
+//! ```
+//! use commonware_simd::{IceLake, Operation, Simd};
+//!
+//! fn foo<S: Simd>(value: S::U32) -> impl Operation<S, Output = S::U32> {
+//!     struct Foo<S: Simd>(S::U32);
+//!     impl<S: Simd> Operation<S> for Foo<S> {
+//!         type Output = S::U32;
+//!
+//!         fn portable(self, simd: S) -> S::U32 {
+//!             simd.u32_xor(self.0, simd.u32_splat(1))
+//!         }
+//!
+//!         fn ice_lake(self, simd: S) -> S::U32
+//!         where
+//!             S: IceLake,
+//!         {
+//!             simd.u32_ternary::<0x96>(self.0, simd.u32_splat(1), simd.u32_splat(0))
+//!         }
+//!     }
+//!     Foo::<S>(value)
+//! }
+//!
+//! fn compose<S: Simd>(simd: S, value: S::U32) -> S::U32 {
+//!     let value = simd.execute(foo::<S>(value));
+//!     simd.u32_add(value, simd.u32_splat(1))
 //! }
 //! ```
 //!
 //! `Simd::execute` selects a path statically for its concrete token: `EmulatedScalar` invokes
 //! `portable`, both Ice Lake tokens invoke `ice_lake`, both Armv9 tokens invoke `arm_v9`, and
 //! both NEON tokens invoke `neon`. Generic functions can use common instructions directly
-//! without implementing `Operation`:
+//! without implementing `Operation`.
 //!
-//! ```rust,ignore
-//! fn double<S: Simd>(s: S, input: &[u64], output: &mut [u64]) {
-//!     let value = s.u64_load(input);
-//!     s.u64_store(s.u64_add(value, value), output);
-//! }
-//! ```
+//! `Operation<S>` can capture and return backend-specific registers such as `S::U32`.
+//! Generic composition keeps those registers tied to the executing token. Runtime dispatch
+//! and consistency checks require a common output across their enumerated backends; normalize
+//! registers to buffers or scalar results at that outer boundary.
 //!
-//! Ordinary functions bounded only by `Simd` can also execute specialized child operations:
-//!
-//! ```rust,ignore
-//! fn composed<S: Simd>(s: S, input: &[u8]) -> Output {
-//!     let intermediate = s.execute(foo(input));
-//!     s.execute(bar(intermediate))
-//! }
-//! ```
-//!
-//! Operation boundaries normally exchange buffers or scalar results. `Operation::Output` must
-//! be common to all profiles; backend-specific vectors instead compose inside generic functions.
-//!
-//! A parent operation can implement only `portable` and call such a composition function. Its
-//! default accelerated methods preserve the supplied token, so specialized children still take
-//! that token's accelerated path. The portable entry point constrains the instructions used by
-//! the parent; it does not force child operations to use their portable paths. Leaf operations
-//! without specializations use their portable defaults. This requires neither trait-implementation
-//! discovery nor overlapping fallback implementations.
+//! Runtime dispatch and consistency checks need a universal operation type with a common
+//! output. An explicit outer operation can implement `portable`, call the shared composition
+//! function, and normalize its result. Its default accelerated methods preserve the supplied
+//! token, so specialized children still take that token's accelerated path. The portable entry
+//! point constrains the instructions used directly; it does not force children to use their
+//! portable paths. Ordinary shared composition needs no parent operation.
 //!
 //! [`dispatch()`] selects a supported native backend, or `EmulatedScalar` at the outer boundary
 //! and executes the root operation. The concrete token threads through the tree. Child calls to
@@ -172,19 +203,13 @@
 //! Passing a runtime enum through the tree and matching it at every child would lose this property.
 //!
 //! ```rust,ignore
-//! let output = simd::dispatch(foo(input));
+//! // root constructs the universal operation that normalizes the composition result.
+//! let output = simd::dispatch(root(input));
 //! ```
 //!
-//! The crate should encapsulate the backend adapters and target-feature wrappers used by
-//! Curve25519's `WithBackend` and Ocelot's `WithKernel` patterns. Consumers implement algorithms,
-//! without repeating that plumbing or requiring macros to generate it. Generic callback traits
-//! or concrete closures can bridge the outer dispatch boundary; ordinary closures cannot have
-//! call methods generic over backend types.
-//!
-//! Native implementations of `execute` establish the target-feature scope around bulk
-//! computations, including when re-entering from surrounding code that has been outlined.
-//! This re-entry does not repeat CPU detection. Holding a token does not propagate compiler
-//! target features to arbitrary callees;
+//! Native implementations of `execute` establish the target-feature scope for operations,
+//! including when re-entering from surrounding code that has been outlined. This re-entry does
+//! not repeat CPU detection. Ordinary functions receiving a token do not inherit target features;
 //! native instruction helpers must remain sound independently of inlining. Small components
 //! should inline within the feature scope, but Rust does not guarantee inlining, so representative
 //! cross-crate compositions need emitted-code and performance checks.
@@ -193,10 +218,12 @@
 //!
 //! ### Bulk loops and shared algorithms
 //!
-//! Make each bulk vector loop an operation and call `s.execute(...)` at its boundary, including
-//! from an outlined function or worker callback. Pass the existing token rather than dispatching
-//! again. Scheduling, allocation, and protocol logic can remain outlined while executing child
-//! operations. Consumers need no target-feature annotations.
+//! Shared loops can remain ordinary generic functions receiving the existing token and executing
+//! instruction leaves. When a bulk loop needs a feature scope around the whole computation,
+//! an explicit operation can serve as a manual execution adapter: its `portable` method calls
+//! the shared loop, and the caller enters through `simd.execute(...)`. This adapter has a distinct
+//! feature-scope purpose; ordinary composition does not need it. Pass the existing token rather
+//! than dispatching again, including from outlined functions or worker callbacks.
 //!
 //! Shared defaults and helpers containing vector arithmetic must inline into the native execution
 //! entry to avoid a feature-gated call per vector. Start with `#[inline]`, and use
@@ -205,45 +232,6 @@
 //! cross-crate kernels without LTO and with multiple codegen units for calls inside hot loops and
 //! unnecessary vector spills; a call once per bulk operation can be acceptable.
 //!
-//! This example shares one loop across backends and reenters the feature scope from an outlined
-//! caller. It adds complete vectors and leaves any incomplete trailing vector unchanged:
-//!
-//! ```
-//! use commonware_simd::{Operation, Simd};
-//!
-//! // Expose the shared loop so it can inline into the backend's execution entry.
-//! #[inline]
-//! fn add_loop<S: Simd>(s: S, input: &[u64], output: &mut [u64]) {
-//!     for (input, output) in input.chunks_exact(S::U64_LANES)
-//!         .zip(output.chunks_exact_mut(S::U64_LANES))
-//!     {
-//!         let sum = s.u64_add(s.u64_load(input), s.u64_load(output));
-//!         s.u64_store(sum, output);
-//!     }
-//! }
-//!
-//! struct Add<'a>(&'a [u64], &'a mut [u64]);
-//!
-//! impl Operation for Add<'_> {
-//!     type Output = ();
-//!
-//!     // Keep the adapter in the same feature scope as the shared loop.
-//!     #[inline]
-//!     fn portable<S: Simd>(self, s: S) {
-//!         add_loop(s, self.0, self.1);
-//!     }
-//! }
-//!
-//! #[inline(never)]
-//! fn outlined<S: Simd>(s: S, input: &[u64], output: &mut [u64]) {
-//!     s.execute(Add(input, output));
-//! }
-//!
-//! let mut output = [3, 4];
-//! outlined(commonware_simd::emulated::EmulatedScalar, &[1, 2], &mut output);
-//! assert_eq!(output, [4, 6]);
-//! ```
-//!
 //! ## Consistency testing
 //!
 //! [`check_consistent`] takes an operation factory and compares scalar execution
@@ -251,7 +239,8 @@
 //! including specialized children and portable defaults throughout composed operations:
 //!
 //! ```rust,ignore
-//! simd::check_consistent(|| foo(&input));
+//! // Each root owns independent state and returns a common output type.
+//! simd::check_consistent(|| root(&input));
 //! ```
 //!
 //! The factory constructs independent operations with identical initial state for each execution.
@@ -261,9 +250,9 @@
 //! a snapshot for comparison. Merely comparing a return value would miss divergent buffer writes.
 //! The comparison may use semantic equality when valid representations differ, such as canonical
 //! field equality. Backend vector representations do not need to be comparable across backends.
-//! A portable-only leaf runs the same algorithm at different widths, while a parent with only portable
-//! orchestration can still exercise different specialized children. Testing composed operations
-//! is therefore useful in addition to testing leaves.
+//! A portable-only leaf runs the same algorithm at different widths. An outer normalization
+//! operation can call shared composition that exercises specialized children. Testing these
+//! compositions is therefore useful in addition to testing leaves.
 //!
 //! Consumers can exercise different algorithm strategies through the consistency helper.
 //! Emulator-specific unit tests live in each backend's module and run on every host, including
@@ -354,6 +343,8 @@ extern crate std;
 // 19 can use shifts and additions, with native code generation checked against existing kernels.
 
 commonware_macros::stability_scope!(ALPHA {
+    #[cfg(test)]
+    mod operation_tests;
     mod consistency;
     pub use consistency::check_consistent;
     mod core;

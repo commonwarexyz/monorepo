@@ -245,7 +245,7 @@ impl Simd for EmulatedNeon {
 
     // Inline nested adapters across consumer code generation units.
     #[inline]
-    fn execute<O: Operation>(self, operation: O) -> O::Output {
+    fn execute<O: Operation<Self>>(self, operation: O) -> O::Output {
         operation.neon(self)
     }
 }

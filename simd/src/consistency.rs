@@ -13,6 +13,9 @@ use core::fmt::Debug;
 /// resetting any mutable state. It is called once per backend because execution
 /// consumes the operation.
 ///
+/// All emulated backends must produce the same output type. Normalize any
+/// backend-specific registers at this outer boundary.
+///
 /// Include observable buffer changes in [`Operation::Output`] to compare them as well.
 /// Agreement between backends does not establish correctness against an independent
 /// reference implementation.
@@ -25,19 +28,26 @@ use core::fmt::Debug;
 /// # Examples
 ///
 /// ```
-/// use commonware_simd::{check_consistent, Operation};
-/// use core::fmt::Debug;
+/// use commonware_simd::{check_consistent, Operation, Simd};
 ///
-/// fn check_case<O: Operation>(make_operation: impl FnMut() -> O)
-/// where
-///     O::Output: PartialEq + Debug,
-/// {
-///     check_consistent(make_operation);
+/// struct Add;
+/// impl<S: Simd> Operation<S> for Add {
+///     type Output = u32;
+///     fn portable(self, simd: S) -> u32 {
+///         let mut output = [0; 16];
+///         simd.u32_store(simd.u32_add(simd.u32_splat(1), simd.u32_splat(2)), &mut output);
+///         output[0]
+///     }
 /// }
+/// check_consistent(|| Add);
 /// ```
-pub fn check_consistent<O: Operation>(mut operation: impl FnMut() -> O)
+pub fn check_consistent<O, R>(mut operation: impl FnMut() -> O)
 where
-    O::Output: PartialEq + Debug,
+    O: Operation<EmulatedScalar, Output = R>
+        + Operation<EmulatedIceLake, Output = R>
+        + Operation<EmulatedArmV9, Output = R>
+        + Operation<EmulatedNeon, Output = R>,
+    R: PartialEq + Debug,
 {
     let expected = EmulatedScalar.execute(operation());
     assert_eq!(

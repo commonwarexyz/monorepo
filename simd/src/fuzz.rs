@@ -33,44 +33,53 @@ pub enum Plan {
 
 struct Instructions<'a, 'b>(Plan, &'a mut Unstructured<'b>);
 
-impl Operation for Instructions<'_, '_> {
+impl<S: Simd> Operation<S> for Instructions<'_, '_> {
     type Output = arbitrary::Result<()>;
 
     // Portable execution does not validate native instructions or consume their inputs.
-    fn portable<S: Simd>(self, _: S) -> Self::Output {
+    fn portable(self, _: S) -> Self::Output {
         Ok(())
     }
 
-    fn neon<S: Neon>(self, s: S) -> Self::Output {
+    fn neon(self, simd: S) -> Self::Output
+    where
+        S: Neon,
+    {
         match self.0 {
             #[cfg(not(miri))]
-            Plan::Common => differential::common(s, EmulatedNeon, self.1),
+            Plan::Common => differential::common(simd, EmulatedNeon, self.1),
             #[cfg(not(miri))]
-            Plan::Profile => differential::neon(s, EmulatedNeon, self.1),
-            plan => memory(plan, s, EmulatedNeon, self.1),
+            Plan::Profile => differential::neon(simd, EmulatedNeon, self.1),
+            plan => memory(plan, simd, EmulatedNeon, self.1),
         }
     }
 
-    fn ice_lake<S: IceLake>(self, s: S) -> Self::Output {
+    fn ice_lake(self, simd: S) -> Self::Output
+    where
+        S: IceLake,
+    {
         match self.0 {
             #[cfg(not(miri))]
-            Plan::Common => differential::common(s, EmulatedIceLake, self.1),
+            Plan::Common => differential::common(simd, EmulatedIceLake, self.1),
             #[cfg(not(miri))]
-            Plan::Profile => differential::ice_lake(s, EmulatedIceLake, self.1),
-            plan => memory(plan, s, EmulatedIceLake, self.1),
+            Plan::Profile => differential::ice_lake(simd, EmulatedIceLake, self.1),
+            plan => memory(plan, simd, EmulatedIceLake, self.1),
         }
     }
 
-    fn arm_v9<S: ArmV9>(self, s: S) -> Self::Output {
+    fn arm_v9(self, simd: S) -> Self::Output
+    where
+        S: ArmV9,
+    {
         match self.0 {
             #[cfg(not(miri))]
-            Plan::Common => differential::common(s, EmulatedArmV9, self.1),
+            Plan::Common => differential::common(simd, EmulatedArmV9, self.1),
             #[cfg(not(miri))]
             Plan::Profile => {
-                differential::neon(s, EmulatedArmV9, self.1)?;
-                differential::arm_v9(s, EmulatedArmV9, self.1)
+                differential::neon(simd, EmulatedArmV9, self.1)?;
+                differential::arm_v9(simd, EmulatedArmV9, self.1)
             }
-            plan => memory(plan, s, EmulatedArmV9, self.1),
+            plan => memory(plan, simd, EmulatedArmV9, self.1),
         }
     }
 }
@@ -135,13 +144,13 @@ fn memory<N: Simd, E: Simd>(
 }
 
 #[cfg(test)]
-fn check_short<S: Simd>(s: S, value: u64, len: usize) {
+fn check_short<S: Simd>(simd: S, value: u64, len: usize) {
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let mut memory = [value; 10];
-    assert!(catch_unwind(AssertUnwindSafe(|| s.u64_load(&memory[1..1 + len]))).is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| simd.u64_load(&memory[1..1 + len]))).is_err());
     assert!(
         catch_unwind(AssertUnwindSafe(|| {
-            s.u64_store(s.u64_splat(!value), &mut memory[1..1 + len]);
+            simd.u64_store(simd.u64_splat(!value), &mut memory[1..1 + len]);
         }))
         .is_err()
     );
@@ -158,58 +167,67 @@ enum Path {
 
 struct Leaf<'a>(&'a mut [u64; 8]);
 
-impl Operation for Leaf<'_> {
+impl<S: Simd> Operation<S> for Leaf<'_> {
     type Output = ();
 
     // Associated constants cannot be used as const generic chunk sizes.
     #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
-    fn portable<S: Simd>(self, s: S) {
+    fn portable(self, simd: S) {
         for chunk in self.0.chunks_exact_mut(S::U64_LANES) {
-            s.u64_store(s.u64_add(s.u64_load(chunk), s.u64_splat(1)), chunk);
+            simd.u64_store(simd.u64_add(simd.u64_load(chunk), simd.u64_splat(1)), chunk);
         }
     }
 }
 
 struct Child<'a>(&'a mut [u64; 8]);
 
-impl Operation for Child<'_> {
+impl<S: Simd> Operation<S> for Child<'_> {
     type Output = (Path, usize);
 
-    fn portable<S: Simd>(self, s: S) -> Self::Output {
-        s.execute(Leaf(self.0));
+    fn portable(self, simd: S) -> Self::Output {
+        simd.execute(Leaf(self.0));
         (Path::Portable, S::U64_LANES)
     }
 
-    fn neon<S: Neon>(self, s: S) -> Self::Output {
-        s.execute(Leaf(self.0));
+    fn neon(self, simd: S) -> Self::Output
+    where
+        S: Neon,
+    {
+        simd.execute(Leaf(self.0));
         (Path::Neon, S::U64_LANES)
     }
 
-    fn ice_lake<S: IceLake>(self, s: S) -> Self::Output {
-        s.execute(Leaf(self.0));
+    fn ice_lake(self, simd: S) -> Self::Output
+    where
+        S: IceLake,
+    {
+        simd.execute(Leaf(self.0));
         (Path::IceLake, S::U64_LANES)
     }
 
-    fn arm_v9<S: ArmV9>(self, s: S) -> Self::Output {
-        s.execute(Leaf(self.0));
+    fn arm_v9(self, simd: S) -> Self::Output
+    where
+        S: ArmV9,
+    {
+        simd.execute(Leaf(self.0));
         (Path::ArmV9, S::U64_LANES)
     }
 }
 
 struct Parent<O>(O);
 
-impl<O: Operation> Operation for Parent<O> {
+impl<S: Simd, O: Operation<S>> Operation<S> for Parent<O> {
     type Output = O::Output;
 
-    fn portable<S: Simd>(self, s: S) -> Self::Output {
-        execute_child(s, self.0)
+    fn portable(self, simd: S) -> Self::Output {
+        execute_child(simd, self.0)
     }
 }
 
 // Keep a consumer frame outlined to test feature-scope reentry through execute.
 #[inline(never)]
-fn execute_child<S: Simd, O: Operation>(s: S, child: O) -> O::Output {
-    s.execute(child)
+fn execute_child<S: Simd, O: Operation<S>>(simd: S, child: O) -> O::Output {
+    simd.execute(child)
 }
 
 fn expected_backend() -> (Path, usize) {
