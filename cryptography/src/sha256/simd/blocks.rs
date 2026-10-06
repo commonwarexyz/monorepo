@@ -1,0 +1,152 @@
+//! Block cursor over a message given as parts, with SHA-256 padding.
+
+use crate::sha256::BLOCK_LENGTH;
+use core::slice::Iter;
+
+/// Reads a message, given as parts, one block at a time.
+pub(super) struct Blocks<'a> {
+    /// Parts not yet started.
+    parts: Iter<'a, &'a [u8]>,
+    /// The unread rest of the current part.
+    part: &'a [u8],
+    /// Scratch for a block that spans parts.
+    block: [u8; BLOCK_LENGTH],
+}
+
+impl<'a> Blocks<'a> {
+    /// Start reading the message `parts`.
+    pub(super) fn new(parts: &'a [&'a [u8]]) -> Self {
+        Self {
+            parts: parts.iter(),
+            part: &[],
+            block: [0; BLOCK_LENGTH],
+        }
+    }
+
+    /// Return the next full block, borrowed in place when the current part
+    /// holds all of it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than [`BLOCK_LENGTH`] bytes remain.
+    #[inline(always)]
+    pub(super) fn next(&mut self) -> &[u8; BLOCK_LENGTH] {
+        // Start the next part, so a block at its start is borrowed in place.
+        if self.part.is_empty() {
+            self.part = self.parts.next().copied().unwrap_or_default();
+        }
+        let part = self.part;
+        if let Some((block, rest)) = part.split_first_chunk() {
+            self.part = rest;
+            return block;
+        }
+        let Self { parts, part, block } = self;
+        fill(parts, part, block);
+        block
+    }
+
+    /// Pad the final `len % BLOCK_LENGTH` bytes of a `len`-byte message,
+    /// returning the padding blocks and how many of them are used.
+    ///
+    /// # Panics
+    ///
+    /// Panics if fewer than `len % BLOCK_LENGTH` bytes remain.
+    #[inline(always)]
+    pub(super) fn finish(mut self, len: usize) -> ([u8; 2 * BLOCK_LENGTH], usize) {
+        let remainder = len % BLOCK_LENGTH;
+        let mut padding = [0u8; 2 * BLOCK_LENGTH];
+        fill(&mut self.parts, &mut self.part, &mut padding[..remainder]);
+        padding[remainder] = 0x80;
+        let end = if remainder < BLOCK_LENGTH - 8 {
+            BLOCK_LENGTH
+        } else {
+            2 * BLOCK_LENGTH
+        };
+        padding[end - 8..end].copy_from_slice(&(len as u64).wrapping_mul(8).to_be_bytes());
+        (padding, end / BLOCK_LENGTH)
+    }
+}
+
+/// Copy the next `out.len()` bytes of a message into `out`, starting with the
+/// rest of `part` and continuing through `parts`.
+///
+/// # Panics
+///
+/// Panics if fewer than `out.len()` bytes remain.
+#[inline(always)]
+fn fill<'a>(parts: &mut Iter<'a, &'a [u8]>, part: &mut &'a [u8], out: &mut [u8]) {
+    let mut filled = 0;
+    while filled < out.len() {
+        if part.is_empty() {
+            *part = *parts.next().expect("message shorter than its length");
+        }
+        let (head, rest) = part.split_at(part.len().min(out.len() - filled));
+        out[filled..filled + head.len()].copy_from_slice(head);
+        filled += head.len();
+        *part = rest;
+    }
+}
+
+/// Return the schedule words plus round constants `k` of the padding block
+/// that follows a message of `len` bytes.
+///
+/// The block holds only the terminator and the bit length, so its schedule is
+/// the same for every message of that length.
+///
+/// # Panics
+///
+/// Panics if `len` is not a multiple of the block length or its bit length
+/// overflows a `u64`.
+pub(super) const fn padding_wk(k: &[u32; 64], len: usize) -> [u32; 64] {
+    assert!(
+        len.is_multiple_of(BLOCK_LENGTH),
+        "message must end on a block boundary"
+    );
+    let bits = (len as u64)
+        .checked_mul(8)
+        .expect("bit length overflows u64");
+    let mut schedule = [0u32; 64];
+    schedule[0] = 0x8000_0000;
+    schedule[14] = (bits >> 32) as u32;
+    schedule[15] = bits as u32;
+
+    let mut i = 16;
+    while i < schedule.len() {
+        let prev15 = schedule[i - 15];
+        let sigma0 = prev15.rotate_right(7) ^ prev15.rotate_right(18) ^ (prev15 >> 3);
+        let prev2 = schedule[i - 2];
+        let sigma1 = prev2.rotate_right(17) ^ prev2.rotate_right(19) ^ (prev2 >> 10);
+        schedule[i] = schedule[i - 16]
+            .wrapping_add(sigma0)
+            .wrapping_add(schedule[i - 7])
+            .wrapping_add(sigma1);
+        i += 1;
+    }
+
+    let mut i = 0;
+    while i < schedule.len() {
+        schedule[i] = schedule[i].wrapping_add(k[i]);
+        i += 1;
+    }
+    schedule
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The precomputed padding schedule starts with the words of the padding
+    /// block that [`Blocks::finish`] builds, including a bit length that
+    /// needs more than 32 bits.
+    #[test]
+    fn test_padding_wk_matches_finish() {
+        for len in [BLOCK_LENGTH, 1 << 35] {
+            let (padding, blocks) = Blocks::new(&[]).finish(len);
+            assert_eq!(blocks, 1);
+            let words: [u32; 16] = core::array::from_fn(|word| {
+                u32::from_be_bytes(padding[4 * word..4 * word + 4].try_into().unwrap())
+            });
+            assert_eq!(padding_wk(&[0; 64], len)[..16], words);
+        }
+    }
+}

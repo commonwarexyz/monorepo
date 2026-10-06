@@ -1,7 +1,26 @@
 use super::{
     super::{DIGEST_LENGTH, Digest, IV},
-    POSITION_LEN,
+    BMT_NODE_LEN, POSITION_LEN,
+    blocks::padding_wk,
 };
+
+mod equal;
+pub use equal::hash_pair_equal;
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "std")] {
+        /// Return whether the SHA2 instructions are available.
+        #[inline]
+        pub(super) fn supports_sha() -> bool {
+            std::arch::is_aarch64_feature_detected!("sha2")
+        }
+    } else {
+        /// Return whether the SHA2 instructions are statically enabled.
+        pub(super) const fn supports_sha() -> bool {
+            cfg!(target_feature = "sha2")
+        }
+    }
+}
 
 /// Wrapper that aligns the round-constant table for aligned vector loads.
 #[repr(align(16))]
@@ -18,6 +37,10 @@ static K: Align16<[u32; 64]> = Align16([
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
+
+/// The SHA-256 schedule words plus round constants for the fixed padding
+/// block after a 64-byte BMT node.
+static FINAL_64_WK: Align16<[u32; 64]> = Align16(padding_wk(&K.0, BMT_NODE_LEN));
 
 /// Hash two MMR node-shaped messages (`position || left || right`, 72 bytes)
 /// with interleaved SHA2 instructions: one full block plus a fixed-layout
@@ -78,8 +101,8 @@ pub unsafe fn hash_pair_72(
 }
 
 /// Hash two BMT node-shaped messages (`left || right`, 64 bytes) with
-/// interleaved SHA2 instructions: one full block plus a compile-time
-/// constant padding block each.
+/// interleaved SHA2 instructions: one full block plus a constant padding
+/// block each, whose schedule comes from a precomputed table.
 ///
 /// Each message is given as its two constituent digests and loaded directly
 /// into vector registers, without first concatenating them into a scratch
@@ -88,7 +111,6 @@ pub unsafe fn hash_pair_72(
 /// # Safety
 ///
 /// The `sha2` target feature must be available.
-#[allow(asm_sub_register)]
 #[target_feature(enable = "sha2")]
 pub unsafe fn hash_pair_64(
     left_a: &[u8; DIGEST_LENGTH],
@@ -106,8 +128,8 @@ pub unsafe fn hash_pair_64(
             include_str!("sha256_pair_block1_64.asm"),
             include_str!("sha256_rounds_2x.asm"),
             include_str!("sha256_pair_chain.asm"),
-            include_str!("sha256_pair_tail0.asm"),
-            include_str!("sha256_rounds_2x.asm"),
+            "mov {k}, {padding}",
+            include_str!("sha256_rounds_2x_fixed.asm"),
             include_str!("sha256_pair_finish.asm"),
             left_a = in(reg) left_a.as_ptr(),
             left_b = in(reg) left_b.as_ptr(),
@@ -115,9 +137,9 @@ pub unsafe fn hash_pair_64(
             right_b = in(reg) right_b.as_ptr(),
             left_output = in(reg) left_digest.as_mut_ptr(),
             right_output = in(reg) right_digest.as_mut_ptr(),
-            tmp = out(reg) _,
             k = out(reg) _,
             k_start = in(reg) K.0.as_ptr(),
+            padding = in(reg) FINAL_64_WK.0.as_ptr(),
             state = in(reg) IV.as_ptr(),
             out("v0") _, out("v1") _, out("v2") _, out("v3") _,
             out("v4") _, out("v5") _, out("v6") _, out("v7") _,
