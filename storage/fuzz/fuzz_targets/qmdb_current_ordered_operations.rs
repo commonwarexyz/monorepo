@@ -10,6 +10,7 @@ use commonware_storage::{
     qmdb::{
         any::value::FixedEncoding,
         current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
+        floor::Proportional,
     },
     translator::TwoCap,
 };
@@ -121,7 +122,7 @@ async fn commit_pending<F: Graftable>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
     let (db, _) = db
         .apply_batch(merkleized)
         .await

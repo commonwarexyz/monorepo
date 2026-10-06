@@ -23,6 +23,8 @@
 //! 4. Inspect the root or create child batches.
 //! 5. Apply the batch to the database (uncommitted ancestors are applied automatically).
 //!
+//! [any] and [current] advance the inactivity floor with a [`floor::Policy`] when merkleizing.
+//!
 //! The specific mutation methods vary by variant.
 //! See each variant's module documentation for the concrete API and usage examples.
 //!
@@ -99,6 +101,7 @@ pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
 pub mod current;
+pub mod floor;
 pub mod immutable;
 pub mod keyless;
 mod metrics;

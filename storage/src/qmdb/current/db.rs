@@ -1190,6 +1190,7 @@ mod tests {
         qmdb::{
             any::traits::{DbAny, UnmerkleizedBatch as _},
             current::{tests::fixed_config, unordered::fixed},
+            floor::Proportional,
         },
         translator::OneCap,
     };
@@ -1393,7 +1394,7 @@ mod tests {
             let value = Sha256::hash(&[&(idx + count).to_be_bytes()]);
             batch = batch.write(key, Some(value));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
     }
@@ -1419,7 +1420,7 @@ mod tests {
                 let value = Sha256::hash(&[&(idx + 100).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (start, ops) = merkleized.operations();
             let (db, range) = db.apply_batch(merkleized).await.unwrap();
             assert_eq!(start, range.start);
@@ -1446,7 +1447,7 @@ mod tests {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(value))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -1494,7 +1495,7 @@ mod tests {
                 let value = Sha256::hash(&[&(idx + 1024).to_be_bytes()]);
                 batch = batch.write(key, Some(value));
             }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (mut db, _) = db.apply_batch(merkleized).await.unwrap();
             assert!(db.sync_boundary() > durable_floor);
             let bounds = db.bounds();
