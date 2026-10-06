@@ -288,24 +288,26 @@ mod tests {
         items
     }
 
-    fn verify_with(
-        items: &[(VerificationKey, Signature, [u8; 32])],
-        strategy: &impl Strategy,
-    ) -> bool {
-        verify_projected(
+    /// Verify the batch and require sequential and parallel strategies to agree.
+    fn verify(items: &[(VerificationKey, Signature, [u8; 32])]) -> bool {
+        let sequential = verify_projected(
             &mut test_rng(),
             items,
             |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
-            strategy,
+            &Sequential,
         )
-        .is_ok()
-    }
-
-    /// Verify the batch and require sequential and parallel strategies to agree.
-    fn verify(items: &[(VerificationKey, Signature, [u8; 32])]) -> bool {
-        let sequential = verify_with(items, &Sequential);
+        .is_ok();
         let parallel = Rayon::new(NZUsize!(4)).unwrap();
-        assert_eq!(sequential, verify_with(items, &parallel.manual()));
+        assert_eq!(
+            sequential,
+            verify_projected(
+                &mut test_rng(),
+                items,
+                |_, (vk, sig, message)| (vk, *sig, None, message.as_slice()),
+                &parallel.manual(),
+            )
+            .is_ok()
+        );
         sequential
     }
 

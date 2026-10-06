@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(result.invalid.len(), 1);
         assert_eq!(result.verified.len(), quorum - 1);
 
-        // Empty input and attestations rejected before batching must consume no randomness.
+        // Malformed signature encodings and unknown signers cannot reach batch verification.
         let subject = TestSubject {
             message: Bytes::from_static(MESSAGE),
         };
@@ -869,6 +869,7 @@ mod tests {
         let mut unknown = schemes[1].sign::<Sha256Digest>(subject.clone()).unwrap();
         unknown.signer = Participant::new(999);
 
+        // If no attestations reach batch verification, the caller's RNG state must remain unchanged.
         for attestations in [Vec::new(), vec![malformed, unknown]] {
             let expected_invalid = attestations.len();
             let mut actual_rng = TestRng::new(0);
