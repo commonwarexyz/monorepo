@@ -163,26 +163,19 @@ impl BatchVerifier for PublicKey {
         T: Sync,
         F: Fn(usize, &'a T) -> BatchEntry<'a, Self> + Sync,
     {
-        // Keep each signature paired with its message hash and public key in input order.
-        // The serial branch fills the output vectors directly. The parallel branch uses
-        // the manual strategy because `run` has already chosen parallel execution.
-        let prepare = |(index, item): (usize, &'a T)| {
+        let hms = strategy.map_collect_vec(items.iter().enumerate(), |(index, item)| {
             let entry = project(index, item);
-            let hm =
-                ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, entry.namespace, entry.message);
-            (entry.public_key.key, hm, entry.signature.signature)
-        };
-        let (publics, hms, signatures): (Vec<_>, Vec<_>, Vec<_>) = strategy.run(
-            items.len(),
-            || items.iter().enumerate().map(&prepare).collect(),
-            || {
-                strategy
-                    .manual()
-                    .map_collect_vec(items.iter().enumerate(), &prepare)
-                    .into_iter()
-                    .collect()
-            },
-        );
+            ops::hash_with_namespace::<MinPk>(MinPk::MESSAGE, entry.namespace, entry.message)
+        });
+        let (publics, signatures): (Vec<_>, Vec<_>) = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let entry = project(index, item);
+                (entry.public_key.key, entry.signature.signature)
+            })
+            .unzip();
+
         MinPk::batch_verify(rng, &publics, &hms, &signatures, strategy).is_ok()
     }
 }
