@@ -33,7 +33,7 @@ use ::core::{
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{Buf, FixedSize, Read, Write};
-use commonware_cryptography::{BatchEntry, BatchVerifier, Verifier};
+use commonware_cryptography::{BatchEntry, BatchVerifier, Signer, Verifier};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -50,7 +50,7 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 /// Secret material is zeroized when the key is dropped.
 /// Serialization writes the raw secret seed, so callers must protect the encoded bytes as
 /// secret key material.
-#[derive(ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub struct SigningKey {
     /// When serializing, we want to just write the seed, so we keep it around.
     seed: [u8; 32],
@@ -164,6 +164,21 @@ impl SigningKey {
     #[cfg(test)]
     pub(crate) fn sign_raw(&self, msg: &[u8]) -> Signature {
         self.sign_message(msg)
+    }
+}
+
+impl commonware_cryptography::PrivateKey for SigningKey {}
+
+impl Signer for SigningKey {
+    type Signature = Signature;
+    type PublicKey = VerifyingKey;
+
+    fn public_key(&self) -> VerifyingKey {
+        self.verifying_key()
+    }
+
+    fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
+        Self::sign(self, namespace, msg)
     }
 }
 
@@ -534,7 +549,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
 mod tests {
     use super::{SigningKey, VerifyingKey};
     use commonware_codec::{Copying, DecodeExt, Encode};
-    use commonware_cryptography::{BatchEntry, BatchVerifier as _};
+    use commonware_cryptography::{BatchEntry, BatchVerifier as _, PrivateKey, Verifier};
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
     use core::cmp::Ordering;
@@ -632,6 +647,36 @@ mod tests {
 
         assert!(verifying_key.verify(NAMESPACE, message, &signature));
         assert!(!verifying_key.verify(WRONG_NAMESPACE, message, &signature));
+    }
+
+    /// Signing and verifying through the `commonware-cryptography` traits match the inherent
+    /// methods.
+    #[test]
+    fn cryptography_traits_match_inherent_methods() {
+        fn sign<S: PrivateKey>(
+            signer: &S,
+            namespace: &[u8],
+            msg: &[u8],
+        ) -> (S::PublicKey, S::Signature) {
+            (signer.public_key(), signer.sign(namespace, msg))
+        }
+
+        let signing_key = SigningKey::from_seed([5; 32]);
+        let (verifying_key, signature) = sign(&signing_key, b"namespace", b"message");
+        assert_eq!(verifying_key, signing_key.verifying_key());
+        assert_eq!(signature, signing_key.sign(b"namespace", b"message"));
+        assert!(Verifier::verify(
+            &verifying_key,
+            b"namespace",
+            b"message",
+            &signature
+        ));
+        assert!(!Verifier::verify(
+            &verifying_key,
+            b"other",
+            b"message",
+            &signature
+        ));
     }
 
     #[test]
