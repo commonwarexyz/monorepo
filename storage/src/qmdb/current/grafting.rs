@@ -212,10 +212,10 @@ pub fn grafted_to_ops_pos<F: Graftable>(
 ///
 /// Both the grafted structure and ops structure use the same family `F`. The grafted
 /// structure's leaves correspond 1:1 with bitmap chunks. This adapter intercepts
-/// [`HasherTrait::node_digest`] and [`HasherTrait::node_digest_pair`] to convert each grafted
-/// position to the corresponding ops-space position via [`Graftable::leftmost_leaf`] and
-/// [`Graftable::subtree_root_position`], ensuring hash pre-images use ops-space positions for
-/// domain separation.
+/// [`HasherTrait::node_digest`], [`HasherTrait::node_digest_pair`], and
+/// [`HasherTrait::node_digests`] to convert each grafted position to the corresponding ops-space
+/// position via [`Graftable::leftmost_leaf`] and [`Graftable::subtree_root_position`], ensuring
+/// hash pre-images use ops-space positions for domain separation.
 #[derive(Clone)]
 pub(super) struct GraftedHasher<F: Graftable, H: HasherTrait<F>> {
     inner: H,
@@ -274,6 +274,30 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
                 right_right,
             ),
         ])
+    }
+
+    fn leaf_digests(&self, leaves: &[(Position<F>, &[u8])]) -> Vec<Self::Digest> {
+        leaves
+            .iter()
+            .map(|(pos, element)| self.leaf_digest(*pos, element))
+            .collect()
+    }
+
+    fn node_digests(
+        &self,
+        nodes: &[(Position<F>, Self::Digest, Self::Digest)],
+    ) -> Vec<Self::Digest> {
+        let nodes: Vec<_> = nodes
+            .iter()
+            .map(|&(pos, left, right)| {
+                (
+                    grafted_to_ops_pos::<F>(pos, self.grafting_height),
+                    left,
+                    right,
+                )
+            })
+            .collect();
+        self.inner.node_digests(&nodes)
     }
 }
 
@@ -412,6 +436,23 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
             self.node_digest(left_pos, left_left, left_right),
             self.node_digest(right_pos, right_left, right_right),
         )
+    }
+
+    fn leaf_digests(&self, leaves: &[(merkle::Position<F>, &[u8])]) -> Vec<H::Digest> {
+        leaves
+            .iter()
+            .map(|(pos, element)| self.leaf_digest(*pos, element))
+            .collect()
+    }
+
+    fn node_digests(
+        &self,
+        nodes: &[(merkle::Position<F>, H::Digest, H::Digest)],
+    ) -> Vec<H::Digest> {
+        nodes
+            .iter()
+            .map(|(pos, left, right)| self.node_digest(*pos, left, right))
+            .collect()
     }
 }
 
@@ -732,6 +773,121 @@ mod tests {
                 grafted.node_digest(right_pos, &c, &d),
             )
         );
+    }
+
+    #[test]
+    fn test_grafted_hasher_node_digests_match_node_digest() {
+        const GH: u32 = 2;
+        let a = Sha256::fill(0x01);
+        let b = Sha256::fill(0x02);
+        let c = Sha256::fill(0x03);
+        let d = Sha256::fill(0x04);
+
+        let grafted = GraftedHasher::<mmr::Family, _>::new(qmdb::hasher::<Sha256>(), GH);
+        let left_pos = mmr::Family::subtree_root_position(Location::new(0), 1);
+        let right_pos = mmr::Family::subtree_root_position(Location::new(2), 1);
+
+        let batched = grafted.node_digests(&[(left_pos, a, b), (right_pos, c, d)]);
+        assert_eq!(
+            batched,
+            [
+                grafted.node_digest(left_pos, &a, &b),
+                grafted.node_digest(right_pos, &c, &d),
+            ]
+        );
+    }
+
+    /// The grafted hasher's batch leaf method matches one leaf_digest call per leaf.
+    #[test]
+    fn test_grafted_hasher_leaf_digests_match_leaf_digest() {
+        const GH: u32 = 2;
+        let grafted = GraftedHasher::<mmr::Family, _>::new(qmdb::hasher::<Sha256>(), GH);
+        let elements = [[0x01; 32], [0x02; 32], [0x03; 32]];
+        let leaves: Vec<(Position, &[u8])> = elements
+            .iter()
+            .enumerate()
+            .map(|(i, element)| {
+                let pos = mmr::Family::location_to_position(Location::new(i as u64));
+                (pos, element.as_slice())
+            })
+            .collect();
+
+        let expected: Vec<_> = leaves
+            .iter()
+            .map(|&(pos, element)| grafted.leaf_digest(pos, element))
+            .collect();
+        assert_eq!(grafted.leaf_digests(&leaves), expected);
+    }
+
+    /// The verifier's batch methods match one single call per input, for nodes below, at, and
+    /// above the grafting height and for leaves.
+    #[test]
+    fn test_verifier_batches_match_single() {
+        const GH: u32 = 2;
+        let chunk: [u8; 1] = [0xAB];
+        let zero: [u8; 1] = [0x00];
+
+        // Chunk 0 is not supplied, chunk 1 is combined, chunk 2 is all-zero, and chunk 3 is
+        // pending.
+        let verifier = Verifier::<mmr::Family, Sha256>::new(GH, 1, vec![&chunk, &zero], 3);
+        let root =
+            |loc: u64, height: u32| mmr::Family::subtree_root_position(Location::new(loc), height);
+        let positions = [
+            root(0, 1),
+            root(6, 1),
+            root(0, GH),
+            root(4, GH),
+            root(8, GH),
+            root(12, GH),
+            root(0, GH + 1),
+            root(0, GH + 2),
+        ];
+        let nodes: Vec<_> = positions
+            .iter()
+            .enumerate()
+            .map(|(i, &pos)| {
+                let i = i as u8;
+                (pos, Sha256::fill(2 * i), Sha256::fill(2 * i + 1))
+            })
+            .collect();
+
+        // Hash the nodes in a batch and one at a time.
+        let expected: Vec<_> = nodes
+            .iter()
+            .map(|(pos, left, right)| verifier.node_digest(*pos, left, right))
+            .collect();
+        assert_eq!(verifier.node_digests(&nodes), expected);
+
+        // Only the node over chunk 1 differs from the standard node digest.
+        let standard = qmdb::hasher::<Sha256>();
+        let combined: Vec<bool> = nodes
+            .iter()
+            .zip(&expected)
+            .map(|((pos, left, right), digest)| {
+                *digest
+                    != <StandardHasher<Sha256> as HasherTrait<mmr::Family>>::node_digest(
+                        &standard, *pos, left, right,
+                    )
+            })
+            .collect();
+        assert_eq!(
+            combined,
+            [false, false, false, true, false, false, false, false]
+        );
+
+        // Hash leaves in a batch and one at a time.
+        let leaves: Vec<(Position, &[u8])> = [0u64, 1, 3]
+            .iter()
+            .map(|&loc| {
+                let pos = mmr::Family::location_to_position(Location::new(loc));
+                (pos, chunk.as_slice())
+            })
+            .collect();
+        let expected: Vec<_> = leaves
+            .iter()
+            .map(|&(pos, element)| verifier.leaf_digest(pos, element))
+            .collect();
+        assert_eq!(verifier.leaf_digests(&leaves), expected);
     }
 
     /// Convert an ops-tree position at the grafting height back to its chunk index.
