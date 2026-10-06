@@ -972,9 +972,8 @@ mod tests {
 
     /// Regression test for https://github.com/commonwarexyz/monorepo/pull/5153.
     ///
-    /// Once every mailbox is dropped, the engine must not spin on its closed
-    /// command channel: the runtime keeps running other tasks, and aborting the
-    /// engine completes.
+    /// Every `Mailbox` can be dropped while the engine runs. The engine must then
+    /// stop instead of polling its closed mailbox forever.
     #[test_traced]
     fn pr_5153_regression() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1000,12 +999,10 @@ mod tests {
             );
             let handle = engine.start(conn.0, conn.1);
 
-            // Give the engine a chance to observe that every mailbox is gone.
             drop(mailbox);
-            context.sleep(Duration::from_millis(100)).await;
-
-            handle.abort();
-            let _ = handle.await;
+            handle
+                .await
+                .expect("engine should stop once every mailbox is dropped");
         });
     }
 }

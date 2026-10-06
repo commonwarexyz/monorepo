@@ -130,7 +130,10 @@ where
                 debug!("context shutdown, stopping engine");
             },
             // Command from the mailbox
-            Some(command) = self.mailbox.recv() else break => match command {
+            Some(command) = self.mailbox.recv() else {
+                debug!("mailbox closed, stopping engine");
+                break;
+            } => match command {
                 Message::Send {
                     request,
                     recipients,
