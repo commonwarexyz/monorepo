@@ -707,6 +707,9 @@ impl msm::Lanes<LANES> for Backend {
     type Point = Point;
     type Affine = Affine;
 
+    // An eight-term group almost never has only zero digits, so the scan would not pay.
+    const SKIP_ZERO_GROUPS: bool = false;
+
     #[inline(always)]
     fn identity(self) -> Point {
         // SAFETY: Backend construction checks AVX-512F and AVX-512 IFMA support.

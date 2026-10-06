@@ -842,6 +842,8 @@ impl msm::Lanes<WIDTH> for Backend {
     type Point = Point;
     type Affine = [Regs; 3];
 
+    // Two-term groups with only zero digits, such as pairs of padding terms, are common enough
+    // to skip.
     const SKIP_ZERO_GROUPS: bool = true;
 
     #[inline(always)]

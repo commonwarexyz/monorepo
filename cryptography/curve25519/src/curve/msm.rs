@@ -5,9 +5,7 @@
 
 use super::{G, GAffine, GBackend, GVec};
 #[cfg(not(feature = "std"))]
-use alloc::vec;
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 /// Bucket filling, window recombination, and native lane dispatch for public scalar digits.
 pub trait Backend: GBackend + Send + Sync {
@@ -69,7 +67,7 @@ pub trait Lanes<const N: usize>: Copy {
     type Affine: Copy;
 
     /// Whether table construction should skip groups whose digits are all zero.
-    const SKIP_ZERO_GROUPS: bool = false;
+    const SKIP_ZERO_GROUPS: bool;
 
     /// Returns the identity in every lane.
     fn identity(self) -> Self::Point;

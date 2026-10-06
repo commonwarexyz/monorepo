@@ -650,17 +650,23 @@ commonware_macros::stability_scope!(BETA {
 
         /// Run an operation on strategy-provided tiles of `rows` rows over the same `len` columns.
         ///
-        /// `run` is called once with tiles that cover every `(row, column)` cell exactly once. Each
-        /// tile is one row over a contiguous range of columns, supplied in pieces and then finished
-        /// once. This suits several independent passes over the same input where finishing a tile
-        /// has a fixed cost (such as reducing per-tile state), so cutting a pass is costly.
-        /// `tile_cost` estimates that cost in cells. A serial run makes every row one tile. A
-        /// parallel run starts each worker on an equal share of the cells, taken row by row. A
-        /// worker that runs out takes the back half of the largest pending share while that half is
-        /// longer than `tile_cost`, so a row is only cut where the extra tile pays for itself.
-        /// When rows are too short for any cut to pay, workers share whole rows instead. When rows
-        /// differ in cost, order them so that consecutive rows mix cheap and expensive ones.
-        /// `rows * len` must not overflow `usize`.
+        /// `run` is called once with tiles that cover every `(row, column)` cell exactly once, so a
+        /// grid without cells has no tiles. Each tile is one row over a contiguous range of
+        /// columns, supplied in pieces and then finished once.
+        ///
+        /// This suits several independent passes over the same input where finishing a tile has a
+        /// fixed cost (such as reducing per-tile state), so cutting a pass is costly. `tile_cost`
+        /// estimates that cost in cells.
+        ///
+        /// A serial run makes every row one tile. A parallel run starts each worker on an equal
+        /// share of the cells, taken row by row. A worker that runs out takes the back half of the
+        /// largest pending share while that half is longer than `tile_cost`, so a row is only cut
+        /// where the extra tile pays for itself. When rows are too short for any cut to pay, shares
+        /// hold whole rows, and an idle worker can take half of any share, since moving whole rows
+        /// adds no tiles.
+        ///
+        /// When rows differ in cost, order them so that consecutive rows mix cheap and expensive
+        /// ones. `rows * len` must not overflow `usize`.
         ///
         /// `multiplier` estimates work per cell. Complete the operation, including result assembly,
         /// inside `run`. Both execution shapes must produce equivalent results. The default
@@ -2947,8 +2953,8 @@ mod test {
     #[test]
     fn run_tiles_cut_the_share_of_a_stalled_worker() {
         // Four equal shares of one row. The worker holding the first share stalls in its first
-        // piece until the others have filled every cell it may keep for itself: that piece, plus
-        // at most two tile costs that are not worth taking.
+        // piece until the others have filled every cell except those it may keep for itself: that
+        // piece, plus at most two tile costs that are not worth taking.
         let (len, tile_cost) = (4_000, 10);
         let filled = AtomicUsize::new(0);
         let tiles = manual_strategy(4).run_tiles(
