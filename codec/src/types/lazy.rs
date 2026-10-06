@@ -415,8 +415,8 @@ mod test {
             Bytes::from_static(b"hello"),
             7u32,
             Bytes::from_static(b"world"),
-        )
-            .encode();
+        );
+        let fields = fields.encode();
         let cfg = ((..).into(), (), (..).into());
         let lazy = Lazy::<(Bytes, u32, Bytes)>::deferred(&mut fields.clone(), cfg);
         let (first, scalar, second) = lazy.get().unwrap();

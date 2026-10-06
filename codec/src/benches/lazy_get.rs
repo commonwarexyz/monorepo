@@ -77,6 +77,7 @@ fn bench_shared<T: Read<Cfg = ()> + Encode + Sync + Send>(
 fn bench_lazy_get(c: &mut Criterion) {
     let encoded: Vec<Bytes> = (0..TXS as u64).map(|i| Tx::sample(i).encode()).collect();
     let shared = slices_of_one_buffer(&encoded);
+
     // Clone each private value once so every arm starts with a shared (non-promotable) handle.
     let private: Vec<Bytes> = encoded
         .iter()
@@ -130,6 +131,7 @@ fn bench_lazy_get_values(c: &mut Criterion) {
             memo: Bytes::from(vec![i as u8; 16]),
         }),
     );
+
     // A small fixed-size value, like a public key.
     bench_shared(
         c,
