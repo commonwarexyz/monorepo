@@ -92,7 +92,7 @@ use crate::{
         },
     },
     simplex::{Plan, types::Context},
-    types::{Epocher, Round},
+    types::{Epocher, Round, View},
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::{Digestible, certificate::Scheme};
@@ -610,6 +610,23 @@ where
                     },
                 };
                 parent_timer.observe(&runtime_context);
+
+                // Deferred verification votes before it checks that a block's parent field
+                // matches the parent named by its consensus context, so an uncertified
+                // handoff parent may be unlinked. Build only on a linked parent. The genesis
+                // parent has no context parent to match.
+                //
+                // The coding variant needs no such check: it fetches each parent by the
+                // commitment in its child's consensus context, and its ancestry stream ends
+                // at a fetched parent that does not match the child's link.
+                if parent_view != View::zero() && parent.parent() != parent.context().parent.1 {
+                    debug!(
+                        ?parent_commitment,
+                        reason = "parent does not link to its context parent",
+                        "skipping proposal"
+                    );
+                    return;
+                }
 
                 // Special case: If the parent block is the last block in the epoch,
                 // re-propose it as to not produce any blocks that will be cut out

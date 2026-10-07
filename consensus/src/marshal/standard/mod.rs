@@ -3743,6 +3743,83 @@ mod tests {
         }
     }
 
+    /// Deferred votes on a block before checking its parent link, so a pipelined
+    /// handoff can request a build on a parent whose link was never validated. The
+    /// build must only walk ancestry through the parent that the block's consensus
+    /// context names.
+    #[test_traced("WARN")]
+    fn test_deferred_handoff_rejects_unvalidated_parent_link() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            let genesis = make_raw_block(Sha256::hash(&[b""]), Height::zero(), 0);
+
+            // Both outgoing tips carry an authentic consensus context naming genesis.
+            // Only the second also links to genesis.
+            let tip_round = Round::new(Epoch::zero(), View::new(1));
+            let tip_context = Ctx {
+                round: tip_round,
+                leader: default_leader(),
+                parent: (View::zero(), genesis.digest()),
+            };
+            let forged = B::new::<Sha256>(
+                tip_context.clone(),
+                Sha256::hash(&[b"forged parent link"]),
+                Height::new(1),
+                100,
+            );
+            let linked = B::new::<Sha256>(tip_context, genesis.digest(), Height::new(1), 101);
+            for (label, tip, built) in [("forged", &forged, false), ("linked", &linked, true)] {
+                assert!(marshal.clone().verified(tip_round, tip.clone()).await);
+                let handoff_context = Ctx {
+                    round: Round::new(Epoch::zero(), View::new(2)),
+                    leader: me.clone(),
+                    parent: (View::new(1), tip.digest()),
+                };
+                let mut app = MockVerifyingApp::new().with_handoff_policy(HandoffPolicy::Prepare(
+                    HandoffPublication::AfterCertification,
+                ));
+                app.propose_result = Some(B::new::<Sha256>(
+                    handoff_context.clone(),
+                    tip.digest(),
+                    Height::new(2),
+                    200,
+                ));
+                let mut deferred = Wrapper::new(
+                    WrapperKind::Deferred,
+                    context.child(label),
+                    app,
+                    marshal.clone(),
+                );
+                let response = deferred.propose_handoff(handoff_context).await.await;
+                assert_eq!(
+                    response.is_ok(),
+                    built,
+                    "{label}: a handoff build must require a parent linked to its context"
+                );
+            }
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_verify_reproposal_validation() {
         for kind in wrapper_kinds() {
