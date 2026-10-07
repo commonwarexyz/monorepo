@@ -83,7 +83,7 @@ impl<P: PublicKey> SafeTip<P> {
         // Get the set of exiting validators.
         let mut exiting_vals = Vec::new();
         #[cfg_attr(
-            dylint_lib = "hash_iteration",
+            dylint_lib = "hash_order",
             expect(
                 hash_iteration,
                 reason = "each exiting tip resets to the default, so any order gives the same heaps"

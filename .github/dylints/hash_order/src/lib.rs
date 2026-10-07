@@ -47,7 +47,7 @@ declare_lint! {
     ///
     /// When the order cannot matter, keep the hash collection and expect the lint with the
     /// reason, for example
-    /// `#[cfg_attr(dylint_lib = "hash_iteration", expect(hash_iteration, reason = "..."))]`.
+    /// `#[cfg_attr(dylint_lib = "hash_order", expect(hash_iteration, reason = "..."))]`.
     ///
     /// The lint does not see traversals inside other code. `Debug` formatting, serde
     /// serialization, `Clone`, set operators, wrapper types that forward `IntoIterator`, and
@@ -101,7 +101,7 @@ declare_lint! {
     ///
     /// When no task can be waiting on the elements, keep the hash collection and expect the
     /// lint with the reason, for example
-    /// `#[cfg_attr(dylint_lib = "hash_iteration", expect(hash_drop, reason = "..."))]`.
+    /// `#[cfg_attr(dylint_lib = "hash_order", expect(hash_drop, reason = "..."))]`.
     ///
     /// Other `let` initializers are not reported, such as a call to another function, a `?`,
     /// block, or branch expression, or a wrapper as in `Arc::new(Mutex::new(HashMap::new()))`.

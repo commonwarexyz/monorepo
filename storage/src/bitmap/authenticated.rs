@@ -544,7 +544,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
 
         // Pre-hash dirty chunks into digests and update in the batch.
         #[cfg_attr(
-            dylint_lib = "hash_iteration",
+            dylint_lib = "hash_order",
             expect(
                 hash_iteration,
                 reason = "dirty chunks are distinct and their ancestors are sorted before hashing"

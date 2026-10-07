@@ -53,7 +53,7 @@ members = [
 exclude = [
     ".github/dylints/borrowed_child_context",
     ".github/dylints/child_attribute_name_conflict",
-    ".github/dylints/hash_iteration",
+    ".github/dylints/hash_order",
     ".github/dylints/implied_bounds",
     ".github/dylints/owned_span_parent",
     ".github/dylints/span_name_style",

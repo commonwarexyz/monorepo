@@ -62,7 +62,7 @@ struct Fields {
 
     // An expectation keeps a hash collection when no task can be waiting on its elements.
     #[cfg_attr(
-        dylint_lib = "hash_iteration",
+        dylint_lib = "hash_order",
         expect(hash_drop, reason = "every sender is removed before the map drops")
     )]
     expected: HashMap<u64, oneshot::Sender<()>>,
@@ -89,7 +89,7 @@ fn main() {
 
     // An expectation keeps a hash collection when no task can be waiting on its elements.
     #[cfg_attr(
-        dylint_lib = "hash_iteration",
+        dylint_lib = "hash_order",
         expect(hash_drop, reason = "every sender is removed before the map drops")
     )]
     let _expected: HashMap<u64, oneshot::Sender<()>> = HashMap::new();

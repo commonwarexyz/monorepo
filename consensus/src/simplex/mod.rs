@@ -4054,7 +4054,7 @@ mod tests {
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for faults in faulter.values() {
                         #[cfg_attr(
-                            dylint_lib = "hash_iteration",
+                            dylint_lib = "hash_order",
                             expect(hash_iteration, reason = "faults are counted or fail the test")
                         )]
                         for fault in faults.iter() {
@@ -5288,7 +5288,7 @@ mod tests {
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for faults in faulter.values() {
                         #[cfg_attr(
-                            dylint_lib = "hash_iteration",
+                            dylint_lib = "hash_order",
                             expect(hash_iteration, reason = "faults are counted or fail the test")
                         )]
                         for fault in faults.iter() {

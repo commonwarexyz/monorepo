@@ -478,7 +478,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hash_iteration"
+name = "hash_order"
 version = "0.0.1"
 dependencies = [
  "ahash",

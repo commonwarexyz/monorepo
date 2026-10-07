@@ -336,7 +336,7 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         self.free.extend_from_slice(&dropped);
         let slots = &self.slots;
         #[cfg_attr(
-            dylint_lib = "hash_iteration",
+            dylint_lib = "hash_order",
             expect(hash_iteration, reason = "the predicate only reads liveness set above")
         )]
         self.index.retain(|&mut slot| slots[slot].live);
@@ -1836,7 +1836,7 @@ mod tests {
             }
 
             #[cfg_attr(
-                dylint_lib = "hash_iteration",
+                dylint_lib = "hash_order",
                 expect(hash_iteration, reason = "the slots are collected into a set")
             )]
             let indexed: BTreeSet<_> = self.index.iter().copied().collect();
@@ -2485,7 +2485,7 @@ mod tests {
             assert_eq!(ghost.tail, previous);
             assert_eq!(actual, expected.iter().copied().collect::<Vec<_>>());
             #[cfg_attr(
-                dylint_lib = "hash_iteration",
+                dylint_lib = "hash_order",
                 expect(hash_iteration, reason = "the slots are collected into a set")
             )]
             let indexed: HashSet<_> = ghost.index.iter().copied().collect();

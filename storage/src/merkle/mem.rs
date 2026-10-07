@@ -454,7 +454,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
                 continue;
             }
             #[cfg_attr(
-                dylint_lib = "hash_iteration",
+                dylint_lib = "hash_order",
                 expect(hash_iteration, reason = "overwrites target distinct positions")
             )]
             for (&pos, &digest) in overwrites.iter() {
@@ -467,7 +467,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
 
         // Apply this batch's own data.
         #[cfg_attr(
-            dylint_lib = "hash_iteration",
+            dylint_lib = "hash_order",
             expect(hash_iteration, reason = "overwrites target distinct positions")
         )]
         for (&pos, &digest) in batch.overwrites.iter() {

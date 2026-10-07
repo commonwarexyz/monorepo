@@ -15,7 +15,7 @@ use std::{collections::HashMap, hash::Hash};
 const HASHMAP_TYPE: &str = "HashMap";
 
 #[cfg_attr(
-    dylint_lib = "hash_iteration",
+    dylint_lib = "hash_order",
     expect(hash_iteration, reason = "entries are sorted by key before encoding")
 )]
 impl<K: Ord + Write, V: Write, S> Write for HashMap<K, V, S> {
@@ -45,7 +45,7 @@ impl<K: Ord + Write, V: Write, S> Write for HashMap<K, V, S> {
 }
 
 #[cfg_attr(
-    dylint_lib = "hash_iteration",
+    dylint_lib = "hash_order",
     expect(hash_iteration, reason = "sizes are summed in any order")
 )]
 impl<K: EncodeSize, V: EncodeSize, S> EncodeSize for HashMap<K, V, S> {

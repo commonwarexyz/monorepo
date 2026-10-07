@@ -1,5 +1,5 @@
 [package]
-name = "hash_iteration"
+name = "hash_order"
 version = "0.0.1"
 description = "Reject hash-order iteration and hash-order drops of values that wake a task."
 edition = "2021"
@@ -20,7 +20,7 @@ rayon = "1.12.0"
 tokio = { version = "1.52.3", features = ["sync"] }
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dylint_lib, values("hash_iteration"))'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dylint_lib, values("hash_order"))'] }
 
 [package.metadata.rust-analyzer]
 rustc_private = true

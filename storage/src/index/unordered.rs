@@ -109,7 +109,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Visit every value held by the index (inline and overflow), in unspecified order.
     #[commonware_macros::stability(ALPHA)]
     #[cfg_attr(
-        dylint_lib = "hash_iteration",
+        dylint_lib = "hash_order",
         expect(
             hash_iteration,
             reason = "the visit order is unspecified and callers only aggregate"

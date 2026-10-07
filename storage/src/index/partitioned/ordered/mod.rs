@@ -385,7 +385,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 
         // Probe the spilled side-table by its (usually empty) key set rather than once per slot.
         #[cfg_attr(
-            dylint_lib = "hash_iteration",
+            dylint_lib = "hash_order",
             expect(hash_iteration, reason = "a range check has one result in any order")
         )]
         let empty = self.spilled.keys().all(|&p| p < lo || p >= lo + len);
@@ -402,7 +402,7 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         // Drain only the partitions that actually spilled (remapping local -> global), rather than
         // probing every slot in the range.
         #[cfg_attr(
-            dylint_lib = "hash_iteration",
+            dylint_lib = "hash_order",
             expect(hash_iteration, reason = "each drained entry moves to its own slot")
         )]
         for (local, inner) in worker.index.spilled.drain() {

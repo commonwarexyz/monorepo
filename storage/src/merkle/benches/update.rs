@@ -80,7 +80,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                 }
 
                                 #[cfg_attr(
-                                    dylint_lib = "hash_iteration",
+                                    dylint_lib = "hash_order",
                                     expect(
                                         hash_iteration,
                                         reason = "leaves are distinct and ancestors are sorted"

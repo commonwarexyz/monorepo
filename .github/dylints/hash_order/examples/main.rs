@@ -137,7 +137,7 @@ fn main() {
     // An expectation keeps a hash collection when the order cannot matter for a reason the
     // lint cannot see.
     #[cfg_attr(
-        dylint_lib = "hash_iteration",
+        dylint_lib = "hash_order",
         expect(hash_iteration, reason = "every value is overwritten")
     )]
     for value in map.values_mut() {

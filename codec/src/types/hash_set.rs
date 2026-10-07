@@ -15,7 +15,7 @@ use std::{collections::HashSet, hash::Hash};
 const HASHSET_TYPE: &str = "HashSet";
 
 #[cfg_attr(
-    dylint_lib = "hash_iteration",
+    dylint_lib = "hash_order",
     expect(hash_iteration, reason = "items are sorted before encoding")
 )]
 impl<K: Ord + Write, S> Write for HashSet<K, S> {
@@ -43,7 +43,7 @@ impl<K: Ord + Write, S> Write for HashSet<K, S> {
 }
 
 #[cfg_attr(
-    dylint_lib = "hash_iteration",
+    dylint_lib = "hash_order",
     expect(hash_iteration, reason = "sizes are summed in any order")
 )]
 impl<K: EncodeSize, S> EncodeSize for HashSet<K, S> {

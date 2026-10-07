@@ -2159,7 +2159,7 @@ mod tests {
             assert!(!round.add_network(sender.clone(), Vote::Finalize(finalize_b)));
             let faults = reporter.faults.lock();
             #[cfg_attr(
-                dylint_lib = "hash_iteration",
+                dylint_lib = "hash_order",
                 expect(hash_iteration, reason = "the predicate only matches the activity variant")
             )]
             let has_expected_fault = faults
@@ -7637,7 +7637,7 @@ mod tests {
             // Verify conflicting evidence was reported via faults
             let faults = reporter.faults.lock();
             #[cfg_attr(
-                dylint_lib = "hash_iteration",
+                dylint_lib = "hash_order",
                 expect(
                     hash_iteration,
                     reason = "callers pass predicates that only match the activity variant"

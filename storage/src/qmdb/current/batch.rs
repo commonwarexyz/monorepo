@@ -891,7 +891,7 @@ where
     //      their h=G ancestor in this batch. Their bitmap bytes may not be dirty (the chunk
     //      became graftable via ops growth alone) but they need a grafted-leaf entry now.
     #[cfg_attr(
-        dylint_lib = "hash_iteration",
+        dylint_lib = "hash_order",
         expect(hash_iteration, reason = "the indices are sorted below")
     )]
     let mut chunk_indices_to_update: Vec<usize> = overlay
