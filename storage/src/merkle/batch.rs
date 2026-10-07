@@ -112,10 +112,6 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
     buckets[h].push(pos);
 }
 
-// ---------------------------------------------------------------------------
-// UnmerkleizedBatch
-// ---------------------------------------------------------------------------
-
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
@@ -513,10 +509,6 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     (base_size, appended, overwrites)
 }
 
-// ---------------------------------------------------------------------------
-// MerkleizedBatch
-// ---------------------------------------------------------------------------
-
 /// A speculative batch whose dirty Merkle nodes have been computed, in contrast to
 /// [`UnmerkleizedBatch`].
 #[derive(Debug)]
@@ -715,10 +707,6 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
         Self::get_node(self, pos)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
