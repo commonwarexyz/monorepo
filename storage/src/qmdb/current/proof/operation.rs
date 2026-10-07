@@ -42,7 +42,6 @@ impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
         loc: Location<F>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
-        // Reject locations in pruned bitmap chunks
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }
@@ -79,7 +78,6 @@ impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
             plan.range().end == loc + 1,
             "operation proof plan must cover one location"
         );
-        // Reject locations in pruned bitmap chunks
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }

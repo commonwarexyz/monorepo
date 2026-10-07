@@ -936,6 +936,7 @@ impl<F: Family> Blueprint<F> {
             siblings,
             positions: _,
         } = plan;
+
         // `inactive_peaks` is a global boundary over the tree's peaks, not just the peaks before
         // this range. It may point into or beyond the proven range; reconstruction then folds the
         // same global boundary and the final root comparison rejects non-canonical proofs.
