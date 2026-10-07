@@ -587,7 +587,7 @@ mod tests {
             }
         }
 
-        fn decide(&mut self, entry: Entry<'_, F, Digest, Digest>) -> Decision<Digest> {
+        fn decide<'a>(&mut self, entry: Entry<'a, F, Digest, Digest>) -> Decision<'a, Digest> {
             match *self {
                 Self::Proportional => Proportional.decide(entry),
                 Self::Hold => Hold.decide(entry),
@@ -865,7 +865,7 @@ mod tests {
             Policy::<F, Digest, Digest>::limits(&self.rule, made_inactive)
         }
 
-        fn decide(&mut self, entry: Entry<'_, F, Digest, Digest>) -> Decision<Digest> {
+        fn decide<'a>(&mut self, entry: Entry<'a, F, Digest, Digest>) -> Decision<'a, Digest> {
             if let Rule::Seeded { seed, .. } = self.rule {
                 let choice = choose(seed, *entry.location(), entry.key());
                 self.choices[choice as usize].fetch_add(1, Ordering::Relaxed);

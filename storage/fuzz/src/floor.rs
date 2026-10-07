@@ -173,7 +173,7 @@ impl<F: Family, K: Clone + AsRef<[u8]>, V: Clone + AsRef<[u8]>> Policy<F, K, V> 
         }
     }
 
-    fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
+    fn decide<'a>(&mut self, entry: Entry<'a, F, K, V>) -> Decision<'a, V> {
         let location = *entry.location();
         let key = entry.key().clone();
         let value = entry.value().clone();

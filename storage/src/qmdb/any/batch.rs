@@ -3816,10 +3816,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide(
+        fn decide<'a>(
             &mut self,
-            entry: Entry<'_, mmr::Family, sha256::Digest, CountedValue>,
-        ) -> Decision<CountedValue> {
+            entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
+        ) -> Decision<'a, CountedValue> {
             self.decided.push((*entry.key(), entry.value().clones()));
             entry.keep()
         }
@@ -3906,10 +3906,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide(
+        fn decide<'a>(
             &mut self,
-            entry: Entry<'_, mmr::Family, sha256::Digest, CountedValue>,
-        ) -> Decision<CountedValue> {
+            entry: Entry<'a, mmr::Family, sha256::Digest, CountedValue>,
+        ) -> Decision<'a, CountedValue> {
             let location = entry.location();
             let key = *entry.key();
             let before = entry.value().clones();
@@ -4200,10 +4200,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide(
+        fn decide<'a>(
             &mut self,
-            entry: Entry<'_, mmr::Family, sha256::Digest, sha256::Digest>,
-        ) -> Decision<sha256::Digest> {
+            entry: Entry<'a, mmr::Family, sha256::Digest, sha256::Digest>,
+        ) -> Decision<'a, sha256::Digest> {
             self.decided += 1;
             entry.keep()
         }
@@ -8492,10 +8492,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide(
+        fn decide<'a>(
             &mut self,
-            entry: Entry<'_, mmr::Family, sha256::Digest, sha256::Digest>,
-        ) -> Decision<sha256::Digest> {
+            entry: Entry<'a, mmr::Family, sha256::Digest, sha256::Digest>,
+        ) -> Decision<'a, sha256::Digest> {
             self.visited.push(*entry.location());
             entry.keep()
         }
@@ -8598,10 +8598,10 @@ pub(crate) mod tests {
             }
         }
 
-        fn decide(
+        fn decide<'a>(
             &mut self,
-            entry: Entry<'_, mmr::Family, sha256::Digest, sha256::Digest>,
-        ) -> Decision<sha256::Digest> {
+            entry: Entry<'a, mmr::Family, sha256::Digest, sha256::Digest>,
+        ) -> Decision<'a, sha256::Digest> {
             let balance_held = held(entry.value());
             self.charged.push((*entry.key(), balance_held));
             match balance_held.checked_sub(self.rent) {

@@ -2849,10 +2849,10 @@ mod test {
                 }
             }
 
-            fn decide(
+            fn decide<'a>(
                 &mut self,
-                entry: Entry<'_, crate::mmr::Family, Digest, Vec<u8>>,
-            ) -> crate::qmdb::floor::Decision<Vec<u8>> {
+                entry: Entry<'a, crate::mmr::Family, Digest, Vec<u8>>,
+            ) -> crate::qmdb::floor::Decision<'a, Vec<u8>> {
                 self.decisions[self.action] += 1;
                 match self.action {
                     0 => entry.keep(),

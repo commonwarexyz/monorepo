@@ -91,7 +91,7 @@
 //!     fn limits(&self, _inactive: usize) -> Limits {
 //!         Limits { entries: 8, skips: 16 }
 //!     }
-//!     fn decide(&mut self, entry: Entry<'_, F, Key, Value>) -> Decision<Value> {
+//!     fn decide<'a>(&mut self, entry: Entry<'a, F, Key, Value>) -> Decision<'a, Value> {
 //!         if entry.value().expiry > self.now {
 //!             return entry.stop();
 //!         }
@@ -2530,7 +2530,7 @@ pub(crate) mod test {
             })
         }
 
-        fn decide(&mut self, entry: Entry<'_, F, Digest, Digest>) -> Decision<Digest> {
+        fn decide<'a>(&mut self, entry: Entry<'a, F, Digest, Digest>) -> Decision<'a, Digest> {
             self.visited
                 .push((entry.location(), *entry.key(), *entry.value()));
             match (self.decide)(entry.key()) {
