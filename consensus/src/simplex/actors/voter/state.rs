@@ -410,17 +410,11 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         self.create_round(view).set_leader(leader);
     }
 
-    /// Records `leader` for `view` if unset. This makes inheritance and early
-    /// handoff updates idempotent.
-    fn set_leader_once(&mut self, view: View, leader: Participant) {
-        if self.leader_is_set(view) {
-            return;
-        }
-        self.create_round(view).set_leader(leader);
-    }
-
     /// Copies the same-term stable leader into an optimistic successor.
     fn inherit_leader(&mut self, from: View, to: View) {
+        if self.leader_is_set(to) {
+            return;
+        }
         let Some(leader) = self
             .views
             .get(&from)
@@ -429,7 +423,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         else {
             return;
         };
-        self.set_leader_once(to, leader);
+        self.create_round(to).set_leader(leader);
     }
 
     /// Ensures a round exists for the given view.
@@ -999,39 +993,24 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// valid.
     ///
     /// Proposal construction is asynchronous, so parent evidence may change
-    /// while the automaton runs. The captured parent is accepted if it remains
-    /// preferred for the view or is still valid ancestry for the completed
-    /// proposal. Conflicting or invalidated ancestry is rejected.
+    /// while the automaton runs. Conflicting or invalidated ancestry is rejected.
     pub fn proposed(&mut self, context: &Context<D, S::PublicKey>, payload: D) -> bool {
-        let proposal = Proposal::new(context.round, context.parent.0, payload);
-
-        // Reject the captured parent only when it is neither preferred nor valid
-        // ancestry.
-        if !self
-            .find_parent(context.view())
-            .is_ok_and(|parent| parent == context.parent)
-            && !self.captured_parent_valid(context)
-        {
+        if !self.captured_parent_valid(context, self.find_parent(context.view())) {
             // The rejected build recorded nothing, so release the latch for a retry.
             if let Some(round) = self.views.get_mut(&context.view()) {
                 round.clear_proposal_request();
             }
             return false;
         }
-
-        // Record the proposal as locally verified after accepting its captured
-        // parent.
-        self.record_proposed(proposal)
+        self.record_proposed(Proposal::new(context.round, context.parent.0, payload))
     }
 
-    /// Releases a proposal's build latch when its captured ancestry is invalid
-    /// and a replacement parent is available. Returns whether the caller should
-    /// drop the pending receiver.
+    /// Releases a request's build latch when its captured parent is no longer
+    /// valid and a replacement parent is selectable. Returns whether the caller
+    /// should drop the pending request.
     pub fn supersede_proposal_request(&mut self, context: &Context<D, S::PublicKey>) -> bool {
-        let Ok(preferred) = self.find_parent(context.view()) else {
-            return false;
-        };
-        if preferred == context.parent || self.captured_parent_valid(context) {
+        let preferred = self.find_parent(context.view());
+        if preferred.is_err() || self.captured_parent_valid(context, preferred) {
             return false;
         }
         let Some(round) = self.views.get_mut(&context.view()) else {
@@ -1041,10 +1020,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         true
     }
 
-    /// Returns whether a captured parent remains valid ancestry independent of
-    /// the currently preferred parent.
-    fn captured_parent_valid(&self, context: &Context<D, S::PublicKey>) -> bool {
-        self.parent_payload_for(context.view(), context.parent.0) == Ok(context.parent.1)
+    /// Returns whether the parent captured by `context` is still usable for its view.
+    ///
+    /// It is usable if it matches `preferred`, the result of [`Self::find_parent`] for the
+    /// view, or if it is still valid ancestry for the view.
+    fn captured_parent_valid(
+        &self,
+        context: &Context<D, S::PublicKey>,
+        preferred: Result<(View, D), View>,
+    ) -> bool {
+        preferred == Ok(context.parent)
+            || self.parent_payload_for(context.view(), context.parent.0) == Ok(context.parent.1)
     }
 
     /// Records a proposal without applying ancestry checks.
@@ -1404,9 +1390,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     // contribute as ancestry. Verification and proposal go through
     // `ancestry_payload_for_child`, which picks the optimistic rule inside the
     // issuance window and the explicit rule outside it.
-    // `handoff_ancestry_payload` is the cross-term counterpart: what the
-    // outgoing term's final view may contribute to a pipelined-handoff
-    // proposal (`handoff_leader` and `is_handoff_parent` decide when it applies).
+    //
+    // `find_parent` adds the cross-term exception: a pipelined handoff may build
+    // on the outgoing term's final view (`is_handoff_parent` decides when).
     //
     // The `*_parent_ready` predicates answer whether a proposal's required
     // parent is settled enough to act on. Certification and finalization
@@ -1485,20 +1471,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             && self.highest_nullification_in_term(parent).is_none()
     }
 
-    /// Returns `parent`'s payload when a pipelined handoff may build on it.
-    /// The parent must satisfy [`Self::is_handoff_parent`] and have usable
-    /// optimistic ancestry.
-    ///
-    /// The [`Self::is_handoff_parent`] check runs first because
-    /// [`Self::optimistic_ancestry_payload`] serves a directly notarized
-    /// `parent` without consulting it.
-    fn handoff_ancestry_payload(&self, parent: View) -> Option<&D> {
-        if !self.is_handoff_parent(parent) {
-            return None;
-        }
-        self.optimistic_ancestry_payload(parent)
-    }
-
     /// Returns the payload of a parent usable as *optimistic* ancestry: a
     /// certificate-backed payload when one exists, otherwise our own verified,
     /// unequivocated, notarize-broadcast proposal; recursively, so the whole
@@ -1550,8 +1522,10 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// proposals. Same-term successors can be prepared when we sign a
     /// notarize vote or receive the leader's proposal.
     ///
-    /// At a term end, only our notarize vote may prepare the incoming leader
-    /// before the certificate exists.
+    /// At a term end, the incoming leader stamps itself once it has voted for the
+    /// outgoing view, so it can prepare a pipelined handoff before the certificate
+    /// that unlocks the term exists. Other validators learn the incoming leader from
+    /// that certificate.
     fn prepare_optimistic_successor(&mut self, view: View) {
         // Same-term successors inherit the current leader as soon as the
         // optimistic issuance window reaches them.
@@ -1561,9 +1535,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             return;
         }
 
-        // Crossing a term boundary requires our notarize vote for the outgoing
-        // view. Receiving its proposal is not enough to elect the incoming
-        // leader early.
+        // Before the outgoing view notarizes, a pipelined handoff can build only on
+        // our own vote (see [`Self::optimistic_ancestry_payload`]), so receiving the
+        // proposal is not enough. Its notarization elects the incoming leader instead.
         if !self
             .views
             .get(&view)
@@ -1571,9 +1545,12 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         {
             return;
         }
-
-        if let Some(leader) = self.handoff_leader(next) {
-            self.set_leader_once(next, leader);
+        if let Some(leader) = self
+            .handoff_leader(next)
+            .filter(|leader| self.is_me(*leader))
+            && !self.leader_is_set(next)
+        {
+            self.create_round(next).set_leader(leader);
         }
     }
 
@@ -1678,13 +1655,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
         // If there are any missing nullifications, return an error.
         // Any lower certified views would also result in an error.
-        // A pipelined handoff may still build on the outgoing term's final
-        // view before it certifies (see [`Self::handoff_ancestry_payload`]).
         if let Some(missing_view) = self.first_unnullified_view(candidate, view) {
+            // A pipelined handoff may build on the outgoing term's final view before
+            // it certifies. `optimistic_ancestry_payload` serves a directly notarized
+            // view without checking `is_handoff_parent`, so check it here.
             let parent = view
                 .previous()
                 .expect("non-genesis views must have a previous view");
-            if let Some(payload) = self.handoff_ancestry_payload(parent) {
+            if self.is_handoff_parent(parent)
+                && let Some(payload) = self.optimistic_ancestry_payload(parent)
+            {
                 return Ok((parent, *payload));
             }
             return Err(missing_view);
@@ -7580,8 +7560,10 @@ mod tests {
         });
     }
 
-    #[test]
-    fn pipelined_handoff_keeps_peer_verification_explicit() {
+    /// A validator other than the incoming leader verifies the pipelined proposal only
+    /// once the tip certifies, whether the proposal arrives before or after the tip's
+    /// notarization.
+    fn peer_verification_stays_explicit(proposal_first: bool) {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let (
@@ -7592,13 +7574,24 @@ mod tests {
             ) = setup_state_with_handoff(&mut context, 4, 1, 9, handoff_terms());
             let (_, tip) = prepare_term_boundary(&mut state, &verifier, &schemes);
 
-            // Only the incoming leader receives a handoff request.
+            // Only the incoming leader elects itself before the tip's certificate
+            // exists, so only it receives a handoff request.
+            assert_eq!(state.leader_index(View::new(6)), None);
             assert!(state.try_propose().is_none());
 
-            // A validator that receives the pipelined proposal early still
-            // waits for the tip's certification before verifying it.
+            // The validator learns the incoming leader from the tip's notarization, so a
+            // proposal that arrives first waits for it. Either way, the validator then
+            // requests the tip's certificate from any peer before verifying.
+            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
             let child = fetch_proposal(6, 5, 66);
-            assert!(state.set_proposal(View::new(6), child.clone()));
+            if proposal_first {
+                assert!(state.set_proposal(View::new(6), child.clone()));
+                assert!(matches!(state.try_verify(), Verify::Wait));
+                assert!(state.add_notarization(tip_notarization).0);
+            } else {
+                assert!(state.add_notarization(tip_notarization).0);
+                assert!(state.set_proposal(View::new(6), child.clone()));
+            }
             assert!(matches!(
                 state.try_verify(),
                 Verify::Resolve {
@@ -7612,8 +7605,6 @@ mod tests {
                         && target.is_none()
             ));
 
-            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
-            assert!(state.add_notarization(tip_notarization).0);
             assert!(state.certified(View::new(5), true).is_some());
             let Verify::Ready(ctx, proposal) = state.try_verify() else {
                 panic!("proposal should verify once the tip certifies");
@@ -7621,6 +7612,16 @@ mod tests {
             assert_eq!(ctx.parent, (View::new(5), tip.payload));
             assert_eq!(proposal, child);
         });
+    }
+
+    #[test]
+    fn pipelined_handoff_keeps_peer_verification_explicit() {
+        peer_verification_stays_explicit(false);
+    }
+
+    #[test]
+    fn pipelined_handoff_keeps_early_peer_proposal_explicit() {
+        peer_verification_stays_explicit(true);
     }
 
     #[test]

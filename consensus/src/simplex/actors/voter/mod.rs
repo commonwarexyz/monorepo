@@ -5238,8 +5238,9 @@ mod tests {
         });
     }
 
-    /// A follower requests a missing term-start parent certificate from any
-    /// validator because the pipelined proposer may not hold it yet.
+    /// A follower that entered a term start through a nullification of the outgoing
+    /// tip requests the tip's certificate from any validator, because a pipelined
+    /// proposer may not hold it.
     #[test_traced]
     fn test_pipelined_handoff_parent_repair_is_untargeted() {
         let n = 5;
@@ -5301,6 +5302,12 @@ mod tests {
                 &relay,
             )
             .await;
+
+            // The follower holds a nullification of the tip that the incoming
+            // leader built on, so it enters view 3 without the tip's certificate.
+            let (_, nullification_2) =
+                build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
+            mailbox.recovered(Certificate::Nullification(nullification_2));
 
             let proposal_3 = Proposal::new(
                 Round::new(epoch, View::new(3)),
