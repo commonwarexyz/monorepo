@@ -28,13 +28,13 @@ use crate::{
         Error,
         durability::Barrier,
         frame::{
-            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
+            FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
+            encode_frame_into, find_frame, read_frame_at,
         },
     },
 };
 use bytes::{Bytes, BytesMut};
-use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
     Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
@@ -1653,11 +1653,40 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::append].
-    pub(crate) async fn append(self: Box<Self>, item: &V) -> Result<(Box<Self>, u64), Error> {
+    pub(crate) async fn append(mut self: Box<Self>, item: &V) -> Result<(Box<Self>, u64), Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
-        self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
-            .await
+        if self.compression.is_some() {
+            return self
+                .append_many_inner(Many::Flat(std::slice::from_ref(item)))
+                .await;
+        }
+
+        let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
+        let frame = UncompressedFrame::new(item)?;
+        // Encode directly into the write buffer when the frame fits. Reuse its cached size
+        // when an owned buffer is required to flush or bypass the write buffer.
+        let offset = match self.blobs.try_append_value(&frame) {
+            Some(offset) => offset,
+            None => {
+                let (blobs, offset) = self.blobs.append_owned(frame.encode_mut().into()).await?;
+                self.blobs = blobs;
+                offset
+            }
+        };
+        let (offsets, position) = self.offsets.append(&offset).await?;
+        self.offsets = offsets;
+        assert_eq!(position, self.bounds.end);
+        self.bounds.end = new_size;
+        if new_size.is_multiple_of(self.items_per_blob.get()) {
+            self.blobs = self.blobs.seal_tail().await?;
+        }
+        self.metrics.update(
+            self.bounds.end,
+            self.bounds.start,
+            self.items_per_blob.get(),
+        );
+        Ok((self, position))
     }
 
     /// See [Journal::append_many].
@@ -4657,6 +4686,94 @@ mod tests {
             );
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_scalar_append_matches_batch_across_boundaries() {
+        deterministic::Runner::default().start(|context| async move {
+            let items: Vec<Vec<u8>> = [
+                0, 1, 100, 101, 127, 128, 1_024, 3, 4_096, 0, 15, 250, 128, 7, 128,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, len)| vec![i as u8; len])
+            .collect();
+            for capacity in [1, 256, 4_096] {
+                let scalar_cfg = Config {
+                    partition: format!("scalar-boundaries-{capacity}"),
+                    items_per_section: NZU64!(5),
+                    compression: None,
+                    codec_config: ((0..).into(), ()),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NonZeroUsize::new(capacity).unwrap(),
+                    replay_buffer: NZUsize!(256),
+                };
+                let mut batch_cfg = scalar_cfg.clone();
+                batch_cfg.partition = format!("batch-boundaries-{capacity}");
+                let mut scalar =
+                    Journal::<_, Vec<u8>>::init(context.child("scalar"), scalar_cfg.clone())
+                        .await
+                        .unwrap();
+                let mut batch =
+                    Journal::<_, Vec<u8>>::init(context.child("batch"), batch_cfg.clone())
+                        .await
+                        .unwrap();
+                for (index, item) in items.iter().enumerate() {
+                    let position;
+                    (scalar, position) = scalar.append(item).await.unwrap();
+                    assert_eq!(position, index as u64);
+                    (batch, _) = batch
+                        .append_many(Many::Flat(std::slice::from_ref(item)))
+                        .await
+                        .unwrap();
+                    assert_eq!(scalar.read(position).await.unwrap(), *item);
+                    if index % 3 == 2 {
+                        scalar = scalar.commit().await.unwrap();
+                        batch = batch.commit().await.unwrap();
+                    }
+                }
+                drop(scalar.sync().await.unwrap());
+                drop(batch.sync().await.unwrap());
+
+                // Scalar and batch paths retain identical framing, offsets, and page checksums.
+                for (left, right) in [
+                    (scalar_cfg.data_partition(), batch_cfg.data_partition()),
+                    (
+                        format!("{}-blobs", scalar_cfg.offsets_partition()),
+                        format!("{}-blobs", batch_cfg.offsets_partition()),
+                    ),
+                ] {
+                    let mut left_names = context.scan(&left).await.unwrap();
+                    let mut right_names = context.scan(&right).await.unwrap();
+                    left_names.sort();
+                    right_names.sort();
+                    assert_eq!(left_names, right_names);
+                    for name in left_names {
+                        let (left, left_len) = context.open(&left, &name).await.unwrap();
+                        let (right, right_len) = context.open(&right, &name).await.unwrap();
+                        assert_eq!(left_len, right_len);
+                        let left = left
+                            .read_at(0, left_len as usize, ReadOptions::default())
+                            .await
+                            .unwrap();
+                        let right = right
+                            .read_at(0, right_len as usize, ReadOptions::default())
+                            .await
+                            .unwrap();
+                        assert_eq!(left.coalesce().as_ref(), right.coalesce().as_ref());
+                    }
+                }
+
+                let scalar = Journal::<_, Vec<u8>>::init(context.child("reopen"), scalar_cfg)
+                    .await
+                    .unwrap();
+                assert_eq!(scalar.bounds(), 0..items.len() as u64);
+                for (index, item) in items.iter().enumerate() {
+                    assert_eq!(scalar.read(index as u64).await.unwrap(), *item);
+                }
+                scalar.destroy().await.unwrap();
+            }
         });
     }
 
