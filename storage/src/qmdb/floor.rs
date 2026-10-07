@@ -8,9 +8,9 @@
 //! Each inactive location the walk passes spends a skip, whether it holds a superseded update, a
 //! delete, or a commit. Each active update it reaches goes to [`Policy::decide`] as an
 //! [`Entry`]: keeping, replacing, or evicting it spends an entry and moves the floor one past it,
-//! while stopping spends nothing and ends the walk with the floor at the update. A policy that
-//! [keeps every entry](Policy::keeps) is not asked: the walk moves each reached update to the
-//! tip directly.
+//! while stopping spends nothing and ends the walk with the floor at the update. The walk applies
+//! the decisions of a policy that [never evicts](Policy::evicts) as it makes them, and the
+//! decisions of one that may once it ends.
 //!
 //! Unless the policy stops it, the walk ends in one of three ways. When its entries run out, the
 //! floor stays where the last decision left it, or where it was inherited if there were none.
@@ -52,9 +52,12 @@ pub struct Limits {
 ///
 /// [`Proportional`] is the policy for batches that need no custom rule.
 pub trait Policy<F: Family, K, V> {
-    /// Whether the policy keeps every entry. The walk then moves each reached update to the tip
-    /// without calling [`decide`](Self::decide).
-    fn keeps(&self) -> bool;
+    /// Whether [`decide`](Self::decide) may evict an entry.
+    ///
+    /// The walk applies the decisions of a policy that never evicts as it makes them. It collects
+    /// the decisions of one that may, so an ordered batch can repair the links its evictions
+    /// break once the walk ends.
+    fn evicts(&self) -> bool;
 
     /// How far the floor advances when the batch's writes made `made_inactive` operations
     /// inactive: one for each update they supersede and two for each delete.
@@ -89,8 +92,8 @@ pub trait Policy<F: Family, K, V> {
 /// struct Evict;
 ///
 /// impl<F: Family> Policy<F, u64, u64> for Evict {
-///     fn keeps(&self) -> bool {
-///         false
+///     fn evicts(&self) -> bool {
+///         true
 ///     }
 ///
 ///     fn limits(&self, _inactive: usize) -> Limits {
@@ -286,8 +289,8 @@ impl<F: Family> Walk<F> {
 pub struct Proportional;
 
 impl<F: Family, K, V> Policy<F, K, V> for Proportional {
-    fn keeps(&self) -> bool {
-        true
+    fn evicts(&self) -> bool {
+        false
     }
 
     /// One entry per operation the batch made inactive and one for its previous commit, with
@@ -300,7 +303,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Proportional {
         }
     }
 
-    /// Not called: the walk keeps every entry.
+    /// Keeps the entry.
     fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         entry.keep()
     }
@@ -312,7 +315,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Proportional {
 pub struct Hold;
 
 impl<F: Family, K, V> Policy<F, K, V> for Hold {
-    fn keeps(&self) -> bool {
+    fn evicts(&self) -> bool {
         false
     }
 
@@ -339,8 +342,8 @@ pub struct Compact {
 }
 
 impl<F: Family, K, V> Policy<F, K, V> for Compact {
-    fn keeps(&self) -> bool {
-        true
+    fn evicts(&self) -> bool {
+        false
     }
 
     fn limits(&self, _: usize) -> Limits {
@@ -350,7 +353,7 @@ impl<F: Family, K, V> Policy<F, K, V> for Compact {
         }
     }
 
-    /// Not called: the walk keeps every entry.
+    /// Keeps the entry.
     fn decide(&mut self, entry: Entry<'_, F, K, V>) -> Decision<V> {
         entry.keep()
     }

@@ -85,8 +85,8 @@
 //!     expired: Vec<(Key, Value)>,
 //! }
 //! impl<F: Family> Policy<F, Key, Value> for Expire {
-//!     fn keeps(&self) -> bool {
-//!         false
+//!     fn evicts(&self) -> bool {
+//!         true
 //!     }
 //!     fn limits(&self, _inactive: usize) -> Limits {
 //!         Limits { entries: 8, skips: 16 }
@@ -2504,8 +2504,7 @@ pub(crate) mod test {
             }
         }
 
-        /// Return a policy with proportional limits that keeps every entry. The walk never calls
-        /// its `decide`.
+        /// Return a policy with proportional limits whose `decide` must keep every entry.
         pub(crate) const fn proportional(decide: D) -> Self {
             Self {
                 limits: None,
@@ -2521,8 +2520,8 @@ pub(crate) mod test {
     }
 
     impl<F: Family, D: FnMut(&Digest) -> Choice> Policy<F, Digest, Digest> for Script<F, D> {
-        fn keeps(&self) -> bool {
-            self.limits.is_none()
+        fn evicts(&self) -> bool {
+            self.limits.is_some()
         }
 
         fn limits(&self, made_inactive: usize) -> Limits {
@@ -3492,9 +3491,7 @@ pub(crate) mod test {
 
         // The three policies append the same operations under the same floor and root.
         let built = build(db, start(), writes).await;
-        let mut policy = Script::proportional(|_: &Digest| -> Choice {
-            unreachable!("decided under proportional limits")
-        });
+        let mut policy = Script::proportional(|_: &Digest| Choice::Keep);
         let proportional = with().merkleize(db, None, &mut policy).await.unwrap();
         assert_same(db, &built, &proportional);
         let mut policy = Compact {

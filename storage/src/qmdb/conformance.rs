@@ -570,8 +570,8 @@ mod tests {
     }
 
     impl<F: Family> Policy<F, Digest, Digest> for Rule {
-        fn keeps(&self) -> bool {
-            matches!(self, Self::Proportional | Self::Compact { .. })
+        fn evicts(&self) -> bool {
+            matches!(self, Self::Seeded { .. })
         }
 
         fn limits(&self, made_inactive: usize) -> Limits {
@@ -850,8 +850,8 @@ mod tests {
     }
 
     impl<F: Family> Policy<F, Digest, Digest> for Counted<'_> {
-        fn keeps(&self) -> bool {
-            Policy::<F, Digest, Digest>::keeps(&self.rule)
+        fn evicts(&self) -> bool {
+            Policy::<F, Digest, Digest>::evicts(&self.rule)
         }
 
         fn limits(&self, made_inactive: usize) -> Limits {

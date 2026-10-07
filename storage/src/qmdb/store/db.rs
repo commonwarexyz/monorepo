@@ -628,10 +628,9 @@ where
         Ok((self, start_loc..end_loc))
     }
 
-    /// Advance `walk` over the active updates below its end, keeping each one when `policy`
-    /// keeps every entry and deciding it with `policy` otherwise. Each decision applies at once:
-    /// the snapshot, the bitmap, and the key count change with it, and the update it writes or
-    /// the delete it appends joins `ops`.
+    /// Advance `walk` over the active updates below its end, deciding each one with `policy`.
+    /// Each decision applies at once: the snapshot, the bitmap, and the key count change with it,
+    /// and the update it writes or the delete it appends joins `ops`.
     ///
     /// `ops` holds the unappended operations starting at `log.size()`, and the bitmap covers them
     /// with the previous commit inactive.
@@ -650,7 +649,6 @@ where
         // decides them all. Candidates in the batch's own region already have their operations
         // in memory.
         let start = self.log.size();
-        let keeps = policy.keeps();
         let mut candidates = Vec::<u64>::with_capacity(walk.entries.min(self.active_keys));
         fill_from(
             &self.bitmap,
@@ -677,13 +675,9 @@ where
                 unreachable!("active candidate must be an update");
             };
             let new_loc = Location::new(start + Widen::widen(ops.len()));
-            let action = if keeps {
-                Action::Write(value)
-            } else {
-                policy
-                    .decide(Entry::new(Location::new(loc), &key, value))
-                    .into_action()
-            };
+            let action = policy
+                .decide(Entry::new(Location::new(loc), &key, value))
+                .into_action();
             let op = match action {
                 Action::Write(value) => {
                     update_known_loc(&mut self.snapshot, &key, Location::new(loc), new_loc);
@@ -1761,9 +1755,7 @@ mod test {
                 .map(|&(i, value)| (seed[i].0, value.map(digest)))
                 .collect();
             let (db, r) = if scripted {
-                let mut policy = Script::proportional(|_: &sha256::Digest| -> Choice {
-                    unreachable!("decided under proportional limits")
-                });
+                let mut policy = Script::proportional(|_: &sha256::Digest| Choice::Keep);
                 apply(db, writes.clone(), &mut policy).await
             } else {
                 apply(db, writes.clone(), &mut Proportional).await
@@ -2825,8 +2817,8 @@ mod test {
         }
 
         impl Policy<crate::mmr::Family, Digest, Vec<u8>> for BitmapPolicy<'_> {
-            fn keeps(&self) -> bool {
-                false
+            fn evicts(&self) -> bool {
+                true
             }
 
             fn limits(&self, _: usize) -> Limits {

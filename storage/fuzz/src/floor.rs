@@ -158,9 +158,8 @@ fn script_index(salt: u8, key: &[u8], value: &[u8]) -> usize {
 }
 
 impl<F: Family, K: Clone + AsRef<[u8]>, V: Clone + AsRef<[u8]>> Policy<F, K, V> for Recorder<K, V> {
-    /// Only a proportional plan keeps every entry: a compact plan records each keep instead.
-    fn keeps(&self) -> bool {
-        matches!(self.plan, Plan::Proportional)
+    fn evicts(&self) -> bool {
+        matches!(self.plan, Plan::Scripted { .. })
     }
 
     fn limits(&self, made_inactive: usize) -> Limits {
@@ -179,9 +178,11 @@ impl<F: Family, K: Clone + AsRef<[u8]>, V: Clone + AsRef<[u8]>> Policy<F, K, V> 
         let key = entry.key().clone();
         let value = entry.value().clone();
         let (outcome, decision) = match self.plan {
-            Plan::Proportional | Plan::Hold => {
-                panic!("{:?} limits must never reach decide", self.plan)
-            }
+            Plan::Proportional => (
+                Outcome::Keep,
+                Policy::<F, K, V>::decide(&mut Proportional, entry),
+            ),
+            Plan::Hold => panic!("{:?} limits must never reach decide", self.plan),
             Plan::Compact { entries, skips } => {
                 let mut compact = Compact {
                     entries: entries.entries(),

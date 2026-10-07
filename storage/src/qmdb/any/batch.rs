@@ -1176,8 +1176,8 @@ where
     /// `walked.ops` under the limits `policy` sets for the writes, returning the floor it reached
     /// and the decisions it collected in ascending location order.
     ///
-    /// A policy that keeps every entry moves each active update the walk reaches to the tip at
-    /// once. Otherwise `policy` decides each one and the decisions wait for the caller to emit
+    /// `policy` decides each active update the walk reaches. The walk applies the decisions of a
+    /// policy that never evicts as it makes them. Otherwise they wait for the caller to emit
     /// them: an ordered batch folds the link repairs its evictions require into the updates it
     /// emits, and an unordered batch emits them as they are. An empty state has no active
     /// update, so the walk does not run.
@@ -1231,11 +1231,11 @@ where
         let made_inactive = usize::try_from(walked.ops.len() as isize - walked.active_keys_delta)
             .expect("a batch creates at most one key per write");
         let Limits { entries, skips } = policy.limits(made_inactive);
-        let keeps = policy.keeps();
+        let evicts = policy.evicts();
         let tip = self.base_state.size + Widen::widen(walked.ops.len());
         let mut walk = Walk::new(self.base_inactivity_floor_loc, tip, entries, skips);
         let strategy = db.strategy();
-        if keeps {
+        if !evicts {
             // The walk appends at most one moved op per entry or active key, plus the CommitFloor.
             let moves = entries.min(active_keys);
             walked.ops.reserve(moves + 1);
@@ -1309,7 +1309,7 @@ where
 
             // The round decides at most its candidates, the remaining entries, and the active
             // keys not yet decided.
-            if !keeps {
+            if evicts {
                 decided.reserve(
                     round
                         .candidates
@@ -1335,11 +1335,10 @@ where
                 let Operation::Update(update) = op else {
                     unreachable!("active operations are updates")
                 };
-                if keeps {
-                    self.relocate(walked, update, mv);
-                } else {
-                    let (key, value, cached) = update.into_parts();
-                    let value = match policy.decide(Entry::new(loc, &key, value)).into_action() {
+                let (key, value, cached) = update.into_parts();
+                let action = policy.decide(Entry::new(loc, &key, value)).into_action();
+                if evicts {
+                    let value = match action {
                         Action::Write(value) => Some(value),
                         Action::Evict => None,
                         Action::Stop => break 'walk,
@@ -1350,6 +1349,14 @@ where
                         mv,
                         value,
                     });
+                } else {
+                    match action {
+                        Action::Write(value) => {
+                            self.relocate(walked, U::from_parts(key, value, cached), mv)
+                        }
+                        Action::Stop => break 'walk,
+                        Action::Evict => unreachable!("a policy that never evicts returned Evict"),
+                    }
                 }
                 walk.decide();
                 if walk.entries == 0 {
@@ -3898,8 +3905,8 @@ pub(crate) mod tests {
     }
 
     impl Policy<mmr::Family, sha256::Digest, CountedValue> for Probe {
-        fn keeps(&self) -> bool {
-            false
+        fn evicts(&self) -> bool {
+            true
         }
 
         fn limits(&self, _: usize) -> Limits {
@@ -3988,8 +3995,8 @@ pub(crate) mod tests {
     }
 
     impl Policy<mmr::Family, sha256::Digest, CountedValue> for Evict {
-        fn keeps(&self) -> bool {
-            false
+        fn evicts(&self) -> bool {
+            true
         }
 
         fn limits(&self, _: usize) -> Limits {
@@ -4279,7 +4286,7 @@ pub(crate) mod tests {
     }
 
     impl Policy<mmr::Family, sha256::Digest, sha256::Digest> for Growing {
-        fn keeps(&self) -> bool {
+        fn evicts(&self) -> bool {
             false
         }
 
@@ -8574,7 +8581,7 @@ pub(crate) mod tests {
     }
 
     impl Policy<mmr::Family, sha256::Digest, sha256::Digest> for Shrinking {
-        fn keeps(&self) -> bool {
+        fn evicts(&self) -> bool {
             false
         }
 
@@ -8655,6 +8662,153 @@ pub(crate) mod tests {
             assert_eq!(staged.root(), direct.root());
             drop((staged, direct, parent));
             db.destroy().await.unwrap();
+        });
+    }
+
+    fn balance(n: u64) -> sha256::Digest {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&n.to_be_bytes());
+        sha256::Digest::from(bytes)
+    }
+
+    fn held(value: &sha256::Digest) -> u64 {
+        u64::from_be_bytes(value.as_ref()[..8].try_into().unwrap())
+    }
+
+    /// Charges `rent` to each active update it walks, which holds a key the database keeps around
+    /// without a recent write. A balance that covers the rent is replaced by the remainder. One
+    /// that does not is evicted, or zeroed by a policy that only debits.
+    struct Rent {
+        rent: u64,
+        entries: usize,
+        evicts: bool,
+        /// Each charged key with the balance it held.
+        charged: Vec<(sha256::Digest, u64)>,
+    }
+
+    impl Policy<mmr::Family, sha256::Digest, sha256::Digest> for Rent {
+        fn evicts(&self) -> bool {
+            self.evicts
+        }
+
+        fn limits(&self, _: usize) -> Limits {
+            Limits {
+                entries: self.entries,
+                skips: u64::MAX,
+            }
+        }
+
+        fn decide(
+            &mut self,
+            entry: Entry<'_, mmr::Family, sha256::Digest, sha256::Digest>,
+        ) -> Decision<sha256::Digest> {
+            let balance_held = held(entry.value());
+            self.charged.push((*entry.key(), balance_held));
+            match balance_held.checked_sub(self.rent) {
+                Some(left) => entry.replace(balance(left)),
+                None if self.evicts => entry.evict().0,
+                None => entry.replace(balance(0)),
+            }
+        }
+    }
+
+    /// A rent policy charges the keys the database keeps around without recent writes: each
+    /// batch walks the oldest live updates first, so its entries land on the keys written longest
+    /// ago, and a charged key moves to the tip behind the untouched ones. Evicting the broke keys
+    /// takes the deferred path; zeroing them takes the direct one.
+    async fn rent_charges_untouched_keys<D>(db: D, evicts: bool)
+    where
+        D: DbAny<mmr::Family, Key = sha256::Digest, Value = sha256::Digest>,
+    {
+        let keys = distinct(5);
+        let seed = keys
+            .iter()
+            .zip([12, 3, 7, 0, 20])
+            .fold(db.new_batch(), |batch, (key, balance_held)| {
+                batch.write(*key, Some(balance(balance_held)))
+            })
+            .merkleize(&db, None, &mut Hold)
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let broke = if evicts { None } else { Some(balance(0)) };
+
+        // The first batch charges the three oldest keys.
+        let mut rent = Rent {
+            rent: 5,
+            entries: 3,
+            evicts,
+            charged: Vec::new(),
+        };
+        let batch = db
+            .new_batch()
+            .merkleize(&db, None, &mut rent)
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        assert_eq!(rent.charged, [(keys[0], 12), (keys[1], 3), (keys[2], 7)]);
+        for (key, expected) in keys.iter().zip([
+            Some(balance(7)),
+            broke,
+            Some(balance(2)),
+            Some(balance(0)),
+            Some(balance(20)),
+        ]) {
+            assert_eq!(db.get(key).await.unwrap(), expected, "after one charge");
+        }
+
+        // The second batch reaches the two keys it has not charged before the charged ones,
+        // which the first walk moved to the tip.
+        let mut rent = Rent {
+            rent: 5,
+            entries: 3,
+            evicts,
+            charged: Vec::new(),
+        };
+        let batch = db
+            .new_batch()
+            .merkleize(&db, None, &mut rent)
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        assert_eq!(rent.charged, [(keys[3], 0), (keys[4], 20), (keys[0], 7)]);
+        for (key, expected) in keys.iter().zip([
+            Some(balance(2)),
+            broke,
+            Some(balance(2)),
+            broke,
+            Some(balance(15)),
+        ]) {
+            assert_eq!(db.get(key).await.unwrap(), expected, "after two charges");
+        }
+        db.destroy().await.unwrap();
+    }
+
+    /// [`rent_charges_untouched_keys`] on an unordered Any database.
+    #[rstest::rstest]
+    #[case::evicting(true)]
+    #[case::debiting(false)]
+    fn rent_charges_untouched_keys_unordered(#[case] evicts: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("rent", &context);
+            let db = AnyUnordered::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            rent_charges_untouched_keys(db, evicts).await;
+        });
+    }
+
+    /// [`rent_charges_untouched_keys`] on an ordered Any database, whose evictions relink neighbors.
+    #[rstest::rstest]
+    #[case::evicting(true)]
+    #[case::debiting(false)]
+    fn rent_charges_untouched_keys_ordered(#[case] evicts: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_db_config::<OneCap>("rent", &context);
+            let db = AnyOrdered::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            rent_charges_untouched_keys(db, evicts).await;
         });
     }
 }
