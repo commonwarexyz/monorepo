@@ -267,7 +267,7 @@ pub trait TestHarness: 'static + Sized {
     /// The application block type.
     /// Note: We require `Digestible<Digest = D>` so generic test functions can use
     /// `subscribe_by_digest` which expects the block's digest type.
-    type ApplicationBlock: crate::Block + Digestible<Digest = D> + Clone + Send + 'static;
+    type ApplicationBlock: crate::Block + Digestible<Digest = D>;
 
     /// The marshal variant type.
     type Variant: crate::marshal::core::Variant<

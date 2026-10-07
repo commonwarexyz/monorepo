@@ -522,7 +522,7 @@ fn complete<M>(
     idle: Duration,
 ) -> (Option<Info>, deterministic::Checkpoint)
 where
-    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit> + Clone,
+    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit>,
 {
     let runner = deterministic::Runner::timed(Duration::from_secs(120));
     runner.start_and_recover({
@@ -556,7 +556,7 @@ fn restart<M>(
     + 'static,
 ) -> (Option<Info>, bool, deterministic::Checkpoint)
 where
-    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit> + Clone,
+    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit>,
 {
     let runner = deterministic::Runner::from(checkpoint);
     let engine = engine.clone();
@@ -735,7 +735,7 @@ fn boot<M>(
     mut channels: Vec<ChannelPair<ed25519::PublicKey>>,
 ) -> (Handle<()>, oneshot::Receiver<bootstrap::Completion<MinPk>>)
 where
-    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit> + Clone,
+    M: crate::dkg::network::Manager<PublicKey = ed25519::PublicKey, Directory = Unit>,
 {
     let public_key = engine.participant(0);
     let bootstrap = bootstrap::Engine::<_, MinPk, _, _, _, _, _>::new(

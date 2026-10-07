@@ -194,7 +194,7 @@ pub struct Output<P> {
     revealed: Set<P>,
 }
 
-impl<P: Ord + Clone> Output<P> {
+impl<P: Clone> Output<P> {
     /// Construct a round output.
     ///
     /// Assumes the caller has already validated participant counts via
@@ -216,7 +216,9 @@ impl<P: Ord + Clone> Output<P> {
             revealed: players,
         }
     }
+}
 
+impl<P> Output<P> {
     /// Return the authoritative quorum for this round, i.e. the number of
     /// players needed to reconstruct the key.
     ///
@@ -267,7 +269,7 @@ impl<P: EncodeSize> EncodeSize for Output<P> {
     }
 }
 
-impl<P: Read<Cfg = ()> + Ord + Clone> Read for Output<P> {
+impl<P: Read<Cfg = ()> + Ord> Read for Output<P> {
     type Cfg = (NonZeroU32, ModeVersion);
 
     fn read_cfg(

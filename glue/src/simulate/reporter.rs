@@ -8,7 +8,7 @@
 use super::tracker::FinalizationUpdate;
 use commonware_actor::Feedback;
 use commonware_consensus::{Block, Reporter, marshal::Update};
-use commonware_cryptography::{Digest, Digestible, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_utils::channel::mpsc;
 
 /// Wraps another [`Reporter`] and forwards marshal [`Update`]
@@ -41,8 +41,7 @@ impl<P: PublicKey, R> MonitorReporter<P, R> {
 impl<P, B, R> Reporter for MonitorReporter<P, R>
 where
     P: PublicKey,
-    B: Block + Digestible,
-    <B as Digestible>::Digest: Digest,
+    B: Block,
     R: Reporter<Activity = Update<B>>,
 {
     type Activity = Update<B>;
