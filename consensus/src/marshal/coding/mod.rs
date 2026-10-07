@@ -64,8 +64,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, HandoffPolicy, HandoffProposal,
-        HandoffPublication, Heightable, Relay, Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Prepared,
+        Publication, Relay, Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -4989,10 +4989,10 @@ mod tests {
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
 
-            // A publication other than the first variant shows that the handoff
-            // forwards the application's permission.
-            let publication = HandoffPublication::AllowBeforeCertification;
-            let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Prepare(publication));
+            // Request `Early` rather than the conservative `Held` to show that the
+            // handoff forwards the application's permission.
+            let publication = Publication::Early;
+            let mock_app = mock_app.with_handoff(Handoff::Prepare(publication));
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -5005,11 +5005,11 @@ mod tests {
 
             // Handoff requests use the ordinary proposal reuse path.
             let decision = marshaled
-                .propose_handoff(ctx)
+                .prepare(ctx)
                 .await
                 .await
                 .expect("handoff proposal must return a decision");
-            let HandoffProposal::Proposed {
+            let Prepared::Proposed {
                 payload: commitment,
                 publication: forwarded,
             } = decision

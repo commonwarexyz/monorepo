@@ -74,8 +74,8 @@
 //!   than blocks they need AND can fetch).
 
 use crate::{
-    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, HandoffProposal,
-    Relay, Reporter,
+    Application, Automaton, CertifiableAutomaton, CertifiableBlock, Epochable, Prepared, Relay,
+    Reporter,
     marshal::{
         Update,
         application::{
@@ -867,14 +867,14 @@ where
     ES: Epocher,
 {
     #[allow(clippy::async_yields_async)]
-    #[tracing::instrument(name = "marshal.deferred.propose_handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn propose_handoff(
+    #[tracing::instrument(name = "marshal.deferred.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn prepare(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
-    ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
-        let policy = self.application.handoff_policy(&consensus_context);
+    ) -> oneshot::Receiver<Prepared<Self::Digest>> {
+        let policy = self.application.handoff(&consensus_context);
         let context = self.context.clone();
-        gates::propose_handoff(
+        gates::prepare(
             &*context,
             self,
             policy,

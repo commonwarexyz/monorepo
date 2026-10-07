@@ -14,7 +14,7 @@ use crate::{
 use arbitrary::Arbitrary;
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
-    HandoffPublication, Monitor, Viewable,
+    Monitor, Publication, Viewable,
     simplex::{
         Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
@@ -62,12 +62,9 @@ const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
-/// Honest handoff modes: defer every handoff, prepare and hold, or publish early.
-pub const HANDOFF_MODES: [Option<HandoffPublication>; 3] = [
-    None,
-    Some(HandoffPublication::AfterCertification),
-    Some(HandoffPublication::AllowBeforeCertification),
-];
+/// Honest handoff modes: stage every handoff, prepare and hold, or publish early.
+pub const HANDOFF_MODES: [Option<Publication>; 3] =
+    [None, Some(Publication::Held), Some(Publication::Early)];
 
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,7 +130,7 @@ pub struct FuzzInput {
     pub term_length: TermLength,
     pub optimistic_views: ViewDelta,
     pub heterogeneous_optimism: bool,
-    pub handoff: Option<HandoffPublication>,
+    pub handoff: Option<Publication>,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -387,7 +384,7 @@ fn spawn_honest_validator<
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
     optimistic_views: ViewDelta,
-    handoff: Option<HandoffPublication>,
+    handoff: Option<Publication>,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,

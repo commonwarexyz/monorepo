@@ -6,8 +6,8 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, HandoffPolicy,
-    Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Handoff, Reporter,
+    Viewable,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
@@ -182,8 +182,8 @@ where
 /// finalized blocks from marshal as a [`Reporter`]. If the actor stops before responding,
 /// `propose` returns `None` and `verify` panics.
 ///
-/// `handoff_policy` is answered from a retained clone of the application, including after the
-/// actor stops, so a [`HandoffPolicy::Prepare`] decision does not guarantee that the proposal
+/// `handoff` is answered from a retained clone of the application, including after the
+/// actor stops, so a [`Handoff::Prepare`] decision does not guarantee that the proposal
 /// can be built.
 pub struct Mailbox<E, A>
 where
@@ -283,8 +283,8 @@ where
         receiver.await.ok().flatten()
     }
 
-    fn handoff_policy(&self, context: &Self::Context) -> HandoffPolicy {
-        self.application.handoff_policy(context)
+    fn handoff(&self, context: &Self::Context) -> Handoff {
+        self.application.handoff(context)
     }
 
     async fn verify(

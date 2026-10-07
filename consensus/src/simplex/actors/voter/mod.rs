@@ -53,7 +53,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
-        HandoffProposal, HandoffPublication, Viewable,
+        Prepared, Publication, Viewable,
         simplex::{
             actors::{
                 batcher,
@@ -122,8 +122,8 @@ mod tests {
     type HandoffProposeResponses = Arc<
         Mutex<
             Vec<(
-                HandoffProposal<Sha256Digest>,
-                oneshot::Sender<HandoffProposal<Sha256Digest>>,
+                Prepared<Sha256Digest>,
+                oneshot::Sender<Prepared<Sha256Digest>>,
             )>,
         >,
     >;
@@ -288,8 +288,8 @@ mod tests {
         /// Whether the mock application drops proposal responses.
         drop_proposals: bool,
         /// Publication permission the mock application returns with handoff
-        /// proposals, or `None` to defer them until the parent certifies.
-        handoff: Option<HandoffPublication>,
+        /// proposals, or `None` to stage them until the parent certifies.
+        handoff: Option<Publication>,
         actor_handle: Option<Arc<Mutex<Option<commonware_runtime::Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
@@ -3983,7 +3983,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     local_index,
                     propose_latency_ms: 10.0,
-                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    handoff: Some(Publication::Early),
                     ..Default::default()
                 },
             )
@@ -4085,7 +4085,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     certifier,
-                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    handoff: Some(Publication::Early),
                     ..Default::default()
                 },
             )
@@ -4181,10 +4181,10 @@ mod tests {
         local_index: usize,
         parent: Proposal<Sha256Digest>,
         /// The candidate the mock built, forwarded unchanged by `respond`.
-        proposal: HandoffProposal<Sha256Digest>,
+        proposal: Prepared<Sha256Digest>,
         /// The candidate's payload, for observing relays and votes.
         digest: Sha256Digest,
-        response: Option<oneshot::Sender<HandoffProposal<Sha256Digest>>>,
+        response: Option<oneshot::Sender<Prepared<Sha256Digest>>>,
         certification_requests: CertificationRequests,
         pending_syncs: PendingSyncs,
         actor_handle: Arc<Mutex<Option<commonware_runtime::Handle<()>>>>,
@@ -4198,7 +4198,7 @@ mod tests {
     impl HandoffFixture {
         async fn new(
             context: &mut deterministic::Context,
-            handoff_publication: HandoffPublication,
+            handoff_publication: Publication,
         ) -> Self {
             let n = 5;
             let epoch = Epoch::new(333);
@@ -4270,7 +4270,7 @@ mod tests {
             )
             .await;
             let (proposal, response) = take_proposal_response(context, &handoff_responses).await;
-            let HandoffProposal::Proposed {
+            let Prepared::Proposed {
                 payload: digest,
                 publication,
             } = proposal
@@ -4304,12 +4304,12 @@ mod tests {
             quorum(self.schemes.len() as u32)
         }
 
-        /// Declines the pending handoff until the parent certifies.
-        fn defer(&mut self) {
+        /// Stages the pending handoff until the parent certifies.
+        fn stage(&mut self) {
             self.response
                 .take()
                 .expect("handoff response must be pending")
-                .send(HandoffProposal::AwaitCertification)
+                .send(Prepared::Stage)
                 .expect("handoff request must remain open");
         }
 
@@ -4343,7 +4343,7 @@ mod tests {
             assert_eq!(contexts.len(), 2);
             assert_eq!(
                 contexts[0], contexts[1],
-                "ordinary request must reuse the deferred context"
+                "ordinary request must reuse the captured context"
             );
             assert_eq!(contexts[1].parent, (View::new(2), self.parent.payload));
         }
@@ -4536,8 +4536,7 @@ mod tests {
     fn test_pipelined_handoff_build_before_certification() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
 
             fixture.respond();
@@ -4579,7 +4578,7 @@ mod tests {
     /// published once, after certification, for either permission.
     async fn certification_first_reuses_build(
         context: &mut deterministic::Context,
-        publication: HandoffPublication,
+        publication: Publication,
     ) {
         let mut fixture = HandoffFixture::new(context, publication).await;
         let mut relayed = fixture.observer();
@@ -4614,8 +4613,7 @@ mod tests {
     fn test_pipelined_handoff_certification_before_build() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            certification_first_reuses_build(&mut context, HandoffPublication::AfterCertification)
-                .await;
+            certification_first_reuses_build(&mut context, Publication::Held).await;
         });
     }
 
@@ -4623,11 +4621,7 @@ mod tests {
     fn test_pipelined_handoff_permitted_early_publication_finishes_after_certification() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            certification_first_reuses_build(
-                &mut context,
-                HandoffPublication::AllowBeforeCertification,
-            )
-            .await;
+            certification_first_reuses_build(&mut context, Publication::Early).await;
         });
     }
 
@@ -4636,8 +4630,7 @@ mod tests {
     fn test_pipelined_handoff_held_build_released_by_parent_finalization() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
@@ -4673,17 +4666,16 @@ mod tests {
         });
     }
 
-    /// An already deferred request starts its ordinary build before the parent
+    /// An already staged request starts its ordinary build before the parent
     /// sync completes, but its response cannot publish the child yet.
     #[test_traced]
-    fn test_pipelined_handoff_deferred_build_overlaps_certification_sync() {
+    fn test_pipelined_handoff_staged_build_overlaps_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
-            fixture.defer();
-            wait_for_handoff_event(&context, "Deferred").await;
+            fixture.stage();
+            wait_for_handoff_event(&context, "Staged").await;
             let certified = fixture.certify_parent(&context).await;
 
             let release = fixture.block_certification(certified).await;
@@ -4724,24 +4716,23 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Deferred", 1), ("Requested", 1)],
+                &[("Staged", 1), ("Requested", 1)],
                 &[],
             );
         });
     }
 
-    /// A deferral that arrives while the parent's certification sync is blocked
+    /// A Stage response that arrives while the parent's certification sync is blocked
     /// is not consumed until the loop resumes; it then dispatches its ordinary
     /// replacement.
     #[test_traced]
-    fn test_pipelined_handoff_deferred_response_during_certification_sync() {
+    fn test_pipelined_handoff_stage_response_during_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let certified = fixture.certify_parent(&context).await;
             let release = fixture.block_certification(certified).await;
-            fixture.defer();
+            fixture.stage();
             context.sleep(Duration::from_millis(50)).await;
             assert_eq!(fixture.requests_for(View::new(3)), 1);
             assert_handoff_metrics(
@@ -4758,45 +4749,44 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Deferred", 1), ("Requested", 1)],
+                &[("Staged", 1), ("Requested", 1)],
                 &[],
             );
         });
     }
 
-    /// A late deferral after durable parent certification needs no further
+    /// A late Stage response after durable parent certification needs no further
     /// parent event to dispatch its ordinary replacement.
     #[test_traced]
-    fn test_pipelined_handoff_deferred_response_after_certification_sync() {
+    fn test_pipelined_handoff_stage_response_after_certification_sync() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let certified = fixture.certify_parent(&context).await;
             fixture.finish_certification(certified).await;
             assert_eq!(fixture.requests_for(View::new(3)), 1);
-            fixture.defer();
+            fixture.stage();
             fixture.wait_for_replacement(&context).await;
             context.sleep(Duration::from_millis(50)).await;
             assert_eq!(fixture.requests_for(View::new(3)), 2);
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Deferred", 1), ("Requested", 1)],
+                &[("Staged", 1), ("Requested", 1)],
                 &[],
             );
         });
     }
 
-    /// A deferred handoff request is abandoned when its view exits.
+    /// A staged handoff request is abandoned when its view exits.
     #[test_traced]
-    fn test_pipelined_handoff_deferred_request_exits_view() {
+    fn test_pipelined_handoff_staged_request_exits_view() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
-            fixture.defer();
-            wait_for_handoff_event(&context, "Deferred").await;
+                HandoffFixture::new(&mut context, Publication::Held).await;
+            fixture.stage();
+            wait_for_handoff_event(&context, "Staged").await;
             let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
@@ -4824,7 +4814,7 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Deferred", 1), ("Requested", 1)],
+                &[("Staged", 1), ("Requested", 1)],
                 &[("ViewExit", 1)],
             );
         });
@@ -4838,8 +4828,7 @@ mod tests {
     fn test_pipelined_handoff_parent_nullify_cancels_pending_build() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let certified = fixture.certify_parent(&context).await;
 
             // The parent's certification times out while its certification and the
@@ -4875,8 +4864,7 @@ mod tests {
     fn test_pipelined_handoff_failed_parent_certification_cancels_pending_build() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let certified = fixture.certify_parent(&context).await;
             certified.send(false).unwrap();
 
@@ -4904,8 +4892,7 @@ mod tests {
     fn test_pipelined_handoff_late_parent_nullification_keeps_build() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
             let certified = fixture.certify_parent(&context).await;
             fixture.finish_certification(certified).await;
@@ -4951,8 +4938,7 @@ mod tests {
     fn test_pipelined_handoff_not_reissued_after_parent_nullify_on_restart() {
         let executor = deterministic::Runner::timed(Duration::from_secs(60));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             wait_for_local_nullify(&context, &mut fixture.batcher, View::new(2)).await;
 
             let handle = fixture.actor_handle.lock().take().unwrap();
@@ -4973,7 +4959,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     propose_requests: Some(restarted_requests.clone()),
-                    handoff: Some(HandoffPublication::AfterCertification),
+                    handoff: Some(Publication::Held),
                     ..Default::default()
                 },
             )
@@ -5019,8 +5005,7 @@ mod tests {
     fn test_pipelined_handoff_held_build_rejects_conflicting_parent() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
@@ -5067,7 +5052,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+                HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
@@ -5115,7 +5100,7 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
             let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+                HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
@@ -5152,8 +5137,7 @@ mod tests {
     fn test_pipelined_handoff_held_build_becomes_ineligible_at_leader_timeout() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             let mut relayed = fixture.observer();
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
@@ -5185,8 +5169,7 @@ mod tests {
     fn test_pipelined_handoff_held_build_is_volatile_on_restart() {
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
         executor.start(|mut context| async move {
-            let mut fixture =
-                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut fixture = HandoffFixture::new(&mut context, Publication::Held).await;
             fixture.respond();
             wait_for_handoff_event(&context, "Held").await;
 
@@ -5207,7 +5190,7 @@ mod tests {
                     leader_timeout: HANDOFF_LEADER_TIMEOUT,
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    handoff: Some(HandoffPublication::AfterCertification),
+                    handoff: Some(Publication::Held),
                     handoff_propose_responses: Some(restarted_responses.clone()),
                     ..Default::default()
                 },
@@ -5284,7 +5267,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     drop_proposals: true,
-                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    handoff: Some(Publication::Early),
                     ..Default::default()
                 },
             )
@@ -5409,7 +5392,7 @@ mod tests {
                     propose_requests: Some(propose_requests.clone()),
                     stall_proposals: !close_response,
                     drop_proposals: close_response,
-                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    handoff: Some(Publication::Early),
                     ..Default::default()
                 },
             )
@@ -5540,7 +5523,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
-                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    handoff: Some(Publication::Early),
                     certifier: mocks::application::Certifier::Controlled(Box::new(
                         move |round, _, response| {
                             if round.view() == View::new(2) {
@@ -5661,13 +5644,13 @@ mod tests {
         });
     }
 
-    /// A deferred handoff is dropped when its parent certifies after we voted to
+    /// A staged handoff is dropped when its parent certifies after we voted to
     /// nullify the handoff's view, because no proposal can be recorded there.
     ///
     /// With rotating terms and no certificate for view 1, nullifying the parent leaves
-    /// no fallback parent, so the deferred request survives until the parent certifies.
+    /// no fallback parent, so the staged request survives until the parent certifies.
     #[test_traced]
-    fn test_pipelined_handoff_deferred_request_dropped_after_view_nullify() {
+    fn test_pipelined_handoff_staged_request_dropped_after_view_nullify() {
         let n = 5;
         let quorum = quorum(n);
         let epoch = Epoch::new(333);
@@ -5724,7 +5707,7 @@ mod tests {
                 build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
             mailbox.recovered(Certificate::Nullification(nullification_2));
 
-            // Notarize view 3 and hold its certification. The application defers the
+            // Notarize view 3 and hold its certification. The application stages the
             // handoff for view 4 until view 3 certifies.
             let proposal_3 = Proposal::new(
                 Round::new(epoch, View::new(3)),
@@ -5757,7 +5740,7 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 "actor",
-                &[("Deferred", 1), ("Requested", 1)],
+                &[("Staged", 1), ("Requested", 1)],
                 &[("ViewNullify", 1)],
             );
         });

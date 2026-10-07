@@ -295,7 +295,7 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, HandoffPolicy, HandoffPublication, Reporter as _,
+        Application as _, CertifiableBlock as _, Handoff, Publication, Reporter as _,
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_forwards_handoff_policy() {
+    fn mailbox_forwards_handoff() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let mut signing_context = context.child("signing");
             let fixture = scheme_mocks::fixture(&mut signing_context, b"handoff-policy", 1);
@@ -394,11 +394,11 @@ mod tests {
             .await;
             let plan =
                 SyncPlan::init(context.child("plan"), "stateful-handoff-policy-stateful").await;
-            let publication = HandoffPublication::AllowBeforeCertification;
+            let publication = Publication::Early;
             let (_stateful, mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
-                    application: TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication)),
+                    application: TestApp::with_handoff(Handoff::Prepare(publication)),
                     db_config: (),
                     provider: (),
                     marshal: (marshal.mailbox.clone(), marshal.floor),
@@ -418,8 +418,8 @@ mod tests {
             let _guards = marshal.guards;
             let block = TestBlock::new(1, 1);
             assert_eq!(
-                mailbox.handoff_policy(&block.context()),
-                HandoffPolicy::Prepare(publication),
+                mailbox.handoff(&block.context()),
+                Handoff::Prepare(publication),
             );
         });
     }

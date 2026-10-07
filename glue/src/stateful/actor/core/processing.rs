@@ -512,7 +512,7 @@ mod tests {
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
         Application as _, Automaton as _, CertifiableAutomaton as _, CertifiableBlock as _,
-        HandoffPolicy, HandoffPublication, Heightable as _, Reporter as _, Reporters,
+        Handoff, Heightable as _, Publication, Reporter as _, Reporters,
         marshal::{
             Update,
             ancestry::{self, Ancestry},
@@ -576,8 +576,8 @@ mod tests {
             panic!("gated application genesis is not used")
         }
 
-        fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
-            HandoffPolicy::Prepare(HandoffPublication::AfterCertification)
+        fn handoff(&self, _context: &Self::Context) -> Handoff {
+            Handoff::Prepare(Publication::Held)
         }
 
         async fn propose(
@@ -1587,7 +1587,7 @@ mod tests {
             );
             let genesis = TestBlock::new(0, 0);
             let winner = TestBlock::child(&genesis, 1);
-            let proposal = deferred.propose_handoff(winner.context()).await;
+            let proposal = deferred.prepare(winner.context()).await;
             proposal_started.await.expect("proposal should start");
 
             let (acknowledgement, mut waiter) = Exact::handle();
@@ -1696,7 +1696,7 @@ mod tests {
             // The handoff build on the uncertified parent starts, and a finalization
             // report is deferred behind it.
             let handoff = deferred
-                .propose_handoff(TestBlock::child(&parent, 3).context())
+                .prepare(TestBlock::child(&parent, 3).context())
                 .await;
             proposal_started.await.expect("handoff build should start");
             let (acknowledgement, mut waiter) = Exact::handle();

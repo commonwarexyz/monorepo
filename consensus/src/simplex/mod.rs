@@ -256,12 +256,12 @@
 //!
 //! Consensus handles each handoff response as follows:
 //!
-//! * [`crate::HandoffProposal::AwaitCertification`]: request an ordinary proposal once the
+//! * [`crate::Prepared::Stage`]: request an ordinary proposal once the
 //!   parent certifies.
-//! * [`crate::HandoffProposal::Proposed`] with [`crate::HandoffPublication::AfterCertification`]:
+//! * [`crate::Prepared::Proposed`] with [`crate::Publication::Held`]:
 //!   hold the candidate until the parent certifies or finalizes.
-//! * [`crate::HandoffProposal::Proposed`] with
-//!   [`crate::HandoffPublication::AllowBeforeCertification`]: permit early relay and the
+//! * [`crate::Prepared::Proposed`] with
+//!   [`crate::Publication::Early`]: permit early relay and the
 //!   proposer's own notarize vote.
 //! * Closed response: abandon the local proposal opportunity once the parent certifies or
 //!   finalizes.
@@ -275,26 +275,26 @@
 //! the uncertified parent. While the leader waits in that view, it requests no new handoff on
 //! that parent. The application may verify other blocks only after the build completes, so the
 //! build could otherwise keep the parent, the view the leader waits in, or a fallback parent
-//! from certifying. A cancelled request waits as if the application had deferred it.
+//! from certifying. A cancelled request waits as if the application had staged it.
 //!
-//! When the parent of a deferred request certifies or finalizes, consensus requests an ordinary
+//! When the parent of a staged request certifies or finalizes, consensus requests an ordinary
 //! proposal for the same context, unless the leader has already voted to nullify the request's
 //! view. In that case, consensus drops the request, since no proposal can be recorded there.
 //!
-//! Consensus discards pending, deferred, held, and closed requests on view exit. When a
+//! Consensus discards pending, staged, held, and closed requests on view exit. When a
 //! replacement parent supersedes their ancestry, consensus discards them and requests a proposal
 //! on the replacement. Restart also discards pending requests and held candidates. Other
 //! validators require explicitly certified ancestry before verifying a term-start proposal, and
 //! so before voting to notarize it.
 //!
-//! Marshal applications opt in through [`crate::Application::handoff_policy`], which returns
-//! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
+//! Marshal applications opt in through [`crate::Application::handoff`], which returns
+//! [`crate::Handoff::Prepare`] or the default [`crate::Handoff::Stage`].
 //! `Prepare` uses the ordinary construction path, which may reuse an existing block without
-//! calling the application builder. With `AfterCertification`, construction overlaps parent
+//! calling the application builder. With `Held`, construction overlaps parent
 //! certification while consensus holds publication. An application can choose it for any
 //! handoff whose outgoing leader it does not trust.
 //!
-//! With [`crate::HandoffPublication::AllowBeforeCertification`], rotating leaders can pipeline
+//! With [`crate::Publication::Early`], rotating leaders can pipeline
 //! every view. The leader distributes each proposal in parallel with its parent's votes, allowing
 //! network-bound view time to drop from two network trips to one. With stable leaders,
 //! optimistic validation pipelines every view except the term start, so the handoff only moves
@@ -309,8 +309,8 @@
 //! ### Handoff Metrics
 //!
 //! `handoff_events` counts lifecycle events, and one request can count several. `Requested`
-//! counts handoff requests to the automaton, not unique views. `Deferred` counts
-//! [`crate::HandoffProposal::AwaitCertification`] responses, including default ones.
+//! counts handoff requests to the automaton, not unique views. `Staged` counts
+//! [`crate::Prepared::Stage`] responses, including default ones.
 //! `CandidateReturned` counts candidates returned by the automaton, and `Held` counts candidates
 //! retained for parent certification. Releasing a held candidate does not count it again.
 //!
@@ -329,16 +329,16 @@
 //! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
 //!   invalid for another reason, such as a failed certification, before a replacement parent was
 //!   selectable.
-//! * `ViewNullify`: the parent of a deferred request certified after a local nullify vote for
+//! * `ViewNullify`: the parent of a staged request certified after a local nullify vote for
 //!   the request's view.
 //! * `ResponseClosed`: the parent of a closed response certified or finalized.
 //! * `IneligibleAtRecording`: a returned candidate could not be recorded for its view.
 //!
-//! A cancelled build leaves its request deferred, so the request counts again if consensus later
+//! A cancelled build leaves its request staged, so the request counts again if consensus later
 //! discards it. A closed response counts under view exit or superseded ancestry instead if one of
 //! those discards it first.
 //!
-//! Neither family tracks the ordinary request that replaces a deferred handoff, losses across
+//! Neither family tracks the ordinary request that replaces a staged handoff, losses across
 //! restart, or whether a candidate was newly built or reused.
 //!
 //! ### Latency Metrics
@@ -778,7 +778,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        HandoffPublication, Monitor, Viewable,
+        Monitor, Publication, Viewable,
         simplex::{
             elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
             mocks::{
@@ -1855,7 +1855,7 @@ mod tests {
     /// validator's reporter, the view-1 leader's index, and the network oracle.
     ///
     /// With `accept_handoffs`, every application permits early publication of handoff
-    /// candidates. Otherwise, applications defer handoffs.
+    /// candidates. Otherwise, applications stage handoffs.
     ///
     /// The leader and certification timeouts are tuned to the callers' link latencies. When
     /// the latency nears half the leader timeout, a view that waits for its parent's
@@ -1911,9 +1911,7 @@ mod tests {
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.child("application"), application_cfg);
-            actor.set_handoff(
-                accept_handoffs.then_some(HandoffPublication::AllowBeforeCertification),
-            );
+            actor.set_handoff(accept_handoffs.then_some(Publication::Early));
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -2174,8 +2172,7 @@ mod tests {
 
             // The incoming leader's application holds its view 3 handoff build and leaves
             // the certification of view 2 to this test.
-            let build: Arc<Mutex<Option<oneshot::Sender<crate::HandoffProposal<D>>>>> =
-                Arc::default();
+            let build: Arc<Mutex<Option<oneshot::Sender<crate::Prepared<D>>>>> = Arc::default();
             let certification: Arc<Mutex<Option<oneshot::Sender<bool>>>> = Arc::default();
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
@@ -2221,7 +2218,7 @@ mod tests {
                     application_cfg,
                 );
                 if idx == incoming {
-                    actor.set_handoff(Some(HandoffPublication::AfterCertification));
+                    actor.set_handoff(Some(Publication::Held));
                     let build = build.clone();
                     actor.set_handoff_propose_controller(Box::new(
                         move |round, proposal, response| {
@@ -8396,7 +8393,7 @@ mod tests {
     ///   reaches a high view via nullifications.
     ///
     /// - `handoffs`: Whether applications return handoff candidates with early publication
-    ///   during the attack prefix instead of deferring every handoff.
+    ///   during the attack prefix instead of staging every handoff.
     ///
     /// The term structure (length and optimistic lookahead) comes from the
     /// elector passed to [twins_campaign]: multi-view terms exercise the
@@ -8413,7 +8410,7 @@ mod tests {
     }
 
     /// Makes an application return handoff candidates with early publication during
-    /// the adversarial prefix and defer handoffs afterward, so early publication
+    /// the adversarial prefix and stage handoffs afterward, so early publication
     /// evidence comes only from prefix views. `side` selects the counter in
     /// `prefix_handoffs` that records returned prefix candidates: 0 for honest
     /// applications and 1 for twin applications.
@@ -8423,13 +8420,13 @@ mod tests {
         prefix_handoffs: Arc<Mutex<[usize; 2]>>,
         side: usize,
     ) {
-        actor.set_handoff(Some(HandoffPublication::AllowBeforeCertification));
+        actor.set_handoff(Some(Publication::Early));
         actor.set_handoff_propose_controller(Box::new(move |round, proposal, response| {
             if round.view() <= prefix_end {
                 prefix_handoffs.lock()[side] += 1;
                 response.send_lossy(proposal);
             } else {
-                response.send_lossy(crate::HandoffProposal::AwaitCertification);
+                response.send_lossy(crate::Prepared::Stage);
             }
         }));
     }

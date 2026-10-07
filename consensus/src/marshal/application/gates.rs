@@ -1,5 +1,5 @@
 use crate::{
-    Automaton, HandoffPolicy, HandoffProposal,
+    Automaton, Handoff, Prepared,
     marshal::core::{Mailbox, Variant, durability::Durable as _},
     types::Round,
 };
@@ -207,35 +207,35 @@ pub(crate) async fn forward<T, U>(
 
 /// Answers a handoff request through `automaton`'s ordinary proposal path.
 ///
-/// [`HandoffPolicy::AwaitCertification`] resolves the receiver immediately. With
-/// [`HandoffPolicy::Prepare`], the built candidate is sent with the granted
+/// [`Handoff::Stage`] resolves the receiver immediately. With
+/// [`Handoff::Prepare`], the built candidate is sent with the granted
 /// publication permission, and closing the receiver cancels the build.
-pub(crate) async fn propose_handoff<E, A>(
+pub(crate) async fn prepare<E, A>(
     context: &E,
     automaton: &mut A,
-    policy: HandoffPolicy,
+    policy: Handoff,
     round: Round,
     consensus_context: A::Context,
-) -> oneshot::Receiver<HandoffProposal<A::Digest>>
+) -> oneshot::Receiver<Prepared<A::Digest>>
 where
     E: Spawner + Metrics,
     A: Automaton,
 {
     let (tx, rx) = oneshot::channel();
     let publication = match policy {
-        HandoffPolicy::Prepare(publication) => publication,
-        HandoffPolicy::AwaitCertification => {
-            tx.send_lossy(HandoffProposal::AwaitCertification);
+        Handoff::Prepare(publication) => publication,
+        Handoff::Stage => {
+            tx.send_lossy(Prepared::Stage);
             return rx;
         }
     };
     let proposal = automaton.propose(consensus_context).await;
     context
-        .child("propose_handoff")
+        .child("prepare")
         .with_attribute("round", round)
         .spawn(move |_| {
             forward(tx, proposal, move |payload| {
-                Some(HandoffProposal::Proposed {
+                Some(Prepared::Proposed {
                     payload,
                     publication,
                 })

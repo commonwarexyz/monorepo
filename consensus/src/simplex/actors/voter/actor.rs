@@ -4,7 +4,7 @@ use super::{
     state::{CertificateFetch, Config as StateConfig, ProposalRequest, State, Verify},
 };
 use crate::{
-    CertifiableAutomaton, HandoffProposal, HandoffPublication, LATENCY, Relay, Reporter, Viewable,
+    CertifiableAutomaton, LATENCY, Prepared, Publication, Relay, Reporter, Viewable,
     simplex::{
         Floor, Plan,
         actors::{Kind, batcher, resolver},
@@ -104,7 +104,7 @@ enum ProposalResponse<D> {
     /// An ordinary candidate or a held candidate released after parent certification.
     Proposed(D),
     /// A response from a handoff request.
-    Handoff(HandoffProposal<D>),
+    Handoff(Prepared<D>),
 }
 
 /// Lifecycle of the pending proposal slot.
@@ -112,12 +112,12 @@ enum ProposalState<D> {
     /// The automaton has not answered an ordinary request yet.
     Regular(oneshot::Receiver<D>),
     /// The automaton has not answered a handoff request yet.
-    Handoff(oneshot::Receiver<HandoffProposal<D>>),
-    /// A handoff without a pending build: the application declined it until its parent
+    Handoff(oneshot::Receiver<Prepared<D>>),
+    /// A handoff without a pending build: the application staged it until its parent
     /// certifies, or we cancelled its build (see [`State::pending_handoff_abandonment`]). An
     /// ordinary request for the same context follows exact parent certification, unless we
     /// voted to nullify the request's view.
-    Deferred,
+    Staged,
     /// A volatile build result awaiting parent certification.
     Held(D),
     /// A held result whose parent has certified. The select loop consumes it only
@@ -450,7 +450,7 @@ impl<
             match &request {
                 ProposalRequest::Handoff(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalState::Handoff(self.automaton.propose_handoff(context).await)
+                    ProposalState::Handoff(self.automaton.prepare(context).await)
                 }
                 ProposalRequest::Regular(_) => {
                     ProposalState::Regular(self.automaton.propose(context).await)
@@ -538,7 +538,7 @@ impl<
         // we vote to nullify the view we are waiting in, at or below its uncertified parent.
         // The application may verify other blocks only after the build completes, so the build
         // could keep the parent, the view we wait in, or a fallback parent from certifying.
-        // Dropping the receiver cancels the build. The request stays deferred: an ordinary
+        // Dropping the receiver cancels the build. The request becomes staged: an ordinary
         // request for the same context follows if the parent certifies, and supersession
         // replaces it once another parent is selectable.
         if let Some(Request(ProposalRequest::Handoff(context), _, state)) = pending_propose.as_mut()
@@ -546,11 +546,11 @@ impl<
             && let Some(reason) = self.state.pending_handoff_abandonment(context)
         {
             self.record_handoff_abandoned(reason);
-            *state = ProposalState::Deferred;
+            *state = ProposalState::Staged;
         }
 
         // Advance a pending handoff once its exact parent certifies or finalizes. A
-        // deferred handoff becomes an ordinary request for the same context, unless we
+        // staged handoff becomes an ordinary request for the same context, unless we
         // voted to nullify its view, where we can no longer record a proposal. A held
         // build becomes ready to publish, and a closed response forfeits the view.
         // Certification and finalization are recorded only in iterations that end with
@@ -560,11 +560,11 @@ impl<
             && self.state.proposal_parent_certified(request.context())
         {
             match state {
-                ProposalState::Deferred if self.state.voted_nullify(request.view()) => {
+                ProposalState::Staged if self.state.voted_nullify(request.view()) => {
                     *pending_propose = None;
                     self.record_handoff_abandoned(HandoffAbandonedReason::ViewNullify);
                 }
-                ProposalState::Deferred => {
+                ProposalState::Staged => {
                     let context = request.context().clone();
                     *pending_propose = Some(
                         self.request_proposal(ProposalRequest::Regular(context))
@@ -1303,19 +1303,19 @@ impl<
                 // Clear propose waiter
                 pending_propose = None;
 
-                // Retain a declined, held, or closed handoff outside the round proposal
+                // Retain a staged, held, or closed handoff outside the round proposal
                 // slot until its parent resolves. The captured request and build latch
                 // remain active until then.
                 let proposed = match proposed {
                     Ok(ProposalResponse::Proposed(payload)) => Ok(payload),
-                    Ok(ProposalResponse::Handoff(HandoffProposal::AwaitCertification)) => {
-                        self.record_handoff_event(HandoffEventKind::Deferred);
-                        pending_propose = Some(Request(request, span, ProposalState::Deferred));
+                    Ok(ProposalResponse::Handoff(Prepared::Stage)) => {
+                        self.record_handoff_event(HandoffEventKind::Staged);
+                        pending_propose = Some(Request(request, span, ProposalState::Staged));
                         continue;
                     }
-                    Ok(ProposalResponse::Handoff(HandoffProposal::Proposed { payload, publication })) => {
+                    Ok(ProposalResponse::Handoff(Prepared::Proposed { payload, publication })) => {
                         self.record_handoff_event(HandoffEventKind::CandidateReturned);
-                        if publication == HandoffPublication::AfterCertification
+                        if publication == Publication::Held
                             && !self.state.proposal_parent_certified(request.context())
                         {
                             self.record_handoff_event(HandoffEventKind::Held);

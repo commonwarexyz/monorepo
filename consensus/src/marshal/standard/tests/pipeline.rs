@@ -28,9 +28,9 @@ impl crate::Application<Runtime> for PipelineApp {
     type SigningScheme = S;
     type Input = ();
 
-    fn handoff_policy(&self, _: &Ctx) -> HandoffPolicy {
+    fn handoff(&self, _: &Ctx) -> Handoff {
         self.policies.fetch_add(1, Ordering::SeqCst);
-        HandoffPolicy::Prepare(HandoffPublication::AfterCertification)
+        Handoff::Prepare(Publication::Held)
     }
 
     async fn propose(
