@@ -2404,7 +2404,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,
@@ -2434,7 +2433,6 @@ mod compact_variable_mmr {
             let imported = ClientDb::init_from_sync(
                 client_cfg.strategy.clone(),
                 journal,
-                client_cfg.commit_codec_config,
                 target_b.size - 1,
                 pinned_nodes,
                 op,

@@ -309,7 +309,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             .expect("init ordered any db");
 
         // Seed committed base state so parent/child batching sees both translated-key
-        // collisions against the committed snapshot and ordinary committed lookups.
+        // collisions against the committed index and ordinary committed lookups.
         let mut model: BTreeMap<Key, Value> = BTreeMap::new();
         let mut batch = db.new_batch();
         for write in &input.initial {
@@ -328,10 +328,10 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let db = match input.schedule {
             Schedule::PendingParent => {
                 // Build a parent batch, then build the child while the parent is still pending so
-                // the child must resolve through the parent's diff plus the committed snapshot.
+                // the child must resolve through the parent's diff plus the committed index.
                 // A parent-deleted key with a colliding committed sibling is the advisory's
                 // trigger: the ordered classifier must not consume the deleted key's stale
-                // committed location via the sibling's snapshot-bucket scan.
+                // committed location via the sibling's index-bucket scan.
                 let batch = apply_mutations(db.new_batch(), &input.parent);
                 apply_to_model(&mut model, &input.parent);
                 let floor = db.inactivity_floor_loc();

@@ -1,5 +1,5 @@
 //! Standalone, opt-in large-scale measurement of QMDB operations at multi-GB scale: building a
-//! database (`generate`), reopening it, i.e. rebuilding the snapshot (`init`), at a chosen
+//! database (`generate`), reopening it, i.e. rebuilding the index (`init`), at a chosen
 //! init-time `(location -> key)` cache size and build concurrency, and random point reads against
 //! it (`get`/`get_many`).
 //!
@@ -46,7 +46,7 @@
 //! reads reach the storage layer. Pass a larger `cache_pages` to measure through an in-process
 //! cache of that many pages instead.
 //!
-//! The optional index flavor (default `ordered`) selects the snapshot index: `ordered` is the P=3
+//! The optional index flavor (default `ordered`) selects the key index: `ordered` is the P=3
 //! partitioned ordered index (the inline-SoA config for large key sets), `unordered` the P=2
 //! (65,536 partition) hash index. Bench a database with the flavor it was generated with, since the
 //! two db variants write different operation logs.
@@ -105,7 +105,7 @@ const PRUNE_FREQUENCY: u32 = 100;
 /// workloads. Higher = more skew; ~1.0 is classic Zipf (near YCSB's 0.99).
 const KEY_ZIPF_EXPONENT: f64 = 1.0;
 
-/// The snapshot index flavor a database is generated and benched with (see the module docs).
+/// The key index flavor a database is generated and benched with (see the module docs).
 #[derive(Clone, Copy)]
 enum IndexKind {
     /// The P=3 partitioned ordered index.
@@ -133,7 +133,7 @@ impl IndexKind {
     }
 }
 
-/// Parse a `concurrency` CLI argument into a snapshot-build concurrency (`1` = serial on the
+/// Parse a `concurrency` CLI argument into an index-build concurrency (`1` = serial on the
 /// init task, larger values follow the decode/insert split in the module docs). `None` is a
 /// parse failure.
 fn parse_concurrency(arg: &str) -> Option<NonZeroUsize> {
