@@ -116,8 +116,6 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn assert_ops_absent(db: &Self::Db, ops: &[OpOf<Self>]) -> impl Future<Output = ()> + Send;
 }
 
-// ===== Shared tests =====
-
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
     OpOf<H>: Encode + Clone,
@@ -967,8 +965,6 @@ where
         max_retained_roots: 1,
     }
 }
-
-// ===== Test Generation Macro =====
 
 /// Instantiates the shared sync tests for `$harness` in a module named `$mod_name`.
 ///

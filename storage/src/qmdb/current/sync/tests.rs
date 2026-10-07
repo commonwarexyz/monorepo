@@ -22,8 +22,6 @@ use commonware_runtime::{
 use commonware_utils::{NZU64, non_empty_range};
 use rand::Rng as _;
 
-// ===== Harness implementations =====
-
 mod harnesses {
     use super::*;
     use crate::merkle::{self, mmb, mmr};
@@ -671,8 +669,6 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         drop(journal);
     });
 }
-
-// ===== Test generation =====
 
 /// Emits the `any`-specific sync tests that also run against `current` databases for `$harness`.
 macro_rules! current_sync_tests {

@@ -80,8 +80,6 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
 }
 
-// ===== Any-specific tests =====
-
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
@@ -1510,8 +1508,6 @@ pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
     });
 }
 
-// ===== Harness implementations =====
-
 /// Implements the [`SyncTestHarness`] methods that `any` and `current` databases provide alike.
 macro_rules! db_any_harness_methods {
     () => {
@@ -1608,11 +1604,8 @@ mod harnesses {
     use commonware_utils::TestRng;
     use rand::Rng;
 
-    // ===== Family-generic op creation helpers =====
-    //
     // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
     // are structurally identical across families.
-
     fn create_ordered_fixed_ops<F: merkle::Family>(
         n: usize,
         seed: u64,
@@ -2050,8 +2043,6 @@ mod harnesses {
     pub(crate) type UnorderedVariableMmrHarness = UnorderedVariableHarness<mmr::Family>;
     pub(crate) type UnorderedVariableMmbHarness = UnorderedVariableHarness<mmb::Family>;
 }
-
-// ===== Test generation =====
 
 /// Emits the `any`-specific sync tests for `$harness`.
 macro_rules! any_sync_tests {

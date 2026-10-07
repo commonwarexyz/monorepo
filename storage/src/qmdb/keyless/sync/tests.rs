@@ -50,8 +50,6 @@ pub(crate) trait KeylessCompactSyncTestHarness: CompactSyncTestHarness {
     ) -> impl Future<Output = (Proof<Self::Family, sha256::Digest>, sha256::Digest)> + Send;
 }
 
-// ===== Keyless-specific tests =====
-
 /// Invalid candidates are retried within the same source call while more candidates remain.
 /// An exhausted source fails with [`sync::EngineError::InvalidResponse`].
 pub(crate) fn test_engine_rejects_invalid_responses<H: SyncTestHarness>()
@@ -582,8 +580,6 @@ pub(crate) fn test_compact_sync_root_mismatch_preserves_existing_state<
         H::destroy_full(source).await;
     });
 }
-
-// ===== Harness implementations =====
 
 pub(crate) mod harnesses {
     use super::*;
@@ -1197,8 +1193,6 @@ pub(crate) mod harnesses {
     pub(crate) type CompactFixedMmrHarness = CompactFixedHarness<mmr::Family>;
     pub(crate) type CompactFixedMmbHarness = CompactFixedHarness<mmb::Family>;
 }
-
-// ===== Test generation =====
 
 /// Emits the keyless-specific sync tests for `$harness`.
 macro_rules! keyless_sync_tests {

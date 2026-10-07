@@ -114,8 +114,6 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     -> CompactOpOf<Self>;
 }
 
-// ===== Shared tests =====
-
 pub(crate) fn test_compact_full_source_missing_reports_missing_source<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|_context| async move {
         let source: Arc<commonware_utils::sync::AsyncRwLock<Option<H::Full>>> =
@@ -695,8 +693,6 @@ pub(crate) fn test_compact_sync_dropped_import_preserves_existing_state<
         H::destroy(reopened).await;
     });
 }
-
-// ===== Test Generation Macro =====
 
 /// Instantiates the shared compact sync tests for `$harness` in a module named `$mod_name`.
 ///

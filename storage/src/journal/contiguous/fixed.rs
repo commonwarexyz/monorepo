@@ -6018,7 +6018,6 @@ mod tests {
                 replay_buffer: NZUsize!(2048),
             };
 
-            // === Test 1: Basic single item operation ===
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -6047,7 +6046,6 @@ mod tests {
                 .expect("failed to read");
             assert_eq!(value, test_digest(0));
 
-            // === Test 2: Multiple items with single item per blob ===
             for i in 1..10u64 {
                 let pos;
                 (journal, pos) = journal
@@ -6072,7 +6070,6 @@ mod tests {
 
             journal = journal.sync().await.expect("failed to sync");
 
-            // === Test 3: Pruning with single item per blob ===
             // Prune to position 5 (removes positions 0-4)
             (journal, _) = journal.prune(5).await.expect("failed to prune");
 
@@ -6118,7 +6115,6 @@ mod tests {
 
             journal.sync().await.expect("failed to sync");
 
-            // === Test 4: Restart persistence with single item per blob ===
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -6143,7 +6139,6 @@ mod tests {
 
             journal.destroy().await.expect("failed to destroy journal");
 
-            // === Test 5: Restart after pruning with non-zero index ===
             // Fresh journal for this test
             let mut journal = Journal::init(context.child("third"), cfg.clone())
                 .await
@@ -6184,7 +6179,6 @@ mod tests {
 
             journal.destroy().await.expect("failed to destroy journal");
 
-            // === Test 6: Prune all items (edge case) ===
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");

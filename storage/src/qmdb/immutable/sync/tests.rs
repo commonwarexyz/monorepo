@@ -48,8 +48,6 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
 
-// ===== Immutable-specific tests =====
-
 pub(crate) fn test_sync_nonzero_floor<H: ImmutableSyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -127,8 +125,6 @@ where
             .await;
     });
 }
-
-// ===== Harness implementations =====
 
 pub(crate) mod harnesses {
     use super::*;
@@ -815,8 +811,6 @@ pub(crate) mod harnesses {
     pub(crate) type CompactFixedMmrHarness = CompactFixedHarness<mmr::Family>;
     pub(crate) type CompactFixedMmbHarness = CompactFixedHarness<mmb::Family>;
 }
-
-// ===== Test generation =====
 
 /// Emits the immutable-specific sync tests for `$harness`.
 macro_rules! immutable_sync_tests {
