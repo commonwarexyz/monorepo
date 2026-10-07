@@ -19,7 +19,7 @@ use crate::{
             },
             source::{
                 Source,
-                tests::{FailSource, SequenceSource, fetch_compact_state},
+                tests::{SequenceSource, fetch_compact_state},
             },
         },
     },
@@ -51,36 +51,6 @@ pub(crate) trait KeylessCompactSyncTestHarness: CompactSyncTestHarness {
 }
 
 // ===== Keyless-specific tests =====
-
-pub(crate) fn test_sync_source_fails<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let source = FailSource::<H::Family, OpOf<H>, sha256::Digest>::new();
-        let db_config = H::config(&context.next_u64().to_string(), &context);
-        let config = Config {
-            context: context.child("client"),
-            target: Target {
-                root: sha256::Digest::from([0; 32]),
-                range: non_empty_range!(Location::new(0), Location::new(5)),
-            },
-            source,
-            apply_batch_size: NZU64!(2),
-            max_outstanding_requests: 2,
-            fetch_batch_size: NZU64!(2),
-            db_config,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-
-        let result: Result<DbOf<H>, _> = sync::sync(config).await;
-        assert!(result.is_err());
-    });
-}
 
 /// Invalid candidates are retried within the same source call while more candidates remain.
 /// An exhausted source fails with [`sync::EngineError::InvalidResponse`].
@@ -666,18 +636,13 @@ pub(crate) mod harnesses {
         ops
     }
 
-    /// Applies the given operations and commits the database, advancing the inactivity floor to
-    /// the new commit location so sync tests that exercise pruning can do so freely.
+    /// Applies the given operations in a batch that keeps the current inactivity floor.
     async fn variable_apply_ops<F: Family>(
         db: VariableDb<F>,
         ops: Vec<VariableOp<F>>,
         metadata: Option<Vec<u8>>,
     ) -> VariableDb<F> {
-        let appends = ops
-            .iter()
-            .filter(|op| matches!(op, Operation::Append(_)))
-            .count() as u64;
-        let new_commit = db.bounds().end + appends;
+        let floor = db.inactivity_floor_loc();
         let mut batch = db.new_batch();
         for op in ops {
             match op {
@@ -689,7 +654,7 @@ pub(crate) mod harnesses {
                 }
             }
         }
-        let merkleized = batch.merkleize(&db, metadata, new_commit).await.unwrap();
+        let merkleized = batch.merkleize(&db, metadata, floor).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db
     }
@@ -748,11 +713,24 @@ pub(crate) mod harnesses {
         }
 
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
+            // Advance the inactivity floor to `loc` via a commit before pruning,
+            // since prune requires the floor to be at or beyond the prune target.
+            let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
             db.prune(loc).await.unwrap()
         }
 
         fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>> {
             db.bounds()
+        }
+
+        fn sync_boundary(db: &Self::Db) -> Location<Self::Family> {
+            db.sync_boundary()
+        }
+
+        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor_loc()
         }
 
         fn db_root(db: &Self::Db) -> sha256::Digest {
@@ -787,6 +765,19 @@ pub(crate) mod harnesses {
                     .any(|window| window.iter().eq(expected.iter().copied())),
                 "operation values are not stored at consecutive locations"
             );
+        }
+
+        async fn assert_ops_absent(db: &Self::Db, ops: &[OpOf<Self>]) {
+            let bounds = db.bounds();
+            for loc in *bounds.start..*bounds.end {
+                if let Some(value) = db.get(Location::new(loc)).await.unwrap() {
+                    assert!(
+                        !ops.iter()
+                            .any(|op| matches!(op, Operation::Append(v) if *v == value)),
+                        "operation value is stored at location {loc}"
+                    );
+                }
+            }
         }
     }
 
@@ -1212,11 +1203,6 @@ pub(crate) mod harnesses {
 /// Emits the keyless-specific sync tests for `$harness`.
 macro_rules! keyless_sync_tests {
     ($harness:ty) => {
-        #[test_traced("WARN")]
-        fn test_sync_source_fails() {
-            super::test_sync_source_fails::<$harness>();
-        }
-
         #[test_traced("WARN")]
         fn test_engine_rejects_invalid_responses() {
             super::test_engine_rejects_invalid_responses::<$harness>();

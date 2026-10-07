@@ -44,7 +44,6 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
         floor: Location<Self::Family>,
     ) -> impl Future<Output = Self::Db> + Send;
     fn commit(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
-    fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
     fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)>;
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
@@ -301,6 +300,14 @@ pub(crate) mod harnesses {
             db.bounds()
         }
 
+        fn sync_boundary(db: &Self::Db) -> Location<Self::Family> {
+            db.sync_boundary()
+        }
+
+        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor_loc()
+        }
+
         fn db_root(db: &Self::Db) -> sha256::Digest {
             db.root()
         }
@@ -314,6 +321,14 @@ pub(crate) mod harnesses {
                 if let Some((key, expected_value)) = Self::op_kv(op) {
                     let got = Self::lookup(db, key).await;
                     assert_eq!(got.as_ref(), Some(expected_value));
+                }
+            }
+        }
+
+        async fn assert_ops_absent(db: &Self::Db, ops: &[OpOf<Self>]) {
+            for op in ops {
+                if let Some((key, _)) = Self::op_kv(op) {
+                    assert_eq!(Self::lookup(db, key).await, None);
                 }
             }
         }
@@ -334,10 +349,6 @@ pub(crate) mod harnesses {
 
         async fn commit(db: Self::Db) -> Self::Db {
             db.commit().await.unwrap()
-        }
-
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
-            db.inactivity_floor_loc()
         }
 
         fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)> {
