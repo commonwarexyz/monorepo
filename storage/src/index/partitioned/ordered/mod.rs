@@ -715,6 +715,47 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         }
         None
     }
+
+    fn translated_range<'a>(
+        &'a self,
+        first: Option<&[u8]>,
+        last: Option<&[u8]>,
+    ) -> impl Iterator<Item = impl Iterator<Item = &'a V> + Send + use<'a, T, V, P>>
+    + Send
+    + use<'a, T, V, P>
+    where
+        V: 'a,
+    {
+        // Keys order by partition, then by translated sub-key, so each bound applies its
+        // sub-key only within its own partition.
+        let translate = |key: &[u8]| {
+            let (i, sub) = partition_index_and_sub_key::<P>(key);
+            (i, self.translator.transform(sub))
+        };
+        let first = first.map(translate);
+        let last = last.map(translate);
+        let start = first.map_or(0, |(i, _)| i);
+        let end = last.map_or(self.partitions.len() - 1, |(i, _)| i);
+        (start..=end)
+            .flat_map(move |p| {
+                let first = first.filter(|&(i, _)| i == p).map(|(_, k)| k);
+                let last = last.filter(|&(i, _)| i == p).map(|(_, k)| k);
+
+                // `BTreeMap::range` panics on inverted bounds.
+                let inverted = matches!((first, last), (Some(first), Some(last)) if first > last);
+                let bounds = (
+                    first.map_or(Bound::Unbounded, Bound::Included),
+                    last.map_or(Bound::Unbounded, Bound::Included),
+                );
+                let spilled = self
+                    .spilled_partition(p)
+                    .filter(|_| !inverted)
+                    .into_iter()
+                    .flat_map(move |inner| inner.range(bounds).map(|(_, vals)| vals.as_slice()));
+                self.partitions[p].runs(first, last).chain(spilled)
+            })
+            .map(|vals| vals.iter())
+    }
 }
 
 #[cfg(test)]

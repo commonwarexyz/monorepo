@@ -256,6 +256,19 @@ pub trait Ordered: Unordered {
     ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
     where
         Self::Value: 'a;
+
+    /// Returns the values of each translated key from the translation of `first` through the
+    /// translation of `last`, both inclusive, in ascending translated-key order. A `None` bound
+    /// leaves that end open. The iteration does not cycle.
+    fn translated_range<'a>(
+        &'a self,
+        first: Option<&[u8]>,
+        last: Option<&[u8]>,
+    ) -> impl Iterator<Item = impl Iterator<Item = &'a Self::Value> + Send + use<'a, Self>>
+    + Send
+    + use<'a, Self>
+    where
+        Self::Value: 'a;
 }
 
 #[cfg(test)]
@@ -475,6 +488,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Verify `translated_range` yields each translated key's values in order between inclusive
+    /// translated bounds, without cycling. Expects a two-byte translation (TwoCap, or OneCap after
+    /// a one-byte partition prefix).
+    fn run_ordered_translated_range<I: Ordered<Value = u64>>(index: &mut I) {
+        let range = |index: &I, first: Option<&[u8]>, last: Option<&[u8]>| {
+            index
+                .translated_range(first, last)
+                .map(|values| {
+                    let mut values: Vec<u64> = values.copied().collect();
+                    values.sort_unstable();
+                    values
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(range(index, None, None).is_empty());
+
+        // Values 1 and 2 collide, and value 3 shares their partition.
+        let keys: [&[u8]; 6] = [
+            &[0x00, 0x01, 0x01],
+            &[0x00, 0x01, 0x02],
+            &[0x00, 0x02],
+            &[0x01, 0x00],
+            &[0x05, 0x05],
+            &[0xFF, 0xFF],
+        ];
+        for (value, &key) in (1..).zip(keys.iter()) {
+            index.insert(key, value);
+        }
+
+        let all = vec![vec![1, 2], vec![3], vec![4], vec![5], vec![6]];
+        assert_eq!(range(index, None, None), all);
+        assert_eq!(
+            range(index, Some(&[0x00, 0x02, 0xAA]), Some(&[0x05, 0x05])),
+            all[1..4]
+        );
+        assert_eq!(range(index, Some(&[0x00, 0x03]), None), all[2..]);
+        assert_eq!(range(index, None, Some(&[0x01, 0x00, 0x07])), all[..3]);
+        assert_eq!(
+            range(index, Some(&[0x01, 0x00, 0x07]), Some(&[0x01, 0x00])),
+            all[2..3]
+        );
+        assert_eq!(
+            range(index, Some(&[0x00, 0x01]), Some(&[0x00, 0x01])),
+            all[..1]
+        );
+        assert!(range(index, Some(&[0x02]), Some(&[0x04])).is_empty());
+        assert!(range(index, Some(&[0x05, 0x05]), Some(&[0x00, 0x01])).is_empty());
+        assert!(range(index, Some(&[0x00, 0x02]), Some(&[0x00, 0x01])).is_empty());
+    }
+
+    #[test_traced]
+    fn test_ordered_translated_range_flat() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_ordered_translated_range(&mut new_ordered(context));
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_translated_range_partitioned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            run_ordered_translated_range(&mut new_partitioned_ordered(context));
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_translated_range_partitioned_spilled() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_partitioned_ordered_spilling(context);
+            run_ordered_translated_range(&mut index);
+            assert!(index.spilled_count() > 0);
+        });
     }
 
     #[test_traced]

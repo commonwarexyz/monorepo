@@ -23,7 +23,7 @@ use std::{
             VacantEntry as BTreeVacantEntry,
         },
     },
-    ops::Bound::{Excluded, Unbounded},
+    ops::Bound::{Excluded, Included, Unbounded},
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
@@ -175,6 +175,30 @@ impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
         V: 'a,
     {
         self.last_translated_values()
+    }
+
+    fn translated_range<'a>(
+        &'a self,
+        first: Option<&[u8]>,
+        last: Option<&[u8]>,
+    ) -> impl Iterator<Item = impl Iterator<Item = &'a V> + Send + use<'a, T, V>> + Send + use<'a, T, V>
+    where
+        V: 'a,
+    {
+        let first = first.map(|key| self.translator.transform(key));
+        let last = last.map(|key| self.translator.transform(key));
+
+        // `BTreeMap::range` panics on inverted bounds.
+        let inverted = matches!((first, last), (Some(first), Some(last)) if first > last);
+        let bounds = (
+            first.map_or(Unbounded, Included),
+            last.map_or(Unbounded, Included),
+        );
+        (!inverted)
+            .then(|| self.map.range(bounds))
+            .into_iter()
+            .flatten()
+            .map(|(k, head)| self.values(k, head))
     }
 }
 

@@ -336,7 +336,7 @@ pub(crate) fn any_fix_cfg_with_cache(
     }
 }
 
-fn any_var_cfg_with_cache(
+pub(crate) fn any_var_cfg_with_cache(
     ctx: &(impl BufferPooler + Strategizer),
     pc: CacheRef,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {

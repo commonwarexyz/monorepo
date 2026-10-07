@@ -167,6 +167,25 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         Some(&self.vals[self.run_starting_at(idx)])
     }
 
+    /// The value runs of the keys from `first` through `last` (inclusive, `None` leaves that end
+    /// open), in ascending key order.
+    pub(super) fn runs(&self, first: Option<K>, last: Option<K>) -> impl Iterator<Item = &[V]> {
+        let start = first.map_or(0, |key| self.lower_bound(&key));
+        let end = last
+            .map_or(self.keys.len(), |key| {
+                self.keys.partition_point(|k| *k <= key)
+            })
+            .max(start);
+        let mut vals = &self.vals[start..end];
+        self.keys[start..end]
+            .chunk_by(|a, b| a == b)
+            .map(move |run| {
+                let (run_vals, rest) = vals.split_at(run.len());
+                vals = rest;
+                run_vals
+            })
+    }
+
     /// The values of the largest key strictly less than `key` in their current run order (None if
     /// no such key exists).
     pub(super) fn prev_values_before(&self, key: &K) -> Option<&[V]> {

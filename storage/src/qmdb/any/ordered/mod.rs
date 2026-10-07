@@ -16,13 +16,12 @@ use core::{
     future::Future,
     mem,
     ops::{
-        Bound::{self, Excluded, Included, Unbounded},
+        Bound::{Excluded, Included, Unbounded},
         RangeBounds,
     },
 };
 use futures::{
     TryStreamExt as _,
-    future::try_join_all,
     stream::{self, Stream},
 };
 
@@ -34,23 +33,20 @@ pub use crate::qmdb::any::operation::{Ordered as Operation, update::Ordered as U
 /// Type alias for a location and its associated key data.
 type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 
-/// Which collision bucket a range scan fetches next.
-enum Cursor<K> {
-    /// The lower bound's bucket.
-    Start,
-    /// The bucket holding this active key, the successor of the pending bucket's largest key.
-    Next(K),
-    /// No further bucket needs fetching.
-    Done,
-}
+/// The most locations a range scan reads at once after a cache miss. The batch starts at one and
+/// doubles after each read, so a scan that stops early reads little beyond what it consumed.
+const MAX_SCAN_BATCH: usize = 256;
 
-/// Whether `key` lies beyond the range's upper bound.
-fn past_end<K: Ord>(end: Bound<&K>, key: &K) -> bool {
-    match end {
-        Included(end) => key > end,
-        Excluded(end) => key >= end,
-        Unbounded => false,
-    }
+/// The update read from `loc`, if its key lies within `range`.
+fn update_in_range<F: Family, K: Key, V: ValueEncoding>(
+    op: Operation<F, K, V>,
+    loc: u64,
+    range: &impl RangeBounds<K>,
+) -> Option<Update<K, V>> {
+    let Operation::Update(data) = op else {
+        unreachable!("expected update operation at location {loc}");
+    };
+    range.contains(&data.key).then_some(data)
 }
 
 impl<
@@ -220,7 +216,7 @@ where
     }
 
     /// Streams active (key, value) pairs in ascending key order within `range`. Read errors are
-    /// yielded in place and the next poll retries the same bucket.
+    /// yielded in place and the next poll retries the same read.
     pub fn stream_range<'a>(
         &'a self,
         range: impl RangeBounds<K> + Send + 'a,
@@ -231,39 +227,73 @@ where
             | (Excluded(start), Included(end)) => start >= end,
             _ => false,
         };
-        let cursor = if empty { Cursor::Done } else { Cursor::Start };
+
+        // The translator preserves order, so the buckets between the bounds' translated keys hold
+        // every key in the range, and ascending buckets hold ascending keys.
+        let first = match range.start_bound() {
+            Included(key) | Excluded(key) => Some(key.as_ref()),
+            Unbounded => None,
+        };
+        let last = match range.end_bound() {
+            Included(key) | Excluded(key) => Some(key.as_ref()),
+            Unbounded => None,
+        };
+        let buckets = (!empty)
+            .then(|| self.snapshot.translated_range(first, last))
+            .into_iter()
+            .flatten();
 
         stream::unfold(
-            (range, cursor, Vec::<Update<K, V>>::new()),
-            move |(range, mut cursor, mut pending)| async move {
+            (range, buckets, Vec::new(), 1, Vec::<Update<K, V>>::new()),
+            move |(range, mut buckets, mut batch, mut limit, mut pending)| async move {
                 loop {
-                    // Drain each collision bucket in ascending order before fetching another.
+                    // Drain each batch in ascending order before reading another.
                     if let Some(item) = pending.pop() {
-                        return Some((Ok((item.key, item.value)), (range, cursor, pending)));
+                        return Some((
+                            Ok((item.key, item.value)),
+                            (range, buckets, batch, limit, pending),
+                        ));
                     }
 
-                    // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): fetch
-                    // the following buckets concurrently with draining this one.
-                    let mut updates =
-                        match self.fetch_scan_bucket(&cursor, range.start_bound()).await {
-                            Ok(Some(updates)) => updates,
-                            Ok(None) => return None,
-                            // Keep the cursor unchanged so a later poll retries this bucket.
-                            Err(e) => return Some((Err(e), (range, cursor, pending))),
-                        };
-
-                    // Save the largest key's successor before filtering: the starting bucket
-                    // may contain only keys below the lower bound.
-                    let last = updates.first().expect("index bucket has no locations");
-                    cursor = if last.next_key <= last.key
-                        || past_end(range.end_bound(), &last.next_key)
-                    {
-                        Cursor::Done
-                    } else {
-                        Cursor::Next(last.next_key.clone())
+                    // Start a batch with the next bucket, unless a failed read left one. A bucket
+                    // the cache holds entirely is served without reading ahead. Otherwise the
+                    // batch takes whole buckets up to the limit.
+                    if batch.is_empty() {
+                        batch.extend(buckets.next()?.map(|loc| **loc));
+                        let cached = batch.iter().try_for_each(|&loc| {
+                            let op = self.log.try_read_sync(loc)?;
+                            pending.extend(update_in_range(op, loc, &range));
+                            Some(())
+                        });
+                        if cached.is_some() {
+                            pending.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+                            batch.clear();
+                            continue;
+                        }
+                        pending.clear();
+                        while batch.len() < limit
+                            && let Some(locs) = buckets.next()
+                        {
+                            batch.extend(locs.map(|loc| **loc));
+                        }
+                        batch.sort_unstable();
+                    }
+                    let ops = match self.log.read_many(&batch).await {
+                        Ok(ops) => ops,
+                        Err(e) => {
+                            return Some((Err(e.into()), (range, buckets, batch, limit, pending)));
+                        }
                     };
-                    updates.retain(|item| range.contains(&item.key));
-                    pending = updates;
+                    pending.extend(
+                        ops.into_iter()
+                            .zip(&batch)
+                            .filter_map(|(op, &loc)| update_in_range(op, loc, &range)),
+                    );
+
+                    // Descending order lets the stream emit ascending keys with constant-time pops.
+                    pending.sort_unstable_by(|a, b| b.key.cmp(&a.key));
+                    batch.clear();
+                    limit = (limit * 2).min(MAX_SCAN_BATCH);
                 }
             },
         )
@@ -275,59 +305,6 @@ where
         range: impl RangeBounds<K> + Send + 'a,
     ) -> impl Stream<Item = Result<K, crate::qmdb::Error<F>>> + Send + 'a {
         self.stream_range(range).map_ok(|(key, _)| key)
-    }
-
-    /// Fetches the cursor's bucket, or returns `None` when the scan has no further bucket.
-    async fn fetch_scan_bucket(
-        &self,
-        cursor: &Cursor<K>,
-        start: Bound<&K>,
-    ) -> Result<Option<Vec<Update<K, V>>>, crate::qmdb::Error<F>> {
-        let updates = match cursor {
-            Cursor::Done => return Ok(None),
-            Cursor::Next(key) => {
-                self.fetch_all_updates(self.snapshot.get(key).copied())
-                    .await?
-            }
-            Cursor::Start => match start {
-                Unbounded => {
-                    let Some(iter) = self.snapshot.first_translated_key() else {
-                        return Ok(None);
-                    };
-                    self.fetch_all_updates(iter.copied()).await?
-                }
-                Included(start) | Excluded(start) => {
-                    // The bound's own bucket may hold keys below it. When no active key shares
-                    // its translated key, the following bucket starts.
-                    let mut locs = self.snapshot.get(start).copied().peekable();
-                    if locs.peek().is_some() {
-                        self.fetch_all_updates(locs).await?
-                    } else {
-                        let Some((iter, false)) = self.snapshot.next_translated_key(start) else {
-                            return Ok(None);
-                        };
-                        self.fetch_all_updates(iter.copied()).await?
-                    }
-                }
-            },
-        };
-        Ok(Some(updates))
-    }
-
-    /// Fetches all update operations corresponding to the input locations, returning the result in
-    /// reverse order of the keys.
-    async fn fetch_all_updates(
-        &self,
-        locs: impl Iterator<Item = Location<F>> + Send,
-    ) -> Result<Vec<Update<K, V>>, crate::qmdb::Error<F>> {
-        // Conflicting entries are independent, so their journal reads can run concurrently.
-        let futures = locs.map(|loc| Self::get_update_op(&self.log, loc));
-        let mut updates = try_join_all(futures).await?;
-
-        // Descending order lets the stream emit ascending keys with constant-time pops.
-        updates.sort_unstable_by(|a, b| b.key.cmp(&a.key));
-
-        Ok(updates)
     }
 }
 
@@ -1692,6 +1669,88 @@ mod test {
         test_stream_range_current_variable_partitioned,
         current::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, 32, Sequential>,
         current::tests::variable_config_partitioned::<OneCap>
+    );
+
+    macro_rules! test_scan_batches {
+        ($name:ident, $db:ty, $config:path) => {
+            #[test]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    type TestDb = $db;
+                    let config = $config("scan-batches", &context);
+                    let mut db = TestDb::init(context.child("db"), config, None)
+                        .await
+                        .unwrap();
+
+                    // A full scan of 1,000 keys reaches the batch cap, and the flat OneCap index has
+                    // only 256 buckets, so its keys collide heavily. The config's tiny page cache
+                    // holds little of the log, so scans mix cached buckets with batched reads.
+                    let mut rng = test_rng();
+                    let mut active = BTreeMap::new();
+                    for _ in 0..4 {
+                        let mut batch = db.new_batch();
+                        for _ in 0..250 {
+                            let key = Sha256::hash(&[&rng.random::<u64>().to_be_bytes()]);
+                            let value = Sha256::hash(&[key.as_ref()]);
+                            batch = batch.write(key, Some(value));
+                            active.insert(key, value);
+                        }
+                        let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
+                        (db, _) = db.apply_batch(batch).await.unwrap();
+                    }
+                    let expected: Vec<_> = active.iter().map(|(&k, &v)| (k, v)).collect();
+                    assert_eq!(
+                        db.stream_range(..).try_collect::<Vec<_>>().await.unwrap(),
+                        expected
+                    );
+
+                    // Random bounds, and scans that stop partway through a batch.
+                    for _ in 0..50 {
+                        let mut bounds = [
+                            Sha256::hash(&[&rng.random::<u64>().to_be_bytes()]),
+                            Sha256::hash(&[&rng.random::<u64>().to_be_bytes()]),
+                        ];
+                        bounds.sort_unstable();
+                        let [low, high] = bounds;
+                        assert_eq!(
+                            db.stream_range(low..high)
+                                .try_collect::<Vec<_>>()
+                                .await
+                                .unwrap(),
+                            active
+                                .range(low..high)
+                                .map(|(&k, &v)| (k, v))
+                                .collect::<Vec<_>>()
+                        );
+                        let count = rng.random_range(0..600);
+                        assert_eq!(
+                            db.stream_range(low..)
+                                .take(count)
+                                .try_collect::<Vec<_>>()
+                                .await
+                                .unwrap(),
+                            active
+                                .range(low..)
+                                .take(count)
+                                .map(|(&k, &v)| (k, v))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                    db.destroy().await.unwrap();
+                });
+            }
+        };
+    }
+
+    test_scan_batches!(
+        test_stream_range_batches_any_fixed,
+        any::ordered::fixed::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, Sequential>,
+        any::test::fixed_db_config::<OneCap>
+    );
+    test_scan_batches!(
+        test_stream_range_batches_any_variable_partitioned,
+        any::ordered::variable::partitioned::Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 1, Sequential>,
+        any::test::variable_db_config_partitioned::<OneCap>
     );
 
     #[test]
