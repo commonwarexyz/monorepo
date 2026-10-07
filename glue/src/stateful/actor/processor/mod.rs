@@ -660,12 +660,6 @@ where
         }
     }
 
-    /// Returns an application clone for test mailboxes.
-    #[cfg(test)]
-    pub(super) fn application(&self) -> A {
-        self.app.clone()
-    }
-
     /// Returns whether no replay is in flight.
     pub(super) fn replays_idle(&self) -> bool {
         self.replays.is_empty()
