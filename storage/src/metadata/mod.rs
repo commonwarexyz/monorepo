@@ -31,10 +31,10 @@
 //!
 //! # Writing Updates
 //!
-//! When keys and encoded value sizes are stable, [Metadata] combines updates into one write if
-//! the complete encoded metadata is at most 4 KiB. Larger stores write only the changed values,
-//! version, and checksum. This reduces I/O submissions for small checkpoints while keeping
-//! writes small for large collections with infrequent changes.
+//! When keys and encoded value sizes are stable, [Metadata] updates the target blob in place. A
+//! store of at most 4 KiB is written whole, in one write. Larger stores write only the changed
+//! values, version, and checksum, so large collections with infrequent changes stay cheap to
+//! update. Any other update rewrites the entire blob.
 //!
 //! # Example
 //!
@@ -91,19 +91,21 @@ pub struct Config<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{storage::FULL_OVERWRITE_LIMIT, *};
     use bytes::Bytes;
+    use commonware_codec::{FixedSize, RangeCfg};
+    use commonware_cryptography::crc32;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
         Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
-        deterministic,
+        deterministic::{self, FaultConfig, PartialWriteMode, WriteConfig},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, WriteFaultContext,
             WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
-    use commonware_utils::sequence::U64;
+    use commonware_utils::{Probability, probability, sequence::U64};
     use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
 
@@ -140,7 +142,7 @@ mod tests {
                     .await
                     .unwrap();
 
-            // Seed both metadata copies so equal-size updates take the incremental branch.
+            // Seed both metadata copies so equal-size updates overwrite in place.
             metadata.put(key.clone(), vec![1; 8]);
             metadata = metadata.sync().await.unwrap();
             metadata = metadata.sync().await.unwrap();
@@ -215,57 +217,142 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_overwrite_submission_boundary() {
-        deterministic::Runner::default().start(|context| async move {
-            // Version, u64 key, Vec length prefix, and CRC occupy 22 bytes at these sizes.
-            // Exercise both sides of the contiguous-write limit with identical update semantics.
-            for value_len in [4_074, 4_075] {
-                let (recording, recordings) = RecordingContext::new(context.child("boundary"));
-                let cfg = Config {
-                    partition: format!("overwrite-boundary-{value_len}"),
-                    codec_config: ((0..).into(), ()),
-                };
-                let key = U64::new(1);
-                let mut metadata =
-                    Metadata::<_, U64, Vec<u8>>::init(recording.child("seed"), cfg.clone())
-                        .await
-                        .unwrap();
-                metadata.put(key.clone(), vec![1; value_len]);
+    fn single_key_config() -> Config<(RangeCfg<usize>, ())> {
+        Config {
+            partition: "test".into(),
+            codec_config: ((0..).into(), ()),
+        }
+    }
 
-                for pipelined in [false, true] {
-                    // Opening discards the diff record, so repopulate both metadata copies before
-                    // checking the steady-state overwrite path.
-                    metadata = metadata.sync().await.unwrap();
-                    metadata = metadata.sync().await.unwrap();
-                    recordings.clear();
-                    let value = vec![if pipelined { 3 } else { 2 }; value_len];
-                    metadata.put(key.clone(), value.clone());
-                    if pipelined {
-                        let (next, handle) = metadata.start_sync().await.unwrap();
-                        metadata = next;
-                        handle.await.unwrap();
-                    } else {
-                        metadata = metadata.sync().await.unwrap();
-                    }
-                    let options = if value_len == 4_074 {
-                        vec![if pipelined {
-                            WriteOptions::DONT_CACHE
-                        } else {
-                            WriteOptions::SYNC | WriteOptions::DONT_CACHE
-                        }]
-                    } else {
-                        vec![WriteOptions::DONT_CACHE; 3]
-                    };
-                    assert_options(&recordings, &[], &options);
-                    drop(metadata);
-                    metadata = Metadata::init(recording.child("reopen"), cfg.clone())
-                        .await
-                        .unwrap();
-                    assert_eq!(metadata.get(&key), Some(&value));
-                }
-                metadata.destroy().await.unwrap();
+    /// Length of the value that makes a single-key store encode to `store_len` bytes: version,
+    /// key, 2-byte value length prefix, value, and checksum.
+    fn single_key_value_len(store_len: usize) -> usize {
+        store_len - u64::SIZE - U64::SIZE - 2 - crc32::Digest::SIZE
+    }
+
+    /// Initialize a single-key store with both copies populated, so an equal-size update
+    /// overwrites in place.
+    async fn init_single_key<E: crate::Context>(
+        context: E,
+        value_len: usize,
+    ) -> Metadata<E, U64, Vec<u8>> {
+        let mut metadata = Metadata::init(context, single_key_config()).await.unwrap();
+        metadata.put(U64::new(1), vec![1; value_len]);
+        metadata = metadata.sync().await.unwrap();
+        metadata.sync().await.unwrap()
+    }
+
+    #[rstest::rstest]
+    #[test_traced]
+    fn test_full_overwrite_limit(
+        #[values(FULL_OVERWRITE_LIMIT, FULL_OVERWRITE_LIMIT + 1)] store_len: usize,
+        #[values(false, true)] pipelined: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let value_len = single_key_value_len(store_len);
+            let (recording, recordings) = RecordingContext::new(context.child("storage"));
+            let mut metadata = init_single_key(recording.child("first"), value_len).await;
+            recordings.clear();
+
+            metadata.put(U64::new(1), vec![2; value_len]);
+            if pipelined {
+                let (next, handle) = metadata.start_sync().await.unwrap();
+                metadata = next;
+                handle.await.unwrap();
+            } else {
+                metadata = metadata.sync().await.unwrap();
             }
+            let writes = if store_len > FULL_OVERWRITE_LIMIT {
+                vec![WriteOptions::DONT_CACHE; 3]
+            } else if pipelined {
+                vec![WriteOptions::DONT_CACHE]
+            } else {
+                vec![WriteOptions::SYNC | WriteOptions::DONT_CACHE]
+            };
+            assert_options(&recordings, &[], &writes);
+            let buffer = context.encode();
+            assert!(buffer.contains("sync_rewrites_total 2"), "{buffer}");
+            assert!(buffer.contains("sync_overwrites_total 1"), "{buffer}");
+
+            drop(metadata);
+            // The store encodes to exactly `store_len` bytes.
+            let (_, len) = context.open("test", b"left").await.unwrap();
+            assert_eq!(len, store_len as u64);
+            let metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("second"), single_key_config())
+                    .await
+                    .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![2; value_len]));
+        });
+    }
+
+    #[rstest::rstest]
+    #[test_traced]
+    fn test_overwrite_survives_crash(
+        #[values(FULL_OVERWRITE_LIMIT, FULL_OVERWRITE_LIMIT + 1)] store_len: usize,
+        #[values(false, true)] pipelined: bool,
+    ) {
+        let value_len = single_key_value_len(store_len);
+        let ((), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let mut metadata = init_single_key(context, value_len).await;
+                metadata.put(U64::new(1), vec![2; value_len]);
+                if pipelined {
+                    let (_metadata, handle) = metadata.start_sync().await.unwrap();
+                    handle.await.unwrap();
+                } else {
+                    metadata.sync().await.unwrap();
+                }
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, single_key_config())
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![2; value_len]));
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::lost(PartialWriteMode::Prefix, probability!(0.0), 1)]
+    #[case::torn(PartialWriteMode::Subset, probability!(0.5), 1)]
+    #[case::retained(PartialWriteMode::Prefix, probability!(1.0), 2)]
+    #[test_traced]
+    fn test_overwrite_crash_during_background_sync(
+        #[case] mode: PartialWriteMode,
+        #[case] retention_rate: Probability,
+        #[case] recovered: u8,
+        #[values(FULL_OVERWRITE_LIMIT, FULL_OVERWRITE_LIMIT + 1)] store_len: usize,
+    ) {
+        let value_len = single_key_value_len(store_len);
+        let faults = FaultConfig::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate,
+            mode,
+        });
+        let runner = deterministic::Runner::new(
+            deterministic::Config::default().with_storage_fault_config(faults),
+        );
+        let ((), checkpoint) = runner.start_and_recover(|context| async move {
+            // Started syncs park until released, so the crash lands before the overwrite is
+            // durable and the retention policy decides which of its bytes survive.
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: PendingSyncs::default(),
+            };
+            let mut metadata = init_single_key(context, value_len).await;
+            metadata.put(U64::new(1), vec![2; value_len]);
+            let (_metadata, _handle) = metadata.start_sync().await.unwrap();
+        });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context, single_key_config())
+                .await
+                .unwrap();
+            assert_eq!(
+                metadata.get(&U64::new(1)),
+                Some(&vec![recovered; value_len])
+            );
         });
     }
 
@@ -823,7 +910,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_recovered_mirror_supports_shrinking_rewrite() {
+    fn test_recovered_buffer_supports_shrinking_rewrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {

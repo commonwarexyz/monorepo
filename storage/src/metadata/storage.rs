@@ -14,8 +14,12 @@ use tracing::{debug, warn};
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
-/// Maximum encoded metadata size to write in one operation.
-const CONTIGUOUS_WRITE_LIMIT: usize = 4_096;
+/// Largest encoded store that an in-place overwrite writes whole, instead of writing the changed
+/// values, version, and checksum separately.
+///
+/// This conservatively bounds the unchanged bytes rewritten per update (one 4 KiB page when blob
+/// data starts page-aligned).
+pub(super) const FULL_OVERWRITE_LIMIT: usize = 4_096;
 
 /// Information about a value in a [Wrapper].
 struct Info {
@@ -438,15 +442,15 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             let checksum = Crc32::checksum(&target.data.as_ref()[..checksum_index]);
             (&mut target.data.as_mut()[checksum_index..]).put_u32(checksum);
 
-            // Freeze the encoded buffer so async writes can hold zero-copy slices, then recover
+            // Freeze the encoded buffer so async writes can share it without copying, then recover
             // the mutable buffer after all writes complete. Since we retain the buffer in memory,
             // every write requests cache bypass.
             let data = std::mem::take(&mut target.data).freeze();
 
-            let contiguous = data.len() <= CONTIGUOUS_WRITE_LIMIT;
-            if contiguous {
-                // This write includes every changed byte, so it can request durability directly.
-                // Pipelined syncs retain a separate completion handle.
+            let full_write = data.len() <= FULL_OVERWRITE_LIMIT;
+            if full_write {
+                // This write includes every changed byte, so a non-pipelined sync can request
+                // durability with it.
                 let options = if pipelined {
                     WriteOptions::DONT_CACHE
                 } else {
@@ -482,10 +486,11 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             }
             let sync = if pipelined {
                 Some(target.blob.start_sync().await)
+            } else if full_write {
+                // The full write above already persisted the store.
+                None
             } else {
-                if !contiguous {
-                    target.blob.sync().await?;
-                }
+                target.blob.sync().await?;
                 None
             };
 
