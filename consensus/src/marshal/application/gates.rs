@@ -207,21 +207,19 @@ pub(crate) async fn forward<T, U>(
 
 /// Answers a handoff request through `automaton`'s ordinary proposal path.
 ///
-/// [`HandoffPolicy::AwaitCertification`] resolves the receiver immediately.
-/// [`HandoffPolicy::Prepare`] clones `automaton` into a task that builds the
-/// candidate and forwards it with the granted publication permission while
-/// consensus still holds the receiver.
-pub(crate) fn propose_handoff<E, A>(
+/// [`HandoffPolicy::AwaitCertification`] resolves the receiver immediately. With
+/// [`HandoffPolicy::Prepare`], the built candidate is sent with the granted
+/// publication permission, and closing the receiver cancels the build.
+pub(crate) async fn propose_handoff<E, A>(
     context: &E,
-    automaton: &A,
+    automaton: &mut A,
     policy: HandoffPolicy,
     round: Round,
     consensus_context: A::Context,
 ) -> oneshot::Receiver<HandoffProposal<A::Digest>>
 where
     E: Spawner + Metrics,
-    A: Automaton + Clone + Send + 'static,
-    A::Context: Send + 'static,
+    A: Automaton,
 {
     let (tx, rx) = oneshot::channel();
     let publication = match policy {
@@ -231,19 +229,17 @@ where
             return rx;
         }
     };
-    let mut automaton = automaton.clone();
+    let proposal = automaton.propose(consensus_context).await;
     context
         .child("propose_handoff")
         .with_attribute("round", round)
-        .spawn(move |_| async move {
-            let proposal = automaton.propose(consensus_context).await;
-            forward(tx, proposal, |payload| {
+        .spawn(move |_| {
+            forward(tx, proposal, move |payload| {
                 Some(HandoffProposal::Proposed {
                     payload,
                     publication,
                 })
             })
-            .await;
         });
     rx
 }

@@ -1127,13 +1127,15 @@ where
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
         let policy = self.application.handoff_policy(&consensus_context);
+        let context = self.context.clone();
         gates::propose_handoff(
-            &*self.context,
+            &*context,
             self,
             policy,
             consensus_context.round,
             consensus_context,
         )
+        .await
     }
 
     #[allow(clippy::async_yields_async)]
