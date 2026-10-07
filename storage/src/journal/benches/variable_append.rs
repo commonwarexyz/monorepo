@@ -1,4 +1,4 @@
-//! Scalar variable-journal append cost with buffered and durable workloads.
+//! Single-item variable-journal append cost with buffered and durable workloads.
 
 use crate::{PAGE_SIZE, REPLAY_BUFFER, WRITE_BUFFER};
 use commonware_runtime::{
@@ -72,7 +72,7 @@ fn bench_case<const SIZE: usize>(
 }
 
 fn bench_size<const SIZE: usize>(c: &mut Criterion) {
-    // Below the write-buffer threshold: isolate scalar framing and offset bookkeeping.
+    // Below the write-buffer threshold: isolate per-item framing and offset bookkeeping.
     bench_case::<SIZE>(c, 320 * 1024 / SIZE, None, 0);
     // Several buffer flushes plus final durability: measure sustained append cost.
     let items = 4 * 1024 * 1024 / SIZE;
@@ -83,7 +83,7 @@ fn bench(c: &mut Criterion) {
     bench_size::<32>(c);
     bench_size::<256>(c);
     bench_size::<4_096>(c);
-    // Compression retains the existing scalar path.
+    // Compressed appends still take the batch path.
     bench_case::<32>(c, 320 * 1024 / 32, Some(3), 0);
     // Expose how durability frequency changes the value of a CPU optimization.
     bench_case::<32>(c, 64, None, 1);

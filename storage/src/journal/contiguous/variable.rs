@@ -4690,7 +4690,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_scalar_append_matches_batch_across_boundaries() {
+    fn test_single_append_matches_batch_across_boundaries() {
         deterministic::Runner::default().start(|context| async move {
             let items: Vec<Vec<u8>> = [
                 0, 1, 100, 101, 127, 128, 1_024, 3, 4_096, 0, 15, 250, 128, 7, 128,
@@ -4700,8 +4700,8 @@ mod tests {
             .map(|(i, len)| vec![i as u8; len])
             .collect();
             for capacity in [1, 256, 4_096] {
-                let scalar_cfg = Config {
-                    partition: format!("scalar-boundaries-{capacity}"),
+                let single_cfg = Config {
+                    partition: format!("single-boundaries-{capacity}"),
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: ((0..).into(), ()),
@@ -4709,10 +4709,10 @@ mod tests {
                     write_buffer: NonZeroUsize::new(capacity).unwrap(),
                     replay_buffer: NZUsize!(256),
                 };
-                let mut batch_cfg = scalar_cfg.clone();
+                let mut batch_cfg = single_cfg.clone();
                 batch_cfg.partition = format!("batch-boundaries-{capacity}");
-                let mut scalar =
-                    Journal::<_, Vec<u8>>::init(context.child("scalar"), scalar_cfg.clone())
+                let mut single =
+                    Journal::<_, Vec<u8>>::init(context.child("single"), single_cfg.clone())
                         .await
                         .unwrap();
                 let mut batch =
@@ -4721,26 +4721,26 @@ mod tests {
                         .unwrap();
                 for (index, item) in items.iter().enumerate() {
                     let position;
-                    (scalar, position) = scalar.append(item).await.unwrap();
+                    (single, position) = single.append(item).await.unwrap();
                     assert_eq!(position, index as u64);
                     (batch, _) = batch
                         .append_many(Many::Flat(std::slice::from_ref(item)))
                         .await
                         .unwrap();
-                    assert_eq!(scalar.read(position).await.unwrap(), *item);
+                    assert_eq!(single.read(position).await.unwrap(), *item);
                     if index % 3 == 2 {
-                        scalar = scalar.commit().await.unwrap();
+                        single = single.commit().await.unwrap();
                         batch = batch.commit().await.unwrap();
                     }
                 }
-                drop(scalar.sync().await.unwrap());
+                drop(single.sync().await.unwrap());
                 drop(batch.sync().await.unwrap());
 
-                // Scalar and batch paths retain identical framing, offsets, and page checksums.
+                // Single-item and batch appends write identical frames, offsets, and checksums.
                 for (left, right) in [
-                    (scalar_cfg.data_partition(), batch_cfg.data_partition()),
+                    (single_cfg.data_partition(), batch_cfg.data_partition()),
                     (
-                        format!("{}-blobs", scalar_cfg.offsets_partition()),
+                        format!("{}-blobs", single_cfg.offsets_partition()),
                         format!("{}-blobs", batch_cfg.offsets_partition()),
                     ),
                 ] {
@@ -4765,14 +4765,14 @@ mod tests {
                     }
                 }
 
-                let scalar = Journal::<_, Vec<u8>>::init(context.child("reopen"), scalar_cfg)
+                let single = Journal::<_, Vec<u8>>::init(context.child("reopen"), single_cfg)
                     .await
                     .unwrap();
-                assert_eq!(scalar.bounds(), 0..items.len() as u64);
+                assert_eq!(single.bounds(), 0..items.len() as u64);
                 for (index, item) in items.iter().enumerate() {
-                    assert_eq!(scalar.read(index as u64).await.unwrap(), *item);
+                    assert_eq!(single.read(index as u64).await.unwrap(), *item);
                 }
-                scalar.destroy().await.unwrap();
+                single.destroy().await.unwrap();
             }
         });
     }
