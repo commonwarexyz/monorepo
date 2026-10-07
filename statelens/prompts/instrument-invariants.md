@@ -131,6 +131,14 @@ campaign stays silent and the silence is read as evidence. The patterns to watch
   digest, view and signer), from what the replica holds or restored; where none can be had
   without changing behaviour, make the evidence part of `pre`, so the case is not evaluated
   rather than passed, say in the Notes which cases are unknown, and set `partial`.
+- **Validity read from who sent it.** A vote, signature or certificate is valid because it
+  verifies, not because an engine produced, signed or published it. The guard skips only the
+  replicas a fuzz target marks compromised, and the tests the campaign gates on also run
+  Byzantine participants it is never told about: the real engine with a scheme that corrupts
+  what it signs, whose published votes every other replica rejects. A ghost record of what a
+  signer published says that it was sent, not that it is valid. When `pre` needs a message to
+  be valid, take that from a verification the observing replica completed, or from its own
+  construction, keyed by the exact message. The subsystem rules name the tests that do this.
 - **A binding the campaign never evaluates.** A `pre` that cannot hold in the fuzz targets
   leaves the check silent there however many unit tests exercise it. Read what the targets
   of this campaign do from their harness in `{{FUZZ_PACKAGE}}` rather than assuming it; the

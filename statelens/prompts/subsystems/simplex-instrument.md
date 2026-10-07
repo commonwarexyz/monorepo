@@ -8,6 +8,13 @@
   mutate messages and split the network. Some targets of `consensus/fuzz/simplex` also
   crash honest replicas and restart them from their journal (the Chaos, Chaos-Twins and
   Mallory drivers), so journal replay runs while fuzzing.
+- Byzantine participants the guard does not know: tests wrap a participant's scheme in
+  `mocks::wrapped::Scheme`, which runs the real engine with a misbehaving scheme. With
+  `Behavior::CorruptSignature`, used for participant 0 of the `test_invalid_*` tests in
+  the test gate, every vote it signs carries a corrupted signature: its engine publishes
+  those votes, and every other replica rejects them, so a count of distinct voters that
+  includes them can reach a quorum no replica can certify. With `Behavior::RecoveryFailure`
+  certificate assembly fails even from a valid quorum.
 - Fuzz targets: every consensus target uses the `cert_mock` scheme, which hides the
   signer set.
 - Replica index, in `consensus/src/simplex/` only (marshal code has its own rule):
