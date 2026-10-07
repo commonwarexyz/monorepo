@@ -3801,7 +3801,7 @@ pub(crate) mod tests {
                 value::FixedEncoding,
             },
             current,
-            floor::{Compact, Decision, Entry, Hold, Limits, Policy, Proportional},
+            floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
         },
         translator::OneCap,
     };
@@ -4202,7 +4202,7 @@ pub(crate) mod tests {
             drop((round, prepared));
 
             // The staged prefetch selects both live updates.
-            let policy = Compact {
+            let policy = Bounded {
                 entries: usize::MAX,
                 skips: u64::MAX,
             };
@@ -4249,7 +4249,7 @@ pub(crate) mod tests {
                 .merkleize(
                     &db,
                     None,
-                    &mut Compact {
+                    &mut Bounded {
                         entries: usize::MAX,
                         skips: u64::MAX,
                     },
@@ -4549,7 +4549,7 @@ pub(crate) mod tests {
                 .unwrap();
             let proportional_reads = items() - before;
             let before = items();
-            let mut policy = Compact {
+            let mut policy = Bounded {
                 entries,
                 skips: u64::MAX,
             };
@@ -4978,7 +4978,7 @@ pub(crate) mod tests {
             };
             let staged_keys: Vec<_> = written.iter().map(|&i| &keys[i]).collect();
             let updates: Vec<_> = (0..written.len()).map(|slot| (slot, value)).collect();
-            let mut fixed = Compact {
+            let mut fixed = Bounded {
                 entries,
                 skips: u64::MAX,
             };
@@ -8384,7 +8384,7 @@ pub(crate) mod tests {
                         .merkleize(
                             &db,
                             None,
-                            &mut Compact {
+                            &mut Bounded {
                                 entries: usize::MAX,
                                 skips: u64::MAX,
                             },
@@ -8447,7 +8447,7 @@ pub(crate) mod tests {
                             .merkleize(
                                 &db,
                                 None,
-                                &mut Compact {
+                                &mut Bounded {
                                     entries: usize::MAX,
                                     skips: u64::MAX,
                                 },
@@ -8536,7 +8536,7 @@ pub(crate) mod tests {
                         })
                     };
                     let compact = batch()
-                        .merkleize(&db, None, &mut Compact { entries, skips })
+                        .merkleize(&db, None, &mut Bounded { entries, skips })
                         .await
                         .unwrap();
                     let mut keep = Script::new(entries, skips, crate::qmdb::any::test::keep);

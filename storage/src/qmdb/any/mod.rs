@@ -112,7 +112,7 @@
 //! let (db, _) = db.apply_batch(merkleized).await?;
 //!
 //! // Keep at most 4 updates and pass at most 8 inactive locations.
-//! let mut policy = Compact { entries: 4, skips: 8 };
+//! let mut policy = Bounded { entries: 4, skips: 8 };
 //! let batch = db.new_batch().write(k3, Some(v3));
 //! let merkleized = batch.merkleize(&db, None, &mut policy).await?;
 //! let (db, _) = db.apply_batch(merkleized).await?;
@@ -2020,7 +2020,7 @@ pub(crate) mod test {
             traits::MerkleizedBatch as MerkleizedTrait,
             unordered::{fixed::Db as UnorderedFixedDb, variable::Db as UnorderedVariableDb},
         },
-        floor::{Compact, Decision, Entry, Hold, Limits, Policy, Proportional},
+        floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
     };
     use commonware_macros::{test_group, test_traced};
     use commonware_parallel::Sequential;
@@ -3455,7 +3455,7 @@ pub(crate) mod test {
 
     /// Merkleize `writes` on batches from `start`, children of the pending `ancestors` (oldest
     /// first) of `db`, under [`Proportional`], under proportional limits with a policy that decides
-    /// nothing, and under [`Compact`] with unlimited skips and one entry for the previous commit
+    /// nothing, and under [`Bounded`] with unlimited skips and one entry for the previous commit
     /// and for each operation the writes make inactive.
     ///
     /// Asserts that all three append the same operations under the same floor and root.
@@ -3494,7 +3494,7 @@ pub(crate) mod test {
         let mut policy = Script::proportional(|_: &Digest| Choice::Keep);
         let proportional = with().merkleize(db, None, &mut policy).await.unwrap();
         assert_same(db, &built, &proportional);
-        let mut policy = Compact {
+        let mut policy = Bounded {
             entries,
             skips: u64::MAX,
         };
@@ -3513,7 +3513,7 @@ pub(crate) mod test {
         (state, expected, moved)
     }
 
-    /// A [`Compact`] policy with unlimited skips and one entry for the previous commit and for
+    /// A [`Bounded`] policy with unlimited skips and one entry for the previous commit and for
     /// each operation the batch's writes make inactive (an update of a key live before the batch,
     /// an ordered predecessor rewrite included, and two for a delete) reproduces the operations,
     /// floor, and root of a [`Proportional`] batch, as does a policy with proportional limits that

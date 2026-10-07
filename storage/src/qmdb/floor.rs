@@ -334,14 +334,14 @@ impl<F: Family, K, V> Policy<F, K, V> for Hold {
 
 /// Keeps every active update it reaches within its limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Compact {
+pub struct Bounded {
     /// The most active updates to keep.
     pub entries: usize,
     /// The most inactive locations to pass.
     pub skips: u64,
 }
 
-impl<F: Family, K, V> Policy<F, K, V> for Compact {
+impl<F: Family, K, V> Policy<F, K, V> for Bounded {
     fn evicts(&self) -> bool {
         false
     }

@@ -44,7 +44,7 @@ use commonware_storage::{
     qmdb::{
         any::FixedConfig,
         current::FixedConfig as CurrentFixedConfig,
-        floor::{Compact, Proportional},
+        floor::{Bounded, Proportional},
     },
     translator::EightCap,
 };
@@ -198,15 +198,15 @@ impl PolicyKind {
     /// The fixed limits for a batch that writes `distinct_keys` existing keys out of `updates`
     /// slots, or `None` for the proportional policy. The entries match the proportional walk's
     /// allowance for that batch: one per superseded update and one for the previous commit.
-    const fn fixed(self, distinct_keys: usize, updates: u64) -> Option<Compact> {
+    const fn fixed(self, distinct_keys: usize, updates: u64) -> Option<Bounded> {
         let entries = distinct_keys + 1;
         match self {
             Self::Proportional => None,
-            Self::Fixed => Some(Compact {
+            Self::Fixed => Some(Bounded {
                 entries,
                 skips: u64::MAX,
             }),
-            Self::FixedBounded => Some(Compact {
+            Self::FixedBounded => Some(Bounded {
                 entries,
                 skips: updates,
             }),
@@ -337,8 +337,8 @@ macro_rules! run_pipeline {
                     .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
                     .await
                     .unwrap(),
-                Some(mut compact) => staged
-                    .merkleize(updates, Vec::new(), None, &db, &mut compact)
+                Some(mut bounded) => staged
+                    .merkleize(updates, Vec::new(), None, &db, &mut bounded)
                     .await
                     .unwrap(),
             };

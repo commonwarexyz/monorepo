@@ -153,7 +153,7 @@ pub(crate) mod test {
         mmr,
         qmdb::{
             bitmap::{Candidates, FnCandidates},
-            floor::{Compact, Proportional},
+            floor::{Bounded, Proportional},
         },
         translator::TwoCap,
     };
@@ -1202,7 +1202,7 @@ pub(crate) mod test {
     fn assert_non_trait_futures_are_send(db: &AnyTest, key: Digest, value: Vec<u8>) {
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None, &mut Proportional));
-        let mut policy = Compact {
+        let mut policy = Bounded {
             entries: 1,
             skips: 1,
         };

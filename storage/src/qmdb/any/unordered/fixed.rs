@@ -157,7 +157,7 @@ pub(crate) mod test {
             },
             cache::Cache,
             delete_key,
-            floor::{Compact, Proportional},
+            floor::{Bounded, Proportional},
             update_key, verify_proof,
         },
         translator::{OneCap, TwoCap},
@@ -1976,7 +1976,7 @@ pub(crate) mod test {
         is_send(reader.get_many(&[&key], db));
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None, &mut Proportional));
-        let mut policy = Compact {
+        let mut policy = Bounded {
             entries: 1,
             skips: 1,
         };

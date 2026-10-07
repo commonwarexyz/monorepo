@@ -317,7 +317,7 @@ async fn apply_writes<F: Family, D: DbAny<F, Key = Digest, Value = Digest>>(
 mod tests {
     use super::*;
     use crate::qmdb::{
-        floor::{Compact, Decision, Entry, Hold, Limits, Policy},
+        floor::{Bounded, Decision, Entry, Hold, Limits, Policy},
         keyless, store,
     };
     use commonware_conformance::{Conformance, conformance_tests};
@@ -539,8 +539,8 @@ mod tests {
         Proportional,
         /// [`Hold`].
         Hold,
-        /// [`Compact`] with these limits.
-        Compact { entries: usize, skips: u64 },
+        /// [`Bounded`] with these limits.
+        Bounded { entries: usize, skips: u64 },
         /// Keeps, evicts, replaces, or stops at each update by a rule over its location, its key,
         /// and `seed`, within these limits.
         Seeded {
@@ -580,8 +580,8 @@ mod tests {
                     Policy::<F, Digest, Digest>::limits(&Proportional, made_inactive)
                 }
                 Self::Hold => Policy::<F, Digest, Digest>::limits(&Hold, made_inactive),
-                Self::Compact { entries, skips } => {
-                    Policy::<F, Digest, Digest>::limits(&Compact { entries, skips }, made_inactive)
+                Self::Bounded { entries, skips } => {
+                    Policy::<F, Digest, Digest>::limits(&Bounded { entries, skips }, made_inactive)
                 }
                 Self::Seeded { entries, skips, .. } => Limits { entries, skips },
             }
@@ -591,7 +591,7 @@ mod tests {
             match *self {
                 Self::Proportional => Proportional.decide(entry),
                 Self::Hold => Hold.decide(entry),
-                Self::Compact { entries, skips } => Compact { entries, skips }.decide(entry),
+                Self::Bounded { entries, skips } => Bounded { entries, skips }.decide(entry),
                 Self::Seeded { seed, .. } => match choose(seed, *entry.location(), entry.key()) {
                     Choice::Keep => entry.keep(),
                     Choice::Evict => entry.evict().0,
@@ -683,7 +683,7 @@ mod tests {
             let round = self.batches.len() as u64;
             let rule = match round % 8 {
                 2 => Rule::Hold,
-                4 => Rule::Compact {
+                4 => Rule::Bounded {
                     entries: 1 + (self.seed % 3) as usize,
                     skips: round % 5,
                 },
@@ -704,7 +704,7 @@ mod tests {
     /// Early batches write a few of many planned live keys, so floor advances move updates of
     /// unwritten keys and the root commits to how many each advance moves. The plan does not track
     /// policy evictions, so a planned update may recreate an evicted key. Unless a step names its
-    /// policy, batches at indices 2, 4, and 6 modulo 8 use [`Hold`], [`Compact`] under small
+    /// policy, batches at indices 2, 4, and 6 modulo 8 use [`Hold`], [`Bounded`] under small
     /// limits, and [`Rule::Seeded`] respectively. The rest use [`Proportional`].
     ///
     /// 1. Create n keys and eight keys that share a translator bucket.
@@ -858,7 +858,7 @@ mod tests {
             let kind = match self.rule {
                 Rule::Proportional => 0,
                 Rule::Hold => 1,
-                Rule::Compact { .. } => 2,
+                Rule::Bounded { .. } => 2,
                 Rule::Seeded { .. } => 3,
             };
             self.rules[kind].fetch_add(1, Ordering::Relaxed);

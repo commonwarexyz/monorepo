@@ -745,7 +745,7 @@ mod test {
                     keep, keys_after, randomized_churn, replay, walk_model,
                 },
             },
-            floor::{Compact, Hold, Proportional},
+            floor::{Bounded, Hold, Proportional},
         },
         translator::{OneCap, TwoCap},
     };
@@ -2380,7 +2380,7 @@ mod test {
             // reaching it costs the skip the policy lacks: the floor stays at 0 and nothing is
             // decided. The walk copies only the operations of candidates it reaches, so the count
             // stays at the witness's own clone.
-            let mut policy = Compact {
+            let mut policy = Bounded {
                 entries: 2,
                 skips: 0,
             };
@@ -2935,7 +2935,7 @@ mod test {
                 .map(|(key, _)| (*key, Some(digest(500))))
                 .collect();
             let (db, _) = apply(db, rewrites, &mut Hold).await;
-            let mut policy = Compact {
+            let mut policy = Bounded {
                 entries: usize::MAX,
                 skips: u64::MAX,
             };

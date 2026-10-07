@@ -538,7 +538,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             chain::Bounds,
-            floor::{Compact, Hold, Proportional},
+            floor::{Bounded, Hold, Proportional},
             store::tests::{TestKey, TestValue},
             verify_proof,
         },
@@ -6103,7 +6103,7 @@ pub mod tests {
         ordered: &OrderedFixedDb,
         key: Digest,
     ) {
-        let mut policy = Compact {
+        let mut policy = Bounded {
             entries: 1,
             skips: 1,
         };

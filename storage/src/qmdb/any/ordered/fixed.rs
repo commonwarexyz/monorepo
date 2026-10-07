@@ -165,7 +165,7 @@ pub(crate) mod test {
                 },
                 test::{fixed_db_config, fixed_db_config_partitioned},
             },
-            floor::{Compact, Policy, Proportional},
+            floor::{Bounded, Policy, Proportional},
             verify_proof,
         },
         translator::{OneCap, TwoCap},
@@ -1999,7 +1999,7 @@ pub(crate) mod test {
         });
     }
 
-    /// [`test_ordered_child_delete_colliding_key_corrupts_next_key`] under a [`Compact`] policy,
+    /// [`test_ordered_child_delete_colliding_key_corrupts_next_key`] under a [`Bounded`] policy,
     /// whose pass gathers the existing-key locations that merkleize then reuses.
     #[test_traced("INFO")]
     fn test_ordered_child_delete_colliding_key_fixed_policy() {
@@ -2007,7 +2007,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             child_delete_colliding_key(
                 context,
-                &mut Compact {
+                &mut Bounded {
                     entries: 1,
                     skips: 0,
                 },
@@ -2225,7 +2225,7 @@ pub(crate) mod test {
         is_send(db.get_all(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
-        let mut policy = Compact {
+        let mut policy = Bounded {
             entries: 1,
             skips: 1,
         };

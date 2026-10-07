@@ -31,7 +31,7 @@
 use arbitrary::Arbitrary;
 use commonware_storage::{
     merkle::{Family, Location},
-    qmdb::floor::{Compact, Decision, Entry, Hold, Limits, Policy, Proportional},
+    qmdb::floor::{Bounded, Decision, Entry, Hold, Limits, Policy, Proportional},
 };
 use commonware_utils::sequence::FixedBytes;
 use std::{
@@ -84,8 +84,8 @@ pub enum Plan {
     Proportional,
     /// The library's [`Hold`] policy, which decides nothing.
     Hold,
-    /// The library's [`Compact`] policy, which keeps every update it reaches.
-    Compact {
+    /// The library's [`Bounded`] policy, which keeps every update it reaches.
+    Bounded {
         /// The most updates to keep.
         entries: Limit,
         /// The most inactive locations to pass.
@@ -166,7 +166,7 @@ impl<F: Family, K: Clone + AsRef<[u8]>, V: Clone + AsRef<[u8]>> Policy<F, K, V> 
         match self.plan {
             Plan::Proportional => Policy::<F, K, V>::limits(&Proportional, made_inactive),
             Plan::Hold => Policy::<F, K, V>::limits(&Hold, made_inactive),
-            Plan::Compact { entries, skips } | Plan::Scripted { entries, skips, .. } => Limits {
+            Plan::Bounded { entries, skips } | Plan::Scripted { entries, skips, .. } => Limits {
                 entries: entries.entries(),
                 skips: skips.skips(),
             },
@@ -183,14 +183,14 @@ impl<F: Family, K: Clone + AsRef<[u8]>, V: Clone + AsRef<[u8]>> Policy<F, K, V> 
                 Policy::<F, K, V>::decide(&mut Proportional, entry),
             ),
             Plan::Hold => panic!("{:?} limits must never reach decide", self.plan),
-            Plan::Compact { entries, skips } => {
-                let mut compact = Compact {
+            Plan::Bounded { entries, skips } => {
+                let mut bounded = Bounded {
                     entries: entries.entries(),
                     skips: skips.skips(),
                 };
                 (
                     Outcome::Keep,
-                    Policy::<F, K, V>::decide(&mut compact, entry),
+                    Policy::<F, K, V>::decide(&mut bounded, entry),
                 )
             }
             Plan::Scripted { salt, choices, .. } => {
@@ -242,7 +242,7 @@ where
         let fixed = match self.plan {
             Plan::Proportional => None,
             Plan::Hold => Some((0, 0)),
-            Plan::Compact { entries, skips } | Plan::Scripted { entries, skips, .. } => {
+            Plan::Bounded { entries, skips } | Plan::Scripted { entries, skips, .. } => {
                 Some((entries.entries(), skips.skips()))
             }
         };
@@ -447,19 +447,19 @@ mod tests {
         recorder(Plan::Hold, &[]).check(&mut empty, at(0), at(4), at(4));
 
         // A@5 lies beyond three skips from floor 0.
-        let compact = Plan::Compact {
+        let bounded = Plan::Bounded {
             entries: ONE,
             skips: Limit::Small(3),
         };
-        recorder(compact, &[]).check(&mut model(&[b"A"]), at(0), at(3), at(7));
+        recorder(bounded, &[]).check(&mut model(&[b"A"]), at(0), at(3), at(7));
 
         // A@1, B@2, and the commit at 3 with floor 0; keeping A spends the only entry.
-        let compact = Plan::Compact {
+        let bounded = Plan::Bounded {
             entries: ONE,
             skips: Limit::Huge,
         };
         let mut live = model(&[b"A", b"B"]);
-        recorder(compact, &[(1, b"A", Outcome::Keep)]).check(&mut live, at(0), at(2), at(5));
+        recorder(bounded, &[(1, b"A", Outcome::Keep)]).check(&mut live, at(0), at(2), at(5));
         assert_eq!(live, model(&[b"A", b"B"]));
     }
 
@@ -478,22 +478,22 @@ mod tests {
     #[test]
     #[should_panic(expected = "walk with entries left advanced 0")]
     fn check_rejects_walk_ending_at_inherited_floor() {
-        let compact = Plan::Compact {
+        let bounded = Plan::Bounded {
             entries: ONE,
             skips: Limit::Huge,
         };
-        recorder(compact, &[]).check(&mut model(&[b"A", b"B"]), at(0), at(0), at(4));
+        recorder(bounded, &[]).check(&mut model(&[b"A", b"B"]), at(0), at(0), at(4));
     }
 
     /// A walk with entries left that passes live keys without deciding them spends every skip.
     #[test]
     #[should_panic(expected = "walk with entries left advanced 2")]
     fn check_rejects_floor_past_undecided_keys() {
-        let compact = Plan::Compact {
+        let bounded = Plan::Bounded {
             entries: ONE,
             skips: Limit::Huge,
         };
-        recorder(compact, &[]).check(&mut model(&[b"A", b"B"]), at(0), at(2), at(4));
+        recorder(bounded, &[]).check(&mut model(&[b"A", b"B"]), at(0), at(2), at(4));
     }
 
     /// Evicting the last key empties the state, so the commit operation records its own location.

@@ -163,7 +163,7 @@ pub(crate) mod test {
                 },
                 test::variable_db_config,
             },
-            floor::{Compact, Proportional},
+            floor::{Bounded, Proportional},
         },
         translator::TwoCap,
     };
@@ -585,7 +585,7 @@ pub(crate) mod test {
         is_send(db.get_all(&key));
         is_send(db.get_with_loc(&key));
         is_send(db.get_span(&key));
-        let mut policy = Compact {
+        let mut policy = Bounded {
             entries: 1,
             skips: 1,
         };
