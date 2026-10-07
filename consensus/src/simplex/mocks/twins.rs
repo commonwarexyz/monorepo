@@ -258,7 +258,6 @@ pub fn view_route<P: Clone + PartialEq>(
 pub struct Elector<C> {
     fallback: C,
     round_leaders: Arc<[Participant]>,
-    early_election: bool,
 }
 
 impl<C: Default> Default for Elector<C> {
@@ -266,7 +265,6 @@ impl<C: Default> Default for Elector<C> {
         Self {
             fallback: C::default(),
             round_leaders: Arc::from(Vec::new()),
-            early_election: false,
         }
     }
 }
@@ -292,15 +290,7 @@ impl<C> Elector<C> {
         Self {
             fallback,
             round_leaders: Arc::from(round_leaders),
-            early_election: false,
         }
-    }
-
-    /// Enables certificate-independent election for scripted leaders, delegating
-    /// to the fallback elector after the prefix. Disabled by default.
-    pub const fn with_early_election(mut self) -> Self {
-        self.early_election = true;
-        self
     }
 }
 
@@ -309,7 +299,6 @@ impl<C> Elector<C> {
 pub struct ElectorState<E> {
     fallback: E,
     round_leaders: Arc<[Participant]>,
-    early_election: bool,
 }
 
 impl<S, C> elector::Config<S> for Elector<C>
@@ -323,7 +312,6 @@ where
         ElectorState {
             fallback: self.fallback.build(participants),
             round_leaders: self.round_leaders,
-            early_election: self.early_election,
         }
     }
 }
@@ -333,11 +321,15 @@ where
     S: Scheme,
     E: elector::Elector<S>,
 {
+    // Scripted leaders never read the input, so the fallback decides whether
+    // election needs the certificate.
+    type Mode = E::Mode;
+
     fn terms(&self) -> Terms {
         self.fallback.terms()
     }
 
-    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
+    fn elect(&self, round: Round, input: elector::Input<'_, S, Self>) -> Participant {
         let idx = term_index(round.view(), self.fallback.terms().length());
         if let Some(&leader) = self.round_leaders.get(idx) {
             return leader;
@@ -347,18 +339,7 @@ where
         // fallback elector rather than forcing an honest-only suffix. Twins
         // campaigns should not prevent the protocol from timing out in
         // later views (if a twin is elected).
-        self.fallback.elect(round, certificate)
-    }
-
-    fn elect_without_certificate(&self, round: Round) -> Option<Participant> {
-        if !self.early_election {
-            return None;
-        }
-        let idx = term_index(round.view(), self.fallback.terms().length());
-        self.round_leaders
-            .get(idx)
-            .copied()
-            .or_else(|| self.fallback.elect_without_certificate(round))
+        self.fallback.elect(round, input)
     }
 }
 
@@ -2263,7 +2244,7 @@ mod tests {
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
             let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
             assert_eq!(
-                twins.elect(round, None),
+                twins.elect(round, ()),
                 Participant::from_usize(round_scenario.leader()),
                 "unexpected leader in scripted attack round"
             );
@@ -2271,7 +2252,7 @@ mod tests {
 
         for view in (framework.rounds as u64 + 1)..=20 {
             let round = Round::new(Epoch::new(333), View::new(view));
-            assert_eq!(twins.elect(round, None), fallback.elect(round, None));
+            assert_eq!(twins.elect(round, ()), fallback.elect(round, ()));
         }
     }
 
@@ -2317,38 +2298,16 @@ mod tests {
             &participants,
         );
 
-        let early = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
-            Elector::new(
-                RoundRobin::<Sha256>::default().with_term(
-                    term_length,
-                    Duration::from_secs(10),
-                    ViewDelta::new(0),
-                ),
-                &scenario,
-                3,
-            )
-            .with_early_election(),
-            &participants,
-        );
-        for view in 1..=20 {
-            let round = Round::new(Epoch::new(333), View::new(view));
-            assert_eq!(twins.elect_without_certificate(round), None);
-            assert_eq!(
-                early.elect_without_certificate(round),
-                Some(twins.elect(round, None))
-            );
-        }
-
         for view in 1..=3 {
             let round = Round::new(Epoch::new(0), View::new(view));
-            assert_eq!(twins.elect(round, None), Participant::new(0));
+            assert_eq!(twins.elect(round, ()), Participant::new(0));
         }
         for view in 4..=6 {
             let round = Round::new(Epoch::new(0), View::new(view));
-            assert_eq!(twins.elect(round, None), Participant::new(2));
+            assert_eq!(twins.elect(round, ()), Participant::new(2));
         }
 
         let round = Round::new(Epoch::new(333), View::new(7));
-        assert_eq!(twins.elect(round, None), fallback.elect(round, None));
+        assert_eq!(twins.elect(round, ()), fallback.elect(round, ()));
     }
 }

@@ -2382,7 +2382,7 @@ mod tests {
             assert_eq!(
                 schemes[1]
                     .participants()
-                    .key(elector.elect(Round::new(Epoch::zero(), View::new(3)), None)),
+                    .key(elector.elect(Round::new(Epoch::zero(), View::new(3)), ())),
                 Some(&byzantine),
             );
 

@@ -135,20 +135,14 @@ where
     S: CertificateScheme,
     E: elector::Elector<S>,
 {
+    type Mode = E::Mode;
+
     fn terms(&self) -> Terms {
         self.inner.terms()
     }
 
-    fn elect(
-        &self,
-        round: Round,
-        certificate: Option<&<Scheme<S> as Verifier>::Certificate>,
-    ) -> Participant {
-        self.inner.elect(round, certificate)
-    }
-
-    fn elect_without_certificate(&self, round: Round) -> Option<Participant> {
-        self.inner.elect_without_certificate(round)
+    fn elect(&self, round: Round, input: elector::Input<'_, Scheme<S>, Self>) -> Participant {
+        self.inner.elect(round, input)
     }
 }
 

@@ -248,9 +248,11 @@
 //! the parent certifies. The application decides, per request, whether to prepare a candidate
 //! and whether consensus may publish it before the parent certifies.
 //!
-//! Handoff requests require an elector that can select the incoming leader without a certificate
-//! (see [`elector::Elector::elect_without_certificate`]) and an available outgoing tip. Otherwise,
-//! the leader uses the ordinary proposal path.
+//! Handoff requests require a [`elector::Static`] elector, which knows the incoming
+//! leader before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector
+//! never pipelines handoffs. The incoming leader must also have voted for the outgoing term's
+//! final view or hold its notarization, and the outgoing term must have no nullification.
+//! Otherwise, the leader uses the ordinary proposal path.
 //!
 //! | Handoff response | Consensus behavior |
 //! | --- | --- |
@@ -1653,6 +1655,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         RoundRobin: elector::Config<S>,
+        <RoundRobin as elector::Config<S>>::Elector: elector::Elector<S, Mode = elector::Static>,
     {
         let n = 5;
         let required_containers = View::new(50);
@@ -1706,7 +1709,7 @@ mod tests {
                     certify_latency: (10.0, 5.0),
                     should_certify: mocks::application::Certifier::Custom(Box::new({
                         let built_elector_clone = built_elector.clone();
-                        move |round, _| built_elector_clone.elect(round, None) != dishonest
+                        move |round, _| built_elector_clone.elect(round, ()) != dishonest
                     })),
                 };
                 let (actor, application) = mocks::application::Application::new(
@@ -1894,7 +1897,7 @@ mod tests {
         let participants_set = participants.clone().try_into().unwrap();
         let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
             elector.build(&participants_set);
-        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+        let leader_idx = usize::from(built_elector.elect(Round::new(epoch, View::new(1)), ()));
 
         (reporters, leader_idx, oracle)
     }
@@ -6624,6 +6627,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: elector::Elector<S, Mode = elector::Static>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6653,7 +6657,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
@@ -6834,6 +6838,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: elector::Elector<S, Mode = elector::Static>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -6863,7 +6868,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let lone = leader_of(11);
             let group = [leader_of(12), leader_of(13)];
@@ -7049,6 +7054,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: elector::Elector<S, Mode = elector::Static>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7078,7 +7084,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let byzantine = leader_of(10);
             let group = [leader_of(11), leader_of(12)];
             let lone = leader_of(13);
@@ -7288,6 +7294,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
+        L::Elector: elector::Elector<S, Mode = elector::Static>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7315,7 +7322,7 @@ mod tests {
             let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
             let schedule = elector.clone().build(&participant_set);
             let leader_of =
-                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), None));
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
             let offline = leader_of(1);
             assert_eq!(offline, leader_of(21), "offline must lead terms 1 and 5");
             let honest: Vec<usize> = (0..n as usize).filter(|idx| *idx != offline).collect();
@@ -8169,7 +8176,6 @@ mod tests {
         mode: twins::Mode,
         max_cases: usize,
         trailing_finalizations: usize,
-        // Opt into both scripted early election and application handoffs.
         handoffs: bool,
     }
 
@@ -8272,11 +8278,9 @@ mod tests {
                     &scenario,
                     n as usize,
                 );
-                let elector = if campaign.handoffs {
-                    elector.with_early_election()
-                } else {
-                    elector
-                };
+
+                // Each scripted round drives one full leader term, so the
+                // adversarial prefix spans `rounds * term_length` views.
                 let prefix_end = View::new(scenario.rounds().len() as u64 * term_length.get());
                 let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
                 let mut reporters = Vec::new();
@@ -8533,9 +8537,6 @@ mod tests {
                 //
                 // Twin halves are Byzantine test machinery and are not required to
                 // make progress for the campaign to establish honest-node liveness.
-                //
-                // Each scripted round drives one full leader term, so the
-                // adversarial prefix spans `rounds * term_length` views.
                 let mut finalizers = Vec::new();
                 for (i, reporter) in reporters.iter_mut().skip(honest_start).enumerate() {
                     let (_latest, mut monitor) = reporter.subscribe().await;

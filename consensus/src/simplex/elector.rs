@@ -17,8 +17,16 @@
 //!
 //! Applications can implement [`Config`] and [`Elector`] for custom leader
 //! selection logic such as stake-weighted selection or other application-specific strategies.
-//! An elector can support pipelined handoffs when it can select a leader before the round's
-//! unlocking certificate exists. See [`Elector::elect_without_certificate`].
+//!
+//! Each elector declares a [`Mode`]. A [`Static`] elector selects every leader from a schedule
+//! fixed when it is built, so consensus can elect a term's incoming leader before the term's
+//! unlocking certificate exists, as [pipelined handoffs](crate::simplex#pipelined-handoff)
+//! require. A [`Dynamic`] elector derives leaders from that certificate and never pipelines
+//! handoffs.
+//!
+//! Declare `type Mode = Dynamic;` to receive `Option<&S::Certificate>` in `elect`, or
+//! `type Mode = Static;` to receive `()`. Generic callers convert the certificate with
+//! [`Mode::input`].
 //!
 //! # Usage
 //!
@@ -32,7 +40,9 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    Hasher, PublicKey, Sha256, bls12381::primitives::variant::Variant, certificate::Scheme,
+    Hasher, PublicKey, Sha256,
+    bls12381::primitives::variant::Variant,
+    certificate::{Scheme, Verifier},
 };
 use commonware_utils::{modulo, ordered::Set};
 use std::{fmt, marker::PhantomData, time::Duration};
@@ -175,6 +185,68 @@ impl Default for Terms {
     }
 }
 
+mod private {
+    pub trait Sealed {}
+}
+
+/// How an [`Elector`] uses the certificate that unlocks a round.
+///
+/// This trait is sealed to [`Static`] and [`Dynamic`]. External types can implement
+/// [`Elector`] and choose either mode.
+pub trait Mode: private::Sealed {
+    /// What [`Elector::elect`] receives in place of the unlocking certificate.
+    type Input<'a, C: 'a>;
+
+    /// Converts the unlocking certificate, `None` only for view 1, into the input.
+    fn input<C>(certificate: Option<&C>) -> Self::Input<'_, C>;
+
+    /// Returns the input available before the unlocking certificate exists, or `None` when
+    /// election must wait for it.
+    fn early<'a, C: 'a>() -> Option<Self::Input<'a, C>>;
+}
+
+/// [`Mode`] of an elector whose leader schedule is fixed when it is built.
+///
+/// [`Elector::elect`] receives `()`, so consensus can also elect a term's incoming leader
+/// before the certificate that unlocks the term exists. It may then call [`Elector::elect`]
+/// several times per view, so keep election inexpensive.
+pub struct Static;
+
+/// [`Mode`] of an elector that derives leaders from the certificate that unlocks a round.
+///
+/// [`Elector::elect`] receives that certificate, `None` only for view 1. Consensus elects
+/// only once the certificate exists, so these electors never pipeline handoffs.
+pub struct Dynamic;
+
+impl private::Sealed for Static {}
+impl private::Sealed for Dynamic {}
+
+impl Mode for Static {
+    type Input<'a, C: 'a> = ();
+
+    fn input<C>(_: Option<&C>) {}
+
+    fn early<'a, C: 'a>() -> Option<()> {
+        Some(())
+    }
+}
+
+impl Mode for Dynamic {
+    type Input<'a, C: 'a> = Option<&'a C>;
+
+    fn input<C>(certificate: Option<&C>) -> Option<&C> {
+        certificate
+    }
+
+    fn early<'a, C: 'a>() -> Option<Option<&'a C>> {
+        None
+    }
+}
+
+/// The input that elector `E`'s [`Mode`] supplies to [`Elector::elect`].
+pub type Input<'a, S, E> =
+    <<E as Elector<S>>::Mode as Mode>::Input<'a, <S as Verifier>::Certificate>;
+
 /// An initialized elector that can select leaders for consensus rounds.
 ///
 /// Consensus obtains initialized electors from [`Config::build`] so leader
@@ -182,11 +254,10 @@ impl Default for Terms {
 ///
 /// # Certificate Handling
 ///
-/// The `certificate` parameter to [`elect`](Elector::elect) is `None` only for
-/// view 1 (the first view after genesis). For all subsequent views, the caller
-/// provides the certificate that unlocked the target view. With stable leaders,
-/// a nullification certificate can skip to the next term start, so this is not
-/// necessarily a certificate from the immediately previous view.
+/// A [`Dynamic`] elector receives the certificate that unlocked the target view, or `None`
+/// for view 1 (the first view after genesis). With stable leaders, a nullification
+/// certificate can skip to the next term start, so this is not necessarily a certificate
+/// from the immediately previous view. A [`Static`] elector receives `()` instead.
 ///
 /// Whether certificate data is safe to use for leader selection depends on the
 /// certificate scheme. Certificates are not necessarily canonical: schemes that
@@ -201,12 +272,16 @@ impl Default for Terms {
 /// different subjects (for example, one via a notarization of the previous view
 /// and another via a nullification). With `term_length > 1`, those certificates
 /// may even be from different views. Implementations must return the same leader
-/// for every certificate that can unlock the round. [`RoundRobinElector`] meets
-/// this requirement by ignoring the certificate. [`RandomElector`] uses the
-/// recovered threshold seed signature, which is independent of vote type and
-/// quorum subset for a given round. [`Random`] does not support `term_length > 1`
-/// because certificates from different views carry different seed signatures.
+/// for every certificate that can unlock the round. [`RoundRobinElector`] is
+/// [`Static`], so it never receives a certificate. [`RandomElector`] uses the
+/// recovered threshold seed signature, which is independent of vote type and quorum
+/// subset for a given round. [`Random`] does not support `term_length > 1` because
+/// certificates from different views carry different seed signatures.
 pub trait Elector<S: Scheme>: Clone + Send + 'static {
+    /// Whether [`Self::elect`] derives leaders from the unlocking certificate ([`Dynamic`])
+    /// or from a schedule fixed when the elector is built ([`Static`]).
+    type Mode: Mode;
+
     /// Returns the leadership term structure this elector was built with.
     ///
     /// Callers that need term arithmetic should use this value so leader
@@ -221,32 +296,13 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// stable-leader term (as defined by [`Self::terms`]): nullification
     /// coverage, finalize gating, and leader-inactivity tracking all assume the
     /// leader is constant for the remainder of a term. This contract is not
-    /// enforced at runtime: once a round's leader is set, the elector is not
-    /// consulted again for that round. A non-conforming implementation leaves
-    /// participants with inconsistent leaders and stalls progress.
+    /// enforced at runtime. A non-conforming implementation leaves participants
+    /// with inconsistent leaders and stalls progress.
     ///
-    /// The `certificate` is expected to be `None` only for view 1.
+    /// See [Certificate Handling](Elector#certificate-handling) for `input`.
     ///
     /// Returns the index of the selected leader in the participants list.
-    fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant;
-
-    /// Selects the leader for `round` without its unlocking certificate.
-    ///
-    /// Returning `Some` allows the application to consider a pipelined handoff
-    /// (see [Pipelined Handoff]).
-    ///
-    /// Return `Some` only when the elector can derive the leader without a certificate.
-    /// The result must equal [`Self::elect`] for every certificate that can
-    /// unlock the round. The default returns `None`, which disables pipelined
-    /// handoffs. Certificate-derived electors such as [`RandomElector`] keep
-    /// the default.
-    ///
-    /// The voter may call this method several times per view. Keep it inexpensive.
-    ///
-    /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
-    fn elect_without_certificate(&self, _round: Round) -> Option<Participant> {
-        None
-    }
+    fn elect(&self, round: Round, input: Input<'_, S, Self>) -> Participant;
 }
 
 /// Configuration for round-robin leader election.
@@ -343,11 +399,13 @@ pub struct RoundRobinElector<S: Scheme> {
 }
 
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
+    type Mode = Static;
+
     fn terms(&self) -> Terms {
         self.terms
     }
 
-    fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
+    fn elect(&self, round: Round, _: ()) -> Participant {
         // In order to get a stable leader, use the 1-based index of the term
         let term_idx = round.view().term_index(self.terms.length());
 
@@ -357,12 +415,6 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
             % u64::try_from(n).expect("permutation length fits in u64");
         let idx = usize::try_from(idx).expect("leader index fits in usize");
         self.permutation[idx]
-    }
-
-    fn elect_without_certificate(&self, round: Round) -> Option<Participant> {
-        // Round-robin election never reads the certificate, so electing early
-        // is always consistent with `elect`.
-        Some(self.elect(round, None))
     }
 }
 
@@ -504,6 +556,8 @@ where
     V: Variant,
     H: Hasher,
 {
+    type Mode = Dynamic;
+
     fn terms(&self) -> Terms {
         Terms::rotating()
     }
@@ -575,7 +629,7 @@ mod tests {
         let mut leaders = Vec::new();
         for view in 1..=(3 * n as u64) {
             let round = Round::new(epoch, View::new(view));
-            leaders.push(elector.elect(round, None));
+            leaders.push(elector.elect(round, ()));
         }
 
         // Verify leaders cycle: consecutive leaders differ by 1 (mod n)
@@ -597,7 +651,7 @@ mod tests {
         let leaders: Vec<_> = (0..n as u64)
             .map(|e| {
                 let round = Round::new(Epoch::new(e), View::new(1));
-                elector.elect(round, None)
+                elector.elect(round, ())
             })
             .collect();
 
@@ -627,10 +681,7 @@ mod tests {
         let term_idx = round.view().term_index(TermLength::new(NZU32!(5)));
         let expected = round.epoch().get().wrapping_add(term_idx) % 5;
 
-        assert_eq!(
-            elector.elect(round, None),
-            Participant::new(expected as u32)
-        );
+        assert_eq!(elector.elect(round, ()), Participant::new(expected as u32));
     }
 
     #[test]
@@ -647,41 +698,18 @@ mod tests {
             .build(&participants);
         let epoch = Epoch::new(0);
 
-        let leader_v1 = elector.elect(Round::new(epoch, View::new(1)), None);
-        let leader_v2 = elector.elect(Round::new(epoch, View::new(2)), None);
-        let leader_v3 = elector.elect(Round::new(epoch, View::new(3)), None);
-        let leader_v4 = elector.elect(Round::new(epoch, View::new(4)), None);
-        let leader_v5 = elector.elect(Round::new(epoch, View::new(5)), None);
-        let leader_v6 = elector.elect(Round::new(epoch, View::new(6)), None);
+        let leader_v1 = elector.elect(Round::new(epoch, View::new(1)), ());
+        let leader_v2 = elector.elect(Round::new(epoch, View::new(2)), ());
+        let leader_v3 = elector.elect(Round::new(epoch, View::new(3)), ());
+        let leader_v4 = elector.elect(Round::new(epoch, View::new(4)), ());
+        let leader_v5 = elector.elect(Round::new(epoch, View::new(5)), ());
+        let leader_v6 = elector.elect(Round::new(epoch, View::new(6)), ());
 
         assert_eq!(leader_v1, leader_v2);
         assert_eq!(leader_v1, leader_v3);
         assert_eq!(leader_v4, leader_v5);
         assert_eq!(leader_v4, leader_v6);
         assert_ne!(leader_v1, leader_v4);
-    }
-
-    #[test]
-    fn round_robin_elect_without_certificate_matches_elect() {
-        let mut rng = test_rng();
-        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
-        let participants = Set::try_from_iter(participants).unwrap();
-        let config = RoundRobin::<Sha256>::default().with_term(
-            TermLength::new(NZU32!(3)),
-            Duration::from_secs(10),
-            ViewDelta::new(1),
-        );
-        let elector: RoundRobinElector<ed25519::Scheme> = config.build(&participants);
-
-        for epoch in [0u64, 7] {
-            for view in 1..=9u64 {
-                let round = Round::new(Epoch::new(epoch), View::new(view));
-                assert_eq!(
-                    elector.elect_without_certificate(round),
-                    Some(elector.elect(round, None))
-                );
-            }
-        }
     }
 
     #[test]
@@ -697,12 +725,12 @@ mod tests {
             )
             .build(&participants);
 
-        let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), None);
-        let leader_epoch_0_v2 = elector.elect(Round::new(Epoch::new(0), View::new(2)), None);
-        let leader_epoch_1 = elector.elect(Round::new(Epoch::new(1), View::new(1)), None);
-        let leader_epoch_1_v3 = elector.elect(Round::new(Epoch::new(1), View::new(3)), None);
-        let leader_epoch_2 = elector.elect(Round::new(Epoch::new(2), View::new(1)), None);
-        let leader_epoch_2_v2 = elector.elect(Round::new(Epoch::new(2), View::new(2)), None);
+        let leader_epoch_0 = elector.elect(Round::new(Epoch::new(0), View::new(1)), ());
+        let leader_epoch_0_v2 = elector.elect(Round::new(Epoch::new(0), View::new(2)), ());
+        let leader_epoch_1 = elector.elect(Round::new(Epoch::new(1), View::new(1)), ());
+        let leader_epoch_1_v3 = elector.elect(Round::new(Epoch::new(1), View::new(3)), ());
+        let leader_epoch_2 = elector.elect(Round::new(Epoch::new(2), View::new(1)), ());
+        let leader_epoch_2_v2 = elector.elect(Round::new(Epoch::new(2), View::new(2)), ());
 
         assert_eq!(leader_epoch_0, Participant::new(1));
         assert_eq!(leader_epoch_0_v2, leader_epoch_0);
@@ -728,13 +756,13 @@ mod tests {
         // Collect first 5 leaders from each
         let epoch = Epoch::new(0);
         let leaders_no_seed: Vec<_> = (1..=5)
-            .map(|v| elector_no_seed.elect(Round::new(epoch, View::new(v)), None))
+            .map(|v| elector_no_seed.elect(Round::new(epoch, View::new(v)), ()))
             .collect();
         let leaders_seed_1: Vec<_> = (1..=5)
-            .map(|v| elector_seed_1.elect(Round::new(epoch, View::new(v)), None))
+            .map(|v| elector_seed_1.elect(Round::new(epoch, View::new(v)), ()))
             .collect();
         let leaders_seed_2: Vec<_> = (1..=5)
-            .map(|v| elector_seed_2.elect(Round::new(epoch, View::new(v)), None))
+            .map(|v| elector_seed_2.elect(Round::new(epoch, View::new(v)), ()))
             .collect();
 
         // No seed should be identity permutation
@@ -785,7 +813,7 @@ mod tests {
         let epoch = Epoch::new(0);
         for view in 1..=10 {
             let round = Round::new(epoch, View::new(view));
-            assert_eq!(elector1.elect(round, None), elector2.elect(round, None));
+            assert_eq!(elector1.elect(round, ()), elector2.elect(round, ()));
         }
     }
 
@@ -841,7 +869,7 @@ mod tests {
         let round = Round::new(Epoch::new(u64::from(u32::MAX)), View::new(1));
 
         // Both electors must preserve the full u64 sum through the modulo
-        assert_eq!(round_robin.elect(round, None), Participant::new(1));
+        assert_eq!(round_robin.elect(round, ()), Participant::new(1));
         assert_eq!(random.elect(round, None), Participant::new(1));
     }
 

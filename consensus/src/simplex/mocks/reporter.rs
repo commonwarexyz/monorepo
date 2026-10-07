@@ -3,7 +3,7 @@
 use crate::{
     Monitor, Viewable,
     simplex::{
-        elector::{self, Elector as _},
+        elector::{self, Elector as _, Mode as _},
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
@@ -140,7 +140,8 @@ where
         let next_round = Round::new(round.epoch(), next_view);
         let mut leaders = self.leaders.lock();
         leaders.entry(next_round.view()).or_insert_with(|| {
-            let leader = self.elector.elect(next_round, Some(certificate));
+            let input = <L::Elector as elector::Elector<S>>::Mode::input(Some(certificate));
+            let leader = self.elector.elect(next_round, input);
             self.participants.key(leader).cloned().unwrap()
         });
     }

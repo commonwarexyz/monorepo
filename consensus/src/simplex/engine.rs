@@ -7,7 +7,6 @@ use super::{
 use crate::{
     CertifiableAutomaton, Relay, Reporter,
     simplex::{Lookahead, Plan, scheme::Scheme},
-    types::{Round, View},
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
@@ -17,7 +16,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
 };
 use rand_core::CryptoRng;
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Instance of `simplex` consensus engine.
 pub struct Engine<
@@ -72,13 +71,6 @@ impl<
                 "stall timeout must be greater than certification timeout"
             );
         }
-
-        let handoff_round = Round::new(cfg.epoch, View::new(1));
-        info!(
-            round = %handoff_round,
-            elect_without_certificate = elector.elect_without_certificate(handoff_round).is_some(),
-            "handoff configuration at the epoch's first term start"
-        );
 
         // Create batcher
         let (batcher, batcher_mailbox) = batcher::Actor::new(

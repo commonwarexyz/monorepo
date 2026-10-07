@@ -4,7 +4,7 @@ use super::relay::Relay;
 use crate::{
     Viewable,
     simplex::{
-        elector::{self, Elector as _},
+        elector::{self, Elector as _, Mode as _},
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
@@ -105,7 +105,8 @@ impl<E: Clock + Rng + Spawner, S: Scheme<H::Digest>, L: elector::Config<S>, H: H
             let next_round = Round::new(self.epoch, next_view);
 
             // Check if we are the leader for the next view, otherwise move on
-            let leader = self.elector.elect(next_round, Some(&certificate));
+            let input = <L::Elector as elector::Elector<S>>::Mode::input(Some(&certificate));
+            let leader = self.elector.elect(next_round, input);
             if leader != self.scheme.me().unwrap() {
                 continue;
             }

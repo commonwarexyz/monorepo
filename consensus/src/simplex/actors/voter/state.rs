@@ -4,7 +4,7 @@ use crate::{
     simplex::{
         Floor, Lookahead, Viewport,
         actors::span::MISSING_SPAN,
-        elector::Elector,
+        elector::{Elector, Mode as _},
         metrics::{Leader, Timeout, TimeoutReason},
         scheme::Scheme,
         types::{
@@ -404,7 +404,9 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.leader_is_set(view) {
             return;
         }
-        let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
+        let leader = self
+            .elector
+            .elect(Rnd::new(self.epoch, view), L::Mode::input(certificate));
         self.create_round(view).set_leader(leader);
     }
 
@@ -1457,17 +1459,17 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             .is_some()
     }
 
-    /// Returns the leader elected for a term-start pipelined handoff before the
-    /// certificate that unlocks `view` exists.
+    /// Returns the leader of the term starting at `view`, elected before the
+    /// certificate that unlocks it exists.
     ///
-    /// Returns `None` when `view` does not start a term or the elector does not
-    /// elect early. See [`Elector::elect_without_certificate`].
+    /// Returns `None` when `view` does not start a term or the elector needs that
+    /// certificate (see [`crate::simplex::elector::Dynamic`]).
     fn handoff_leader(&self, view: View) -> Option<Participant> {
         if !view.is_term_start(self.term_length()) {
             return None;
         }
-        self.elector
-            .elect_without_certificate(Rnd::new(self.epoch, view))
+        let input = L::Mode::early()?;
+        Some(self.elector.elect(Rnd::new(self.epoch, view), input))
     }
 
     /// Returns whether `parent` can support a pipelined handoff. `parent` must
@@ -1822,7 +1824,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 mod tests {
     use super::*;
     use crate::simplex::{
-        elector::{Config as _, RoundRobin, RoundRobinElector, Terms},
+        elector::{Config as _, Dynamic, RoundRobin, RoundRobinElector, Terms},
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
@@ -2127,6 +2129,8 @@ mod tests {
     }
 
     impl<S: certificate::Scheme> Elector<S> for RequireCertificateElector<S> {
+        type Mode = Dynamic;
+
         fn terms(&self) -> Terms {
             Terms::stable(self.term_length, Duration::from_secs(30), ViewDelta::new(1))
         }
@@ -5929,7 +5933,7 @@ mod tests {
             );
             // Use a non-leader so its local vote is the event that opens the
             // optimistic child.
-            let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
+            let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), ()));
             let local_idx = (leader_idx + 1) % schemes.len();
 
             let config = |scheme: ed25519::Scheme, elector| {
