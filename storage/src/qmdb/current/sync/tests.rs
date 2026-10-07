@@ -7,6 +7,7 @@
 
 use crate::qmdb::{
     current::tests::{fixed_config, variable_config},
+    floor::Proportional,
     sync::{
         Database as SyncDatabase,
         harness::{ConfigOf, SyncTestHarness},
@@ -185,7 +186,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, metadata).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -211,7 +215,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, metadata).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -237,7 +244,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, metadata).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -263,7 +273,10 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            batch.merkleize(&db, metadata).await.unwrap()
+            batch
+                .merkleize(&db, metadata, &mut Proportional)
+                .await
+                .unwrap()
         };
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap()
@@ -499,7 +512,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
             let merkleized = target_db
                 .new_batch()
                 .write(key, expected)
-                .merkleize(&target_db, None)
+                .merkleize(&target_db, None, &mut Proportional)
                 .await
                 .unwrap();
             (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
@@ -595,7 +608,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
             let merkleized = db
                 .new_batch()
                 .write(key, Some(Digest::from([round as u8; 32])))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             (db, _) = db.apply_batch(merkleized).await.unwrap();

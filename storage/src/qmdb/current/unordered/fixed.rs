@@ -124,10 +124,13 @@ pub mod test {
         journal::contiguous::fixed::Config as JournalConfig,
         merkle::full::Config as MerkleConfig,
         mmr,
-        qmdb::current::{
-            FixedConfig,
-            tests::{fixed_config, fixed_config_partitioned},
-            unordered::tests as shared,
+        qmdb::{
+            current::{
+                FixedConfig,
+                tests::{fixed_config, fixed_config_partitioned},
+                unordered::tests as shared,
+            },
+            floor::Proportional,
         },
         translator::{OneCap, TwoCap},
     };
@@ -173,7 +176,7 @@ pub mod test {
             let batch = db
                 .new_batch()
                 .write(key, Some(value))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
@@ -219,7 +222,7 @@ pub mod test {
             for i in 0..2000u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None).await.unwrap();
+            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
@@ -249,7 +252,7 @@ pub mod test {
                     for (k, v) in make(900) {
                         p = p.write(k, v);
                     }
-                    Some(p.merkleize(&db, None).await.unwrap())
+                    Some(p.merkleize(&db, None, &mut Proportional).await.unwrap())
                 } else {
                     None
                 };
@@ -265,7 +268,11 @@ pub mod test {
                 for (k, v) in &muts {
                     nb = nb.write(*k, *v);
                 }
-                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+                let normal_root = nb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
 
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
@@ -275,7 +282,11 @@ pub mod test {
                 for (k, v) in &muts {
                     fb = fb.write(*k, *v);
                 }
-                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                let fused_root = fb
+                    .merkleize(&db, None, &mut Proportional)
+                    .await
+                    .unwrap()
+                    .root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
             }
         });
@@ -310,7 +321,7 @@ pub mod test {
             for i in 0..8u64 {
                 seed = seed.write(key(i), Some(val(i)));
             }
-            let seed = seed.merkleize(&db, None).await.unwrap();
+            let seed = seed.merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
@@ -320,13 +331,13 @@ pub mod test {
                 .new_batch()
                 .write(key(0), Some(val(1_000)))
                 .write(key(100), Some(val(1_001)))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
             let parent = grandparent
                 .new_batch::<Sha256>()
                 .write(key(1), Some(val(1_002)))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -345,7 +356,7 @@ pub mod test {
 
             let updates = vec![(0, Some(val(2_000))), (1, Some(val(2_001)))];
             let staged = staged
-                .merkleize(updates, Vec::new(), None, &db)
+                .merkleize(updates, Vec::new(), None, &db, &mut Proportional)
                 .await
                 .unwrap();
 
@@ -354,7 +365,7 @@ pub mod test {
                 .new_batch::<Sha256>()
                 .write(key(0), Some(val(2_000)))
                 .write(key(100), Some(val(2_001)))
-                .merkleize(&db, None)
+                .merkleize(&db, None, &mut Proportional)
                 .await
                 .unwrap()
                 .root();
@@ -388,7 +399,7 @@ pub mod test {
                 let batch = db
                     .new_batch()
                     .write(key, Some(value))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 last_batch_boundary = batch.sync_boundary();
@@ -490,7 +501,7 @@ pub mod test {
             let v = Sha256::hash(&[&(i * 7).to_be_bytes()]);
             batch = batch.write(k, Some(v));
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -505,7 +516,7 @@ pub mod test {
             let k = Sha256::hash(&[&i.to_be_bytes()]);
             batch = batch.write(k, None);
         }
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
 
@@ -621,7 +632,7 @@ pub mod test {
                 for i in 1..=100 {
                     batch = batch.write(key(i), Some(value(1, i)));
                 }
-                let batch = batch.merkleize(&db, None).await.unwrap();
+                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 103);
@@ -632,7 +643,7 @@ pub mod test {
                 for i in 2..=50 {
                     batch = batch.write(key(i), Some(value(2, i)));
                 }
-                let batch = batch.merkleize(&db, None).await.unwrap();
+                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
@@ -658,7 +669,7 @@ pub mod test {
                 for i in 1..=20 {
                     batch = batch.write(key(100 + i), Some(value(4, i)));
                 }
-                let batch = batch.merkleize(&db, None).await.unwrap();
+                let batch = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
                 let root_n = batch.root();
                 let (db, range) = db.apply_batch(batch).await.unwrap();
                 assert_eq!((*range.start, *range.end), (103, 191));
@@ -707,7 +718,7 @@ pub mod test {
                 let batch = db
                     .new_batch()
                     .write(key(1), Some(value(5, 1)))
-                    .merkleize(&db, None)
+                    .merkleize(&db, None, &mut Proportional)
                     .await
                     .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
