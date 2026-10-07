@@ -144,7 +144,7 @@ pub mod test {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, probability};
     use rand::Rng as _;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -236,7 +236,7 @@ pub mod test {
                         out.push((key(2000 + rng.next_u64() % 2000), Some(val(rng.next_u64()))));
                     }
                 }
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: BTreeMap<Digest, Option<Digest>> = BTreeMap::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }

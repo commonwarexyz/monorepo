@@ -15,7 +15,7 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     mem,
     time::{Duration, SystemTime},
 };
@@ -111,9 +111,9 @@ where
     /// Active requests ordered by deadline (ID -> deadline)
     active: PrioritySet<ID, SystemTime>,
     /// Request data for active requests (ID -> request details)
-    requests: HashMap<ID, ActiveRequest<P, Key>>,
+    requests: BTreeMap<ID, ActiveRequest<P, Key>>,
     /// Reverse lookup from key to request ID
-    key_to_id: HashMap<Key, ID>,
+    key_to_id: BTreeMap<Key, ID>,
 
     // Config
     /// Timeout for requests
@@ -141,7 +141,7 @@ where
     /// Only target peers are tried, waiting for them if unavailable. There is no
     /// fallback to other peers. Targets persist through transient failures and are
     /// cleared on successful fetch. Blocked targets are skipped until unblocked.
-    targets: HashMap<Key, HashSet<P>>,
+    targets: BTreeMap<Key, HashSet<P>>,
 
     /// Per-peer performance metric (exponential moving average of throughput in bytes per second)
     performance: GaugeFamily<Peer<P>>,
@@ -186,14 +186,14 @@ where
             participants: PrioritySet::new(),
             request_id: 0,
             active: PrioritySet::new(),
-            requests: HashMap::new(),
-            key_to_id: HashMap::new(),
+            requests: BTreeMap::new(),
+            key_to_id: BTreeMap::new(),
             timeout: config.timeout,
             pending: PrioritySet::new(),
             waiter: None,
             retry_timeout: config.retry_timeout,
             priority_requests: config.priority_requests,
-            targets: HashMap::new(),
+            targets: BTreeMap::new(),
             performance,
             requests_created,
             requests_sent,

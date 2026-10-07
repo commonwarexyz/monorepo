@@ -17,7 +17,7 @@ use commonware_storage_fuzz::assert_ordered_neighbors;
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroU64},
 };
 
@@ -113,9 +113,9 @@ fn generate_seed_kv(index: u64) -> (RawKey, RawValue) {
 async fn commit_pending<F: Graftable>(
     db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    committed_state: &mut HashMap<RawKey, RawValue>,
-    pending_inserts: &mut HashMap<RawKey, RawValue>,
-    pending_deletes: &mut HashSet<RawKey>,
+    committed_state: &mut BTreeMap<RawKey, RawValue>,
+    pending_inserts: &mut BTreeMap<RawKey, RawValue>,
+    pending_deletes: &mut BTreeSet<RawKey>,
 ) -> Db<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
@@ -127,17 +127,17 @@ async fn commit_pending<F: Graftable>(
         .await
         .expect("commit should not fail");
     let db = db.commit().await.expect("commit fsync should not fail");
-    for key in pending_deletes.drain() {
+    for key in std::mem::take(pending_deletes) {
         committed_state.remove(&key);
     }
-    committed_state.extend(pending_inserts.drain());
+    committed_state.extend(std::mem::take(pending_inserts));
     db
 }
 
 /// Check strict, non-wrapping neighbors against the committed model, excluding queued writes.
 async fn assert_neighbors<F: Graftable>(
     db: &Db<F>,
-    committed_state: &HashMap<RawKey, RawValue>,
+    committed_state: &BTreeMap<RawKey, RawValue>,
     key: RawKey,
 ) {
     let query = Key::new(key);
@@ -199,10 +199,10 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
 
         // committed_state tracks state after apply_batch. pending_inserts/pending_deletes
         // track uncommitted mutations.
-        let mut committed_state: HashMap<RawKey, RawValue> = HashMap::new();
-        let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
-        let mut pending_deletes: HashSet<RawKey> = HashSet::new();
-        let mut all_keys = HashSet::new();
+        let mut committed_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+        let mut pending_inserts: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+        let mut pending_deletes: BTreeSet<RawKey> = BTreeSet::new();
+        let mut all_keys = BTreeSet::new();
         let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
         let mut committed_op_count = Location::<F>::new(1);
 

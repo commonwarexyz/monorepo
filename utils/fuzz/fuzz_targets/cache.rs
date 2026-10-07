@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_utils::cache::Cache;
 use libfuzzer_sys::fuzz_target;
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 /// Keys are confined to a small space so a small-capacity cache churns and
 /// evicts heavily, exercising eviction sweeps, Ghost history, and slot reuse.
@@ -46,7 +46,7 @@ fn run(plan: Plan) {
     // Oracle: last value written for each logically-present key. A key the cache
     // reports as present must hold its last-written value (no stale or conjured
     // values); an evicted key is simply absent.
-    let mut model: HashMap<u8, u16> = HashMap::new();
+    let mut model: BTreeMap<u8, u16> = BTreeMap::new();
 
     for op in plan.ops {
         match op {

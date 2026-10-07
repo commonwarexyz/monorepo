@@ -13,7 +13,7 @@ use commonware_runtime::{Clock, Metrics as RuntimeMetrics, Spawner, telemetry::m
 use commonware_utils::{IpAddrExt, PrioritySet, SystemTimeExt, ordered::Set};
 use rand_core::Rng;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, HashSet, btree_map::Entry},
     net::IpAddr,
     num::NonZeroUsize,
     time::{Duration, SystemTime},
@@ -48,7 +48,6 @@ pub struct Config {
 pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: E,
 
-    // ---------- Configuration ----------
     /// The maximum number of peer sets to track.
     max_sets: NonZeroUsize,
 
@@ -67,9 +66,8 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// Minimum duration between reservations for a given peer.
     peer_connection_cooldown: Duration,
 
-    // ---------- State ----------
     /// The records of all peers.
-    peers: HashMap<C, Record>,
+    peers: BTreeMap<C, Record>,
 
     /// Primary and secondary peer sets indexed by peer set ID.
     peer_sets: BTreeMap<u64, PeerSetsAtIndex<C>>,
@@ -78,11 +76,9 @@ pub struct Directory<E: Rng + Clock + RuntimeMetrics, C: PublicKey> {
     /// whether a peer is blocked, persisting even if the peer record is deleted.
     blocked: PrioritySet<C, SystemTime>,
 
-    // ---------- Message-Passing ----------
     /// The releaser for the tracker actor.
     releaser: Releaser<C>,
 
-    // ---------- Metrics ----------
     /// The metrics for the records.
     metrics: Metrics<C>,
 }
@@ -91,7 +87,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     /// Create a new set of records using the given local node information.
     pub fn init(context: E, myself: C, cfg: Config, releaser: Releaser<C>) -> Self {
         // Create the list of peers and add myself.
-        let mut peers = HashMap::new();
+        let mut peers = BTreeMap::new();
         peers.insert(myself, Record::myself());
 
         let metrics = Metrics::init(&context);
@@ -112,8 +108,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             metrics,
         }
     }
-
-    // ---------- Setters ----------
 
     /// Releases a peer.
     pub fn release(&mut self, metadata: Metadata<C>) {
@@ -352,8 +346,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
         true
     }
 
-    // ---------- Getters ----------
-
     /// Returns all peers across all tracked peer sets.
     ///
     /// Same overlap rule as each stored set and as [`crate::Provider::subscribe`] documents for
@@ -402,7 +394,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
                 DialStatus::Unavailable => {}
             }
         }
-        peers.sort();
 
         Dialable {
             peers,
@@ -481,8 +472,6 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     pub fn blocked(&self) -> usize {
         self.blocked.len()
     }
-
-    // --------- Helpers ----------
 
     /// Attempt to reserve a peer.
     ///

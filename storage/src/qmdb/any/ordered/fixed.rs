@@ -335,7 +335,7 @@ pub(crate) mod test {
                     }
                 }
                 // Dedup last-write-wins.
-                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                let mut m: BTreeMap<Digest, Option<Digest>> = BTreeMap::new();
                 for (k, v) in out {
                     m.insert(k, v);
                 }
@@ -1006,7 +1006,7 @@ pub(crate) mod test {
 
     /// P=3 allocates `2^24` partition slots (~800 MB per index), so it is too memory-heavy for the
     /// default suite. Run it explicitly with `--ignored` (and ideally `--release`). Only serial and
-    /// one offset-parallel reopen are checked -- enough to validate the offset-based range build and
+    /// one offset-parallel reopen are checked, enough to validate the offset-based range build and
     /// merge at the largest prefix width without the full worker-count sweep.
     #[test_traced("WARN")]
     #[ignore]
@@ -1151,7 +1151,7 @@ pub(crate) mod test {
                     let v = Sha256::hash(&[&((i + 1) * 10000).to_be_bytes()]);
                     batch = batch.write(k, Some(v));
                 }
-                // Don't merkleize/apply -- simulates uncommitted writes
+                // Skip merkleize and apply to simulate uncommitted writes.
             }
 
             // Insert operations without applying, then drop without cleanup.
@@ -1227,7 +1227,7 @@ pub(crate) mod test {
                     let v = Sha256::hash(&[&((i + 1) * 10000).to_be_bytes()]);
                     batch = batch.write(k, Some(v));
                 }
-                // Don't merkleize/apply -- simulates uncommitted writes
+                // Skip merkleize and apply to simulate uncommitted writes.
             }
 
             // Insert operations without applying then drop without cleanup.
@@ -1755,8 +1755,6 @@ pub(crate) mod test {
         (db, range)
     }
 
-    // -- Generic inner functions for parameterized batch tests --
-
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
         let db = open_db_generic::<F>(context.child("db")).await;
         let root_before = db.root();
@@ -2045,8 +2043,6 @@ pub(crate) mod test {
         });
     }
 
-    // -- MMR test wrappers --
-
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_empty() {
         let executor = deterministic::Runner::default();
@@ -2101,8 +2097,6 @@ pub(crate) mod test {
         executor.start(log_replay_inner::<mmr::Family>);
     }
 
-    // -- MMB test wrappers --
-
     #[test_traced("INFO")]
     fn test_ordered_fixed_batch_empty_mmb() {
         let executor = deterministic::Runner::default();
@@ -2156,8 +2150,6 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(log_replay_inner::<crate::merkle::mmb::Family>);
     }
-
-    // -- MMR-only tests (use verify_proof / Position which are MMR-specific) --
 
     fn is_send<T: Send>(_: T) {}
 

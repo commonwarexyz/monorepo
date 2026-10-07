@@ -88,7 +88,7 @@ use futures::StreamExt;
 #[cfg(not(test))]
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     future::Future,
     num::{NonZeroU16, NonZeroUsize},
     ops::Range,
@@ -271,7 +271,7 @@ struct Expected {
     values: Vec<Item>,
     /// Values whose append failed after possibly persisting. Cleared by every barrier that
     /// pins content exactly.
-    candidates: HashMap<u64, Vec<Item>>,
+    candidates: BTreeMap<u64, Vec<Item>>,
 }
 
 impl Expected {
@@ -285,7 +285,7 @@ impl Expected {
             durable_prune: target,
             max_prune: target,
             values: Vec::new(),
-            candidates: HashMap::new(),
+            candidates: BTreeMap::new(),
         }
     }
 
@@ -719,7 +719,7 @@ async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
         durable_prune: bounds.start,
         max_prune: bounds.start,
         values,
-        candidates: HashMap::new(),
+        candidates: BTreeMap::new(),
     }
 }
 

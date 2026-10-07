@@ -54,7 +54,7 @@
 //! target and contribute to its multiplicity.
 //!
 //! Scenario generation guarantees that every case within a campaign is
-//! structurally distinct -- no duplicate (scenario, compromised-assignment)
+//! structurally distinct. No duplicate (scenario, compromised-assignment)
 //! pairs are ever emitted. The scenario space is counted with an exact
 //! compressed transition DAG: each edge stores a residual symmetry-cell
 //! transition and the exact number of concrete round scenarios represented by
@@ -79,7 +79,7 @@ use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
 use rand::{Rng, RngExt as _, seq::SliceRandom};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -355,7 +355,7 @@ pub enum Mode {
 /// The generator uses `u64` masks for recipient sets and residual cell
 /// boundaries, so campaigns support at most 64 participants.
 ///
-/// Each canonical scenario tracks residual symmetry cells -- participants that
+/// Each canonical scenario tracks residual symmetry cells, the participants that
 /// were treated identically across all rounds. Two compromised-node assignments
 /// that differ only in which members of a symmetry cell are compromised are
 /// equivalent under relabeling for the adversarial prefix, so the framework
@@ -516,7 +516,7 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
 ///
 /// Bit `i` is set when there is a cell boundary after participant `i`. The
 /// unset gaps between boundaries belong to the same residual symmetry cell.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct CellState {
     boundaries: u64,
 }
@@ -796,10 +796,10 @@ impl ScenarioGenerator {
         // the initial state. Later DP layers only need to account for these
         // reachable states.
         let mut layers = Vec::with_capacity(rounds + 1);
-        layers.push(HashSet::from([*initial]));
+        layers.push(BTreeSet::from([*initial]));
 
         for depth in 0..rounds {
-            let mut next_layer = HashSet::new();
+            let mut next_layer = BTreeSet::new();
             for state in layers[depth].iter() {
                 self.ensure_transitions(state);
                 let transitions = self.transitions(state);
@@ -1541,12 +1541,12 @@ mod tests {
         result
     }
 
-    fn reference_scenarios(cells: &[usize], rounds: usize) -> HashSet<(Scenario, Cells)> {
+    fn reference_scenarios(cells: &[usize], rounds: usize) -> BTreeSet<(Scenario, Cells)> {
         if rounds == 0 {
-            return HashSet::from([(Scenario { rounds: Vec::new() }, cells.to_vec())]);
+            return BTreeSet::from([(Scenario { rounds: Vec::new() }, cells.to_vec())]);
         }
 
-        let mut out = HashSet::new();
+        let mut out = BTreeSet::new();
         for (round, next_cells) in reference_next_round_transitions(cells) {
             for (mut scenario, residual) in reference_scenarios(&next_cells, rounds - 1) {
                 scenario.rounds.insert(0, round);
@@ -1724,7 +1724,7 @@ mod tests {
     fn compressed_unranking_matches_reference_space() {
         for (n, rounds) in [(2usize, 3usize), (3, 2)] {
             let mut generator = ScenarioGenerator::new(n);
-            let generated: HashSet<_> = generator
+            let generated: BTreeSet<_> = generator
                 .generate(&mut test_rng(), rounds, usize::MAX)
                 .into_iter()
                 .collect();

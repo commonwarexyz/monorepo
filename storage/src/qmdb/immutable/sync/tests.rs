@@ -29,7 +29,7 @@ use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     future::Future,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
@@ -60,7 +60,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
             Digest = sha256::Digest,
             Config: Clone,
         > + Sync;
-    type Key: Clone + Eq + std::hash::Hash + Send + Sync + 'static;
+    type Key: Clone + Ord + Send + Sync + 'static;
     type Value: Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static;
     type Metadata: Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static;
 
@@ -117,7 +117,7 @@ where
         let target_oldest_retained_loc = bounds.start;
         let target_root = H::db_root(&target_db);
 
-        let mut expected_kvs: HashMap<H::Key, H::Value> = HashMap::new();
+        let mut expected_kvs: BTreeMap<H::Key, H::Value> = BTreeMap::new();
         for op in &target_ops {
             if let Some((key, value)) = H::op_kv(op) {
                 expected_kvs.insert(key.clone(), value.clone());

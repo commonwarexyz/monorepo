@@ -726,7 +726,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Apply the first -- should succeed.
+            // Applying the first succeeds.
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
             let db = db.commit().await.unwrap();
             let expected_root = db.root();
@@ -734,7 +734,7 @@ pub(crate) mod test {
             assert_eq!(db.get(&key1).await.unwrap(), Some(vec![10]));
             assert_eq!(db.get(&key2).await.unwrap(), None);
 
-            // Apply the second -- should fail because the DB was modified.
+            // Applying the second fails because the DB was modified.
             let Err(err) = db.apply_batch(batch_b).await else {
                 panic!("expected StaleBatch error");
             };
@@ -922,7 +922,7 @@ pub(crate) mod test {
         executor.start(|context| async move {
             let db = open_db(context.child("storage")).await;
 
-            // A writes 1 key, B writes 5 keys -- different total_size.
+            // A writes 1 key and B writes 5 keys, so their total_size differs.
             let batch_a = db
                 .new_batch()
                 .write(Sha256::hash(&[&[1]]), Some(vec![10]))
@@ -1062,7 +1062,7 @@ pub(crate) mod test {
         });
     }
 
-    /// Apply parent then child -- this is the sequential commit pattern
+    /// Apply parent then child. This is the sequential commit pattern
     /// and must succeed. `apply_batch` detects that the child's ancestors
     /// were committed and applies only the child's own operations.
     #[test_traced]
@@ -1088,7 +1088,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Apply parent first, then child -- sequential commit.
+            // Apply parent first, then child, as a sequential commit.
             let (db, _) = db.apply_batch(parent).await.unwrap();
             let (db, _) = db.apply_batch(child).await.unwrap();
 
@@ -1122,7 +1122,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            // Apply child first -- parent should now be stale.
+            // Apply child first, so the parent is now stale.
             let (db, _) = db.apply_batch(child).await.unwrap();
             let Err(err) = db.apply_batch(parent).await else {
                 panic!("expected StaleBatch for parent after child applied");
@@ -1372,7 +1372,7 @@ pub(crate) mod test {
     fn test_owned_batch_homogeneous_collection() {
         use crate::qmdb::any::batch::MerkleizedBatch;
         use commonware_cryptography::sha256;
-        use std::collections::HashMap;
+        use std::collections::BTreeMap;
 
         type Snap = MerkleizedBatch<
             mmr::Family,
@@ -1391,7 +1391,7 @@ pub(crate) mod test {
             let base = db.to_batch();
 
             // Build several batches at different depths and store them by root.
-            let mut collection: HashMap<sha256::Digest, Arc<Snap>> = HashMap::new();
+            let mut collection: BTreeMap<sha256::Digest, Arc<Snap>> = BTreeMap::new();
 
             // Depth 1.
             let key = Digest::random(commonware_utils::TestRng::new(500));
@@ -1415,7 +1415,7 @@ pub(crate) mod test {
                 .unwrap();
             collection.insert(batch2.root(), batch2);
 
-            // All batches in the same HashMap -- type erasure works.
+            // Both batches fit in one BTreeMap, so type erasure works.
             assert_eq!(collection.len(), 2);
 
             db.destroy().await.unwrap();

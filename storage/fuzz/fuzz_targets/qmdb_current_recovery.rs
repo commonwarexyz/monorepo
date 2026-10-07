@@ -31,7 +31,7 @@ use commonware_storage_fuzz::{
 use commonware_utils::{Entropy, NZU64, NZUsize, Probability, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroUsize},
 };
 
@@ -142,11 +142,11 @@ fn make_config(
 }
 
 /// Committed key-value state tracked across batch boundaries.
-type State = HashMap<RawKey, RawValue>;
+type State = BTreeMap<RawKey, RawValue>;
 
 /// Merge pending changes into committed after a successful commit.
-fn apply_pending(pending: &mut HashMap<RawKey, Option<RawValue>>, committed: &mut State) {
-    for (k, v) in pending.drain() {
+fn apply_pending(pending: &mut BTreeMap<RawKey, Option<RawValue>>, committed: &mut State) {
+    for (k, v) in std::mem::take(pending) {
         match v {
             Some(val) => {
                 committed.insert(k, val);
@@ -163,7 +163,7 @@ fn apply_pending(pending: &mut HashMap<RawKey, Option<RawValue>>, committed: &mu
 /// An applied batch can be KV-identical to the committed state while still appending
 /// operations (and changing the root), so entries collapse only when the roots also match.
 fn failure_states(
-    pending: &HashMap<RawKey, Option<RawValue>>,
+    pending: &BTreeMap<RawKey, Option<RawValue>>,
     committed: &State,
     committed_root: Digest,
     post_root: Digest,
@@ -194,7 +194,7 @@ fn failure_states(
 async fn commit_pending<F: Graftable>(
     db: Db<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    pending: &mut HashMap<RawKey, Option<RawValue>>,
+    pending: &mut BTreeMap<RawKey, Option<RawValue>>,
     committed: &mut State,
     committed_root: &mut Digest,
 ) -> Result<Db<F>, Vec<(State, Digest)>> {
@@ -278,7 +278,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
             // Active KV pairs after the last successful commit.
             let mut committed = State::new();
             // Uncommitted changes since the last commit. None = delete, Some = upsert.
-            let mut pending: HashMap<RawKey, Option<RawValue>> = HashMap::new();
+            let mut pending: BTreeMap<RawKey, Option<RawValue>> = BTreeMap::new();
             let mut known_keys = BTreeSet::new();
             let mut failure = None;
 

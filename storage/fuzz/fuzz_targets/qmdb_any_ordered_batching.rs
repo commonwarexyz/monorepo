@@ -20,7 +20,7 @@ use commonware_storage::{
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroU16,
     ops::Bound::{Excluded, Unbounded},
 };
@@ -64,8 +64,8 @@ async fn commit_pending<F: MerkleFamily>(
     db: GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut BTreeMap<RawKey, RawValue>,
-    pending_inserts: &mut HashMap<RawKey, RawValue>,
-    pending_deletes: &mut HashSet<RawKey>,
+    pending_inserts: &mut BTreeMap<RawKey, RawValue>,
+    pending_deletes: &mut BTreeSet<RawKey>,
     metadata: Option<Value>,
 ) -> GenericDb<F> {
     let mut batch = db.new_batch();
@@ -78,10 +78,10 @@ async fn commit_pending<F: MerkleFamily>(
         .await
         .expect("commit should not fail");
     let db = db.commit().await.expect("commit fsync should not fail");
-    for key in pending_deletes.drain() {
+    for key in std::mem::take(pending_deletes) {
         committed_state.remove(&key);
     }
-    committed_state.extend(pending_inserts.drain());
+    committed_state.extend(std::mem::take(pending_inserts));
     db
 }
 
@@ -125,9 +125,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             // committed_state tracks state after apply_batch. pending_inserts/pending_deletes
             // track uncommitted mutations.
             let mut committed_state: BTreeMap<RawKey, RawValue> = BTreeMap::new();
-            let mut pending_inserts: HashMap<RawKey, RawValue> = HashMap::new();
-            let mut pending_deletes: HashSet<RawKey> = HashSet::new();
-            let mut all_keys: HashSet<RawKey> = HashSet::new();
+            let mut pending_inserts: BTreeMap<RawKey, RawValue> = BTreeMap::new();
+            let mut pending_deletes: BTreeSet<RawKey> = BTreeSet::new();
+            let mut all_keys: BTreeSet<RawKey> = BTreeSet::new();
 
             for op in operations.iter().take(MAX_OPS) {
                 db = match op {

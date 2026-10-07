@@ -166,7 +166,7 @@ fn fuzz(data: FuzzInput) {
         let mut oldest_allowed: Option<u64> = None;
 
         // Track written indices
-        let mut written_indices = std::collections::HashSet::new();
+        let mut written_indices = std::collections::BTreeSet::new();
 
         for op in &data.operations {
             match op {
@@ -292,7 +292,7 @@ fn fuzz(data: FuzzInput) {
 
         archive = archive.sync().await.expect("final sync failed");
 
-        let modeled_indices: std::collections::HashSet<_> =
+        let modeled_indices: std::collections::BTreeSet<_> =
             items.iter().map(|(index, _, _)| *index).collect();
         assert_eq!(modeled_indices, written_indices, "written-index model drifted");
 

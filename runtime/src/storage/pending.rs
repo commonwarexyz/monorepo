@@ -6,13 +6,13 @@ use commonware_formatting::hex;
 use commonware_utils::channel::oneshot::Sender as OneshotSender;
 use commonware_utils::{channel::watch, sync::Mutex};
 #[cfg(not(target_os = "linux"))]
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::sync::mpsc::{Receiver as MpscReceiver, Sender as MpscSender};
 use std::{
-    collections::HashMap,
+    collections::BTreeMap,
     ptr,
     sync::{Arc, Weak},
 };
@@ -25,14 +25,14 @@ use std::{
 /// the name is removed or recreated.
 #[derive(Default)]
 pub(crate) struct Pending {
-    pub(super) entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
+    pub(super) entries: Mutex<BTreeMap<(String, Vec<u8>), Entry>>,
     /// Names whose first open through this instance has been accounted for: created here, or
     /// an existing blob whose first-open flush debt was recorded in `entries`. There is no
     /// filesystem-wide startup flush here, so the first open of any other existing name owes
     /// a flush before trusting the file. Removing a name drops it: a later open of that name
     /// creates the blob and owes nothing.
     #[cfg(not(target_os = "linux"))]
-    pub(super) flushed: Mutex<HashSet<(String, Vec<u8>)>>,
+    pub(super) flushed: Mutex<BTreeSet<(String, Vec<u8>)>>,
     #[cfg(test)]
     pub(super) test: Hooks,
 }

@@ -1284,9 +1284,9 @@ where
         match choice {
             0 => {
                 use commonware_utils::TryFromIterator;
-                use std::collections::HashMap;
+                use std::collections::BTreeMap;
 
-                let base: HashMap<P, AckOrReveal<P>> = u.arbitrary()?;
+                let base: BTreeMap<P, AckOrReveal<P>> = u.arbitrary()?;
                 let map =
                     Map::try_from_iter(base).map_err(|_| arbitrary::Error::IncorrectFormat)?;
 

@@ -23,7 +23,7 @@ use commonware_storage::{
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet},
     num::NonZeroU16,
 };
 
@@ -66,8 +66,8 @@ const PAGE_CACHE_SIZE: usize = 100;
 async fn commit_pending<F: MerkleFamily>(
     db: GenericDb<F>,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
-    committed_state: &mut HashMap<RawKey, Option<RawValue>>,
-    pending_expected: &mut HashMap<RawKey, Option<RawValue>>,
+    committed_state: &mut BTreeMap<RawKey, Option<RawValue>>,
+    pending_expected: &mut BTreeMap<RawKey, Option<RawValue>>,
 ) -> GenericDb<F> {
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
@@ -79,7 +79,7 @@ async fn commit_pending<F: MerkleFamily>(
         .await
         .expect("commit should not fail");
     let db = db.commit().await.expect("commit fsync should not fail");
-    committed_state.extend(pending_expected.drain());
+    committed_state.extend(std::mem::take(pending_expected));
     db
 }
 
@@ -124,9 +124,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
             // committed_state tracks state after apply_batch. pending_expected tracks
             // uncommitted mutations that haven't been applied yet.
-            let mut committed_state: HashMap<RawKey, Option<RawValue>> = HashMap::new();
-            let mut pending_expected: HashMap<RawKey, Option<RawValue>> = HashMap::new();
-            let mut all_keys: HashSet<RawKey> = HashSet::new();
+            let mut committed_state: BTreeMap<RawKey, Option<RawValue>> = BTreeMap::new();
+            let mut pending_expected: BTreeMap<RawKey, Option<RawValue>> = BTreeMap::new();
+            let mut all_keys: BTreeSet<RawKey> = BTreeSet::new();
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
             for op in &operations {

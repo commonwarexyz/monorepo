@@ -254,7 +254,7 @@ mod tests {
     };
     use rand_core::{CryptoRng, Rng};
     use std::{
-        collections::{HashMap, HashSet},
+        collections::{BTreeMap, HashSet},
         future::{Future, pending},
         net::{IpAddr, Ipv4Addr, SocketAddr},
         panic::{AssertUnwindSafe, catch_unwind},
@@ -2322,7 +2322,7 @@ mod tests {
     struct TestHandshake<const MAX_SIZE: u32 = CUSTOM_MAX_FRAME_SIZE> {
         application_key: ed25519::PublicKey,
         transport_signer: ed25519::PrivateKey,
-        transport_to_application: Arc<HashMap<ed25519::PublicKey, ed25519::PublicKey>>,
+        transport_to_application: Arc<BTreeMap<ed25519::PublicKey, ed25519::PublicKey>>,
         observations: Arc<Observations>,
     }
 
@@ -2519,7 +2519,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let transport_to_application: Arc<HashMap<_, _>> = Arc::new(
+        let transport_to_application: Arc<BTreeMap<_, _>> = Arc::new(
             keys.iter()
                 .map(|(transport, application)| {
                     (Signer::public_key(transport), application.clone())
