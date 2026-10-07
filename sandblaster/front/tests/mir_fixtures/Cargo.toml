@@ -64,8 +64,13 @@ members = [
     "sd_neon",
     "sd_neon_detect",
     "sd_neon_lane",
+    "sd_neon_mul128",
+    "sd_neon_mul128_row",
+    "sd_neon_mul128_shift",
     "sd_neon_nomodel",
     "sd_neon_ptr",
     "sd_neon_shift",
+    "sd_ptr",
+    "sd_ptr_twins",
     "sd_x86",
 ]

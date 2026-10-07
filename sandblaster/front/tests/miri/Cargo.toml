@@ -1,0 +1,13 @@
+[package]
+name = "sd-miri"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Miri gate of the narrow reading of existing unsafe (docs/DESIGN-UNSAFE-SIMD.md risk 1, A-S1): the pointer fixtures under Stacked and Tree Borrows"
+
+[lib]
+path = "src/lib.rs"
+
+# (not a member of the sandblaster workspace: run by `run.sh` with the
+# pinned nightly's Miri)
+[workspace]

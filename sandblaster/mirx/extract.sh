@@ -5,7 +5,7 @@
 #   sandblaster/mirx/extract.sh <package> <module>[,<module>..] <out.sbmir> [--exclude T,..] [--stub out.rs=src.rs,..]
 #       [--stubs crate:out.rs=src.rs;crate2:..] [--instance Trait=path::Type,..] [--skip-traits T,..]
 #       [--inject name=file.rs,..] [--items 'mod=Item,..;mod2=..'] [--skip-fns T::m,..]
-#       [--manifest path/Cargo.toml] [--target <triple>]
+#       [--manifest path/Cargo.toml] [--target <triple>] [--mir-opt-level N]
 #
 #   sandblaster/mirx/extract.sh commonware-codec varint codec/sandblaster/varint/varint.sbmir \
 #       --exclude u128,i128 --stub varint.rs=codec/sandblaster/varint/varint.rs
@@ -33,6 +33,10 @@
 # * --target: extract for another target than the host (`x86_64-apple-darwin`
 #   for x86 SIMD code on an aarch64 host); the `.sbmir` records the target and
 #   the build refuses MIR of another architecture than its own.
+# * --mir-opt-level: rustc's MIR optimization level for the extracted crate
+#   (`-Zmir-opt-level`, default 1: what `cargo check` runs); the `.sbmir`
+#   records it and the build refuses an extraction at another level
+#   (`docs/mir-lift.md` §20.1).
 #
 #   sandblaster/mirx/extract.sh commonware-storage merkle::position,merkle::location,merkle::mmr,merkle::hasher,merkle::proof \
 #       storage/sandblaster/verifier/verifier.sbmir \
@@ -43,7 +47,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 pkg="$1"; module="$2"; out="$3"; shift 3
-exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; items=""; skipfns=""; manifest="$root/Cargo.toml"; target=""
+exclude=""; stub=""; stubs=""; instance=""; skip=""; inject=""; items=""; skipfns=""; manifest="$root/Cargo.toml"; target=""; level=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --exclude) exclude="$2"; shift 2 ;;
@@ -56,6 +60,7 @@ while [ $# -gt 0 ]; do
     --skip-fns) skipfns="$2"; shift 2 ;;
     --manifest) manifest="$2"; case "$manifest" in /*) ;; *) manifest="$root/$manifest" ;; esac; shift 2 ;;
     --target) target="$2"; shift 2 ;;
+    --mir-opt-level) level="$2"; shift 2 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
@@ -98,6 +103,6 @@ if [ -n "$skip" ]; then export SBMIR_SKIP_TRAITS="$skip"; fi
 RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER="$tdir/driver/release/sandblaster-mirx" \
 SBMIR_CRATE="$crate" SBMIR_MODULE="$module" SBMIR_OUT="$out" SBMIR_EXCLUDE="$exclude" SBMIR_STUB="$abs_stub" \
 SBMIR_STUBS="$abs_stubs" SBMIR_INSTANCE="$instance" SBMIR_INJECT="$abs_inject" \
-SBMIR_ITEMS="$items" SBMIR_SKIP_FNS="$skipfns" \
+SBMIR_ITEMS="$items" SBMIR_SKIP_FNS="$skipfns" SBMIR_MIR_OPT_LEVEL="$level" \
 CARGO_TARGET_DIR="$tdir/check" cargo +"$toolchain" check -q --manifest-path "$manifest" -p "$pkg" ${target:+--target "$target"}
 echo "wrote $out"

@@ -70,6 +70,11 @@ pub(super) struct Spell {
     params: HashMap<String, String>,
     /// The names of the host-model modules (`host`).
     host_mods: HashSet<String>,
+    /// The structs of the in-place files by name: each field's type as the
+    /// source writes it (where the lift reads it otherwise: a `&'static T`
+    /// field as its `T`, a `u128` as its two 64-bit words). A name declared
+    /// in two files is left out.
+    pub(super) host_fields: HashMap<String, Vec<(String, String)>>,
 }
 
 impl Spell {
@@ -138,6 +143,45 @@ impl Spell {
         syn::visit_mut::VisitMut::visit_type_mut(&mut A(&self.type_args), &mut t);
         quote::ToTokens::to_token_stream(&t).to_string().replace(' ', "")
     }
+}
+
+/// The named-field structs of a source file (top level): their fields'
+/// types as written, by struct name; a name seen twice (in `seen`) is
+/// removed.
+fn host_struct_fields(text: &str, out: &mut HashMap<String, Vec<(String, String)>>, seen: &mut HashSet<String>) {
+    let Ok(file) = syn::parse_file(text) else { return };
+    for it in &file.items {
+        let syn::Item::Struct(st) = it else { continue };
+        let name = st.ident.to_string();
+        if !seen.insert(name.clone()) {
+            out.remove(&name);
+            continue;
+        }
+        let syn::Fields::Named(fs) = &st.fields else { continue };
+        let fields = fs.named.iter().map(|f| (f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default(), quote::ToTokens::to_token_stream(&f.ty).to_string().replace(' ', ""))).collect();
+        out.insert(name, fields);
+    }
+}
+
+/// The harness's expression for a field the source writes as `host`, from
+/// the reader's value `value` of the lifted field: a `&T` field gets a leaked
+/// box of its value (harness code: the inputs live to the end of the run);
+/// a `u128` (and an array of them) is built from the lift's (low, high)
+/// words.
+pub(super) fn host_field_value(host: &str, value: String) -> String {
+    let words = "(lo as u128) | ((hi as u128) << 64)";
+    let (is_ref, inner) = match host.strip_prefix('&') {
+        Some(r) => (true, r.strip_prefix("'static").unwrap_or(r).trim_start_matches("mut")),
+        None => (false, host),
+    };
+    let v = if inner == "u128" {
+        format!("{{ let (lo, hi) = {value}; {words} }}")
+    } else if inner.starts_with("[u128;") {
+        format!("{value}.map(|(lo, hi)| {words})")
+    } else {
+        value
+    };
+    if is_ref { format!("::std::boxed::Box::leak(::std::boxed::Box::new({v}))") } else { v }
 }
 
 /// `written` (a type) with every host model's DSL path replaced by the
@@ -471,6 +515,7 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
     // the in-place files: their host module paths
     let mut ip = Spell { host_mods: c.lifted.iter().filter(|l| l.host).map(|l| l.name.rsplit("::").next().unwrap_or(&l.name).to_string()).collect(), ..Default::default() };
     let mut files: Vec<(Vec<String>, PathBuf, String)> = Vec::new();
+    let mut seen_structs: HashSet<String> = HashSet::new();
     for info in infos {
         let path = abs(c.sm.path(info.file));
         let Some(segs) = path.strip_prefix(&src_dir).ok().and_then(module_segments) else {
@@ -486,6 +531,7 @@ pub fn check_in_place(out: &mut elab::Output, krate: &Crate, c: &Checked, infos:
             return done(rep);
         }
         ip.modules.insert(info.name.clone(), segs.clone());
+        host_struct_fields(&text, &mut ip.host_fields, &mut seen_structs);
         files.push((segs, path, text));
     }
     if files.is_empty() {
@@ -1301,5 +1347,26 @@ mod tests {
         assert_eq!(cv_expr("cv", &Ty::Ref(Box::new(Ty::Slice(Box::new(d)))), "a"), "a.into_iter().map(|x| cv(x)).collect::<::std::vec::Vec<_>>()");
         // negative twin: a value without arrays is passed as it is
         assert_eq!(cv_expr("cv", &Ty::Seq(Box::new(Ty::Uint(UintTy::U8))), "a"), "a");
+    }
+
+    /// A field the lift reads otherwise than the source writes it (stage
+    /// neon-mul: Reed–Solomon's engines): a `&'static T` table is built as a
+    /// leaked box of its value, a `u128` (alone or in an array) from the
+    /// lift's (low, high) words. Negative twins: any other field is the
+    /// reader's value as it is; a struct named in two files is not adapted.
+    #[test]
+    fn fields_the_lift_reads_otherwise_are_built_as_the_source_writes_them() {
+        let w = "(lo as u128) | ((hi as u128) << 64)";
+        assert_eq!(host_field_value("&'static[u8;4]", "r(t)".into()), "::std::boxed::Box::leak(::std::boxed::Box::new(r(t)))");
+        assert_eq!(host_field_value("[u128;4]", "r(t)".into()), format!("r(t).map(|(lo, hi)| {w})"));
+        assert_eq!(host_field_value("u128", "r(t)".into()), format!("{{ let (lo, hi) = r(t); {w} }}"));
+        assert_eq!(host_field_value("u64", "r(t)".into()), "r(t)");
+        assert_eq!(host_field_value("(u64,u64)", "r(t)".into()), "r(t)");
+        let (mut out, mut seen) = (HashMap::new(), HashSet::new());
+        host_struct_fields("pub struct Neon { mul128: &'static Mul128, skew: &'static Skew }\npub struct Lut { pub lo: [u128; 4] }\n", &mut out, &mut seen);
+        assert_eq!(out.get("Neon"), Some(&vec![("mul128".to_string(), "&'staticMul128".to_string()), ("skew".to_string(), "&'staticSkew".to_string())]));
+        assert_eq!(out.get("Lut"), Some(&vec![("lo".to_string(), "[u128;4]".to_string())]));
+        host_struct_fields("pub struct Lut(u8);\n", &mut out, &mut seen);
+        assert_eq!(out.get("Lut"), None);
     }
 }

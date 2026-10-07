@@ -172,12 +172,28 @@ about speed.
   lift conformance check running it natively, and an SSSE3 PSHUFB
   counterpart reads onto the x86 models.
 
-  No Commonware module is verified yet. Its SIMD engines are `unsafe`
-  throughout: raw-pointer loads and stores, and `unsafe` blocks that
-  rustc forces around value intrinsics in inlined helpers. Whether they
-  may be split into safe vector arithmetic and unverified load/store
-  wrappers is the user's open decision (9). Reading the `unsafe` code
-  itself would reverse decision (1).
+  No Commonware SIMD module is verified yet. Its SIMD engines are
+  `unsafe` throughout: raw-pointer loads and stores, and `unsafe` blocks
+  that rustc forces around value intrinsics in inlined helpers. The user
+  decided on 2026-10-06 ("We need to support this.", decision 9): they are
+  verified **as written**, through a narrow, proof-checked reading of their
+  existing `unsafe` (every pointer access proven in bounds, aliasing
+  checked, CPU features established; `docs/DESIGN-UNSAFE-SIMD.md`, C10).
+  No engine is split or rewritten, and sandblaster never adds `unsafe`.
+  The reading is designed and reviewed; its first stage (a union
+  soundness fix and the MIR optimization-level pin it needs) and its
+  second, the reading itself (2026-10-07: L's memory model of raw
+  pointers, the window rule, the feature binding, the `IterMut` model, the
+  structured reading and the walker's support; `docs/mir-lift.md` §20.10),
+  are built: a fixture of `mul_neon`'s shape, its `IterMut` loop over
+  64-byte chunks with four loads and four stores through
+  `as_mut_ptr().add(16 * k)`, gets every theorem, the loop's lemma
+  included, and runs clean under Miri's two aliasing models, as does
+  Commonware's NEON engine (`mul`, `fft`, `ifft`) through a harness. Its
+  per-vector laws are proven; the laws of a whole chunk and of the slice
+  wait for a prover step (64-lane goals exceed the automation's read-back
+  bound). The engines themselves need C4 first: `mul_128` loads its table
+  rows through `u128` bases.
 
   The C8 survey (`recovery/prover-simd/SIMD-SURVEY.md`, outside the
   repository) found none of Commonware's SIMD functions readable as
@@ -223,10 +239,10 @@ comparison of §17 decides with data.
    is a law or a lemma.
 4. **No new optimized code.** sandblaster verifies the code a crate has.
    It does not generate, rewrite or propose faster code, and its roadmap
-   is prover and verifier capability, not speed. Where existing code must
-   change to be verifiable at all (an `unsafe` SIMD engine split into safe
-   vector arithmetic and unverified loads, §18), the change keeps its
-   behavior and its machine code, and it is the user's decision.
+   is prover and verifier capability, not speed. It never adds `unsafe`
+   to shipped code; the `unsafe` already there is verified as written,
+   through a narrow reading, or not at all (§2, decision 9): code is not
+   split or rewritten to make it verifiable.
 5. **Gates are mandatory; review tools are on demand.** No flag skips a
    proof or a §15 gate. Spec mutation and LR8 run when an author or
    reviewer asks (`sandblaster mutate`).
@@ -325,7 +341,10 @@ lift, is not listed there yet (§19, stale text).
 7. **Assumptions**: `num-bigint`/`num-integer`; the rustc that compiled the
    kernel; `syn` agreeing with rustc on the subset; the §3.7 stack
    assumption; host code calls a `#[target_feature]` function only on a
-   CPU with those features; a process free of undefined behavior (host `unsafe`,
+   CPU with those features, and the binary runs only on a CPU with its
+   target's statically enabled features (the narrow reading of existing
+   `unsafe` counts them as facts once bound to the build's own, §20.10 of
+   `docs/mir-lift.md`); a process free of undefined behavior (host `unsafe`,
    `transmute` and C externs can forge any value, including values of
    invariant types); and **overflow checks on** in the build that compiles
    the verified files. The MIR is extracted with them and L reads
@@ -353,17 +372,32 @@ lift, is not listed there yet (§19, stale text).
      function, a callee's panic, an index leaf past the end), `Stuck` for
      everything else that gives no value (out of fuel, undefined
      behaviour, an unmodeled construct; `docs/mir-lift.md` §20.4). Files:
-     the generator `mir/literal.rs` (1,476 code lines; 1,436 before C8,
-     1,297 before C1) and its library `literal.core` (203; 186); its
-     reading of `core::arch` code `mir/arch.rs` (111, C8: a vector type as
-     its model representation, an intrinsic call as its validated target
-     model, `docs/mir-lift.md` §20.9); the theorem statements `mir/stmt.rs`
-     (240; 213); the parse `mir/ir.rs` and `sexp.rs` (529; 482 before C8,
-     131); names and load checks `mir/mod.rs` (542; 531, the check that the
-     MIR is of the build's architecture included); the printer `mirx`
-     (1,208; 1,122 before C8: a rustc driver on the pinned nightly of the
-     stable release; its output is checked in with the sources' SHA-256 and
-     the target it was built for). Then the gate's
+     the generator `mir/literal.rs` (1,788 code lines; 1,739 before stage
+     neon-mul, 1,476 before the narrow reading of existing `unsafe`, 1,436
+     before C8, 1,297 before C1) and its library `literal.core` (315; 298;
+     203; 186); its reading of
+     `core::arch` code `mir/arch.rs` (115; 111, C8: a vector type as its
+     model representation, an intrinsic call as its validated target
+     model, `docs/mir-lift.md` §20.9); the narrow reading's tables
+     `mir/ptr.rs` (422; 414 before stage neon-mul's `u128`: the admitted
+     pointer helpers by exact path and signature, the plain byte views, the admitted loads and stores with
+     their alignment, the pure-reinterpretation check) and its window rule
+     `mir/window.rs` (415: W0–W4 on the unoptimized extraction, the
+     verdicts carried to L by source span and kind; §20.10); the theorem
+     statements `mir/stmt.rs` (240; 213); the parse `mir/ir.rs` and
+     `sexp.rs` (700; 659 before stage neon-mul, 611 before the narrow reading, 529 before the union
+     fix and the optimization-level record of 2026-10-06, 482 before C8,
+     131); names and load checks `mir/mod.rs` (638; 635 before stage neon-mul,
+     572 before the narrow reading's feature binding (A-S3), window verdicts and `IterMut`
+     models, 542 before the optimization-level check and the window
+     extraction's load, 531 before C8, the check that the MIR is of the
+     build's architecture included); the build's codegen flags in
+     `target.rs` (29, A-S3); the printer `mirx` (1,254; 1,215 before the
+     narrow reading's records, 1,208 before it pinned and recorded the MIR
+     optimization level, 1,122 before C8: a rustc driver on the pinned
+     nightly of the stable release; its output is checked in with the
+     sources' SHA-256, the target it was built for and its optimization
+     level). Then the gate's
      trusted check `mir/gate.rs` (176; 159, plus about 30 at its call site
      `driver::gates::theorem_gate`): L enters the kernel only through it,
      and a function is accepted only when its MIR instance is that
@@ -376,8 +410,28 @@ lift, is not listed there yet (§19, stale text).
      precondition check (39: a function read from MIR is elaborated only
      when each precondition, a panic contract's no-panic clause included,
      is α-equal to its declared contract's clause) and the lift glue (about
-     300, the panic contract's attachment and no-panic clause included).
-     **About 5.01k code lines in all** (4.69k before C8's first slice,
+     350, the panic contract's attachment and no-panic clause and the
+     window extraction's declaration included).
+     **About 6.69k code lines in all** (6.57k before stage neon-mul,
+     2026-10-07, which added 118: in L a `u128` held as its two words, the
+     code step `PRange` with `split_at_mut`'s model, `Len`, the referent's
+     type after the `Deref` of a `&mut`, `ptr.rs`'s `u128` byte views, the
+     parse's fusion of rustc's fake raw borrow with its metadata, and one
+     line of the printer; 5.16k before the narrow reading of
+     existing `unsafe`, stage "unsafe-reading", 2026-10-07, which added
+     about 1,410: `mir/ptr.rs` 414, `mir/window.rs` 415, in `literal.rs`
+     the pointer type, formations, moves, casts, loads and stores, the
+     refusal of library `unsafe fn` calls, the static facts and the
+     `IterMut` model (+263), in `literal.core` the memory model (+95), the
+     parse (+48), the load checks (+63), `arch.rs` (+4), `target.rs` (+29),
+     the printer (+39) and the lift glue (≈ +40), `docs/mir-lift.md`
+     §20.10; and in the ghost language, item 6, the admitted loads' and
+     stores' types from their models in ghost code; 5.01k before the first
+     stage of the narrow `unsafe` reading, 2026-10-06, which added about 150: the
+     refusal of every access to a union's fields in the parse, about 80,
+     and the MIR optimization level pinned, recorded and checked with the
+     window extraction's declaration, load and check, about 70; 4.69k
+     before C8's first slice,
      which added about 325: `mir/arch.rs`, the vector type and the call in
      L, their parse, the target check, the printer's vector types and
      intrinsic leaves, the lift's kept `#[target_feature]`; and 10 in the
@@ -386,7 +440,7 @@ lift, is not listed there yet (§19, stale text).
      `must_panic` with its tables of panic functions and message
      constructors in L, the `Assert` kinds that panic, the panic statement,
      the gate's second theorem, the glue).
-   * **The theorem.** S (`mir/read.rs` 2,975, steered by `mir/cfg.rs` 298)
+   * **The theorem.** S (`mir/read.rs` 3,989, steered by `mir/cfg.rs` 299)
      is untrusted. Every build checks, per lifted function,
      `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0 (Ret init(x̄))
      = Ret(erase(S_f x̄))` (total correctness, final `&mut` referents
@@ -396,13 +450,16 @@ lift, is not listed there yet (§19, stale text).
      theorem by its panic mode) and checked by the kernel. Today: varint 63
      of 63 (no function of varint panics on its own; a write into a
      too-short `&mut [u8]` panics inside `bytes`), MMR 69 of 69 with 18 panic
-     theorems, verifier 69 of 69 with 13.
+     theorems, verifier 69 of 69 with 13, the Reed–Solomon engine multiply
+     (`cryptography/sandblaster/rs_engine`, not yet locked) 5 of 5, none
+     of which panics.
    * **The item skeleton**: `front/src/lift.rs` and `lift_open.rs`
      (`macro_rules!` expansion of item macros, inline modules, sealed-trait
      monomorphization, state passing in signatures, struct and enum
-     declarations, derived `Default`, the attachments, in-place children,
-     open traits at a declared instance, operator and conversion impls as
-     methods, host models).
+     declarations, derived `Default`, the attachments (element attachments
+     of a loop's body on one element included), in-place children, open
+     traits at one declared instance or read at each of several, operator
+     and conversion impls as methods, host models).
    * **The expression reading** of the ghost language and of the bodies
      that are not exec code (constant initializers, host-model functions).
    * **The lift prelude** (`front/lift/prelude.rs`), **the buffer model**
@@ -482,16 +539,33 @@ host/
 * `#[cfg(sandblaster)]` items are **ghost**: never compiled by rustc; the
   checker treats `cfg(sandblaster)` as true. `#![forbid(unsafe_code)]` is
   required at the DSL root.
-* **No `unsafe`, for good** (user decision, 2026-10-05: proof-justified
-  `unsafe` in shipped Commonware code? "then remove it"). Verified code is
-  safe Rust: the DSL root forbids `unsafe_code`; the front end refuses an
-  `unsafe` block (the lift: in a body it reads, and any `unsafe` written in
-  a body read from MIR, even around an operation L reads), `unsafe fn`
-  (typeck) and `unsafe impl` (resolve); and L reads raw pointers, raw
-  borrows' dereferences and transmutes other than its few modeled ones as
-  stuck. There is no memory model for raw pointers and no plan for one;
-  code that needs `unsafe` stays unverified host code outside the verified
-  files (its undefined behavior is the assumption of §1.1 item 7).
+* **Never add `unsafe`; verify the `unsafe` already there, narrowly**
+  (user decisions: 2026-10-05, proof-justified `unsafe` in shipped
+  Commonware code? "then remove it"; refined 2026-10-06 for Commonware's
+  SIMD engines, "We need to support this."). sandblaster never adds
+  `unsafe` to shipped code, and no code is split or rewritten to avoid
+  it. Existing `unsafe` is verified as written through a narrow reading
+  (`docs/DESIGN-UNSAFE-SIMD.md`, roadmap C10): raw pointers formed from
+  references to slices, arrays and plain integers, pointer offsets,
+  vector loads and stores through them, and calls into `#[target_feature]`
+  code, each access proven in bounds (L reads an out-of-bounds access as
+  stuck, so the theorem excludes it), its aliasing checked by a trusted
+  static window rule, its CPU features established. Everything else
+  `unsafe` stays refused: raw dereferences, `ptr::read`/`write`,
+  `get_unchecked`, `from_raw_parts`, a crate's own `transmute`, union
+  field reads,
+  `static mut`, FFI, assembly, a general memory model for raw pointers.
+  **Until that reading lands, the front end refuses every `unsafe`** as
+  before: the DSL root forbids `unsafe_code`; the lift refuses an `unsafe`
+  block in a body it reads and any `unsafe` written in a body read from
+  MIR, even around an operation L reads; typeck refuses `unsafe fn`,
+  resolve `unsafe impl`; and L reads raw pointers, raw borrows'
+  dereferences, transmutes other than its few modeled ones and (since
+  2026-10-06, wherever they occur, followed library MIR included) every
+  access to a union's fields as stuck. Code with `unsafe` outside the
+  reading stays unverified host code (its undefined behavior is the
+  assumption of §1.1 item 7). The DSL root's `#![forbid(unsafe_code)]`
+  stays for the ghost files when the reading lands.
 * Target information comes from `CARGO_CFG_TARGET_*`, never from the host.
 * A crate written entirely in sandblaster's own dialect (no `#[lift]`) can
   be checked (`sandblaster check`): it gets a verdict and no code.
@@ -1708,9 +1782,9 @@ models, by native validation, §9).
 | coupled loops (product programs) | — | missing | C5 |
 | loops with invariants | loop attachments, loop lemmas, fuel functions | iterator adapters; fold matching | per-adapter models; fold matching |
 | bit tricks | `bvnorm`, K1 bit-count axioms, `stdlib::bits`, proof by computation; shifts by a variable amount (`lemmas/bits_shift.core`, §16.3) | leading zeros as bounds (a case per value), carries, popcount across a split, `u128` | C4, then C11 |
-| SIMD lanes | models retained and validated (§9); safe `core::arch` code read from MIR (S and L) onto them and proven lane by lane against scalar references (C8's first slice); ghost lane indexing `v[i]` and lane steps (`auto::lanes`, §16.4) | AVX models not loaded; loads and stores (`unsafe`); runtime dispatch; a table-lookup lane (`vqtbl1q_u8`) and a lane split with per-lane case analysis (a PSHUFB lane law needs 256 enumerated cases today) | C8 (second slice) |
+| SIMD lanes | models retained and validated (§9); safe `core::arch` code read from MIR (S and L) onto them and proven lane by lane against scalar references (C8's first slice); ghost lane indexing `v[i]` and lane steps; the lane closer: a vector equation split into lanes, each decided by a case analysis on its table lookups' index tests (`auto::lanes`, §16.4) | AVX models not loaded; runtime dispatch; `u128` table rows (C4) | C8 (second slice) |
 | documented panics | built and applied: panic contracts (`panics_when`, the panic theorem; §16.5); panic lemmas restate a condition in the code's terms | a panic reached only after many loop iterations (the panic walk's fuel bound); panics inside lifted callees' loops | a panic loop lemma, when a verified function needs one |
-| `unsafe` | refused, and out of scope for good (§2, §16.5) | — | — |
+| `unsafe` | never added; every `unsafe` refused today, every union field access stuck (§2, §16.5) | existing SIMD `unsafe` read narrowly: pointers formed from references, offsets, vector loads and stores, `#[target_feature]` calls, each access proven in bounds (`docs/DESIGN-UNSAFE-SIMD.md`) | C10 (first stage built: the union fix, the optimization-level pin, the window extraction) |
 | proof reuse and stability | per-module verdicts; theorem and mutant caches | per-function checking; cross-root reuse | C6, C7 |
 
 ### 16.1 Relational and equivalence proofs
@@ -1842,11 +1916,12 @@ readings.**
   (and back), so a law states a vector function lane by lane against a
   scalar reference (`mul_nibbles(x, lo, hi) == mul_lanes(x, lo, hi)`).
   `bv()` proves such laws when the reference has the model's shape at
-  each lane's conditions (NEON TBL); where it has another (PSHUFB's model
+  each lane's conditions (NEON TBL). Where it has another (PSHUFB's model
   tests bit 7 in a plain `if`, the elaborated reference's `if` carries its
-  path equation), the proof enumerates one lane's 256 index bytes in a
-  lemma and moves each lane to it: about 25 proof lines for one PSHUFB.
-  That is the prover gap of this slice.
+  path equation; a reference that reads `t[x & 15]` directly where TBL
+  tests `x & 15 < 16`), the first slice's proof enumerated one lane's 256
+  index bytes in a lemma (about 25 proof lines for one PSHUFB); since
+  2026-10-07 the lane closer below proves it with `unfold(f); follows();`.
 * **Lanes in proofs** (the prover track, 2026-10-06). Ghost code
   indexes a vector: `v[i]` is lane `i` of its model's `Array(lane, n)`,
   lane 0 first (through the lane view above; exec code still reads a lane
@@ -1858,15 +1933,50 @@ readings.**
   for linear arithmetic and the bit lemmas, and a symbolic lane `i < n` is
   split into the literal ones. Nibble splits (`x & 15`, `x >> 4`), lane
   sums exact under lane bounds, carry splits and the x86 byte lanes of a
-  32-bit sum are proven this way (`front/tests/hardware.rs`). Not yet: a
-  table lookup (`vqtbl1q_u8`, whose lane is the dependent `if k < 16 as .h
-  then t[k] else 0`): deciding `k < 16` after the step builds a motive
-  whose read-back holds `Erased`, so Reed–Solomon's split-table step is
-  still open. A lane step whose result reads back with such a hidden proof
-  is not taken (a lane of `_mm_and_si128` fed to the PSHUFB reference's
-  `if`, in `sd_x86`'s masked lookup), and the search goes on as before
-  lane steps existed; one step is tried per model application, not per
-  lane read.
+  32-bit sum are proven this way (`front/tests/hardware.rs`). A table
+  lookup's lane (`vqtbl1q_u8`: the dependent `if k < 16 as .h then t[k]
+  else 0`) used to read back with an `Erased` placeholder after a step
+  inside it: the arm's index proof, carried along the step's equation,
+  read the unfolded vector back as an untyped pair. The read-back now gives
+  a transport's endpoints its type (`auto::util::kernel_friendly`), so the
+  step is taken; a step whose result still reads back with a hidden proof
+  is not taken, and one step is tried per model application, not per lane
+  read.
+* **The lane closer** (C8's second slice, 2026-10-07; `auto::lanes`,
+  untrusted). An equation between two vectors of which one is made by
+  the models is proven lane by lane, with no search: the models of both
+  sides unfolded at once (their bodies, equated with the folded sides by
+  `BvRefl`), so each side is the vector of its lanes; arrays the sides
+  read that are not variables (a table row `lut.lo[0]`) generalized to
+  variables, which the kernel introduces as their lanes (§5.9); each
+  lane's reads of vector lanes abstracted, so the sixteen lanes of a
+  lane-wise computation are one shape, proven once as a function of its
+  inputs, checked by the kernel when built, and applied to each lane's; a
+  shape decided by a case analysis on its conditions (a table lookup's
+  index test: `x & 15 < 16` decided by linear arithmetic and rewritten,
+  PSHUFB's bit 7 of a symbolic byte split), each condition generalized
+  where the lane tests it with the dependent match's path equation as the
+  motive's equation binder, so the arm's index proof keeps its type; a
+  lane with no condition left closes by conversion, `BvRefl`, or
+  (bounded) the search on the lane; the lanes joined by one congruence
+  step each and `array::ext`. The kernel checks the result like any
+  proof. It is off where the search does not use `BvRefl` by itself: the
+  law rules' echo prover (LR6 (a) runs without it, so a law that restates
+  one model's lanes is not counted an echo, as before) and the
+  completeness discharges. Measured: a whole TBL vector law about 0.25M
+  steps of search; one product vector of Reed–Solomon's `mul_128` shape
+  (sixteen elements, four lookups each) 1.0M and a 0.9M check (one lane
+  shape; sixteen lanes one by one cost 3.5M and a 6.9M check, and the
+  plain search 12.7M for one lane). The x86 fixture's 256-case PSHUFB
+  lemma and its sixteen moves are gone (`unfold(f); follows();` for each
+  of its three laws); the unsafe-reading stage's four quarter laws of a
+  64-byte chunk now prove with `follows()`. Fixture:
+  `mir_fixtures/sd_neon_mul128` (`mul_128` and `muladd_128` as the engine
+  writes them, rows `[u8; 16]` where the engine's are `u128`, loaded
+  through `ptr::from_ref(..).cast()`), verified in place with native
+  conformance; its twins (a shift by 3, two rows swapped) refused by the
+  same laws (`front/tests/simd.rs`). Record:
+  `docs/DESIGN-UNSAFE-SIMD.md`, stage "table-lookup-lanes".
 * **Conformance** runs `#[target_feature]` code natively (the harness
   transmutes lane arrays and calls the original in `unsafe`): the NEON
   fixture compared 1,201 inputs on 4 functions, the literal reading on
@@ -1880,17 +1990,32 @@ readings.**
   dispatcher is `unsafe` today; the planned reading (an unknown boolean
   fixed for the run; the function read twice, the two structured readings
   proven equal) waits for a function that needs it.
-* **Loads and stores** take raw pointers and need `unsafe`: refused, the
-  load named (`vld1q_u8`). A verified SIMD function takes and returns
-  vectors and builds them with value intrinsics; the loads that feed it
-  stay in unverified host code. Whether shipped `unsafe` SIMD engines may
-  be split that way is the user's open decision (§18, decision 9). A
-  proof-checked reading of the loads and stores themselves (raw pointers
-  from slices, with in-bounds obligations) would reverse decision (1)
-  for that class. The C8 survey (stage notes
-  `sandblaster-wt/recovery/prover-simd/SIMD-SURVEY.md`, outside the
-  repository) costs it at 300–500 trusted lines and 10–20 agent-days,
-  and does not propose it.
+* **Loads and stores** take raw pointers and need `unsafe`: read in
+  crate code by the narrow reading of existing `unsafe` (built 2026-10-07,
+  `docs/mir-lift.md` §20.10), refused anywhere else. Decided 2026-10-06 (decision 9,
+  "We need to support this."): Commonware's engines are verified as
+  written through a narrow reading of their existing `unsafe`
+  (`docs/DESIGN-UNSAFE-SIMD.md`, with its amendments; C10), not split and
+  not rewritten. A pointer is formed from a reference (its base is the
+  referent: a chunk `[u8; 64]`, a table row `u128`), offset within the
+  base, and read or written by an admitted unaligned load or store, whose
+  validated model applies to the base's bytes; anything out of bounds, a
+  store through a shared formation, or a pointer that escapes is stuck in
+  L, so a function's theorem proves every access in bounds; a trusted
+  static check (the window rule) refuses a pointer whose base anything
+  else touches while it is in use; features come from the static target
+  set or a declared `requires_features`. The window rule reads an
+  unoptimized extraction of the same module (`window_mir = ".."`,
+  `docs/mir-lift.md` §20.1), because the MIR the readings read (level 1)
+  has already merged and dropped locals and assignments. Built so far
+  (stage "prepare"): the refusal of every access to a union's fields
+  (a latent soundness bug of the current lift: followed library MIR
+  reaches `MaybeUninit` and `LazyLock`'s `Data`), the optimization level
+  pinned and recorded by mirx and checked at load, and the window
+  extraction's declaration and check. Estimated, with the critique's
+  fixes: about 510–775 trusted lines for the reading, plus the mutable
+  iterator models it promotes to trusted (`IterMut`, `Zip`), and 14–26
+  agent-days for the reading before the first engine.
 * Trusted: about 325 code lines of L, the parse, names, printer and lift
   glue, and 10 in the ghost language's elaboration (the lane view), against
   the 150–300 planned.
@@ -1903,8 +2028,9 @@ intrinsics). None of its SIMD functions is readable as written today:
   `#[inline(always)]` together with `#[target_feature]`, and a statically
   enabled feature does not make a call safe. So the inlined helpers wrap
   their value intrinsics in `unsafe` (curve25519's NEON backend, the
-  Reed–Solomon `mul_128`s).
-* **Raw-pointer loads and stores** (155 call sites).
+  Reed–Solomon `mul_128`s). The narrow reading admits these calls; their
+  obligation is that the features are available.
+* **Raw-pointer loads and stores** (155 call sites; C10).
 * **SHA-256 is inline assembly**, as is curve25519's `mul19`. Assembly
   is out of scope for any MIR-level tool.
 * **Missing or unloaded models.** 15 of the 62 intrinsics are read today
@@ -1919,9 +2045,8 @@ intrinsics). None of its SIMD functions is readable as written today:
 
 **Next** (C8's second slice):
 
-1. A closer that splits an array equation into lanes and decides each
-   lane's conditions by cases (the PSHUFB lemma's 256 cases become one
-   step).
+1. Done (2026-10-07): the lane closer above (the PSHUFB lemma's 256 cases
+   became `follows()`).
 2. `core::array::from_fn` and `<[T; N]>::map` as modeled leaves in both
    readings.
 3. Loading the AVX models (`x86_64_avx.core`: a lock change of every
@@ -1931,7 +2056,7 @@ intrinsics). None of its SIMD functions is readable as written today:
 With these, curve25519's AVX-512 `add_raw`, `sub_raw` and `reduce_regs`
 are readable as written (verified on an AVX-512 host).
 
-The rest waits for decision (9)'s split:
+The rest needs the narrow reading of existing `unsafe` (C10), as written:
 
 * **Reed–Solomon's NEON `mul_128`/`muladd_128`.** Every model they call
   is validated and loaded today.
@@ -1943,7 +2068,7 @@ The rest waits for decision (9)'s split:
 SWAR code in safe Rust (eight byte lanes in a `u64`), where it exists,
 needs no intrinsic reading, only the bit automation (C4).
 
-### 16.5 Panic contracts (C1, built), and no `unsafe`
+### 16.5 Panic contracts (C1, built), and `unsafe`: never added, existing read narrowly
 
 **Panic contracts.** `PeakIterator::to_nearest_size` asserts `size <=
 MAX_NODES` and a host test checks the panic. With the precondition `size
@@ -2055,15 +2180,21 @@ Total equivalence on every input, including where the original loops or
 returns garbage, is not offered: it would oblige every change to the code
 to reproduce undocumented misbehavior.
 
-**No `unsafe`, for good** (user decision, 2026-10-05: "then remove it").
-Proof-justified `unsafe` in shipped Commonware code is not part of the
-model, now or later: verified code stays `#![forbid(unsafe_code)]` (§2),
-there is no capability for unsafe standard-library APIs
-(`get_unchecked`, ...) and no memory model for raw pointers. Existing code
-that uses `unsafe` is either restructured in safe Rust without changing
-its behavior (a `get_unchecked` usually becomes a bounds check the
-compiler removes, or a safe API such as `chunks_exact`), or stays
-unverified host code outside the verified files.
+**`unsafe`: never added; existing `unsafe` verified narrowly** (user
+decisions 2026-10-05, "then remove it", and 2026-10-06, "We need to
+support this."). sandblaster never adds `unsafe` to shipped code, and it
+does not split or rewrite code to make it verifiable. The `unsafe` already
+in Commonware's SIMD engines is verified as written, through the narrow
+reading of `docs/DESIGN-UNSAFE-SIMD.md` (C10; §2 lists what it admits):
+each pointer access is read by L with a bounds test, so the function's
+theorem, which excludes `Stuck`, proves every access in bounds on its
+domain; the window rule and the feature rule are its trusted checks.
+There is still no general memory model for raw pointers and no capability
+for unsafe standard-library APIs (`get_unchecked`, `from_raw_parts`, ...);
+every `unsafe` outside the narrow reading stays refused, and code that
+uses it stays unverified host code outside the verified files. A new kind
+of `unsafe` needs its own user decision. Until the reading lands, the
+front end refuses every `unsafe` (§2).
 
 ### 16.6 Proof reuse and stability
 
@@ -2156,6 +2287,20 @@ prover and verifier capability on existing code, SIMD first. The same day
 models; a NEON nibble multiply verified in place against scalar
 references with native conformance, an SSSE3 counterpart on the x86
 models, the twins refused (+about 335 trusted lines, item 8 and item 6).
+Also that day, **decision (9) was taken**: Commonware's `unsafe` SIMD
+engines are verified as written, through a narrow, proof-checked reading
+of their existing `unsafe` (C10, `docs/DESIGN-UNSAFE-SIMD.md` with its
+adversarial critique `docs/UNSAFE-SIMD-CRITIQUE.md`); no split, no
+rewrite, no `unsafe` added. Its first stage ("prepare") is built: every
+access to a union's fields is refused in both readings (a latent
+soundness bug: followed library MIR reaches `MaybeUninit` and
+`LazyLock`'s `Data`; no shipped function accessed one, and the three
+roots' theorems and locks are unchanged), and mirx pins and records the
+MIR optimization level, the build refuses another than 1, and an
+unoptimized window extraction (`window_mir = ".."`) is declared and
+checked for the window rule (level 0 for every reading was measured and
+refused: the structured reading lost six MMR functions and the
+verifier's `Subtree` code). +about 150 trusted lines (item 8).
 
 **Capabilities, in order** (agent-days are focused agent work with tests):
 
@@ -2168,14 +2313,18 @@ models, the twins refused (+about 335 trusted lines, item 8 and item 6).
 | C5 | coupled loops | a SIMD engine's loop against its scalar loop | none | 8–15 |
 | C6 | per-function checking, summary lint, library spec mutation once per version | every root's check time | small | 11–21 |
 | C7 | contract schemas (one reviewed line generates a newtype's routine contracts), views on lifted types, host-callable by name, cross-root reuse | review cost; a representation change of `PeakIterator` | +150–350 | 13–23 |
-| C8 | **first slice done** (2026-10-06): `core::arch` value intrinsic calls read from MIR (S and L) onto the retained models, the feature rule on MIR, laws over vector lanes. Next: a lane-split closer, `core::array::from_fn`/`map` leaves, the AVX models loaded with their surface entries; after decision (9), the missing NEON and SSE models (§16.4; loads, stores and dispatchers need `unsafe` and stay host code) | Reed–Solomon's NEON and x86 engines, curve25519's backends | +about 335 so far (models already item 4) | second slice 7–13 |
+| C8 | **first slice done** (2026-10-06): `core::arch` value intrinsic calls read from MIR (S and L) onto the retained models, the feature rule on MIR, laws over vector lanes. **Second slice, first item done** (2026-10-07): the lane closer (untrusted). Next: `core::array::from_fn`/`map` leaves, the AVX models loaded with their surface entries; the missing NEON and SSE models (§16.4; loads, stores and the `unsafe` around them are C10) | Reed–Solomon's NEON and x86 engines, curve25519's backends | +about 335 so far (models already item 4) | second slice 7–13 |
+| C10 | **decided 2026-10-06** (decision 9): the narrow reading of existing `unsafe` SIMD (`docs/DESIGN-UNSAFE-SIMD.md` and its amendments): raw pointers formed from references, offsets, vector loads and stores, `#[target_feature]` calls; bounds in L, the window rule on an unoptimized extraction, static features and `requires_features`; the two-model Miri cross-check over the real engine functions and an independent review land with the reading. **First stage done** (2026-10-06): the union fix, the optimization-level pin and check, the window extraction. **Second stage done** (2026-10-07, `docs/mir-lift.md` §20.10): the reading (L's memory model, the window rule W0–W4 with the `&mut` parameters it reaches, the feature binding A-S3, pure reinterpretation A-S9, `IterMut` A-S4; S and the walker's read-back rewrite and sharing abstraction), the Miri gate over the fixtures and, through a harness, the real NEON engine; `Zip`, `requires_features`, `u128` bases (C4, `mul_128`'s table rows) and the independent review not yet. Not a general memory model (the old C10, a +1.0–1.5k raw-pointer memory model, left the roadmap with decision 1) | Reed–Solomon's four engines as written: `<Neon as Engine>::mul` first | about 510–775 plus the mutable iterator models (+about 150 so far) | the reading 14–26; NEON `mul` 8–13 after it; all four engines 48–87 |
 | C11 | (research) bit-blasting with a checked certificate checker | after C4, if bit proofs still dominate | none | 5 spike, then 20–40 |
 
 **Order.** SIMD first: C8's first slice (done: value-only NEON and SSSE3
 intrinsics in `#[target_feature]` functions, read from MIR in both
 readings, proven on fixtures), then its second slice (the lane-split
-closer first), then C4 and C2, C3 and C5 as the first target needs them.
-C6 runs alongside: check time limits every target.
+closer first: done 2026-10-07) and C10 (the narrow reading of the engines' existing
+`unsafe`: fixtures and twins first, then mirx and the parse, L's pointer
+values, the window rule, features, S and the walker), then C4 (`u128`)
+and C2, C3 and C5 as the first target needs them. C6 runs alongside:
+check time limits every target.
 
 **First target: Commonware's SIMD as written.** Reed–Solomon's
 `Neon::mul` against `Scalar::mul`. The crate already treats the scalar
@@ -2183,30 +2332,34 @@ engine as the reference; the x86 engines can be checked the same way on
 x86 hosts. It needs:
 
 * C8;
-* `u128` (C4);
+* C10, the narrow reading of the engine's existing `unsafe`;
+* `u128` (C4), as a value with its byte view;
+* the mutable iterator models (`IterMut`, then `Zip` for the transforms),
+  trusted under C10 with a stated disjointness property;
 * C2, or laws for `Scalar::mul`;
-* a proof that the NEON tables are the nibble split of the scalar ones.
+* a proof that the NEON tables are the nibble split of the scalar ones
+  (first a hypothesis of the law, later the verified table initializers).
 
-Verified code is safe Rust (§16.5), and today's engine is `unsafe`
-throughout. `engine_neon.rs` has 13 `unsafe`: `unsafe fn mul_neon`,
+The engine is `unsafe` throughout, and it is verified **as written**
+(decision 9): `engine_neon.rs` has 13 `unsafe` (`unsafe fn mul_neon`,
 raw-pointer loads and stores, and `unsafe` blocks around value
-intrinsics, which rustc forces on `#[inline(always)]` helpers (§16.4).
-So the engine is verifiable only after a split that keeps its behavior
-and machine code: the vector arithmetic as safe `#[target_feature]`
-functions over vectors and arrays (verified), the loads and stores in
-thin unverified wrappers. That split is decision (9).
-
-After the split:
+intrinsics, which rustc forces on `#[inline(always)]` helpers, §16.4),
+all within the narrow reading: measured on the engines' MIR, they use no
+unsafe operation besides pointer formations from references, offsets,
+casts, the admitted loads and stores, and `#[target_feature]` calls.
+Nothing is split or rewritten.
 
 * `mul_128`'s arithmetic needs no new model: every intrinsic it calls is
-  validated and loaded.
-* It has the shape of C8's fixture, with 4 tables and 2 outputs instead
-  of 2 and 1.
-* The transforms also need the reader to handle `&mut` slices of arrays
-  and the engine's `ShardsRefMut`.
+  validated and loaded; its 8 table loads read 16 bytes of a `u128` each.
+* `mul_neon`'s 4 loads and 4 stores per chunk stay within the chunk's 64
+  bytes, through one pointer formed from the chunk's `&mut`.
+* The transforms also need subslice codes and the engine's
+  `ShardsRefMut`.
 
-15–25 agent-days after the split. Measured by the C8 survey, the only
-Commonware SIMD functions readable as written are three of curve25519's
+The reading takes 14–26 agent-days, then `<Neon as Engine>::mul` 8–13
+(at the edge of the stop rule below, reported if it goes over), `fft`
+and `ifft` 10–18 more. Measured by the C8 survey, the only Commonware
+SIMD functions readable without the reading are three of curve25519's
 AVX-512 helpers (`add_raw`, `sub_raw`, `reduce_regs`), after C8's second
 slice, on an AVX-512 host.
 
@@ -2217,9 +2370,11 @@ measured as proof lines and check time before and after, with no change to
 the code.
 
 **Decisions for the user:** (1) proof-justified `unsafe` in shipped
-Commonware code: **taken** (2026-10-05: "then remove it"; verified code
-stays `#![forbid(unsafe_code)]`, and the unsafe/raw-pointer capability
-left the roadmap, §16.5); (2) restoring SIMD models: **taken** (2026-10-05,
+Commonware code: **taken** (2026-10-05: "then remove it"; a general
+unsafe/raw-pointer capability left the roadmap, §16.5), **refined**
+2026-10-06 by (9): sandblaster never adds `unsafe`; the `unsafe` already
+in Commonware's SIMD engines is verified through the narrow reading
+(C10), and every other `unsafe` stays refused; (2) restoring SIMD models: **taken** (2026-10-05,
 kept and first-class, §9); (3) whether
 "behaves exactly like the code at revision R" is an acceptable law for
 existing code (pinned originals); (4) the `Buf::chunk` buffer model; (5)
@@ -2228,10 +2383,12 @@ host-callable and need contracts); (6) whether a kernel change is ever on
 the table (this design assumes not); (7) **taken** (2026-10-05): the
 hardware parts of `intrinsics.rs` and `elab/semantics.rs` stay (§9); (8)
 **taken** (2026-10-06): no new optimized code, the pilots are dropped
-(North star); (9) whether shipped `unsafe` SIMD engines may be split,
-without changing their behavior or machine code, into safe vector
-arithmetic (verified) and thin load/store wrappers (unverified), which the
-first target needs.
+(North star); (9) **taken** (2026-10-06, verbatim: "We need to support
+this."): Commonware's existing `unsafe` SIMD (the Reed–Solomon NEON,
+SSSE3, AVX2 and AVX-512 engines' raw-pointer loads and stores) is verified
+as written, through a narrow, proof-checked reading that proves every
+access in bounds (C10, `docs/DESIGN-UNSAFE-SIMD.md`); no engine is split
+or rewritten, and sandblaster never adds `unsafe`.
 
 **Stop rules.** If after C3–C5 a verified function still needs more than 20
 proof lines per code line, or the first target more than two agent-weeks

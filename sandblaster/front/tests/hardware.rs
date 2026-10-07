@@ -243,6 +243,128 @@ fn masked_byte_bad(a: __m128i, m: __m128i, i: usize) {
     lanes_proven(&r, &["epi32_lane0", "xor_byte", "masked_byte"], &["masked_byte_bad"]);
 }
 
+/// The elements `f(i)` for `i` in `0..16`, comma separated.
+fn lanes16(f: impl Fn(usize) -> String) -> String {
+    (0..16).map(f).collect::<Vec<_>>().join(", ")
+}
+
+/// Table lookups lane by lane (the lane closer, `auto::lanes`; C8's second
+/// slice): a vector equation whose side is made by the models is split into
+/// its lanes and each lane decided by a case analysis on its lookup's index.
+/// A TBL lane is the model's dependent `if k < 16 as .h then t[k] else 0`:
+/// with the index a nibble (`x & 15`, `x >> 4`) the test is decided by linear
+/// arithmetic and the lane is the reference's direct read `t[x & 15]` —
+/// whose read through the dependent match keeps its index proof well typed
+/// (the match's path equation is the case's); with the table a row read
+/// from an array of rows, the row is generalized to a variable, whose lanes
+/// the kernel knows (§5.9). Reed–Solomon's split-table multiply (four
+/// lookups per product byte, xored) closes the same way, its sixteen lanes
+/// one shape proven once. Also a single lane at a literal index through the
+/// plain search (a model nested in the lookup's index: the read-back of the
+/// rewritten lane, its index proof carried along the step's equation,
+/// stays typed). Negative twins: the high nibble taken from the wrong
+/// vector; nothing proven, no kernel rejection.
+#[test]
+fn table_lookups_are_decided_lane_by_lane() {
+    let lanes = format!(
+        r#"
+#[spec]
+pub fn tbl_and(t: [u8; 16], x: [u8; 16]) -> [u8; 16] {{
+    [{tbl_and}]
+}}
+#[lemma]
+fn nibble_lookup(t: uint8x16_t, x: uint8x16_t) {{
+    ensures(vqtbl1q_u8(t, vandq_u8(x, vdupq_n_u8(15))) == tbl_and(t, x));
+    follows();
+}}
+#[lemma]
+fn nibble_lookup_lane3(t: uint8x16_t, x: uint8x16_t) {{
+    ensures(vqtbl1q_u8(t, vandq_u8(x, vdupq_n_u8(15)))[3usize] == t[(x[3usize] & 15u8) as usize]);
+    follows();
+}}
+#[spec]
+pub fn tbl_row(rows: [[u8; 16]; 4], x: [u8; 16]) -> [u8; 16] {{
+    [{tbl_row}]
+}}
+#[lemma]
+fn row_lookup(rows: [[u8; 16]; 4], x: uint8x16_t) {{
+    ensures(vqtbl1q_u8(vld1q_u8(rows[1usize]), vandq_u8(x, vdupq_n_u8(15))) == tbl_row(rows, x));
+    follows();
+}}
+#[spec]
+pub fn mul_lo_byte(lo: u8, hi: u8, t0: [u8; 16], t1: [u8; 16], t2: [u8; 16], t3: [u8; 16]) -> u8 {{
+    t0[(lo & 15u8) as usize] ^ t1[(lo >> 4u32) as usize] ^ t2[(hi & 15u8) as usize] ^ t3[(hi >> 4u32) as usize]
+}}
+#[spec]
+pub fn mul_lo(vlo: [u8; 16], vhi: [u8; 16], t0: [u8; 16], t1: [u8; 16], t2: [u8; 16], t3: [u8; 16]) -> [u8; 16] {{
+    [{mul_lo}]
+}}
+#[lemma]
+fn split_multiply(vlo: uint8x16_t, vhi: uint8x16_t, t0: uint8x16_t, t1: uint8x16_t, t2: uint8x16_t, t3: uint8x16_t) {{
+    ensures(veorq_u8(veorq_u8(veorq_u8(vqtbl1q_u8(t0, vandq_u8(vlo, vdupq_n_u8(15))), vqtbl1q_u8(t1, vshrq_n_u8::<4>(vlo))), vqtbl1q_u8(t2, vandq_u8(vhi, vdupq_n_u8(15)))), vqtbl1q_u8(t3, vshrq_n_u8::<4>(vhi)))
+        == mul_lo(vlo, vhi, t0, t1, t2, t3));
+    follows();
+}}
+#[lemma]
+fn split_multiply_bad(vlo: uint8x16_t, vhi: uint8x16_t, t0: uint8x16_t, t1: uint8x16_t, t2: uint8x16_t, t3: uint8x16_t) {{
+    ensures(veorq_u8(veorq_u8(veorq_u8(vqtbl1q_u8(t0, vandq_u8(vlo, vdupq_n_u8(15))), vqtbl1q_u8(t1, vshrq_n_u8::<4>(vlo))), vqtbl1q_u8(t2, vandq_u8(vhi, vdupq_n_u8(15)))), vqtbl1q_u8(t3, vshrq_n_u8::<4>(vlo)))
+        == mul_lo(vlo, vhi, t0, t1, t2, t3));
+    follows();
+}}
+"#,
+        tbl_and = lanes16(|i| format!("t[(x[{i}] & 15u8) as usize]")),
+        tbl_row = lanes16(|i| format!("rows[1usize][(x[{i}] & 15u8) as usize]")),
+        mul_lo = lanes16(|i| format!("mul_lo_byte(vlo[{i}], vhi[{i}], t0, t1, t2, t3)")),
+    );
+    let r = run_lanes("core::arch::aarch64::*", &lanes, &sandblaster_front::target::TargetInfo::aarch64_apple_darwin());
+    lanes_proven(&r, &["nibble_lookup", "nibble_lookup_lane3", "row_lookup", "split_multiply"], &["split_multiply_bad"]);
+}
+
+/// PSHUFB lanes (the lane closer): the model's `if m & 128 != 0 then 0 else
+/// t[m & 15]` (non-dependent) and the reference's (dependent, carrying its
+/// path equation) meet in each case of the lane's split on bit 7 of its
+/// index byte, with no case per byte value (the x86 fixture's proof had one
+/// lemma of 256 cases per lane). Two lookups xored split twice per lane.
+/// Negative twin: the table and the indices swapped.
+#[test]
+fn pshufb_lanes_are_split_on_their_index_bit() {
+    let lanes = format!(
+        r#"
+#[spec]
+pub fn pshufb(t: [u8; 16], k: u8) -> u8 {{
+    if k & 128u8 != 0u8 {{ 0u8 }} else {{ t[(k & 15u8) as usize] }}
+}}
+#[spec]
+pub fn pshufb_lanes(t: [u8; 16], idx: [u8; 16]) -> [u8; 16] {{
+    [{pshufb_lanes}]
+}}
+#[lemma]
+fn lookup(t: __m128i, idx: __m128i) {{
+    ensures(_mm_shuffle_epi8(t, idx) == pshufb_lanes(t, idx));
+    follows();
+}}
+#[lemma]
+fn lookup_bad(t: __m128i, idx: __m128i) {{
+    ensures(_mm_shuffle_epi8(idx, t) == pshufb_lanes(t, idx));
+    follows();
+}}
+#[spec]
+pub fn split_lanes(ln: [u8; 16], hn: [u8; 16], lo: [u8; 16], hi: [u8; 16]) -> [u8; 16] {{
+    [{split_lanes}]
+}}
+#[lemma]
+fn split_lookup(ln: __m128i, hn: __m128i, lo: __m128i, hi: __m128i) {{
+    ensures(_mm_xor_si128(_mm_shuffle_epi8(lo, ln), _mm_shuffle_epi8(hi, hn)) == split_lanes(ln, hn, lo, hi));
+    follows();
+}}
+"#,
+        pshufb_lanes = lanes16(|i| format!("pshufb(t, idx[{i}])")),
+        split_lanes = lanes16(|i| format!("pshufb(lo, ln[{i}]) ^ pshufb(hi, hn[{i}])")),
+    );
+    let r = run_lanes("core::arch::x86_64::*", &lanes, &sandblaster_front::target::TargetInfo::x86_64_apple_darwin());
+    lanes_proven(&r, &["lookup", "split_lookup"], &["lookup_bad"]);
+}
+
 /// Lane indexing is ghost-only: exec code cannot index a vector (Rust
 /// cannot either); it reads a lane with the lane intrinsic.
 #[test]

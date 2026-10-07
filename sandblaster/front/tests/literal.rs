@@ -54,7 +54,7 @@ fn with_env(f: impl FnOnce(&mut Env) + Send) {
 fn names() -> ModuleNames {
     let mut host_enums = BTreeMap::new();
     host_enums.insert("Error".to_string(), vec!["EndOfBuffer".to_string()]);
-    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec!["crate::m".into()], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None }
+    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec!["crate::m".into()], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None, static_features: None, codegen_flags: None }
 }
 
 /// The reading of a fixture, loaded (every instance with a body).
@@ -392,9 +392,12 @@ const REVIEW: &str = r#"(adt-def "std::option::Option<u16>" (path "std::option::
 fn readings_the_review_found_wrong_are_none_where_rust_differs() {
     with_env(|env| {
         let fx = load(env, REVIEW);
-        // `u128` was read as a 64-bit word (its values truncated): it is not modeled
-        assert!(fx.lf("wide").local_tys.iter().all(|t| t == "mir::Unmodeled"), "{:?}", fx.lf("wide").local_tys);
+        // `u128` was read as a 64-bit word (its values truncated): it is held
+        // as its two 64-bit words (stage neon-mul), and no operator on it is read
+        assert!(fx.lf("wide").local_tys.iter().all(|t| t == "Tuple2(U64, U64)"), "{:?}", fx.lf("wide").local_tys);
         assert!(fx.lf("wide").faults.iter().any(|f| f.starts_with("bb0")), "{:?}", fx.lf("wide").faults);
+        let w = "tuple2[U64, U64](18446744073709551615u64, 0u64)";
+        same(env, &fx.run("wide", 0, &[w, w]), "mir::Res::Stuck[Tuple2(U64, U64)]");
         // negative twin: a `u64` sum is read
         assert!(fx.lf("narrow").faults.is_empty(), "{:?}", fx.lf("narrow").faults);
         same(env, &fx.run("narrow", 0, &["2u64", "3u64"]), "mir::Res::Ret[U64](5u64)");
@@ -424,6 +427,86 @@ fn readings_the_review_found_wrong_are_none_where_rust_differs() {
     });
 }
 
+/// A union `U` (fields `a`, `b` overlap) and a struct `S` of the same fields.
+const UNIONS: &str = r#"(adt-def "k::myu::U" (path "k::myu::U") (kind union) (args ())
+  (variant 0 "U" 0 (field "a" u32) (field "b" u32) (no-glue)))
+(adt-def "k::myu::S" (path "k::myu::S") (kind struct) (args ())
+  (variant 0 "S" 0 (field "a" u32) (field "b" u32) (no-glue)))
+(fn "k::m::spun" (kind root) (def "k::m::spun") (args ()) (item fn "spun") (argc 1)
+  (locals (0 u32 mut) (1 u32 imm) (2 (adt "k::myu::S") mut))
+  (bb 0 (assign (p 2) (agg (adt (adt "k::myu::S") 0) (copy (p 1)) (int u32 7))) (assign (p 0) (use (copy (p 2 (field 1 u32))))) (return)))
+(fn "k::m::upun" (kind root) (def "k::m::upun") (args ()) (item fn "upun") (argc 1)
+  (locals (0 u32 mut) (1 u32 imm) (2 (adt "k::myu::U") mut))
+  (bb 0 (assign (p 2) (agg (adt (adt "k::myu::U") 0 (union-field 0)) (copy (p 1)))) (assign (p 0) (use (copy (p 2 (field 1 u32))))) (return)))
+(fn "k::m::uagg" (kind root) (def "k::m::uagg") (args ()) (item fn "uagg") (argc 1)
+  (locals (0 (adt "k::myu::U") mut) (1 u32 imm))
+  (bb 0 (assign (p 0) (agg (adt (adt "k::myu::U") 0) (copy (p 1)))) (return)))
+(fn "k::m::uwrite" (kind root) (def "k::m::uwrite") (args ()) (item fn "uwrite") (argc 2)
+  (locals (0 u32 mut) (1 u32 imm) (2 (ref mut (adt "k::myu::U")) imm))
+  (bb 0 (assign (p 0) (use (copy (p 1)))) (assign (p 2 deref (field 0 u32)) (use (copy (p 1)))) (return)))
+(fn "k::m::uread" (kind root) (def "k::m::uread") (args ()) (item fn "uread") (argc 1)
+  (locals (0 u32 mut) (1 (adt "k::myu::U") imm))
+  (bb 0 (assign (p 0) (use (copy (p 1 (field 0 u32))))) (return)))
+(fn "k::m::uref" (kind root) (def "k::m::uref") (args ()) (item fn "uref") (argc 1)
+  (locals (0 (ref shared u32) mut) (1 (ref shared (adt "k::myu::U")) imm))
+  (bb 0 (assign (p 0) (ref shared (p 1 deref (field 1 u32)))) (return)))
+(fn "k::m::uconst" (kind root) (def "k::m::uconst") (args ()) (item fn "uconst") (argc 0)
+  (locals (0 (adt "k::myu::U") mut))
+  (bb 0 (assign (p 0) (use (const-agg (adt "k::myu::U") 0 (int u32 5)))) (return)))
+(fn "k::m::uwhole" (kind root) (def "k::m::uwhole") (args ()) (item fn "uwhole") (argc 1)
+  (locals (0 (adt "k::myu::U") mut) (1 (adt "k::myu::U") imm))
+  (bb 0 (assign (p 0) (use (move (p 1)))) (return)))
+(fn "core::lib::get_a" (kind callee) (def "core::lib::get_a") (args ()) (item fn "get_a") (argc 1)
+  (locals (0 u32 mut) (1 (adt "k::myu::U") imm))
+  (bb 0 (assign (p 0) (use (copy (p 1 (field 1 u32))))) (return)))
+(fn "k::m::ucall" (kind root) (def "k::m::ucall") (args ()) (item fn "ucall") (argc 1)
+  (locals (0 u32 mut) (1 (adt "k::myu::U") imm))
+  (bb 0 (call (fn "core::lib::get_a") (args (move (p 1))) (p 0) 1))
+  (bb 1 (return)))
+(fn "core::lib::get_s" (kind callee) (def "core::lib::get_s") (args ()) (item fn "get_s") (argc 1)
+  (locals (0 u32 mut) (1 (adt "k::myu::S") imm))
+  (bb 0 (assign (p 0) (use (copy (p 1 (field 1 u32))))) (return)))
+(fn "k::m::scall" (kind root) (def "k::m::scall") (args ()) (item fn "scall") (argc 1)
+  (locals (0 u32 mut) (1 (adt "k::myu::S") imm))
+  (bb 0 (call (fn "core::lib::get_s") (args (move (p 1))) (p 0) 1))
+  (bb 1 (return)))
+"#;
+
+/// A union's fields overlap: reading one is a type pun (`unsafe`, possibly
+/// in followed library MIR, where the lift's `unsafe` refusal never looks).
+/// Read as the struct its adt-def lists, `upun(5)` would give a value where
+/// Rust gives 5's bits: every access to a union's fields is stuck, a union
+/// moved whole is read (DESIGN-UNSAFE-SIMD, amendment A-S2).
+#[test]
+fn a_union_field_is_never_read_and_a_struct_field_is() {
+    with_env(|env| {
+        let fx = load(env, UNIONS);
+        // negative twin: the struct's field is its value
+        assert!(fx.lf("spun").faults.is_empty(), "{:?}", fx.lf("spun").faults);
+        same(env, &fx.run("spun", 0, &["5u32"]), "mir::Res::Ret[U32](7u32)");
+        // the union's aggregate (printed with its field, or without), a field
+        // read (of a value, borrowed through a reference), a field write
+        // through a `&mut`, a constant: each stuck, named
+        same(env, &fx.run("upun", 0, &["5u32"]), "mir::Res::Stuck[U32]");
+        for (f, what) in [("upun", "an aggregate of a union (adt"), ("uagg", "an aggregate of a union Adt("), ("uread", "Field(0, Int(false, 32)) of a union"), ("uref", "of a union"), ("uwrite", "of a union"), ("uconst", "a constant of a union")] {
+            assert!(fx.lf(f).faults.iter().any(|x| x.contains(what)), "{f}: {:?}", fx.lf(f).faults);
+        }
+        // a union moved whole is read
+        assert!(fx.lf("uwhole").faults.is_empty(), "{:?}", fx.lf("uwhole").faults);
+        // the critique's twin (S2): a crate function without `unsafe` of its
+        // own reads a union's field through a followed library function.
+        // Read as the struct its adt-def lists, field `b` was the second
+        // component (6 here), where Rust's `b` is `a`'s bits: now stuck,
+        // while the struct's field through the same call is its value
+        let ut = fx.lit.state.adt_ty("k::myu::U").expect("the union's type");
+        let st = fx.lit.state.adt_ty("k::myu::S").expect("the struct's type");
+        assert!(fx.lf("ucall").faults.is_empty(), "{:?}", fx.lf("ucall").faults);
+        same(env, &fx.run("ucall", 0, &[&format!("{ut}::v0_U(5u32, 6u32)")]), "mir::Res::Stuck[U32]");
+        same(env, &fx.run("uread", 0, &[&format!("{ut}::v0_U(5u32, 6u32)")]), "mir::Res::Stuck[U32]");
+        same(env, &fx.run("scall", 0, &[&format!("{st}::v0_S(5u32, 6u32)")]), "mir::Res::Ret[U32](6u32)");
+    });
+}
+
 /// The parse L reads (trusted since stage cs-assurance) guesses nothing.
 #[test]
 fn the_parse_refuses_what_it_would_have_guessed() {
@@ -438,7 +521,12 @@ fn the_parse_refuses_what_it_would_have_guessed() {
     let parse = |t: &str| mir::ir::parse(&format!("{HEADER}{t}"));
     let m = parse(ok).expect("well-formed");
     assert_eq!(m.adts["k::m::E"].variants[1].discr, 5);
+    assert!(m.adts["k::m::E"].is_enum && !m.adts["k::m::E"].is_union);
+    // an ADT's kind is one of the three rustc has, a union marked as one
+    let u = parse(&ok.replace("(kind enum)", "(kind union)")).expect("well-formed");
+    assert!(u.adts["k::m::E"].is_union && !u.adts["k::m::E"].is_enum);
     for (bad, what) in [
+        (ok.replace("(kind enum)", "(kind onion)"), "adt kind"),
         (ok.replace("(variant 1 \"B\" 5", "(variant 2 \"B\" 5"), "variants out of order"),
         (ok.replace("\"B\" 5", "\"B\" five"), "variant discriminant"),
         (ok.replace("(1 bool imm)", "(2 bool imm)"), "locals out of order"),
@@ -1348,6 +1436,125 @@ fn a_slices_index_by_a_range_is_the_subslice_or_a_panic() {
         same(env, &fx.run("smyrange", 0, &[&s, "1usize", "3usize"]), stuck);
         assert!(fx.lf("smyidx").faults.iter().any(|f| f.contains("k::myops::Index::index")), "{:?}", fx.lf("smyidx").faults);
         same(env, &fx.run("smyidx", 0, &[&s, "1usize", "3usize"]), stuck);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// stage neon-mul: `split_at_mut`'s halves (`PRange`), lengths, `u128` words
+// ---------------------------------------------------------------------------
+
+const HALVES: &str = r#"(fn "core::slice::<impl [u8]>::split_at_mut" (kind callee) (def "core::slice::<impl [T]>::split_at_mut") (args (u8)) (item inherent (slice u8) "split_at_mut") (argc 2)
+  (locals (0 (tuple (ref mut (slice u8)) (ref mut (slice u8))) mut) (1 (ref mut (slice u8)) imm) (2 usize imm))
+  (bb 0 (unreachable)))
+(fn "k::m::halves" (kind root) (def "k::m::halves") (args ()) (item fn "halves") (argc 4)
+  (locals (0 unit mut) (1 (ref mut (array u8 4)) imm) (2 usize imm) (3 usize imm) (4 u8 imm)
+    (5 (ref mut (slice u8)) mut) (6 (tuple (ref mut (slice u8)) (ref mut (slice u8))) mut) (7 (ref mut (slice u8)) imm) (8 (ref mut (slice u8)) imm)
+    (9 (ptr const (slice u8)) mut) (10 usize mut) (11 bool mut) (12 (ptr const (slice u8)) mut) (13 usize mut) (14 bool mut))
+  (bb 0 (assign (p 5) (cast unsize (copy (p 1)) (ref mut (slice u8)))) (call (fn "core::slice::<impl [u8]>::split_at_mut") (args (move (p 5)) (copy (p 2))) (p 6) 1))
+  (bb 1 (assign (p 7) (use (move (p 6 (field 0 (ref mut (slice u8))))))) (assign (p 8) (use (move (p 6 (field 1 (ref mut (slice u8)))))))
+    (assign (p 9) (addr-of fake (p 7 deref))) (assign (p 10) (un ptr-metadata (move (p 9))))
+    (assign (p 11) (bin lt (copy (p 3)) (copy (p 10)))) (assert (move (p 11)) true bounds 2))
+  (bb 2 (assign (p 7 deref (index 3)) (use (copy (p 4))))
+    (assign (p 12) (addr-of fake (p 8 deref))) (storage-dead 9) (assign (p 13) (un ptr-metadata (move (p 12))))
+    (assign (p 14) (bin lt (copy (p 3)) (copy (p 13)))) (assert (move (p 14)) true bounds 3))
+  (bb 3 (assign (p 8 deref (index 3)) (use (copy (p 4)))) (return)))
+(fn "k::m::lens" (kind root) (def "k::m::lens") (args ()) (item fn "lens") (argc 2)
+  (locals (0 (tuple usize usize) mut) (1 (array u8 4) imm) (2 (ref shared (slice u8)) imm) (3 usize mut) (4 usize mut))
+  (bb 0 (assign (p 3) (len (p 1))) (assign (p 4) (len (p 2 deref))) (assign (p 0) (agg (tuple) (move (p 3)) (move (p 4)))) (return)))
+(fn "k::m::fakeonly" (kind root) (def "k::m::fakeonly") (args ()) (item fn "fakeonly") (argc 1)
+  (locals (0 usize mut) (1 (ref mut (slice u8)) imm) (2 (ptr const (slice u8)) mut) (3 usize mut))
+  (bb 0 (assign (p 2) (addr-of fake (p 1 deref))) (assign (p 3) (use (int usize 1))) (assign (p 0) (un ptr-metadata (copy (p 2)))) (return)))
+(fn "k::m::wmove" (kind root) (def "k::m::wmove") (args ()) (item fn "wmove") (argc 2)
+  (locals (0 (tuple u128 u8) mut) (1 u128 imm) (2 u8 imm))
+  (bb 0 (assign (p 0) (agg (tuple) (copy (p 1)) (copy (p 2)))) (return)))
+(fn "k::m::wadd" (kind root) (def "k::m::wadd") (args ()) (item fn "wadd") (argc 2)
+  (locals (0 u128 mut) (1 u128 imm) (2 u128 imm))
+  (bb 0 (assign (p 0) (bin add (copy (p 1)) (copy (p 2)))) (return)))
+(fn "k::m::wconst" (kind root) (def "k::m::wconst") (args ()) (item fn "wconst") (argc 0)
+  (locals (0 u128 mut))
+  (bb 0 (assign (p 0) (use (int u128 5))) (return)))
+"#;
+
+fn arr4(b: [u8; 4]) -> String {
+    format!("pair(Array U8 4usize, Cons[U8]({}u8, Cons[U8]({}u8, Cons[U8]({}u8, Cons[U8]({}u8, Nil[U8])))), refl(Int, 4int))", b[0], b[1], b[2], b[3])
+}
+
+/// `<[T]>::split_at_mut` (a model: core's body forms raw pointers) gives the
+/// codes of the ranges `0..mid` and `mid..len` of the slice (`PRange`): a
+/// write through a half lands at its element of the whole, each half's
+/// length (`s.len()`, rustc's fake raw borrow and its metadata, fused by the
+/// parse into `Len`) is its own, and an element reached through the
+/// `&mut [u8]` (`(*r)[i]`) is typed as the slice's. Negative twins: `mid`
+/// past the length panics where core's does; an index past a half's own
+/// length fails its bounds check (with the whole's length it would pass and
+/// the write would be stuck, `mir::range_index`); a write lands at the
+/// half's element, not at the whole's element of the same index.
+#[test]
+fn split_at_mut_halves_are_ranges_of_the_slice_with_their_own_lengths() {
+    with_env(|env| {
+        let fx = load(env, HALVES);
+        assert!(fx.lf("halves").faults.is_empty(), "{:?}", fx.lf("halves").faults);
+        let c = arr4([1, 2, 3, 4]);
+        let ret = |b: [u8; 4]| format!("mir::Res::Ret[Array U8 4usize]({})", arr4(b));
+        // `let (lo, hi) = c.split_at_mut(mid); lo[i] = v; hi[i] = v;`
+        same(env, &fx.run("halves", 0, &[&c, "2usize", "0usize", "9u8"]), &ret([9, 2, 9, 4]));
+        same(env, &fx.run("halves", 0, &[&c, "2usize", "1usize", "7u8"]), &ret([1, 7, 3, 7]));
+        same(env, &fx.run("halves", 0, &[&c, "1usize", "0usize", "5u8"]), &ret([5, 5, 3, 4]));
+        same(env, &fx.run("halves", 0, &[&c, "0usize", "0usize", "5u8"]), "mir::Res::Panic[Array U8 4usize]");
+        // negative twins: `mid > len` (core panics); `hi[1]` with `hi` of
+        // length 1 (its bounds check fails: a panic, not a stuck write)
+        same(env, &fx.run("halves", 0, &[&c, "5usize", "0usize", "5u8"]), "mir::Res::Panic[Array U8 4usize]");
+        same(env, &fx.run("halves", 0, &[&c, "3usize", "1usize", "5u8"]), "mir::Res::Panic[Array U8 4usize]");
+        same(env, &fx.run("halves", 0, &[&c, "4usize", "0usize", "5u8"]), "mir::Res::Panic[Array U8 4usize]");
+    });
+}
+
+/// `Len(P)`: an array place's `N`, a slice place's length read through its
+/// reference. A fake raw borrow is read only fused with the `PtrMetadata`
+/// that is its one use; anywhere else it is an unmodeled construct (named,
+/// `None` on its path).
+#[test]
+fn a_length_is_the_places_and_a_fake_borrow_is_read_only_for_its_metadata() {
+    with_env(|env| {
+        let fx = load(env, HALVES);
+        let ret = |a: usize, b: usize| format!("mir::Res::Ret[Tuple2(Usize, Usize)](tuple2[Usize, Usize]({a}usize, {b}usize))");
+        same(env, &fx.run("lens", 0, &[&arr4([1, 2, 3, 4]), &sl(&[7, 8, 9])]), &ret(4, 3));
+        same(env, &fx.run("lens", 0, &[&arr4([1, 2, 3, 4]), &sl(&[])]), &ret(4, 0));
+        // negative twin: the fake borrow's metadata read from a copy, not
+        // its fused move: not read
+        assert!(fx.lf("fakeonly").faults.iter().any(|f| f.contains("metadata")), "{:?}", fx.lf("fakeonly").faults);
+        same(env, &fx.run("fakeonly", 0, &[&sl(&[7, 8, 9])]), "mir::Res::Stuck[Tuple2(Slice U8, Usize)]");
+    });
+}
+
+/// A `u128` is the pair of its 64-bit words, low word first (C4's slice):
+/// held and moved whole, read as bytes through `ptr::bytes_text` (the low
+/// word's eight little-endian bytes, then the high word's) and back from
+/// exactly sixteen. Negative twins: no operator and no constant of `u128`
+/// is read (each `None` on its path, named); fifteen or seventeen bytes are
+/// no `u128`.
+#[test]
+fn a_u128_is_its_two_words_moved_whole_and_read_through_its_bytes_only() {
+    use sandblaster_front::mir::{ir::Ty, ptr};
+    with_env(|env| {
+        let fx = load(env, HALVES);
+        // 0x0706050403020100, 0x0f0e0d0c0b0a0908: the bytes 0..15
+        let w = "tuple2[U64, U64](506097522914230528u64, 1084818905618843912u64)";
+        same(env, &fx.run("wmove", 0, &[w, "3u8"]), &format!("mir::Res::Ret[Tuple2(Tuple2(U64, U64), U8)](tuple2[Tuple2(U64, U64), U8]({w}, 3u8))"));
+        let u = Ty::Int(false, 128);
+        assert_eq!(ptr::plain(&u), Ok(()));
+        assert_eq!(ptr::size_of(&u), Some(16));
+        let list = |k: std::ops::Range<u8>| k.rev().fold("Nil[U8]".to_string(), |l, b| format!("Cons[U8]({b}u8, {l})"));
+        let bytes = ptr::bytes_text(&u, w).unwrap();
+        same(env, &bytes, &list(0..16));
+        same(env, &ptr::of_bytes_text(&u, &list(0..16), None).unwrap(), &format!("Some[Tuple2(U64, U64)]({w})"));
+        // negative twins
+        same(env, &ptr::of_bytes_text(&u, &list(0..15), None).unwrap(), "None[Tuple2(U64, U64)]");
+        same(env, &ptr::of_bytes_text(&u, &list(0..17), None).unwrap(), "None[Tuple2(U64, U64)]");
+        assert!(!fx.lf("wadd").faults.is_empty(), "an operator on `u128` must not be read");
+        same(env, &fx.run("wadd", 0, &[w, w]), "mir::Res::Stuck[Tuple2(U64, U64)]");
+        assert!(!fx.lf("wconst").faults.is_empty(), "a `u128` constant must not be read");
+        same(env, &fx.run("wconst", 0, &[]), "mir::Res::Stuck[Tuple2(U64, U64)]");
     });
 }
 

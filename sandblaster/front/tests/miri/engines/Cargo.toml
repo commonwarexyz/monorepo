@@ -1,0 +1,27 @@
+[package]
+name = "sd-miri-engines"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Miri gate over Commonware's real NEON Reed-Solomon engine (docs/DESIGN-UNSAFE-SIMD.md A-S1): the engine against the naive one, under Stacked and Tree Borrows"
+
+[dependencies]
+commonware-cryptography = { path = "../../../../../cryptography" }
+
+[lib]
+path = "src/lib.rs"
+
+# (cpufeatures' Miri support answers `false` for every target feature; the
+# copy here answers the build's static features, so `Neon::new()` runs)
+[patch.crates-io]
+cpufeatures = { path = "cpufeatures-static" }
+
+[workspace]
+
+# (commonware-codec's build script verifies its varint module with
+# sandblaster: compiled optimized it takes minutes, unoptimized an hour)
+[profile.dev.build-override]
+opt-level = 3
+
+[profile.dev]
+overflow-checks = true

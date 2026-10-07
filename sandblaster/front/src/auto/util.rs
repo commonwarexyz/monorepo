@@ -490,7 +490,9 @@ fn map_term_node(t: &Tm, k: u32, f: &mut dyn FnMut(&Tm, u32) -> Option<Tm>, memo
 /// * an untyped pair passed to a global at a parameter of type `Slice T` is
 ///   rebuilt as `slice::mk T n l p`, at `Array T N` it gets that type, at a
 ///   literal Σ type it gets the Σ (and its second component, if an untyped
-///   pair, the instantiated second type).
+///   pair, the instantiated second type);
+/// * likewise a constructor's field, an equation's side, a `refl`'s value
+///   and a `transport`'s endpoints, at the type their position has.
 pub fn kernel_friendly(env: &Env, t: &Tm) -> Tm {
     let slice_mk = env.lookup_global("slice::mk");
     let (slice_g, array_g) = (env.lookup_global("Slice"), env.lookup_global("Array"));
@@ -534,6 +536,18 @@ pub fn kernel_friendly(env: &Env, t: &Tm) -> Tm {
                 Term::Pair { fst, snd, .. } => Rc::new(Term::Refl { ty: ty.clone(), val: type_pair(ty, fst, snd, slice_mk, slice_g, array_g).unwrap_or_else(|| val.clone()) }),
                 _ => n,
             },
+            // the endpoints of a transport have its type: a proof carried
+            // along a rewrite's equation (`super::abstraction`) whose
+            // motive variable was instantiated with a vector or array value
+            // (a lane step, `super::lanes`) reads back with that value as an
+            // untyped pair
+            Term::Transport { ty, lhs, rhs, eq, motive, val } if is_untyped_pair(lhs) || is_untyped_pair(rhs) => {
+                let fix = |x: &Tm| match &**x {
+                    Term::Pair { fst, snd, .. } if is_untyped_pair(x) => type_pair(ty, fst, snd, slice_mk, slice_g, array_g).unwrap_or_else(|| x.clone()),
+                    _ => x.clone(),
+                };
+                Rc::new(Term::Transport { ty: ty.clone(), lhs: fix(lhs), rhs: fix(rhs), eq: eq.clone(), motive: motive.clone(), val: val.clone() })
+            }
             Term::App { .. } => {
                 let (h, args) = crate::elab::items::spine(&n);
                 let Term::Global(g) = &*h else { return Some(n) };
@@ -618,6 +632,179 @@ pub fn subst0(body: &Tm, arg: &Tm) -> Tm {
 /// `transport(Int, N, len(fst x), ..)`).
 pub fn fold_array_eta(t: &Tm, index: GlobalId, list: IndId) -> Tm {
     map_term(t, 0, &mut |x, _| eta_list_var(x, index, list).map(|v| Rc::new(Term::Fst(v))))
+}
+
+/// The length proofs of array values whose list is spelled out (`N`
+/// constructors): `refl(Int, N)`. A list computed under a binder's eta
+/// expansion (a match arm quoted under fresh variables, DESIGN.md §5.9:
+/// an update of an array evaluated element by element) keeps a length
+/// proof about the binder's `fst`, quoted by substitution; once the binder
+/// is instantiated with an array that is no variable, that proof no longer
+/// has the length the spelled-out list computes to. An explicit list's
+/// length is its count: the proof is by computation. The kernel checks it.
+pub fn refl_explicit_array_len(env: &Env, t: &Tm) -> Tm {
+    let (Some(list), Some(len)) = (env.lookup_ind("List"), env.lookup_global("seq::len")) else { return t.clone() };
+    let repair = |n: &Tm| -> Option<Tm> {
+        let Term::Pair { ty, fst, snd } = &**n else { return None };
+        // `Σ (l : List T). Eq(Int, len T l, N)` with a literal `N`
+        let Term::Sigma { snd: sty, .. } = &**ty else { return None };
+        let Term::Eq { ty: ity, lhs, rhs } = &**sty else { return None };
+        if !matches!(&**ity, Term::IntTy(Width::Int)) {
+            return None;
+        }
+        let Term::Lit { w: Width::Int, n: nn } = &**rhs else { return None };
+        let (h, a) = crate::elab::items::spine(lhs);
+        if !matches!(&*h, Term::Global(g) if *g == len) || a.len() != 2 || !matches!(&*a[1], Term::Var(Idx(0))) {
+            return None;
+        }
+        // the list spelled out: exactly `N` constructors, then `Nil`
+        let mut cur = fst;
+        let mut k = 0u64;
+        loop {
+            match &**cur {
+                Term::Ctor { ind, args, .. } if *ind == list && args.is_empty() => break,
+                Term::Ctor { ind, args, .. } if *ind == list && args.len() == 2 => {
+                    k += 1;
+                    cur = &args[1];
+                }
+                _ => return None,
+            }
+        }
+        if u64::try_from(nn.clone()).ok() != Some(k) || matches!(&**snd, Term::Refl { .. }) {
+            return None;
+        }
+        let refl = mk::refl(mk::int_ty(Width::Int), rhs.clone());
+        Some(Rc::new(Term::Pair { ty: ty.clone(), fst: fst.clone(), snd: refl }))
+    };
+    crate::elab::tm::map_post(t, 0, &mut |n, _| Some(repair(&n).unwrap_or(n))).unwrap_or_else(|| t.clone())
+}
+
+/// A list spelled out by `seq::update` over a spelled-out list (the
+/// update of an array evaluated under its binder's eta expansion, DESIGN.md
+/// §5.9: element `k` is `if i - k == 0 { v } else { x_k }`) folded back to
+/// `seq::update T l i v`, `l` the list of the `x_k` folded the same way (an
+/// update again, or an array's eta list: `fst(e)`). The fold is the
+/// update's own recursion run backwards, so the folded list converts with
+/// the spelled-out one wherever the array is a variable; where it is not
+/// (an element read out of a slice), the folded form is what evaluating the
+/// update computes, and what the length proofs about it say. The kernel
+/// checks every term built from it.
+pub fn fold_update_lists(env: &Env, t: &Tm) -> Tm {
+    let (Some(index), Some(list), Some(update), Some(bool_ind)) = (env.lookup_global("seq::index"), env.lookup_ind("List"), env.lookup_global("seq::update"), env.lookup_ind("Bool")) else { return t.clone() };
+    let same = |a: &Tm, b: &Tm| Rc::ptr_eq(a, b) || env.alpha_eq_relevant(a, b, &|p, q| p == q);
+    map_term(t, 0, &mut |x, _| unrolled_update(x, index, list, update, bool_ind, &same))
+}
+
+/// [`fold_update_lists`]'s recognizer at a list `t`.
+fn unrolled_update(t: &Tm, index: GlobalId, list: IndId, update: GlobalId, bool_ind: IndId, same: &dyn Fn(&Tm, &Tm) -> bool) -> Option<Tm> {
+    // the elements: `match #eq_int(I_k, 0) { false => x_k, true => v }`
+    let mut elems: Vec<(Tm, Tm, Tm, Tm)> = Vec::new(); // (I_k, x_k, v, element type)
+    let mut cur = t;
+    loop {
+        match &**cur {
+            Term::Ctor { ind, args, .. } if *ind == list && args.is_empty() => break,
+            Term::Ctor { ind, args, .. } if *ind == list && args.len() == 2 => {
+                let Term::Match { ind: mi, scrut, motive, arms, .. } = &*args[0] else { return None };
+                if *mi != bool_ind || arms.len() != 2 || !arms[0].names.is_empty() || !arms[1].names.is_empty() {
+                    return None;
+                }
+                let Term::Prim { op: PrimOp::Eq(Width::Int), args: pa, .. } = &**scrut else { return None };
+                if pa.len() != 2 || !matches!(&*pa[1], Term::Lit { w: Width::Int, n } if n == &BigInt::from(0)) {
+                    return None;
+                }
+                // (the element type: the match's motive, closed)
+                let ety = sandblaster_kernel::util::shift_from(motive, -1, 0);
+                elems.push((pa[0].clone(), arms[0].body.clone(), arms[1].body.clone(), ety));
+                cur = &args[1];
+            }
+            _ => return None,
+        }
+    }
+    if elems.len() < 2 {
+        return None;
+    }
+    // `I_{k+1} = I_k - 1`, one `v` for all
+    for k in 1..elems.len() {
+        let Term::Prim { op: PrimOp::ISub, args: sa, .. } = &*elems[k].0 else { return None };
+        if sa.len() != 2 || !matches!(&*sa[1], Term::Lit { w: Width::Int, n } if n == &BigInt::from(1)) || !same(&sa[0], &elems[k - 1].0) || !same(&elems[k].2, &elems[0].2) {
+            return None;
+        }
+    }
+    let ety = elems[0].3.clone();
+    // the list updated: the `x_k`, folded in turn
+    let mut inner: Tm = mk::ctor(list, 0, vec![ety.clone()], vec![]);
+    for (_, x, _, _) in elems.iter().rev() {
+        inner = mk::ctor(list, 1, vec![ety.clone()], vec![x.clone(), inner]);
+    }
+    let folded_inner = match unrolled_update(&inner, index, list, update, bool_ind, same) {
+        Some(f) => f,
+        None => match eta_list_of(&inner, index, list, same) {
+            Some(e) => Rc::new(Term::Fst(e)),
+            None => inner,
+        },
+    };
+    Some(mk::apps(mk::global(update), vec![(Rel::Rel, ety), (Rel::Rel, folded_inner), (Rel::Rel, elems[0].0.clone()), (Rel::Rel, elems[0].2.clone())]))
+}
+
+/// [`fold_array_eta`] for the eta list of any array term `e`, not only a
+/// variable's: a binder's eta expansion instantiated with a term (an array
+/// read out of a slice, `xs[i]`) is folded back to `fst(e)` like a
+/// variable's, so that the bound proofs of its reads and the length proofs
+/// of its updates (stated against `len(fst e)`, which a list of `N`
+/// elements would compute to `N`) keep their type. The kernel checks every
+/// term built from it.
+pub fn fold_array_eta_any(env: &Env, t: &Tm, index: GlobalId, list: IndId) -> Tm {
+    let same = |a: &Tm, b: &Tm| Rc::ptr_eq(a, b) || env.alpha_eq_relevant(a, b, &|p, q| p == q);
+    map_term(t, 0, &mut |x, _| eta_list_of(x, index, list, &same).map(|v| Rc::new(Term::Fst(v))))
+}
+
+/// The array term `x` if `t` is the full eta list of `x` (`same`: whether
+/// two elements read out of the same array).
+fn eta_list_of(t: &Tm, index: GlobalId, list: IndId, same: &dyn Fn(&Tm, &Tm) -> bool) -> Option<Tm> {
+    let mut cur = t;
+    let mut k = 0u64;
+    let mut var: Option<Tm> = None;
+    let mut len: Option<u64> = None;
+    loop {
+        match &**cur {
+            Term::Ctor { ind, args, .. } if *ind == list && args.is_empty() => break,
+            Term::Ctor { ind, args, .. } if *ind == list && args.len() == 2 => {
+                let mut a = Vec::new();
+                let mut h = &args[0];
+                while let Term::App { rel, fun, arg } = &**h {
+                    a.push((*rel, arg));
+                    h = fun;
+                }
+                a.reverse();
+                if !matches!(&**h, Term::Global(g) if *g == index) || a.len() != 5 {
+                    return None;
+                }
+                let Term::Fst(xv) = &**a[1].1 else { return None };
+                if var.as_ref().is_some_and(|v| !same(v, xv)) {
+                    return None;
+                }
+                let Term::Lit { w: Width::Int, n } = &**a[2].1 else { return None };
+                if u64::try_from(n.clone()).ok() != Some(k) {
+                    return None;
+                }
+                let Term::Transport { lhs, .. } = &**a[4].1 else { return None };
+                let Term::Lit { w: Width::Int, n: nn } = &**lhs else { return None };
+                let nn = u64::try_from(nn.clone()).ok()?;
+                if len.is_some_and(|l| l != nn) {
+                    return None;
+                }
+                len = Some(nn);
+                var = Some(xv.clone());
+                k += 1;
+                cur = &args[1];
+            }
+            _ => return None,
+        }
+    }
+    if k == 0 || len != Some(k) {
+        return None;
+    }
+    var
 }
 
 /// The variable term `x` if `t` is the full eta list of `x`.

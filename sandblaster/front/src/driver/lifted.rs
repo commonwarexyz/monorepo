@@ -240,6 +240,9 @@ pub fn in_place_record(h: &InPlaceInfo<'_>, facts: &LiftFacts) -> String {
     for (f, r) in &facts.host_obligations {
         s.push_str(&format!("// Host obligation (a precondition, proven at every lifted call, unchecked at host calls): `{f}` requires `{r}`.\n"));
     }
+    for (f, x) in &facts.pointer_params {
+        s.push_str(&format!("// Assumed (A3, docs/DESIGN-UNSAFE-SIMD.md A-S8): `{f}` forms raw pointers from its `&mut` parameter `{x}`, which aliases no other parameter (Rust's guarantee for `&mut`, which host `unsafe` could break; the window rule does not check it).\n"));
+    }
     for (f, b) in &facts.host_depth_bounds {
         s.push_str(&format!("// Host obligation (a recursion depth bound, the stack safety of DESIGN.md §3.7: proven at every lifted call, unchecked at host calls): `{f}` needs `{b}`.\n"));
     }

@@ -257,6 +257,18 @@ name = "fx-sd-neon-lane"
 version = "0.0.0"
 
 [[package]]
+name = "fx-sd-neon-mul128"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-neon-mul128-row"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-neon-mul128-shift"
+version = "0.0.0"
+
+[[package]]
 name = "fx-sd-neon-nomodel"
 version = "0.0.0"
 
@@ -266,6 +278,14 @@ version = "0.0.0"
 
 [[package]]
 name = "fx-sd-neon-shift"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-ptr"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-ptr-twins"
 version = "0.0.0"
 
 [[package]]

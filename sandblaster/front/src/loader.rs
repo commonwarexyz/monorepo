@@ -424,7 +424,13 @@ impl Loader<'_> {
             let ghost = self.modules[mi].ghost;
             for (name, c) in children {
                 let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-                let vis = self.modules[c].vis.clone();
+                // a private child of the host's file is crate-visible in the
+                // model, as the lift makes its private methods (rustc
+                // enforces the host's privacy; laws and proofs may name it)
+                let vis = match &self.modules[c].vis {
+                    syn::Visibility::Inherited => syn::parse_quote!(pub(crate)),
+                    v => v.clone(),
+                };
                 let item: syn::ItemMod = syn::parse_quote!(#vis mod #ident;);
                 self.modules[mi].items.push(LoadedItem { item: syn::Item::Mod(item), ghost, cfg: None, child: Some(c) });
             }
@@ -620,7 +626,12 @@ impl Loader<'_> {
         self.modules.push(LoadedModule { name: name.clone(), parent: Some(parent), file: cfile, ghost, vis, decl_span: span, decl_attrs, inner_attrs: cast.attrs.clone(), items: vec![], cfg: cfg.clone(), data_files: HashMap::new(), lifted: true });
         self.lifted_info.push(crate::lift::LiftedInfo { name: name.clone(), file: cfile, ghost, host: opts.host, unverified: opts.unverified.clone(), in_place: opts.in_place, mir: None });
         let info_index = self.lifted_info.len() - 1;
-        // the children to lift with this module
+        // the children to lift with this module, where the host's rustc finds
+        // them: an in-place source is the host's own file, which the host
+        // declares with a plain `mod` (its `#[path]` is the DSL root's), so
+        // its children are next to a `mod.rs`/`lib.rs` and in `<stem>/`
+        // beside any other file
+        let mod_rs_like = if opts.in_place { path.file_name().is_some_and(|f| f == "mod.rs" || f == "lib.rs") } else { mod_rs_like };
         let dir = if mod_rs_like {
             path.parent().map(Path::to_path_buf).unwrap_or_default()
         } else {
@@ -664,10 +675,12 @@ impl Loader<'_> {
             let mut copts = opts.clone();
             copts.children = vec![];
             // a child reads the same MIR file (found next to the declaration)
-            if let Some(rel) = &opts.mir {
-                let decl_dir = self.sm.path(self.modules[parent].file).parent().map(Path::to_path_buf).unwrap_or_default();
-                let full = decl_dir.join(rel);
-                copts.mir = Some(std::path::absolute(&full).unwrap_or(full).display().to_string());
+            let decl_dir = self.sm.path(self.modules[parent].file).parent().map(Path::to_path_buf).unwrap_or_default();
+            for (rel, to) in [(&opts.mir, &mut copts.mir), (&opts.window_mir, &mut copts.window_mir)] {
+                if let Some(rel) = rel {
+                    let full = decl_dir.join(rel);
+                    *to = Some(std::path::absolute(&full).unwrap_or(full).display().to_string());
+                }
             }
             let cvis = m.vis.clone();
             let cc = self.add_lifted(want.clone(), c, parsed, cpath, cmodrs, ghost, cvis, span, vec![], cfg.clone(), copts);
@@ -698,11 +711,29 @@ impl Loader<'_> {
                 }
             }
         });
+        // `window_mir = "x.window.sbmir"`: the same MIR unoptimized, for the
+        // window analysis only, next to the declaring file
+        let window_mir = opts.window_mir.as_ref().and_then(|rel| {
+            let decl_dir = self.sm.path(self.modules[parent].file).parent().map(Path::to_path_buf).unwrap_or_default();
+            let full = decl_dir.join(rel);
+            match self.fs.read(&full) {
+                Ok(t) => {
+                    self.sm.add(full.clone(), t.clone());
+                    Some(t)
+                }
+                Err(e) => {
+                    self.diags.error(DiagKind::Load, span, format!("cannot read the window MIR file `{}` (`window_mir = \"{rel}\"`): {e}", full.display()));
+                    None
+                }
+            }
+        });
         let path_display = self.sm.path(cfile).display().to_string();
         let text = self.sm.get(cfile).map(|f| f.text.clone()).unwrap_or_default();
         let mir_extra = mir.as_deref().map(|t| self.mir_extra_sources(t, &path_display)).unwrap_or_default();
         let target_arch = self.target.arch.name().to_string();
-        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, path_display, text, mir_extra, target_arch });
+        let target_features: Vec<String> = self.target.features.iter().cloned().collect();
+        let codegen_flags = self.target.codegen_flags.clone();
+        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, window_mir, path_display, text, mir_extra, target_arch, target_features, codegen_flags });
         c
     }
 

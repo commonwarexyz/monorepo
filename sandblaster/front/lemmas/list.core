@@ -340,6 +340,46 @@ def[lemma] seq::index_update_other : (T : Type) -> (l : List(T)) -> (i : Int) ->
      end) .h1
   structural 1
 
+-- Two updates of one position: the last one wins (a store through a
+-- reference code after another into the same element, as the literal and
+-- the structured readings write a chunk four times through one pointer).
+def[lemma] seq::update_update_same : (T : Type) -> (l : List(T)) -> (i : Int) -> (a : T) -> (b : T)
+    -> Eq(List(T), seq::update T (seq::update T l i a) i b, seq::update T l i b) :=
+  fun (T : Type) (l : List(T)) (i : Int) (a : T) (b : T) =>
+    match l : List(T) as y return Eq(List(T), seq::update T (seq::update T y i a) i b, seq::update T y i b) with
+    | Nil => refl(List(T), Nil[T])
+    | Cons(x, t) =>
+        match #eq_int(i, 0int) : Bool as z return Eq(List(T),
+            Cons[T](match z : Bool as _ return T with | false => (match z : Bool as _ return T with | false => x | true => a end) | true => b end,
+                    seq::update T (seq::update T t (#isub(i, 1int)) a) (#isub(i, 1int)) b),
+            Cons[T](match z : Bool as _ return T with | false => x | true => b end, seq::update T t (#isub(i, 1int)) b)) with
+        | false => eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r))
+                     (seq::update T (seq::update T t (#isub(i, 1int)) a) (#isub(i, 1int)) b) (seq::update T t (#isub(i, 1int)) b)
+                     (rec(T, t, #isub(i, 1int), a, b))
+        | true => eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](b, r))
+                     (seq::update T (seq::update T t (#isub(i, 1int)) a) (#isub(i, 1int)) b) (seq::update T t (#isub(i, 1int)) b)
+                     (rec(T, t, #isub(i, 1int), a, b))
+        end
+    end
+  structural 1
+
+-- An update below index 0 changes nothing (as in `seq.core`, the
+-- optimizer's library, which the checks do not load).
+def[lemma] seq::update_neg : (T : Type) -> (a : List(T)) -> (i : Int) -> (v : T) -> (.h : Eq(Bool, #lt_int(i, 0int), true))
+    -> Eq(List(T), seq::update T a i v, a) :=
+  fun (T : Type) (a : List(T)) (i : Int) (v : T) (.h : Eq(Bool, #lt_int(i, 0int), true)) =>
+    match a : List(T) as y return Eq(List(T), seq::update T y i v, y) with
+    | Nil => refl(List(T), Nil[T])
+    | Cons(x, t) =>
+        -- Cons(if i == 0 then v else x, update(t, i − 1, v)) with i ≠ 0
+        transport(Bool, false, #eq_int(i, 0int),
+          eq::sym Bool (#eq_int(i, 0int)) false (linarith([h : Eq(Bool, #lt_int(i, 0int), true)]; Eq(Bool, #eq_int(i, 0int), false); [])),
+          z. Eq(List(T), Cons[T](match z : Bool as _ return T with | false => x | true => v end, seq::update T t (#isub(i, 1int)) v), Cons[T](x, t)),
+          eq::cong (List(T)) (List(T)) (fun (r : List(T)) => Cons[T](x, r)) (seq::update T t (#isub(i, 1int)) v) t
+            (rec(T, t, #isub(i, 1int), v, .linarith([h : Eq(Bool, #lt_int(i, 0int), true)]; Eq(Bool, #lt_int(#isub(i, 1int), 0int), true); []))))
+    end
+  structural 1
+
 -- Extensionality: equal lengths and equal elements.
 def[lemma] seq::list_ext : (T : Type) -> (xs : List(T)) -> (ys : List(T))
     -> (.hl : Eq(Int, seq::len T xs, seq::len T ys))

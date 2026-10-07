@@ -45,11 +45,14 @@ pub mod checked;
 pub mod gate;
 pub mod ir;
 pub mod literal;
+pub mod ptr;
 pub mod read;
 pub mod replay;
 pub mod sexp;
 pub mod simproof;
 pub mod stmt;
+pub mod unsafe_diag;
+pub mod window;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -105,11 +108,12 @@ pub struct ModuleNames {
     /// `lift::Ctx::attach_path`): their calls are obligations, bound where
     /// they occur.
     pub requires: BTreeSet<String>,
-    /// Open traits read at one instance (SEMANTICS.md §19.6): trait name →
-    /// the instance's path in the crate (`Family` → `merkle::mmr::Family`).
-    /// The instance's type arguments are erased from names, and the
-    /// instance's impl of the trait is its inherent methods.
-    pub open: BTreeMap<String, String>,
+    /// Open traits read at their instances (SEMANTICS.md §19.6): trait name
+    /// → the instances' paths in the crate (`Family` →
+    /// `[merkle::mmr::Family]`; `Engine` → its two verified engines). The
+    /// instance's type arguments are erased from names, and an instance's
+    /// impl of the trait is its inherent methods.
+    pub open: BTreeMap<String, Vec<String>>,
     /// The DSL paths of the lifted modules (`crate::merkle::mmr::iterator`):
     /// an item of another lifted module is named by its path there.
     pub dsl_modules: Vec<String>,
@@ -128,6 +132,16 @@ pub struct ModuleNames {
     /// records another one is refused (`None`: not checked, the toolchain's
     /// own tests of extractions without a recorded target).
     pub target_arch: Option<String>,
+    /// The build's statically enabled target features
+    /// (`CARGO_CFG_TARGET_FEATURE`, `TargetInfo::features`): an extraction
+    /// whose own are others is refused, and only once they are bound do the
+    /// static features count as facts for the readings (`None`: not known,
+    /// none count; DESIGN-UNSAFE-SIMD amendment A-S3).
+    pub static_features: Option<Vec<String>>,
+    /// The build's `-C target-cpu` (`None`: the target's default) and
+    /// `-C target-feature` flags, when known: a build that changes the
+    /// target's static features with them is refused (A-S3).
+    pub codegen_flags: Option<(Option<String>, String)>,
 }
 
 /// Host models a library type of rustc's MIR is read as (SEMANTICS.md
@@ -210,14 +224,14 @@ impl ModuleNames {
     fn is_instance(&self, m: &Sbmir, t: &Ty) -> bool {
         let Ty::Adt(k) = t else { return false };
         let Some(d) = m.adts.get(k) else { return false };
-        self.open.values().any(|inst| d.path.ends_with(&format!("::{inst}"))) || self.host_instance(m, k).is_some()
+        self.open.values().flatten().any(|inst| d.path.ends_with(&format!("::{inst}"))) || self.host_instance(m, k).is_some()
     }
 
     /// Whether a primitive type is the declared instance of an open trait
     /// through a host model alias (`Word: crate::host::W`, `type W = u64;`).
     fn is_prim_instance(&self, t: &Ty) -> bool {
         let Some(p) = prim_name(t) else { return false };
-        self.open.values().any(|inst| self.host.types.values().any(|(dsl, ty)| *dsl == format!("crate::{inst}") && ty.replace(' ', "") == p))
+        self.open.values().flatten().any(|inst| self.host.types.values().any(|(dsl, ty)| *dsl == format!("crate::{inst}") && ty.replace(' ', "") == p))
     }
 
     /// A library type that is the declared instance of an open trait whose
@@ -231,7 +245,7 @@ impl ModuleNames {
         }
         let base = self.adt_base(&d.path);
         let dsl = self.host.structs.get(&base).or_else(|| self.host.types.get(&base).map(|t| &t.0))?;
-        self.open.values().any(|inst| format!("crate::{inst}") == *dsl).then(|| dsl.clone())
+        self.open.values().flatten().any(|inst| format!("crate::{inst}") == *dsl).then(|| dsl.clone())
     }
 
     /// The library types of `m` that stand for host models: `(the model's
@@ -256,7 +270,8 @@ impl ModuleNames {
     /// ..;` of the field's type): the model's DSL path.
     fn transparent_path(&self, m: &Sbmir, k: &str) -> Option<String> {
         let d = m.adts.get(k)?;
-        if self.local(&d.path) || d.is_enum || d.variants.len() != 1 || d.variants[0].fields.len() != 1 {
+        // (a union is never its field: reading it so is a type pun)
+        if self.local(&d.path) || d.is_enum || d.is_union || d.variants.len() != 1 || d.variants[0].fields.len() != 1 {
             return None;
         }
         let (dsl, target) = self.host.types.get(&self.adt_base(&d.path))?;
@@ -434,6 +449,8 @@ impl Names for ModuleNames {
                 let i = quote::format_ident!("I{}", b);
                 syn::parse_quote!(crate::__lift::#i)
             }
+            // a `u128` is its (low, high) 64-bit words, as the lift reads it
+            Ty::Int(false, 128) => syn::parse_quote!((u64, u64)),
             Ty::Tuple(ts) => {
                 let ts: Vec<syn::Type> = ts.iter().map(|t| self.ty(m, t)).collect::<Result<_, _>>()?;
                 syn::parse_quote!((#(#ts),*))
@@ -468,6 +485,11 @@ impl Names for ModuleNames {
                 if bytes_iter_model(m, t) {
                     // the byte strings not yet yielded (SEMANTICS.md §19.10)
                     return Ok(syn::parse_quote!(&[&[u8]]));
+                }
+                // core's `IterMut` (docs/mir-lift.md §20.10): the index of the
+                // element it yields next (the slice is the place it walks)
+                if iter_mut_elem(m, t).is_some() {
+                    return Ok(syn::parse_quote!(usize));
                 }
                 // core's slice iterator: the slice and the index of its next element
                 if let Some(e) = slice_iter_elem(m, t) {
@@ -663,6 +685,19 @@ pub enum Model {
     SliceIterNext,
     /// `<Range<usize> as SliceIndex<[T]>>::get`.
     SliceGetRange,
+    /// `<[T]>::iter_mut`: core's `IterMut<'_, T>` (raw pointers inside) as
+    /// the slice's reference code and the index of the element it yields
+    /// next, from 0 (DESIGN-UNSAFE-SIMD amendment A-S4).
+    IterMutNew,
+    /// `<IterMut<'_, T> as Iterator>::next`: the code of element `i`
+    /// (`i < len`), the index one further; distinct calls yield distinct
+    /// elements (the disjointness the write-backs rely on, A-S4).
+    IterMutNext,
+    /// `<I as IntoIterator>::into_iter` at an `IterMut`: the iterator itself.
+    IterMutIntoIter,
+    /// `<[T]>::split_at_mut(s, mid)`: the codes of the subslices `0..mid`
+    /// and `mid..len` of `s` (`PRange`), or a panic when `mid > len`.
+    SplitAtMut,
 }
 
 const MODEL_FNS: &[(&str, Model)] = &[
@@ -675,12 +710,35 @@ const MODEL_FNS: &[(&str, Model)] = &[
     ("<core::slice::Iter<'a, T> as core::iter::Iterator>::next", Model::SliceIterNext),
     ("<std::ops::Range<usize> as std::slice::SliceIndex<[T]>>::get", Model::SliceGetRange),
     ("<core::ops::Range<usize> as core::slice::SliceIndex<[T]>>::get", Model::SliceGetRange),
+    ("core::slice::<impl [T]>::iter_mut", Model::IterMutNew),
+    ("<std::slice::IterMut<'a, T> as std::iter::Iterator>::next", Model::IterMutNext),
+    ("<core::slice::IterMut<'a, T> as core::iter::Iterator>::next", Model::IterMutNext),
+    ("core::slice::<impl [T]>::split_at_mut", Model::SplitAtMut),
 ];
+
+/// core's `slice::IterMut<'_, T>` (by its exact path): `T`.
+pub fn iter_mut_elem(m: &Sbmir, t: &Ty) -> Option<Ty> {
+    let Ty::Adt(k) = t else { return None };
+    let d = m.adts.get(k)?;
+    match (d.path.as_str(), d.args.as_slice()) {
+        ("std::slice::IterMut" | "core::slice::IterMut", [e]) => Some(e.clone()),
+        _ => None,
+    }
+}
 
 /// The model a function is read as, and its element type `T`.
 pub fn model_of(f: &Fn) -> Option<(Model, Ty)> {
-    let (_, m) = MODEL_FNS.iter().find(|(p, _)| *p == f.def)?;
-    Some((*m, f.args.first()?.clone()))
+    if let Some((_, m)) = MODEL_FNS.iter().find(|(p, _)| *p == f.def) {
+        return Some((*m, f.args.first()?.clone()));
+    }
+    // `<I as IntoIterator>::into_iter` at core's `IterMut<'_, T>` (the identity)
+    if matches!(f.def.as_str(), "<I as std::iter::IntoIterator>::into_iter" | "<I as core::iter::IntoIterator>::into_iter")
+        && let [Ty::Adt(k)] = f.args.as_slice()
+        && (k.starts_with("std::slice::IterMut<") || k.starts_with("core::slice::IterMut<"))
+    {
+        return Some((Model::IterMutIntoIter, f.args[0].clone()));
+    }
+    None
 }
 
 fn prelude_iter_ty(d: &ir::AdtDef) -> Option<syn::Type> {
@@ -698,6 +756,17 @@ fn release_series(v: &str) -> String {
     v.split('.').take(2).collect::<Vec<_>>().join(".")
 }
 
+/// The MIR optimization level of the extraction both readings read
+/// (`cargo check`'s own; `sandblaster-mirx` pins it): its MIR is what L and
+/// S read, and every lock and theorem was made from it.
+pub const MIR_OPT_LEVEL: u32 = 1;
+/// The MIR optimization level of the window extraction (`window_mir =
+/// ".."`, DESIGN-UNSAFE-SIMD amendment A-S1): no optimization, so the MIR's
+/// accesses and reference flow are the source's (level 1 already runs
+/// `CopyProp`, `SimplifyLocals`, `RemoveZsts`). Only the window (aliasing)
+/// analysis of pointers reads it; L and S never do.
+pub const WINDOW_MIR_OPT_LEVEL: u32 = 0;
+
 /// A parsed `.sbmir` with its lifted-name index.
 #[derive(Clone, Debug)]
 pub struct Loaded {
@@ -705,6 +774,9 @@ pub struct Loaded {
     pub names: ModuleNames,
     /// Lifted name → MIR instance key.
     pub by_lifted: BTreeMap<String, String>,
+    /// The window extraction of the same module ([`load_window`]), when
+    /// declared: read by nothing but the window analysis.
+    pub window: Option<std::sync::Arc<Sbmir>>,
 }
 
 /// Parses a `.sbmir` file and checks it against the sources it was
@@ -738,12 +810,47 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
     if !m.overflow_checks {
         return Err("the .sbmir file was extracted without overflow checks (the workspace's profiles build with them)".into());
     }
+    // the MIR is the image of one optimization level's passes: the readings'
+    // own (`None`: an extraction older than the record, which `cargo check`
+    // made at its default, this level)
+    if let Some(l) = m.mir_opt_level
+        && l != MIR_OPT_LEVEL
+    {
+        return Err(format!("the MIR was extracted at -Zmir-opt-level={l}; the readings read MIR of level {MIR_OPT_LEVEL} (extract it again without `--mir-opt-level`; an unoptimized extraction is a `window_mir`)"));
+    }
     // MIR of another architecture is not what this build compiles (its
     // `core::arch` and `cfg(target_arch)` code is another's)
     if let (Some((triple, arch)), Some(build)) = (&m.target, &names.target_arch)
         && arch != build
     {
         return Err(format!("the MIR was extracted for `{triple}` ({arch}), but this build is for {build}: extract it for the build's target (`extract.sh --target`)"));
+    }
+    // the reading of existing `unsafe` (DESIGN-UNSAFE-SIMD): the static
+    // target features are facts only when they are the build's own and come
+    // from the target's defaults (amendment A-S3); the targets are
+    // little-endian (the byte views)
+    let mut m = m;
+    if m.unsafe_reading {
+        if m.endian.as_deref() != Some("little") {
+            return Err(format!("the MIR was extracted for a {} target: the byte views of raw-pointer loads and stores are little-endian", m.endian.as_deref().unwrap_or("unknown-endian")));
+        }
+        if let Some(build) = &names.static_features {
+            match (&m.target_cpu, m.target_feature_flags.as_deref()) {
+                (Some((None, _)), Some("")) => {}
+                (cpu, flags) => return Err(format!("the MIR was extracted with -C target-cpu={:?} and -C target-feature={flags:?}: its static target features would not be the target's (extract it without them; DESIGN-UNSAFE-SIMD A-S3)", cpu.as_ref().and_then(|c| c.0.clone()))),
+            }
+            if let Some((cpu, feats)) = &names.codegen_flags
+                && (cpu.is_some() || !feats.is_empty())
+            {
+                return Err(format!("this build sets -C target-cpu={cpu:?} / -C target-feature={feats:?}: the static target features the MIR's reading counts would not be the shipped binary's (DESIGN-UNSAFE-SIMD A-S3)"));
+            }
+            let rec: BTreeSet<&str> = m.static_features.iter().flatten().map(String::as_str).collect();
+            let got: BTreeSet<&str> = build.iter().map(String::as_str).collect();
+            if rec != got {
+                return Err(format!("the MIR was extracted with the static target features {rec:?}, but this build's are {got:?}: extract it again for this build's configuration (DESIGN-UNSAFE-SIMD A-S3)"));
+            }
+            m.static_facts = m.static_features.clone();
+        }
     }
     for (path, hash) in &m.sources {
         let Some(bytes) = sources(path) else { return Err(format!("the .sbmir file names the source `{path}`, which does not exist")) };
@@ -779,5 +886,49 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
             }
         }
     }
-    Ok(Loaded { m, names, by_lifted })
+    Ok(Loaded { m, names, by_lifted, window: None })
+}
+
+/// Parses the window extraction of `main`'s module (`window_mir = ".."`)
+/// and checks that it is the same program at MIR optimization level
+/// [`WINDOW_MIR_OPT_LEVEL`]: the level recorded, exactly; the same
+/// compiler, crate, module, overflow checks, target, exclusions, sources
+/// (by SHA-256: `main`'s were checked against the files) and roots; and
+/// every function of `main` with the same definition, item, parameters,
+/// return type, body presence and target features. Its other locals and
+/// its blocks differ by construction (the passes level 1 runs), and it may
+/// follow library functions `main` does not.
+pub fn load_window(text: &str, main: &mut Loaded) -> Result<(), String> {
+    let w = ir::parse(text)?;
+    let m = &main.m;
+    if w.mir_opt_level != Some(WINDOW_MIR_OPT_LEVEL) {
+        return Err(format!("the window extraction must be of -Zmir-opt-level={WINDOW_MIR_OPT_LEVEL} (`extract.sh --mir-opt-level {WINDOW_MIR_OPT_LEVEL}`); it records {:?}", w.mir_opt_level));
+    }
+    let same = |what: &str, a: String, b: String| if a == b { Ok(()) } else { Err(format!("the window extraction's {what} is {b}, the extraction's {a}")) };
+    same("compiler", m.rustc.clone(), w.rustc.clone())?;
+    same("crate", m.krate.clone(), w.krate.clone())?;
+    same("module", m.module.clone(), w.module.clone())?;
+    same("overflow checks", m.overflow_checks.to_string(), w.overflow_checks.to_string())?;
+    same("target", format!("{:?}", m.target), format!("{:?}", w.target))?;
+    same("exclusions", format!("{:?}", m.exclude), format!("{:?}", w.exclude))?;
+    same("sources", format!("{:?}", m.sources), format!("{:?}", w.sources))?;
+    same("roots", format!("{:?}", m.roots), format!("{:?}", w.roots))?;
+    for (k, f) in &m.fns {
+        let Some(g) = w.fns.get(k) else { return Err(format!("the window extraction has no `{k}`")) };
+        let sig = |f: &Fn| format!("{} {:?} {} {:?} {:?} {} {:?}", f.def, f.item, f.argc, f.spread_arg, f.locals.iter().take(f.argc + 1).collect::<Vec<_>>(), f.has_body, f.target_features);
+        same(&format!("signature of `{k}`"), sig(f), sig(g))?;
+    }
+    if m.unsafe_reading != w.unsafe_reading {
+        return Err("the window extraction and the extraction were made by different printers (`(unsafe-reading ..)`)".into());
+    }
+    // the window rule's verdicts on the formations of crate code, carried to
+    // the extraction the readings read (DESIGN-UNSAFE-SIMD §2.6, A-S1)
+    let verdicts: BTreeMap<String, Vec<window::Verdict>> = w.fns.iter().filter(|(k, g)| g.local && m.fns.contains_key(*k)).map(|(k, g)| (k.clone(), window::check(&w, g))).collect();
+    for (k, v) in verdicts {
+        if let Some(f) = main.m.fns.get_mut(&k) {
+            f.window = Some(v);
+        }
+    }
+    main.window = Some(std::sync::Arc::new(w));
+    Ok(())
 }

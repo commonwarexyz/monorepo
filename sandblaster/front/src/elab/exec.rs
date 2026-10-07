@@ -1691,6 +1691,36 @@ impl<'a> Elab<'a> {
                 };
                 self.ctor_with_invariants(ind, 0, params, args, owner, span)
             }
+            // an element of a slice state (a function read from MIR whose
+            // `&mut [T]` parameter is the state `&[T]`, docs/mir-lift.md
+            // §20.10): the slice with element `i` replaced (`i < len` an
+            // obligation), its length unchanged: `slice::mk T (fst x)
+            // (seq::update T (fst(snd x)) i v)`, as the literal reading's
+            // write through a code (`mir::slice_set`)
+            Proj::Index(ix) if matches!(ty.peel_refs(), Ty::Slice(_)) => {
+                let Ty::Slice(e) = ty.peel_refs() else { return internal(span, "element assignment on a non-slice") };
+                let i = self.pure_value(ix)?;
+                let et = self.ty(e, span)?;
+                let goal = self.holds(self.p0(PrimOp::Lt(Width::Usize), vec![i.clone(), mk::fst(x.clone())]));
+                let pf = self.prove(ObligationKind::IndexBounds, span, &goal, false)?;
+                let inner = if rest.is_empty() {
+                    v
+                } else {
+                    let cur = mk::apps(mk::global(self.p.g("slice::index")), [(Rel::Rel, et.clone()), (Rel::Rel, x.clone()), (Rel::Rel, i.clone()), (Rel::Irr, pf.clone())]);
+                    self.update(e, cur, rest, v, span)?
+                };
+                let g = |n: &str| mk::global(self.p.g(n));
+                let ii = self.p0(PrimOp::Cast { from: Width::Usize, to: Width::Int }, vec![i.clone()]);
+                let l = mk::fst(mk::snd(x.clone()));
+                let l2 = mk::apps(g("seq::update"), [(Rel::Rel, et.clone()), (Rel::Rel, l.clone()), (Rel::Rel, ii.clone()), (Rel::Rel, inner.clone())]);
+                let int = mk::int_ty(Width::Int);
+                let len = |t: Tm| mk::apps(g("seq::len"), [(Rel::Rel, et.clone()), (Rel::Rel, t)]);
+                let n = mk::fst(x.clone());
+                let nint = self.p0(PrimOp::Cast { from: Width::Usize, to: Width::Int }, vec![n.clone()]);
+                let len_eq = mk::apps(g("eq::trans"), [(Rel::Rel, int), (Rel::Rel, len(l2.clone())), (Rel::Rel, len(l.clone())), (Rel::Rel, nint), (Rel::Rel, mk::apps(g("seq::len_update"), [(Rel::Rel, et.clone()), (Rel::Rel, l), (Rel::Rel, ii), (Rel::Rel, inner)])), (Rel::Rel, mk::apps(g("slice::ok_len"), [(Rel::Rel, et.clone()), (Rel::Rel, x.clone())]))]);
+                let ok = mk::pair(mk::apps(g("SliceOk"), [(Rel::Rel, et.clone()), (Rel::Rel, n.clone()), (Rel::Rel, l2.clone())]), len_eq, mk::apps(g("slice::ok_bound"), [(Rel::Rel, et.clone()), (Rel::Rel, x)]));
+                Ok(mk::apps(g("slice::mk"), [(Rel::Rel, et), (Rel::Rel, n), (Rel::Rel, l2), (Rel::Irr, ok)]))
+            }
             Proj::Index(ix) => {
                 let Ty::Array(e, n) = ty.peel_refs() else { return internal(span, "element assignment on a non-array") };
                 let i = self.pure_value(ix)?;

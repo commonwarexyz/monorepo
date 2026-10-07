@@ -182,6 +182,8 @@ pub const LEMMA_ROLES: &[(&str, &[Role])] = &[
     ("seq::eq_complete_usize", &[Backward]),
     ("seq::index_update_same", &[Rewrite]),
     ("seq::index_update_other", &[Rewrite]),
+    // (consecutive stores into one element: the last one's value)
+    ("seq::update_update_same", &[Rewrite]),
     // kernel prelude: slice/array well-formedness (lengths of their lists)
     ("slice::ok_len", &[Linarith]),
     ("slice::ok_bound", &[Linarith]),

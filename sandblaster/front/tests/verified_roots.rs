@@ -40,6 +40,7 @@ use sandblaster_front::validate;
 const VARINT: &str = "codec/sandblaster/varint/mod.rs";
 const MMR: &str = "storage/sandblaster/mmr/mod.rs";
 const VERIFIER: &str = "storage/sandblaster/verifier/mod.rs";
+const RS_ENGINE: &str = "cryptography/sandblaster/rs_engine/mod.rs";
 
 /// Serializes the elaborations of whole roots (each holds a root's kernel
 /// environment; side by side they would exceed the memory limit).
@@ -115,6 +116,44 @@ fn the_boundary_gate_passes_on_the_verified_roots_and_refuses_a_pub_mod() {
     let c = check_on(VERIFIER, &fs, &TargetInfo::aarch64_apple_darwin());
     let g = boundary_gate(&c);
     assert!(g.iter().any(|m| m.contains("`pub mod merkle` is not allowed at the DSL root")), "{g:?}\n{}", c.render());
+}
+
+/// The Reed–Solomon engine multiply (`cryptography/sandblaster/rs_engine`,
+/// stage neon-mul), through the front end: the open trait `Engine` read at
+/// both of its verified instances (each `impl Engine for ..` as that
+/// engine's methods), both engines' element attachments read as element
+/// functions, the scalar engine's inner loop as a helper that rebuilds its
+/// references into the chunk (`split_at_mut`'s halves), the private engine
+/// modules of the host's `engine.rs` found beside it and named by the laws,
+/// the `core::arch` leaf of a `use` group kept, and the type alias
+/// `tables::Mul128`, selected by `items = ..` and named only by another
+/// lifted file, kept. Negative twins: `Mul128` left out of `items` is
+/// pruned and `engine_neon.rs` no longer resolves; `Engine` declared at the
+/// NEON engine alone leaves the scalar engine's impl out (host code), and
+/// the laws that call it no longer resolve.
+#[test]
+fn the_rs_engine_root_reads_the_engine_trait_at_both_engines() {
+    let c = check(RS_ENGINE);
+    let inst = &c.lift_facts.open_instances;
+    for e in ["::engine_neon::Neon", "::engine_scalar::Scalar"] {
+        assert!(inst.iter().any(|(t, p)| t == "Engine" && p.ends_with(e)), "{inst:?}");
+    }
+    assert_eq!(c.lift_facts.mir_elements.len(), 2, "{:?}", c.lift_facts.mir_elements);
+    assert!(c.lift_facts.mir_helpers.iter().any(|h| !h.derived.is_empty() && !h.extra.is_empty()), "no helper rebuilds references into an element");
+    // the printer's fake raw borrows of `x_lo.len()` (`&mut [u8]`) parsed
+    // with their metadata into lengths, none left unread
+    use sandblaster_front::mir::ir::{Rvalue, Stmt};
+    let mm = c.lift_facts.mir_loaded.first().expect("the extraction");
+    let (_, f) = mm.loaded.m.fns.iter().find(|(k, _)| k.contains("engine_scalar::Scalar as") && k.ends_with(">::mul")).expect("Scalar::mul");
+    let stmts: Vec<&Stmt> = f.blocks.iter().flat_map(|b| &b.stmts).collect();
+    assert_eq!(stmts.iter().filter(|s| matches!(s, Stmt::Assign(_, Rvalue::Len(_), _))).count(), 4);
+    assert!(!stmts.iter().any(|s| matches!(s, Stmt::Assign(_, Rvalue::Unsupported(_), _) | Stmt::Unsupported(_))));
+    let rs = "cryptography/sandblaster/rs_engine/reed_solomon.rs";
+    let c = check_on(RS_ENGINE, &edited(rs, " Mul128,", ""), &TargetInfo::aarch64_apple_darwin());
+    assert!(!c.ok() && c.render().contains("Mul128"), "{}", c.render());
+    let c = check_on(RS_ENGINE, &edited(rs, ", Engine: crate::reed_solomon::engine::engine_scalar::Scalar\"", "\""), &TargetInfo::aarch64_apple_darwin());
+    assert!(!c.ok(), "{}", c.render());
+    assert!(c.render().contains("engine_scalar::Scalar"), "{}", c.render());
 }
 
 /// Every root passes the front end's stack check (DESIGN.md §3.7), and the

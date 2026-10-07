@@ -19,16 +19,18 @@
 //! A call is refused (read as stuck: the function has no theorem) when:
 //!
 //! * the intrinsic is an `unsafe fn` or takes or returns a raw pointer (the
-//!   loads and stores, `vld1q_u8(ptr)`, `_mm_loadu_si128(ptr)`): verified
-//!   code is safe Rust (DESIGN.md §16.5), and whether shipped `unsafe`
-//!   SIMD code may be split into safe vector arithmetic and unverified
-//!   loads and stores is the user's open decision (§18, decision 9);
+//!   loads and stores, `vld1q_u8(ptr)`, `_mm_loadu_si128(ptr)`), except a
+//!   load or store of the admitted table (`ptr::MEM_INTRINSICS`) in crate
+//!   code, which the narrow reading of existing `unsafe` reads through its
+//!   pointer ([`mem_model`]; docs/DESIGN-UNSAFE-SIMD.md, decided 2026-10-06);
 //! * the extraction records no target, or another architecture than the
 //!   intrinsic's;
 //! * no model has the call's path, or its model is not validated;
 //! * the calling function's body is not compiled with every target feature
-//!   the intrinsic needs (rustc's own rule for a safe call; the model's
-//!   features too): the instruction is then not known to exist on the CPU;
+//!   the intrinsic needs (its `#[target_feature]` set, and the target's
+//!   statically enabled features once they are bound to the build's,
+//!   `Sbmir::static_facts`, amendment A-S3; the model's features too): the
+//!   instruction is then not known to exist on the CPU;
 //! * an immediate is outside the model's range, or an argument or the
 //!   result does not have the model's type (rustc refuses both at compile
 //!   time, so a well-formed extraction never has them).
@@ -105,12 +107,23 @@ pub fn core_ty_text(t: CoreTy) -> String {
 /// the call is not read.
 pub fn model(m: &Sbmir, a: &ArchCall, body_features: &[String]) -> Result<&'static CoreModel, String> {
     if !a.safe || a.pointer {
-        let what = if a.pointer { "takes or returns a raw pointer (a load or a store)" } else { "is an `unsafe fn`" };
-        return Err(format!(
-            "the intrinsic `{}` {what}: refused, verified code is safe Rust (DESIGN.md §16.5) and whether shipped `unsafe` SIMD code may be split into safe vector arithmetic and unverified loads and stores is the user's open decision (§18, decision 9); build the vectors with value intrinsics, and leave the loads and stores to unverified host code (DESIGN.md §16.4)",
-            a.path
-        ));
+        let what = if a.pointer { "takes or returns a raw pointer (a load or a store): only the admitted loads and stores of crate code are read, through their pointer (docs/DESIGN-UNSAFE-SIMD.md)" } else { "is an `unsafe fn` that is no admitted load or store" };
+        return Err(format!("the intrinsic `{}` {what}", a.path));
     }
+    checked_model(m, a, body_features)
+}
+
+/// The validated model of an admitted load or store
+/// (`ptr::MEM_INTRINSICS`) called in a body compiled with `body_features`
+/// (its own and the bound static ones), with its row; or why the call is
+/// not read (no row: an aligned, masked, broadcasting, gathering,
+/// scattering, non-temporal or interleaving form, or another intrinsic).
+pub fn mem_model(m: &Sbmir, a: &ArchCall, body_features: &[String]) -> Result<(&'static CoreModel, &'static super::ptr::MemIntrinsic), String> {
+    let row = super::ptr::mem_intrinsic(&a.path).filter(|_| a.pointer).ok_or_else(|| format!("the intrinsic `{}` is no admitted load or store through a pointer (docs/DESIGN-UNSAFE-SIMD.md §1.5: unaligned, unmasked loads and stores whose model is a pure byte reinterpretation)", a.path))?;
+    Ok((checked_model(m, a, body_features)?, row))
+}
+
+fn checked_model(m: &Sbmir, a: &ArchCall, body_features: &[String]) -> Result<&'static CoreModel, String> {
     let (arch, _) = split(&a.path).ok_or_else(|| format!("`{}` is not a `core::arch` path", a.path))?;
     match &m.target {
         Some((_, t)) if t == arch => {}
@@ -128,7 +141,7 @@ pub fn model(m: &Sbmir, a: &ArchCall, body_features: &[String]) -> Result<&'stat
         let mut missing = missing;
         missing.sort();
         missing.dedup();
-        return Err(format!("the intrinsic `{}` needs target feature(s) {}, which the calling function is not compiled with (`#[target_feature(enable = \"..\")]`)", a.path, missing.join(", ")));
+        return Err(format!("the intrinsic `{}` needs target feature(s) {}, which the calling function is not compiled with (`#[target_feature(enable = \"..\")]`) and the target does not enable statically (bound to the build's)", a.path, missing.join(", ")));
     }
     Ok(cm)
 }

@@ -47,6 +47,7 @@ extern crate rustc_span;
 extern crate rustc_hir;
 extern crate rustc_session;
 extern crate rustc_abi;
+extern crate rustc_target;
 extern crate rustc_public;
 extern crate sha2;
 extern crate rustc_public_bridge;
@@ -103,6 +104,15 @@ fn main() {
     if !rest.iter().any(|a| a.starts_with("--cap-lints")) {
         dargs.extend(["--cap-lints".to_string(), "warn".to_string()]);
     }
+    // the MIR optimization level is pinned (`SBMIR_MIR_OPT_LEVEL`, by default
+    // 1, `cargo check`'s own) and recorded; the build refuses another
+    // (`docs/mir-lift.md` §20.1). Last on the command line, so it wins.
+    let level = std::env::var("SBMIR_MIR_OPT_LEVEL").unwrap_or_else(|_| "1".into());
+    if level.parse::<u8>().is_err() {
+        eprintln!("sandblaster-mirx: SBMIR_MIR_OPT_LEVEL={level:?} is no MIR optimization level");
+        std::process::exit(2);
+    }
+    dargs.push(format!("-Zmir-opt-level={level}"));
     let mut cb = Driver { done: false };
     let ran = rustc_driver::catch_fatal_errors(|| rustc_driver::run_compiler(&dargs, &mut cb));
     if ran.is_err() || !cb.done {
@@ -511,9 +521,28 @@ fn extract<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> ControlFlow<(), ()> {
     let _ = writeln!(out, "(crate {})", q(&krate.name));
     let _ = writeln!(out, "(module {})", q(&prefix));
     let _ = writeln!(out, "(overflow-checks {})", if tcx.sess.overflow_checks() { "on" } else { "off" });
+    // the MIR optimization passes that ran (what the MIR is the image of)
+    let _ = writeln!(out, "(mir-opt-level {})", tcx.sess.mir_opt_level());
     // the target the MIR was built for (its `core::arch` and `cfg(target_*)`
     // code is that target's): the build refuses MIR of another architecture
     let _ = writeln!(out, "(target {} {})", q(&tcx.sess.target.llvm_target), q(&tcx.sess.target.arch.to_string()));
+    // the reading of existing `unsafe` (docs/DESIGN-UNSAFE-SIMD.md): this
+    // printer writes raw pointer types, `&raw`, pointer casts, each
+    // function's `unsafe` and locality, and the target's static facts
+    let _ = writeln!(out, "(unsafe-reading 1)");
+    // the statically enabled target features (`cfg(target_feature)`, as the
+    // build's `CARGO_CFG_TARGET_FEATURE` lists them), the byte order, and
+    // the flags they come from (`-C target-cpu`, `-C target-feature`): the
+    // build refuses an extraction whose features are not its own
+    // (the stable ones: the nightly's `cfg` also lists unstable features,
+    // which the stable build's `CARGO_CFG_TARGET_FEATURE` leaves out)
+    let stable: BTreeSet<&str> = tcx.sess.target.rust_target_features().iter().filter(|(_, s, _)| matches!(s, rustc_target::target_features::Stability::Stable)).map(|(n, _, _)| *n).collect();
+    let mut statics: Vec<String> = tcx.sess.target_features.iter().map(|f| f.to_string()).filter(|f| stable.contains(f.as_str())).collect();
+    statics.sort();
+    let _ = writeln!(out, "(target-static-features{})", statics.iter().map(|f| format!(" {}", q(f))).collect::<String>());
+    let _ = writeln!(out, "(endian {})", tcx.sess.target.endian.as_str());
+    let _ = writeln!(out, "(target-cpu {} {})", tcx.sess.opts.cg.target_cpu.as_deref().map(q).unwrap_or_else(|| "default".into()), q(&tcx.sess.target.cpu));
+    let _ = writeln!(out, "(target-feature-flags {})", q(&tcx.sess.opts.cg.target_feature));
     let _ = writeln!(out, "(exclude{})", exclude.iter().map(|e| format!(" {}", q(e))).collect::<String>());
     for (f, h) in &ex.spans.files {
         let _ = writeln!(out, "(source {} {})", q(f), q(h));
@@ -598,6 +627,17 @@ impl<'tcx> Ex<'tcx> {
         let _ = writeln!(s, "  {item}");
         if let Some((f, l, c)) = self.spans.loc(inst.def.span()) {
             let _ = writeln!(s, "  (span {} {l} {c})", q(&f));
+        }
+        // a function of the extracted crate (`local`; the narrow reading of
+        // pointers applies to crate code only), and a declared `unsafe fn`
+        // (`unsafe`; a call from crate code to a library one outside the
+        // admitted pointer operations is refused)
+        let (local, unsafe_fn) = self.fn_marks(inst);
+        if local {
+            let _ = writeln!(s, "  (local)");
+        }
+        if unsafe_fn {
+            let _ = writeln!(s, "  (unsafe)");
         }
         // the target features rustc compiles the body with (its own
         // `#[target_feature]` and what they imply; a closure's inherited):
@@ -770,6 +810,12 @@ impl<'tcx> Ex<'tcx> {
                 RigidTy::Ref(_, e, m) => {
                     let e = self.ty(e);
                     format!("(ref {} {e})", if matches!(m, Mutability::Mut) { "mut" } else { "shared" })
+                }
+                // a raw pointer (`*const T`, `*mut T`): the reader decides
+                // which pointee types it reads (docs/DESIGN-UNSAFE-SIMD.md §1.2)
+                RigidTy::RawPtr(e, m) => {
+                    let e = self.ty(e);
+                    format!("(ptr {} {e})", if matches!(m, Mutability::Mut) { "mut" } else { "const" })
                 }
                 RigidTy::Adt(def, args) => {
                     // a `#[repr(simd)]` vector (stdarch's `uint8x16_t`,
@@ -1126,6 +1172,8 @@ impl<'tcx> Ex<'tcx> {
                     CastKind::PointerCoercion(PointerCoercion::Unsize) => "unsize".to_string(),
                     CastKind::PointerCoercion(PointerCoercion::ReifyFnPointer(_)) => "reify-fn-pointer".to_string(),
                     CastKind::Transmute => "transmute".to_string(),
+                    // between raw pointers (`*mut u8 as *const u8`, `p.cast()`)
+                    CastKind::PtrToPtr => "ptr-to-ptr".to_string(),
                     other => format!("(unsupported {})", q(&format!("{other:?}"))),
                 };
                 let (x, t) = (self.operand(x), self.ty(*t));
@@ -1144,6 +1192,14 @@ impl<'tcx> Ex<'tcx> {
                 format!("(ref {k} {})", self.place(p))
             }
             Rvalue::CopyForDeref(p) => format!("(use (copy {}))", self.place(p)),
+            // `&raw const place` / `&raw mut place` (rustc's pointer formation)
+            Rvalue::AddressOf(k, p) => match k {
+                RawPtrKind::Mut => format!("(addr-of mut {})", self.place(p)),
+                RawPtrKind::Const => format!("(addr-of const {})", self.place(p)),
+                // a raw borrow whose only use is its metadata (a slice's
+                // length: rustc's `s.len()` of a `&mut [T]`, without a reborrow)
+                RawPtrKind::FakeForPtrMetadata => format!("(addr-of fake {})", self.place(p)),
+            },
             Rvalue::Discriminant(p) => format!("(discr {})", self.place(p)),
             Rvalue::Len(p) => format!("(len {})", self.place(p)),
             Rvalue::Repeat(o, n) => {
@@ -1175,6 +1231,12 @@ impl<'tcx> Ex<'tcx> {
                 let (p, r) = (self.place(p), self.rvalue(r));
                 Some(format!("(assign {p} {r}{at})"))
             }
+            // storage markers, in the unoptimized window extraction only
+            // (`-Zmir-opt-level=0`): the window rule reads a local's death
+            // inside a pointer's window (docs/DESIGN-UNSAFE-SIMD.md §2.6);
+            // the readings give them no meaning
+            StatementKind::StorageLive(l) if self.tcx.sess.mir_opt_level() == 0 => Some(format!("(storage-live {l})")),
+            StatementKind::StorageDead(l) if self.tcx.sess.mir_opt_level() == 0 => Some(format!("(storage-dead {l})")),
             // no runtime meaning: storage markers, borrow-checker-only
             // statements, coverage counters
             StatementKind::StorageLive(_)
@@ -1316,6 +1378,22 @@ impl Ex<'_> {
         let Some(GenericArgKind::Type(st)) = args.0.first() else { return false };
         let erase = |t: &Ty| tcx.erase_and_anonymize_regions(rustc_public::rustc_internal::internal(tcx, *t));
         self.models.iter().any(|(k, ty)| trait_matches(k, &tpath) && erase(ty) == erase(st))
+    }
+
+    /// `(local, unsafe)` of an instance: its definition is in the extracted
+    /// crate; it is a declared `unsafe fn` (a safe `#[target_feature]`
+    /// function is not: its signature is `unsafe` only for function
+    /// pointers). Shims and closures are neither.
+    fn fn_marks(&self, inst: &Instance) -> (bool, bool) {
+        let tcx = self.tcx;
+        let ii = rustc_public::rustc_internal::internal(tcx, inst.clone());
+        let did = ii.def_id();
+        let rustc_middle::ty::InstanceKind::Item(_) = ii.def else { return (did.is_local(), false) };
+        if !matches!(tcx.def_kind(did), rustc_hir::def::DefKind::Fn | rustc_hir::def::DefKind::AssocFn) {
+            return (did.is_local(), false);
+        }
+        let declared_unsafe = matches!(tcx.fn_sig(did).skip_binder().skip_binder().safety(), rustc_hir::Safety::Unsafe);
+        (did.is_local(), declared_unsafe && !tcx.codegen_fn_attrs(did).safe_target_features)
     }
 
     /// The target features rustc compiles an item instance's body with

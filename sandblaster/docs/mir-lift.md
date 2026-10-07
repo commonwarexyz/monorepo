@@ -478,6 +478,41 @@ is of another release (`1.98.x` against `1.98.0-nightly`). Since
 architecture than the build's is refused), each function's target
 features, `core::arch` vector types and intrinsic calls (§20.9).
 
+**The MIR optimization level** (2026-10-06, DESIGN-UNSAFE-SIMD amendment
+A-S1). `optimized_mir` runs rustc's MIR passes of the session's
+`-Zmir-opt-level`; `cargo check` (the extraction) runs level 1, the
+release build that ships level 2. mirx pins the level for the extracted
+crate (`SBMIR_MIR_OPT_LEVEL`, `extract.sh --mir-opt-level N`, default 1,
+the last flag on rustc's command line) and records it, `(mir-opt-level
+N)`. The build refuses an extraction recorded at another level than
+`mir::MIR_OPT_LEVEL` (1): every lock and theorem was made from level-1
+MIR, which both readings read. An extraction without the record is older
+than it; mirx made those with `cargo check`'s default, level 1 (the three
+shipped ones, re-extracted at a pinned level 1, are byte-identical but for
+the two header lines `(mir-opt-level 1)` and `(target ..)`).
+
+A **window extraction** (`#[lift(mir = "m.sbmir", window_mir =
+"m.window.sbmir")]`) is the same module extracted at level 0 (`extract.sh
+.. --mir-opt-level 0`): no optimization, so its accesses and reference
+flow are the source's (level 1 already runs passes such as `CopyProp`,
+`SimplifyLocals` and `RemoveZsts`, which merge and drop locals and
+assignments). Only the window (aliasing) analysis of pointers in crate
+code (`docs/DESIGN-UNSAFE-SIMD.md` §2.6, not built yet) reads it; L and S
+never do. `mir::load_window` refuses it unless it records level 0 exactly
+and has the main extraction's compiler, crate, module, overflow checks,
+target, exclusions, sources (by SHA-256) and roots, and every function of
+the main extraction with the same definition, item, parameters, return
+type, body presence and target features (its other locals and its blocks
+differ by construction, and it may follow library functions the main one
+does not). Pinning level 0 for the main extraction instead was measured
+on 2026-10-06: varint kept its 63 theorems and its lock, but the
+structured reading refused six MMR functions and the verifier's `Subtree`
+code (`checked_add` read `_0` before it is set; a `&str` constant
+dereferenced; a zero-sized closure value; type errors), so the MMR and the
+verifier would lose their theorems and locks. L itself read the same
+instances with the same unmodeled constructs, all in the host's codec
+impls.
+
 Several modules of one crate are extracted together (`SBMIR_MODULE="a,b"`;
 calls between them are calls by name), open traits at their declared
 instance (`SBMIR_INSTANCE`, §19.6), and the impls of formatting and hashing
@@ -616,10 +651,13 @@ verified build checks every lifted function's theorem (the gate of §20.6),
 so the structured reading of §20.2 (`read.rs`), the control-flow analyses
 (`cfg.rs`), the walker that proves the theorems (`crate::mir::simproof`)
 and its driver (`crate::mir::checked`: planning, order, the verdict
-cache, reports) are untrusted proposers: a misreading there fails a theorem, never
-a verdict. Trusted: L's generator (`mir/literal.rs`) and library
+cache, reports) and the diagnostic pass over `unsafe`
+(`crate::mir::unsafe_diag`, §20.10) are untrusted proposers: a misreading
+there fails a theorem, never a verdict. Trusted: L's generator (`mir/literal.rs`) and library
 (`mir/literal.core`), its reading of `core::arch` calls (`mir/arch.rs`,
-§20.9), the statement generator (`mir/stmt.rs`), the parse
+§20.9), the narrow reading's tables and window rule (`mir/ptr.rs`,
+`mir/window.rs`, §20.10; the build's codegen flags in `target.rs`), the
+statement generator (`mir/stmt.rs`), the parse
 L reads (`mir/ir.rs`, `mir/sexp.rs`), the names and load checks of
 `mir/mod.rs`, the printer `sandblaster-mirx`, the lift glue that lists
 each function read from MIR with its instance (`lift::MirContract`; that
@@ -786,8 +824,10 @@ outcome.
 | `Vec<T, Global>`, `Copied<slice::Iter<&[u8]>>`, a library newtype of a host model alias (`Digest([u8; 32])`) | the models `List(T)`, `Slice (Slice U8)`, the field's type |
 | core's `slice::Iter<'_, T>` (by exact path) | `Tuple2(Slice T, Usize)`: the slice and the index of the element it yields next (its raw pointers are never read) |
 | any other library ADT | L's own inductive (constructors `v<i>_<Name>`, MIR field types) |
+| a union (`(kind union)`: `MaybeUninit`, `LazyLock`'s `Data`, reached through followed library MIR) | the same inductive, but only to hold a union value whole (a move or a copy): every access to a field is not modeled (below) |
 | a `core::arch` vector `(simd "core::arch::<arch>::<name>" lane n)` (§20.9) | its model representation `Array lane' lanes'` (`intrinsics::VecTy`), when rustc lays it out in as many bits |
-| `u128`, `i128`, `char`, anything else (raw pointers, function pointers, trait objects) | not modeled: the local's slot is `mir::Unmodeled` and every use of it `None` (before stage cs-assurance, `u128`/`i128` were read as 64-bit words) |
+| `u128` | the pair of its 64-bit words, low word first, `Tuple2(U64, U64)` (C4's slice, stage neon-mul): held, moved, and read and written through its bytes (§20.10); every operator, cast and constant of it is not modeled (`None`, named) |
+| `i128`, `char`, anything else (raw pointers outside §20.10, function pointers, trait objects) | not modeled: the local's slot is `mir::Unmodeled` and every use of it `None` (before stage cs-assurance, `u128`/`i128` were read as 64-bit words) |
 
 **Data-free values.** A read of a place whose type holds no data (`()`,
 the empty tuple, a closure without captures, a function item) is that
@@ -810,7 +850,33 @@ place is evaluated). Reading and writing through a code
 (`deref__<T>`/`write__<T>`) follows the path in the root's current value,
 each step a field match or an array element, and is `None` on a path that
 does not lead to a `T`. `&mut place` is the code of the place; `&mut *r`
-extends the code `r` holds; `&place` is the value of the place.
+extends the code `r` holds; `&place` is the value of the place. The
+projections after the `Deref` of a `&mut` apply to its referent's type
+(`(*r)[i]` of a `&mut [T]` is element `i` of the slice). A code's step
+`PRange(lo, hi)` (the halves of `<[T]>::split_at_mut`, §20.10) is the
+elements `lo..hi` of an array or a slice: element `i` of it is element
+`lo + i` (`mir::range_index`: `None` unless `lo <= hi <= len` and `i <
+hi - lo`), the range read whole is a slice (`mir::slice_range`,
+`mir::array_range`), and it is never written whole.
+
+**Unions** (2026-10-06, DESIGN-UNSAFE-SIMD amendment A-S2). A union's
+fields overlap, so reading one is a type pun (`unsafe` in Rust, and
+possibly in followed library MIR, where the lift's `unsafe` refusal never
+looks); read as the struct its adt-def lists it would be a wrong value.
+The parse (`ir::refuse_union_access`, trusted) makes every access to a
+union's fields unsupported, so L reads it as stuck and S refuses it: a
+`Field` (or `Downcast`) projection of a place of union type (a read, a
+write, a borrow of the field, through a reference or not), a union's
+aggregate (`(union-field f)`), and a constant of union type (rustc's
+destructuring of a union constant lists every field at offset 0). A union
+moved or copied whole is read as before, and a union is never a library
+newtype read as its field (`ModuleNames::transparent_path`). A place behind
+a `Deref` of anything but a reference has no type in the parse; both
+readings refuse that `Deref` already. The three shipped extractions reach
+`MaybeUninit` and `LazyLock`'s `Data` only as field types of other types,
+never accessed: `tests/mir.rs`
+`every_checked_in_extraction_is_scanned_for_unions` scans every checked-in
+`.sbmir` and pins that list.
 
 **Statements and rvalues**
 
@@ -834,6 +900,7 @@ extends the code `r` holds; `&place` is the value of the place.
 | signed `Div`, `Rem`, unchecked operations, `CheckedMul` | not modeled |
 | `Not`, `Neg` (signed) | `#not`, `#wneg` on the bits |
 | `PtrMetadata` of `&[T]` | its length |
+| `Len(P)`; rustc's `t = &raw const (fake) P; d = PtrMetadata(move t)` for `s.len()` of a `&mut [T]` (only storage markers between; the parse fuses the pair into `d = Len(P)`, and a fake raw borrow with any other use is not modeled) | an array's `N`; a slice place's length, read through its code |
 | `IntToInt` | the bits truncated, zero-extended from an unsigned type, sign-extended (`mir::sext`) from a signed one; a `bool` is 0 or 1 |
 | `Transmute` of `u16`/`u32`/`u64` to `[u8; n]`, and of `[u8; n]` to the word of `n` bytes | its little-endian bytes (the targets), the word whose little-endian bytes they are (`uN::to_le_bytes`, `uN::from_le_bytes`) |
 | `Unsize` of `&[T; N]` to `&[T]` | the slice (`None` past `isize::MAX`) |
@@ -1120,11 +1187,11 @@ checks test it, and test that the theorems catch what they should:
 
 *Added 2026-10-06 (capability C8, first slice; DESIGN.md §16.4).* Safe
 SIMD code is read from rustc's MIR onto the target models of
-`sandblaster/targets` (DESIGN.md §1.1 item 4), in both readings. Pointer
-loads and stores, and any `unsafe`, stay refused. Verified code is safe
-Rust (DESIGN.md §16.5, decision 1). Whether shipped `unsafe` SIMD code may
-be split into safe vector arithmetic and unverified loads and stores is
-the user's open decision (DESIGN.md §18, decision 9).
+`sandblaster/targets` (DESIGN.md §1.1 item 4), in both readings. The
+loads and stores through raw pointers that Commonware's engines already
+contain are read by §20.10's narrow reading of existing `unsafe` (the
+user's decision of 2026-10-06: "We need to support this"); every other
+`unsafe` stays refused. Sandblaster never adds `unsafe` to shipped code.
 
 **The extraction** (`sandblaster-mirx`, trusted as a printer).
 
@@ -1166,7 +1233,8 @@ read only when every one of these holds, and is otherwise **stuck** at its
 block (the function has no theorem; `LFn::faults` names the reason):
 
 1. the intrinsic is declared safe and takes and returns no raw pointer
-   (`vld1q_u8(ptr)`, `vst1q_u8`, `_mm_loadu_si128` are refused, named);
+   (`vld1q_u8(ptr)`, `vst1q_u8`, `_mm_loadu_si128` are §20.10's loads and
+   stores, read only there; any other pointer intrinsic is refused, named);
 2. the extraction records its target, of the intrinsic's architecture;
 3. a core model has the call's exact path;
 4. the model is **validated**: the fail-closed verdict of
@@ -1180,10 +1248,15 @@ block (the function has no theorem; `LFn::faults` names the reason):
 6. the calling function's body is compiled with every target feature the
    intrinsic needs — rustc's codegen set of the intrinsic and the model's
    registered features, all among the body's (its `#[target_feature]` and
-   what they imply). This is rustc's own rule for a safe call (since Rust
-   1.86 statically enabled features do not count: "the neon target feature
-   being enabled in the build configuration does not remove the
-   requirement to list it in `#[target_feature]`"); L checks it again;
+   what they imply) or among the target's **static facts**: the features
+   the target enables statically, counted only once `mir::load` has bound
+   them to the build's own (§20.10, A-S3; a CPU that runs the binary has
+   them). For a safe call this is rustc's own rule with the static facts
+   added (since Rust 1.86 rustc does not count them for a safe call: "the
+   neon target feature being enabled in the build configuration does not
+   remove the requirement to list it in `#[target_feature]`"; inside
+   `unsafe` rustc lets a body without the features call the intrinsic, and
+   the static facts are what makes that call defined); L checks it again;
 7. the immediates are as many as the model's, each in its range, and the
    arguments and the destination have the model's types.
 
@@ -1267,10 +1340,12 @@ does not list (`_mm_set_epi64x`, `_mm_set_epi32`) is refused by S even when
 L could read its model. An intrinsic without a model (`vaddq_u8`,
 `vextq_u8`, `vgetq_lane_u8`, `_mm_srli_epi64`, `_mm_set1_epi8`) is
 refused by both. Laws whose reference has another
-shape than the model at a lane condition need a case per lane value (the
-PSHUFB lane lemma of `tests/simd.rs`: 256 cases); a closer that splits an
-array equation into lanes and decides each lane's conditions is the next
-prover step.
+shape than the model at a lane condition (PSHUFB's `if`, a reference that
+reads `t[x & 15]` where TBL tests `x & 15 < 16`) needed a case per lane
+value (a PSHUFB lane lemma of 256 cases); since 2026-10-07 the lane
+closer proves them (`auto::lanes`, untrusted, DESIGN.md §16.4: the vector
+equation split into lanes, each decided by a case analysis on its
+lookups' index tests).
 
 *Pinned by:* `tests/simd.rs` (the NEON fixture verified in place with its
 native conformance run, its twins, the x86 fixture, fault injection of an
@@ -1280,3 +1355,265 @@ nibble multiply's reading against the hardware, each refusal with its
 reason; `an_intrinsic_call_in_mir_without_its_target_is_not_read`; the
 parse's twins in `the_parse_refuses_what_it_would_have_guessed`),
 `tests/hardware.rs` (`ghost_code_reads_a_vector_as_the_array_of_its_lanes`).
+
+#### 20.10 Existing `unsafe`: the narrow reading of raw-pointer loads and stores
+
+*Added 2026-10-07 (stage "unsafe-reading"; docs/DESIGN-UNSAFE-SIMD.md
+with its amendments A-S1..A-S9; its implementation record).* The user's
+decision of 2026-10-06 is that Commonware's existing `unsafe` SIMD code —
+the Reed–Solomon engines' raw-pointer loads and stores — is verified as
+written, through a narrow, proof-checked reading that proves every access
+in bounds. Sandblaster never adds `unsafe` to shipped code; it reads the
+`unsafe` already there, through this reading only. Everything else that
+is `unsafe` stays refused, by name.
+
+**What the reading admits.** In a function of the crate (`(local)` in the
+extraction), and nowhere else:
+
+* **formations** of a raw pointer from a reference: `<[T]>::as_ptr`,
+  `<[T]>::as_mut_ptr`, `ptr::from_ref`, `ptr::from_mut` (§ "Helpers"), and
+  `&raw const`/`&raw mut` of a place;
+* **moves**: `add(k)`, `sub(k)` (a `usize` count), `offset(k)` (an
+  `isize`), each by `k · size_of::<T>()` bytes, and MIR's `Offset`;
+* **casts**: `cast::<U>()`, `cast_mut()`, `cast_const()`, MIR's
+  `PtrToPtr` — the same pointer;
+* **loads and stores**: the `core::arch` intrinsics of the trusted table
+  `mir::ptr::MEM_INTRINSICS` (13 rows: NEON `vld1q`/`vst1q` of `u8`, `u32`,
+  `u64`, `vld1_u8`; SSE2, AVX and AVX-512 unaligned 128-, 256- and 512-bit
+  loads and stores), each with its byte count, its alignment obligation
+  and the stdarch implementation it was read from.
+
+A raw pointer has no other use in the subset: it is never compared,
+converted to an integer, dereferenced as a place (`*p`), stored, returned,
+passed to a function of the crate, or held across a call that is not one
+of the above.
+
+**The extraction** (`sandblaster-mirx`, trusted as a printer).
+
+| `.sbmir` | meaning |
+| --- | --- |
+| `(unsafe-reading 1)` | printed by a mirx that prints what the narrow reading needs (an older extraction keeps the blanket refusal: `unsafe` in a lifted function is refused with "extract it again") |
+| `(target-static-features "aes" .. "neon" ..)` | the target's statically enabled features, as rustc's session has them (its stable features: the ones the build's `CARGO_CFG_TARGET_FEATURE` lists) |
+| `(endian little)` | the target's byte order |
+| `(target-cpu default "apple-m1")` | the `-C target-cpu` of the extraction (`default`, or the CPU given) and the target's default CPU |
+| `(target-feature-flags "")` | the extraction's `-C target-feature` flags |
+| `(local)`, `(unsafe)` on a function | a function of the extracted crate; a declared `unsafe fn` (not a safe `#[target_feature]` one) |
+| `(ptr mut T)`, `(ptr const T)` | a raw pointer type |
+| `(cast ptr-to-ptr ..)`, `(addr-of mut P)` | MIR's `PtrToPtr` cast and `&raw mut P` (`RawPtrKind`) |
+| `(storage-live l)`, `(storage-dead l)` | at `-Zmir-opt-level=0` only (the window extraction): a local's storage markers |
+
+The parse (`ir.rs`, trusted) reads each exactly.
+
+**Library `unsafe` functions** (amendment A-S7). A call of a library
+function declared `unsafe fn` from crate code is refused ("a call of the
+library `unsafe fn` `core::ptr::read`, outside the admitted pointer
+operations"), unless it is one of the admitted helpers, which are matched
+by the **exact path of their definition and the instance's exact
+signature** (parameter and result types, the pointer's mutability, and
+whether it is a declared `unsafe fn`: `mir::ptr::HELPERS`), never by name:
+a crate function named `add`, or `byte_add` beside `add`, is no helper
+(`tests/unsafe_simd.rs`, `calls_add`, `byte_offset`). The helpers' MIR
+bodies are printed but never read: L applies the table's meaning.
+
+**Types** (amendment A-S6, `mir::ptr::plain`). A pointee or base type is
+admitted only when every byte string of its size is a value: unsigned
+integers (a `u128` as its two 64-bit words, its bytes the low word's
+little-endian bytes then the high word's: C4's slice), `core::arch`
+vectors with a model representation, and arrays of them. Checked structurally, so it holds no
+`UnsafeCell` and no niche: `bool`, `char`, signed integers, structs,
+enums, references and pointers are refused, named ("`bool` has a niche:
+its bytes are no plain reinterpretation, and a store could forge an
+invalid value"). A value of an admitted type is its little-endian bytes:
+a `uN` its `to_le_bytes`, an array its elements' in order, a vector its
+lanes' (the target is little-endian, `(endian little)`, checked at load).
+
+**The memory model in L** (`literal.rs`, `literal.core`, trusted). A
+pointer is a value of `mir::Ptr(C)`:
+
+* `PMut(code, off, size)`: a mutable formation's base, held as its
+  reference code (the place, §20.4), with the byte offset and the base's
+  size in bytes (static, or a slice's length times its element size);
+* `PShr(bytes, off)`: a shared formation's snapshot of the base's bytes
+  (a `&T` is read as its value at the formation; the window rule's W3 and
+  the absence of `UnsafeCell` make the snapshot equal memory at every use).
+
+A move to an offset outside `0..=size` is `Stuck` (Rust's `add`, `sub` and
+`offset` are undefined behaviour outside the allocation, access or not;
+the base is stricter than the allocation). A **load** of `n` bytes at
+`off` reads `off..off+n` of the base's bytes (through the code, its
+current value, for `PMut`; the snapshot for `PShr`), `Stuck` past the
+end, and applies the row's validated model to them. A **store** writes the
+model's bytes there and writes the base back through the code; through
+`PShr` it is `Stuck` (a store through a shared formation is undefined
+behaviour, `cast_mut()` or not), and so past the end. A row that needs an
+alignment `a > 1` is read only for a base aligned to `a` (its element's
+size) and an offset that is a multiple of `a` (else `Stuck`, even where
+the address happens to be aligned); every current row needs 1.
+
+**Pure reinterpretation** (amendment A-S9, `mir::ptr::pure_reinterpretation`).
+A row is read only when its validated model is a pure byte
+reinterpretation: the model's memory type is its vector type, of the row's
+byte count, and the kernel finds the model's body, applied to a fresh
+variable, convertible with that variable. So a load is its bytes as lanes
+and a store its lanes as bytes, as stdarch's implementation (a byte copy:
+`read_unaligned`, `write_unaligned`, `copy_nonoverlapping`) and the
+instruction agree.
+
+**The alignment obligation** (amendment A-S5). Each row records the
+alignment its contract needs and the stdarch function it was read from.
+`tests/unsafe_simd.rs`
+(`the_admitted_rows_are_unaligned_copies_in_the_toolchains_stdarch`)
+reads the toolchain's own stdarch source at every run and fails unless
+every row is an unaligned copy of its bytes there, so a toolchain bump
+that changes one fails the build's tests.
+
+**The window rule** (`mir/window.rs`, trusted; DESIGN-UNSAFE-SIMD §2.6,
+A-S1, A-S8). It runs on the unoptimized window extraction
+(`window_mir = ".."`, §20.1), per formation of crate code. A pointer
+family is the formation's pointer and every pointer derived from it by
+the admitted moves and casts; its window runs from the formation to the
+family's last use. Its rules:
+
+* **W0**: the family's pointers are live only inside the window;
+* **W1**: no pointer of the family escapes: it is not returned, stored
+  into memory, passed to a function that is not an admitted operation, or
+  derived into anything but a member or an admitted load or store;
+* **W2**: nothing reaches the base but the family inside the window: no
+  use of the reference it was formed from, or of any reference or place
+  that reaches the same memory (the base's ancestors: the reference, the
+  place it borrows, an `unsize` source), reads included — which is
+  stricter than both Stacked and Tree Borrows (a read through the parent
+  leaves a raw pointer usable in both) and is the rule's conservative
+  side; storage markers of ancestors that are not the base are not uses;
+* **W3**: a shared formation's base is not written in the window;
+* **W4**: no store through a pointer formed from a shared reference.
+
+Two formations reached from one local are refused. Each formation's
+verdict is carried to the level-1 MIR that L reads by its source span and
+its kind (the helper's path, or `&raw mut`/`&raw const`); L reads a
+formation only when exactly one verdict matches it, and the verdict is
+`Ok`. A verdict names the `&mut` parameters among the base's ancestors
+(A-S8: a `&mut` parameter and its referent cell are the family's base),
+and the build record lists each as an assumption: "`f` forms raw
+pointers from its `&mut` parameter `x`, which aliases no other
+parameter" — Rust's guarantee for `&mut` (A3), which the window rule does
+not check and host `unsafe` could break.
+
+**Feature facts** (amendment A-S3, `mir::load`). The target's static
+features count as facts for both readings only when they are the build's:
+the extraction's static features must equal the build's
+`CARGO_CFG_TARGET_FEATURE`, the extraction must be made without
+`-C target-cpu` or `-C target-feature`, and the build's own rustflags
+(`CARGO_ENCODED_RUSTFLAGS`) must set neither; otherwise the load is
+refused, with the reason. When the build's features are not known, there
+are no static facts (a NEON call outside a `#[target_feature]` function
+is then refused for its feature). A runtime-detected feature with no fact
+(a call into `#[target_feature(enable = "sm4")]` code from a body without
+it) is refused in both readings.
+
+**`IterMut`** (amendment A-S4). `<[T]>::iter_mut`, `IntoIterator::into_iter`
+of an `IterMut` and `<IterMut<'_, T> as Iterator>::next` are models, by
+the exact paths of their definitions (`mir::MODEL_FNS`). In L an `IterMut`
+is the slice's reference code and the index of the next element; `next`
+at an index below the slice's length yields the reference code of that
+element (the slice's code with `PIndex(i)`) and steps the index, else
+`None` with the iterator unchanged. Each element is yielded once, in
+order, so two codes it yields are never the same element: the
+disjointness the write-backs through them rely on.
+`tests/unsafe_simd.rs` breaks it (`literal::test_fault`: every code the
+first element's) and the loop's lemma fails. `Zip` is not modeled yet (the
+transforms' butterflies need it; `mul_neon` does not).
+
+**`split_at_mut`** (stage neon-mul). `<[T]>::split_at_mut(s, mid)` is a
+model, by the exact path of its definition (core's body forms raw
+pointers): a panic where core's panics (`mid > len`), else the codes of
+the halves, `s`'s code with `PRange(0, mid)` and with `PRange(mid, len)`
+(§20.4). The two ranges do not overlap, so the write-backs through them
+never touch the same element, as with `IterMut`'s codes.
+
+**The structured reading** (`read.rs`, untrusted). S holds a pointer as
+the place of its base and a constant byte offset (`Val::Ptr`). A load is
+the intrinsic, typed from its model, applied to the bytes it reads
+(`vld1q_u8([c[16], .., c[31]])`); a store is `let w: [u8; 16] =
+vst1q_u8(v);` and an assignment of the base. Within a family's window S
+holds the base's bytes as the stores left them (the bytes of the base
+before the first store, `let c = x[i];`, or a stored byte), so it never
+reads the state back. S reads byte-array bases at constant offsets; any
+other base or offset is refused in S (L still reads it). An `IterMut` is
+its index; `next` is `let i = iter; let c = i < x.len();`, and the switch
+on its result is `if c { iter = i + 1; .. }`. A `&mut [T]` parameter is
+the state `&[T]`, whose element assignment the elaborator reads as L's
+write through a code (`slice::mk T (fst x) (seq::update ..)`). The lift
+drops the `unsafe` marker of a function it reads this way (`unsafe` has
+no run-time meaning). In ghost code, and in lifted code, an admitted load
+or store intrinsic is typed from its model (`[u8; 16] -> uint8x16_t`,
+`uint8x16_t -> [u8; 16]`), so laws and proofs can speak of them.
+
+**The walker** (untrusted). A store through a code into a slice's element
+leaves the next access through it reading the element back from the
+updated slice (`index(update(l, i, v), i)`), which no evaluation reduces on
+a symbolic slice: the walker rewrites it to `v` by `seq::index_update_same`
+as soon as it appears (a transport along the lemma, checked by the
+kernel). A literal side too large for the kernel's abstraction (which
+reads a value back as a tree, its closures' environments substituted at
+each occurrence) is abstracted by a sharing read-back
+(`Walker::abstract_dag`); the kernel checks the motive as any other.
+
+**Refused, by name** (the lift's diagnostic pass `mir/unsafe_diag.rs`,
+untrusted, then L, stuck): every other library `unsafe fn` call; a raw
+pointer dereferenced as a place; any other pointer operation; a pointer
+intrinsic without a row; an `unsafe` intrinsic that is not a load or a
+store; a window rule's failure; a type that is not plain; a `transmute`
+written in the crate; an extraction older than this reading.
+
+**The Miri gate** (`front/tests/miri/run.sh`; DESIGN-UNSAFE-SIMD risk 1,
+A-S1). The positive pointer fixtures, from the same source files the
+reading verifies, run clean under Miri with Stacked Borrows and with Tree
+Borrows; each twin whose refusal is about undefined behaviour (an access
+past the end, an offset past one beyond it, a store through a shared
+formation, a write through the base's reference inside the window, a
+second formation inside the first's window) is reported as undefined
+behaviour by at least one of the two models. `run.sh --engines` runs
+Commonware's NEON engine (`mul`, `fft`, `ifft`) against its naive engine
+under both models (`tests/miri/engines`, with a `cpufeatures` that
+detects the build's static features under Miri, the published one
+detecting none). Run it at every toolchain bump, with the re-extraction
+of every `.sbmir`, and whenever the window rule or L's pointer constructs
+change (clean on 2026-10-07, `nightly-2026-06-21`, in 17 minutes). A
+clean run with `--engines` writes `tests/miri/GATE.txt`: the
+toolchain and the SHA-256 of every file it covered (the fixtures, the
+harnesses, the `cpufeatures` patch, `engine_neon.rs`).
+`tests/unsafe_simd.rs` fails while that record names another toolchain
+than the pinned one, or a covered file has changed since, so a bump
+cannot skip the gate unnoticed.
+
+**Trusted** (code lines, no comments or tests): `mir/ptr.rs` 414 (new);
+`mir/window.rs` 415 (new); `literal.rs` +263 (the pointer type, the
+formations, moves, casts, loads and stores, the helpers' meaning, the
+refusal of library `unsafe fn` calls, the static facts, the `IterMut`
+model, slice cells); `literal.core` +95 (`mir::Ptr`, the byte views,
+`mem::read`, `mem::write`, `mem::moved`, `mir::slice_set`); `ir.rs` +48;
+`mod.rs` +63 (the A-S3 binding, the window's verdicts, the `IterMut`
+models); `arch.rs` +4; `target.rs` +29 (the build's codegen flags);
+`mirx` +39; the lift glue ≈ +40. In the ghost language (TCB item 6): the
+loads' and stores' types from their models in ghost code. Stage neon-mul
+(2026-10-07) added 118: in `literal.rs` +49 (`u128` held as its words,
+`PRange` in the codes' follow and update, `split_at_mut`, `Len`, the
+referent's type after a `Deref` of a `&mut`), `literal.core` +17
+(`mir::range_index`, `mir::slice_range`, `mir::array_range`, the
+`PRange` step), `ir.rs` +41 (the fake raw borrow fused with its
+metadata), `mod.rs` +3 (the `split_at_mut` model; `u128` in names),
+`ptr.rs` +8 (`u128` plain, its size and byte views) and one changed line
+of `mirx` (the fake raw borrow printed).
+
+*Pinned by:* `tests/unsafe_simd.rs` (the window verdicts of the fixtures;
+L against rustc on concrete inputs; each twin stuck or refused in L with
+its reason; each refused by name when lifted; the feature binding's
+twins; the theorems of every function of the chunk multiplier, its
+`IterMut` loop's lemma included; the vector and row laws; fault injection
+of an offset, a load's width, a load's family, a formation's kind and the
+`IterMut` model's disjointness; the admitted rows against the toolchain's
+stdarch; the Miri gate's record against the pinned toolchain and the
+covered files, with its twins), `tests/simd.rs` (an extraction older than
+this reading), `tests/mir.rs` (the window extraction's load),
+`front/tests/miri/run.sh`.

@@ -123,10 +123,31 @@ pub struct LoopAttach {
     pub decreases: Option<syn::Expr>,
     pub invariants: Vec<syn::Expr>,
     pub ensures: Vec<syn::Expr>,
+    /// `requires(..)`: only an element attachment's (its function's
+    /// precondition); the lift refuses it on a loop.
+    pub requires: Vec<syn::Expr>,
     pub at_start: Vec<syn::Stmt>,
     pub steps: Vec<syn::Stmt>,
     pub at_end: Vec<syn::Stmt>,
     pub after: Vec<syn::Stmt>,
+    /// An element attachment (`#[lift_attach(path, loop_nr = k, element)]`):
+    /// the loop's body on one element of a slice (the element an `IterMut`
+    /// yields, or the one a loop inside another loop's body works on
+    /// through references into it) is read as a function of that element
+    /// ([`Reader::extract_element`]), opaque, with this contract.
+    pub element: Option<ElementAttach>,
+}
+
+/// An element attachment's contract and proof steps.
+#[derive(Clone, Debug, Default)]
+pub struct ElementAttach {
+    pub ensures: Vec<syn::Expr>,
+    /// `requires(..)`: what the body needs of the variables it reads (its
+    /// callers, the loop's iterations, prove it).
+    pub requires: Vec<syn::Expr>,
+    /// `at_start! { .. }`: proof steps before the body (facts about the
+    /// element and the variables it reads).
+    pub at_start: Vec<syn::Stmt>,
 }
 
 /// What the lift knows about the function being read.
@@ -157,6 +178,9 @@ pub struct ReadOut {
     /// Each loop helper (innermost first): what its loop lemma is stated
     /// over (`crate::mir::checked`; a hint, never trusted).
     pub helper_info: Vec<HelperInfo>,
+    /// The element functions built ([`Reader::extract_element`]), by name:
+    /// the walk unfolds them where a loop helper calls them.
+    pub elements: Vec<String>,
 }
 
 /// A loop helper as the reading built it: its name, whether it is a method
@@ -181,6 +205,40 @@ pub struct HelperInfo {
     /// The loop helper whose body holds this loop (`None`: the lifted
     /// function's own body), and whether it is a method helper.
     pub owner: Option<(String, bool)>,
+    /// The helper's parameters that are core's `IterMut` over the referent
+    /// of a `&mut [T]` parameter: (their position among `params`, that
+    /// parameter's local). At the header the literal reading holds such an
+    /// iterator as (the parameter's code, the index).
+    pub iters: Vec<(usize, usize)>,
+    /// A returning helper's references into an element of a state, which
+    /// it rebuilds rather than takes: (the reference's local, the state's
+    /// position among `params`, the position of the element's index among
+    /// the helper's parameters (one of `extra`), the range of the element
+    /// it refers to as the literal reading's `PRange(lo, hi)`, if any). At
+    /// the header the literal reading holds such a reference as the
+    /// state's code with `PIndex(index)` (then `PRange(lo, hi)`).
+    pub derived: Vec<(usize, usize, usize, Option<(u128, u128)>)>,
+    /// The helper's parameters after `params` that carry no local (an
+    /// element's index, `derived`), by name.
+    pub extra: Vec<String>,
+}
+
+/// [`root_locals`], with a `&mut T` local typed as the `T` it refers to (an
+/// element attachment names a loop's element by its variable, as a value).
+pub fn root_locals_deref(m: &Sbmir, nm: &dyn Names, key: &str, params: &[String]) -> Result<Vec<(String, Option<syn::Type>)>, String> {
+    let f = m.fns.get(key).ok_or_else(|| format!("no MIR for `{key}`"))?;
+    let names = local_names(f, params, true);
+    Ok(names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let t = match &f.locals[i].0 {
+                Ty::Ref(true, inner) => Some((**inner).clone()),
+                other => value_ty(other),
+            };
+            (n.clone(), t.and_then(|t| nm.ty(m, &t).ok()))
+        })
+        .collect())
 }
 
 /// The names and subset types of the root function's locals (the lift
@@ -280,6 +338,33 @@ enum Val {
     /// A constant the reading has no expression for (a panic message):
     /// fine to pass along to what never reads it, refused as data.
     Opaque(String),
+    /// A raw pointer of crate code (docs/mir-lift.md §20.10): it has no
+    /// value in the subset; its loads and stores read and write its base.
+    Ptr(Box<PtrVal>),
+    /// `IterMut::next`'s result before its discriminant is tested: `Some`
+    /// of the place (the slice's element at the index stepped over) when
+    /// `cond` (a variable) holds, else `None`; with the iterator's local and
+    /// its value one further, which the `Some` arm sets.
+    Next(syn::Expr, LRef, Key, syn::Expr),
+    /// A `&mut` to a place, held in a constructor's field (`Some(&mut x[i])`).
+    Place(LRef),
+}
+
+/// A raw pointer as the structured reading holds it: its base (the place a
+/// mutable formation's reference names, or a shared formation's base
+/// value), the base's MIR type, and the byte offset (a literal).
+#[derive(Clone, Debug)]
+struct PtrVal {
+    base: PBase,
+    base_ty: Ty,
+    off: u64,
+    mutable: bool,
+}
+
+#[derive(Clone, Debug)]
+enum PBase {
+    Mut(LRef),
+    Shr(syn::Expr),
 }
 
 /// A `&mut` place: the lvalue expression it stands for.
@@ -297,6 +382,11 @@ struct LRef {
     /// the `T` it points to ([`Env::writeback`]): `*r` of a reference to it
     /// is that same `T`.
     inner: bool,
+    /// A subslice of the place (`split_at_mut`'s halves): its first element's
+    /// index in the place and its length. `(*r)[i]` is the place's element
+    /// `off.wrapping_add(i)` (the literal reading's `PRange` then `PIndex`,
+    /// `mir::range_index`, after the bounds check `i < len`).
+    range: Option<(syn::Expr, syn::Expr)>,
 }
 
 #[derive(Clone, Default)]
@@ -314,6 +404,17 @@ struct Env {
     /// although it is carried as a known constructor (bound by `let x = C;`
     /// and not assigned since): the value is in its name already.
     holds: BTreeSet<Key>,
+    /// core's `IterMut` locals (their value: the index of the element they
+    /// yield next) and the slice place each walks; a `&mut` to one, the
+    /// local it points to.
+    iters: HashMap<Key, LRef>,
+    iter_refs: HashMap<Key, Key>,
+    /// A pointer family's window over a byte array (§20.10): the base's
+    /// bytes as the stores so far left them (`c[j]` of the value before the
+    /// first store, else the byte a store wrote), by the base's place. The
+    /// window rule (W2) has the family alone on the base meanwhile, so a
+    /// load or store reads these instead of reading the state back.
+    windows: HashMap<String, Vec<syn::Expr>>,
 }
 
 enum Flow {
@@ -430,7 +531,7 @@ fn rv_locals(r: &Rvalue, out: &mut Vec<usize>) {
             op(a, out);
             op(b, out);
         }
-        Rvalue::Ref(_, p) | Rvalue::Discr(p) | Rvalue::Len(p) => out.push(p.local),
+        Rvalue::Ref(_, p) | Rvalue::Discr(p) | Rvalue::Len(p) | Rvalue::AddrOf(_, p) => out.push(p.local),
         Rvalue::Agg(_, ops) => ops.iter().for_each(|o| op(o, out)),
         Rvalue::Unsupported(_) => {}
     }
@@ -446,8 +547,10 @@ fn kdepth(k: &K) -> usize {
 #[derive(Clone)]
 enum LoopForm {
     While,
-    /// The helper as called (`f__loop0`, `Self::m__loop0`) and its parameters.
-    Helper(syn::Expr, Vec<usize>),
+    /// The helper as called (`f__loop0`, `Self::m__loop0`), its parameters,
+    /// and its parameters that carry no local (an element's index: the
+    /// same in every call, `returning_helper`).
+    Helper(syn::Expr, Vec<usize>, Vec<String>),
 }
 
 #[derive(Clone)]
@@ -483,6 +586,17 @@ struct Reader<'m> {
     /// and the `while` loops written so far per function.
     owner: Option<(String, bool)>,
     whiles: std::collections::BTreeMap<String, usize>,
+    /// core's `IterMut` locals of the lifted function: the slice they walk
+    /// (its place, for a loop's measure) and, when it is a `&mut [T]`
+    /// parameter's referent, that parameter's local (for the loop lemma).
+    iter_slices: HashMap<usize, syn::Expr>,
+    iter_params: HashMap<usize, usize>,
+    /// The name of the variable an `IterMut`'s element is bound to (the
+    /// source's loop variable), by the index variable the element's place
+    /// is indexed with (`chunk` for `x[__i2]`).
+    elem_names: HashMap<String, String>,
+    /// [`ReadOut::elements`].
+    elements: Vec<String>,
 }
 
 fn ident(s: &str) -> syn::Ident {
@@ -547,6 +661,17 @@ fn lit_value(e: &syn::Expr) -> Option<u128> {
     }
 }
 
+/// The names a `let` pattern binds.
+fn pat_names(p: &syn::Pat, out: &mut Vec<String>) {
+    match p {
+        syn::Pat::Ident(pi) => out.push(pi.ident.to_string()),
+        syn::Pat::Type(pt) => pat_names(&pt.pat, out),
+        syn::Pat::Tuple(t) => t.elems.iter().for_each(|q| pat_names(q, out)),
+        syn::Pat::TupleStruct(t) => t.elems.iter().for_each(|q| pat_names(q, out)),
+        _ => {}
+    }
+}
+
 fn ts_mentions(ts: TokenStream, name: &str) -> bool {
     ts.into_iter().any(|t| match t {
         proc_macro2::TokenTree::Ident(i) => i == name,
@@ -560,6 +685,11 @@ fn mentions(e: &syn::Expr, name: &str) -> bool {
 }
 
 fn val_mentions(v: &Val, name: &str) -> bool {
+    // (a mutable pointer names a place, not a value: what it reads is the
+    // place's current value)
+    if let Val::Ptr(p) = v {
+        return matches!(&p.base, PBase::Shr(e) if mentions(e, name));
+    }
     match v {
         Val::E(e) => mentions(e, name),
         Val::C(_, _, fs) => fs.iter().any(|f| val_mentions(f, name)),
@@ -708,6 +838,8 @@ impl<'m> Reader<'m> {
             Val::Z(t) => return self.err(fr, format!("a zero-sized value of type {t:?} used as data")),
             Val::K(v) => return self.err(fr, format!("the discriminant value {v} used as data")),
             Val::Opaque(what) => return self.err(fr, format!("constant {what}")),
+            Val::Ptr(_) => return self.err(fr, "a raw pointer used as a value (it has none in the subset: only its loads and stores are read, docs/mir-lift.md §20.10)"),
+            Val::Next(..) | Val::Place(_) => return self.err(fr, "a `&mut` to a place used as a value (an `IterMut` element)"),
             Val::R(inner) => {
                 let e = paren(self.materialize(fr, inner)?);
                 syn::parse_quote!(&#e)
@@ -793,6 +925,21 @@ impl<'m> Reader<'m> {
                             v
                         }
                         (Some(_), _) => Val::E(self.state_value(r)?),
+                        // an element of a subslice: the place's element `off + i`
+                        (None, Some(Proj::Index(l))) if r.range.is_some() => {
+                            let (off, _) = r.range.clone().unwrap_or_else(|| unreachable!());
+                            let l = *l;
+                            projs.next();
+                            let (iv, _) = self.read(fr, &Place { local: l, proj: vec![] }, env, out)?;
+                            let ie = self.materialize(fr, &iv)?;
+                            let (lv, off) = (paren(r.lv.clone()), paren(off));
+                            t = match t {
+                                Ty::Array(e, _) | Ty::Slice(e) => *e,
+                                other => return self.err(fr, format!("index of {other:?}")),
+                            };
+                            Val::E(syn::parse_quote!(#lv[#off.wrapping_add(#ie)]))
+                        }
+                        (None, _) if r.range.is_some() => return self.err(fr, "a subslice read whole (only its elements are read)"),
                         (None, _) => Val::E(r.lv.clone()),
                     }
                 }
@@ -1268,6 +1415,22 @@ impl<'m> Reader<'m> {
                     (var(&fv), fv)
                 }
                 (Some(_), _) => return self.err(fr, "a write of a whole exploded state through a projection"),
+                // an element of a subslice: the place's element `off + i`
+                (None, Some(Proj::Index(l))) if r.range.is_some() => {
+                    let (off, _) = r.range.clone().unwrap_or_else(|| unreachable!());
+                    let l = *l;
+                    projs.next();
+                    let (iv, _) = self.read(fr, &Place { local: l, proj: vec![] }, env, out)?;
+                    let ie = self.materialize(fr, &iv)?;
+                    let base = r.lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
+                    let (lv, off) = (paren(r.lv.clone()), paren(off));
+                    t = match t {
+                        Ty::Array(e, _) | Ty::Slice(e) => *e,
+                        other => return self.err(fr, format!("index of {other:?}")),
+                    };
+                    (syn::parse_quote!(#lv[#off.wrapping_add(#ie)]), base)
+                }
+                (None, _) if r.range.is_some() => return self.err(fr, "a subslice written whole (only its elements are written)"),
                 (None, _) => {
                     let base = r.lv.to_token_stream().into_iter().next().map(|t| t.to_string()).unwrap_or_default();
                     (r.lv.clone(), base)
@@ -1331,6 +1494,32 @@ impl<'m> Reader<'m> {
     /// `place = v`.
     fn assign(&mut self, fr: usize, p: &Place, v: Val, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
         let key = (fr, p.local);
+        // a `&mut` to a place (an `IterMut` element moved out of its `Some`):
+        // the same place
+        if let Val::Place(r) = &v
+            && p.proj.is_empty()
+        {
+            // (the element's variable, for an element function's parameter)
+            if fr == 0
+                && self.named(fr, p.local)
+                && r.range.is_none()
+                && let syn::Expr::Index(ix) = &r.lv
+                && let syn::Expr::Path(ip) = &*ix.index
+                && let Some(i) = ip.path.get_ident()
+            {
+                self.elem_names.entry(i.to_string()).or_insert_with(|| self.frames[fr].names[p.local].clone());
+            }
+            env.refs.insert(key, r.clone());
+            return Ok(());
+        }
+        // a raw pointer is carried (it has no value in the subset)
+        if matches!(v, Val::Ptr(_) | Val::Next(..)) {
+            if !p.proj.is_empty() {
+                return self.err(fr, "a raw pointer stored into a place (it goes through memory)");
+            }
+            env.vals.insert(key, v);
+            return Ok(());
+        }
         if p.proj.is_empty() && !env.refs.contains_key(&key) {
             let name = self.frames[fr].names[p.local].clone();
             self.invalidate(fr, &name, Some(key), env, out)?;
@@ -1456,6 +1645,8 @@ impl<'m> Reader<'m> {
                 Ok(())
             }
             Stmt::Unsupported(x) => self.err(fr, format!("statement {x}")),
+            // storage markers have no meaning
+            Stmt::Storage(..) => Ok(()),
             Stmt::Assign(p, r, _) => {
                 let key = (fr, p.local);
                 match r {
@@ -1463,11 +1654,28 @@ impl<'m> Reader<'m> {
                         if !p.proj.is_empty() {
                             return self.err(fr, "a `&mut` stored into a place");
                         }
+                        // (a `&mut` to an `IterMut` local, for its `next`)
+                        if q.proj.is_empty() && env.iters.contains_key(&(fr, q.local)) {
+                            env.iter_refs.insert(key, (fr, q.local));
+                        }
                         let lr = self.mut_ref(fr, q, env, out)?;
                         env.refs.insert(key, lr);
                         return Ok(());
                     }
+                    // an `IterMut` moved or copied: the same iterator
+                    Rvalue::Use(Operand::Copy(q) | Operand::Move(q)) if p.proj.is_empty() && q.proj.is_empty() && env.iters.contains_key(&(fr, q.local)) => {
+                        let r = env.iters[&(fr, q.local)].clone();
+                        env.iters.insert(key, r);
+                        self.iter_moved(fr, q.local, p.local);
+                    }
                     Rvalue::Ref(k, _) if k == "fake" => return Ok(()),
+                    // `&mut [T; N]` as `&mut [T]`: the same place (a pointer
+                    // formation looks through it, `ptr::bases`)
+                    Rvalue::Cast(k, Operand::Copy(q) | Operand::Move(q), Ty::Ref(true, _)) if k == "unsize" && p.proj.is_empty() && q.proj.is_empty() && env.refs.contains_key(&(fr, q.local)) => {
+                        let r = env.refs[&(fr, q.local)].clone();
+                        env.refs.insert(key, r);
+                        return Ok(());
+                    }
                     // a `&mut` copied or moved out of a `&mut` local, or out
                     // of the place one points to (`copy (*r)` of a `&mut &mut
                     // T` whose inner reference is held in a state's field):
@@ -1602,7 +1810,7 @@ impl<'m> Reader<'m> {
             env.vals.insert(key, Val::C(t, cv, fs2));
             env.writeback.insert(key);
             env.holds.remove(&key);
-            return Ok(LRef { lv: var(&n), buf: None, fields: None, inner: true });
+            return Ok(LRef { lv: var(&n), buf: None, fields: None, inner: true, range: None });
         }
         let (lv, _) = self.lvalue(fr, q, env, out)?;
         let t = self.place_ty(fr, q)?;
@@ -1611,7 +1819,7 @@ impl<'m> Reader<'m> {
             Ty::Ref(false, inner) if matches!(**inner, Ty::Slice(ref e) if **e == Ty::Int(false, 8)) => Some("buf"),
             _ => None,
         };
-        Ok(LRef { lv, buf, fields: None, inner: false })
+        Ok(LRef { lv, buf, fields: None, inner: false, range: None })
     }
 
     fn rvalue(&mut self, fr: usize, r: &Rvalue, dest_ty: &Ty, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<Val, String> {
@@ -1626,9 +1834,47 @@ impl<'m> Reader<'m> {
                     Ok(self.bind(e, false, t, out))
                 }
             }
+            // between raw pointers: the same pointer
+            Rvalue::Cast(k, a, _) if k == "ptr-to-ptr" => match self.operand(fr, a, env, out)? {
+                (v @ Val::Ptr(_), _) => Ok(v),
+                _ => self.err(fr, "a pointer cast of something that is no pointer of an admitted formation"),
+            },
+            // `Offset(p, k)`: `p` moved by `k` elements
+            Rvalue::Bin(op, a, b) if op == "offset" => {
+                let Ty::Ptr(_, pointee) = self.op_ty(fr, a)? else { return self.err(fr, "`Offset` of something that is no pointer") };
+                let signed = self.op_ty(fr, b)?.signed();
+                self.ptr_moved(fr, a, b, false, signed, &pointee, env, out).map(|p| Val::Ptr(Box::new(p)))
+            }
+            // a division or remainder of two unsigned literals by a divisor
+            // that is not zero (`SHARD_CHUNK_BYTES / 2`): its value (a
+            // constant length or offset)
+            Rvalue::Bin(op, a, b)
+                if matches!(op.as_str(), "div" | "rem")
+                    && let (Ok(Ty::Int(false, _)), Some((ta, x)), Some((_, y))) = (self.op_ty(fr, a), Self::int_const(a), Self::int_const(b))
+                    && x >= 0
+                    && y > 0 =>
+            {
+                let r = if op == "div" { x / y } else { x % y };
+                Ok(Val::E(lit_uint(r as u128, &int_ty_name(ta).unwrap_or_default())))
+            }
             Rvalue::Bin(op, a, b) => {
                 let (e, p) = self.binop(fr, op, a, b, env, out)?;
                 Ok(self.bind(e, p, t, out))
+            }
+            // checked arithmetic on two unsigned literals that does not
+            // overflow (`16 * 2`): its value (a constant offset)
+            Rvalue::Checked(op, a, b)
+                if let (Ok(Ty::Int(false, bits)), Some((_, x)), Some((_, y))) = (self.op_ty(fr, a), Self::int_const(a), Self::int_const(b))
+                    && let Some(r) = match op.as_str() {
+                        "add" => (x as u128).checked_add(y as u128),
+                        "sub" => (x as u128).checked_sub(y as u128),
+                        "mul" => (x as u128).checked_mul(y as u128),
+                        _ => None,
+                    }
+                    && r <= (if bits == 0 { u64::MAX as u128 } else { (1u128 << bits) - 1 }) =>
+            {
+                let tn = int_ty_name(&Ty::Int(false, bits)).unwrap_or_default();
+                Ok(Val::C(dest_ty.clone(), 0, vec![Val::E(lit_uint(r, &tn)), Val::E(syn::parse_quote!(false))]))
             }
             Rvalue::Checked(op, a, b) => {
                 // `(a op b, overflowed)`: the subset's checked operator, whose
@@ -1714,7 +1960,31 @@ impl<'m> Reader<'m> {
                     }
                 }
             }
-            Rvalue::Len(_) => self.err(fr, "`Len`"),
+            // the length of a slice place (the parse's `Len` of rustc's
+            // `PtrMetadata(&raw const (fake) *r)`): a subslice's own, an
+            // array's `N`, else the place's `len()`
+            Rvalue::Len(q) => {
+                // (only of a slice or an array, as the literal reading reads it)
+                if !matches!(self.place_ty(fr, q)?, Ty::Slice(_) | Ty::Array(..)) {
+                    return self.err(fr, "a length of a place that is no slice or array");
+                }
+                if let [Proj::Deref] = q.proj.as_slice()
+                    && let Some(r) = env.refs.get(&(fr, q.local)).cloned()
+                {
+                    if let Some((_, len)) = &r.range {
+                        return Ok(Val::E(len.clone()));
+                    }
+                    if let Some(n) = self.array_len_through(fr, q.local) {
+                        return Ok(Val::E(lit_uint(n as u128, "usize")));
+                    }
+                    let lv = paren(r.lv.clone());
+                    return Ok(Val::E(syn::parse_quote!(#lv.len())));
+                }
+                let (v, _) = self.read(fr, q, env, out)?;
+                let e = paren(self.materialize(fr, &v)?);
+                Ok(Val::E(syn::parse_quote!(#e.len())))
+            }
+            Rvalue::AddrOf(..) => self.err(fr, "`&raw` (a pointer formation the structured reading does not read here)"),
             Rvalue::Discr(_) => self.err(fr, "a discriminant used as a value"),
             Rvalue::Unsupported(s) => self.err(fr, format!("rvalue {s}")),
         }
@@ -1820,10 +2090,16 @@ impl<'m> Reader<'m> {
                 // a back edge
                 match form {
                     LoopForm::While => return Ok(Flow::Fall(env)),
-                    LoopForm::Helper(name, params) => {
+                    LoopForm::Helper(name, params, extra) => {
+                        // (a loop with an element attachment: where its
+                        // body on the element ends, `extract_element`)
+                        if self.element_loop(b) {
+                            out.push(syn::parse_quote!(__sb_element_end!();));
+                        }
                         let live = self.live_at(b);
                         self.normalize(&live, &mut env, out)?;
-                        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect::<Result<_, _>>()?;
+                        let mut args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(&env, *l)).collect::<Result<_, _>>()?;
+                        args.extend(extra.iter().map(|n| var(n)));
                         out.push(syn::parse_quote!(return #name(#(#args),*);));
                         return Ok(Flow::Diverge);
                     }
@@ -2085,6 +2361,15 @@ impl<'m> Reader<'m> {
                 cont(self, env, out)
             }
             Callee::Intrinsic(name, _) => self.err(fr, format!("the intrinsic `{name}`")),
+            // a load or store through a pointer of crate code (§20.10): the
+            // intrinsic's model on the base's bytes
+            Callee::Arch(a) if a.pointer => {
+                if cx.probe {
+                    return Err("probe: a load or store".into());
+                }
+                self.mem_access(fr, a, args, dest, &mut env, out)?;
+                cont(self, env, out)
+            }
             // a `core::arch` intrinsic (§20.9): the same call in the subset,
             // which the front end elaborates to the intrinsic's target model;
             // the pointer loads and stores, and `unsafe` intrinsics, refused
@@ -2120,6 +2405,33 @@ impl<'m> Reader<'m> {
                 // a library function read as a model (core's slice iterator, a
                 // slice's `get` by a range): the model's body
                 let f2: &'m Fn = self.models.get(key).unwrap_or(f2);
+                // core's `IterMut` (A-S4): the index it yields next, over the
+                // slice place it walks
+                if let Some((model @ (super::Model::IterMutNew | super::Model::IterMutNext | super::Model::IterMutIntoIter), _)) = super::model_of(f2) {
+                    if cx.probe {
+                        return Err("probe: an `IterMut`".into());
+                    }
+                    self.iter_mut_call(fr, model, args, dest, &mut env, out)?;
+                    return cont(self, env, out);
+                }
+                // `<[T]>::split_at_mut` (raw pointers inside): the two
+                // halves of the place, as subslices of it
+                if let Some((super::Model::SplitAtMut, _)) = super::model_of(f2) {
+                    if cx.probe {
+                        return Err("probe: a `split_at_mut`".into());
+                    }
+                    self.split_at_mut_call(fr, args, dest, &mut env, out)?;
+                    return cont(self, env, out);
+                }
+                // an admitted pointer helper (`ptr::helper`, by exact path and
+                // signature): a formation, a cast, an offset (§20.10)
+                if let Some(h) = super::ptr::helper(f2) {
+                    if cx.probe {
+                        return Err("probe: a pointer helper".into());
+                    }
+                    self.ptr_helper(fr, h, args, dest, &mut env, out)?;
+                    return cont(self, env, out);
+                }
                 // `o.as_deref_mut()` of an optional state `o: Option<&mut T>`
                 // (`&mut o`): the same optional place (§19.10's state table;
                 // rustc's borrow checker makes the reborrow exclusive)
@@ -2348,6 +2660,292 @@ impl<'m> Reader<'m> {
         }
     }
 
+    /// An `IterMut` local moved from `from` to `to` (the root frame's records).
+    fn iter_moved(&mut self, fr: usize, from: usize, to: usize) {
+        if fr != 0 {
+            return;
+        }
+        if let Some(e) = self.iter_slices.get(&from).cloned() {
+            self.iter_slices.insert(to, e);
+        }
+        if let Some(p) = self.iter_params.get(&from).copied() {
+            self.iter_params.insert(to, p);
+        }
+    }
+
+    /// core's `IterMut` (docs/DESIGN-UNSAFE-SIMD.md A-S4): `iter_mut(s)` is
+    /// index 0 over the place `s` names; `next(&mut it)` binds the index `i`,
+    /// steps it when `i < s.len()` and yields `Some(&mut s[i])` then, else
+    /// `None` (the literal reading's model, element for element).
+    fn iter_mut_call(&mut self, fr: usize, model: super::Model, args: &[Operand], dest: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+        let Some(Operand::Copy(a) | Operand::Move(a)) = args.first() else { return self.err(fr, "an `IterMut` call without its argument") };
+        if !a.proj.is_empty() || !dest.proj.is_empty() {
+            return self.err(fr, "an `IterMut` through a projection");
+        }
+        let dkey = (fr, dest.local);
+        match model {
+            super::Model::IterMutNew => {
+                let Some(r) = env.refs.get(&(fr, a.local)).cloned() else { return self.err(fr, "`iter_mut` of a slice the reading holds no place for") };
+                if fr == 0 {
+                    self.iter_slices.insert(dest.local, r.lv.clone());
+                    if self.is_param(0, a.local) {
+                        self.iter_params.insert(dest.local, a.local);
+                    }
+                }
+                env.iters.insert(dkey, r);
+                self.assign(fr, dest, Val::E(lit_uint(0, "usize")), env, out)
+            }
+            super::Model::IterMutIntoIter => {
+                let Some(r) = env.iters.get(&(fr, a.local)).cloned() else { return self.err(fr, "`into_iter` of an `IterMut` the reading does not hold") };
+                let (v, _) = self.read(fr, a, env, out)?;
+                env.iters.insert(dkey, r);
+                self.iter_moved(fr, a.local, dest.local);
+                self.assign(fr, dest, v, env, out)
+            }
+            super::Model::IterMutNext => {
+                let Some(ik) = env.iter_refs.get(&(fr, a.local)).copied() else { return self.err(fr, "`next` of an `IterMut` the reading does not hold") };
+                let Some(sl) = env.iters.get(&ik).cloned() else { return self.err(fr, "`next` of an `IterMut` without its slice") };
+                let (iv, _) = self.read(ik.0, &Place { local: ik.1, proj: vec![] }, env, out)?;
+                let ie = self.materialize(ik.0, &iv)?;
+                let (i0, c0) = (ident(&self.fresh("i")), ident(&self.fresh("c")));
+                let se = paren(self.state_value(&sl)?);
+                out.push(syn::parse_quote!(let #i0: usize = #ie;));
+                out.push(syn::parse_quote!(let #c0: bool = #i0 < #se.len();));
+                env.declared.insert(i0.to_string());
+                env.declared.insert(c0.to_string());
+                // (the iterator moves one further on the `Some` arm of the
+                // switch on the result, which follows: set there, so the
+                // condition is tested once)
+                let one = lit_uint(1, "usize");
+                let elem = LRef { lv: syn::parse_quote!(#se[#i0]), buf: None, fields: None, inner: false, range: None };
+                self.assign(fr, dest, Val::Next(syn::parse_quote!(#c0), elem, ik, syn::parse_quote!(#i0.wrapping_add(#one))), env, out)
+            }
+            _ => self.err(fr, "an `IterMut` model"),
+        }
+    }
+
+    /// The literal value of an unsigned operand (a constant, or a value the
+    /// reading carries as a literal).
+    fn lit_operand(&mut self, fr: usize, o: &Operand, env: &Env, out: &mut Vec<syn::Stmt>) -> Option<u128> {
+        if let Some((_, v)) = Self::int_const(o) {
+            return u128::try_from(v).ok();
+        }
+        match self.operand(fr, o, env, out).ok()? {
+            (Val::E(e), _) => lit_value(&e),
+            _ => None,
+        }
+    }
+
+    /// The pointer `p` moved by the literal count `k` of `pointee` elements
+    /// (`add`; `sub` back; `offset` by an `isize`), within its base.
+    #[allow(clippy::too_many_arguments)]
+    fn ptr_moved(&mut self, fr: usize, p: &Operand, k: &Operand, neg: bool, signed: bool, pointee: &Ty, env: &Env, out: &mut Vec<syn::Stmt>) -> Result<PtrVal, String> {
+        let Val::Ptr(pv) = self.operand(fr, p, env, out)?.0 else { return self.err(fr, "an offset of something that is no pointer of an admitted formation") };
+        let Some(kv) = self.lit_operand(fr, k, env, out) else { return self.err(fr, "a pointer offset by a count that is not a constant (the structured reading reads constant offsets)") };
+        let t = super::ptr::size_of(pointee).ok_or("a pointee without a size")? as i128;
+        let kv = if signed { kv as u64 as i64 as i128 } else { kv as i128 };
+        let off = pv.off as i128 + if neg { -kv * t } else { kv * t };
+        let size = super::ptr::size_of(&pv.base_ty).map(|n| n as i128);
+        if off < 0 || size.is_some_and(|n| off > n) {
+            return self.err(fr, format!("a pointer offset to byte {off}, outside its base's {} bytes", size.unwrap_or(-1)));
+        }
+        Ok(PtrVal { off: off as u64, ..*pv })
+    }
+
+    /// A call of an admitted pointer helper (§20.10): a formation (the
+    /// place its `&mut` names, or the value its `&` reads), a cast (the same
+    /// pointer), an offset.
+    fn ptr_helper(&mut self, fr: usize, h: Result<(super::ptr::Helper, Ty), String>, args: &[Operand], dest: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+        let (h, pointee) = match h {
+            Ok(x) => x,
+            Err(e) => return self.err(fr, e),
+        };
+        let v = match h {
+            super::ptr::Helper::Form { mutable, slice } => {
+                let Some(Operand::Copy(q) | Operand::Move(q)) = args.first() else { return self.err(fr, "a formation without its reference") };
+                if !q.proj.is_empty() {
+                    return self.err(fr, "a formation from a projection");
+                }
+                let base_ty = match super::ptr::bases(self.m, self.frames[fr].f).get(&dest.local) {
+                    Some(Ok(b)) => b.ty.clone(),
+                    Some(Err(e)) => return self.err(fr, e.clone()),
+                    None => return self.err(fr, "a formation without a base"),
+                };
+                let base = if mutable {
+                    match env.refs.get(&(fr, q.local)) {
+                        Some(r) => {
+                            // (a new family: its window starts)
+                            env.windows.remove(&r.lv.to_token_stream().to_string());
+                            PBase::Mut(r.clone())
+                        }
+                        None => return self.err(fr, "a mutable formation from a reference the reading holds no place for"),
+                    }
+                } else {
+                    // the referent's value: through the `unsize` the base's
+                    // type looks through (an array's), else the reference's own
+                    let src = if slice && matches!(base_ty, Ty::Array(..)) { self.unsize_source(fr, q.local).unwrap_or(q.local) } else { q.local };
+                    let (v, _) = self.read(fr, &Place { local: src, proj: vec![Proj::Deref] }, env, out)?;
+                    PBase::Shr(self.materialize(fr, &v)?)
+                };
+                PtrVal { base, base_ty, off: 0, mutable }
+            }
+            super::ptr::Helper::Cast => match self.operand(fr, args.first().ok_or("a cast without its pointer")?, env, out)?.0 {
+                Val::Ptr(p) => *p,
+                _ => return self.err(fr, "a pointer cast of something that is no pointer of an admitted formation"),
+            },
+            super::ptr::Helper::Move { neg, signed } => {
+                let [p, k] = args else { return self.err(fr, "an offset without its two arguments") };
+                self.ptr_moved(fr, p, k, neg, signed, &pointee, env, out)?
+            }
+        };
+        self.assign(fr, dest, Val::Ptr(Box::new(v)), env, out)
+    }
+
+    /// `<[T]>::split_at_mut(s, mid)`: the halves of the place `s` names, as
+    /// subslices (`0..mid` and `mid..len`; the literal reading's `PRange`
+    /// codes), with the split's own panic (`mid > len`) an obligation. A
+    /// subslice is not split again (the literal reading does not read a
+    /// range of a range).
+    fn split_at_mut_call(&mut self, fr: usize, args: &[Operand], dest: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+        let [Operand::Copy(a) | Operand::Move(a), mid] = args else { return self.err(fr, "`split_at_mut` without its two arguments") };
+        if !a.proj.is_empty() || !dest.proj.is_empty() {
+            return self.err(fr, "a `split_at_mut` through a projection");
+        }
+        let Some(r) = env.refs.get(&(fr, a.local)).cloned() else { return self.err(fr, "`split_at_mut` of a slice the reading holds no place for") };
+        if r.range.is_some() || r.fields.is_some() || r.buf.is_some() || r.inner {
+            return self.err(fr, "`split_at_mut` of a subslice or a state (a range of a range is not read)");
+        }
+        let (mv, _) = self.operand_expr(fr, mid, env, out)?;
+        let lv = paren(r.lv.clone());
+        let n = self.array_len_through(fr, a.local);
+        let len: syn::Expr = match n {
+            Some(n) => lit_uint(n as u128, "usize"),
+            None => syn::parse_quote!(#lv.len()),
+        };
+        let rest: syn::Expr = match (n, lit_value(&mv)) {
+            (Some(n), Some(m)) if m <= n as u128 => lit_uint(n as u128 - m, "usize"),
+            _ => {
+                // (core panics past the slice's end: not taken)
+                out.push(syn::parse_quote!(if !(#mv <= #len) { unreachable!() }));
+                syn::parse_quote!(#len - #mv)
+            }
+        };
+        let lo = LRef { range: Some((lit_uint(0, "usize"), mv.clone())), ..r.clone() };
+        let hi = LRef { range: Some((mv, rest)), ..r };
+        let dt = self.frames[fr].f.locals[dest.local].0.clone();
+        self.assign(fr, dest, Val::C(dt, 0, vec![Val::Place(lo), Val::Place(hi)]), env, out)
+    }
+
+    /// The length `N` of the array a `&mut [T]` local refers to, when it is
+    /// an unsized `&mut [T; N]` (its one assignment an `unsize` of one).
+    fn array_len_through(&self, fr: usize, l: usize) -> Option<u64> {
+        let f = self.frames[fr].f;
+        let pointee = |t: &Ty| match t {
+            Ty::Ref(_, inner) => match &**inner {
+                Ty::Array(_, n) => Some(*n),
+                _ => None,
+            },
+            _ => None,
+        };
+        pointee(&f.locals[l].0).or_else(|| self.unsize_source(fr, l).and_then(|s| pointee(&f.locals[s].0)))
+    }
+
+    /// The local an `unsize` cast into `l` reads (its one assignment).
+    fn unsize_source(&self, fr: usize, l: usize) -> Option<usize> {
+        let f = self.frames[fr].f;
+        let mut found = None;
+        for bl in &f.blocks {
+            for st in &bl.stmts {
+                if let Stmt::Assign(d, rv, _) = st
+                    && d.local == l
+                {
+                    match rv {
+                        Rvalue::Cast(k, Operand::Copy(q) | Operand::Move(q), _) if k == "unsize" && q.proj.is_empty() && found.is_none() => found = Some(q.local),
+                        _ => return None,
+                    }
+                }
+            }
+        }
+        found
+    }
+
+    /// A load or a store through a pointer (§20.10): a load is the
+    /// intrinsic's model on the `n` bytes at the pointer's offset in its base
+    /// (`vld1q_u8([b[o], .., b[o + 15]])`); a store writes the bytes its
+    /// model gives into the base, through the place a mutable formation
+    /// names (`b = [b[0], .., w[0], .., w[15], .., b[63]]`). Byte arrays only
+    /// here, at constant offsets.
+    fn mem_access(&mut self, fr: usize, a: &ArchCall, args: &[Operand], dest: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
+        let Some(row) = super::ptr::mem_intrinsic(&a.path) else { return self.err(fr, format!("the intrinsic `{}` is no admitted load or store", a.path)) };
+        let Some(p) = args.first() else { return self.err(fr, "a load or store without its pointer") };
+        let Val::Ptr(pv) = self.operand(fr, p, env, out)?.0 else { return self.err(fr, "a load or store through something that is no pointer of an admitted formation") };
+        // (a `u128` base, loaded only: its little-endian bytes, the low
+        // word's first: `t.0.to_le_bytes()[k]`, `t.1.to_le_bytes()[k - 8]`)
+        let wide = pv.base_ty == Ty::Int(false, 128);
+        let n = match &pv.base_ty {
+            Ty::Array(e, n) if **e == Ty::Int(false, 8) => *n,
+            Ty::Int(false, 128) if !row.store => 16,
+            other => return self.err(fr, format!("a load or store in a base of {other:?} (the structured reading reads byte arrays, and loads from a `u128`)")),
+        };
+        if pv.off + row.bytes > n {
+            return self.err(fr, format!("bytes {}..{} of a {n}-byte base", pv.off, pv.off + row.bytes));
+        }
+        let path: syn::Path = syn::parse_str(&a.path).map_err(|e| format!("the intrinsic path `{}`: {e}", a.path))?;
+        let base: syn::Expr = match &pv.base {
+            PBase::Mut(r) => paren(self.state_value(r)?),
+            PBase::Shr(e) => paren(e.clone()),
+        };
+        let at = |e: &syn::Expr, k: u64| -> syn::Expr {
+            if wide {
+                let (w, k) = (syn::Index::from((k / 8) as usize), lit_uint((k % 8) as u128, "usize"));
+                return syn::parse_quote!(#e.#w.to_le_bytes()[#k]);
+            }
+            let k = lit_uint(k as u128, "usize");
+            syn::parse_quote!(#e[#k])
+        };
+        // (the family's window over a mutable base: the bytes its stores
+        // left, never the state read back)
+        let key = match &pv.base {
+            PBase::Mut(r) => Some(r.lv.to_token_stream().to_string()),
+            PBase::Shr(_) => None,
+        };
+        if !row.store {
+            let elems: Vec<syn::Expr> = match key.as_ref().and_then(|k| env.windows.get(k)) {
+                Some(win) => win[pv.off as usize..(pv.off + row.bytes) as usize].to_vec(),
+                None => (pv.off..pv.off + row.bytes).map(|k| at(&base, k)).collect(),
+            };
+            let v = self.bind(syn::parse_quote!(#path([#(#elems),*])), false, None, out);
+            return self.assign(fr, dest, v, env, out);
+        }
+        let (true, PBase::Mut(r)) = (pv.mutable, &pv.base) else { return self.err(fr, format!("the store `{}` through a pointer formed from a shared reference", a.path)) };
+        let Some(x) = args.get(1) else { return self.err(fr, "a store without its vector") };
+        let (xv, _) = self.operand_expr(fr, x, env, out)?;
+        let w = ident(&self.fresh("w"));
+        let wn = syn::LitInt::new(&format!("{}usize", row.bytes), PSpan::call_site());
+        out.push(syn::parse_quote!(let #w: [u8; #wn] = #path(#xv);));
+        let we: syn::Expr = syn::parse_quote!(#w);
+        let key = key.unwrap_or_default();
+        let mut win = match env.windows.get(&key) {
+            Some(win) => win.clone(),
+            None => {
+                // (the window's first store: the base's value before it)
+                let c = ident(&self.fresh("c"));
+                let nn = syn::LitInt::new(&format!("{n}usize"), PSpan::call_site());
+                out.push(syn::parse_quote!(let #c: [u8; #nn] = #base;));
+                let ce: syn::Expr = syn::parse_quote!(#c);
+                (0..n).map(|j| at(&ce, j)).collect()
+            }
+        };
+        for j in pv.off..pv.off + row.bytes {
+            win[j as usize] = at(&we, j - pv.off);
+        }
+        let elems = win.clone();
+        let r = r.clone();
+        self.state_store(fr, &r, syn::parse_quote!([#(#elems),*]), env, out)?;
+        env.windows.insert(key, win);
+        self.assign(fr, dest, Val::Z(Ty::Unit), env, out)
+    }
+
     /// The leaves: the buffer model and array/slice indexing.
     #[allow(clippy::too_many_arguments)]
     fn leaf(&mut self, fr: usize, path: &str, tys: &[Ty], args: &[Operand], dest: &Place, env: &mut Env, out: &mut Vec<syn::Stmt>) -> Result<(), String> {
@@ -2505,8 +3103,29 @@ impl<'m> Reader<'m> {
             if cx.probe {
                 return Err("probe: match".into());
             }
-            scrut = self.materialize(sf, &cur)?;
-            for var_def in &adt.variants {
+            // `IterMut::next`'s result: `Some(&mut s[i])` exactly when its
+            // condition holds
+            let next = match &cur {
+                Val::Next(c, r, ik, adv) => Some((c.clone(), r.clone(), *ik, adv.clone())),
+                _ => None,
+            };
+            scrut = match &next {
+                Some((c, ..)) => c.clone(),
+                None => self.materialize(sf, &cur)?,
+            };
+            if let Some((_, place, ik, adv)) = next {
+                let var_of = |n: &str| adt.variants.iter().find(|v| v.name == n).map(|v| (v.idx, v.discr));
+                let (Some((si, sd)), Some((ni, nd))) = (var_of("Some"), var_of("None")) else { return self.err(fr, "`IterMut::next`'s result is no `Option`") };
+                let mut e_some = env.clone();
+                e_some.vals.insert((sf, sp.local), Val::C(t.clone(), si, vec![Val::Place(place)]));
+                e_some.vals.insert(ik, Val::E(adv));
+                let mut e_none = env.clone();
+                e_none.vals.insert((sf, sp.local), Val::C(t.clone(), ni, vec![]));
+                plan.push((Some(syn::parse_quote!(true)), target_of(sd), e_some));
+                plan.push((Some(syn::parse_quote!(false)), target_of(nd), e_none));
+                is_bool = true;
+            }
+            for var_def in adt.variants.iter().filter(|_| !is_bool) {
                 let c = self.nm.ctor(self.m, key, var_def.idx)?;
                 let binders: Vec<String> = var_def.fields.iter().map(|_| self.fresh("f")).collect();
                 let p = &c.path;
@@ -2713,7 +3332,7 @@ impl<'m> Reader<'m> {
         if let Some((cond, body_entry, exit, env_c, env_x, tree)) = wc {
             let widx = self.next_while();
             self.loop_forms.push((k, "while".into()));
-            let info = HelperInfo { name: format!("loop#{widx}"), method: false, header: h, params: vec![], while_loop: true, local_names: self.frames[0].names.clone(), returns: None, owner: self.owner.clone() };
+            let info = HelperInfo { name: format!("loop#{widx}"), method: false, header: h, params: vec![], while_loop: true, local_names: self.frames[0].names.clone(), returns: None, owner: self.owner.clone(), iters: vec![], derived: vec![], extra: vec![] };
             let mut bo: Vec<syn::Stmt> = Vec::new();
             let mut head: Vec<syn::Stmt> = Vec::new();
             for i in &at.invariants {
@@ -2758,10 +3377,12 @@ impl<'m> Reader<'m> {
         // a loop inside another loop's body, not while-shaped: a helper from
         // the header to the loop's one exit, which returns the variables the
         // loop assigns; its caller goes on after it (a tail-recursive helper
-        // would go on into the outer loop and call it: mutual recursion)
+        // would go on into the outer loop and call it: mutual recursion).
+        // An attachment's `ensures` is then about what the helper returns,
+        // when the loop leaves into the outer loop's body (its caller's).
         if !cx.loops.is_empty()
-            && at.ensures.is_empty()
             && let Some(x) = self.loop_exit_block(&body)
+            && (at.ensures.is_empty() || cx.loops.last().is_some_and(|(oh, _)| *oh == x || self.cfg.body[*oh].contains(&x)))
             && let Some(flow) = self.returning_helper(h, k, &at, x, &live, &body, &env, cx, out)?
         {
             return Ok(flow);
@@ -2790,7 +3411,7 @@ impl<'m> Reader<'m> {
             hb.push(syn::parse_quote!(proof! { #(#s)* }));
         }
         let mut loops = cx.loops.clone();
-        loops.push((h, LoopForm::Helper(callee.clone(), params.clone())));
+        loops.push((h, LoopForm::Helper(callee.clone(), params.clone(), vec![])));
         // the header's own statements run first in each call
         let cx_h = Cx { k: K::Ret, stop: None, loops: loops.clone(), probe: false };
         let saved = self.owner.replace((name.to_string(), method));
@@ -2798,6 +3419,18 @@ impl<'m> Reader<'m> {
         self.owner = saved;
         if let Flow::Fall(_) = flow? {
             return self.err(0, "a loop helper that falls through");
+        }
+        // an element attachment: the body on the element, a function of it
+        if let Some(ens) = &at.element {
+            if method {
+                return self.err(0, format!("the element attachment of loop {k}: the loop is read as a method helper (its body reads `self`)"));
+            }
+            let item = match self.extract_element(&name.to_string(), &inputs, &mut hb, &ens.ensures, &ens.requires, &ens.at_start) {
+                Ok(item) => item,
+                Err(e) => return self.err(0, format!("the element attachment of loop {k}: {e}")),
+            };
+            self.elements.push(item.sig.ident.to_string());
+            self.helpers.push(syn::Item::Fn(item));
         }
         let mut attrs = self.helper_attrs(h, &body, &at, inferred);
         for e in &at.ensures {
@@ -2813,8 +3446,442 @@ impl<'m> Reader<'m> {
             fn #name(#(#inputs),*) -> #out_ty { #(#hb)* }
         );
         self.helpers.push(syn::Item::Fn(item));
-        self.helper_info.push(HelperInfo { name: name.to_string(), method, header: h, params: params.clone(), while_loop: false, local_names: vec![], returns: None, owner: self.owner.clone() });
+        let iters: Vec<(usize, usize)> = params.iter().enumerate().filter_map(|(i, l)| self.iter_params.get(l).map(|p| (i, *p))).collect();
+        self.helper_info.push(HelperInfo { name: name.to_string(), method, header: h, params: params.clone(), while_loop: false, local_names: vec![], returns: None, owner: self.owner.clone(), iters, derived: vec![], extra: vec![] });
         Ok(Flow::Diverge)
+    }
+
+    /// Whether the loop at header `h` has an element attachment.
+    fn element_loop(&self, h: usize) -> bool {
+        self.cfg.headers.iter().position(|x| *x == h).and_then(|k| self.spec.loops.get(&k)).is_some_and(|a| a.element.is_some())
+    }
+
+    /// A loop's body on one element (an element attachment): the helper's
+    /// body `hb` holds, in the `then` block of its iteration test, the
+    /// statements of one iteration up to the back edge's marker. From the
+    /// first that names the slice `xs` on (those before it stay in the
+    /// helper: an iterator's step, an index, checks on it), when they touch
+    /// `xs` only as one element `xs[i]` (`i` bound before: the index an
+    /// `IterMut` yields, or a returning helper's element index), read and
+    /// write it (whole or in part: `xs[i][j] = v`), assign no variable bound
+    /// before them, and neither leave nor loop, they are the body of the
+    /// element function `<helper>__element(v̄, <elem>)` (`v̄` the variables
+    /// bound before that they read, `<elem>` the variable that held the
+    /// element: `xs[i]` read as it), opaque, with the attachment's contract;
+    /// it returns the element after each of its writes, in order, and the
+    /// helper calls it and writes them back in that order: `let e =
+    /// <helper>__element(v̄, xs[i]); xs[i] = e.0; xs[i] = e.1; ..`, as the
+    /// literal reading's stores leave the element. The walk unfolds the
+    /// call (`delta`), so the loop's theorem is as before; the loop's
+    /// contract sees the element's contract only.
+    #[allow(clippy::too_many_arguments)]
+    fn extract_element(&mut self, helper: &str, inputs: &[TokenStream], hb: &mut [syn::Stmt], ens: &[syn::Expr], req: &[syn::Expr], at_start: &[syn::Stmt]) -> Result<syn::ItemFn, String> {
+        use syn::visit::Visit;
+        use syn::visit_mut::VisitMut;
+        fn is_marker(st: &syn::Stmt) -> bool {
+            matches!(st, syn::Stmt::Macro(m) if m.mac.path.is_ident("__sb_element_end"))
+        }
+        // every marker (one back edge: one)
+        struct Markers(usize);
+        impl<'a> Visit<'a> for Markers {
+            fn visit_stmt(&mut self, st: &'a syn::Stmt) {
+                if is_marker(st) {
+                    self.0 += 1;
+                }
+                syn::visit::visit_stmt(self, st);
+            }
+        }
+        let mut mk = Markers(0);
+        for st in hb.iter() {
+            mk.visit_stmt(st);
+        }
+        if mk.0 != 1 {
+            return Err(format!("the body reaches the next iteration on {} paths (an element body is one straight path)", mk.0));
+        }
+        let pos = hb
+            .iter()
+            .position(|st| matches!(st, syn::Stmt::Expr(syn::Expr::If(ei), _) if ei.then_branch.stmts.iter().any(is_marker)))
+            .ok_or("the next iteration is not reached at the end of the iteration test's branch")?;
+        // the parameters' types, by name
+        let mut ptys: HashMap<String, syn::Type> = HashMap::new();
+        for i in inputs {
+            if let Ok(syn::FnArg::Typed(pt)) = syn::parse2::<syn::FnArg>(i.clone())
+                && let syn::Pat::Ident(pi) = &*pt.pat
+            {
+                ptys.insert(pi.ident.to_string(), (*pt.ty).clone());
+            }
+        }
+        // the variables bound before the test (`let v: T = ..;`), by name
+        let mut before: HashMap<String, Option<syn::Type>> = HashMap::new();
+        for st in &hb[..pos] {
+            if let syn::Stmt::Local(l) = st {
+                match &l.pat {
+                    syn::Pat::Type(pt) => {
+                        if let syn::Pat::Ident(pi) = &*pt.pat {
+                            before.insert(pi.ident.to_string(), Some((*pt.ty).clone()));
+                        }
+                    }
+                    syn::Pat::Ident(pi) => {
+                        before.insert(pi.ident.to_string(), None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let syn::Stmt::Expr(syn::Expr::If(ei), _) = &mut hb[pos] else { unreachable!() };
+        let m = ei.then_branch.stmts.iter().position(is_marker).ok_or("the marker")?;
+        let body: Vec<syn::Stmt> = ei.then_branch.stmts[..m].to_vec();
+        // the element's place: `xs[i]`, one slice parameter, one index
+        struct Places {
+            slices: Vec<String>,
+            found: Vec<(String, String)>,
+        }
+        impl<'a> Visit<'a> for Places {
+            fn visit_expr_index(&mut self, e: &'a syn::ExprIndex) {
+                if let (syn::Expr::Path(a), syn::Expr::Path(b)) = (&*e.expr, &*e.index)
+                    && let (Some(a), Some(b)) = (a.path.get_ident(), b.path.get_ident())
+                    && self.slices.contains(&a.to_string())
+                {
+                    let p = (a.to_string(), b.to_string());
+                    if !self.found.contains(&p) {
+                        self.found.push(p);
+                    }
+                }
+                syn::visit::visit_expr_index(self, e);
+            }
+        }
+        let slices: Vec<String> = ptys.iter().filter(|(_, t)| matches!(t, syn::Type::Reference(r) if matches!(&*r.elem, syn::Type::Slice(_)))).map(|(n, _)| n.clone()).collect();
+        let mut pl = Places { slices, found: Vec::new() };
+        for st in &body {
+            pl.visit_stmt(st);
+        }
+        let (xs, idx) = match pl.found.as_slice() {
+            [p] => p.clone(),
+            [] => return Err("the body does not touch an element of the slice the loop walks".into()),
+            _ => return Err(format!("the body touches more than one element place ({})", pl.found.iter().map(|(a, b)| format!("`{a}[{b}]`")).collect::<Vec<_>>().join(", "))),
+        };
+        let ety: syn::Type = match &ptys[&xs] {
+            syn::Type::Reference(r) => match &*r.elem {
+                syn::Type::Slice(sl) => (*sl.elem).clone(),
+                _ => return Err("the slice's type".into()),
+            },
+            _ => return Err("the slice's type".into()),
+        };
+        let elem = self.elem_names.get(&idx).cloned().ok_or_else(|| format!("no variable holds the element `{xs}[{idx}]`"))?;
+        // the statements before the first that names the slice stay in the
+        // helper, before the call; what they bind is bound before the body
+        let first = body.iter().position(|st| ts_mentions(st.to_token_stream(), &xs)).unwrap_or(body.len());
+        let mut prefix: Vec<syn::Stmt> = body[..first].to_vec();
+        // (a check of the body, `if !(c) { unreachable!() }`, on variables
+        // bound before it only is made before the call too: it reads
+        // nothing the body computes, and the helper knows what the loop
+        // knows of them)
+        let mut kept: Vec<syn::Stmt> = Vec::new();
+        let mut bound_in: Vec<String> = Vec::new();
+        for st in &body[first..] {
+            let unreachable = |b: &syn::Block| match b.stmts.as_slice() {
+                [syn::Stmt::Macro(m)] => m.mac.path.is_ident("unreachable"),
+                [syn::Stmt::Expr(syn::Expr::Macro(m), _)] => m.mac.path.is_ident("unreachable"),
+                _ => false,
+            };
+            let is_check = matches!(st, syn::Stmt::Expr(syn::Expr::If(ci), _) if ci.else_branch.is_none()
+                && unreachable(&ci.then_branch)
+                && matches!(&*ci.cond, syn::Expr::Unary(u) if matches!(u.op, syn::UnOp::Not(_))));
+            if is_check {
+                let ts = st.to_token_stream();
+                if !ts_mentions(ts.clone(), &xs) && !bound_in.iter().any(|n| ts_mentions(ts.clone(), n)) {
+                    prefix.push(st.clone());
+                    continue;
+                }
+            }
+            if let syn::Stmt::Local(l) = st {
+                let mut ns = Vec::new();
+                pat_names(&l.pat, &mut ns);
+                bound_in.extend(ns);
+            }
+            kept.push(st.clone());
+        }
+        let body: Vec<syn::Stmt> = kept;
+        for st in &prefix {
+            if let syn::Stmt::Local(l) = st {
+                match &l.pat {
+                    syn::Pat::Type(pt) => {
+                        if let syn::Pat::Ident(pi) = &*pt.pat {
+                            before.insert(pi.ident.to_string(), Some((*pt.ty).clone()));
+                        }
+                    }
+                    syn::Pat::Ident(pi) => {
+                        before.insert(pi.ident.to_string(), None);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // a place rooted at the element `xs[i]` (the element, or a part of it)
+        fn rooted(e: &syn::Expr, xs: &str, idx: &str) -> bool {
+            match e {
+                syn::Expr::Index(ix) if matches!((&*ix.expr, &*ix.index), (syn::Expr::Path(x), syn::Expr::Path(i)) if x.path.is_ident(xs) && i.path.is_ident(idx)) => true,
+                syn::Expr::Index(ix) => rooted(&ix.expr, xs, idx),
+                syn::Expr::Field(f) => rooted(&f.base, xs, idx),
+                syn::Expr::Paren(p) => rooted(&p.expr, xs, idx),
+                _ => false,
+            }
+        }
+        // a place rooted at the variable `v` (once the element is it)
+        fn rooted_var(e: &syn::Expr, v: &str) -> bool {
+            match e {
+                syn::Expr::Path(p) => p.path.is_ident(v),
+                syn::Expr::Index(ix) => rooted_var(&ix.expr, v),
+                syn::Expr::Field(f) => rooted_var(&f.base, v),
+                syn::Expr::Paren(p) => rooted_var(&p.expr, v),
+                _ => false,
+            }
+        }
+        // what the body may do: read and write the element, read the
+        // variables bound before, bind its own; no exit, loop or closure
+        struct Check<'s> {
+            xs: &'s str,
+            idx: &'s str,
+            elem: &'s str,
+            bound: BTreeSet<String>,
+            used: Vec<String>,
+            xs_uses: usize,
+            place_uses: usize,
+            err: Option<String>,
+        }
+        impl Check<'_> {
+            fn note_pat(&mut self, p: &syn::Pat) {
+                match p {
+                    syn::Pat::Ident(pi) => {
+                        self.bound.insert(pi.ident.to_string());
+                    }
+                    syn::Pat::Type(pt) => self.note_pat(&pt.pat),
+                    syn::Pat::Tuple(t) => t.elems.iter().for_each(|q| self.note_pat(q)),
+                    syn::Pat::TupleStruct(t) => t.elems.iter().for_each(|q| self.note_pat(q)),
+                    syn::Pat::Wild(_) => {}
+                    _ => self.err = Some("a pattern the element body cannot bind".into()),
+                }
+            }
+        }
+        impl<'a> Visit<'a> for Check<'_> {
+            fn visit_local(&mut self, l: &'a syn::Local) {
+                if let Some(init) = &l.init {
+                    self.visit_expr(&init.expr);
+                }
+                self.note_pat(&l.pat);
+            }
+            fn visit_expr(&mut self, e: &'a syn::Expr) {
+                match e {
+                    syn::Expr::Return(_) | syn::Expr::Break(_) | syn::Expr::Continue(_) | syn::Expr::Try(_) | syn::Expr::While(_) | syn::Expr::Loop(_) | syn::Expr::ForLoop(_) | syn::Expr::Closure(_) | syn::Expr::Async(_) | syn::Expr::Await(_) | syn::Expr::Yield(_) => {
+                        self.err = Some("the body leaves, loops or holds a closure".into());
+                    }
+                    syn::Expr::Assign(a) => {
+                        match &*a.left {
+                            l if rooted(l, self.xs, self.idx) => {}
+                            syn::Expr::Path(p) if p.path.get_ident().is_some_and(|i| self.bound.contains(&i.to_string())) => {}
+                            other => self.err = Some(format!("the body assigns `{}`, bound before it", other.to_token_stream())),
+                        }
+                        self.visit_expr(&a.left);
+                        self.visit_expr(&a.right);
+                        return;
+                    }
+                    syn::Expr::Index(ix) if matches!((&*ix.expr, &*ix.index), (syn::Expr::Path(x), syn::Expr::Path(i)) if x.path.is_ident(self.xs) && i.path.is_ident(self.idx)) => {
+                        self.place_uses += 1;
+                    }
+                    syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                        let n = p.path.segments[0].ident.to_string();
+                        if n == self.xs {
+                            self.xs_uses += 1;
+                        }
+                        if n == self.elem {
+                            self.err = Some(format!("the body names `{n}`, the element's variable"));
+                        }
+                        if !self.bound.contains(&n) && !self.used.contains(&n) {
+                            self.used.push(n);
+                        }
+                    }
+                    syn::Expr::Macro(m) if !m.mac.path.is_ident("unreachable") => {
+                        self.err = Some(format!("the body holds `{}!`", m.mac.path.to_token_stream()));
+                    }
+                    _ => {}
+                }
+                syn::visit::visit_expr(self, e);
+            }
+            fn visit_stmt_macro(&mut self, m: &'a syn::StmtMacro) {
+                if !m.mac.path.is_ident("proof") && !m.mac.path.is_ident("unreachable") {
+                    self.err = Some(format!("the body holds `{}!`", m.mac.path.to_token_stream()));
+                }
+            }
+            fn visit_item(&mut self, _: &'a syn::Item) {
+                self.err = Some("the body holds an item".into());
+            }
+        }
+        let mut ck = Check { xs: &xs, idx: &idx, elem: &elem, bound: BTreeSet::new(), used: Vec::new(), xs_uses: 0, place_uses: 0, err: None };
+        for st in &body {
+            ck.visit_stmt(st);
+            if ck.err.is_some() {
+                break;
+            }
+        }
+        if let Some(e) = ck.err {
+            return Err(e);
+        }
+        if ck.xs_uses != ck.place_uses {
+            return Err(format!("the body uses `{xs}` other than as its element `{xs}[{idx}]`"));
+        }
+        // the element function's parameters: the variables bound before
+        // that the body reads (globals named by one segment stay as they are)
+        let mut params: Vec<(String, syn::Type)> = Vec::new();
+        for n in &ck.used {
+            if *n == xs || *n == idx {
+                continue;
+            }
+            if n == "self" {
+                return Err("the body reads `self`".into());
+            }
+            if let Some(t) = ptys.get(n) {
+                params.push((n.clone(), t.clone()));
+            } else if let Some(t) = before.get(n) {
+                let t = t.clone().ok_or_else(|| format!("the type of `{n}`, bound before the body"))?;
+                params.push((n.clone(), t));
+            }
+        }
+        // the body on the element: `xs[i]` is the element's variable
+        struct Subst<'s> {
+            xs: &'s str,
+            idx: &'s str,
+            to: syn::Expr,
+        }
+        impl VisitMut for Subst<'_> {
+            fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
+                if let syn::Expr::Index(ix) = e
+                    && matches!((&*ix.expr, &*ix.index), (syn::Expr::Path(x), syn::Expr::Path(i)) if x.path.is_ident(self.xs) && i.path.is_ident(self.idx))
+                {
+                    *e = self.to.clone();
+                    return;
+                }
+                syn::visit_mut::visit_expr_mut(self, e);
+            }
+        }
+        let ev = var(&elem);
+        let mut sb = Subst { xs: &xs, idx: &idx, to: ev.clone() };
+        let mut ebody = body.clone();
+        for st in ebody.iter_mut() {
+            sb.visit_stmt_mut(st);
+        }
+        // each write of the element (`xs[i] = e;` at the body's top level):
+        // the function returns them in order, and the helper writes them
+        // back in that order, as the literal reading's stores leave the
+        // element (a write only in a branch is no element body)
+        let mut writes: Vec<syn::Ident> = Vec::new();
+        let mut nb: Vec<syn::Stmt> = Vec::new();
+        for st in ebody.into_iter() {
+            let is_write = matches!(&st, syn::Stmt::Expr(syn::Expr::Assign(a), _) if rooted_var(&a.left, &elem));
+            nb.push(st);
+            if is_write {
+                let w = ident(&self.fresh("w"));
+                nb.push(syn::parse_quote!(let #w: #ety = #ev;));
+                writes.push(w);
+            }
+        }
+        let mut ebody = nb;
+        {
+            struct Nested<'s> {
+                elem: &'s str,
+                depth: usize,
+                found: bool,
+            }
+            impl<'a> Visit<'a> for Nested<'_> {
+                fn visit_block(&mut self, b: &'a syn::Block) {
+                    self.depth += 1;
+                    syn::visit::visit_block(self, b);
+                    self.depth -= 1;
+                }
+                fn visit_expr_assign(&mut self, a: &'a syn::ExprAssign) {
+                    if self.depth > 0 && rooted_var(&a.left, self.elem) {
+                        self.found = true;
+                    }
+                    syn::visit::visit_expr_assign(self, a);
+                }
+            }
+            let mut nv = Nested { elem: &elem, depth: 0, found: false };
+            for st in &ebody {
+                nv.visit_stmt(st);
+            }
+            if nv.found {
+                return Err("the body writes its element in a branch".into());
+            }
+        }
+        if writes.is_empty() {
+            return Err("the body does not write its element".into());
+        }
+        let n = writes.len();
+        let ret_ty: syn::Type = if n == 1 { ety.clone() } else { let ts = vec![ety.clone(); n]; syn::parse_quote!((#(#ts),*)) };
+        let ret_e: syn::Expr = if n == 1 { let w = &writes[0]; syn::parse_quote!(#w) } else { syn::parse_quote!((#(#writes),*)) };
+        // the contract is about the element as the body leaves it: the
+        // last write (`|ret: T| P` is `|r: (T, ..)| P[ret := r.(n-1)]`)
+        let mut ens2: Vec<syn::Expr> = Vec::new();
+        for e in ens {
+            let syn::Expr::Closure(c) = e else { return Err("an element attachment's `ensures` is a closure `|ret: T| ..`".into()) };
+            let [syn::Pat::Type(pt)] = c.inputs.iter().collect::<Vec<_>>()[..] else { return Err("an element attachment's `ensures` names its result: `|ret: T| ..`".into()) };
+            let syn::Pat::Ident(pi) = &*pt.pat else { return Err("an element attachment's `ensures` names its result: `|ret: T| ..`".into()) };
+            if n == 1 {
+                ens2.push(e.clone());
+                continue;
+            }
+            let rn = pi.ident.to_string();
+            let r = ident(&self.fresh("r"));
+            let last = syn::Index::from(n - 1);
+            struct Rename<'s> {
+                from: &'s str,
+                to: syn::Expr,
+            }
+            impl VisitMut for Rename<'_> {
+                fn visit_expr_mut(&mut self, e: &mut syn::Expr) {
+                    if let syn::Expr::Path(p) = e
+                        && p.path.is_ident(self.from)
+                    {
+                        *e = self.to.clone();
+                        return;
+                    }
+                    syn::visit_mut::visit_expr_mut(self, e);
+                }
+            }
+            let mut body = (*c.body).clone();
+            Rename { from: &rn, to: syn::parse_quote!(#r.#last) }.visit_expr_mut(&mut body);
+            ens2.push(syn::parse_quote!(|#r: #ret_ty| #body));
+        }
+        let fname = format_ident!("{}__element", helper);
+        let eid = ident(&elem);
+        let pins: Vec<TokenStream> = params.iter().map(|(n, t)| {
+            let id = ident(n);
+            quote!(mut #id: #t)
+        }).chain(std::iter::once(quote!(mut #eid: #ety))).collect();
+        let attrs: Vec<syn::Attribute> = std::iter::once(syn::parse_quote!(#[opaque])).chain(req.iter().map(|e| syn::parse_quote!(#[requires(#e)]))).chain(ens2.iter().map(|e| syn::parse_quote!(#[ensures(#e)]))).collect();
+        if !at_start.is_empty() {
+            ebody.insert(0, syn::parse_quote!(proof! { #(#at_start)* }));
+        }
+        let item: syn::ItemFn = syn::parse_quote!(
+            #(#attrs)*
+            fn #fname(#(#pins),*) -> #ret_ty { #(#ebody)* return #ret_e; }
+        );
+        // the helper: the call, and its writes of the element in order
+        let args: Vec<syn::Expr> = params.iter().map(|(n, _)| var(n)).collect();
+        let e_tmp = ident(&self.fresh("e"));
+        let (xsi, idxi) = (ident(&xs), ident(&idx));
+        let mut rest: Vec<syn::Stmt> = prefix;
+        rest.push(syn::parse_quote!(let #e_tmp: #ret_ty = #fname(#(#args,)* #xsi[#idxi]);));
+        for k in 0..n {
+            if n == 1 {
+                rest.push(syn::parse_quote!(#xsi[#idxi] = #e_tmp;));
+            } else {
+                let kk = syn::Index::from(k);
+                rest.push(syn::parse_quote!(#xsi[#idxi] = #e_tmp.#kk;));
+            }
+        }
+        rest.extend(ei.then_branch.stmts[m + 1..].iter().cloned());
+        ei.then_branch.stmts = rest;
+        Ok(item)
     }
 
     /// The index of the next `while` loop of the function being written (the
@@ -2831,6 +3898,15 @@ impl<'m> Reader<'m> {
     /// those its attachment names.
     fn loop_params(&self, live: &BTreeSet<usize>, at: &LoopAttach, env: &Env) -> Vec<usize> {
         let mut params: Vec<usize> = live.iter().copied().filter(|l| *l != 0).collect();
+        // the `&mut [T]` parameter a live `IterMut` walks: its state is read
+        // and written through the iterator's elements
+        for l in live {
+            if let Some(p) = self.iter_params.get(l)
+                && !params.contains(p)
+            {
+                params.push(*p);
+            }
+        }
         let mut attach_ts = TokenStream::new();
         for e in at.invariants.iter().chain(at.ensures.iter()).chain(at.decreases.iter()) {
             attach_ts.extend(e.to_token_stream());
@@ -2906,6 +3982,9 @@ impl<'m> Reader<'m> {
             henv.declared.insert(n.clone());
             if let Some(r) = env.refs.get(&(0, l)) {
                 henv.refs.insert((0, l), r.clone());
+            }
+            if let Some(r) = env.iters.get(&(0, l)) {
+                henv.iters.insert((0, l), r.clone());
             }
         }
         let mut inputs: Vec<TokenStream> = Vec::new();
@@ -3056,46 +4135,123 @@ impl<'m> Reader<'m> {
     /// `h` to its one exit `x`, which returns the parameters the loop
     /// assigns (in parameter order, the value itself when there is one):
     /// `let r = f__loopK(..); a = r.0; ..`, then the walk goes on from `x`.
-    /// `None` (nothing written) when it does not apply: a state or a `&mut`
-    /// among the parameters, the receiver of a method, a variable live at the
-    /// exit that is no parameter, or a loop that assigns none of them.
+    /// A state is a parameter like any other, returned when the loop writes
+    /// it (itself or through a reference into it). A `&mut` live at the
+    /// header that refers to an element of a state, or to a literal range of
+    /// one (an `IterMut`'s element, `split_at_mut`'s halves of it), is no
+    /// parameter: the helper rebuilds it from the state and the element's
+    /// index, an extra parameter after the others (`<elem>_index`, `elem`
+    /// the variable that held the element; one per index), which the
+    /// walker reads as the reference's code (`HelperInfo::derived`).
+    /// `None` (nothing written) when it does not apply: another `&mut` or a
+    /// state held otherwise than as its place among the parameters, the
+    /// receiver of a method, a variable live at the exit that is no
+    /// parameter, or a loop that assigns none of them.
     #[allow(clippy::too_many_arguments)]
     fn returning_helper(&mut self, h: usize, k: usize, at: &LoopAttach, x: usize, live: &BTreeSet<usize>, body: &BTreeSet<usize>, env: &Env, cx: &Cx, out: &mut Vec<syn::Stmt>) -> Result<Option<Flow>, String> {
         let f = self.frames[0].f;
         let receiver = self.spec.params.first().is_some_and(|p| p == "self");
-        let mut params = self.loop_params(live, at, env);
+        let all = self.loop_params(live, at, env);
         let is_state = |l: usize| self.spec.states.iter().any(|s| *s + 1 == l);
-        if (receiver && params.contains(&1)) || params.iter().any(|l| env.refs.contains_key(&(0, *l)) || is_state(*l) || value_ty(&f.locals[*l].0).is_none()) {
+        // a state held as its place (not field by field, not a buffer, not
+        // an optional one's)
+        let plain_state = |l: usize| is_state(l) && env.refs.get(&(0, l)).is_some_and(|r| r.fields.is_none() && r.buf.is_none() && !r.inner && r.range.is_none());
+        if receiver && all.contains(&1) {
             return Ok(None);
         }
+        let mut params: Vec<usize> = Vec::new();
+        // (the reference's local, the state's local, the index, the range)
+        let mut derived: Vec<(usize, usize, syn::Expr, Option<(u128, u128)>)> = Vec::new();
+        for &l in &all {
+            if is_state(l) {
+                if !plain_state(l) {
+                    return Ok(None);
+                }
+                params.push(l);
+            } else if let Some(r) = env.refs.get(&(0, l)) {
+                let Some((s, ie, range)) = self.element_ref(r, env) else { return Ok(None) };
+                derived.push((l, s, ie, range));
+            } else if value_ty(&f.locals[l].0).is_none() {
+                return Ok(None);
+            } else {
+                params.push(l);
+            }
+        }
+        for (_, s, _, _) in &derived {
+            if !params.contains(s) {
+                params.push(*s);
+            }
+        }
         let live_x = self.live_at(x);
-        if live_x.iter().any(|l| *l != 0 && !params.contains(l)) {
+        if live_x.iter().any(|l| *l != 0 && !params.contains(l) && !derived.iter().any(|d| d.0 == *l)) {
             return Ok(None);
         }
         self.order_params(&mut params, body, false);
         let assigned = loop_assigns(f, body);
-        let returned: Vec<usize> = params.iter().copied().filter(|l| assigned.contains(l)).collect();
+        // (a state the loop writes through a reference into it)
+        let written_through = |l: usize| derived.iter().any(|d| d.1 == l && assigned.contains(&d.0));
+        // (with a contract, only what the caller reads after it: a state, or
+        // a variable live at the exit)
+        let wanted = |l: usize| at.ensures.is_empty() || is_state(l) || live_x.contains(&l);
+        let returned: Vec<usize> = params.iter().copied().filter(|l| (assigned.contains(l) || written_through(*l)) && wanted(*l)).collect();
         if returned.is_empty() {
             return Ok(None);
         }
-        let tys: Vec<syn::Type> = returned.iter().map(|l| value_ty(&f.locals[*l].0).ok_or("a `&mut` result").and_then(|t| self.nm.ty(self.m, &t).map_err(|_| "a result type"))).collect::<Result<_, _>>()?;
+        // the elements' indices: one parameter each, after the others
+        let mut indices: Vec<(String, syn::Expr)> = Vec::new();
+        for (_, _, ie, _) in &derived {
+            let key = ie.to_token_stream().to_string();
+            if indices.iter().any(|(_, e)| e.to_token_stream().to_string() == key) {
+                continue;
+            }
+            let stem = match ie {
+                syn::Expr::Path(p) => p.path.get_ident().and_then(|i| self.elem_names.get(&i.to_string()).cloned()),
+                _ => None,
+            };
+            let mut name = format!("{}_index", stem.clone().unwrap_or_else(|| "__elem".to_string()));
+            while self.frames[0].names.contains(&name) || indices.iter().any(|(n, _)| *n == name) {
+                name.push('_');
+            }
+            // (the element's variable, for an element function's parameter)
+            if let Some(st) = stem {
+                self.elem_names.insert(name.clone(), st);
+            }
+            indices.push((name, ie.clone()));
+        }
+        let tys: Vec<syn::Type> = returned
+            .iter()
+            .map(|l| {
+                if is_state(*l) {
+                    return self.state_ty(*l);
+                }
+                value_ty(&f.locals[*l].0).ok_or_else(|| "a `&mut` result".to_string()).and_then(|t| self.nm.ty(self.m, &t).map_err(|_| "a result type".to_string()))
+            })
+            .collect::<Result<_, _>>()?;
         let out_ty: syn::Type = if tys.len() == 1 { tys[0].clone() } else { syn::parse_quote!((#(#tys),*)) };
         let name = format_ident!("{}__loop{}", self.spec.lifted_name.replace("::", "__"), k);
         let callee: syn::Expr = syn::parse_quote!(#name);
         // the call, and the results in their variables
-        let args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(env, *l)).collect::<Result<_, _>>()?;
+        let mut args: Vec<syn::Expr> = params.iter().map(|l| self.state_or_var(env, *l)).collect::<Result<_, _>>()?;
+        args.extend(indices.iter().map(|(_, e)| e.clone()));
         let r = ident(&self.fresh("l"));
         out.push(syn::parse_quote!(let #r = #callee(#(#args),*);));
         let mut env2 = env.clone();
         for (i, l) in returned.iter().enumerate() {
             let n = self.frames[0].names[*l].clone();
-            let id = ident(&n);
             let v: syn::Expr = if returned.len() == 1 {
                 syn::parse_quote!(#r)
             } else {
                 let ix = syn::Index::from(i);
                 syn::parse_quote!(#r.#ix)
             };
+            if is_state(*l) {
+                // (its place, the parameter: what was read of it is read before)
+                let sr = env2.refs.get(&(0, *l)).cloned().ok_or("a state without its place")?;
+                self.state_store(0, &sr, v, &mut env2, out)?;
+                self.assigned_params.insert(*l - 1);
+                continue;
+            }
+            let id = ident(&n);
             out.push(syn::parse_quote!(#id = #v;));
             if self.is_param(0, *l) {
                 self.assigned_params.insert(*l - 1);
@@ -3104,13 +4260,26 @@ impl<'m> Reader<'m> {
         }
         // the helper: the header's statements first, `return h(..)` at the
         // back edge, the results where the loop leaves to `x`
-        let (henv, inputs, mut hb) = self.helper_head(&params, env, false)?;
+        let (mut henv, mut inputs, mut hb) = self.helper_head(&params, env, false)?;
+        for (n, _) in &indices {
+            let id = ident(n);
+            inputs.push(quote!(mut #id: usize));
+            henv.declared.insert(n.clone());
+        }
+        for (l, s, ie, range) in &derived {
+            let sr = env.refs.get(&(0, *s)).ok_or("a state without its place")?;
+            let base = paren(self.state_value(sr)?);
+            let key = ie.to_token_stream().to_string();
+            let iname = ident(&indices.iter().find(|(_, e)| e.to_token_stream().to_string() == key).ok_or("an element's index")?.0);
+            let range = range.map(|(lo, hi)| (lit_uint(lo, "usize"), lit_uint(hi - lo, "usize")));
+            henv.refs.insert((0, *l), LRef { lv: syn::parse_quote!(#base[#iname]), buf: None, fields: None, inner: false, range });
+        }
         if !at.at_start.is_empty() {
             let s = &at.at_start;
             hb.push(syn::parse_quote!(proof! { #(#s)* }));
         }
         let mut loops = cx.loops.clone();
-        loops.push((h, LoopForm::Helper(callee.clone(), params.clone())));
+        loops.push((h, LoopForm::Helper(callee.clone(), params.clone(), indices.iter().map(|(n, _)| n.clone()).collect())));
         let cx_h = Cx { k: K::Ret, stop: Some(x), loops, probe: false };
         let saved = self.owner.replace((name.to_string(), false));
         let flow = self.go_header(h, henv, &cx_h, &mut hb);
@@ -3118,7 +4287,7 @@ impl<'m> Reader<'m> {
         if let Flow::Fall(mut e) = flow? {
             let rset: BTreeSet<usize> = returned.iter().copied().collect();
             self.normalize(&rset, &mut e, &mut hb)?;
-            let rs: Vec<syn::Expr> = returned.iter().map(|l| var(&self.frames[0].names[*l])).collect();
+            let rs: Vec<syn::Expr> = returned.iter().map(|l| self.state_or_var(&e, *l)).collect::<Result<_, _>>()?;
             hb.push(if rs.len() == 1 {
                 let r0 = &rs[0];
                 syn::parse_quote!(return #r0;)
@@ -3126,7 +4295,19 @@ impl<'m> Reader<'m> {
                 syn::parse_quote!(return (#(#rs),*);)
             });
         }
-        let attrs = self.helper_attrs(h, body, at, !self.spec.loops.contains_key(&k));
+        // an element attachment: the body on the element, a function of it
+        if let Some(ens) = &at.element {
+            let item = match self.extract_element(&name.to_string(), &inputs, &mut hb, &ens.ensures, &ens.requires, &ens.at_start) {
+                Ok(item) => item,
+                Err(e) => return self.err(0, format!("the element attachment of loop {k}: {e}")),
+            };
+            self.elements.push(item.sig.ident.to_string());
+            self.helpers.push(syn::Item::Fn(item));
+        }
+        let mut attrs = self.helper_attrs(h, body, at, !self.spec.loops.contains_key(&k));
+        for e in &at.ensures {
+            attrs.push(syn::parse_quote!(#[ensures(#e)]));
+        }
         let item: syn::ItemFn = syn::parse_quote!(
             #(#attrs)*
             fn #name(#(#inputs),*) -> #out_ty { #(#hb)* }
@@ -3134,8 +4315,40 @@ impl<'m> Reader<'m> {
         self.helpers.push(syn::Item::Fn(item));
         self.loop_forms.push((k, "returning".into()));
         let positions: Vec<usize> = returned.iter().filter_map(|l| params.iter().position(|p| p == l)).collect();
-        self.helper_info.push(HelperInfo { name: name.to_string(), method: false, header: h, params: params.clone(), while_loop: false, local_names: self.frames[0].names.clone(), returns: Some(positions), owner: self.owner.clone() });
+        let iters: Vec<(usize, usize)> = params.iter().enumerate().filter_map(|(i, l)| self.iter_params.get(l).map(|p| (i, *p))).collect();
+        let derived_info: Vec<(usize, usize, usize, Option<(u128, u128)>)> = derived
+            .iter()
+            .map(|(l, s, ie, range)| {
+                let key = ie.to_token_stream().to_string();
+                let sp = params.iter().position(|p| p == s).unwrap_or(usize::MAX);
+                let ip = params.len() + indices.iter().position(|(_, e)| e.to_token_stream().to_string() == key).unwrap_or(usize::MAX - params.len());
+                (*l, sp, ip, *range)
+            })
+            .collect();
+        let extra: Vec<String> = indices.iter().map(|(n, _)| n.clone()).collect();
+        self.helper_info.push(HelperInfo { name: name.to_string(), method: false, header: h, params: params.clone(), while_loop: false, local_names: self.frames[0].names.clone(), returns: Some(positions), owner: self.owner.clone(), iters, derived: derived_info, extra });
         Ok(Some(self.go(0, x, env2, cx, out)?))
+    }
+
+    /// A `&mut` that refers to an element of a state held as its place, or
+    /// to a literal range of one (`&mut xs[i]`, `&mut xs[i][lo..hi]`): (the
+    /// state's local, the element's index, the range as the literal
+    /// reading's `PRange(lo, hi)`).
+    fn element_ref(&self, r: &LRef, env: &Env) -> Option<(usize, syn::Expr, Option<(u128, u128)>)> {
+        if r.buf.is_some() || r.fields.is_some() || r.inner {
+            return None;
+        }
+        let syn::Expr::Index(ix) = &r.lv else { return None };
+        let base = ix.expr.to_token_stream().to_string();
+        let s = self.spec.states.iter().map(|s| s + 1).find(|l| env.refs.get(&(0, *l)).is_some_and(|sr| sr.fields.is_none() && sr.buf.is_none() && !sr.inner && sr.range.is_none() && sr.lv.to_token_stream().to_string() == base))?;
+        let range = match &r.range {
+            None => None,
+            Some((off, len)) => {
+                let (o, n) = (lit_value(off)?, lit_value(len)?);
+                Some((o, o.checked_add(n)?))
+            }
+        };
+        Some((s, (*ix.index).clone(), range))
     }
 
     /// An untrusted guess of the measure of the loop at header `h` whose
@@ -3160,6 +4373,13 @@ impl<'m> Reader<'m> {
             let x = var(&self.frames[0].names[l]);
             if super::slice_iter_elem(self.m, t).is_some() {
                 return Some(syn::parse_quote!((#x.0.len() as Int) - (#x.1 as Int)));
+            }
+            // core's `IterMut`: the index over the slice it walks
+            if super::iter_mut_elem(self.m, t).is_some()
+                && let Some(sl) = self.iter_slices.get(&l)
+            {
+                let sl = paren(sl.clone());
+                return Some(syn::parse_quote!((#sl.len() as Int) - (#x as Int)));
             }
             if let Ty::Adt(k) = t
                 && let Some(d) = self.m.adts.get(k)
@@ -3324,6 +4544,8 @@ impl<'m> Reader<'m> {
         match t {
             Ty::Ref(true, inner) => match &**inner {
                 Ty::Ref(_, s) if matches!(**s, Ty::Slice(_)) => Ok(syn::parse_quote!(Seq<u8>)),
+                // `&mut [T]`: the state `&[T]` (docs/mir-lift.md §20.10)
+                Ty::Slice(_) => self.nm.ty(self.m, &Ty::Ref(false, inner.clone())),
                 other => self.nm.ty(self.m, other),
             },
             other => self.nm.ty(self.m, other),
@@ -3383,6 +4605,9 @@ pub fn model_body(m: &Sbmir, f: &Fn) -> Option<Fn> {
             let b4 = blk(vec![asg(0, vec![], Rvalue::Agg(AggKind::Adt(ret.clone(), some), vec![cp(8, vec![])]))], Term::Return);
             (locals, vec![b0, b1, b2, b3, b4])
         }
+        // (core's `IterMut` holds a `&mut` the subset cannot hold in a
+        // value: the reading reads its loop itself, `Reader::call`)
+        super::Model::IterMutNew | super::Model::IterMutNext | super::Model::IterMutIntoIter | super::Model::SplitAtMut => return None,
     };
     let mut g = f.clone();
     g.locals = locals.into_iter().map(|t| (t, true)).collect();
@@ -3501,7 +4726,7 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
     }
     let cfg = Cfg::new(f);
     let models: std::collections::BTreeMap<String, Fn> = m.fns.iter().filter_map(|(k, g)| model_body(m, g).map(|b| (k.clone(), b))).collect();
-    let mut r = Reader { m, nm, spec, models: &models, frames: Vec::new(), cfg, fresh: 0, helpers: Vec::new(), loop_forms: Vec::new(), assigned_params: BTreeSet::new(), helper_info: Vec::new(), owner: None, whiles: Default::default() };
+    let mut r = Reader { m, nm, spec, models: &models, frames: Vec::new(), cfg, fresh: 0, helpers: Vec::new(), loop_forms: Vec::new(), assigned_params: BTreeSet::new(), helper_info: Vec::new(), owner: None, whiles: Default::default(), iter_slices: HashMap::new(), iter_params: HashMap::new(), elem_names: HashMap::new(), elements: Vec::new() };
     let fr = r.new_frame(f, true);
     let mut env = Env::default();
     let mut out = Vec::new();
@@ -3532,7 +4757,7 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
                     env.declared.insert(fv.clone());
                 }
             }
-            env.refs.insert((fr, l), LRef { lv: var(&name), buf, fields, inner: false });
+            env.refs.insert((fr, l), LRef { lv: var(&name), buf, fields, inner: false, range: None });
         } else if matches!(t, Ty::Ref(true, _)) {
             return Err(format!("`{}`: rustc's MIR parameter `{name}` is `&mut` but the lift does not pass it as a state", spec.lifted_name));
         } else if matches!(t, Ty::Ref(false, _)) && !spec.ref_params.contains(&i) && name != "_" {
@@ -3546,5 +4771,5 @@ pub fn read(m: &Sbmir, nm: &dyn Names, spec: &Spec<'_>) -> Result<ReadOut, Strin
     if let Flow::Fall(_) = flow {
         return Err(format!("`{}`: the reading fell off the end", spec.lifted_name));
     }
-    Ok(ReadOut { body: syn::Block { brace_token: Default::default(), stmts: out }, helpers: r.helpers, loops: r.loop_forms, assigned_params: r.assigned_params.into_iter().collect(), helper_info: r.helper_info })
+    Ok(ReadOut { body: syn::Block { brace_token: Default::default(), stmts: out }, helpers: r.helpers, loops: r.loop_forms, assigned_params: r.assigned_params.into_iter().collect(), helper_info: r.helper_info, elements: r.elements })
 }

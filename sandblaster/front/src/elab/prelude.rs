@@ -72,6 +72,7 @@ const GLOBALS: &[&str] = &[
     "seq::replicate",
     "seq::eq",
     "seq::len_append",
+    "seq::len_update",
     "seq::len_take",
     "seq::len_drop",
     "Not",

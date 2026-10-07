@@ -70,6 +70,10 @@ pub struct LiftOpts {
     /// from rustc's MIR in that file (relative to the declaring file),
     /// [`crate::mir`], `docs/mir-lift.md` §20.
     pub mir: Option<String>,
+    /// `window_mir = "varint.window.sbmir"`: the same module's MIR extracted
+    /// unoptimized (`-Zmir-opt-level=0`), read only by the window analysis
+    /// of pointers ([`crate::mir::load_window`]); needs `mir`.
+    pub window_mir: Option<String>,
 }
 
 impl LiftOpts {
@@ -85,6 +89,9 @@ impl LiftOpts {
         self.items.extend(o.items);
         if o.mir.is_some() {
             self.mir = o.mir;
+        }
+        if o.window_mir.is_some() {
+            self.window_mir = o.window_mir;
         }
     }
 }
@@ -104,7 +111,7 @@ fn split_pairs(s: &str) -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\", items = \"Item, ..\")]`; `mir = \"file.sbmir\"` on either reads the bodies from rustc's MIR";
+const LIFT_USAGE: &str = "expected `#[lift]`, `#[lift(host)]` or `#[lift(unverified = \"T, ..\")]`, and for the host's own files `#[lift(in_place, children = \"m\", instance = \"Trait: path::Type\", unverified_instances = \"Trait: path::Type\", unverified_impls = \"Trait, ..\", unverified_fns = \"Type::method, ..\", items = \"Item, ..\")]`; `mir = \"file.sbmir\"` on either reads the bodies from rustc's MIR (with `window_mir = \"file.window.sbmir\"`, its unoptimized extraction for the window analysis)";
 
 /// Parses one `#[lift]` / `#[lift(..)]` attribute.
 pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
@@ -128,6 +135,7 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
                     "unverified_fns" => o.unverified_fns.extend(split_list(&v)),
                     "items" => o.items.extend(split_list(&v)),
                     "mir" => o.mir = Some(v),
+                    "window_mir" => o.window_mir = Some(v),
                     _ => return Err(LIFT_USAGE.into()),
                 }
             }
@@ -136,6 +144,9 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
     }
     if !o.children.is_empty() && !o.in_place {
         return Err("`children = \"..\"` needs `in_place` (the children are the host's own files next to the source)".into());
+    }
+    if o.window_mir.is_some() && o.mir.is_none() {
+        return Err("`window_mir = \"..\"` needs `mir = \"..\"` (it is the same module's MIR, extracted unoptimized for the window analysis)".into());
     }
     if !o.items.is_empty() && !o.in_place {
         return Err("`items = \"..\"` needs `in_place` (it selects the verified items of a host file; a copied source is lifted whole)".into());
@@ -152,6 +163,11 @@ pub fn parse_lift_opts(a: &syn::Attribute) -> Result<LiftOpts, String> {
 pub struct OpenCtx {
     /// Open trait → its instance path (`Family` → `crate::merkle::mmr::Family`).
     pub instances: HashMap<String, syn::Path>,
+    /// Open traits declared at several verified instances (`Engine` at
+    /// `Neon` and `Scalar`): trait → its instance paths. Each instance's
+    /// impl is read as that instance's methods; no lifted item may be
+    /// generic over such a trait (no one instance to erase it to).
+    pub multi: HashMap<String, Vec<syn::Path>>,
     /// Associated constants of lifted impls: `(S, C)` → `S__C`.
     pub assoc_consts: HashSet<(String, String)>,
     /// Operator / conversion impls: `(self type, trait, argument)` → method
@@ -170,6 +186,9 @@ pub struct OpenCtx {
     pub const_fns: HashSet<String>,
     /// Lifted functions with a `requires` attachment (for the record).
     pub host_obligations: Vec<(String, String)>,
+    /// `&mut` parameters raw pointers are formed from (for the record:
+    /// their non-aliasing is assumed, DESIGN-UNSAFE-SIMD A-S8).
+    pub pointer_params: Vec<(String, String)>,
     /// Lifted functions with a recursion depth bound (for the record).
     pub host_depth_bounds: Vec<(String, String)>,
     /// Lifted functions with a panic contract (for the record).
@@ -194,6 +213,18 @@ pub struct OpenCtx {
     /// The non-generic enums of the lifted sources (the local typing of
     /// `E::V`).
     pub enums: HashSet<String>,
+}
+
+impl OpenCtx {
+    /// Whether `t` is an open trait read at its verified instance(s).
+    pub fn is_open(&self, t: &str) -> bool {
+        self.instances.contains_key(t) || self.multi.contains_key(t)
+    }
+
+    /// Whether any open trait is declared.
+    pub fn any_open(&self) -> bool {
+        !self.instances.is_empty() || !self.multi.is_empty()
+    }
 }
 
 /// Supertraits of an open trait declared in a lifted file that constrain
@@ -548,6 +579,12 @@ pub fn state_param(t: &syn::Type, byte_iters: &HashSet<String>) -> Option<(syn::
             (super::is_prim(&n) || n == "bool" || p.path.segments.len() > 1 || n.chars().next().is_some_and(|c| c.is_ascii_uppercase())).then(|| ((*r.elem).clone(), (*r.elem).clone(), false))
         }
         syn::Type::Tuple(_) | syn::Type::Array(_) => Some(((*r.elem).clone(), (*r.elem).clone(), false)),
+        // `&mut [T]` (a function read from MIR, docs/mir-lift.md §20.10): the
+        // state `&[T]`, the slice's elements (its length cannot change)
+        syn::Type::Slice(_) => {
+            let st: syn::Type = syn::Type::Reference(syn::TypeReference { and_token: Default::default(), lifetime: None, mutability: None, elem: r.elem.clone() });
+            Some((st.clone(), st, false))
+        }
         _ => None,
     }
 }
@@ -672,10 +709,13 @@ fn take_open_params(g: &mut syn::Generics, instances: &HashMap<String, syn::Path
 impl Ctx {
     /// Erases the open-trait parameters of every item (module docs).
     pub(super) fn erase_open_generics(&mut self, items: &mut Vec<syn::Item>) {
-        if self.open.instances.is_empty() {
+        if !self.open.any_open() {
             return;
         }
         let instances = self.open.instances.clone();
+        let multi = self.open.multi.clone();
+        // (each such trait with any one of its instances: only to find its bounds)
+        let multi_bound: HashMap<String, syn::Path> = multi.iter().filter_map(|(t, v)| Some((t.clone(), v.first()?.clone()))).collect();
         let mut keep = Vec::new();
         for mut item in std::mem::take(items) {
             let generics: Option<&mut syn::Generics> = match &mut item {
@@ -687,6 +727,14 @@ impl Ctx {
                 syn::Item::Trait(t) => Some(&mut t.generics),
                 _ => None,
             };
+            // (a generic item over a trait of several instances: no one
+            // instance to read it at)
+            if let Some(g) = generics.as_deref()
+                && !open_param_positions(g, &multi_bound).is_empty()
+            {
+                self.err(item.span(), "a generic item bounded by an open trait declared at several verified instances: it has no one instance to be read at");
+                continue;
+            }
             let params = match generics.map(|g| take_open_params(g, &instances)) {
                 Some(Ok(p)) => p,
                 Some(Err(e)) => {
@@ -723,8 +771,8 @@ impl Ctx {
             if let syn::Item::Impl(im) = &item
                 && let Some((_, tp, _)) = &im.trait_
                 && let Some(tn) = tp.segments.last().map(|s| s.ident.to_string())
-                && let Some(inst) = instances.get(&tn)
-                && !matches!(&*im.self_ty, syn::Type::Path(st) if is_instance_path(&st.path, inst))
+                && let Some(insts) = instances.get(&tn).map(|i| vec![i.clone()]).or_else(|| multi.get(&tn).cloned())
+                && !insts.iter().any(|inst| matches!(&*im.self_ty, syn::Type::Path(st) if is_instance_path(&st.path, inst)))
             {
                 self.note_left_out(im);
                 self.drop_item(im.span(), format!("impl `{tn}` for `{written}`"), "an instance of the open trait other than the verified one (`instance = ..`): unverified host code");
@@ -952,13 +1000,17 @@ impl Ctx {
     /// Prunes an in-place module's lifted items: `use` leaves and type
     /// aliases no other item names (neither is code: an unused one cannot
     /// change a meaning, and a used one is kept, so it resolves or fails).
-    pub(super) fn prune_unused(&mut self, items: &mut Vec<syn::Item>) {
-        // type aliases, to a fixpoint (an alias may be used by another)
+    pub(super) fn prune_unused(&mut self, items: &mut Vec<syn::Item>, selected: &[String]) {
+        // type aliases, to a fixpoint (an alias may be used by another),
+        // but those the declaration's `items = ..` names (another lifted
+        // file may name them: `tables::Mul128` in `engine_neon.rs`)
         loop {
             let uses: Vec<usize> = items.iter().enumerate().filter(|(_, i)| matches!(i, syn::Item::Use(_))).map(|(k, _)| k).collect();
             let mut drop_at = None;
             for (k, it) in items.iter().enumerate() {
-                if let syn::Item::Type(t) = it {
+                if let syn::Item::Type(t) = it
+                    && !selected.iter().any(|s| t.ident == s.as_str())
+                {
                     let mut skip = uses.clone();
                     skip.push(k);
                     if !used_idents(items, &skip).contains(&t.ident.to_string()) {
@@ -1126,7 +1178,7 @@ impl Ctx {
         let Some(tname) = tp.segments.last().map(|s| s.ident.to_string()) else { return false };
         let Some(sn) = super::type_name(&im.self_ty) else { return false };
         let prim_self = super::is_prim(&sn);
-        if self.open.instances.contains_key(&tname) {
+        if self.open.is_open(&tname) {
             // provided methods the impl does not override are methods of the instance too
             let overridden: HashSet<String> = im.items.iter().filter_map(|ii| match ii {
                 syn::ImplItem::Fn(f) => Some(f.sig.ident.to_string()),

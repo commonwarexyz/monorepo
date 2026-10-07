@@ -119,6 +119,9 @@ pub struct LiftSource {
     pub module_path: String,
     /// `#[lift(mir = "..")]`: the `.sbmir` file's text ([`crate::mir`]).
     pub mir: Option<String>,
+    /// `#[lift(window_mir = "..")]`: the unoptimized extraction's text, for
+    /// the window analysis only ([`crate::mir::load_window`]).
+    pub window_mir: Option<String>,
     /// The source file's path and text (the `.sbmir` names its sources by
     /// their SHA-256).
     pub path_display: String,
@@ -129,6 +132,11 @@ pub struct LiftSource {
     pub mir_extra: Vec<(String, Vec<u8>)>,
     /// The build's target architecture (`aarch64`): the `.sbmir` must be of it.
     pub target_arch: String,
+    /// The build's statically enabled target features and its `-C
+    /// target-cpu`/`-C target-feature` flags (when known): bound to the
+    /// extraction's (`mir::load`, DESIGN-UNSAFE-SIMD A-S3).
+    pub target_features: Vec<String>,
+    pub codegen_flags: Option<(Option<String>, String)>,
 }
 
 /// What a lifted module is, for module-mode emission (`driver::gates`,
@@ -172,6 +180,11 @@ pub struct LiftFacts {
     /// Lifted functions with a `requires` attachment: at the boundary a
     /// precondition the host must meet (`(function, requires)`).
     pub host_obligations: Vec<(String, String)>,
+    /// The `&mut` parameters of functions read from MIR that raw pointers
+    /// are formed from (`(function, parameter)`): that each aliases no other
+    /// parameter is assumed (Rust's guarantee for `&mut`, assumption A3;
+    /// the window rule does not check it, DESIGN-UNSAFE-SIMD A-S8).
+    pub pointer_params: Vec<(String, String)>,
     /// Lifted functions with a recursion depth bound (`decreases(e, max =
     /// C)`, DESIGN.md §3.7): at the boundary a stack-depth bound the host
     /// must meet (`(function, "e <= C")`).
@@ -213,6 +226,11 @@ pub struct LiftFacts {
     /// The loop helpers the (untrusted) reading of the bodies built, with
     /// what their loop lemmas are stated over (`crate::mir::checked`).
     pub mir_helpers: Vec<MirHelper>,
+    /// The element functions the (untrusted) reading built (a loop's body
+    /// on one element of an `IterMut`, `crate::mir::read`), by kernel name:
+    /// a hint for the walk, which unfolds them where a loop helper calls
+    /// them; never part of a statement.
+    pub mir_elements: Vec<String>,
     /// The panic lemmas a proof file attaches to a function with a panic
     /// contract (`panic_lemma(path);`): `(function, lemma)`. An untrusted
     /// hint for its panic theorem's walk (`crate::mir::checked`), which
@@ -247,6 +265,14 @@ pub struct MirHelper {
     /// (`crate::mir::read::HelperInfo::returns`): the positions of the
     /// parameters it returns; its lemma is a `while` loop's.
     pub returns: Option<Vec<usize>>,
+    /// Its parameters that are core's `IterMut` over a `&mut [T]`
+    /// parameter's referent: (position, that parameter's local).
+    pub iters: Vec<(usize, usize)>,
+    /// A returning helper's references into a state's element, which it
+    /// rebuilds (`crate::mir::read::HelperInfo::derived`), and its
+    /// parameters that carry no local (`..::extra`).
+    pub derived: Vec<(usize, usize, usize, Option<(u128, u128)>)>,
+    pub extra: Vec<String>,
 }
 
 /// One `#[lift(mir = ..)]` module's loaded MIR.
@@ -485,30 +511,45 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             diags.push(Diagnostic::error(DiagKind::Unsupported, src.decl_span, "lift: `#[lift(host)]` models host exec items; a ghost module cannot be one"));
         }
     }
-    // open traits at their verified instance (crate-wide; every declaration agrees)
+    // open traits at their verified instances (crate-wide; every declaration
+    // agrees): a trait at one instance is erased to it in generic items; a
+    // trait at several (`Engine` at `Neon` and `Scalar`) is read at each of
+    // them, and no lifted item may be generic over it
     let mut unverified_instances: Vec<(String, String)> = Vec::new();
     let in_place_crate = sources.iter().any(|s| s.opts.in_place);
+    let mut declared: Vec<(String, Vec<syn::Path>)> = Vec::new();
     for src in &sources {
         for (t, p) in &src.opts.instances {
             let Ok(path) = syn::parse_str::<syn::Path>(p) else {
                 diags.push(Diagnostic::error(DiagKind::Unsupported, src.decl_span, format!("lift: `instance = \"{t}: {p}\"`: `{p}` is not a path")));
                 continue;
             };
-            match cx.open.instances.get(t) {
-                Some(q) if path_key(q) != path_key(&path) => diags.push(Diagnostic::error(DiagKind::Unsupported, src.decl_span, format!("lift: the open trait `{t}` is declared at two instances (`{}`, `{p}`); one verified instance per open trait is supported", path_key(q)))),
-                Some(_) => {}
+            let at = match declared.iter().position(|(d, _)| d == t) {
+                Some(i) => i,
                 None => {
-                    cx.open.instances.insert(t.clone(), path);
+                    declared.push((t.clone(), Vec::new()));
+                    declared.len() - 1
                 }
+            };
+            if !declared[at].1.iter().any(|q| path_key(q) == path_key(&path)) {
+                declared[at].1.push(path);
             }
         }
         for (t, p) in &src.opts.unverified_instances {
             if !unverified_instances.contains(&(t.clone(), p.clone())) {
                 unverified_instances.push((t.clone(), p.clone()));
             }
-            diags.push(Diagnostic::warning(DiagKind::Unsupported, src.decl_span, format!("lift: the instance `{p}` of the open trait `{t}` is declared unverified: the lifted items are checked at `{}` only; at `{p}` they stay unchecked host code", cx.open.instances.get(t).map(path_key).unwrap_or_else(|| "(no verified instance)".into()))));
+            let verified: Vec<String> = declared.iter().filter(|(d, _)| d == t).flat_map(|(_, ps)| ps.iter().map(path_key)).collect();
+            diags.push(Diagnostic::warning(DiagKind::Unsupported, src.decl_span, format!("lift: the instance `{p}` of the open trait `{t}` is declared unverified: the lifted items are checked at `{}` only; at `{p}` they stay unchecked host code", if verified.is_empty() { "(no verified instance)".to_string() } else { verified.join("`, `") })));
         }
         cx.open.module_paths.insert(src.name.clone(), src.module_path.clone());
+    }
+    for (t, mut ps) in declared {
+        if ps.len() == 1 {
+            cx.open.instances.insert(t, ps.remove(0));
+        } else {
+            cx.open.multi.insert(t, ps);
+        }
     }
     // exec code is read from rustc's MIR only (`docs/mir-lift.md` §20): a
     // lifted exec module without its extraction is refused, never read
@@ -538,15 +579,20 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     // 1. preprocess: drop host-only items, expand macros, flatten modules
     let mut pre: Vec<(usize, FileId, bool, bool, String, Vec<syn::Item>)> = Vec::new();
     let mut in_place: HashSet<usize> = HashSet::new();
+    // an in-place module's `items = ..` (a type alias named there is kept
+    // even when only another lifted file names it)
+    let mut selected: HashMap<usize, Vec<String>> = HashMap::new();
     // `#[lift(mir = ..)]` modules (name, DSL path without `crate::`, text,
     // declaration) and the lifted source files the MIR must match
-    let mut mir_texts: Vec<(String, String, String, Span)> = Vec::new();
+    let mut mir_texts: Vec<(String, String, String, Option<String>, Span)> = Vec::new();
     let target_arch: Option<String> = sources.first().map(|s| s.target_arch.clone());
+    let static_features: Option<Vec<String>> = sources.first().map(|s| s.target_features.clone());
+    let codegen_flags: Option<(Option<String>, String)> = sources.first().and_then(|s| s.codegen_flags.clone());
     let dsl_modules: Vec<String> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| s.module_path.clone()).collect();
     let mir_files: Vec<(String, Vec<u8>)> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| (s.path_display.clone(), s.text.clone().into_bytes())).chain(sources.iter().flat_map(|s| s.mir_extra.clone())).collect();
     for s in &sources {
         if let Some(t) = &s.mir {
-            mir_texts.push((s.name.clone(), s.module_path.trim_start_matches("crate::").to_string(), t.clone(), s.decl_span));
+            mir_texts.push((s.name.clone(), s.module_path.trim_start_matches("crate::").to_string(), t.clone(), s.window_mir.clone(), s.decl_span));
         }
     }
     // host models other than enums, for the MIR reading (`crate::mir::HostModels`)
@@ -595,6 +641,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         }
         if s.opts.in_place {
             in_place.insert(s.module_index);
+            selected.insert(s.module_index, s.opts.items.clone());
         }
         pre.push((s.module_index, s.file, s.ghost, s.host, s.name, items));
     }
@@ -625,15 +672,22 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             }
         }
         let files: Vec<(String, Vec<u8>)> = mir_files.clone();
-        for (modname, suffix, text, span) in &mir_texts {
+        for (modname, suffix, text, window, span) in &mir_texts {
             let requires: std::collections::BTreeSet<String> = cx.attach_fn.iter().filter(|(_, a)| a.stmts.iter().any(|st| attach_call(st, "requires").is_some())).map(|(n, _)| n.clone()).collect();
-            let open: BTreeMap<String, String> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p).trim_start_matches("crate::").to_string())).collect();
+            let open: BTreeMap<String, Vec<String>> = cx.open.instances.iter().map(|(t, p)| (t.clone(), vec![p.clone()])).chain(cx.open.multi.iter().map(|(t, ps)| (t.clone(), ps.clone()))).map(|(t, ps)| (t, ps.iter().map(|p| path_key(p).trim_start_matches("crate::").to_string()).collect())).collect();
             let consts: BTreeMap<(String, String), bool> = cx.open.assoc_consts.iter().map(|(t, c)| ((t.clone(), c.clone()), cx.open.const_fns.contains(&open::const_name(t, c)))).collect();
             let invariant_types = cx.attach_ty.keys().map(|k| k.rsplit("::").next().unwrap_or(k).to_string()).collect();
-            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types, host: mir_host.clone(), target_arch: target_arch.clone() };
+            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types, host: mir_host.clone(), target_arch: target_arch.clone(), static_features: static_features.clone(), codegen_flags: codegen_flags.clone() };
             let lookup = |p: &str| -> Option<Vec<u8>> { files.iter().find(|(f, _)| f.ends_with(&format!("/{p}")) || f == p).map(|(_, b)| b.clone()) };
             match crate::mir::load(text, &lookup, names, suffix) {
-                Ok(l) => {
+                Ok(mut l) => {
+                    // the window extraction: checked against this one, read
+                    // by the window analysis only
+                    if let Some(w) = window
+                        && let Err(e) = crate::mir::load_window(w, &mut l)
+                    {
+                        diags.push(Diagnostic::error(DiagKind::Unsupported, *span, format!("lift: `window_mir = ..`: {e}")));
+                    }
                     facts.mir_rustc = Some(l.m.rustc.clone());
                     facts.mir_loaded.push(MirModule { dsl: format!("crate::{suffix}"), loaded: std::sync::Arc::new(l.clone()) });
                     for t in l.names.host_types(&l.m) {
@@ -662,7 +716,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
         // (a MIR module's bodies need none of its imports: `use Trait as _`
         // only steered rustc's method resolution)
         if in_place.contains(&idx) || mir_module {
-            cx.prune_unused(&mut lifted);
+            cx.prune_unused(&mut lifted, selected.get(&idx).map(Vec::as_slice).unwrap_or(&[]));
         }
         out.push(LiftResult { module_index: idx, items: lifted });
     }
@@ -693,6 +747,11 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             unused.push((format!("{f}, loop {n}"), a.span));
         }
     }
+    for ((f, n), a) in &cx.attach_elem {
+        if !cx.attach_used.contains(&format!("element {f}#{n}")) {
+            unused.push((format!("{f}, loop {n}, element"), a.span));
+        }
+    }
     unused.sort_by(|a, b| a.0.cmp(&b.0));
     cx.unused_attachments.extend(unused);
     for (sp, msg, notes) in cx.errors.drain(..) {
@@ -721,14 +780,16 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     facts.mir_read = std::mem::take(&mut cx.mir_read);
     facts.mir_contracts = std::mem::take(&mut cx.mir_contracts);
     facts.mir_helpers = std::mem::take(&mut cx.mir_helpers);
+    facts.mir_elements = std::mem::take(&mut cx.mir_elements);
     facts.panic_lemmas = std::mem::take(&mut cx.panic_lemmas);
     facts.instances = std::mem::take(&mut cx.instances);
     facts.test_hook = test_hook::get();
     facts.conform_skipped = std::mem::take(&mut cx.conform_skipped);
     facts.host_obligations = std::mem::take(&mut cx.open.host_obligations);
+    facts.pointer_params = std::mem::take(&mut cx.open.pointer_params);
     facts.host_depth_bounds = std::mem::take(&mut cx.open.host_depth_bounds);
     facts.panic_contracts = std::mem::take(&mut cx.open.panic_contracts);
-    let mut inst: Vec<(String, String)> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p))).collect();
+    let mut inst: Vec<(String, String)> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p))).chain(cx.open.multi.iter().flat_map(|(t, ps)| ps.iter().map(|p| (t.clone(), path_key(p))))).collect();
     inst.sort();
     facts.open_instances = inst;
     facts.unverified_instances = unverified_instances;
@@ -894,6 +955,10 @@ struct Ctx {
     macros: HashMap<String, Vec<MacroRule>>,
     attach_ty: HashMap<String, Attach>,
     attach_loop: HashMap<(String, usize), Attach>,
+    /// Element attachments (`#[lift_attach(path, loop_nr = k, element)]`):
+    /// the contract of the `k`-th loop's body on one element of the slice an
+    /// `IterMut` walks, by (function, loop).
+    attach_elem: HashMap<(String, usize), Attach>,
     /// Function attachments (`ensures(..)`), by source name.
     attach_fn: HashMap<String, Attach>,
     attach_used: HashSet<String>,
@@ -947,6 +1012,8 @@ struct Ctx {
     mir_contracts: Vec<MirContract>,
     /// [`LiftFacts::mir_helpers`].
     mir_helpers: Vec<MirHelper>,
+    /// [`LiftFacts::mir_elements`].
+    mir_elements: Vec<String>,
     /// [`LiftFacts::panic_lemmas`].
     panic_lemmas: Vec<(String, String)>,
     /// The text of every lifted source file and its line starts (an
@@ -1091,7 +1158,11 @@ impl Ctx {
                     let name = t.ident.to_string();
                     let sealed = t.attrs.iter().any(|a| a.path().is_ident("lift_sealed"));
                     // an open trait declared in a lifted file, read at its instance
+                    // (at one: its provided methods are read at that instance)
                     let open_decl = !sealed && self.open.instances.contains_key(&name);
+                    if !sealed && self.open.multi.contains_key(&name) {
+                        self.err(t.span(), format!("the open trait `{name}` is declared in a lifted file and at several verified instances: a trait declared in a lifted file is read at one instance"));
+                    }
                     let mut from = None;
                     let mut shift_amount = None;
                     for b in &t.supertraits {
@@ -1343,12 +1414,19 @@ impl Ctx {
             };
             let mut segs: Vec<String> = Vec::new();
             let mut lp = None;
+            let mut element = false;
             for (i, x) in args.iter().enumerate() {
                 match x {
                     syn::Expr::Path(p) if i == 0 => segs = p.path.segments.iter().map(|s| s.ident.to_string()).collect(),
                     syn::Expr::Assign(asg) if matches!(&*asg.left, syn::Expr::Path(p) if p.path.is_ident("loop_nr")) => lp = expr_usize(&asg.right),
-                    other => self.err(other.span(), "`#[lift_attach(path)]` or `#[lift_attach(path, loop_nr = k)]`"),
+                    // `element`: the loop's body on one element (`IterMut`)
+                    syn::Expr::Path(p) if i > 0 && p.path.is_ident("element") => element = true,
+                    other => self.err(other.span(), "`#[lift_attach(path)]`, `#[lift_attach(path, loop_nr = k)]` or `#[lift_attach(path, loop_nr = k, element)]`"),
                 }
+            }
+            if element && lp.is_none() {
+                self.err(a.span(), "`element` names a loop's body: `#[lift_attach(path, loop_nr = k, element)]`");
+                continue;
             }
             // the target, by its full path: a struct (`crate::m::S`), a
             // method of a lifted struct (`crate::m::S::f`, `S` declared in
@@ -1397,6 +1475,12 @@ impl Ctx {
             let spans: Vec<Span> = f.block.stmts.iter().map(|st| self.sp(st.span())).collect();
             let at = Attach { params, stmts: f.block.stmts.clone(), in_laws: vec![in_laws; k], modules: vec![module.to_string(); k], srcs, spans, span };
             match (target_ty, target_fn, lp) {
+                (None, Some(fname), Some(k)) if element => match self.attach_elem.get_mut(&(fname.clone(), k)) {
+                    Some(prev) => prev.extend(at),
+                    None => {
+                        self.attach_elem.insert((fname, k), at);
+                    }
+                },
                 (Some(t), None, None) => {
                     // several attachments to one item (a law file's precondition, a
                     // proof file's summary) are one attachment, in file order
@@ -1687,12 +1771,20 @@ impl Ctx {
                     // `core::arch::<arch>` (and std's re-export of it): the
                     // vector types and intrinsics the front end resolves
                     // against its target library (docs/mir-lift.md §20.9)
-                    if matches!(first.as_str(), "core" | "std")
-                        && let syn::UseTree::Path(a) = &*p.tree
-                        && a.ident == "arch"
-                        && matches!(&*a.tree, syn::UseTree::Path(m) if m.ident == "aarch64" || m.ident == "x86_64")
-                    {
+                    fn arch_tree(t: &syn::UseTree) -> bool {
+                        matches!(t, syn::UseTree::Path(a) if a.ident == "arch" && matches!(&*a.tree, syn::UseTree::Path(m) if m.ident == "aarch64" || m.ident == "x86_64"))
+                    }
+                    if matches!(first.as_str(), "core" | "std") && arch_tree(&p.tree) {
                         return true;
+                    }
+                    // `use core::{arch::aarch64::*, iter::zip};`: the `core::arch`
+                    // leaves of a group are kept, the rest of the group dropped
+                    if matches!(first.as_str(), "core" | "std")
+                        && let syn::UseTree::Group(g) = &mut *p.tree
+                    {
+                        let items: Vec<syn::UseTree> = std::mem::take(&mut g.items).into_iter().filter(arch_tree).collect();
+                        g.items = items.into_iter().collect();
+                        return !g.items.is_empty();
                     }
                     if matches!(first.as_str(), "bytes" | "core" | "std" | "alloc" | "sealed") {
                         return false;
@@ -1861,7 +1953,7 @@ impl Ctx {
             self.open.cur_impl_assoc = assoc.clone();
             // an open trait's impl at its instance: its methods and the trait's provided ones
             let impl_items: Vec<syn::ImplItem> = match &tname {
-                Some(t) if self.open.instances.contains_key(t) => self.open_impl_items(&sname, t, &im),
+                Some(t) if self.open.is_open(t) => self.open_impl_items(&sname, t, &im),
                 _ => im.items.clone(),
             };
             for ii in &impl_items {
@@ -1902,7 +1994,7 @@ impl Ctx {
                     }
                     syn::ImplItem::Type(_) => {}
                     // an associated constant of an open-trait impl: the module constant `S__C`
-                    syn::ImplItem::Const(c) if tname.as_ref().is_some_and(|t| self.open.instances.contains_key(t)) => {
+                    syn::ImplItem::Const(c) if tname.as_ref().is_some_and(|t| self.open.is_open(t)) => {
                         let name = format_ident!("{}", open::const_name(&sname, &c.ident.to_string()), span = c.ident.span());
                         let mut ty = c.ty.clone();
                         let mut e = c.expr.clone();
@@ -2011,7 +2103,7 @@ impl Ctx {
                         new_inputs.push(syn::parse_quote!(self));
                     }
                     // `&self` of a struct: `self` is a reference (`*self` is the builtin deref)
-                    if r.reference.is_some() && r.mutability.is_none() && !rw.cx.open.instances.is_empty() && !self_ty.as_ref().is_some_and(|t| type_name(t).is_some_and(|n| is_prim(&n))) {
+                    if r.reference.is_some() && r.mutability.is_none() && rw.cx.open.any_open() && !self_ty.as_ref().is_some_and(|t| type_name(t).is_some_and(|n| is_prim(&n))) {
                         rw.bind("self", syn::parse_quote!(&#st));
                     } else {
                         rw.bind("self", st);
@@ -2101,27 +2193,92 @@ impl Ctx {
         // attachments' below (never what the reading of the body adds)
         let n_skeleton = f.attrs.len();
         if use_mir {
-            // verified code is safe Rust (DESIGN.md §2, "No `unsafe`, for
-            // good"): a body read from MIR is refused with an `unsafe` in it
-            // (a block, an `unsafe fn` or `impl` inside, a macro's argument),
-            // as the expression reading refuses an `unsafe` block
-            if let Some(sp) = first_unsafe(f.block.to_token_stream()) {
+            // existing `unsafe` (DESIGN.md §2; docs/DESIGN-UNSAFE-SIMD.md,
+            // decided 2026-10-06): an extraction by the current printer
+            // (`(unsafe-reading 1)`) is read through the narrow reading of
+            // raw-pointer formations, offsets, casts, loads and stores, which
+            // the literal reading checks (anything else in it is stuck); an
+            // older extraction keeps the blanket refusal. `unsafe` itself has
+            // no run-time meaning: the structured reading drops the marker.
+            let narrow = self.cur_mir.as_ref().is_some_and(|ld| ld.m.unsafe_reading);
+            let has_unsafe = first_unsafe(f.block.to_token_stream()).or(f.sig.unsafety.map(|u| u.span));
+            if let Some(sp) = has_unsafe
+                && !narrow
+            {
                 // (a `core::arch` load or store through a raw pointer is
                 // named: the reason the SIMD code needs `unsafe`)
                 let mut loads = Vec::new();
                 pointer_intrinsics(f.block.to_token_stream(), &mut loads);
-                let named = if loads.is_empty() {
-                    String::new()
-                } else {
-                    format!("; the raw-pointer load/store {} is refused with it: pointer loads and stores need `unsafe`, and whether shipped `unsafe` SIMD code may be split into safe vector arithmetic and unverified loads and stores is the user's open decision (DESIGN.md §16.4, §18 decision 9; docs/mir-lift.md §20.9): build the vectors with value intrinsics and leave the loads and stores to unverified host code", loads.iter().map(|l| format!("`{l}`")).collect::<Vec<_>>().join(", "))
-                };
-                self.err(sp, format!("`unsafe` in a lifted function: verified code is safe Rust (DESIGN.md §2); code that needs `unsafe` stays unverified host code{named}"));
+                let named = if loads.is_empty() { String::new() } else { format!(" (the raw-pointer load/store {})", loads.iter().map(|l| format!("`{l}`")).collect::<Vec<_>>().join(", ")) };
+                self.err(sp, format!("`unsafe` in a lifted function whose MIR was extracted before the narrow reading of existing `unsafe`{named}: extract it again with the current `sandblaster/mirx` (`(unsafe-reading 1)`, docs/DESIGN-UNSAFE-SIMD.md)"));
             }
-            let n = self.mir_read.len();
-            let (b, h) = self.mir_body(&mut f.sig, &akey, self_ty.as_ref(), &state_names, &state_tys);
-            f.block = Box::new(b);
-            helpers = h;
-            mir_key = self.mir_read.get(n).map(|r| r.1.clone());
+            // (§1.11 item 2: a `transmute` written in the crate is outside
+            // the decision, whatever the reading would read of it)
+            if narrow && let Some(sp) = first_ident(f.block.to_token_stream(), &["transmute", "transmute_copy"]) {
+                self.err(sp, "`transmute` written in a lifted function: outside the narrow reading of existing `unsafe` (docs/DESIGN-UNSAFE-SIMD.md §1.8, §1.11)");
+            }
+            if narrow {
+                f.sig.unsafety = None;
+            }
+            // the diagnostic pass (untrusted: the literal reading is stuck on
+            // all of these anyway): every operation of the function's MIR
+            // outside the narrow reading, named — before the structured
+            // reading, whose own refusal of the same operation (inside a
+            // library body it inlines) would name it less well
+            let mut outside = false;
+            if let (Some(sp), true) = (has_unsafe, narrow)
+                && let Some(ld) = self.cur_mir.clone()
+            {
+                let lifted = match self_ty.as_ref().and_then(|t| type_name(t)) {
+                    Some(st) if !is_prim(&st) => format!("{st}::{}", f.sig.ident),
+                    _ => f.sig.ident.to_string(),
+                };
+                if let Some(k) = ld.by_lifted.get(&lifted) {
+                    for why in crate::mir::unsafe_diag::outside_reading(&ld.m, k) {
+                        outside = true;
+                        self.err(sp, format!("`unsafe` outside the narrow reading of existing `unsafe` (docs/DESIGN-UNSAFE-SIMD.md §1.10): {why}"));
+                    }
+                }
+            }
+            if outside {
+                // (no reading: the function is refused already, and its source
+                // body is not the subset's)
+                f.block = Box::new(syn::parse_quote!({ unreachable!() }));
+            } else {
+                // the `&mut` parameters raw pointers are formed from (A-S8:
+                // their non-aliasing is assumed, listed in the record), by
+                // the window rule's verdicts
+                if let Some(ld) = self.cur_mir.clone()
+                    && let Some(k) = ld.by_lifted.get(&match self_ty.as_ref().and_then(|t| type_name(t)) {
+                        Some(st) if !is_prim(&st) => format!("{st}::{}", f.sig.ident),
+                        _ => f.sig.ident.to_string(),
+                    })
+                    && let Some(vs) = ld.m.fns.get(k).and_then(|g| g.window.as_ref())
+                {
+                    let names: Vec<String> = f.sig.inputs.iter().map(|a| match a {
+                        syn::FnArg::Receiver(_) => "self".to_string(),
+                        syn::FnArg::Typed(pt) => match &*pt.pat {
+                            syn::Pat::Ident(pi) => pi.ident.to_string(),
+                            other => other.to_token_stream().to_string(),
+                        },
+                    }).collect();
+                    let mut seen = std::collections::BTreeSet::new();
+                    for v in vs.iter().filter(|v| v.result.is_ok()) {
+                        for &l in &v.params {
+                            if let Some(n) = l.checked_sub(1).and_then(|i| names.get(i))
+                                && seen.insert(n.clone())
+                            {
+                                self.open.pointer_params.push((f.sig.ident.to_string(), n.clone()));
+                            }
+                        }
+                    }
+                }
+                let n = self.mir_read.len();
+                let (b, h) = self.mir_body(&mut f.sig, &akey, self_ty.as_ref(), &state_names, &state_tys);
+                f.block = Box::new(b);
+                helpers = h;
+                mir_key = self.mir_read.get(n).map(|r| r.1.clone());
+            }
             // (`test_hook`: a structured reading that adds a precondition, which
             // the reading cannot do — it sees the signature only — so that the
             // statement's refusal of a precondition the contract lacks is tested)
@@ -2534,7 +2691,38 @@ impl Ctx {
                 at.stmts = at.stmts.iter().map(|st| rename_vars(st, map)).collect();
             }
             let la = self.mir_loop_attach(&at, &locals, self_ty, state_tys);
+            if !la.requires.is_empty() {
+                self.errors.push((at.span, "a loop attachment states `invariant(..)` (`requires(..)` is an element attachment's)".into(), vec![]));
+            }
             loops.insert(k, la);
+        }
+        // element attachments: `requires(..)` and `ensures(..)` of the
+        // loop's body on one element, its names read as at the loop (the
+        // element's `&mut T` variable as the `T` it refers to)
+        let ekeys: Vec<usize> = self.attach_elem.keys().filter(|(fnm, _)| fnm == akey).map(|(_, k)| *k).collect();
+        if !ekeys.is_empty() {
+            let elocals = match crate::mir::read::root_locals_deref(&ld.m, &ld.names, &key, &params) {
+                Ok(l) => l,
+                Err(e) => {
+                    self.err(sig.ident.span(), format!("MIR: {e}"));
+                    return (empty, vec![]);
+                }
+            };
+            for k in ekeys {
+                let mut at = self.attach_elem[&(akey.to_string(), k)].clone();
+                self.attach_used.insert(format!("element {akey}#{k}"));
+                if let Some(map) = scopes.get(k).filter(|m| !m.is_empty()) {
+                    at.stmts = at.stmts.iter().map(|st| rename_vars(st, map)).collect();
+                }
+                for (i, st) in at.stmts.iter().enumerate() {
+                    let at_start = matches!(st, syn::Stmt::Macro(m) if m.mac.path.is_ident("at_start"));
+                    if attach_call(st, "ensures").is_none() && attach_call(st, "requires").is_none() && !at_start {
+                        self.errors.push((at.spans[i], "an element attachment holds `requires(..);`, `ensures(..);` and `at_start! { .. }` only".into(), vec![]));
+                    }
+                }
+                let la = self.mir_loop_attach(&at, &elocals, self_ty, state_tys);
+                loops.entry(k).or_default().element = Some(crate::mir::read::ElementAttach { ensures: la.ensures, requires: la.requires, at_start: la.at_start });
+            }
         }
         let ref_params: Vec<usize> = sig.inputs.iter().enumerate().filter(|(_, a)| matches!(a, syn::FnArg::Typed(pt) if matches!(&*pt.ty, syn::Type::Reference(_)))).map(|(i, _)| i).collect();
         let spec = crate::mir::read::Spec { key: &key, lifted_name: &lifted, params: params.clone(), states, has_ret, out_ty, loops, ref_params };
@@ -2562,7 +2750,10 @@ impl Ctx {
                         None if h.while_loop => format!("{mp}::{lifted}::{}", h.name),
                         _ => helper_global(&h.name, h.method),
                     };
-                    self.mir_helpers.push(MirHelper { global, key: key.clone(), header: h.header, params: h.params.clone(), while_loop: h.while_loop, local_names: h.local_names.clone(), returns: h.returns.clone() });
+                    self.mir_helpers.push(MirHelper { global, key: key.clone(), header: h.header, params: h.params.clone(), while_loop: h.while_loop, local_names: h.local_names.clone(), returns: h.returns.clone(), iters: h.iters.clone(), derived: h.derived.clone(), extra: h.extra.clone() });
+                }
+                for e in &o.elements {
+                    self.mir_elements.push(format!("{mp}::{e}"));
                 }
                 (o.body, o.helpers)
             }
@@ -2602,6 +2793,9 @@ impl Ctx {
             } else if let Some(mut e) = attach_call(st, "ensures") {
                 rw.expr(&mut e, None);
                 la.ensures.push(e);
+            } else if let Some(mut e) = attach_call(st, "requires") {
+                rw.expr(&mut e, None);
+                la.requires.push(e);
             } else if let syn::Stmt::Macro(m) = st
                 && (m.mac.path.is_ident("at_start") || m.mac.path.is_ident("at_end") || m.mac.path.is_ident("after_loop"))
             {
@@ -3932,7 +4126,7 @@ impl<'c> FnRw<'c> {
             syn::Expr::Binary(b) => match b.op {
                 syn::BinOp::Eq(_) | syn::BinOp::Ne(_) | syn::BinOp::Lt(_) | syn::BinOp::Le(_) | syn::BinOp::Gt(_) | syn::BinOp::Ge(_) | syn::BinOp::And(_) | syn::BinOp::Or(_) => Some(syn::parse_quote!(bool)),
                 // a shift has its left operand's type (never the amount's)
-                syn::BinOp::Shl(_) | syn::BinOp::Shr(_) if !self.cx.open.instances.is_empty() => self.ty_of_src(&b.left),
+                syn::BinOp::Shl(_) | syn::BinOp::Shr(_) if self.cx.open.any_open() => self.ty_of_src(&b.left),
                 _ => self.ty_of_src(&b.left).or_else(|| self.ty_of_src(&b.right)),
             },
             syn::Expr::MethodCall(mc) => {
@@ -3976,7 +4170,7 @@ impl<'c> FnRw<'c> {
                 let sigma: HashMap<String, syn::Type> = si.params.iter().map(|p| p.name.clone()).zip(instance_args(&sn, &base)).collect();
                 let mut r = self.cx.subst_ty(r, &sigma);
                 ReplaceSelfTy { ty: t.clone() }.visit_type_mut(&mut r);
-                if !self.cx.open.instances.is_empty() {
+                if self.cx.open.any_open() {
                     ReplaceSelfAny { ty: strip_refs(&t) }.visit_type_mut(&mut r);
                 }
                 Some(r)
@@ -4326,18 +4520,30 @@ fn signed_lit(n: u32, v: u128, neg: bool, span: PSpan, rw: &mut FnRw<'_>) -> syn
 /// The final pass of a lifted module (SEMANTICS.md §19.3): `i16`/`i32`/`i64`
 /// in types become the prelude's bit types `crate::__lift::I16`.. (every
 /// operation on them was translated by `FnRw::signed_rewrite`; any other
-/// fails to type check).
+/// fails to type check). `u128` becomes the pair of its 64-bit words, low
+/// word first, `(u64, u64)` (capability C4's slice for the Reed–Solomon
+/// tables, docs/DESIGN-UNSAFE-SIMD.md §2.2; the literal reading reads a MIR
+/// `u128` as the same pair, `mir::literal`): a `u128` value is held, moved,
+/// compared and loaded through its little-endian bytes; no operation on it
+/// is read (the subset types none: a cast, a literal or an operator on the
+/// pair fails to type check, and L reads every MIR operation on a `u128` as
+/// stuck).
 struct SignedTypes;
 impl VisitMut for SignedTypes {
     fn visit_type_mut(&mut self, t: &mut syn::Type) {
         if let syn::Type::Path(p) = t
             && p.qself.is_none()
             && let Some(id) = p.path.get_ident()
-            && let Some(n) = signed_name_bits(&id.to_string())
         {
-            let c = signed_ctor(n);
-            *t = syn::parse_quote!(#c);
-            return;
+            if let Some(n) = signed_name_bits(&id.to_string()) {
+                let c = signed_ctor(n);
+                *t = syn::parse_quote!(#c);
+                return;
+            }
+            if id == "u128" {
+                *t = syn::parse_quote!((u64, u64));
+                return;
+            }
         }
         syn::visit_mut::visit_type_mut(self, t);
     }
@@ -4661,6 +4867,15 @@ fn pointer_intrinsics(ts: TokenStream, out: &mut Vec<String>) {
             _ => {}
         }
     }
+}
+
+/// The span of the first of `names` written in `ts` as an identifier.
+fn first_ident(ts: TokenStream, names: &[&str]) -> Option<PSpan> {
+    ts.into_iter().find_map(|t| match t {
+        TokenTree::Ident(i) if names.iter().any(|n| i == n) => Some(i.span()),
+        TokenTree::Group(g) => first_ident(g.stream(), names),
+        _ => None,
+    })
 }
 
 /// The span of the first `unsafe` written in `ts` (a function's body; a

@@ -62,6 +62,11 @@ pub struct TargetInfo {
     pub features: BTreeSet<String>,
     pub little_endian: bool,
     pub pointer_width: u32,
+    /// The build's `-C target-cpu` (`None`: the target's default) and
+    /// `-C target-feature` flags (`CARGO_ENCODED_RUSTFLAGS`), when known: the
+    /// reading of existing `unsafe` counts the static features only of a
+    /// build at the target's defaults (DESIGN-UNSAFE-SIMD amendment A-S3).
+    pub codegen_flags: Option<(Option<String>, String)>,
 }
 
 impl TargetInfo {
@@ -75,6 +80,7 @@ impl TargetInfo {
                 .collect(),
             little_endian: true,
             pointer_width: 64,
+            codegen_flags: None,
         }
     }
 
@@ -85,6 +91,7 @@ impl TargetInfo {
             features: ["cmpxchg16b", "fxsr", "sse", "sse2", "sse3", "sse4.1", "ssse3"].iter().map(|s| s.to_string()).collect(),
             little_endian: true,
             pointer_width: 64,
+            codegen_flags: None,
         }
     }
 
@@ -95,7 +102,7 @@ impl TargetInfo {
         } else if cfg!(target_arch = "aarch64") {
             TargetInfo::aarch64_apple_darwin()
         } else {
-            TargetInfo { arch: Arch::Other(std::env::consts::ARCH.to_string()), features: BTreeSet::new(), little_endian: cfg!(target_endian = "little"), pointer_width: usize::BITS }
+            TargetInfo { arch: Arch::Other(std::env::consts::ARCH.to_string()), features: BTreeSet::new(), little_endian: cfg!(target_endian = "little"), pointer_width: usize::BITS, codegen_flags: None }
         }
     }
 
@@ -123,6 +130,7 @@ impl TargetInfo {
             features: features.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect(),
             little_endian: endian == "little",
             pointer_width: width.parse().map_err(|_| format!("bad CARGO_CFG_TARGET_POINTER_WIDTH `{width}`"))?,
+            codegen_flags: Some(codegen_flags(&get("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default())),
         })
     }
 }
@@ -197,4 +205,34 @@ mod tests {
         let s = feature_closure(&Arch::X86_64, &["avx2".into()]);
         assert!(s.contains(&"sse4.2".to_string()) && s.contains(&"avx".to_string()));
     }
+}
+
+/// `-C target-cpu` and the `-C target-feature` flags of a build's encoded
+/// rustflags (`CARGO_ENCODED_RUSTFLAGS`, separated by `\x1f`): the last
+/// `target-cpu`, and every `target-feature` joined by `,`.
+pub fn codegen_flags(encoded: &str) -> (Option<String>, String) {
+    let args: Vec<&str> = encoded.split('\x1f').filter(|a| !a.is_empty()).collect();
+    let mut cpu = None;
+    let mut feats: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i];
+        // `-C k=v`, `-Ck=v`, `--codegen k=v`, `--codegen=k=v`
+        let kv = match a {
+            "-C" | "--codegen" => {
+                i += 1;
+                args.get(i).copied()
+            }
+            _ => a.strip_prefix("-C").or_else(|| a.strip_prefix("--codegen=")),
+        };
+        if let Some((k, v)) = kv.and_then(|kv| kv.split_once('=')) {
+            match k {
+                "target-cpu" => cpu = Some(v.to_string()),
+                "target-feature" => feats.push(v.to_string()),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    (cpu, feats.join(","))
 }

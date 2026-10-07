@@ -148,6 +148,18 @@ fn the_declared_instance_is_the_one_checked() {
     assert!(f.iter().any(|n| n.contains("room")), "{f:?}");
 }
 
+/// An open trait may be declared at several verified instances (the
+/// Reed–Solomon `Engine` at its NEON and scalar engines, the positive case
+/// in `verified_roots.rs`): each instance's impl is read as its methods.
+/// Negative twin: an item generic over such a trait has no one instance to
+/// be read at, and is refused.
+#[test]
+fn a_generic_item_over_an_open_trait_at_several_instances_is_refused() {
+    let r = root(", instance = \"Fam: crate::a::Small, Fam: crate::a::Big\"", false);
+    let c = check(&[(R, &r), (A, OPEN)]);
+    rejects(&c, "declared at several verified instances");
+}
+
 // ---------------------------------------------------------------------
 // operator impls, `Deref`, derived `Default`
 // ---------------------------------------------------------------------

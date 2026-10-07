@@ -293,3 +293,15 @@ fn loop_info() {
     assert_eq!(l.info.invariants.len(), 1);
     assert_eq!(l.info.index, 0);
 }
+
+/// A constant whose type is an alias of an unsigned type (`pub type
+/// GfElement = u16;`, Reed–Solomon's engine, stage neon-mul) is evaluated
+/// at the alias's width, through aliases of aliases, so it can size an
+/// array. Negative twins: an alias of a signed type is no unsigned
+/// constant; a value past the alias's width is refused, as rustc refuses it.
+#[test]
+fn a_constant_of_an_unsigned_alias_is_evaluated_at_its_width() {
+    accepts("type V = u16;\ntype W = V;\nconst C: W = 300;\nfn f(a: [u8; C as usize]) -> u8 { a[299] }");
+    rejects("type W = i16;\nconst C: W = 3;\nfn f(a: [u8; C as usize]) -> u8 { a[0] }", K::Type, "array length must be a literal or a constant");
+    rejects("type W = u8;\nconst C: W = 300;\nfn f(a: [u8; C as usize]) -> u8 { a[0] }", K::Type, "array length must be a literal or a constant");
+}

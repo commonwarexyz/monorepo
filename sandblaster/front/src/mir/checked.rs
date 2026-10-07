@@ -62,6 +62,21 @@ pub fn load_into(ledger: &mut Ledger, env: &mut Env, m: &Sbmir, names: &ModuleNa
     Ok(Literal { state, refused: l.refused, items: l.items, lines: l.lines, bytes: l.bytes, check_secs: l.secs })
 }
 
+/// How a returning loop helper's parameters stand for the literal
+/// reading's slots at its header, beyond one local each by name
+/// ([`Entry::While`]).
+#[derive(Clone, Debug, Default)]
+pub struct WhileShape {
+    /// (the parameter's position, the `&mut [T]` parameter's local an
+    /// `IterMut` parameter walks).
+    pub iters: Vec<(usize, usize)>,
+    /// (the reference's local, the state's local, the position of the
+    /// element's index, the range `PRange(lo, hi)`).
+    pub derived: Vec<(usize, usize, usize, Option<(u128, u128)>)>,
+    /// The parameters that carry no local, by name.
+    pub extra: Vec<String>,
+}
+
 /// A theorem to prove (in dependency order: callees, loop helpers, functions).
 #[derive(Clone, Debug)]
 pub enum Entry {
@@ -77,8 +92,13 @@ pub enum Entry {
     /// and the reading's names of the instance's locals. Also of a loop
     /// helper the structured reading built for a loop inside another loop's
     /// body, which returns at the loop's exit the parameters at `returned`
-    /// (positions; `None`: the parameters a recursive call changes).
-    While { key: String, s_global: String, header: usize, local_names: Vec<String>, returned: Option<Vec<usize>> },
+    /// (positions; `None`: the parameters a recursive call changes), with
+    /// its parameters that are core's `IterMut` over a `&mut [T]`
+    /// parameter's referent (position, that parameter's local), the
+    /// references it rebuilds from a state's element (the reference's
+    /// local, the state's local, the position of the element's index, the
+    /// range `PRange(lo, hi)`), and its parameters that carry no local.
+    While { key: String, s_global: String, header: usize, local_names: Vec<String>, returned: Option<Vec<usize>>, shape: WhileShape },
     /// The (untrusted) model lemma of a library function the lift prelude
     /// models (`core::num::<impl u64>::div_ceil` against `u64::div_ceil`):
     /// a callee lemma for the walks of the functions that call it, so that
@@ -141,11 +161,18 @@ pub struct Prover<'a> {
     /// (`LiftFacts::panic_lemmas`: `(function, lemma)`), hints for their
     /// panic theorems' walks.
     pub panic_lemmas: Vec<(String, String)>,
+    /// The reading's element functions (`LiftFacts::mir_elements`), by
+    /// kernel name: the walks unfold them where a loop helper calls them.
+    pub elements: Vec<String>,
+    /// Per element function whose body spells out the eta list of an
+    /// array parameter: its unfolding lemma with that list folded back
+    /// (`Self::element_unfolds`), and the folded body.
+    element_unfolds: Option<Vec<(GlobalId, GlobalId, Tm)>>,
 }
 
 impl<'a> Prover<'a> {
     pub fn new(env: &'a mut Env, m: &'a Sbmir, names: &'a ModuleNames, lit: &'a Literal, pre_commit: &'a std::collections::HashMap<GlobalId, crate::elab::PreCommit>, contracts: &'a [MirContract]) -> Self {
-        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), helpers: Vec::new(), whiles: Vec::new(), added: Vec::new(), panic_lemmas: Vec::new() }
+        Prover { env, m, names, lit, pre_commit, contracts, trace: false, dump: None, budget_secs: 300.0, max_steps: 2_000_000, callees: Vec::new(), helpers: Vec::new(), whiles: Vec::new(), added: Vec::new(), panic_lemmas: Vec::new(), elements: Vec::new(), element_unfolds: None }
     }
 
     /// Adds `d` to the environment (the kernel checks it) and to the log.
@@ -160,11 +187,66 @@ impl<'a> Prover<'a> {
         }
     }
 
+    /// The unfolding lemmas of the element functions whose bodies spell out
+    /// the eta list of an array parameter (the elaborator reads an array
+    /// variable back element by element, DESIGN.md §5.9, while the bound
+    /// proofs of its reads keep `len(fst x)`): `Π p̄. Eq(R, e(p̄),
+    /// body[folded])`, `λ p̄. delta(e; p̄)` checked under the parameters'
+    /// fresh (eta-expanded) variables, where the folded list and the
+    /// spelled-out one convert. A walk unfolds a call `e(ā)` by it, so the
+    /// instantiated body says `fst(a)` of an argument `a` that is no
+    /// variable (an element of a slice), as its proofs do.
+    fn element_unfolds(&mut self) -> Vec<(GlobalId, GlobalId, Tm)> {
+        if let Some(v) = &self.element_unfolds {
+            return v.clone();
+        }
+        let mut out = Vec::new();
+        let (Some(index), Some(list), Some(eq_sym)) = (self.env.lookup_global("seq::index"), self.env.lookup_ind("List"), self.env.lookup_global("eq::sym")) else {
+            self.element_unfolds = Some(out.clone());
+            return out;
+        };
+        let _ = eq_sym;
+        let globals: Vec<GlobalId> = self.elements.iter().filter_map(|n| self.env.lookup_global(n)).collect();
+        for eg in globals {
+            let (Some(body), Some(ty)) = (self.env.global_body(eg), self.env.global_type(eg)) else { continue };
+            // the parameters' binders
+            let mut tele: Vec<(Name, Rel, Tm)> = Vec::new();
+            let mut b = body.clone();
+            let mut t = ty.clone();
+            while let (Term::Lam { body: bb, .. }, Term::Pi { name, rel, dom, cod }) = (&*b.clone(), &*t.clone()) {
+                tele.push((name.clone(), *rel, dom.clone()));
+                b = bb.clone();
+                t = cod.clone();
+            }
+            let folded = crate::auto::util::fold_array_eta(&b, index, list);
+            if Rc::ptr_eq(&folded, &b) || self.env.alpha_eq_relevant(&folded, &b, &|p, q| p == q) && crate::elab::tm::size(&folded) == crate::elab::tm::size(&b) {
+                continue;
+            }
+            let n = tele.len() as u32;
+            let args: Vec<(Rel, Tm)> = tele.iter().enumerate().map(|(i, (_, r, _))| (*r, mk::var(n - 1 - i as u32))).collect();
+            let app = mk::apps(mk::global(eg), args.clone());
+            let mut lty = mk::eq(t.clone(), app, folded.clone());
+            let mut lpf: Tm = Rc::new(Term::Delta { def: eg, args: args.iter().map(|a| a.1.clone()).collect() });
+            for (nm, r, d) in tele.iter().rev() {
+                lty = mk::pi(nm, *r, d.clone(), lty);
+                lpf = mk::lam(nm, *r, d.clone(), lpf);
+            }
+            let name = format!("L::eunfold::{}", self.env.global_name(eg).map(|x| x.to_string()).unwrap_or_default());
+            let decl = DefDecl { name: Rc::from(name.as_str()), kind: DefKind::Lemma, ty: lty, body: lpf, recursion: Recursion::None, arity: n, opaque: false };
+            if let Ok(lem) = self.add(decl, 4_000_000_000) {
+                out.push((eg, lem, folded));
+            }
+        }
+        self.element_unfolds = Some(out.clone());
+        out
+    }
+
     pub fn prove(&mut self, e: &Entry) -> Result<Proven, String> {
+        let _ = self.element_unfolds();
         match e {
             Entry::Fn { key, s_global } => self.prove_fn(key, s_global),
             Entry::Helper { key, s_global, header, slots } => self.prove_helper(key, s_global, *header, slots),
-            Entry::While { key, s_global, header, local_names, returned } => self.prove_while(key, s_global, *header, local_names, returned.as_deref()),
+            Entry::While { key, s_global, header, local_names, returned, shape } => self.prove_while(key, s_global, *header, local_names, returned.as_deref(), shape),
             Entry::Model { key, s_global } => self.prove_fn_as(key, s_global, true),
             Entry::Panic { key, s_global, nopanic } => self.prove_panic(key, s_global, *nopanic),
         }
@@ -367,6 +449,8 @@ impl<'a> Prover<'a> {
             whiles: self.whiles.clone(),
             exit: None,
             panic: false,
+            elements: self.elements.iter().filter_map(|n| self.env.lookup_global(n)).collect(),
+            element_unfolds: self.element_unfolds.clone().unwrap_or_default(),
         }
     }
 
@@ -651,6 +735,11 @@ impl<'a> Prover<'a> {
                 let val = if v == "code" {
                     let j = lf.cells.iter().position(|c| c.param == i).ok_or("code of a non-`&mut` parameter")?;
                     format!("tuple2[L::{id}::Root, List(mir::Proj)](L::{id}::Root::rc{j}, Nil[mir::Proj])", id = lf.id)
+                } else if let Some(rest) = v.strip_prefix("iter:") {
+                    // core's `IterMut`: (the cell's code, the index)
+                    let (j, p) = rest.split_once(':').ok_or("iterator slot")?;
+                    let pi: usize = p.strip_prefix('p').and_then(|x| x.parse().ok()).ok_or("iterator slot value")?;
+                    format!("tuple2[Tuple2(L::{id}::Root, List(mir::Proj)), Usize](tuple2[L::{id}::Root, List(mir::Proj)](L::{id}::Root::rc{j}, Nil[mir::Proj]), {})", params[pi].0, id = lf.id)
                 } else {
                     let pi: usize = v.strip_prefix('p').and_then(|x| x.parse().ok()).ok_or("slot value")?;
                     let x = &params[pi].0;
@@ -799,7 +888,7 @@ impl Prover<'_> {
     /// with `eqS : h p̄ = S` in its goals: an exit hands the literal side,
     /// stepped to `X`, to `hC`; a recursive call is the induction hypothesis
     /// with `hC` moved along `eqS`.
-    fn prove_while(&mut self, key: &str, h_global: &str, header: usize, local_names: &[String], returned: Option<&[usize]>) -> Result<Proven, String> {
+    fn prove_while(&mut self, key: &str, h_global: &str, header: usize, local_names: &[String], returned: Option<&[usize]>, shape: &WhileShape) -> Result<Proven, String> {
         let t0 = Instant::now();
         let lf = self.lit.lfn(key).cloned().ok_or_else(|| format!("no literal reading of `{key}`"))?;
         let f = self.m.fns.get(key).cloned().ok_or("no MIR")?;
@@ -865,6 +954,10 @@ impl Prover<'_> {
                 continue;
             }
             let nm = &hnames[k];
+            // (an element's index: no local's; the references rebuilt from it are)
+            if shape.extra.contains(nm) {
+                continue;
+            }
             let locals: Vec<usize> = local_names.iter().enumerate().filter(|(_, n)| *n == nm).map(|(i, _)| i).collect();
             let [l] = locals[..] else { return Err(format!("the `while` helper's parameter `{nm}` names {} MIR locals", locals.len())) };
             pslot[k] = Some(match lf.cells.iter().position(|c| c.param == l && c.parent.is_none()) {
@@ -872,7 +965,8 @@ impl Prover<'_> {
                 None => (l, f.locals[l].0.clone()),
             });
         }
-        let occupied: Vec<usize> = pslot.iter().flatten().map(|(i, _)| *i).collect();
+        let mut occupied: Vec<usize> = pslot.iter().flatten().map(|(i, _)| *i).collect();
+        occupied.extend(shape.derived.iter().map(|d| d.0));
         let junk: Vec<usize> = (0..nslots).filter(|i| !occupied.contains(i)).collect();
         let nj = junk.len() as u32;
         let e0 = arity + nj;
@@ -884,11 +978,33 @@ impl Prover<'_> {
         let mut g = Gen::resume(self.m, &kn, self.lit.state.clone());
         let erase_txt = |g: &mut Gen<'_>, i: usize, mt: &Ty, x: &str| -> Result<String, String> { if i >= nl && slot_ty(i) == "List(U8)" { Ok(x.to_string()) } else { stmt::erase(g, self.env, mt, x) } };
         let mut param_slot_tm: Vec<Option<Tm>> = vec![None; nslots];
+        let id = &lf.id;
+        let code_of = |pl: usize| -> Result<String, String> {
+            let j = lf.cells.iter().position(|c| c.param == pl && c.parent.is_none()).ok_or("a reference into a parameter without its cell")?;
+            Ok(format!("tuple2[L::{id}::Root, List(mir::Proj)](L::{id}::Root::rc{j}, Nil[mir::Proj])"))
+        };
         for k in 0..arity as usize {
             let Some((i, mt)) = &pslot[k] else { continue };
-            let txt = erase_txt(&mut g, *i, mt, &pnames[k])?;
+            // core's `IterMut`: (the parameter's code, the index)
+            let txt = match shape.iters.iter().find(|(pos, _)| *pos == k) {
+                Some((_, pl)) => format!("tuple2[{rc}, Usize]({}, {})", code_of(*pl)?, pnames[k]),
+                None => erase_txt(&mut g, *i, mt, &pnames[k])?,
+            };
             let t = self.env.parse_term(&pn, &format!("Some[{}]({txt})", slot_ty(*i))).map_err(|e| format!("a slot of the `while` lemma: {e}"))?;
             param_slot_tm[*i] = Some(t);
+        }
+        // a reference rebuilt from a state's element: the state's code with
+        // `PIndex(index)` (then `PRange(lo, hi)`)
+        for (l, sl, ip, range) in &shape.derived {
+            let j = lf.cells.iter().position(|c| c.param == *sl && c.parent.is_none()).ok_or("a reference into a state without its cell")?;
+            let ix = pnames.get(*ip).ok_or("an element's index that is no parameter")?;
+            let tail = match range {
+                Some((lo, hi)) => format!("Cons[mir::Proj](mir::Proj::PRange({lo}usize, {hi}usize), Nil[mir::Proj])"),
+                None => "Nil[mir::Proj]".to_string(),
+            };
+            let txt = format!("tuple2[L::{id}::Root, List(mir::Proj)](L::{id}::Root::rc{j}, Cons[mir::Proj](mir::Proj::PIndex({ix}), {tail}))");
+            let t = self.env.parse_term(&pn, &format!("Some[{}]({txt})", slot_ty(*l))).map_err(|e| format!("a reference's slot of the `while` lemma: {e}"))?;
+            param_slot_tm[*l] = Some(t);
         }
         // σ_X: the loop's variables the components `c̄` of the result, the
         // other slots `w̄`
@@ -917,7 +1033,13 @@ impl Prover<'_> {
             sx_slots.push(format!("w{wi}"));
             sx_bind.push_str(&format!(" (w{wi} : Option({}))", slot_ty(i)));
             w_slots.push(i);
-            if let Some(t) = &param_slot_tm[i] {
+            // (a reference rebuilt from a state's element keeps its code,
+            // whatever is written through it; a parameter the loop assigns
+            // and does not return is what the loop left in it)
+            let derived_slot = shape.derived.iter().any(|d| d.0 == i);
+            if let Some(t) = &param_slot_tm[i]
+                && (derived_slot || !assigned.contains(&i) || returned.is_none())
+            {
                 // a parameter the loop does not change, over (p̄, j̄)
                 w.push(Some(shift(t, nj as i64)));
             } else if assigned.contains(&i) {
@@ -1571,12 +1693,13 @@ pub fn plan(m: &Sbmir, lit: &Literal, contracts: &[MirContract], helpers: &[crat
         for h in helpers.iter().filter(|h| &h.key == k && (h.while_loop || h.returns.is_some())) {
             let mut needs = dep_idx.clone();
             needs.extend(own.iter().copied());
-            out.push(Planned { entry: Entry::While { key: k.clone(), s_global: h.global.clone(), header: h.header, local_names: h.local_names.clone(), returned: h.returns.clone() }, global: h.global.clone(), key: k.clone(), needs, is_fn: false });
+            let shape = WhileShape { iters: h.iters.clone(), derived: h.derived.iter().map(|(l, sp, ip, r)| (*l, h.params.get(*sp).copied().unwrap_or(usize::MAX), *ip, *r)).collect(), extra: h.extra.clone() };
+            out.push(Planned { entry: Entry::While { key: k.clone(), s_global: h.global.clone(), header: h.header, local_names: h.local_names.clone(), returned: h.returns.clone(), shape }, global: h.global.clone(), key: k.clone(), needs, is_fn: false });
             own.push(out.len() - 1);
         }
         for h in helpers.iter().filter(|h| &h.key == k && !h.while_loop && h.returns.is_none()) {
             let slots = match lit.lfn(k) {
-                Some(lf) => helper_slots(lf, &h.params),
+                Some(lf) => helper_slots(lf, &h.params, &h.iters),
                 None => vec![],
             };
             let mut needs = dep_idx.clone();
@@ -1601,9 +1724,17 @@ pub fn plan(m: &Sbmir, lit: &Literal, contracts: &[MirContract], helpers: &[crat
 /// The slots a loop helper's parameters occupy at the header: a `&mut`
 /// parameter's referent is its cell (`c<j>`) and the parameter's own slot
 /// holds the cell's code; any other is the local's slot.
-fn helper_slots(lf: &LFn, params: &[usize]) -> Vec<(String, String)> {
+fn helper_slots(lf: &LFn, params: &[usize], iters: &[(usize, usize)]) -> Vec<(String, String)> {
     let mut slots = Vec::new();
     for (i, l) in params.iter().enumerate() {
+        // core's `IterMut` over a `&mut [T]` parameter's referent: (the
+        // parameter's code, the index the helper's parameter holds)
+        if let Some((_, pl)) = iters.iter().find(|(pos, _)| *pos == i)
+            && let Some(j) = lf.cells.iter().position(|c| c.param == *pl && c.parent.is_none())
+        {
+            slots.push((format!("l{l}"), format!("iter:{j}:p{i}")));
+            continue;
+        }
         match lf.cells.iter().position(|c| c.param == *l && c.parent.is_none()) {
             Some(j) => {
                 slots.push((format!("c{j}"), format!("p{i}")));
@@ -1697,7 +1828,7 @@ impl Default for GateOptions<'_> {
 /// generator places fuel by: a change there changes L's text).
 pub(crate) fn generator_hash() -> String {
     let mut t = String::from("sandblaster-mir-theorem-generator/1\n");
-    for (n, s) in [("literal.rs", include_str!("literal.rs")), ("stmt.rs", include_str!("stmt.rs")), ("mod.rs", include_str!("mod.rs")), ("ir.rs", include_str!("ir.rs")), ("sexp.rs", include_str!("sexp.rs")), ("literal.core", super::literal::LIBRARY), ("arch.rs", include_str!("arch.rs")), ("cfg.rs", include_str!("cfg.rs"))] {
+    for (n, s) in [("literal.rs", include_str!("literal.rs")), ("stmt.rs", include_str!("stmt.rs")), ("mod.rs", include_str!("mod.rs")), ("ir.rs", include_str!("ir.rs")), ("sexp.rs", include_str!("sexp.rs")), ("literal.core", super::literal::LIBRARY), ("arch.rs", include_str!("arch.rs")), ("ptr.rs", include_str!("ptr.rs")), ("window.rs", include_str!("window.rs")), ("cfg.rs", include_str!("cfg.rs"))] {
         t.push_str(&format!("{n} {}\n", crate::surface::hex(&crate::surface::sha256(s.as_bytes()))));
     }
     crate::surface::hex(&crate::surface::sha256(t.as_bytes()))
@@ -1919,6 +2050,7 @@ fn prove_module(out: &mut crate::elab::Output, (m, names, lit, facts): (&Sbmir, 
     pv.max_steps = opts.max_steps;
     pv.trace = opts.trace;
     pv.panic_lemmas = facts.panic_lemmas.clone();
+    pv.elements = facts.mir_elements.clone();
     let (mut failed, mut outcomes, mut stores, mut rejected) = (vec![false; n], Vec::new(), Vec::new(), false);
     for (i, p) in plan.iter().enumerate() {
         let replay = !walk[i] && selected[i] && stored[i].is_some();

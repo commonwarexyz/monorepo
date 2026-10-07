@@ -1392,17 +1392,195 @@ are about is checked against it by a kernel theorem per lifted function.
 
 | File | Code lines | Role | Trusts |
 | --- | --- | --- | --- |
-| `front/src/mir/literal.rs` | 1,476 (1,436 before C8's first slice, 1,431 before C1's review fixes, 1,297 before C1's outcome split, 1,287 before stage finish-A's slice leaves, 1,217 before stage reader-widen) | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls) to a `mir::Res(Out)` outcome (`Ret`, `Panic`, `Stuck`); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally. `Panic` only from a terminator: a failed `Assert` of a kind whose failure panics (`PANIC_ASSERT_KINDS`: overflow, bounds, division or remainder by zero; any other kind is stuck where it fails), a block `must_panic` reads (every path ends in a call of a function of `PANIC_FNS`, on the way only `PANIC_MSG_FNS` calls and steps that cannot be undefined behaviour), a callee's panic, an index leaf. The post-order, the loop headers, the blocks from which every path diverges and type-occurrence pruning come from the untrusted `cfg.rs` as numbers and booleans: they only place fuel (every decrease is kernel-checked) or read a block or path as stuck (never as a panic) | the MIR reference (each construct's meaning); `literal.core`; the names of `mod.rs`; the lift's models in the leaves (A5); the tables of panic functions and message constructors (their documented behaviour in core and std); `cfg.rs` for nothing but fuel placement and stuck blocks |
-| `front/src/mir/literal.core` | 203 (201 before C1's review fixes, 186 before C1, 170 before stage finish-A's slice leaves, 139 before stage reader-widen) | L's library: the option monad within a block, the outcome `mir::Res` with its combinators (`mir::st`, `mir::bindr`, `mir::then`, `mir::check`, `mir::check_or_stuck`, `mir::or_panic`), checked/unchecked/division operators per width, signed comparisons and sign extension of bits, `bswap`, array get/set under the bound test, the leaves' models (the index leaves' panic exactly where core's `index` panics) | the kernel's primitives and prelude; the lift's models (`crate::__lift_model`, host models) in the leaves |
+| `front/src/mir/literal.rs` | 1,788 (1,739 before stage neon-mul, 1,476 before the narrow reading of existing `unsafe`, 1,436 before C8's first slice, 1,431 before C1's review fixes, 1,297 before C1's outcome split, 1,287 before stage finish-A's slice leaves, 1,217 before stage reader-widen) | L's generator: per MIR instance, `Root`, `St` (one `Option` slot per local, one per `&mut` referent cell), `Blk`, `rank`, `run` by measure recursion (fuel only at loop headers and self-calls) to a `mir::Res(Out)` outcome (`Ret`, `Panic`, `Stuck`); places, reference codes, calls with the cell protocol, operators, casts, intrinsics, leaves — tables, each construct read locally. `Panic` only from a terminator: a failed `Assert` of a kind whose failure panics (`PANIC_ASSERT_KINDS`: overflow, bounds, division or remainder by zero; any other kind is stuck where it fails), a block `must_panic` reads (every path ends in a call of a function of `PANIC_FNS`, on the way only `PANIC_MSG_FNS` calls and steps that cannot be undefined behaviour), a callee's panic, an index leaf. The post-order, the loop headers, the blocks from which every path diverges and type-occurrence pruning come from the untrusted `cfg.rs` as numbers and booleans: they only place fuel (every decrease is kernel-checked) or read a block or path as stuck (never as a panic) | the MIR reference (each construct's meaning); `literal.core`; the names of `mod.rs`; the lift's models in the leaves (A5); the tables of panic functions and message constructors (their documented behaviour in core and std); `cfg.rs` for nothing but fuel placement and stuck blocks |
+| `front/src/mir/literal.core` | 315 (298 before stage neon-mul, 203 before the narrow reading, 201 before C1's review fixes, 186 before C1, 170 before stage finish-A's slice leaves, 139 before stage reader-widen) | L's library: the option monad within a block, the outcome `mir::Res` with its combinators (`mir::st`, `mir::bindr`, `mir::then`, `mir::check`, `mir::check_or_stuck`, `mir::or_panic`), checked/unchecked/division operators per width, signed comparisons and sign extension of bits, `bswap`, array get/set under the bound test, the leaves' models (the index leaves' panic exactly where core's `index` panics) | the kernel's primitives and prelude; the lift's models (`crate::__lift_model`, host models) in the leaves |
 | `front/src/mir/stmt.rs` | 240 (213 before C1's panic statement; 234 with the optimizer's panic statement, removed 2026-10-05; 210 before stage optimizer-generic) | the statements `L::thm::f` and, for a panic contract, `L::pthm::f` (`S_f`'s telescope with the no-panic clause `Not(P)` read as `P`, the conclusion `Panic`): `S_f`'s telescope, `init`, `erase` (its preconditions are `S_f`'s, which the elaborator's check below makes the declared contract's) | `S_f`'s telescope (the elaborator and its precondition check); L's `LFn` record; the lift's index of the no-panic clause (`MirContract::panic`) |
-| `front/src/mir/ir.rs`, `sexp.rs` | 529 (482 before C8's first slice), 131 | the parse L reads; malformed input is an error, never a default | the printer's format |
-| `front/src/mir/arch.rs` | 111 (C8's first slice, 2026-10-06) | the reading of `core::arch` code (§21.2): a vector type as its model representation, an intrinsic call as its validated model, every refusal | the target models and their evidence verdict (TCB item 4); `intrinsics::VecTy` (hashed, TCB item 2) |
-| `front/src/mir/mod.rs` | 542 (531 before C8's first slice, 491 before stage reader-widen) | names (`kernel_adt`, `is_transparent`, `host_model_method`, `instance_global`: the lifted function a module instance is) and the load checks (format version, module, compiler release, overflow checks, the sources' SHA-256) | the lift's names (`ModuleNames`: DSL modules, sealed traits, host models) |
-| `sandblaster/mirx` | 1,208 (1,122 before C8's first slice; 1,131 before `--replace` was removed, 2026-10-05) | the printer (rustc's data, transcribed) | rustc (A4: the build compiles the MIR it printed) |
+| `front/src/mir/ir.rs`, `sexp.rs` | 700 (659 before stage neon-mul, 611 before the narrow reading, 529 before C10's first stage, 482 before C8's first slice), 131 | the parse L reads; malformed input is an error, never a default; every access to a union's fields made unsupported (`refuse_union_access`); the recorded MIR optimization level; rustc's fake raw borrow of a slice place fused with its `PtrMetadata` into the place's length (`fake_metadata`), any other fake raw borrow unsupported | the printer's format |
+| `front/src/mir/arch.rs` | 115 (111 before the narrow reading; C8's first slice, 2026-10-06) | the reading of `core::arch` code (§21.2): a vector type as its model representation, an intrinsic call as its validated model, every refusal | the target models and their evidence verdict (TCB item 4); `intrinsics::VecTy` (hashed, TCB item 2) |
+| `front/src/mir/mod.rs` | 638 (635 before stage neon-mul, 572 before the narrow reading, 542 before C10's first stage, 531 before C8's first slice, 491 before stage reader-widen) | names (`kernel_adt`, `is_transparent` (never a union), `host_model_method`, `instance_global`: the lifted function a module instance is) and the load checks (format version, module, compiler release, overflow checks, the MIR optimization level, the sources' SHA-256); the window extraction's check (`load_window`) | the lift's names (`ModuleNames`: DSL modules, sealed traits, host models) |
+| `sandblaster/mirx` | 1,254 (1,215 before the narrow reading, 1,208 before C10's first stage; 1,122 before C8's first slice; 1,131 before `--replace` was removed, 2026-10-05) | the printer (rustc's data, transcribed); the pinned and recorded `-Zmir-opt-level` | rustc (A4: the build compiles the MIR it printed) |
+| `front/src/mir/ptr.rs` | 422 (414 before stage neon-mul's `u128`; new: the narrow reading of existing `unsafe`, 2026-10-07) | which library pointer helpers, types and `core::arch` loads and stores L reads, and how a value is bytes: `HELPERS` (formations, casts, moves) matched by the exact path of their definition and the instance's exact signature and declared unsafety (A-S7); `plain` (unsigned integers, a `u128` as its two 64-bit words, model-represented vectors, arrays of them: no `UnsafeCell`, no niche, A-S6); the little-endian byte views (`bytes_text`, `of_bytes_text`; a `u128`'s are its low word's bytes then its high word's, back from exactly sixteen); `MEM_INTRINSICS` (13 rows: path, store or load, bytes, alignment, the stdarch function read; A-S5); `pure_reinterpretation` (the kernel finds the model the identity on its vector type, A-S9); the families' bases | the target models and their evidence verdict (TCB item 4); stdarch's implementation of each row (re-read by `tests/unsafe_simd.rs`) |
+| `front/src/mir/window.rs` | 415 (new) | the window rule W0–W4 on the unoptimized window extraction (§2.6 of DESIGN-UNSAFE-SIMD, A-S1): formations, families, ancestors, liveness, the window, the verdicts with the `&mut` parameters the base reaches (A-S8); `verdict_for` carries a verdict to the level-1 MIR L reads by source span and kind, exactly one or refused | the printer's storage markers and spans; rustc's level-0 MIR preserving the source's aliasing structure (A3′) |
+| `front/src/target.rs` (the build's codegen flags) | 29 (new) | `-C target-cpu` and `-C target-feature` of the build's `CARGO_ENCODED_RUSTFLAGS`, which `mir::load` requires to be the defaults before the static features count (A-S3) | Cargo's `CARGO_ENCODED_RUSTFLAGS` and `CARGO_CFG_TARGET_FEATURE` |
 | `front/src/mir/gate.rs` and its call site | 176 + ≈ 30 (159 + ≈ 27 before C1; 232 + ≈ 29 with the optimizer's shipped and panic acceptance, removed 2026-10-05) | the gate's trusted check: the literal reading enters the kernel only through its loader (which records, per extraction, the globals and inductives it loaded and the MIR of each instance it read); a listed function is accepted only when its MIR instance is that function (the lift finds instances by unqualified lifted names), the kernel holds `L::thm::<f>` (and, with a panic contract, listed as the function's declaration has it, `hir::FnDef::nopanic_clause`, `L::pthm::<f>`) whose type is α-equal (up to proofs) to `stmt`'s statement generated afresh, read from this MIR, reaching only definitions of the elaboration, of L's library or of its own extraction's literal reading, with no inductive added otherwise, and every module type its MIR instances reach is declared alike by the MIR and the subset (variants and fields by name and in order, discriminants `0, 1, ..`). Call site: the gate's errors (`driver::gates::theorem_gate`) | the kernel (`alpha_eq_relevant`, `refs_closure`); the files above; the lift's list of the functions read from MIR; the elaborator |
 | the precondition check: `front/src/elab/items.rs` (`fn_requires`, `as_declared`, `depth_prop`), `typeck` (`#[mir_contract]`, `#[panics_when]`), `hir::FnDef::declared` | 22 + 30 + 1 | a function read from MIR is elaborated only when it has as many `requires` clauses as its declared contract, each precondition α-equal to the elaboration of the declared clause at the same depth, and the depth bound exactly when declared, α-equal to the declared one; the lift carries the declared contract apart from the function's own attributes (`#[mir_contract(..)]`, copied from the skeleton's and the attachments' attributes); a panic contract `panics_when(p)` is, in both, the last clause `!(p)` (typeck appends it after every `requires`). Otherwise the function has no definition, so no theorem | typeck and the elaborator (TCB items 2, 6) |
-| the lift glue | ≈ 320 (≈ 290 before C8's first slice: the kept `#[target_feature]` and `core::arch` uses, the target's architecture, the named pointer loads) | loading, signature checks, the declared contracts (the skeleton's attributes before the body is read and the attachments' after, carried as `#[mir_contract(..)]`; the body reader sees the signature only), a panic contract (laws file only, a function read from MIR, at most one; its no-panic clause's index `MirContract::panic`), the list of functions read from MIR (`lift::MirContract`) | the lift's skeleton (TCB item 8) |
-| **total** | **≈ 5,012** (≈ 4,687 before C8's first slice, ≈ 4,680 before C1's review fixes, ≈ 4,447 before C1; re-counted after the removal of 2026-10-05: ≈ 4,552 before it; ≈ 4,289 before stage reader-widen, ≈ 4,430 before stage optimizer-generic, ≈ 4,526 before stage finish-A) | the literal reading, its statement, parse, names and printer (≈ 4,444 with `mir/arch.rs`; 4,149 before C8's first slice), the gate's trusted check with its call site (≈ 197), the precondition check (53), the lift glue (≈ 320; ≈ 290 before C8's first slice); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
+| the lift glue | ≈ 391 (≈ 351 before the narrow reading: the narrow reading's admission of `unsafe` (an extraction by the current printer; the `unsafe` marker dropped; a `transmute` written in the crate named; an older extraction refused with "extract it again"), the `&mut [T]` state, the build's features and codegen flags passed to the load; ≈ 320 before C10's first stage: `window_mir = ".."`, its file and its check; ≈ 290 before C8's first slice: the kept `#[target_feature]` and `core::arch` uses, the target's architecture, the named pointer loads) | loading, signature checks, the declared contracts (the skeleton's attributes before the body is read and the attachments' after, carried as `#[mir_contract(..)]`; the body reader sees the signature only), a panic contract (laws file only, a function read from MIR, at most one; its no-panic clause's index `MirContract::panic`), the list of functions read from MIR (`lift::MirContract`) | the lift's skeleton (TCB item 8) |
+| **total** | **≈ 6,690** (≈ 6,572 before stage neon-mul, 2026-10-07; ≈ 5,162 before the narrow reading of existing `unsafe`, 2026-10-07; ≈ 5,012 before C10's first stage, ≈ 4,687 before C8's first slice, ≈ 4,680 before C1's review fixes, ≈ 4,447 before C1; re-counted after the removal of 2026-10-05: ≈ 4,552 before it; ≈ 4,289 before stage reader-widen, ≈ 4,430 before stage optimizer-generic, ≈ 4,526 before stage finish-A) | the literal reading, its statement, parse, names and printer (≈ 6,051 with `mir/ptr.rs`, `mir/window.rs` and the codegen flags; ≈ 5,933 before stage neon-mul; ≈ 4,563 before the narrow reading; ≈ 4,444 before C10's first stage, with `mir/arch.rs`; 4,149 before C8's first slice), the gate's trusted check with its call site (≈ 197), the precondition check (53), the lift glue (≈ 391; ≈ 351 before the narrow reading, ≈ 320 before C10's first stage, ≈ 290 before C8's first slice); ≈ 4,972 when the structurer's trust was first replaced, ≈ 4,780 with the structurer trusted (`docs/checked-structuring.md`, stage tcb-review) | |
+
+**Unions and the MIR optimization level (C10's first stage, "prepare",
+2026-10-06; `docs/DESIGN-UNSAFE-SIMD.md`, amendments A-S2 and A-S1 and
+its implementation record; `docs/mir-lift.md` §20.1, §20.4).** About 150
+trusted code lines: in `ir.rs` the union refusal (+80: `AdtDef::is_union`,
+the ADT kind parsed strictly, a union's aggregate, `refuse_union_access`)
+and the level's record (+2); in `mod.rs` `MIR_OPT_LEVEL`,
+`WINDOW_MIR_OPT_LEVEL`, the level's load check and `load_window` (+30;
+`transparent_path` refuses a union in place); in `mirx` the pinned
+`-Zmir-opt-level` and its record (+7); in the lift glue `window_mir`
+(`lift_open.rs` +8, `loader.rs` +16, `lift.rs` +7).
+
+*What an auditor checks.* Unions: that `refuse_union_access` types every
+place of every function (assignments' places, every operand, borrows,
+discriminants, lengths, drops, call arguments and destinations, switch,
+assert and assume operands) through its projections exactly as both
+readings do (`Deref` of a reference, a field's printed type, an array or
+slice element, a downcast keeps the type), and replaces a `Field` or
+`Downcast` applied to a union with an unsupported projection, which L
+reads as stuck and S refuses; that a type it cannot follow (a `Deref` of
+anything but a reference) is one both readings refuse already; that a
+union's aggregate (printed with `(union-field ..)`, or of a union type)
+and a constant of union type, nested in aggregates, references and items,
+are unsupported; that a union moved whole is the only use left, and that
+`transparent_path` never reads one as its field. The optimization level:
+that mirx's `-Zmir-opt-level` is the last such flag on the extracted
+crate's command line and that the record is the session's
+`mir_opt_level()`; that `load` refuses every recorded level but
+`MIR_OPT_LEVEL` (an extraction without the record is older than it, made
+by `cargo check` at its default, 1: an assumption, below); that
+`load_window` refuses a window extraction unless it records exactly
+`WINDOW_MIR_OPT_LEVEL` and has the main extraction's compiler, crate,
+module, overflow checks, target, exclusions, sources, roots and every
+function with the same definition, item, parameters, return type, body
+presence and target features. Nothing reads the window extraction yet
+but this check; its reader, the window rule, is trusted and comes with
+its own checklist.
+
+**The narrow reading of existing `unsafe` (stage "unsafe-reading",
+2026-10-07; `docs/mir-lift.md` §20.10, `docs/DESIGN-UNSAFE-SIMD.md` with
+its amendments and implementation record).** About 1,410 trusted code
+lines: `mir/ptr.rs` 414 and `mir/window.rs` 415 (new); in `literal.rs`
++263, `literal.core` +95, `ir.rs` +48, `mod.rs` +63, `arch.rs` +4,
+`target.rs` +29, `mirx` +39, the lift glue ≈ +40; one rule of the ghost
+language (TCB item 6): in ghost code an admitted load or store is typed
+from its model.
+
+*What an auditor checks.*
+1. *The printer* records `(unsafe-reading 1)`, the session's stable
+   static target features, the byte order, the extraction's
+   `-C target-cpu` and `-C target-feature`, `(local)` exactly for the
+   extracted crate's functions, `(unsafe)` exactly for declared
+   `unsafe fn`s that are not safe `#[target_feature]` functions, raw
+   pointer types with their mutability, `PtrToPtr` casts, `&raw` borrows
+   with their kind, and storage markers only at `-Zmir-opt-level=0`.
+2. *The helpers* (`ptr::HELPERS`, `ptr::helper`): each row's path is the
+   definition path rustc prints for that function under `std::` and
+   `core::`; its shape, mutability and unsafety are the function's real
+   signature; a definition in the table whose instance differs in any of
+   them is refused, not read; no lookup is by name.
+3. *The types* (`ptr::plain`): only unsigned integers (not `u128`), model
+   vectors and arrays of them; every other type, nested anywhere in a
+   base or pointee, refused; the byte views are little-endian and
+   complete (`mem::elems` over every element, `mem::pieces` consuming
+   every byte), and `of_bytes` is their inverse on the right length only.
+4. *The memory model* (`literal.rs` `formation`, `addr_of`, `ptr_move`,
+   `helper_call`, `mem_access`; `literal.core` `mir::Ptr`, `mem::*`,
+   `mir::slice_set`): a formation from `&mut` holds the referent's code
+   and its size in bytes (a slice's from its length), from `&` a snapshot
+   of the bytes; a move outside `0..=size` is stuck; a load reads exactly
+   `off..off + n` of the base's current bytes (or the snapshot) and is
+   stuck past the end; a store writes exactly those bytes, writes the base
+   back through its code, and is stuck through a snapshot or past the
+   end; the alignment arm (no current row needs it) requires the base's
+   element alignment and the offset's; only functions of the crate read
+   pointers at all (`fx.f.local`); a call of a library `unsafe fn` from
+   crate code that is not an admitted helper is stuck, named.
+5. *The loads and stores* (`ptr::MEM_INTRINSICS`, `pure_reinterpretation`,
+   `arch::mem_model`): each row is stdarch's unaligned copy of exactly its
+   byte count (`tests/unsafe_simd.rs` re-reads the toolchain's source); a
+   row is read only when its model is validated, loaded, its memory type
+   its vector type of the row's byte count, and the kernel finds its body
+   the identity on a fresh variable.
+6. *The window rule* (`window.rs`): that a family is closed under the
+   admitted moves and casts and nothing else; that W1 refuses every other
+   use of a member (a return, a store into memory, an argument of any
+   other call, a cast, a comparison); that the ancestors of the base
+   include the reference, the place it borrows and an `unsize` source,
+   closed over assignments and calls that reach memory; that W2 refuses
+   any mention of an ancestor inside the window but the storage markers
+   of ancestors that are not the base; W3 and W4 as stated; that the
+   window is the intersection of what follows the formation and what
+   precedes a use; and that `verdict_for` accepts a formation of the
+   level-1 MIR only when exactly one level-0 verdict has its span and
+   kind.
+7. *The feature binding* (`mir::load`): the static features count only
+   when the build's are known, equal to the extraction's, and neither the
+   extraction nor the build set `-C target-cpu` or `-C target-feature`;
+   the target is little-endian; `facts()` in L is the body's features plus
+   exactly these.
+8. *`IterMut`* (`literal.rs` `iter_mut_next`, `mir::MODEL_FNS`): matched by
+   exact path; `next` yields the code of element `i` only below the
+   slice's length and steps `i` by one, else `None` with the iterator
+   unchanged (`test_fault` is never set by a build).
+9. *At every toolchain bump* (and whenever the window rule or L's pointer
+   constructs change): `sh sandblaster/front/tests/miri/run.sh --engines`
+   (the positive fixtures clean under Stacked and Tree Borrows, each
+   undefined-behaviour twin reported by at least one, Commonware's NEON
+   engine against its naive engine under both), the re-extraction of
+   every `.sbmir`, and `tests/unsafe_simd.rs` (the rows against the
+   toolchain's stdarch). A clean gate writes its record,
+   `front/tests/miri/GATE.txt`: the toolchain and the SHA-256 of every
+   file it covered (the fixtures, the harnesses, the `cpufeatures` patch,
+   `engine_neon.rs`). `tests/unsafe_simd.rs` fails while the record names
+   another toolchain or a covered file has changed, so a bump cannot skip
+   the gate unnoticed. The record is written by the gate, not proven: the
+   auditor checks that it was not edited by hand (its history).
+
+*Pinned by:* `tests/literal.rs`
+`a_union_field_is_never_read_and_a_struct_field_is` (fails without the
+fix) and `the_parse_refuses_what_it_would_have_guessed` (the kind);
+`tests/mir.rs` `a_union_is_never_read_through_its_field_nor_as_its_field`,
+`every_checked_in_extraction_is_scanned_for_unions` (the standing scan:
+the unions every checked-in `.sbmir` reaches, and no refused access),
+`the_mir_opt_level_is_the_readings_and_a_window_extraction_is_the_same_program_unoptimized`
+and `a_window_extraction_is_declared_beside_the_extraction_and_checked`.
+Measured: the three roots' obligations, theorems and lock roots are
+unchanged; their extractions at a pinned level 1 are the checked-in ones
+byte for byte but for the two new header lines; at level 0 the
+structured reading loses six MMR functions and the verifier's `Subtree`
+code, which is why the readings stay at level 1.
+
+**The engine multiply's constructs (stage neon-mul, 2026-10-07;
+`docs/mir-lift.md` §20.4, §20.10; `docs/DESIGN-UNSAFE-SIMD.md`, its
+implementation record).** 118 trusted code lines: `literal.rs` +49,
+`literal.core` +17, `ir.rs` +41, `mod.rs` +3, `ptr.rs` +8, one changed
+line of `mirx`.
+
+*What an auditor checks.*
+1. *`u128`* (`Gen::ty`, `Names::ty`, `ptr::plain`, `ptr::size_of`,
+   `ptr::bytes_text`, `ptr::of_bytes_text`): held as `Tuple2(U64, U64)`,
+   the low word first; its bytes are `u128::to_le_bytes`' (the low word's
+   eight little-endian bytes, then the high word's), back only from
+   exactly sixteen; no operator, cast or constant of it is read (`bits`
+   has no word for it).
+2. *`PRange(lo, hi)`* (`literal.core` `mir::range_index`,
+   `mir::slice_range`, `mir::array_range`; the follow and update arms of
+   `literal.rs`): element `i` of a range is element `lo + i` of the whole,
+   and only when `lo <= hi <= len` and `i < hi - lo` (so the sum does not
+   wrap); a range is read whole as a slice and never written whole; any
+   other step after it is `None`.
+3. *`split_at_mut`* (`mir::MODEL_FNS`, `literal.rs` `split_at_mut`):
+   matched by the exact path of its definition at a `&mut [T]` and a
+   `usize`; a panic exactly where core's panics (`mid > len`), else the
+   two codes `PRange(0, mid)` and `PRange(mid, len)` of the slice's code,
+   which never reach one element.
+4. *`Len(P)`* (`literal.rs` `Rvalue::Len`): an array's `N`, a slice
+   place's length read through its code; the parse's fusion
+   (`ir::fake_metadata`) only of a `&raw const (fake) P` into a local that
+   is moved, with only storage markers between, into `PtrMetadata` (the
+   pair is `s.len()` of a `&mut [T]`; the temporary has no other use in
+   borrow-checked MIR); any other fake raw borrow unsupported. The printer
+   prints rustc's `RawPtrKind::FakeForPtrMetadata` as `(addr-of fake P)`.
+5. *Places* (`literal.rs` `place`): the projections after the `Deref` of
+   a `&mut` are typed from its referent (they were typed from the
+   reference: `(*r)[i]` was refused; a place read before reads the same).
+
+*Pinned by:* `tests/literal.rs`
+`split_at_mut_halves_are_ranges_of_the_slice_with_their_own_lengths`
+(fails with the old `Deref` typing),
+`a_length_is_the_places_and_a_fake_borrow_is_read_only_for_its_metadata`,
+`a_u128_is_its_two_words_moved_whole_and_read_through_its_bytes_only`;
+`tests/verified_roots.rs`
+`the_rs_engine_root_reads_the_engine_trait_at_both_engines` (the real
+extraction's four fake raw borrows read as lengths, none unread).
 
 **`core::arch` code (C8's first slice, 2026-10-06; `docs/mir-lift.md`
 §20.9).** The rows above include it: `mir/arch.rs` (111), its arm of
@@ -1453,9 +1631,9 @@ argument order, each breaking exactly its function's theorem),
 `tests/hardware.rs` (the ghost lane view).
 
 **Untrusted** (code lines, counted as above): `front/src/mir/read.rs`
-(2,975, the structurer), `cfg.rs` (298, with the literal reading's shape
-facts), the walker `simproof.rs` (5,083; 4,999 before C1, 5,014 before the removal
-of 2026-10-05) and its driver `checked.rs` (1,615; 1,468 before C1, 1,889
+(3,989; 2,975 before C10's stages, the structurer), `cfg.rs` (299, with the literal reading's shape
+facts), the walker `simproof.rs` (5,544; 5,453 before stage neon-mul, 5,083 before C10's stages, 4,999 before C1, 5,014 before the removal
+of 2026-10-05) and its driver `checked.rs` (1,706; 1,624 before stage neon-mul, 1,615 before C10's stages, 1,468 before C1, 1,889
 before the removal: planning, dependency order, loop and model lemmas, the verdict cache —
 whose entries are declarations the kernel re-checks on replay — and the
 reports). A bug there makes a theorem missing or refused and the build
@@ -1527,7 +1705,10 @@ exact path).
 
 **Assumptions recorded, not checked by the theorems**: rustc compiles the
 MIR `mirx` printed (the extraction has overflow checks on, so the build
-must too); `RuntimeChecks(ub)` is read as `false` (where a library
+must too); an extraction without the `(mir-opt-level ..)` record (older
+than it: the three shipped ones and the toolchain's fixtures) was made at
+`cargo check`'s default level 1 (checked once for the shipped three, by
+re-extraction, 2026-10-06); `RuntimeChecks(ub)` is read as `false` (where a library
 precondition check would fail, the operation it guards is undefined
 behaviour, which L reads as `None`); the host models and leaves mean the
 host functions (as for S), host enums and host instances included (a host

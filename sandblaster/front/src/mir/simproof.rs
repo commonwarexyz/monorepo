@@ -431,6 +431,14 @@ pub struct Walker<'e> {
     /// side is `Panic` (`Goal::rhs`), the literal side is driven to it
     /// alone, and a value is an outcome to refute.
     pub panic: bool,
+    /// The reading's element functions (a loop's body on one element,
+    /// `mir::read`'s `extract_element`): opaque, unfolded where the
+    /// structured side calls them ([`Self::unfold_element`]).
+    pub elements: Vec<GlobalId>,
+    /// Per element function whose body spells out an array parameter's
+    /// eta list: (it, its unfolding lemma, its folded body under its
+    /// parameters), `checked::Prover::element_unfolds`.
+    pub element_unfolds: Vec<(GlobalId, GlobalId, Tm)>,
 }
 
 /// The constructors of the literal run's outcome `mir::Res` (`literal.core`).
@@ -456,8 +464,50 @@ impl<'e> Walker<'e> {
         self.env.eval(&self.env.ctx_venv(ctx), ctx.depth(), t, &mut b).map_err(|e| format!("eval: {e:?}"))
     }
 
+    /// A term printed for a diagnostic, cut at `max` characters; a term
+    /// whose tree is large is summarized instead of printed (its text would
+    /// be the tree).
+    fn pterm(&self, names: &[Name], t: &Tm, max: usize) -> String {
+        let tree = term_size_in(t, &[]);
+        if tree > 2e5 {
+            return format!("<a term of {} nodes, {tree:.1e} as a tree>", dag_nodes(t));
+        }
+        trunc(&self.env.print_term(names, t), max)
+    }
+
     fn quote(&self, ctx: &Ctx, v: &V) -> Tm {
-        self.env.quote_typed(ctx, v, None, true)
+        // (a value whose tree is large: the memoized read-back, a DAG; the
+        // sharing read-back substitutes closures' environments as trees)
+        if value_tree_size_over(v, BIG_TREE) {
+            return self.fold_eta(self.env.quote_typed(ctx, v, None, false));
+        }
+        self.fold_eta(self.env.quote_typed(ctx, v, None, true))
+    }
+
+    /// Kernel-built array eta lists folded back to their variable
+    /// (`auto::util::fold_array_eta`, DESIGN.md §5.9): a binder of array
+    /// type the walk reads under is introduced eta-expanded, and its
+    /// read-back spells its list out element by element while the bound
+    /// proofs of its reads keep `len(fst x)`; once the binder is
+    /// instantiated with an array that is no variable (an element read out
+    /// of a slice), a list spelled out and a proof about `fst` of that
+    /// array would no longer agree (a list of `N` elements has length `N`,
+    /// `fst(xs[i])` has none by computation).
+    /// [`Env::quote_typed`] with [`Self::fold_eta`].
+    fn qt(&self, ctx: &Ctx, v: &V, ty: Option<&V>, share: bool) -> Tm {
+        self.fold_eta(self.env.quote_typed(ctx, v, ty, share))
+    }
+
+    fn fold_eta(&self, t: Tm) -> Tm {
+        match (self.env.lookup_global("seq::index"), self.env.lookup_ind("List")) {
+            (Some(ix), Some(li)) => {
+                let t = crate::auto::util::kernel_friendly(self.env, &t);
+                let t = crate::auto::util::fold_update_lists(self.env, &t);
+                let t = crate::auto::util::fold_array_eta_any(self.env, &t, ix, li);
+                crate::auto::util::refl_explicit_array_len(self.env, &t)
+            }
+            _ => t,
+        }
     }
 
     fn conv(&self, ctx: &Ctx, a: &V, b: &V) -> bool {
@@ -1020,6 +1070,9 @@ impl<'e> Walker<'e> {
             && let Some((r, _)) = app_spine(lcall)
             && self.l_runs.contains(&r)
             && self.s_self_run != Some(r)
+            // (the callee's run must be in the literal side: looked for in
+            // its value before the costly folding abstraction)
+            && value_mentions_global(&self.eval(ctx, &g.l)?, r)
         {
             let mut fold: Vec<GlobalId> = self.opaque.iter().copied().filter(|x| Some(*x) != self.s_self_run).collect();
             fold.push(r);
@@ -1033,7 +1086,7 @@ impl<'e> Walker<'e> {
         let lv = self.eval(ctx, lcall)?;
         if self.conv(ctx, &lv, &self.eval(ctx, sval)?) {
             if std::env::var("CS_TRACE_CALLS").is_ok() {
-                eprintln!("  call converts already: {}", trunc(&self.env.print_term(&[], lcall), 300));
+                eprintln!("  call converts already: {}", self.pterm(&[], lcall, 300));
             }
             return Ok(None);
         }
@@ -1065,7 +1118,7 @@ impl<'e> Walker<'e> {
         if count_var(&l_abs, 0) == 0 {
             if std::env::var("CS_TRACE_CALLS").is_ok() {
                 let lt = self.quote(ctx, &self.eval(ctx, &g.l)?);
-                eprintln!("  lemma not applicable:\n    call    {}\n    literal {}", trunc(&self.env.print_term(&[], &self.quote(ctx, &lv)), 3000), trunc(&self.env.print_term(&[], &lt), 6000));
+                eprintln!("  lemma not applicable:\n    call    {}\n    literal {}", self.pterm(&[], &self.quote(ctx, &lv), 3000), self.pterm(&[], &lt, 6000));
             }
             return Ok(None);
         }
@@ -1076,6 +1129,13 @@ impl<'e> Walker<'e> {
     #[allow(clippy::too_many_arguments)]
     fn transport_with(&mut self, ctx: &Ctx, g: &Goal, l_abs: Tm, lcall: &Tm, sval: &Tm, out_g: &Tm, eq: Tm, with_prem: bool) -> Result<(Goal, Tm), String> {
         self.stats.transports += 1;
+        // (the abstraction is quoted without sharing: a literal state that
+        // holds byte arrays written through pointers repeats large subterms,
+        // and each transport would copy them again)
+        let l_abs = hashcons(&l_abs);
+        if std::env::var("CS_TRACE_SIZES").is_ok() {
+            eprintln!("  transport {}: goal L {} | l_abs {} | call {} | s {}", self.stats.transports, profile(&g.l), profile(&l_abs), profile(lcall), profile(&g.s));
+        }
         let opt_g = mk::ind(self.ind("mir::Res"), vec![out_g.clone()]);
         let sym = mk::apps(mk::global(self.g("eq::sym")?), vec![(Rel::Rel, opt_g.clone()), (Rel::Rel, lcall.clone()), (Rel::Rel, sval.clone()), (Rel::Rel, eq)]);
         let gm = g.with(l_abs.clone(), shift(&g.s, 1), 1);
@@ -1124,7 +1184,7 @@ impl<'e> Walker<'e> {
                     let ep = |k: &Tm| matches!(&**k, Term::Pair { ty, .. } if matches!(&**ty, Term::Erased));
                     if kids.iter().any(|k| ep(k)) {
                         let head = match &**x { Term::App { rel, .. } => format!("app {rel:?}"), Term::Ctor { .. } => "ctor".into(), Term::Fst(_) => "fst".into(), Term::Snd(_) => "snd".into(), Term::Prim { .. } => "prim".into(), Term::Pair { .. } => "pair".into(), Term::Transport { .. } => "transport".into(), _ => "?".into() };
-                        where_.push_str(&format!("\n    erased pair under a {head}: {}", trunc(&self.env.print_term(&[], x), 300)));
+                        where_.push_str(&format!("\n    erased pair under a {head}: {}", self.pterm(&[], x, 300)));
                     }
                 }
                 None
@@ -1144,7 +1204,7 @@ impl<'e> Walker<'e> {
                             if !inner_bad {
                                 n += 1;
                                 eprintln!("BAD NODE: {}
-  because {}", trunc(&self.env.print_term(&names, x), 6000), trunc(&e2.to_string(), 600));
+  because {}", self.pterm(&names, x, 6000), trunc(&e2.to_string(), 600));
                             }
                         }
                     }
@@ -1179,7 +1239,7 @@ impl<'e> Walker<'e> {
         let mut b = self.b();
         if let Err(e) = self.env.infer(ctx, goal, &mut b) {
             let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-            return Err(format!("GOAL ill-formed at depth {} ({what}): {}; goal = {}", ctx.entries.len(), trunc(&e.to_string(), 600), trunc(&self.env.print_term(&names, goal), 3000)));
+            return Err(format!("GOAL ill-formed at depth {} ({what}): {}; goal = {}", ctx.entries.len(), trunc(&e.to_string(), 600), self.pterm(&names, goal, 3000)));
         }
         let gv = self.eval(ctx, goal)?;
         if let Err(e) = self.env.check(ctx, r, &gv, &mut b) {
@@ -1192,7 +1252,7 @@ impl<'e> Walker<'e> {
                 Term::Rec { .. } => "rec".into(),
                 _ => "other".into(),
             };
-            return Err(format!("CHECK failed at depth {} ({what}; node {head}; n_level {}): {}\n  ctx {}\n  goal {}", ctx.entries.len(), self.n_level, trunc(&e.to_string(), 6000), names.join(" "), trunc(&self.env.print_term(&ctx.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(), goal), 6000)));
+            return Err(format!("CHECK failed at depth {} ({what}; node {head}; n_level {}): {}\n  ctx {}\n  goal {}", ctx.entries.len(), self.n_level, trunc(&e.to_string(), 6000), names.join(" "), self.pterm(&ctx.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(), goal, 6000)));
         }
         Ok(())
     }
@@ -1228,8 +1288,8 @@ impl<'e> Walker<'e> {
     /// and lets to here, and both sides (the literal side evaluated).
     fn fail(&self, ctx: &Ctx, g: &Goal, msg: &str) -> String {
         let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-        let lt = self.eval(ctx, &g.l).map(|v| self.env.print_term(&names, &self.quote(ctx, &v))).unwrap_or_else(|e| e);
-        let st = self.env.print_term(&names, &self.commit(&g.s));
+        let lt = self.eval(ctx, &g.l).map(|v| self.pterm(&names, &self.quote(ctx, &v), usize::MAX)).unwrap_or_else(|e| e);
+        let st = self.pterm(&names, &self.commit(&g.s), usize::MAX);
         let lim = if std::env::var("CS_FULL").is_ok() { 1_000_000 } else { 3000 };
         format!("{msg}\n  in `{}` at {}\n  literal side:    {}\n  structured side: {}", self.fname, if self.path.is_empty() { "the start".to_string() } else { self.path.join(" / ") }, trunc(&lt, lim), trunc(&st, lim))
     }
@@ -1258,6 +1318,17 @@ impl<'e> Walker<'e> {
             let inner = Rc::new(Term::Let { name: xn.clone(), rel: *xr, ty: shift(xt, 1), val: yb.clone(), body: shift_from(body, 1, 1) });
             let t2 = Rc::new(Term::Let { name: yn.clone(), rel: *yr, ty: yt.clone(), val: yv.clone(), body: inner });
             return self.walk0(ctx, &g.with(g.l.clone(), t2, 0), facts);
+        }
+        // a call of an element function (opaque): unfolded by its `delta`
+        // equation, the walk goes on through its body
+        if let Term::Let { name: xn, rel: xr, ty: xt, val, body } = &*t
+            && let Some((eg, eargs)) = app_spine(val)
+            && self.elements.contains(&eg)
+        {
+            self.path.push(format!("element {xn}"));
+            let r = self.unfold_element(ctx, g, facts, (xn, *xr, xt, body), eg, &eargs);
+            self.path.pop();
+            return r;
         }
         // a `while` loop's call: a tail (its lemma runs the loop, the rest of
         // the function is walked in its continuation)
@@ -1324,7 +1395,7 @@ impl<'e> Walker<'e> {
                 collect_prims(self.env, val, &mut prims);
                 if std::env::var("CS_TRACE_PRIMS").is_ok() {
                     let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                    eprintln!("  let {n}: {} primitive facts: {}", prims.len(), prims.iter().map(|(_, t, _)| trunc(&self.env.print_term(&names, t), 300)).collect::<Vec<_>>().join(" ; "));
+                    eprintln!("  let {n}: {} primitive facts: {}", prims.len(), prims.iter().map(|(_, t, _)| self.pterm(&names, t, 300)).collect::<Vec<_>>().join(" ; "));
                 }
                 for (p, ty2, br) in prims {
                     if std::env::var("CS_CHECK_FACTS").is_ok() {
@@ -1333,7 +1404,7 @@ impl<'e> Walker<'e> {
                             && let Err(e) = self.env.check(ctx, &p, &tv, &mut b)
                         {
                             let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                            eprintln!("  FACT PROOF of let {n} does not check: {} : {}\n    {}", trunc(&self.env.print_term(&names, &p), 1500), trunc(&self.env.print_term(&names, &ty2), 300), trunc(&e.to_string(), 300));
+                            eprintln!("  FACT PROOF of let {n} does not check: {} : {}\n    {}", self.pterm(&names, &p, 1500), self.pterm(&names, &ty2, 300), trunc(&e.to_string(), 300));
                         }
                     }
                     fs.push(Fact { bridge: br.map(|(o, a, b)| (o, shift(&a, 1), shift(&b, 1))), reused: true, ..Fact::eq(shift(&p, 1), shift(&ty2, 1)) });
@@ -1399,9 +1470,9 @@ impl<'e> Walker<'e> {
         }
         if std::env::var("CS_TRACE_TAIL").is_ok() {
             let names: Vec<Name> = hctx.entries.iter().map(|e| e.name.clone()).collect();
-            eprintln!("TAIL at {}\n  L = {}\n  S = {}", self.path.join(" / "), self.env.print_term(&names, &self.quote(&hctx, &self.eval(&hctx, &g1.l)?)), self.env.print_term(&names, &self.commit(&g1.s)));
+            eprintln!("TAIL at {}\n  L = {}\n  S = {}", self.path.join(" / "), self.pterm(&names, &self.quote(&hctx, &self.eval(&hctx, &g1.l)?), usize::MAX), self.pterm(&names, &self.commit(&g1.s), usize::MAX));
             if std::env::var("CS_TRACE_TAIL_RAW").is_ok() {
-                eprintln!("  L (unevaluated) = {}", self.env.print_term(&names, &g1.l));
+                eprintln!("  L (unevaluated) = {}", self.pterm(&names, &g1.l, usize::MAX));
             }
         }
         // a `while` lemma: `eqS` introduced, the exit handed to the
@@ -1478,7 +1549,7 @@ impl<'e> Walker<'e> {
             }
         }
         let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-        Err(format!("no proof of {}", trunc(&self.env.print_term(&names, &self.quote(ctx, &wv)), 600)))
+        Err(format!("no proof of {}", self.pterm(&names, &self.quote(ctx, &wv), 600)))
     }
 
     /// Facts for the calls of lifted functions with lemmas in `t` (outside
@@ -1823,15 +1894,15 @@ impl<'e> Walker<'e> {
         }
         let refined = count_var(&l_abs, 0) > 0;
         let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-        let scrut_txt = trunc(&self.env.print_term(&names, &self.quote(ctx, &sv)), 140);
+        let scrut_txt = self.pterm(&names, &self.quote(ctx, &sv), 140);
         if std::env::var("CS_TRACE_S").is_ok() {
-            eprintln!("  S-SPLIT k={k} S = {}", trunc(&self.env.print_term(&names, &self.commit(&t)), 6000));
+            eprintln!("  S-SPLIT k={k} S = {}", self.pterm(&names, &self.commit(&t), 6000));
         }
         if self.trace {
             eprintln!("  S-split on {scrut_txt} ; literal side refined: {refined}");
             if !refined && std::env::var("CS_TRACE_SPLIT").is_ok() {
                 let lt = self.quote(ctx, &self.eval(ctx, &g.l)?);
-                eprintln!("    scrutinee {}\n    literal   {}", trunc(&self.env.print_term(&[], &self.quote(ctx, &sv)), 4000), trunc(&self.env.print_term(&[], &lt), 12000));
+                eprintln!("    scrutinee {}\n    literal   {}", self.pterm(&[], &self.quote(ctx, &sv), 4000), self.pterm(&[], &lt, 12000));
             }
         }
         // (a scrutinee the literal side does not hold, e.g. `ord_lt(pc)` where
@@ -1903,7 +1974,7 @@ impl<'e> Walker<'e> {
         for j in lvl + 1..n {
             let e = &ctx.entries[j as usize];
             let pre = Ctx { entries: Rc::new(ctx.entries[..j as usize].to_vec()) };
-            let ty = self.env.quote_typed(&pre, &e.ty, None, true);
+            let ty = self.qt(&pre, &e.ty, None, true);
             if count_var(&ty, j - 1 - lvl) == 0 && !out.iter().any(|(h, _)| count_var(&ty, j - 1 - h) > 0) {
                 continue;
             }
@@ -1997,8 +2068,7 @@ impl<'e> Walker<'e> {
         }
         let carrier = mk::eq(self.opt_out(), l.clone(), l.clone());
         let cv = self.eval(ctx, &carrier)?;
-        let mut b = self.b();
-        let abs = self.env.abstract_occurrences_ext(ctx, &cv, c, true, &mut b).map_err(|e| format!("abstract: {e}"))?;
+        let abs = self.abstract_occ(ctx, &cv, c, true)?;
         let Term::Eq { lhs, .. } = &*abs else { return Ok(r) };
         let r2 = repair_idiom(&self.repair_unit(lhs, 0), 0);
         let r2 = if has_erased_pair(&r2) { self.complete_erased(&cy, &r2) } else { r2 };
@@ -2016,7 +2086,7 @@ impl<'e> Walker<'e> {
                             && count_var(scrut, d) > 0
                         {
                             shown += 1;
-                            eprintln!("    idiom on the value: {}", trunc(&self.env.print_term(&[], x), 2500));
+                            eprintln!("    idiom on the value: {}", self.pterm(&[], x, 2500));
                         }
                         None
                     });
@@ -2024,6 +2094,124 @@ impl<'e> Walker<'e> {
                 Ok(r)
             }
         }
+    }
+
+    /// [`Env::abstract_occurrences_ext`]: `v` read back with the
+    /// occurrences of `c` as the new variable `y` (a term in `(ctx, y)`).
+    /// A value whose tree is large goes through [`Self::abstract_dag`].
+    fn abstract_occ(&self, ctx: &Ctx, v: &V, c: &V, in_proofs: bool) -> Result<Tm, String> {
+        if value_tree_size_over(v, BIG_TREE) {
+            return Ok(self.fold_eta(self.abstract_dag(ctx, v, c, in_proofs)));
+        }
+        let mut b = self.b();
+        self.env.abstract_occurrences_ext(ctx, v, c, in_proofs, &mut b).map(|t| self.fold_eta(t)).map_err(|e| format!("abstract: {e}"))
+    }
+
+    /// The abstraction of a large value, keeping its sharing: the kernel's
+    /// abstraction reads a value back as a tree (each closure's environment
+    /// substituted at every occurrence), exponential in a straight-line
+    /// body's length; here the value is read back memoized (a DAG), the
+    /// target's read-back is hash-consed with it, and each subterm that is
+    /// the target (shifted under binders) becomes `y` — one walk of the DAG,
+    /// memoized by node and depth. A syntactic match of the two normal
+    /// forms: an occurrence spelled otherwise stays, which keeps
+    /// `motive[y := c] ≡ v` (what the kernel checks of the motive). Without
+    /// `in_proofs`, irrelevant positions are only shifted.
+    fn abstract_dag(&self, ctx: &Ctx, v: &V, c: &V, in_proofs: bool) -> Tm {
+        use std::collections::HashMap;
+        let mut hc = HashCons::default();
+        let lq = hc.add(&self.qt(ctx, v, None, false));
+        let cq = self.qt(ctx, c, None, false);
+        struct A<'a> {
+            env: &'a Env,
+            hc: HashCons,
+            cq: Tm,
+            targets: HashMap<u32, Tm>,
+            memo: HashMap<(*const Term, u32, bool), Tm>,
+            in_proofs: bool,
+        }
+        impl A<'_> {
+            fn target(&mut self, d: u32) -> Tm {
+                if let Some(t) = self.targets.get(&d) {
+                    return t.clone();
+                }
+                let t = self.hc.add(&shift(&self.cq, d as i64));
+                self.targets.insert(d, t.clone());
+                t
+            }
+            /// `t` at depth `d` (binders crossed): `y` is `Var(d)`, a free
+            /// variable `i ≥ d` moves to `i + 1`; `rel` false in an
+            /// irrelevant position (no abstraction without `in_proofs`).
+            fn go(&mut self, t: &Tm, d: u32, rel: bool) -> Tm {
+                let key = (Rc::as_ptr(t), d, rel);
+                if let Some(r) = self.memo.get(&key) {
+                    return r.clone();
+                }
+                let r = self.node(t, d, rel);
+                self.memo.insert(key, r.clone());
+                r
+            }
+            fn node(&mut self, t: &Tm, d: u32, rel: bool) -> Tm {
+                let abstracting = rel || self.in_proofs;
+                if abstracting && !matches!(&**t, Term::Global(_) | Term::Sort(_) | Term::IntTy(_) | Term::Lit { .. } | Term::Erased) && Rc::ptr_eq(t, &self.target(d)) {
+                    return mk::var(d);
+                }
+                let irr = |r: Rel| rel && r == Rel::Rel;
+                let node = match &**t {
+                    Term::Var(Idx(i)) => return if *i >= d { mk::var(*i + 1) } else { t.clone() },
+                    Term::Global(_) | Term::Sort(_) | Term::IntTy(_) | Term::Lit { .. } | Term::Erased => return t.clone(),
+                    Term::Pi { name, rel: r, dom, cod } => Term::Pi { name: name.clone(), rel: *r, dom: self.go(dom, d, rel), cod: self.go(cod, d + 1, rel) },
+                    Term::Lam { name, rel: r, dom, body } => Term::Lam { name: name.clone(), rel: *r, dom: self.go(dom, d, rel), body: self.go(body, d + 1, rel) },
+                    Term::App { rel: r, fun, arg } => Term::App { rel: *r, fun: self.go(fun, d, rel), arg: self.go(arg, d, irr(*r)) },
+                    Term::Let { name, rel: r, ty, val, body } => Term::Let { name: name.clone(), rel: *r, ty: self.go(ty, d, rel), val: self.go(val, d, irr(*r)), body: self.go(body, d + 1, rel) },
+                    Term::Sigma { name, snd_rel, fst, snd } => Term::Sigma { name: name.clone(), snd_rel: *snd_rel, fst: self.go(fst, d, rel), snd: self.go(snd, d + 1, rel) },
+                    Term::Pair { ty, fst, snd } => {
+                        let snd_rel = !matches!(&**ty, Term::Sigma { snd_rel: Rel::Irr, .. });
+                        Term::Pair { ty: self.go(ty, d, rel), fst: self.go(fst, d, rel), snd: self.go(snd, d, rel && snd_rel) }
+                    }
+                    Term::Fst(x) => Term::Fst(self.go(x, d, rel)),
+                    Term::Snd(x) => Term::Snd(self.go(x, d, rel)),
+                    Term::Eq { ty, lhs, rhs } => Term::Eq { ty: self.go(ty, d, rel), lhs: self.go(lhs, d, rel), rhs: self.go(rhs, d, rel) },
+                    Term::Refl { ty, val } => Term::Refl { ty: self.go(ty, d, rel), val: self.go(val, d, rel) },
+                    Term::Transport { ty, lhs, rhs, eq, motive, val } => Term::Transport {
+                        ty: self.go(ty, d, rel),
+                        lhs: self.go(lhs, d, rel),
+                        rhs: self.go(rhs, d, rel),
+                        eq: self.go(eq, d, false),
+                        motive: self.go(motive, d + 1, rel),
+                        val: self.go(val, d, rel),
+                    },
+                    Term::Ind { ind, params } => Term::Ind { ind: *ind, params: params.iter().map(|p| self.go(p, d, rel)).collect() },
+                    Term::Ctor { ind, ctor, params, args } => {
+                        let rels: Vec<bool> = self.env.inductive_decl(*ind).and_then(|dcl| dcl.ctors.get(*ctor as usize).map(|c| c.fields.iter().map(|f| f.1 == Rel::Rel).collect())).unwrap_or_default();
+                        Term::Ctor {
+                            ind: *ind,
+                            ctor: *ctor,
+                            params: params.iter().map(|p| self.go(p, d, rel)).collect(),
+                            args: args.iter().enumerate().map(|(i, a)| self.go(a, d, rel && rels.get(i).copied().unwrap_or(true))).collect(),
+                        }
+                    }
+                    Term::Match { ind, params, scrut, motive, arms } => Term::Match {
+                        ind: *ind,
+                        params: params.iter().map(|p| self.go(p, d, rel)).collect(),
+                        scrut: self.go(scrut, d, rel),
+                        motive: self.go(motive, d + 1, rel),
+                        arms: arms.iter().map(|a| Arm { names: a.names.clone(), body: self.go(&a.body, d + a.names.len() as u32, rel) }).collect(),
+                    },
+                    Term::Prim { op, args, proofs } => Term::Prim { op: *op, args: args.iter().map(|a| self.go(a, d, rel)).collect(), proofs: proofs.iter().map(|p| self.go(p, d, false)).collect() },
+                    Term::Rec { args, proof } => Term::Rec { args: args.iter().map(|a| self.go(a, d, rel)).collect(), proof: proof.as_ref().map(|p| self.go(p, d, false)) },
+                    Term::Delta { def, args } => Term::Delta { def: *def, args: args.iter().map(|a| self.go(a, d, rel)).collect() },
+                    Term::Unfold { def, args, to_body, val } => Term::Unfold { def: *def, args: args.iter().map(|a| self.go(a, d, rel)).collect(), to_body: *to_body, val: self.go(val, d, false) },
+                    Term::Linarith { hyps, goal, cert } => Term::Linarith { hyps: hyps.iter().map(|(a, b)| (self.go(a, d, false), self.go(b, d, false))).collect(), goal: self.go(goal, d, false), cert: cert.clone() },
+                    Term::BvRefl { ty, lhs, rhs } => Term::BvRefl { ty: self.go(ty, d, false), lhs: self.go(lhs, d, false), rhs: self.go(rhs, d, false) },
+                    Term::Absurd { ty, proof } => Term::Absurd { ty: self.go(ty, d, rel), proof: self.go(proof, d, false) },
+                    Term::Axiom { ax, args } => Term::Axiom { ax: *ax, args: args.iter().map(|a| self.go(a, d, rel)).collect() },
+                };
+                Rc::new(node)
+            }
+        }
+        let mut a = A { env: self.env, hc, cq, targets: HashMap::new(), memo: HashMap::new(), in_proofs };
+        a.go(&lq, 0, true)
     }
 
     /// The literal side abstracted over a value `c`: a term in `(ctx, y)`.
@@ -2048,6 +2236,12 @@ impl<'e> Walker<'e> {
 
     /// [`Self::abstract_l1`] with the runs `fold` kept folded.
     fn abstract_l_folding(&self, ctx: &Ctx, l: &Tm, c: &V, fold: &[GlobalId]) -> Result<Tm, String> {
+        self.abstract_l_folding_in(ctx, l, c, fold, false)
+    }
+
+    /// [`Self::abstract_l_folding`], the occurrences in proofs abstracted
+    /// too with `in_proofs`.
+    fn abstract_l_folding_in(&self, ctx: &Ctx, l: &Tm, c: &V, fold: &[GlobalId], in_proofs: bool) -> Result<Tm, String> {
         let carrier = mk::eq(self.opt_out(), l.clone(), l.clone());
         // (at a loop header the runs stay folded: the literal side must stay
         // at the header, its state normalized)
@@ -2060,8 +2254,10 @@ impl<'e> Walker<'e> {
         } else {
             self.eval_folding(ctx, &carrier, fold)?
         };
-        let mut b = self.b();
-        let abs = self.env.abstract_occurrences_ext(ctx, &cv, c, false, &mut b).map_err(|e| format!("abstract: {e}"))?;
+        if std::env::var("CS_TRACE_ABSSIZE").is_ok() {
+            eprintln!("  abstraction at {}: a tree of {:.3e} nodes", self.path.join(" / "), value_tree_size(&cv));
+        }
+        let abs = self.abstract_occ(ctx, &cv, c, in_proofs)?;
         let Term::Eq { lhs, .. } = &*abs else { return Err("abstracted carrier is not an Eq".into()) };
         let r = repair_idiom(&self.repair_unit(lhs, 0), 0);
         // (pairs the quoter could not type, inside proofs quoted by
@@ -2069,7 +2265,7 @@ impl<'e> Walker<'e> {
         if has_erased_pair(&r) {
             let tyc = {
                 let mut b = self.b();
-                let ct = self.env.quote_typed(ctx, c, None, true);
+                let ct = self.qt(ctx, c, None, true);
                 self.env.infer(ctx, &ct, &mut b).ok()
             };
             if let Some(tyc) = tyc {
@@ -2170,7 +2366,7 @@ impl<'e> Walker<'e> {
                     Ok(v) => v,
                     Err(e) => {
                         if tr {
-                            eprintln!("  complete: fst not typed: {} :: {}", trunc(&e.to_string(), 300), trunc(&self.env.print_term(&[], &f2), 300));
+                            eprintln!("  complete: fst not typed: {} :: {}", trunc(&e.to_string(), 300), self.pterm(&[], &f2, 300));
                         }
                         return Rc::new(Term::Pair { ty: ty.clone(), fst: f2, snd: s2 });
                     }
@@ -2179,7 +2375,7 @@ impl<'e> Walker<'e> {
                     Ok(v) => v,
                     Err(e) => {
                         if tr {
-                            eprintln!("  complete: snd not typed: {} :: {}", trunc(&e.to_string(), 300), trunc(&self.env.print_term(&[], &s2), 600));
+                            eprintln!("  complete: snd not typed: {} :: {}", trunc(&e.to_string(), 300), self.pterm(&[], &s2, 600));
                         }
                         return Rc::new(Term::Pair { ty: ty.clone(), fst: f2, snd: s2 });
                     }
@@ -2309,7 +2505,7 @@ impl<'e> Walker<'e> {
     fn abstract_rhs(&self, ctx: &Ctx, r: &Tm, c: &V) -> Result<Tm, String> {
         let cty = {
             let mut b = self.b();
-            let ct = self.env.quote_typed(ctx, c, None, true);
+            let ct = self.qt(ctx, c, None, true);
             self.env.infer(ctx, &ct, &mut b).map_err(|e| format!("abstract: the test's type: {e}"))?
         };
         self.abstract_rhs_ty(ctx, r, c, cty)
@@ -2321,8 +2517,7 @@ impl<'e> Walker<'e> {
         let cv = self.eval(ctx, &carrier)?;
         let ctx_y = ctx.push(CtxEntry { name: name("y"), rel: Rel::Rel, ty: cty, def: None });
         for in_proofs in [false, true] {
-            let mut b = self.b();
-            let abs = self.env.abstract_occurrences_ext(ctx, &cv, c, in_proofs, &mut b).map_err(|e| format!("abstract: {e}"))?;
+            let abs = self.abstract_occ(ctx, &cv, c, in_proofs)?;
             let Term::Eq { lhs, .. } = &*abs else { return Err("abstracted carrier is not an Eq".into()) };
             let r_abs = repair_idiom(&self.repair_unit(lhs, 0), 0);
             if count_var(&r_abs, 0) == 0 {
@@ -2589,7 +2784,7 @@ impl<'e> Walker<'e> {
                 let l_abs = self.abstract_l_typed(ctx, &g.l, &wv, &mk::int_ty(w))?;
                 if std::env::var("CS_TRACE_BRIDGE").is_ok() {
                     let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                    eprintln!("  bridge {} found {}", trunc(&self.env.print_term(&names, &self.quote(ctx, &wv)), 300), count_var(&l_abs, 0));
+                    eprintln!("  bridge {} found {}", self.pterm(&names, &self.quote(ctx, &wv), 300), count_var(&l_abs, 0));
                 }
                 if count_var(&l_abs, 0) == 0 {
                     continue;
@@ -2607,6 +2802,18 @@ impl<'e> Walker<'e> {
                 g = g.with(crate::elab::tm::subst0(&l_abs, &ct), g.s.clone(), 0);
                 self.stats.transports += 1;
                 self.stats.reused_proofs += 1;
+                moved = true;
+            }
+            // an element read back after its update (a store through a
+            // pointer into a slice's element, then the next access through
+            // it): `index(update(l, i, v), i) = v`, so the element stays the
+            // value written instead of nesting the updates (§20.10)
+            if !moved
+                && let Some((g2, w)) = self.read_back(ctx, &g, with_prem)?
+            {
+                self.stats.transports += 1;
+                wraps.push(w);
+                g = g2;
                 moved = true;
             }
             // a stuck test decided by a fact
@@ -2638,7 +2845,7 @@ impl<'e> Walker<'e> {
                         let rhs_c = self.quote(ctx, fr);
                         if std::env::var("CS_TRACE_FACT").is_ok() {
                             let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                            eprintln!("  fact decides {} = {}", trunc(&self.env.print_term(&names, &bt), 600), self.env.print_term(&names, &rhs_c));
+                            eprintln!("  fact decides {} = {}", self.pterm(&names, &bt, 600), self.env.print_term(&names, &rhs_c));
                         }
                         // (a dependent idiom on the test, a library function's
                         // `if c as .h`: over the test and its proof)
@@ -2700,6 +2907,185 @@ impl<'e> Walker<'e> {
         Ok((g, wraps, newf))
     }
 
+    /// `let x = e(ā); b` for an element function `e` (opaque): the
+    /// structured side moved along `delta(e; ā)` (a transport whose motive
+    /// abstracts the `let`'s value) to `let x = body_e[ā]; b`, then walked.
+    #[allow(clippy::type_complexity)]
+    fn unfold_element(&mut self, ctx: &Ctx, g: &Goal, facts: &[Fact], (xn, xr, xt, body): (&Name, Rel, &Tm, &Tm), eg: GlobalId, eargs: &[(Rel, Tm)]) -> Result<Tm, String> {
+        let mut eb = self.env.global_body(eg).ok_or("an element function without a body")?;
+        let mut ety = self.env.global_type(eg).ok_or("an element function without a type")?;
+        for _ in 0..eargs.len() {
+            let Term::Lam { body: b, .. } = &*eb else { return Err("an element function's body".into()) };
+            eb = b.clone();
+            let Term::Pi { cod, .. } = &*ety else { return Err("an element function's type".into()) };
+            ety = cod.clone();
+        }
+        let vals: Vec<Tm> = eargs.iter().map(|(_, a)| a.clone()).collect();
+        let r_ty = crate::elab::tm::subst_n(&ety, &vals);
+        let app = mk::apps(mk::global(eg), eargs.to_vec());
+        // (the body with its array parameters' eta lists folded, by its
+        // unfolding lemma, when it spells one out)
+        let (body_t, delta) = match self.element_unfolds.iter().find(|(g, _, _)| *g == eg) {
+            Some((_, lem, folded)) => (crate::elab::tm::subst_n(folded, &vals), mk::apps(mk::global(*lem), eargs.to_vec())),
+            None => (crate::elab::tm::subst_n(&eb, &vals), Rc::new(Term::Delta { def: eg, args: vals })),
+        };
+        let sym = mk::apps(mk::global(self.g("eq::sym")?), vec![(Rel::Rel, r_ty.clone()), (Rel::Rel, app.clone()), (Rel::Rel, body_t.clone()), (Rel::Rel, delta)]);
+        let ctx_y = self.push(ctx, "y", Rel::Rel, &r_ty, None)?;
+        let s_abs = Rc::new(Term::Let { name: xn.clone(), rel: xr, ty: shift(xt, 1), val: mk::var(0), body: shift_from(body, 1, 1) });
+        let gm = g.with(shift(&g.l, 1), s_abs, 1);
+        let motive = self.goal(&ctx_y, &gm);
+        self.check_motive(ctx, &r_ty, &motive, "element")?;
+        if self.trace {
+            eprintln!("  unfold element {}", self.env.global_name(eg).map(|n| n.to_string()).unwrap_or_default());
+        }
+        let s2 = Rc::new(Term::Let { name: xn.clone(), rel: xr, ty: xt.clone(), val: body_t.clone(), body: body.clone() });
+        let inner = self.walk0(ctx, &g.with(g.l.clone(), s2, 0), facts)?;
+        self.stats.unfolds += 1;
+        self.stats.transports += 1;
+        Ok(Rc::new(Term::Transport { ty: r_ty, lhs: body_t, rhs: app, eq: sym, motive, val: inner }))
+    }
+
+    /// A read of a list element right after its update at the same index,
+    /// `index(T, update(T, l, i, v), j, h0, h1)` with `i ≡ j`, in the
+    /// literal side's value: the literal side moved along
+    /// `seq::index_update_same` (its bound `i < len l` from `h1` by
+    /// `seq::len_update`) to `v`.
+    fn read_back(&mut self, ctx: &Ctx, g: &Goal, with_prem: bool) -> Result<Option<(Goal, Tm)>, String> {
+        let (Ok(gi), Ok(gu), Ok(lemma), Ok(len_upd), Ok(seq_len), Ok(sym)) = (self.g("seq::index"), self.g("seq::update"), self.g("seq::index_update_same"), self.g("seq::len_update"), self.g("seq::len"), self.g("eq::sym")) else {
+            return Ok(None);
+        };
+        let lv = self.eval(ctx, &g.l)?;
+        let Some(found) = self.find_read_back(ctx, &lv, gi, gu) else { return Ok(None) };
+        // the read as a term, its eliminations (a projection of the element)
+        // dropped
+        let mut t = self.qt(ctx, &found, None, false);
+        let args = loop {
+            if let Some((h, a)) = app_spine(&t)
+                && h == gi
+                && a.len() == 5
+            {
+                break a;
+            }
+            t = match &*t {
+                Term::Fst(x) | Term::Snd(x) => x.clone(),
+                Term::Match { scrut, .. } => scrut.clone(),
+                Term::App { fun, .. } => fun.clone(),
+                _ => return Ok(None),
+            };
+        };
+        let Some((hu, ua)) = app_spine(&args[1].1) else { return Ok(None) };
+        if hu != gu || ua.len() != 4 {
+            return Ok(None);
+        }
+        let (ty, l, i, v) = (ua[0].1.clone(), ua[1].1.clone(), ua[2].1.clone(), ua[3].1.clone());
+        let (h0, h1) = (args[3].1.clone(), args[4].1.clone());
+        let upd = args[1].1.clone();
+        let len = |x: &Tm| mk::apps(mk::global(seq_len), vec![(Rel::Rel, ty.clone()), (Rel::Rel, x.clone())]);
+        // `i < len l` from `h1 : i < len (update l i v)`
+        let bi = self.env.bool_ind();
+        let lt = |z: Tm| mk::eq_bool(bi, mk::prim(PrimOp::Lt(Width::Int), vec![shift(&i, 1), z], vec![]), true);
+        let h1l = Rc::new(Term::Transport {
+            ty: mk::int_ty(Width::Int),
+            lhs: len(&upd),
+            rhs: len(&l),
+            eq: mk::apps(mk::global(len_upd), vec![(Rel::Rel, ty.clone()), (Rel::Rel, l.clone()), (Rel::Rel, i.clone()), (Rel::Rel, v.clone())]),
+            motive: lt(mk::var(0)),
+            val: h1,
+        });
+        let pf = mk::apps(mk::global(lemma), vec![(Rel::Rel, ty.clone()), (Rel::Rel, l.clone()), (Rel::Rel, i.clone()), (Rel::Rel, v.clone()), (Rel::Irr, h0), (Rel::Irr, h1l)]);
+        let read = t.clone();
+        let target = self.eval(ctx, &read)?;
+        // (every occurrence, the proofs' included: a bound proved of the
+        // read is then one of the value written)
+        let l_abs = self.abstract_l_folding_in(ctx, &g.l, &target, &[], true)?;
+        if count_var(&l_abs, 0) == 0 {
+            return Ok(None);
+        }
+        if self.trace {
+            eprintln!("  read back after an update: the element written");
+        }
+        let gm = g.with(l_abs.clone(), shift(&g.s, 1), 1);
+        let ctx_y = self.push(ctx, "y", Rel::Rel, &ty, None)?;
+        let motive = if with_prem { self.goal(&ctx_y, &gm) } else { self.goal_e(&gm) };
+        self.check_motive(ctx, &ty, &motive, "read back")?;
+        let e = mk::apps(mk::global(sym), vec![(Rel::Rel, ty.clone()), (Rel::Rel, read.clone()), (Rel::Rel, v.clone()), (Rel::Rel, pf)]);
+        let tr = Rc::new(Term::Transport { ty, lhs: v.clone(), rhs: read, eq: e, motive, val: mk::var(u32::MAX) });
+        Ok(Some((g.with(crate::elab::tm::subst0(&l_abs, &v), g.s.clone(), 0), tr)))
+    }
+
+    /// [`Self::read_back`]'s read: a neutral (with any eliminations) of
+    /// `index(T, update(T, l, i, v), j, ..)` with `i ≡ j`, anywhere in the
+    /// value (closures' environments included).
+    fn find_read_back(&self, ctx: &Ctx, v: &V, gi: GlobalId, gu: GlobalId) -> Option<V> {
+        use sandblaster_kernel::value::Closure;
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut stack: Vec<V> = vec![v.clone()];
+        let push_clo = |c: &Closure, stack: &mut Vec<V>| {
+            for e in c.env.0.iter() {
+                if let EnvEntry::Rel(x) = e {
+                    stack.push(x.clone());
+                }
+            }
+        };
+        while let Some(x) = stack.pop() {
+            if !seen.insert(Rc::as_ptr(&x) as *const () as usize) {
+                continue;
+            }
+            match &*x {
+                Value::Neu(n) => {
+                    if let Head::Global { def, args } = &n.head
+                        && *def == gi
+                        && args.len() == 5
+                        && let (Arg::Rel(lst), Arg::Rel(j)) = (&args[1], &args[2])
+                        && let Value::Neu(un) = &**lst
+                        && un.spine.is_empty()
+                        && let Head::Global { def: d2, args: ua } = &un.head
+                        && *d2 == gu
+                        && ua.len() == 4
+                        && let Arg::Rel(i) = &ua[2]
+                        && self.conv(ctx, i, j)
+                    {
+                        return Some(x.clone());
+                    }
+                    match &n.head {
+                        Head::Global { args, .. } | Head::Axiom { args, .. } => {
+                            for a in args {
+                                if let Arg::Rel(y) = a {
+                                    stack.push(y.clone());
+                                }
+                            }
+                        }
+                        Head::Prim { args, .. } => stack.extend(args.iter().cloned()),
+                        _ => {}
+                    }
+                    for e in &n.spine {
+                        match e {
+                            Elim::App(Arg::Rel(y)) => stack.push(y.clone()),
+                            Elim::Match { arms, .. } => arms.iter().for_each(|c| push_clo(c, &mut stack)),
+                            _ => {}
+                        }
+                    }
+                }
+                Value::Ctor { args, .. } => {
+                    for a in args {
+                        if let Arg::Rel(y) = a {
+                            stack.push(y.clone());
+                        }
+                    }
+                }
+                Value::Pair { fst, snd } => {
+                    stack.push(fst.clone());
+                    if let Arg::Rel(y) = snd {
+                        stack.push(y.clone());
+                    }
+                }
+                Value::Lam { body, .. } => push_clo(body, &mut stack),
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// The innermost folded run whose body holds the test the literal side
     /// waits for, when that test is not in the literal term: unfolded by
     /// `delta(run; args)` (the literal side then evaluated: the block's code
@@ -2742,7 +3128,7 @@ impl<'e> Walker<'e> {
         self.check_motive(ctx, &opt_g, &motive, "unfold")?;
         let w = Rc::new(Term::Transport { ty: opt_g, lhs: body_t.clone(), rhs: rt, eq: sym, motive, val: mk::var(u32::MAX) });
         let ov = self.eval(ctx, &self.opt_out())?;
-        let l_new = self.env.quote_typed(ctx, &self.eval(ctx, &crate::elab::tm::subst0(&l_abs, &body_t))?, Some(&ov), true);
+        let l_new = self.qt(ctx, &self.eval(ctx, &crate::elab::tm::subst0(&l_abs, &body_t))?, Some(&ov), true);
         self.stats.transports += 1;
         self.stats.unfolds += 1;
         if self.trace {
@@ -2835,7 +3221,7 @@ impl<'e> Walker<'e> {
                 let mut b = self.b();
                 if count_var(&l_abs, 0) == 0 || self.env.infer(&cy, &l_abs, &mut b).is_err() {
                     if self.trace {
-                        eprintln!("  (no eta on {}: not well-typed)", trunc(&self.env.print_term(&[], &bt), 200));
+                        eprintln!("  (no eta on {}: not well-typed)", self.pterm(&[], &bt, 200));
                     }
                     return Ok(None);
                 }
@@ -2844,7 +3230,7 @@ impl<'e> Walker<'e> {
         self.stats.transports += 1;
         self.stats.literal_etas += 1;
         if self.trace {
-            eprintln!("  eta on {}", trunc(&self.env.print_term(&[], &bt), 200));
+            eprintln!("  eta on {}", self.pterm(&[], &bt, 200));
         }
         // the projections of y, in (ctx, y)
         let params1: Vec<Tm> = params_t.iter().map(|p| shift(p, 1)).collect();
@@ -2908,11 +3294,14 @@ impl<'e> Walker<'e> {
         let cv = self.eval(ctx, c)?;
         let l_abs = self.abstract_l(ctx, &g.l, &cv)?;
         // (the structured value waiting for the same test, a transparent
-        // callee's comparison: abstracted too, unless it is a loop's call)
-        let r_abs = if self.is_loop_tail(&g.s) && g.rhs.is_none() { None } else { Some(self.abstract_rhs(ctx, &self.goal_rhs(g), &cv)?) }.filter(|r| count_var(r, 0) > 0);
+        // callee's comparison: abstracted too, unless it is a loop's call;
+        // the test's type is the split's own: a test read back from the
+        // literal side may hold a proof stated at a convertible-only type)
+        let tty = self.eval(ctx, &mk::ind(ind, params.to_vec()))?;
+        let r_abs = if self.is_loop_tail(&g.s) && g.rhs.is_none() { None } else { Some(self.abstract_rhs_ty(ctx, &self.goal_rhs(g), &cv, tty)?) }.filter(|r| count_var(r, 0) > 0);
         if count_var(&l_abs, 0) == 0 && r_abs.is_none() && !force {
             let lt = self.quote(ctx, &self.eval(ctx, &g.l)?);
-            return Err(format!("L-split: the test is not in the literal side: test {}\n literal {}", trunc(&self.env.print_term(&[], c), 2000), trunc(&self.env.print_term(&[], &lt), 8000)));
+            return Err(format!("L-split: the test is not in the literal side: test {}\n literal {}", self.pterm(&[], c, 2000), self.pterm(&[], &lt, 8000)));
         }
         let dty = mk::ind(ind, params.to_vec());
         let eq_ye = mk::eq(shift(&dty, 1), shift(c, 1), mk::var(0));
@@ -2975,7 +3364,7 @@ impl<'e> Walker<'e> {
             let a = self.abs_syn(ctx, &fu, &cv)?;
             if std::env::var("CS_TRACE_RW").is_ok() {
                 let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                eprintln!("  rw? {} defs; fact {} ; unfolded {} ; found {}", defs.len(), trunc(&self.env.print_term(&names, fl), 200), trunc(&self.env.print_term(&names, &fu), 400), count_var(&a, 0));
+                eprintln!("  rw? {} defs; fact {} ; unfolded {} ; found {}", defs.len(), self.pterm(&names, fl, 200), self.pterm(&names, &fu, 400), count_var(&a, 0));
             }
             if count_var(&a, 0) == 0 {
                 continue;
@@ -3092,7 +3481,7 @@ impl<'e> Walker<'e> {
             // (a panic theorem: a value or stuck where the facts allow it)
             if self.panic {
                 let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                let fs: Vec<String> = facts.iter().filter(|f| !f.is_marker()).filter_map(|f| self.eval(ctx, &f.ty).ok()).map(|v| trunc(&self.env.print_term(&names, &self.quote(ctx, &v)), 300)).collect();
+                let fs: Vec<String> = facts.iter().filter(|f| !f.is_marker()).filter_map(|f| self.eval(ctx, &f.ty).ok()).map(|v| self.pterm(&names, &self.quote(ctx, &v), 300)).collect();
                 let what = if matches!(&*lv, Value::Ctor { ctor: RES_RET, .. }) { "returns a value" } else { "is stuck (undefined behaviour, out of fuel or a construct it does not model)" };
                 return Err(self.fail(ctx, g, &format!("the literal reading {what} on a path where the panic condition holds, and the facts do not refute the path: the panic contract is too wide there (or the walk cannot show the path is impossible)\n  facts:\n    {}", fs.join("\n    "))));
             }
@@ -3175,9 +3564,9 @@ impl<'e> Walker<'e> {
                 Some(b) if !self.is_loop_tail(&g.s) || g.rhs.is_some() => b,
                 _ => {
                     let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                    let lt = self.env.print_term(&names, &self.quote(ctx, &lv));
-                    let rt = self.env.print_term(&names, &self.quote(ctx, &rv));
-                    let fs: Vec<String> = facts.iter().filter(|f| !f.is_marker()).filter_map(|f| self.eval(ctx, &f.ty).ok()).filter(|v| matches!(&**v, Value::Eq { rhs, .. } if matches!(&**rhs, Value::Ctor { .. }))).map(|v| trunc(&self.env.print_term(&names, &self.quote(ctx, &v)), if std::env::var("CS_FULL").is_ok() { 100_000 } else { 300 })).collect();
+                    let lt = self.pterm(&names, &self.quote(ctx, &lv), usize::MAX);
+                    let rt = self.pterm(&names, &self.quote(ctx, &rv), usize::MAX);
+                    let fs: Vec<String> = facts.iter().filter(|f| !f.is_marker()).filter_map(|f| self.eval(ctx, &f.ty).ok()).filter(|v| matches!(&**v, Value::Eq { rhs, .. } if matches!(&**rhs, Value::Ctor { .. }))).map(|v| self.pterm(&names, &self.quote(ctx, &v), if std::env::var("CS_FULL").is_ok() { 100_000 } else { 300 })).collect();
                     let lim = if std::env::var("CS_FULL").is_ok() { 1_000_000 } else { 1500 };
                     // (`CS_DIFF`: the first subterms where the two sides differ)
                     let diff = if std::env::var("CS_DIFF").is_ok() {
@@ -3185,7 +3574,7 @@ impl<'e> Walker<'e> {
                         let b = self.env.quote_typed(ctx, &rv, None, false);
                         let mut out = Vec::new();
                         first_diff(self.env, &a, &b, &mut out);
-                        out.iter().map(|(x, y)| format!("\n  differs: {}\n      vs: {}", trunc(&self.env.print_term(&names, x), 2000), trunc(&self.env.print_term(&names, y), 2000))).collect::<String>()
+                        out.iter().map(|(x, y)| format!("\n  differs: {}\n      vs: {}", self.pterm(&names, x, 2000), self.pterm(&names, y, 2000))).collect::<String>()
                     } else {
                         String::new()
                     };
@@ -3217,10 +3606,10 @@ impl<'e> Walker<'e> {
         let params_t: Vec<Tm> = params.iter().map(|p| self.quote(ctx, p)).collect();
         self.stats.l_splits += 1;
         if self.trace {
-            eprintln!("  L-split on {}", trunc(&self.env.print_term(&[], &bt), 300));
+            eprintln!("  L-split on {}", self.pterm(&[], &bt, 300));
             if std::env::var("CS_TRACE_LSPLIT").is_ok() {
                 let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                eprintln!("    test    {}\n    literal {}\n    rhs     {}", self.env.print_term(&names, &bt), self.env.print_term(&names, &self.quote(ctx, &lv)), self.env.print_term(&names, &self.quote(ctx, &rv)));
+                eprintln!("    test    {}\n    literal {}\n    rhs     {}", self.pterm(&names, &bt, usize::MAX), self.pterm(&names, &self.quote(ctx, &lv), usize::MAX), self.pterm(&names, &self.quote(ctx, &rv), usize::MAX));
             }
         }
         self.l_split(ctx, g, ind, &params_t, &bt, facts, depth)
@@ -3231,8 +3620,8 @@ impl<'e> Walker<'e> {
     /// word normalizer) and the literal side rewritten to the structured
     /// side's subterm.
     fn bv_repair(&mut self, ctx: &Ctx, g: &Goal, lv: &V, rv: &V, facts: &[Fact], depth: u32) -> Result<Option<Tm>, String> {
-        let lt = self.env.quote_typed(ctx, lv, None, false);
-        let rt = self.env.quote_typed(ctx, rv, None, false);
+        let lt = self.qt(ctx, lv, None, false);
+        let rt = self.qt(ctx, rv, None, false);
         let mut pairs: Vec<(Tm, Tm)> = Vec::new();
         if !self.diff_words(ctx, &lt, &rt, 0, &mut pairs) || pairs.is_empty() {
             return Ok(None);
@@ -3278,7 +3667,7 @@ impl<'e> Walker<'e> {
     /// refl(fst y)) a`, checked under the fresh (eta-expanded) variable.
     fn array_eta_repair(&mut self, ctx: &Ctx, g: &Goal, rv: &V, facts: &[Fact], depth: u32) -> Result<Option<Tm>, String> {
         let ov = self.eval(ctx, &self.opt_out())?;
-        let rt = self.env.quote_typed(ctx, rv, Some(&ov), false);
+        let rt = self.qt(ctx, rv, Some(&ov), false);
         let mut cands: Vec<(Tm, Tm, u32)> = Vec::new();
         let mut budget = 400usize;
         let env = self.env;
@@ -3302,7 +3691,7 @@ impl<'e> Walker<'e> {
         if std::env::var("CS_TRACE_ERASED").is_ok() {
             // where the literal side's quote loses a pair's type
             let ovv = ov.clone();
-            let lq = self.env.quote_typed(ctx, &self.eval(ctx, &g.l)?, Some(&ovv), false);
+            let lq = self.qt(ctx, &self.eval(ctx, &g.l)?, Some(&ovv), false);
             let mut shown = 0;
             crate::auto::util::map_term(&lq, 0, &mut |x, _| {
                 let is_ep = |t: &Tm| matches!(&**t, Term::Pair { ty, .. } if matches!(&**ty, Term::Erased));
@@ -3318,13 +3707,13 @@ impl<'e> Walker<'e> {
                 if shown < 3 && kids.iter().any(is_ep) {
                     shown += 1;
                     let head = match &**x { Term::App { .. } => "app", Term::Ctor { .. } => "ctor", Term::Match { .. } => "match", Term::Fst(_) => "fst", Term::Snd(_) => "snd", Term::Prim { .. } => "prim", Term::Let { .. } => "let", _ => "?" };
-                    eprintln!("  ERASED pair under a {head}: {}", trunc(&self.env.print_term(&[], x), 400));
+                    eprintln!("  ERASED pair under a {head}: {}", self.pterm(&[], x, 400));
                 }
                 None
             });
         }
         if std::env::var("CS_TRACE_ETA").is_ok() {
-            eprintln!("  array eta: {} candidate(s): {}", cands.len(), cands.iter().map(|c| trunc(&self.env.print_term(&[], &c.0), 150)).collect::<Vec<_>>().join(" | "));
+            eprintln!("  array eta: {} candidate(s): {}", cands.len(), cands.iter().map(|c| self.pterm(&[], &c.0, 150)).collect::<Vec<_>>().join(" | "));
         }
         let list = self.ind("List");
         for (cand, elem, n) in cands {
@@ -3408,7 +3797,7 @@ impl<'e> Walker<'e> {
     /// nothing, the comparison is split (its path equation then decides).
     fn minmax_repair(&mut self, ctx: &Ctx, g: &Goal, rv: &V, facts: &[Fact], depth: u32) -> Result<Option<Tm>, String> {
         use sandblaster_kernel::axioms::{self, Schema};
-        let rt = self.env.quote_typed(ctx, rv, None, false);
+        let rt = self.qt(ctx, rv, None, false);
         let Some((op, a, b)) = find_minmax(&rt) else { return Ok(None) };
         let (w, is_max) = match op {
             PrimOp::Max(w) => (w, true),
@@ -3661,10 +4050,14 @@ impl<'e> Walker<'e> {
         let isop = move |g: GlobalId| opq.contains(&g);
         let mut b = self.b();
         let v = self.env.eval_opaque(&self.env.ctx_venv(ctx), ctx.depth(), &term, &isop, &mut b).map_err(|e| format!("step: {e:?}"))?;
-        let Value::Neu(n) = &*v else { return Err("step: no folded call".into()) };
-        let Head::Global { def, .. } = &n.head else { return Err("step: not a folded call".into()) };
+        let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
+        let Value::Neu(n) = &*v else { return Err(format!("step: no folded call: {}", self.pterm(&names, &self.quote(ctx, &v), 3000))) };
+        let Head::Global { def, .. } = &n.head else {
+            let blk = self.blocker(ctx, &v).map(|(b, _, _)| self.pterm(&names, &self.quote(ctx, &b), 3000)).unwrap_or_default();
+            return Err(format!("step: not a folded call (waits for {blk}): {}", self.pterm(&names, &self.quote(ctx, &v), 3000)));
+        };
         if *def != head || !n.spine.is_empty() {
-            return Err(format!("step: the block does not end in a jump: from {} to {}", trunc(&self.env.print_term(&[], l), 1500), trunc(&self.env.print_term(&[], &self.quote(ctx, &v)), 3000)));
+            return Err(format!("step: the block does not end in a jump: from {} to {}", self.pterm(&[], l, 1500), self.pterm(&[], &self.quote(ctx, &v), 3000)));
         }
         Ok(self.quote(ctx, &v))
     }
@@ -3684,7 +4077,10 @@ impl<'e> Walker<'e> {
                     _ => break,
                 }
             }
-            let (_, args) = app_spine(&cur).ok_or_else(|| format!("step_to: the literal side is not a run: {}", trunc(&self.env.print_term(&[], &cur), 3000)))?;
+            let (_, args) = app_spine(&cur).ok_or_else(|| format!("step_to: the literal side is not a run: {}", self.pterm(&[], &cur, 3000)))?;
+            if self.trace {
+                eprintln!("  step_to block {}: at {:?}", ctor, args.get(1).map(|(_, b)| match &**b { Term::Ctor { ctor, .. } => format!("b{ctor}"), _ => self.pterm(&[], b, 200) }));
+            }
             if let Some((_, b)) = args.get(1)
                 && let Term::Ctor { ctor: c, .. } = &**b
                 && *c == ctor
@@ -3702,7 +4098,7 @@ impl<'e> Walker<'e> {
         let os = args.get(2).ok_or("slots_of: no state")?.1.clone();
         let osv = self.eval(ctx, &os)?;
         let Value::Ctor { args: oa, .. } = &*osv else {
-            return Err(format!("slots_of: the state is not `Some(..)`: {}", trunc(&self.env.print_term(&ctx.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(), &self.quote(ctx, &osv)), 6000)));
+            return Err(format!("slots_of: the state is not `Some(..)`: {}", self.pterm(&ctx.entries.iter().map(|e| e.name.clone()).collect::<Vec<_>>(), &self.quote(ctx, &osv), 6000)));
         };
         let Some(Arg::Rel(stv)) = oa.first() else { return Err("slots_of".into()) };
         let Value::Ctor { ind, args: sa, .. } = &**stv else { return Err("slots_of: the state is not a constructor".into()) };
@@ -3712,7 +4108,7 @@ impl<'e> Walker<'e> {
         for (i, a) in sa.iter().enumerate() {
             out.push(match a {
                 Arg::Rel(x) => match fields.get(i).and_then(|t| self.eval(&Ctx::default(), t).ok()) {
-                    Some(tv) => self.env.quote_typed(ctx, x, Some(&tv), true),
+                    Some(tv) => self.qt(ctx, x, Some(&tv), true),
                     None => self.quote(ctx, x),
                 },
                 Arg::Irr(_) => self.tt(),
@@ -3851,26 +4247,60 @@ impl<'e> Walker<'e> {
         let env = self.env;
         let sg = wh.s_global;
         let cval_v = self.eval(&c2, &cval)?;
-        let rest_l = crate::auto::util::map_term(&rest_c, 0, &mut |x, dd| {
-            let (h, xs) = app_spine(x)?;
-            if h != sg || xs.len() != cargs.len() {
-                return None;
+        let abstract_call = |t: &Tm| -> Tm {
+            crate::auto::util::map_term(t, 0, &mut |x, dd| {
+                let (h, xs) = app_spine(x)?;
+                if h != sg || xs.len() != cargs.len() {
+                    return None;
+                }
+                // (the same call: its arguments as written, or their values: the
+                // elaborator's annotations spell the call's `let`s out)
+                let same = xs.iter().zip(&cargs).all(|((r1, x1), (r2, x2))| r1 == r2 && (*r1 == Rel::Irr || env.alpha_eq_relevant(x1, &shift(x2, dd as i64 + 1), &|p, q| p == q)));
+                if same {
+                    return Some(mk::var(dd));
+                }
+                if (0..=dd).any(|k| count_var(x, k) > 0) {
+                    return None;
+                }
+                let x_down = shift(x, -(dd as i64 + 1));
+                let mut b = Budget { steps: 50_000_000 };
+                let xv = env.eval(&env.ctx_venv(&c2), c2.depth(), &x_down, &mut b).ok()?;
+                let mut b = Budget { steps: 50_000_000 };
+                env.conv(c2.depth(), &xv, &cval_v, &mut b).unwrap_or(false).then(|| mk::var(dd))
+            })
+        };
+        let mut rest_l = abstract_call(&rest_c);
+        // (a fact about the call bound before it — a callee's `ensures`, which
+        // the elaborator states of the call itself — that the rest uses: bound
+        // again at the rest's start with its type about the loop's result, so
+        // that it is the loop fact below, moved along the transport)
+        {
+            let n_ctx = ctx.entries.len();
+            for lf in (0..n_ctx).rev() {
+                let e = &ctx.entries[lf];
+                if e.rel != Rel::Irr {
+                    continue;
+                }
+                let iv = (dc - lf as u32) as u32;
+                if count_var(&rest_l, iv) == 0 {
+                    continue;
+                }
+                let pre = Ctx { entries: Rc::new(ctx.entries[..lf].to_vec()) };
+                let ty_pre = self.qt(&pre, &e.ty, None, true);
+                let ty_r = shift(&ty_pre, (dc + 1 - lf as u32) as i64);
+                let ty_abs = abstract_call(&ty_r);
+                if count_var(&ty_abs, 0) == 0 {
+                    continue;
+                }
+                // `let h' : T[loop] = h; rest[h := h']`
+                let body = crate::auto::util::map_term(&shift(&rest_l, 1), 0, &mut |x, dd| match &**x {
+                    Term::Var(Idx(i)) if *i == iv + 1 + dd => Some(mk::var(dd)),
+                    _ => None,
+                });
+                rest_l = Rc::new(Term::Let { name: e.name.clone(), rel: Rel::Irr, ty: ty_abs, val: mk::var(iv), body });
+                break;
             }
-            // (the same call: its arguments as written, or their values: the
-            // elaborator's annotations spell the call's `let`s out)
-            let same = xs.iter().zip(&cargs).all(|((r1, x1), (r2, x2))| r1 == r2 && (*r1 == Rel::Irr || env.alpha_eq_relevant(x1, &shift(x2, dd as i64 + 1), &|p, q| p == q)));
-            if same {
-                return Some(mk::var(dd));
-            }
-            if (0..=dd).any(|k| count_var(x, k) > 0) {
-                return None;
-            }
-            let x_down = shift(x, -(dd as i64 + 1));
-            let mut b = Budget { steps: 50_000_000 };
-            let xv = env.eval(&env.ctx_venv(&c2), c2.depth(), &x_down, &mut b).ok()?;
-            let mut b = Budget { steps: 50_000_000 };
-            env.conv(c2.depth(), &xv, &cval_v, &mut b).unwrap_or(false).then(|| mk::var(dd))
-        });
+        }
         // (the loop fact: the first irrelevant `let` of the rest's chain whose
         // type is about the loop, its proof independent of the chain)
         let mut hl: Option<(usize, Tm, Tm)> = None;
@@ -4196,12 +4626,12 @@ impl<'e> Walker<'e> {
             for (i, sl) in slots.iter().enumerate() {
                 if !hi.junk.contains(&i) {
                     let v = self.quote(ctx, &self.eval(ctx, sl)?);
-                    eprintln!("    header slot {i}: {}", trunc(&self.env.print_term(&names, &v), 1500));
+                    eprintln!("    header slot {i}: {}", self.pterm(&names, &v, 1500));
                 }
             }
             for (i, a) in cargs.iter().enumerate() {
                 let v = self.quote(ctx, &self.eval(ctx, a)?);
-                eprintln!("    S arg {i}: {}", trunc(&self.env.print_term(&names, &v), 1500));
+                eprintln!("    S arg {i}: {}", self.pterm(&names, &v, 1500));
             }
         }
         let d = ctx.depth().0;
@@ -4236,7 +4666,7 @@ impl<'e> Walker<'e> {
                     let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
                     eprintln!("  induction arithmetic failed: goal {}", self.env.print_term(&names, &goal));
                     for f in fs.iter().filter(|f| !f.is_marker()) {
-                        eprintln!("    fact {}", trunc(&self.env.print_term(&names, &self.quote(ctx, &self.eval(ctx, &f.ty)?)), 40000));
+                        eprintln!("    fact {}", self.pterm(&names, &self.quote(ctx, &self.eval(ctx, &f.ty)?), 40000));
                     }
                 }
                 return Err(e);
@@ -4410,9 +4840,14 @@ impl<'e> Walker<'e> {
         let ev = self.eval(ctx, &empty)?;
         let mut b = self.b();
         if let Err(e) = self.env.check(ctx, pf, &ev, &mut b) {
+            // (a refutation sits in an irrelevant position: its uses of
+            // irrelevant variables are fine there)
+            if e.to_string().contains("Relevance") {
+                return Ok(());
+            }
             let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
             return Err(format!("CHECK of a refutation by {who} failed: {}
-  proof: {}", trunc(&e.to_string(), 3000), trunc(&self.env.print_term(&names, pf), 20000)));
+  proof: {}", trunc(&e.to_string(), 3000), self.pterm(&names, pf, 20000)));
         }
         Ok(())
     }
@@ -4445,7 +4880,7 @@ impl<'e> Walker<'e> {
                 Err(e) => {
                     if std::env::var("CS_TRACE_ARITH").is_ok() {
                         let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
-                        eprintln!("  arith: no refutation of {} = {c}: {e}", trunc(&self.env.print_term(&names, &lt), 2000));
+                        eprintln!("  arith: no refutation of {} = {c}: {e}", self.pterm(&names, &lt, 2000));
                     }
                     continue;
                 }
@@ -4510,9 +4945,9 @@ impl<'e> Walker<'e> {
             let names: Vec<Name> = ctx.entries.iter().map(|e| e.name.clone()).collect();
             let r = crate::elab::basic::linarith_term(self.env, ctx, hyps.clone(), goal.clone());
             if r.is_err() {
-                eprintln!("FUEL FAILED at {}: goal {}", self.path.join(" / "), trunc(&self.env.print_term(&names, goal), 3000));
+                eprintln!("FUEL FAILED at {}: goal {}", self.path.join(" / "), self.pterm(&names, goal, 3000));
                 for (_, t) in &hyps {
-                    eprintln!("    hyp {}", trunc(&self.env.print_term(&names, t), 3000));
+                    eprintln!("    hyp {}", self.pterm(&names, t, 3000));
                 }
             }
         }
@@ -6054,107 +6489,240 @@ pub fn profile(t: &Tm) -> String {
     format!("distinct nodes {} (motives {}, absurd types {}, rest {}); hash-consed {} (motives {}, absurd types {}, rest {})", counts.iter().sum::<usize>(), counts[1], counts[2], counts[0], c2.iter().sum::<usize>(), c2[1], c2[2], c2[0])
 }
 
-/// The term with structurally equal subterms shared (one node each).
-pub fn hashcons(t: &Tm) -> Tm {
+/// The tree size above which a value is read back and abstracted with its
+/// sharing ([`Walker::abstract_dag`]).
+const BIG_TREE: f64 = 2e6;
+
+/// Whether the tree an unshared read-back of `v` builds is over `limit`.
+fn value_tree_size_over(v: &V, limit: f64) -> bool {
+    value_tree_size(v) > limit
+}
+
+/// The size of the tree an unshared read-back of `v` builds (closures read
+/// back by substituting their environments).
+pub fn value_tree_size(v: &V) -> f64 {
+    use sandblaster_kernel::value::{Closure, EnvEntry};
     use std::collections::HashMap;
-    struct H {
-        memo: HashMap<*const Term, Tm>,
-        table: HashMap<String, Tm>,
+    struct S {
+        vm: HashMap<usize, f64>,
+        cm: HashMap<(usize, usize), f64>,
     }
-    fn p(t: &Tm) -> usize {
-        Rc::as_ptr(t) as *const () as usize
-    }
-    impl H {
-        fn go(&mut self, t: &Tm) -> Tm {
-            if let Some(r) = self.memo.get(&Rc::as_ptr(t)) {
-                return r.clone();
+    impl S {
+        fn v(&mut self, v: &V) -> f64 {
+            let a = Rc::as_ptr(v) as *const () as usize;
+            if let Some(r) = self.vm.get(&a) {
+                return *r;
             }
-            let mut g = |x: &Tm| self.go(x);
-            let node: Term = match &**t {
-                Term::Var(_) | Term::Global(_) | Term::Sort(_) | Term::IntTy(_) | Term::Lit { .. } | Term::Erased => {
-                    let key = format!("{:?}", t);
-                    let r = self.table.entry(key).or_insert_with(|| t.clone()).clone();
-                    self.memo.insert(Rc::as_ptr(t), r.clone());
-                    return r;
+            let r = match &**v {
+                Value::Neu(n) => {
+                    let mut acc = match &n.head {
+                        Head::Var(_) => 1.0,
+                        Head::Global { args, .. } | Head::Axiom { args, .. } => 1.0 + args.iter().map(|x| self.arg(x)).sum::<f64>(),
+                        Head::Prim { args, proofs, .. } => 1.0 + args.iter().map(|x| self.v(x)).sum::<f64>() + proofs.iter().map(|c| self.c(c)).sum::<f64>(),
+                        Head::Absurd { ty } => 1.0 + self.v(ty),
+                        Head::Transport { ty, lhs, rhs, motive, val } => 1.0 + self.v(ty) + self.v(lhs) + self.v(rhs) + self.c(motive) + self.v(val),
+                    };
+                    for e in &n.spine {
+                        acc += 1.0
+                            + match e {
+                                Elim::App(x) => self.arg(x),
+                                Elim::Fst | Elim::Snd => 0.0,
+                                Elim::Match { params, motive, arms, .. } => params.iter().map(|x| self.v(x)).sum::<f64>() + self.c(motive) + arms.iter().map(|c| self.c(c)).sum::<f64>(),
+                            };
+                    }
+                    acc
                 }
-                Term::Pi { name, rel, dom, cod } => Term::Pi { name: name.clone(), rel: *rel, dom: g(dom), cod: g(cod) },
-                Term::Lam { name, rel, dom, body } => Term::Lam { name: name.clone(), rel: *rel, dom: g(dom), body: g(body) },
-                Term::App { rel, fun, arg } => Term::App { rel: *rel, fun: g(fun), arg: g(arg) },
-                Term::Let { name, rel, ty, val, body } => Term::Let { name: name.clone(), rel: *rel, ty: g(ty), val: g(val), body: g(body) },
-                Term::Sigma { name, snd_rel, fst, snd } => Term::Sigma { name: name.clone(), snd_rel: *snd_rel, fst: g(fst), snd: g(snd) },
-                Term::Pair { ty, fst, snd } => Term::Pair { ty: g(ty), fst: g(fst), snd: g(snd) },
-                Term::Fst(x) => Term::Fst(g(x)),
-                Term::Snd(x) => Term::Snd(g(x)),
-                Term::Eq { ty, lhs, rhs } => Term::Eq { ty: g(ty), lhs: g(lhs), rhs: g(rhs) },
-                Term::Refl { ty, val } => Term::Refl { ty: g(ty), val: g(val) },
-                Term::Transport { ty, lhs, rhs, eq, motive, val } => Term::Transport { ty: g(ty), lhs: g(lhs), rhs: g(rhs), eq: g(eq), motive: g(motive), val: g(val) },
-                Term::Ind { ind, params } => Term::Ind { ind: *ind, params: params.iter().map(&mut g).collect() },
-                Term::Ctor { ind, ctor, params, args } => Term::Ctor { ind: *ind, ctor: *ctor, params: params.iter().map(&mut g).collect(), args: args.iter().map(&mut g).collect() },
-                Term::Match { ind, params, scrut, motive, arms } => Term::Match { ind: *ind, params: params.iter().map(&mut g).collect(), scrut: g(scrut), motive: g(motive), arms: arms.iter().map(|a| Arm { names: a.names.clone(), body: g(&a.body) }).collect() },
-                Term::Prim { op, args, proofs } => Term::Prim { op: *op, args: args.iter().map(&mut g).collect(), proofs: proofs.iter().map(&mut g).collect() },
-                Term::Rec { args, proof } => Term::Rec { args: args.iter().map(&mut g).collect(), proof: proof.as_ref().map(&mut g) },
-                Term::Delta { def, args } => Term::Delta { def: *def, args: args.iter().map(&mut g).collect() },
-                Term::Unfold { def, args, to_body, val } => Term::Unfold { def: *def, args: args.iter().map(&mut g).collect(), to_body: *to_body, val: g(val) },
-                Term::Linarith { hyps, goal, cert } => Term::Linarith { hyps: hyps.iter().map(|(a, b)| (g(a), g(b))).collect(), goal: g(goal), cert: cert.clone() },
-                Term::BvRefl { ty, lhs, rhs } => Term::BvRefl { ty: g(ty), lhs: g(lhs), rhs: g(rhs) },
-                Term::Absurd { ty, proof } => Term::Absurd { ty: g(ty), proof: g(proof) },
-                Term::Axiom { ax, args } => Term::Axiom { ax: *ax, args: args.iter().map(&mut g).collect() },
+                Value::Ctor { params, args, .. } => 1.0 + params.iter().map(|x| self.v(x)).sum::<f64>() + args.iter().map(|x| self.arg(x)).sum::<f64>(),
+                Value::Ind { params, .. } => 1.0 + params.iter().map(|x| self.v(x)).sum::<f64>(),
+                Value::Pair { fst, snd } => 1.0 + self.v(fst) + self.arg(snd),
+                Value::Lam { dom, body, .. } => 1.0 + self.v(dom) + self.c(body),
+                Value::Pi { dom, cod, .. } => 1.0 + self.v(dom) + self.c(cod),
+                Value::Sigma { fst, snd, .. } => 1.0 + self.v(fst) + self.c(snd),
+                Value::Eq { ty, lhs, rhs } => 1.0 + self.v(ty) + self.v(lhs) + self.v(rhs),
+                Value::Refl { ty, val } => 1.0 + self.v(ty) + self.v(val),
+                _ => 1.0,
             };
-            // the key: the node's own data with its children's (canonical) addresses
-            let key = shallow_key(&node);
-            let r = match self.table.get(&key) {
-                Some(r) => r.clone(),
-                None => {
-                    let r = Rc::new(node);
-                    self.table.insert(key, r.clone());
-                    r
-                }
-            };
-            self.memo.insert(Rc::as_ptr(t), r.clone());
+            self.vm.insert(a, r);
+            r
+        }
+        fn arg(&mut self, a: &sandblaster_kernel::value::Arg) -> f64 {
+            match a {
+                sandblaster_kernel::value::Arg::Rel(x) => self.v(x),
+                sandblaster_kernel::value::Arg::Irr(c) => self.c(c),
+            }
+        }
+        fn c(&mut self, c: &Closure) -> f64 {
+            let key = (Rc::as_ptr(&c.env.0) as *const () as usize, Rc::as_ptr(&c.body) as *const () as usize);
+            if let Some(r) = self.cm.get(&key) {
+                return *r;
+            }
+            let env: Vec<f64> = c.env.0.iter().map(|e| match e {
+                EnvEntry::Rel(x) => self.v(x),
+                EnvEntry::Irr(c2) => self.c(c2),
+            }).collect();
+            let r = term_size_in(&c.body, &env);
+            self.cm.insert(key, r);
             r
         }
     }
-    fn shallow_key(n: &Term) -> String {
-        use std::fmt::Write;
-        let mut k = String::new();
-        fn c(k: &mut String, x: &Tm) {
-            let _ = write!(k, ",{:x}", p(x));
+    S { vm: HashMap::new(), cm: HashMap::new() }.v(v)
+}
+
+/// (diagnostics) The number of distinct nodes of a term DAG.
+fn dag_nodes(t: &Tm) -> usize {
+    let mut n = 0;
+    crate::auto::util::map_term(t, 0, &mut |_, _| {
+        n += 1;
+        None
+    });
+    n
+}
+
+/// (diagnostics) The size of `t` with each free variable `k` counting
+/// `env[len - 1 - k]` (the environment's last entry is index 0).
+fn term_size_in(t: &Tm, env: &[f64]) -> f64 {
+    fn go(t: &Tm, local: u32, env: &[f64], memo: &mut std::collections::HashMap<(*const Term, u32), f64>) -> f64 {
+        let key = (Rc::as_ptr(t), local);
+        if let Some(r) = memo.get(&key) {
+            return *r;
         }
-        let cs = |k: &mut String, xs: &[Tm]| xs.iter().for_each(|x| c(k, x));
-        let head = match n {
-            Term::Pi { name, rel, dom, cod } => { c(&mut k, dom); c(&mut k, cod); format!("Pi{name}{rel:?}") }
-            Term::Lam { name, rel, dom, body } => { c(&mut k, dom); c(&mut k, body); format!("Lam{name}{rel:?}") }
-            Term::App { rel, fun, arg } => { c(&mut k, fun); c(&mut k, arg); format!("App{rel:?}") }
-            Term::Let { name, rel, ty, val, body } => { c(&mut k, ty); c(&mut k, val); c(&mut k, body); format!("Let{name}{rel:?}") }
-            Term::Sigma { name, snd_rel, fst, snd } => { c(&mut k, fst); c(&mut k, snd); format!("Sig{name}{snd_rel:?}") }
-            Term::Pair { ty, fst, snd } => { c(&mut k, ty); c(&mut k, fst); c(&mut k, snd); "Pair".into() }
-            Term::Fst(x) => { c(&mut k, x); "Fst".into() }
-            Term::Snd(x) => { c(&mut k, x); "Snd".into() }
-            Term::Eq { ty, lhs, rhs } => { c(&mut k, ty); c(&mut k, lhs); c(&mut k, rhs); "Eq".into() }
-            Term::Refl { ty, val } => { c(&mut k, ty); c(&mut k, val); "Refl".into() }
-            Term::Transport { ty, lhs, rhs, eq, motive, val } => { for x in [ty, lhs, rhs, eq, motive, val] { c(&mut k, x); } "Tr".into() }
-            Term::Ind { ind, params } => { cs(&mut k, params); format!("Ind{ind:?}") }
-            Term::Ctor { ind, ctor, params, args } => { cs(&mut k, params); k.push('|'); cs(&mut k, args); format!("Ctor{ind:?}{ctor}") }
-            Term::Match { ind, params, scrut, motive, arms } => {
-                cs(&mut k, params);
-                c(&mut k, scrut);
-                c(&mut k, motive);
-                let names: Vec<String> = arms.iter().map(|a| a.names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" ")).collect();
-                arms.iter().for_each(|a| c(&mut k, &a.body));
-                format!("Match{ind:?}{names:?}")
+        let r = match &**t {
+            Term::Var(Idx(i)) if *i >= local => env.get(env.len().wrapping_sub(1 + (*i - local) as usize)).copied().unwrap_or(1.0),
+            _ => {
+                let mut acc = 1.0;
+                let mut kids: Vec<(Tm, u32)> = Vec::new();
+                crate::auto::util::map_term(t, 0, &mut |y, d| {
+                    if Rc::ptr_eq(y, t) {
+                        return None;
+                    }
+                    kids.push((y.clone(), d));
+                    Some(y.clone())
+                });
+                for (y, d) in kids {
+                    acc += go(&y, local + d, env, memo);
+                }
+                acc
             }
-            Term::Prim { op, args, proofs } => { cs(&mut k, args); k.push('|'); cs(&mut k, proofs); format!("Prim{op:?}") }
-            Term::Rec { args, proof } => { cs(&mut k, args); if let Some(x) = proof { k.push('|'); c(&mut k, x); } "Rec".into() }
-            Term::Delta { def, args } => { cs(&mut k, args); format!("Delta{def:?}") }
-            Term::Unfold { def, args, to_body, val } => { cs(&mut k, args); c(&mut k, val); format!("Unf{def:?}{to_body}") }
-            Term::Linarith { hyps, goal, cert } => { hyps.iter().for_each(|(a, b)| { c(&mut k, a); c(&mut k, b); }); c(&mut k, goal); format!("Lin{cert:?}") }
-            Term::BvRefl { ty, lhs, rhs } => { c(&mut k, ty); c(&mut k, lhs); c(&mut k, rhs); "Bv".into() }
-            Term::Absurd { ty, proof } => { c(&mut k, ty); c(&mut k, proof); "Abs".into() }
-            Term::Axiom { ax, args } => { cs(&mut k, args); format!("Ax{ax:?}") }
-            other => return format!("{other:?}"),
         };
-        head + &k
+        memo.insert(key, r);
+        r
     }
-    let mut h = H { memo: HashMap::new(), table: HashMap::new() };
-    h.go(t)
+    go(t, 0, env, &mut std::collections::HashMap::new())
+}
+
+/// The term with structurally equal subterms shared (one node each).
+pub fn hashcons(t: &Tm) -> Tm {
+    HashCons::default().add(t)
+}
+
+/// Hash-consing with one table across several terms (their equal subterms
+/// become one node, so equality is the address's). The terms added are
+/// kept alive: the memo is keyed by their nodes' addresses.
+#[derive(Default)]
+pub struct HashCons {
+    memo: std::collections::HashMap<*const Term, Tm>,
+    table: std::collections::HashMap<String, Tm>,
+    keep: Vec<Tm>,
+}
+
+impl HashCons {
+    /// `t` hash-consed with the terms added before.
+    pub fn add(&mut self, t: &Tm) -> Tm {
+        self.keep.push(t.clone());
+        self.go(t)
+    }
+
+    fn go(&mut self, t: &Tm) -> Tm {
+        if let Some(r) = self.memo.get(&Rc::as_ptr(t)) {
+            return r.clone();
+        }
+        let mut g = |x: &Tm| self.go(x);
+        let node: Term = match &**t {
+            Term::Var(_) | Term::Global(_) | Term::Sort(_) | Term::IntTy(_) | Term::Lit { .. } | Term::Erased => {
+                let key = format!("{:?}", t);
+                let r = self.table.entry(key).or_insert_with(|| t.clone()).clone();
+                self.memo.insert(Rc::as_ptr(t), r.clone());
+                return r;
+            }
+            Term::Pi { name, rel, dom, cod } => Term::Pi { name: name.clone(), rel: *rel, dom: g(dom), cod: g(cod) },
+            Term::Lam { name, rel, dom, body } => Term::Lam { name: name.clone(), rel: *rel, dom: g(dom), body: g(body) },
+            Term::App { rel, fun, arg } => Term::App { rel: *rel, fun: g(fun), arg: g(arg) },
+            Term::Let { name, rel, ty, val, body } => Term::Let { name: name.clone(), rel: *rel, ty: g(ty), val: g(val), body: g(body) },
+            Term::Sigma { name, snd_rel, fst, snd } => Term::Sigma { name: name.clone(), snd_rel: *snd_rel, fst: g(fst), snd: g(snd) },
+            Term::Pair { ty, fst, snd } => Term::Pair { ty: g(ty), fst: g(fst), snd: g(snd) },
+            Term::Fst(x) => Term::Fst(g(x)),
+            Term::Snd(x) => Term::Snd(g(x)),
+            Term::Eq { ty, lhs, rhs } => Term::Eq { ty: g(ty), lhs: g(lhs), rhs: g(rhs) },
+            Term::Refl { ty, val } => Term::Refl { ty: g(ty), val: g(val) },
+            Term::Transport { ty, lhs, rhs, eq, motive, val } => Term::Transport { ty: g(ty), lhs: g(lhs), rhs: g(rhs), eq: g(eq), motive: g(motive), val: g(val) },
+            Term::Ind { ind, params } => Term::Ind { ind: *ind, params: params.iter().map(&mut g).collect() },
+            Term::Ctor { ind, ctor, params, args } => Term::Ctor { ind: *ind, ctor: *ctor, params: params.iter().map(&mut g).collect(), args: args.iter().map(&mut g).collect() },
+            Term::Match { ind, params, scrut, motive, arms } => Term::Match { ind: *ind, params: params.iter().map(&mut g).collect(), scrut: g(scrut), motive: g(motive), arms: arms.iter().map(|a| Arm { names: a.names.clone(), body: g(&a.body) }).collect() },
+            Term::Prim { op, args, proofs } => Term::Prim { op: *op, args: args.iter().map(&mut g).collect(), proofs: proofs.iter().map(&mut g).collect() },
+            Term::Rec { args, proof } => Term::Rec { args: args.iter().map(&mut g).collect(), proof: proof.as_ref().map(&mut g) },
+            Term::Delta { def, args } => Term::Delta { def: *def, args: args.iter().map(&mut g).collect() },
+            Term::Unfold { def, args, to_body, val } => Term::Unfold { def: *def, args: args.iter().map(&mut g).collect(), to_body: *to_body, val: g(val) },
+            Term::Linarith { hyps, goal, cert } => Term::Linarith { hyps: hyps.iter().map(|(a, b)| (g(a), g(b))).collect(), goal: g(goal), cert: cert.clone() },
+            Term::BvRefl { ty, lhs, rhs } => Term::BvRefl { ty: g(ty), lhs: g(lhs), rhs: g(rhs) },
+            Term::Absurd { ty, proof } => Term::Absurd { ty: g(ty), proof: g(proof) },
+            Term::Axiom { ax, args } => Term::Axiom { ax: *ax, args: args.iter().map(&mut g).collect() },
+        };
+        // the key: the node's own data with its children's (canonical) addresses
+        let key = hc_shallow_key(&node);
+        let r = match self.table.get(&key) {
+            Some(r) => r.clone(),
+            None => {
+                let r = Rc::new(node);
+                self.table.insert(key, r.clone());
+                r
+            }
+        };
+        self.memo.insert(Rc::as_ptr(t), r.clone());
+        r
+    }
+}
+
+fn hc_shallow_key(n: &Term) -> String {
+    use std::fmt::Write;
+    fn p(t: &Tm) -> usize {
+        Rc::as_ptr(t) as *const () as usize
+    }
+    let mut k = String::new();
+    fn c(k: &mut String, x: &Tm) {
+        let _ = write!(k, ",{:x}", p(x));
+    }
+    let cs = |k: &mut String, xs: &[Tm]| xs.iter().for_each(|x| c(k, x));
+    let head = match n {
+        Term::Pi { name, rel, dom, cod } => { c(&mut k, dom); c(&mut k, cod); format!("Pi{name}{rel:?}") }
+        Term::Lam { name, rel, dom, body } => { c(&mut k, dom); c(&mut k, body); format!("Lam{name}{rel:?}") }
+        Term::App { rel, fun, arg } => { c(&mut k, fun); c(&mut k, arg); format!("App{rel:?}") }
+        Term::Let { name, rel, ty, val, body } => { c(&mut k, ty); c(&mut k, val); c(&mut k, body); format!("Let{name}{rel:?}") }
+        Term::Sigma { name, snd_rel, fst, snd } => { c(&mut k, fst); c(&mut k, snd); format!("Sig{name}{snd_rel:?}") }
+        Term::Pair { ty, fst, snd } => { c(&mut k, ty); c(&mut k, fst); c(&mut k, snd); "Pair".into() }
+        Term::Fst(x) => { c(&mut k, x); "Fst".into() }
+        Term::Snd(x) => { c(&mut k, x); "Snd".into() }
+        Term::Eq { ty, lhs, rhs } => { c(&mut k, ty); c(&mut k, lhs); c(&mut k, rhs); "Eq".into() }
+        Term::Refl { ty, val } => { c(&mut k, ty); c(&mut k, val); "Refl".into() }
+        Term::Transport { ty, lhs, rhs, eq, motive, val } => { for x in [ty, lhs, rhs, eq, motive, val] { c(&mut k, x); } "Tr".into() }
+        Term::Ind { ind, params } => { cs(&mut k, params); format!("Ind{ind:?}") }
+        Term::Ctor { ind, ctor, params, args } => { cs(&mut k, params); k.push('|'); cs(&mut k, args); format!("Ctor{ind:?}{ctor}") }
+        Term::Match { ind, params, scrut, motive, arms } => {
+            cs(&mut k, params);
+            c(&mut k, scrut);
+            c(&mut k, motive);
+            let names: Vec<String> = arms.iter().map(|a| a.names.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" ")).collect();
+            arms.iter().for_each(|a| c(&mut k, &a.body));
+            format!("Match{ind:?}{names:?}")
+        }
+        Term::Prim { op, args, proofs } => { cs(&mut k, args); k.push('|'); cs(&mut k, proofs); format!("Prim{op:?}") }
+        Term::Rec { args, proof } => { cs(&mut k, args); if let Some(x) = proof { k.push('|'); c(&mut k, x); } "Rec".into() }
+        Term::Delta { def, args } => { cs(&mut k, args); format!("Delta{def:?}") }
+        Term::Unfold { def, args, to_body, val } => { cs(&mut k, args); c(&mut k, val); format!("Unf{def:?}{to_body}") }
+        Term::Linarith { hyps, goal, cert } => { hyps.iter().for_each(|(a, b)| { c(&mut k, a); c(&mut k, b); }); c(&mut k, goal); format!("Lin{cert:?}") }
+        Term::BvRefl { ty, lhs, rhs } => { c(&mut k, ty); c(&mut k, lhs); c(&mut k, rhs); "Bv".into() }
+        Term::Absurd { ty, proof } => { c(&mut k, ty); c(&mut k, proof); "Abs".into() }
+        Term::Axiom { ax, args } => { cs(&mut k, args); format!("Ax{ax:?}") }
+        other => return format!("{other:?}"),
+    };
+    head + &k
 }

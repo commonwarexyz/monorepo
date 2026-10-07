@@ -65,7 +65,7 @@ fn rv_uses(r: &Rvalue, out: &mut HashSet<usize>) {
             op_uses(a, out);
             op_uses(b, out);
         }
-        Rvalue::Ref(_, p) | Rvalue::Discr(p) | Rvalue::Len(p) => place_uses(p, out),
+        Rvalue::Ref(_, p) | Rvalue::Discr(p) | Rvalue::Len(p) | Rvalue::AddrOf(_, p) => place_uses(p, out),
         Rvalue::Agg(_, ops) => ops.iter().for_each(|o| op_uses(o, out)),
         Rvalue::Unsupported(_) => {}
     }
@@ -101,7 +101,7 @@ fn block_use_def(f: &Fn, b: usize) -> (HashSet<usize>, HashSet<usize>) {
                 op_uses(o, &mut u);
                 add_uses(u, &kills, &mut uses);
             }
-            Stmt::Unsupported(_) => {}
+            Stmt::Storage(..) | Stmt::Unsupported(_) => {}
         }
     }
     let mut u = HashSet::new();
@@ -341,10 +341,12 @@ pub fn panic_blocks(f: &Fn) -> Vec<usize> {
 /// reading follows reference codes only into types where it can.
 pub fn occurs(m: &Sbmir, t: &Ty, a: &Ty, depth: u32) -> bool {
     a == t
+        // (a range of an array is a slice of its elements: `PRange`)
+        || matches!((a, t), (Ty::Array(e, _), Ty::Slice(f)) if e == f)
         || depth < 8
             && match a {
                 Ty::Tuple(ts) => ts.iter().any(|x| occurs(m, t, x, depth + 1)),
-                Ty::Array(e, _) => occurs(m, t, e, depth + 1),
+                Ty::Array(e, _) | Ty::Slice(e) => occurs(m, t, e, depth + 1),
                 Ty::Adt(k) => m.adts.get(k).is_some_and(|d| d.variants.iter().any(|v| v.fields.iter().any(|(_, ft)| occurs(m, t, ft, depth + 1)))),
                 _ => false,
             }

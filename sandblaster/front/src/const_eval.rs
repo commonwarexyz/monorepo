@@ -42,7 +42,7 @@ impl<'r> ConstEval<'r> {
         let it = &self.res.items[id.0 as usize];
         let r = match (&it.tag, &it.src) {
             (ItemTag::Const, ItemSrc::Const(c)) => {
-                let width = uint_of_type(&c.ty);
+                let width = uint_of_type(&c.ty).or_else(|| self.alias_uint(it.module, &c.ty));
                 match width {
                     Some(w) => self.eval(it.module, &c.expr, Some(w)),
                     None => Err(format!("constant `{}` is not of an unsigned integer type", it.name)),
@@ -53,6 +53,27 @@ impl<'r> ConstEval<'r> {
         self.stack.borrow_mut().pop();
         self.memo.borrow_mut().insert(id, r.clone());
         r
+    }
+
+    /// The unsigned type a type alias of module `m` names (`GfElement` for
+    /// `pub type GfElement = u16;`), through aliases of aliases.
+    fn alias_uint(&self, m: ModId, t: &syn::Type) -> Option<UintTy> {
+        let mut cur = (m, t.clone());
+        for _ in 0..8 {
+            let syn::Type::Path(p) = &cur.1 else { return None };
+            if p.qself.is_some() {
+                return None;
+            }
+            let segs: Vec<(String, Span)> = p.path.segments.iter().map(|s| (s.ident.to_string(), Span::DUMMY)).collect();
+            let Ok(Def::Item(id)) = self.res.resolve_path_defs(cur.0, &segs, Ns::Type, p.path.leading_colon.is_some(), false) else { return None };
+            let it = &self.res.items[id.0 as usize];
+            let (ItemTag::Alias, ItemSrc::Type(a)) = (&it.tag, &it.src) else { return None };
+            if let Some(w) = uint_of_type(&a.ty) {
+                return Some(w);
+            }
+            cur = (it.module, (*a.ty).clone());
+        }
+        None
     }
 
     /// Evaluates `e` in module `m`; `w` is the expected width (if known).

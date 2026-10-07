@@ -91,6 +91,21 @@ FIXTURES = [
     ("sd_neon_nomodel", "sd_neon_nomodel", "a", "a.sbmir", []),
     ("sd_neon_detect", "sd_neon_detect", "a", "a.sbmir", []),
     ("sd_x86", "sd_x86", "a", "a.sbmir", ["--target", "x86_64-apple-darwin"]),
+    # tests/unsafe_simd.rs: existing `unsafe` read through the narrow reading of
+    # raw pointers (docs/DESIGN-UNSAFE-SIMD.md); each with its window
+    # extraction (`--mir-opt-level 0`, the window rule's input)
+    ("sd_ptr", "sd_ptr", "a", "a.sbmir", []),
+    ("sd_ptr_window", "sd_ptr", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    ("sd_ptr_twins", "sd_ptr_twins", "a", "a.sbmir", []),
+    ("sd_ptr_twins_window", "sd_ptr_twins", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    # tests/simd.rs: Reed–Solomon's NEON `mul_128` shape (table rows loaded
+    # through shared pointers, TBL lookups proven lane by lane), and its twins
+    ("sd_neon_mul128", "sd_neon_mul128", "a", "a.sbmir", []),
+    ("sd_neon_mul128_window", "sd_neon_mul128", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    ("sd_neon_mul128_shift", "sd_neon_mul128_shift", "a", "a.sbmir", []),
+    ("sd_neon_mul128_shift_window", "sd_neon_mul128_shift", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
+    ("sd_neon_mul128_row", "sd_neon_mul128_row", "a", "a.sbmir", []),
+    ("sd_neon_mul128_row_window", "sd_neon_mul128_row", "a", "a.window.sbmir", ["--mir-opt-level", "0"]),
 ]
 
 # crates of the workspace that are dependencies only (no MIR of their own)

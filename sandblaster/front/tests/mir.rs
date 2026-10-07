@@ -20,7 +20,7 @@ const HEADER: &str = r#"(sbmir 1)
 fn names() -> ModuleNames {
     let mut host = BTreeMap::new();
     host.insert("Error".to_string(), vec!["EndOfBuffer".to_string()]);
-    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums: host, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None }
+    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums: host, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None, static_features: None, codegen_flags: None }
 }
 
 fn load(body: &str) -> Result<mir::Loaded, String> {
@@ -206,10 +206,13 @@ fn blocks_out_of_order_are_refused() {
     assert!(read_f(&body, &["a"], &[], true, "u16").unwrap_err().contains("out of order"));
 }
 
+/// A length (`Len`, stage neon-mul: rustc's `s.len()` of a `&mut [T]`,
+/// fused by the parse) is read only of a slice or an array place; of any
+/// other place it is refused, as an unknown form is.
 #[test]
 fn a_length_rvalue_and_unknown_forms_are_refused() {
     let body = ASSERT_ONLY.replace("(bin lt (copy (p 1)) (int u16 5))", "(len (p 1))");
-    assert!(read_f(&body, &["a"], &[], true, "u16").is_err());
+    assert!(read_f(&body, &["a"], &[], true, "u16").unwrap_err().contains("no slice or array"));
     let body2 = ASSERT_ONLY.replace("(bin lt (copy (p 1)) (int u16 5))", "(frobnicate (p 1))");
     assert!(read_f(&body2, &["a"], &[], true, "u16").is_err());
 }
@@ -616,7 +619,7 @@ const NAMING: &str = r#"(adt-def "k::m::S" (path "k::m::S") (kind struct) (args 
 
 fn load_open(body: &str) -> mir::Loaded {
     let mut nm = names();
-    nm.open.insert("Tr".into(), "m::S".into());
+    nm.open.insert("Tr".into(), vec!["m::S".into()]);
     mir::load(&format!("{HEADER}{body}"), &|_| None, nm, "m").unwrap()
 }
 
@@ -665,7 +668,7 @@ const HOST: &str = r#"(adt-def "x::D" (path "x::D") (kind struct) (args ())
 fn host_names(n: &mut ModuleNames) {
     n.host.types.insert("D".into(), ("crate::h::D".into(), "[u8 ; 4]".into()));
     n.host.structs.insert("H".into(), "crate::h::H".into());
-    n.open.insert("CH".into(), "h::H".into());
+    n.open.insert("CH".into(), vec!["h::H".into()]);
 }
 
 #[test]
@@ -682,6 +685,21 @@ fn a_library_newtype_of_a_host_model_type_is_read_as_its_field() {
     assert!(read_with(&two, "k::m::g", "g", &["d"], &[], true, "crate::h::D", host_names).is_err());
 }
 
+/// The structured reading never reads a union's field (a type pun) or a
+/// union as the newtype of its one field (DESIGN-UNSAFE-SIMD, amendment
+/// A-S2); the struct above is the negative twin.
+#[test]
+fn a_union_is_never_read_through_its_field_nor_as_its_field() {
+    let union = HOST.replace("(adt-def \"x::D\" (path \"x::D\") (kind struct)", "(adt-def \"x::D\" (path \"x::D\") (kind union)");
+    assert_ne!(union, HOST);
+    let e = read_with(&union, "k::m::g", "g", &["d"], &[], true, "crate::h::D", host_names).unwrap_err();
+    assert!(e.contains("of a union"), "{e}");
+    let l = mir::load(&format!("{HEADER}{union}"), &|_| None, { let mut n = names(); host_names(&mut n); n }, "m").unwrap();
+    assert!(!l.names.is_transparent(&l.m, "x::D"));
+    let t = read::Names::ty(&l.names, &l.m, &mir::ir::Ty::Adt("x::D".into())).map(|t| t.to_token_stream().to_string());
+    assert_ne!(t.as_deref(), Ok("crate :: h :: D"), "{t:?}");
+}
+
 #[test]
 fn a_host_models_deref_and_method_are_the_models() {
     let s = read_with(HOST, "k::m::f", "f", &["d"], &[], true, "crate::h::D", host_names).unwrap();
@@ -696,7 +714,7 @@ fn a_host_models_deref_and_method_are_the_models() {
     assert!(e.contains("the leaf `x::Hasher::hash`"), "{e}");
     let e2 = read_with(HOST, "k::m::f", "f", &["d"], &[], true, "crate::h::D", |n| {
         n.host.structs.insert("H".into(), "crate::h::H".into());
-        n.open.insert("CH".into(), "h::H".into());
+        n.open.insert("CH".into(), vec!["h::H".into()]);
     })
     .unwrap_err();
     assert!(e2.contains("has no MIR body"), "{e2}");
@@ -842,6 +860,125 @@ fn the_storage_mmr_bodies_are_read_from_rustc_mir() {
     for f in ["Family::position_to_location", "PeakIterator::next", "Position::add__u64", "PeakIterator::to_nearest_size"] {
         assert!(read.iter().any(|(n, _, _)| n == f), "`{f}` is read from MIR: {:?}", read.iter().map(|r| &r.0).collect::<Vec<_>>());
     }
+}
+
+/// The MIR both readings read is of one optimization level, `MIR_OPT_LEVEL`
+/// (`sandblaster-mirx` pins and records it); an unoptimized extraction is a
+/// window extraction (`window_mir = ".."`, DESIGN-UNSAFE-SIMD amendment
+/// A-S1), checked against the extraction it accompanies (the same program,
+/// at level 0) and read by nothing but the window analysis.
+#[test]
+fn the_mir_opt_level_is_the_readings_and_a_window_extraction_is_the_same_program_unoptimized() {
+    assert_eq!((mir::MIR_OPT_LEVEL, mir::WINDOW_MIR_OPT_LEVEL), (1, 0));
+    let at = |level: &str, body: &str| format!("{HEADER}{level}{body}");
+    // the readings' level, or none recorded (an extraction older than the record)
+    for ok in ["(mir-opt-level 1)\n", ""] {
+        assert!(mir::load(&at(ok, CHECKED_ADD), &|_| None, names(), "m").is_ok(), "{ok}");
+    }
+    for bad in ["(mir-opt-level 0)\n", "(mir-opt-level 2)\n"] {
+        let e = mir::load(&at(bad, CHECKED_ADD), &|_| None, names(), "m").unwrap_err();
+        assert!(e.contains("-Zmir-opt-level"), "{e}");
+    }
+    assert!(mir::ir::parse(&at("(mir-opt-level one)\n", CHECKED_ADD)).unwrap_err().contains("mir-opt-level"));
+    // the window extraction: the same program at level 0 (more blocks and
+    // locals, a library function the main one does not follow)
+    let mut main = mir::load(&at("(mir-opt-level 1)\n", CHECKED_ADD), &|_| None, names(), "m").unwrap();
+    let unopt = CHECKED_ADD
+        .replace("(3 (tuple u16 bool) mut))", "(3 (tuple u16 bool) mut) (4 u16 mut))")
+        .replace("(bb 1 (assign (p 0) (use (move (p 3 (field 0 u16))))) (return)))", "(bb 1 (assign (p 4) (use (move (p 3 (field 0 u16))))) (goto 2))\n  (bb 2 (assign (p 0) (use (copy (p 4)))) (return)))")
+        + "(fn \"core::clone::Clone::clone\" (kind callee) (def \"core::clone::Clone::clone\") (args ()) (item fn \"clone\") (argc 1)\n  (nobody))\n";
+    assert_ne!(unopt, CHECKED_ADD);
+    mir::load_window(&at("(mir-opt-level 0)\n", &unopt), &mut main).unwrap();
+    assert_eq!(main.window.as_ref().map(|w| w.mir_opt_level), Some(Some(0)));
+    // negative twins: another level or none recorded, another module or
+    // compiler or source, a function missing or of another signature
+    let header_twins = [
+        (at("(mir-opt-level 1)\n", &unopt), "-Zmir-opt-level=0"),
+        (at("", &unopt), "-Zmir-opt-level=0"),
+        (at("(mir-opt-level 0)\n", &unopt).replace("(module \"k::m\")", "(module \"k::n\")"), "module"),
+        (at("(mir-opt-level 0)\n", &unopt).replace("2026-06-20", "2026-06-21"), "compiler"),
+        (at("(mir-opt-level 0)\n(source \"a.rs\" \"00\")\n", &unopt), "sources"),
+        (at("(mir-opt-level 0)\n", &unopt).replace("(root \"k::m::f\")", ""), "roots"),
+        (at("(mir-opt-level 0)\n", &unopt.replace("(fn \"k::m::f\"", "(fn \"k::m::g\"")), "no `k::m::f`"),
+        (at("(mir-opt-level 0)\n", &unopt.replace("(2 u16 imm)", "(2 u32 imm)")), "signature of `k::m::f`"),
+    ];
+    for (bad, what) in header_twins {
+        let e = mir::load_window(&bad, &mut main).unwrap_err();
+        assert!(e.contains(what), "{what}: {e}");
+    }
+}
+
+/// `window_mir = ".."` through the lift: loaded and checked next to `mir`,
+/// refused without it, without its level, or at the readings' level.
+#[test]
+fn a_window_extraction_is_declared_beside_the_extraction_and_checked() {
+    let w_rs = include_str!("mir_fixtures/lift_w/w.rs");
+    let w_mir = include_str!("mir_fixtures/lift_w/w.sbmir");
+    let window = w_mir.replace("(overflow-checks on)\n", "(overflow-checks on)\n(mir-opt-level 0)\n");
+    let check = |decl: &str, window: &str| {
+        let root = format!("#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n#[lift({decl})]\nmod w;\npub use w::{{Counter, Wrap}};\n");
+        let fs = sandblaster_front::loader::MemFs::from_files([("r/mod.rs", root.as_str()), ("r/w.rs", w_rs), ("r/w.sbmir", w_mir), ("r/w.window.sbmir", window)]);
+        sandblaster_front::driver::check(Path::new("r/mod.rs"), &fs, &sandblaster_front::target::TargetInfo::aarch64_apple_darwin())
+    };
+    let c = check("mir = \"w.sbmir\", window_mir = \"w.window.sbmir\"", &window);
+    assert!(c.ok(), "{}", c.render());
+    let l = &c.lift_facts.mir_loaded[0].loaded;
+    assert_eq!(l.window.as_ref().map(|w| w.mir_opt_level), Some(Some(0)));
+    // negative twin: without the declaration, none
+    let c = check("mir = \"w.sbmir\"", &window);
+    assert!(c.ok() && c.lift_facts.mir_loaded[0].loaded.window.is_none(), "{}", c.render());
+    for (decl, win, what) in [
+        ("mir = \"w.sbmir\", window_mir = \"w.window.sbmir\"", w_mir.to_string(), "-Zmir-opt-level=0"),
+        ("mir = \"w.sbmir\", window_mir = \"w.window.sbmir\"", window.replace("(mir-opt-level 0)", "(mir-opt-level 1)"), "-Zmir-opt-level=0"),
+        ("window_mir = \"w.window.sbmir\"", window.clone(), "needs `mir"),
+        ("mir = \"w.sbmir\", window_mir = \"w.nowhere.sbmir\"", window.clone(), "cannot read the window MIR file"),
+    ] {
+        let c = check(decl, &win);
+        assert!(!c.ok() && c.render().contains(what), "{what}: {}", c.render());
+    }
+}
+
+/// A standing scan of every checked-in extraction for unions (DESIGN-UNSAFE-SIMD,
+/// amendment A-S2): which union types each one reaches, and that the parse
+/// refused no access to one. The shipped extractions reach two library unions
+/// through followed library MIR (`LazyLock`'s `Data`, `MaybeUninit`), as
+/// fields of other types only: a new union, or an access to one (which both
+/// readings refuse), shows here first.
+#[test]
+fn every_checked_in_extraction_is_scanned_for_unions() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    let mut dirs = vec![repo.join("codec/sandblaster"), repo.join("storage/sandblaster"), repo.join("sandblaster/front/tests/mir_fixtures")];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap().map(Result::unwrap) {
+            let p = e.path();
+            if p.is_dir() {
+                dirs.push(p);
+            } else if p.extension().is_some_and(|x| x == "sbmir") {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    assert!(files.len() >= 50, "{}", files.len());
+    let mut reached = BTreeMap::new();
+    for p in &files {
+        let m = mir::ir::parse(&std::fs::read_to_string(p).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        let unions: Vec<String> = m.adts.values().filter(|d| d.is_union).map(|d| d.path.clone()).collect();
+        let refused = m.fns.values().map(|f| format!("{f:?}")).filter(|f| f.contains("of a union")).count();
+        assert_eq!(refused, 0, "{}: an access to a union's field ({unions:?})", p.display());
+        if !unions.is_empty() {
+            reached.insert(p.strip_prefix(&repo).unwrap().display().to_string(), unions);
+        }
+    }
+    let want: BTreeMap<String, Vec<String>> = [
+        ("storage/sandblaster/mmr/mmr.sbmir", vec!["std::sync::lazy_lock::Data"]),
+        ("storage/sandblaster/verifier/verifier.sbmir", vec!["std::mem::MaybeUninit", "std::sync::lazy_lock::Data"]),
+    ]
+    .into_iter()
+    .map(|(f, u)| (f.to_string(), u.into_iter().map(str::to_string).collect()))
+    .collect();
+    assert_eq!(reached, want);
 }
 
 // ---------------------------------------------------------------------------

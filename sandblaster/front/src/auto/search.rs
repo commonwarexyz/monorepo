@@ -135,6 +135,10 @@ pub struct Engine<'a> {
     pub no_simp: bool,
     /// The simplifier rewrote a fact or the target in this search.
     pub simp_used: bool,
+    /// The lane closer last stopped at a side that does not unfold to the
+    /// vector of its lanes (an opaque function's result): a rewrite of the
+    /// target may expose it ([`Engine::atomic`] tries again after rewrites).
+    pub lane_side_folded: bool,
     /// The simplifier's cast normal form is off ([`prove_goal`]'s last
     /// pass), and whether it produced a step in this search.
     pub no_cast: bool,
@@ -210,6 +214,7 @@ impl<'a> Engine<'a> {
             lin_no_cuts: false,
             no_simp: false,
             simp_used: false,
+            lane_side_folded: false,
             no_cast: false,
             cast_used: false,
             lin_skip_rounds: 0,
@@ -1015,6 +1020,16 @@ impl<'a> Engine<'a> {
                 return Ok(p.map(|p| apply_conts(&conts, st.depth(), p)));
             }
         }
+        // an equation between vectors one of which a hardware model makes:
+        // lane by lane, before any rewriting ([`super::lanes`])
+        self.lane_side_folded = false;
+        if let Some(p) = self.lane_split(st, &t)? {
+            return Ok(Some(apply_conts(&conts, st.depth(), p)));
+        }
+        // a side the closer could not see through (an opaque function's
+        // result, `f(c)` with a fact `f(c) == ..`): tried again after each
+        // rewrite of the target, while a side stays folded (at most four)
+        let mut lane_retry: u32 = if self.lane_side_folded { 4 } else { 0 };
         loop {
             self.tick()?;
             if let Some(p) = self.close(st, &t)? {
@@ -1055,6 +1070,16 @@ impl<'a> Engine<'a> {
                         // target quantifies over their rewritten versions.
                         let p = self.solve(st, t.clone(), !self.relevant)?;
                         return Ok(p.map(|p| apply_conts(&conts, st.depth(), p)));
+                    }
+                    if lane_retry > 0 {
+                        lane_retry -= 1;
+                        self.lane_side_folded = false;
+                        if let Some(p) = self.lane_split(st, &t)? {
+                            return Ok(Some(apply_conts(&conts, st.depth(), p)));
+                        }
+                        if !self.lane_side_folded {
+                            lane_retry = 0;
+                        }
                     }
                     if st.facts.len() != nfacts
                         && let Some(p) = self.saturate(st)?

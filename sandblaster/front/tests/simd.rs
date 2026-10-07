@@ -32,7 +32,17 @@
 //!   `_mm_shuffle_epi8`, with `_mm_and_si128` and `_mm_xor_si128`),
 //!   extracted for `x86_64-apple-darwin` and read onto the x86 models; its
 //!   gates and MIR theorems pass for an x86_64 build (the lift conformance
-//!   check, which runs the code natively, runs on x86 hosts only).
+//!   check, which runs the code natively, runs on x86 hosts only). Its laws
+//!   are proven by the lane closer (`auto::lanes`, C8's second slice): each
+//!   lane split on bit 7 of its index byte, with no lemma of 256 cases.
+//! * `mir_fixtures/sd_neon_mul128`: Reed–Solomon's NEON `mul_128` and
+//!   `muladd_128` as the engine writes them (an `#[inline(always)]` helper
+//!   whose value intrinsics need `unsafe`; the eight table rows loaded
+//!   through raw pointers formed from shared references), their rows byte
+//!   arrays where the engine's are `u128`: verified in place, lane by lane,
+//!   against the scalar reference (each element's product bytes through the
+//!   split nibble tables) by the lane closer, with native conformance; its
+//!   twins (a shift by 3, two rows swapped) refused by the same laws.
 
 #[path = "gated_util.rs"]
 mod gated;
@@ -261,78 +271,24 @@ use crate::a::{lookup, mul_split, lookup_masked};
 #[allow(unused_imports)]
 use crate::laws::{pshufb, pshufb_lanes, split_byte, split_lanes, masked_lanes};
 
-/// The lanes of a vector, lane 0 first.
-#[spec]
-#[example(lanes([1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]) == [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])]
-pub fn lanes(v: [u8; 16]) -> [u8; 16] {
-    v
-}
-
-/// PSHUFB's lane 0 is the scalar reference, for every index byte `k`: one
-/// case per byte, each by word algebra (the condition on bit 7 is then a
-/// constant). The model's `if` and the reference's do not have the same
-/// shape (the elaborated `if` carries its path equation), so word algebra
-/// alone cannot equate them on a symbolic byte.
-#[lemma]
-fn pshufb_lane0(t: __m128i, k: u8) {
-    ensures(lanes(_mm_shuffle_epi8(t, [k; 16]))[0usize] == pshufb(t, k));
-    by_cases(k, 0..=255);
-    bv();
-}
-
-/// Lane by lane: each lane of PSHUFB is its lane 0 at that index byte.
+/// Lane for lane (the lane closer, `auto::lanes`): each lane's condition,
+/// bit 7 of its index byte, is split; in either case the model's `if` and
+/// the reference's compute the same byte.
 #[proof]
 fn lookup_is_pshufb(t: __m128i, idx: __m128i) {
     unfold(lookup);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[0usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[0usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[0usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[1usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[1usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[1usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[2usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[2usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[2usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[3usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[3usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[3usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[4usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[4usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[4usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[5usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[5usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[5usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[6usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[6usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[6usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[7usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[7usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[7usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[8usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[8usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[8usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[9usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[9usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[9usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[10usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[10usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[10usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[11usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[11usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[11usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[12usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[12usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[12usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[13usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[13usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[13usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[14usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[14usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[14usize]);
-    assert(lanes(_mm_shuffle_epi8(t, idx))[15usize] == lanes(_mm_shuffle_epi8(t, [lanes(idx)[15usize]; 16]))[0usize], { bv(); });
-    pshufb_lane0(t, lanes(idx)[15usize]);
     follows();
 }
 
 #[proof]
 fn mul_split_is_the_scalar_reference(lo_n: __m128i, hi_n: __m128i, lo: __m128i, hi: __m128i) {
-    lookup_is_pshufb(lo, lo_n);
-    lookup_is_pshufb(hi, hi_n);
     unfold(mul_split);
-    unfold(lookup);
     follows();
 }
 
 #[proof]
 fn lookup_masked_is_the_scalar_reference(t: __m128i, idx: __m128i, m: __m128i) {
-    lookup_is_pshufb(t, _mm_and_si128(idx, m));
     unfold(lookup_masked);
-    unfold(lookup);
     follows();
 }
 
@@ -354,6 +310,149 @@ fn mul_split_determined(lo_n: __m128i, hi_n: __m128i, lo: __m128i, hi: __m128i) 
 fn lookup_masked_determined(table: __m128i, idx: __m128i, mask: __m128i) {
     use_hyp(0, table, idx, mask);
     use_real(0, table, idx, mask);
+    by_arithmetic();
+}
+"#;
+
+/// A host file, rustc's MIR of it, and its window extraction (the
+/// unoptimized MIR the narrow reading's window rule reads, for code with raw
+/// pointers; `docs/mir-lift.md` §20.10).
+type CodeW = (&'static str, &'static str, &'static str);
+const MUL128: CodeW =
+    (include_str!("mir_fixtures/sd_neon_mul128/src/a.rs"), include_str!("mir_fixtures/sd_neon_mul128/a.sbmir"), include_str!("mir_fixtures/sd_neon_mul128/a.window.sbmir"));
+const MUL128_SHIFT: CodeW = (
+    include_str!("mir_fixtures/sd_neon_mul128_shift/src/a.rs"),
+    include_str!("mir_fixtures/sd_neon_mul128_shift/a.sbmir"),
+    include_str!("mir_fixtures/sd_neon_mul128_shift/a.window.sbmir"),
+);
+const MUL128_ROW: CodeW = (
+    include_str!("mir_fixtures/sd_neon_mul128_row/src/a.rs"),
+    include_str!("mir_fixtures/sd_neon_mul128_row/a.sbmir"),
+    include_str!("mir_fixtures/sd_neon_mul128_row/a.window.sbmir"),
+);
+
+/// The split-table multiply's items (the twins have the same).
+const MUL128_FNS: &str = "Lut, mul_128, muladd_128";
+
+/// The elements `f(i)` for `i` in `0..n`, comma separated.
+fn elems(n: usize, f: impl Fn(usize) -> String) -> String {
+    (0..n).map(f).collect::<Vec<_>>().join(", ")
+}
+
+/// A literal `Lut` whose row `i` holds `lo(i, x)` and `hi(i, x)` at `x`.
+fn lut_lit(lo: impl Fn(usize, usize) -> u8, hi: impl Fn(usize, usize) -> u8) -> String {
+    let rows = |f: &dyn Fn(usize, usize) -> u8| format!("[{}]", elems(4, |i| format!("[{}]", elems(16, |x| format!("{}u8", f(i, x))))));
+    format!("Lut {{ lo: {}, hi: {} }}", rows(&lo), rows(&hi))
+}
+
+/// What the split-table multiply computes: element by element, the scalar
+/// reference (Reed–Solomon's `Scalar::mul` on one element, its 16-bit table
+/// rows split into the rows of the product's low and high bytes).
+fn mul128_laws() -> String {
+    // the multiplier 1 (the rows of `log_m = 0`): every element unchanged
+    let one = lut_lit(|i, x| match i { 0 => x as u8, 1 => ((x << 4) & 0xff) as u8, _ => 0 }, |i, x| match i { 2 => x as u8, 3 => ((x << 4) & 0xff) as u8, _ => 0 });
+    // rows with every entry distinct
+    let some = lut_lit(|i, x| (x + 16 * i) as u8, |i, x| (3 * x + 7 * i) as u8);
+    format!(
+        r#"//! What the split-table multiply computes: element by element, the product's
+//! low and high bytes through the split nibble tables, which is what
+//! Reed–Solomon's scalar engine computes per element (`Scalar::mul`, its
+//! 16-bit rows split into the rows of the product's low and high bytes).
+use sandblaster::prelude::*;
+use core::arch::aarch64::*;
+use crate::a::{{Lut, mul_128, muladd_128}};
+
+/// The low byte of the product of one element (low byte `lo`, high byte
+/// `hi`) by the multiplier of `lut`: its four nibbles looked up in the rows of
+/// the product's low bytes, combined by xor.
+#[spec]
+#[example(mul_lo_byte({one}, 0x21u8, 0x43u8) == 0x21u8)]
+#[example(mul_lo_byte({some}, 0x21u8, 0x43u8) == 4u8)]
+pub fn mul_lo_byte(lut: Lut, lo: u8, hi: u8) -> u8 {{
+    lut.lo[0][(lo & 15u8) as usize] ^ lut.lo[1][(lo >> 4u32) as usize] ^ lut.lo[2][(hi & 15u8) as usize] ^ lut.lo[3][(hi >> 4u32) as usize]
+}}
+
+/// The high byte of the same product.
+#[spec]
+#[example(mul_hi_byte({one}, 0x21u8, 0x43u8) == 0x43u8)]
+#[example(mul_hi_byte({some}, 0x21u8, 0x43u8) == 56u8)]
+pub fn mul_hi_byte(lut: Lut, lo: u8, hi: u8) -> u8 {{
+    lut.hi[0][(lo & 15u8) as usize] ^ lut.hi[1][(lo >> 4u32) as usize] ^ lut.hi[2][(hi & 15u8) as usize] ^ lut.hi[3][(hi >> 4u32) as usize]
+}}
+
+/// The low product bytes of sixteen elements, lane 0 first.
+#[spec]
+#[example(mul_lo_lanes({one}, {vlo}, {vhi}) == {vlo})]
+pub fn mul_lo_lanes(lut: Lut, vlo: [u8; 16], vhi: [u8; 16]) -> [u8; 16] {{
+    [{lo_lanes}]
+}}
+
+/// Their high product bytes.
+#[spec]
+#[example(mul_hi_lanes({one}, {vlo}, {vhi}) == {vhi})]
+pub fn mul_hi_lanes(lut: Lut, vlo: [u8; 16], vhi: [u8; 16]) -> [u8; 16] {{
+    [{hi_lanes}]
+}}
+
+/// `mul_128` multiplies every element by the multiplier of `lut`: the low and
+/// high product bytes, lane by lane (a vector is the array of its lanes, lane 0
+/// first).
+#[law]
+fn mul_128_is_the_scalar_reference(value_lo: uint8x16_t, value_hi: uint8x16_t, lut: Lut) {{
+    ensures(mul_128(value_lo, value_hi, &lut) == (mul_lo_lanes(lut, value_lo, value_hi), mul_hi_lanes(lut, value_lo, value_hi)));
+}}
+
+/// `muladd_128` adds (xor) the product of `y` to `x`, lane by lane.
+#[law]
+fn muladd_128_adds_the_product(x_lo: uint8x16_t, x_hi: uint8x16_t, y_lo: uint8x16_t, y_hi: uint8x16_t, lut: Lut) {{
+    ensures(muladd_128(x_lo, x_hi, y_lo, y_hi, &lut) == ([{xor_lo}], [{xor_hi}]));
+}}
+"#,
+        vlo = format!("[{}]", elems(16, |i| format!("{}u8", (17 * i + 3) & 0xff))),
+        vhi = format!("[{}]", elems(16, |i| format!("{}u8", 255 - 13 * i))),
+        lo_lanes = elems(16, |i| format!("mul_lo_byte(lut, vlo[{i}], vhi[{i}])")),
+        hi_lanes = elems(16, |i| format!("mul_hi_byte(lut, vlo[{i}], vhi[{i}])")),
+        xor_lo = elems(16, |i| format!("x_lo[{i}] ^ mul_lo_byte(lut, y_lo[{i}], y_hi[{i}])")),
+        xor_hi = elems(16, |i| format!("x_hi[{i}] ^ mul_hi_byte(lut, y_lo[{i}], y_hi[{i}])")),
+    )
+}
+
+/// The proofs of [`mul128_laws`]: the lane closer (`auto::lanes`), which
+/// decides each lane's table lookups (an index `x & 15` or `x >> 4` is below
+/// 16) and closes the lane.
+const MUL128_PROOF: &str = r#"use sandblaster::prelude::*;
+use core::arch::aarch64::*;
+#[allow(unused_imports)]
+use crate::a::{Lut, mul_128, muladd_128};
+#[allow(unused_imports)]
+use crate::laws::{mul_lo_byte, mul_hi_byte, mul_lo_lanes, mul_hi_lanes};
+
+/// Lane for lane: every lookup's index is a nibble.
+#[proof]
+fn mul_128_is_the_scalar_reference(value_lo: uint8x16_t, value_hi: uint8x16_t, lut: Lut) {
+    unfold(mul_128);
+    follows();
+}
+
+/// The same lanes, each xored into `x`.
+#[proof]
+fn muladd_128_adds_the_product(x_lo: uint8x16_t, x_hi: uint8x16_t, y_lo: uint8x16_t, y_hi: uint8x16_t, lut: Lut) {
+    unfold(muladd_128);
+    unfold(mul_128);
+    follows();
+}
+
+#[proof(complete = crate::a::mul_128)]
+fn mul_128_determined(value_lo: uint8x16_t, value_hi: uint8x16_t, lut: &Lut) {
+    use_hyp(0, value_lo, value_hi, *lut);
+    use_real(0, value_lo, value_hi, lut);
+    by_arithmetic();
+}
+
+#[proof(complete = crate::a::muladd_128)]
+fn muladd_128_determined(x_lo: uint8x16_t, x_hi: uint8x16_t, y_lo: uint8x16_t, y_hi: uint8x16_t, lut: &Lut) {
+    use_hyp(0, x_lo, x_hi, y_lo, y_hi, *lut);
+    use_real(0, x_lo, x_hi, y_lo, y_hi, lut);
     by_arithmetic();
 }
 "#;
@@ -381,6 +480,19 @@ fn files(code: Code, fns: &str, laws: Option<&str>, proof: Option<&str>) -> Vec<
     if let Some(p) = proof {
         v.push(("host/sandblaster/m/PROOF.rs".into(), p.into()));
     }
+    v
+}
+
+/// [`files`] for code with raw pointers: its window extraction beside it,
+/// declared by the lift (`window_mir`).
+fn files_w(code: CodeW, fns: &str, laws: Option<&str>, proof: Option<&str>) -> Vec<(String, String)> {
+    let mut v = files((code.0, code.1), fns, laws, proof);
+    for (p, t) in v.iter_mut() {
+        if p == ROOT_PATH {
+            *t = t.replace("mir = \"a.sbmir\")]", "mir = \"a.sbmir\", window_mir = \"a.window.sbmir\")]");
+        }
+    }
+    v.push(("host/sandblaster/m/a.window.sbmir".into(), code.2.into()));
     v
 }
 
@@ -455,7 +567,9 @@ impl Scratch {
             ("CARGO_MANIFEST_DIR", self.dir.join("host").display().to_string()),
             ("OUT_DIR", out.display().to_string()),
             ("CARGO_CFG_TARGET_ARCH", "aarch64".into()),
-            ("CARGO_CFG_TARGET_FEATURE", "neon,sha2,sha3,aes".into()),
+            // the static features stable rustc gives `aarch64-apple-darwin`
+            // (an extraction records its own, which must be the build's)
+            ("CARGO_CFG_TARGET_FEATURE", TargetInfo::aarch64_apple_darwin().features.iter().cloned().collect::<Vec<_>>().join(",")),
             ("CARGO_CFG_TARGET_ENDIAN", "little".into()),
             ("CARGO_CFG_TARGET_POINTER_WIDTH", "64".into()),
             ("SANDBLASTER_CACHE_DIR", self.dir.join("cache").display().to_string()),
@@ -547,13 +661,75 @@ fn a_wrong_shift_and_the_wrong_lanes_are_refused_by_the_same_laws() {
     }
 }
 
+/// Reed–Solomon's NEON `mul_128` as written (`mir_fixtures/sd_neon_mul128`:
+/// its rows loaded through raw pointers formed from shared references, its
+/// value intrinsics in `unsafe`, its rows as byte arrays) is verified in place
+/// against the scalar reference, lane by lane, by the lane closer: each lane's
+/// eight lookups have nibble indices (decided below 16), so each product byte
+/// is the reference's xor of four row entries. `muladd_128` likewise. The
+/// lock pins the laws and the models; every function has its MIR theorem; the
+/// lift conformance check runs the NEON code natively.
+#[test]
+fn a_split_table_multiply_is_verified_lane_by_lane_against_its_scalar_reference() {
+    let mut s = Scratch::new("mul128");
+    let laws = mul128_laws();
+    let f = files_w(MUL128, MUL128_FNS, Some(&laws), Some(MUL128_PROOF));
+    let lock = s.accept(&f, &TargetInfo::aarch64_apple_darwin()).unwrap_or_else(|e| panic!("the split-table multiply's gates:\n{e}"));
+    for law in ["mul_128_is_the_scalar_reference", "muladd_128_adds_the_product"] {
+        assert!(lock.contains(&format!("law:crate::laws::{law}")), "{law}: {lock}");
+    }
+    for m in ["vandq_u8", "vdupq_n_u8", "veorq_u8", "vld1q_u8", "vqtbl1q_u8", "vshrq_n_u8"] {
+        assert!(lock.contains(&format!("item target-model:aarch64:{m}\n")), "{m}");
+    }
+    let o = s.build(&with_lock(f, &lock));
+    assert!(o.ok, "no verdict:\n{}\n{:?}", o.stderr, o.cargo);
+    let record = output(&o, "m-verified.txt").unwrap_or_else(|| panic!("no record: {:?}", o.cargo));
+    assert!(record.contains("VERIFIED + LIFTED IN PLACE") && record.contains("src/a.rs"), "{record}");
+    let report = output(&o, "m-report.json").expect("a report");
+    for gate in ["boundary", "examples", "sections", "law-rules", "lock", "mir-theorems", "lift-conformance"] {
+        let entry = gate_entry(report, gate);
+        assert!(entry.contains("\"ran\": true") && entry.contains("\"errors\": 0"), "gate {gate}: {entry}");
+    }
+    // both functions read from MIR have their theorems; the conformance check
+    // ran them natively (their table rows loaded through the pointers)
+    assert!(gate_entry(report, "mir-theorems").contains("2 of 2"), "{}", gate_entry(report, "mir-theorems"));
+    let conformance = gate_entry(report, "lift-conformance");
+    assert!(conformance.contains("on 2 function(s) (0 skipped)") && conformance.contains(", 0 mismatch(es)"), "{conformance}");
+    eprintln!("{}\n{conformance}", gate_entry(report, "mir-theorems"));
+}
+
+/// The negative twins (`sd_neon_mul128_shift`: the low bytes' high nibble
+/// taken with a shift by 3; `sd_neon_mul128_row`: the third and fourth rows of
+/// the low product bytes swapped) are refused by the same laws and proofs: a
+/// lane the closer cannot decide (its lookups read other entries than the
+/// reference's), no kernel rejection. Their MIR theorems hold (the wrong code
+/// is read as what it is).
+#[test]
+fn a_wrong_nibble_and_a_wrong_row_are_refused_by_the_same_laws() {
+    let s = Scratch::new("mul128-twins");
+    let laws = mul128_laws();
+    for (what, code) in [("a shift by 3", MUL128_SHIFT), ("two rows swapped", MUL128_ROW)] {
+        let f = files_w(code, MUL128_FNS, Some(&laws), Some(MUL128_PROOF));
+        let (ok, why) = s.gates(&f, &TargetInfo::aarch64_apple_darwin());
+        assert!(!ok, "{what}: a wrong variant passed every gate:\n{why}");
+        assert!(why.contains("mul_128_is_the_scalar_reference"), "{what}: the refusal names the law:\n{why}");
+        assert!(!why.contains("rejected by the kernel") && !why.contains("the kernel rejected"), "{what}: {why}");
+        let c = s.check(&f, &TargetInfo::aarch64_apple_darwin());
+        let m = theorems(&c, &c.lift_facts);
+        assert_eq!(outcome(&m, "crate::a::mul_128"), Ok(()), "{what}: the MIR theorem of the wrong code");
+        eprintln!("{what}: refused by the law");
+    }
+}
+
 #[test]
 fn a_load_through_a_raw_pointer_is_refused_and_named() {
     let s = Scratch::new("pointer");
     let c = s.check(&files(POINTER, "load", None, None), &TargetInfo::aarch64_apple_darwin());
     let r = c.render();
     assert!(!c.ok(), "a pointer load was read:\n{r}");
-    assert!(r.contains("`unsafe` in a lifted function") && r.contains("`vld1q_u8`") && r.contains("user's open decision"), "{r}");
+    // (an extraction from before the narrow reading of existing `unsafe`:
+    // refused with the load named, and the remedy, extracting it again)
+    assert!(r.contains("`unsafe` in a lifted function whose MIR was extracted before the narrow reading") && r.contains("`vld1q_u8`") && r.contains("extract it again"), "{r}");
     // the literal reading refuses the load itself (whatever the source says)
     let m = ir::parse(POINTER.1).expect("parse");
     let f = m.fns.get("fx_sd_neon_ptr::a::load").expect("load's MIR");

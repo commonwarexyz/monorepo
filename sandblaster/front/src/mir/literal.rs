@@ -92,12 +92,16 @@ fn lib_path(p: &str, path: &str) -> bool { if p.starts_with("bytes::") { path ==
 
 /// The integer types, `(signed, bits)` (bits 0: `usize`/`isize`) → the word
 /// holding their bits and, when signed, the lift's bit model (`""`: `i8` and
-/// `isize` are their bits). `u128`/`i128` are not modeled: no kernel word
-/// holds them.
+/// `isize` are their bits). `u128`/`i128` have no word: a `u128` is held as
+/// its two 64-bit words ([`U128_PAIR`]) and no operator, cast or constant of
+/// it is read; an `i128` is not modeled.
 const INTS: &[(bool, u32, &str, &str)] = &[
     (false, 8, "u8", ""), (false, 16, "u16", ""), (false, 32, "u32", ""), (false, 64, "u64", ""), (false, 0, "usize", ""),
     (true, 8, "u8", ""), (true, 16, "u16", "crate::__lift::I16"), (true, 32, "u32", "crate::__lift::I32"), (true, 64, "u64", "crate::__lift::I64"), (true, 0, "u64", ""),
 ];
+
+/// The L type of a `u128`: its (low, high) 64-bit words (`Gen::ty`).
+pub const U128_PAIR: &str = "Tuple2(U64, U64)";
 
 /// One generated function.
 #[derive(Clone, Debug)]
@@ -323,6 +327,12 @@ impl<'a> Gen<'a> {
             Ty::Unit => "Unit".into(),
             Ty::Never => "Empty".into(),
             Ty::Str => "mir::Str".into(),
+            // a `u128` is the pair of its 64-bit words, low word first, as
+            // the lift reads it in types (C4's slice, DESIGN-UNSAFE-SIMD
+            // §2.2): held, moved and read through its bytes (`ptr::bytes_text`);
+            // no operation on it is read (`bits` has no word for it: every
+            // operator, cast and constant of `u128` is stuck)
+            Ty::Int(false, 128) => U128_PAIR.into(),
             Ty::Int(..) => match int(t).ok_or("an integer type")? {
                 (_, Some(model)) if !model.is_empty() => model.to_string(),
                 (w, _) => wty(w),
@@ -343,6 +353,13 @@ impl<'a> Gen<'a> {
             Ty::FnDef(..) => "Unit".into(),
             // a `core::arch` vector: its model representation (§20.9)
             Ty::Simd(p, lane, n) => super::arch::core_ty_text(super::arch::vector(p, lane, *n)?),
+            // a raw pointer to an admitted type (crate code only: §20.10)
+            Ty::Ptr(_, pointee) => {
+                super::ptr::plain(pointee)?;
+                "mir::Ptr(@RC@)".into()
+            }
+            // the referent of a `&mut [T]` (a cell, a code's target)
+            Ty::Slice(e) => format!("(Slice {})", self.ty(e)?),
             other => return Err(format!("the type {other:?}")),
         })
     }
@@ -385,6 +402,12 @@ impl<'a> Gen<'a> {
         // core's slice iterator: the slice and the index of its next element
         if let Some(e) = super::slice_iter_elem(self.m, &Ty::Adt(key.to_string())) {
             return Ok(AdtL { opaque: true, ..plain(format!("Tuple2((Slice {}), Usize)", self.ty(&e)?)) });
+        }
+        // core's mutable slice iterator (raw pointers inside; A-S4): the
+        // slice's reference code and the index of the element it yields next
+        if let Some(e) = super::iter_mut_elem(self.m, &Ty::Adt(key.to_string())) {
+            self.ty(&e)?;
+            return Ok(AdtL { opaque: true, ..plain("Tuple2(@RC@, Usize)".into()) });
         }
         if self.k.names.is_transparent(self.m, key) {
             return Ok(AdtL { newtype: true, ..plain(self.ty(&d.variants[0].fields[0].1)?) });
@@ -531,6 +554,8 @@ struct FnCx {
     targets: BTreeMap<String, Target>,
     /// The constructor (`b<k>`/`d<k>`) being generated.
     cur: String,
+    /// The base of each pointer local of crate code (`ptr::bases`).
+    bases: BTreeMap<usize, Result<super::ptr::Base, String>>,
 }
 
 /// What a code is followed to: a value of a MIR type, or the buffer model.
@@ -627,7 +652,14 @@ impl<'a> Gen<'a> {
         for i in 1..=f.argc.min(nl.saturating_sub(1)) {
             self.cells_of(&f.locals[i].0, i, None, &mut cells).map_err(|e| format!("the referent of parameter {i}: {e}"))?;
         }
-        let tys: Vec<R<String>> = f.locals.iter().map(|(t, _)| self.ty(t)).collect();
+        // raw pointers are read in crate code only (§20.10: library MIR's
+        // pointers stay unmodeled), and never leave their function: no
+        // pointer parameter or result (the window rule's W1)
+        let is_ptr = |t: &Ty| matches!(t, Ty::Ptr(..));
+        if f.local && f.locals.iter().take(f.argc + 1).any(|(t, _)| is_ptr(t)) {
+            return Err(format!("`{key}` takes or returns a raw pointer (a pointer never leaves the function that forms it: docs/DESIGN-UNSAFE-SIMD.md §1.10)"));
+        }
+        let tys: Vec<R<String>> = f.locals.iter().map(|(t, _)| if is_ptr(t) && !f.local { Err("a raw pointer of library code".to_string()) } else { self.ty(t) }).collect();
         let unmodeled: BTreeSet<usize> = (0..nl).filter(|i| tys[*i].is_err()).collect();
         let local_tys: Vec<String> = tys.into_iter().map(|t| t.unwrap_or_else(|_| "mir::Unmodeled".into())).collect();
         let slot_tys: Vec<String> = local_tys.iter().chain(cells.iter().map(|c| &c.ty)).map(|t| t.replace("@RC@", &rc)).collect();
@@ -664,7 +696,8 @@ impl<'a> Gen<'a> {
         let out_ty = out_tuple(&outs, &outs).0;
         let lf = LFn { key: key.to_string(), id, run: format!("{p}::run"), st: st.clone(), blk: format!("{p}::Blk"), out_ty: out_ty.clone(), out_parts: outs.clone(), local_tys, cells: cells.clone(), headers: headers.clone(), faults: vec![], panics: vec![], diverging: vec![] };
         self.s.fns.insert(key.to_string(), lf.clone());
-        let mut fx = FnCx { p: p.clone(), rc, f: f.clone(), key: key.to_string(), slot_tys, unmodeled, nl, cells, out_ty: out_ty.clone(), outs, post, headers, targets: BTreeMap::new(), cur: String::new() };
+        let bases = if f.local { super::ptr::bases(self.m, &f) } else { BTreeMap::new() };
+        let mut fx = FnCx { p: p.clone(), rc, f: f.clone(), key: key.to_string(), slot_tys, unmodeled, nl, cells, out_ty: out_ty.clone(), outs, post, headers, targets: BTreeMap::new(), cur: String::new(), bases };
         // a block every path of which panics ([`must_panic`], trusted) is
         // `Panic`; another from which every path diverges (`cfg.rs`, not
         // trusted: an `unreachable`, an abort, a call that does not return)
@@ -800,6 +833,14 @@ impl<'a> Gen<'a> {
             // `Assume(c)`: undefined behaviour unless `c`
             Stmt::Assume(o, _) => Some(bind("Bool", &st, &self.operand(fx, o)?, "c", &format!("mir::guard {st} c s"))),
             Stmt::Assign(_, Rvalue::Ref(k, _), _) if k == "fake" => None,
+            // storage markers have no meaning for the reading
+            Stmt::Storage(..) => None,
+            // `&raw mut place` / `&raw const place`: a pointer formation (§20.10)
+            Stmt::Assign(pl, Rvalue::AddrOf(mt, q), at) => {
+                let dt = place_ty(&fx.f, pl)?;
+                let v = self.addr_of(fx, *mt, q, at)?;
+                Some(bind(&self.ty(&dt)?, &st, &v, "v", &self.write(fx, pl, "v")?))
+            }
             Stmt::Assign(pl, rv, _) => {
                 let dt = place_ty(&fx.f, pl)?;
                 let v = self.rvalue(fx, rv, &dt)?;
@@ -860,7 +901,12 @@ impl<'a> Gen<'a> {
         for pr in &pl.proj {
             match (pr, &t) {
                 (Proj::Deref, Ty::Ref(false, inner)) => t = (**inner).clone(),
-                (Proj::Deref, Ty::Ref(true, _)) => cur = PlaceC::Dyn(self.read_c(fx, &cur)?, proj_ty(&t, pr)?),
+                // (the referent's type is what the projections after it
+                // apply to: `(*r)[i]` of a `&mut [T]`)
+                (Proj::Deref, Ty::Ref(true, inner)) => {
+                    cur = PlaceC::Dyn(self.read_c(fx, &cur)?, (**inner).clone());
+                    t = (**inner).clone();
+                }
                 (Proj::Field(..) | Proj::Downcast(_) | Proj::Index(_), _) => {
                     let nt = proj_ty(&t, pr)?;
                     cur = match cur {
@@ -1068,7 +1114,7 @@ impl<'a> Gen<'a> {
             }
             Ok([0, 1].map(|j| select("i", &cs[j], &r[j], &nn[j])))
         };
-        let (mut sel, mut down, mut idx) = (nn.clone(), nn.clone(), nn.clone());
+        let (mut sel, mut down, mut idx, mut range) = (nn.clone(), nn.clone(), nn.clone(), nn.clone());
         match a {
             Ty::Tuple(ts) => sel = via(self, 0, ts, "rest")?,
             Ty::Adt(k) if !self.adt(k)?.opaque && !self.adt(k)?.newtype => {
@@ -1080,7 +1126,7 @@ impl<'a> Gen<'a> {
                         let fields: Vec<Ty> = d.variants[vi].fields.iter().map(|f| f.1.clone()).collect();
                         let fu = via(self, vi, &fields, "rest2")?;
                         for (j, c) in cs.iter_mut().enumerate() {
-                            c.push((vi, mat("rest", "List(mir::Proj)", &r[j], &format!("| Nil => {} | Cons(h2, rest2) => match h2 : mir::Proj as _ return {} with | PField(i) => {} | PDown(v1) => {} | PIndex(i1) => {} end", nn[j], r[j], fu[j], nn[j], nn[j]))));
+                            c.push((vi, mat("rest", "List(mir::Proj)", &r[j], &format!("| Nil => {} | Cons(h2, rest2) => match h2 : mir::Proj as _ return {} with | PField(i) => {} | PDown(v1) => {} | PIndex(i1) => {} | PRange(lo1, hi1) => {} end", nn[j], r[j], fu[j], nn[j], nn[j], nn[j]))));
                         }
                     }
                     down = [0, 1].map(|j| select("v0", &cs[j], &r[j], &nn[j]));
@@ -1088,17 +1134,52 @@ impl<'a> Gen<'a> {
                     sel = via(self, 0, &v.fields.iter().map(|f| f.1.clone()).collect::<Vec<Ty>>(), "rest")?;
                 }
             }
-            Ty::Array(e, n) => {
-                if let Some((f2, u2)) = self.follow(fx, e, t)? {
-                    let et = self.ty(e)?;
-                    let get = format!("mir::array_get {et} {n}usize x i0");
-                    idx = [bind(&et, &tt, &get, "y", &format!("{f2} y rest")), bind(&et, &att, &get, "y", &bind(&et, &att, &format!("{u2} y rest v"), "z", &format!("mir::array_set {et} {n}usize x i0 z")))];
+            // an element of an array, or of a slice (the referent of a
+            // `&mut [T]`); and of a range of either (`PRange`, below)
+            Ty::Array(e, _) | Ty::Slice(e) => {
+                let et = self.ty(e)?;
+                let (len, whole) = match a {
+                    Ty::Array(_, n) => (format!("{n}usize"), format!("mir::array_range {et} {n}usize x lo0 hi0")),
+                    _ => ("fst(x)".to_string(), format!("mir::slice_range {et} x lo0 hi0")),
+                };
+                // element `k` of `x`, the path's rest `rest`: its follow and update
+                let at = |f2: &str, u2: &str, k: &str, rest: &str| -> [String; 2] {
+                    let (get, set) = match a {
+                        Ty::Array(_, n) => (format!("mir::array_get {et} {n}usize x {k}"), format!("mir::array_set {et} {n}usize x {k} z")),
+                        _ => (format!("slice::get {et} x {k}"), format!("mir::slice_set {et} x {k} z")),
+                    };
+                    [bind(&et, &tt, &get, "y", &format!("{f2} y {rest}")), bind(&et, &att, &get, "y", &bind(&et, &att, &format!("{u2} y {rest} v"), "z", &set))]
+                };
+                let elem = self.follow(fx, e, t)?;
+                if let Some((f2, u2)) = &elem {
+                    idx = at(f2, u2, "i0", "rest");
                 }
+                // `PRange(lo, hi)`: the elements `lo..hi` (a subslice:
+                // `split_at_mut`'s halves), read whole as a slice (never written
+                // whole), or its element `i` (`PIndex(i)` next), which is element
+                // `lo + i` of `x` (`mir::range_index`: `None` unless `lo <= hi <=
+                // len` and `i < hi - lo`); any other step after it is `None`
+                let sub_elem: [String; 2] = match &elem {
+                    Some((f2, u2)) => {
+                        let ats = at(f2, u2, "j3", "rest3");
+                        [0, 1].map(|j| bind("Usize", if j == 0 { &tt } else { &att }, &format!("mir::range_index {len} lo0 hi0 i3"), "j3", &ats[j]))
+                    }
+                    None => nn.clone(),
+                };
+                let sub_whole = [if matches!(t, Ty::Slice(f) if f == e) { whole } else { nn[0].clone() }, nn[1].clone()];
+                range = [0, 1].map(|j| mat("rest", "List(mir::Proj)", &r[j], &format!("| Nil => {} | Cons(h3, rest3) => match h3 : mir::Proj as _ return {} with | PField(i4) => {} | PDown(v4) => {} | PIndex(i3) => {} | PRange(lo4, hi4) => {} end", sub_whole[j], r[j], nn[j], nn[j], sub_elem[j], nn[j])));
             }
             _ => {}
         }
-        let here = if a == t { [some(&tt, "x"), some(&att, "v")] } else { nn.clone() };
-        let body = |j: usize| mat("path", "List(mir::Proj)", &r[j], &format!("| Nil => {} | Cons(h, rest) => match h : mir::Proj as _ return {} with | PField(i) => {} | PDown(v0) => {} | PIndex(i0) => {} end", here[j], r[j], sel[j], down[j], idx[j]));
+        let here = match (a, t) {
+            _ if a == t => [some(&tt, "x"), some(&att, "v")],
+            // an array read whole as a slice: the referent of an unsized
+            // `&mut [T; N]` (`&mut [T]`, the same code, its place the array),
+            // never written whole
+            (Ty::Array(e, n), Ty::Slice(f)) if e == f => [format!("mir::as_slice {} {n}usize x", self.ty(e)?), nn[1].clone()],
+            _ => nn.clone(),
+        };
+        let body = |j: usize| mat("path", "List(mir::Proj)", &r[j], &format!("| Nil => {} | Cons(h, rest) => match h : mir::Proj as _ return {} with | PField(i) => {} | PDown(v0) => {} | PIndex(i0) => {} | PRange(lo0, hi0) => {} end", here[j], r[j], sel[j], down[j], idx[j], range[j]));
         let _ = writeln!(self.out, "{}", format!("def[prelude] {fname} : (x : {att}) -> (path : List(mir::Proj)) -> {} := fun (x : {att}) (path : List(mir::Proj)) => {}", r[0], body(0)).replace("@RC@", &fx.rc));
         self.emit(&uname, format!("def[prelude] {uname} : (x : {att}) -> (path : List(mir::Proj)) -> (v : {tt}) -> {} := fun (x : {att}) (path : List(mir::Proj)) (v : {tt}) => {}", r[1], body(1)).replace("@RC@", &fx.rc));
         Ok(Some((fname, uname)))
@@ -1231,6 +1312,9 @@ const PANIC_PATH_CASTS: &[&str] = &["int-to-int", "unsize", "reify-fn-pointer"];
 /// the lists above; places only through references; nothing the parse does
 /// not know).
 fn panic_path_ok(f: &Fn, s: &Stmt) -> bool {
+    if matches!(s, Stmt::Storage(..)) {
+        return true;
+    }
     let Stmt::Assign(pl, rv, _) = s else { return false };
     let ops_ok = |ops: &[&Operand]| ops.iter().all(|o| operand_ok(f, o));
     place_ok(f, pl)
@@ -1242,7 +1326,7 @@ fn panic_path_ok(f: &Fn, s: &Stmt) -> bool {
             Rvalue::Cast(kind, o, _) => PANIC_PATH_CASTS.contains(&kind.as_str()) && ops_ok(&[o]),
             Rvalue::Ref(_, q) | Rvalue::Discr(q) | Rvalue::Len(q) => place_ok(f, q),
             Rvalue::Agg(_, ops) => ops.iter().all(|o| operand_ok(f, o)),
-            Rvalue::Unsupported(_) => false,
+            Rvalue::AddrOf(..) | Rvalue::Unsupported(_) => false,
         }
 }
 
@@ -1415,7 +1499,18 @@ impl<'a> Gen<'a> {
                 binds(&vals, &tys, &dtt, "a", some(&dtt, &built))
             }
             Rvalue::Ref(k, _) => return Err(format!("a {k} borrow")),
-            Rvalue::Len(_) => return Err("`Len`".into()),
+            Rvalue::AddrOf(..) => return Err("`&raw` outside an assignment".into()),
+            // `Len(P)`: the length of the slice place `P` (read through its
+            // code), `N` of an array; the parse's reading of rustc's
+            // `PtrMetadata(&raw const (fake) *r)` of a `&mut [T]` (`ir.rs`)
+            Rvalue::Len(q) => match place_ty(&fx.f, q)? {
+                Ty::Slice(e) => {
+                    let et = self.ty(&e)?;
+                    map(&format!("(Slice {et})"), "Usize", &self.read(fx, q)?, "x", &format!("slice::len {et} x"))
+                }
+                Ty::Array(e, n) => map(&format!("(Array {} {n}usize)", self.ty(&e)?), "Usize", &self.read(fx, q)?, "x", &format!("{n}usize")),
+                other => return Err(format!("`Len` of {other:?}")),
+            },
             Rvalue::Unsupported(s) => return Err(format!("the rvalue {s}")),
         })
     }
@@ -1457,6 +1552,10 @@ impl<'a> Gen<'a> {
 
     fn binop(&mut self, fx: &mut FnCx, op: &str, a: &Operand, b: &Operand) -> R<String> {
         let (ta, tb) = (op_ty(&fx.f, a)?, op_ty(&fx.f, b)?);
+        // `Offset(p, k)`: `p` moved by `k` elements (§20.10)
+        if let ("offset", Ty::Ptr(_, pointee)) = (op, &ta) {
+            return self.ptr_move(fx, a, b, false, tb.signed(), pointee);
+        }
         let (av, bv) = (self.operand(fx, a)?, self.operand(fx, b)?);
         let (tat, tbt) = (self.ty(&ta)?, self.ty(&tb)?);
         let (rt, body, total) = if ta == Ty::Bool {
@@ -1526,6 +1625,16 @@ impl<'a> Gen<'a> {
                 let Ty::Array(e, n) = &**fa else { unreachable!() };
                 return Ok(bind(&ft, &tt, &av, "x", &format!("mir::as_slice {} {n}usize x", self.ty(e)?)));
             }
+            // `&mut [T; N]` as `&mut [T]`: the same reference code (its place
+            // is the array: reading it as a slice through the code is `None`,
+            // only a formation looks through the unsize, `ptr::bases`)
+            ("unsize", Ty::Ref(true, fa), Ty::Ref(true, tb)) if matches!((&**fa, &**tb), (Ty::Array(..), Ty::Slice(_))) => "x".to_string(),
+            // between raw pointers: the same pointer (crate code; §20.10)
+            ("ptr-to-ptr", Ty::Ptr(_, fp), Ty::Ptr(_, tp)) if fx.f.local => {
+                super::ptr::plain(fp)?;
+                super::ptr::plain(tp)?;
+                "x".to_string()
+            }
             _ => return Err(format!("the cast {kind} {from:?} -> {to:?}")),
         };
         Ok(map(&ft, &tt, &av, "x", &e))
@@ -1561,10 +1670,26 @@ impl<'a> Gen<'a> {
                 let after = self.leaf(fx, path, tys, args, dest, os)?;
                 return Ok(self.jump(fx, fx.rank(b), t, &after));
             }
+            // a load or store through a pointer of crate code (§20.10)
+            Callee::Arch(a) if a.pointer => self.mem_access(fx, a, args, dest, os)?,
             // a `core::arch` intrinsic: its validated target model (§20.9)
             Callee::Arch(a) => {
                 let (rt, e) = self.arch_call(fx, a, args, dest)?;
                 self.result(fx, dest, os, &rt, &e)?
+            }
+            // an admitted pointer helper (by exact path and signature, A-S7)
+            Callee::Fn(k2) if let Some(h) = self.m.fns.get(k2).and_then(super::ptr::helper) => self.helper_call(fx, b, k2, h, args, dest, os)?,
+            // a library `unsafe fn` called by crate code, outside the
+            // admitted pointer operations: its safety precondition is not
+            // what the reading checks (§1.11 item 3, A-S7)
+            Callee::Fn(k2) if fx.f.local && self.m.fns.get(k2).is_some_and(|g| g.unsafe_fn && !g.local) => {
+                return Err(format!("a call of the library `unsafe fn` `{}` from crate code: outside the admitted pointer operations (the reading does not check its safety precondition; docs/DESIGN-UNSAFE-SIMD.md §1.10)", self.m.fns[k2].def));
+            }
+            // `<[T]>::split_at_mut` (raw pointers inside): two subslice codes,
+            // or a panic past the slice's end
+            Callee::Fn(k2) if let Some((super::Model::SplitAtMut, elem)) = self.m.fns.get(k2).and_then(super::model_of) => {
+                let after = self.split_at_mut(fx, &elem, args, dest, os)?;
+                return Ok(self.jump(fx, fx.rank(b), t, &after));
             }
             // core's slice iterator and range `get` (raw pointers): their models
             Callee::Fn(k2) if let Some((model, elem)) = self.m.fns.get(k2).and_then(super::model_of) => self.model_call(fx, model, &elem, args, dest, os)?,
@@ -1595,6 +1720,14 @@ impl<'a> Gen<'a> {
     fn call_fn(&mut self, fx: &mut FnCx, b: usize, k2: &str, args: &[Operand], dest: &Place, t: usize, os: &str) -> R<String> {
         let (st, p, rc, rb) = (fx.st(), fx.p.clone(), fx.rc.clone(), fx.rank(b));
         let g = self.m.fns.get(k2).cloned().ok_or("no MIR")?;
+        // a call into `#[target_feature]` code runs its instructions: the
+        // CPU must have its features, which the caller's own or the target's
+        // static ones (bound to the build's) establish (DESIGN-UNSAFE-SIMD §4)
+        let have = self.facts(fx);
+        let missing: Vec<&String> = g.target_features.iter().filter(|x| !have.contains(x)).collect();
+        if !missing.is_empty() {
+            return Err(format!("a call of `{k2}`, compiled with target feature(s) {}, which neither the caller's `#[target_feature]` nor the target's static features establish: the CPU may lack them", missing.iter().map(|x| x.as_str()).collect::<Vec<_>>().join(", ")));
+        }
         let self_call = k2 == fx.key;
         let gl = if self_call { self.s.fns.get(k2).cloned().ok_or("self")? } else { self.function(k2).map_err(|e| format!("the callee `{k2}`: {e}"))? };
         // the arguments (a closure body takes its parameters one by one, its
@@ -1610,6 +1743,13 @@ impl<'a> Gen<'a> {
         }
         if argv.len() != g.argc {
             return Err(format!("`{k2}` takes {} arguments, called with {}", g.argc, argv.len()));
+        }
+        // a value holding this frame's reference codes (a raw pointer, an
+        // `IterMut`) never crosses into another frame but as a cell
+        for (i, (_, at)) in argv.iter().enumerate() {
+            if !gl.cells.iter().any(|c| c.param == i + 1 && c.parent.is_none()) && self.ty(at)?.contains("@RC@") && !matches!(at, Ty::Ref(true, _)) && opt_mut(self.m, at).is_none() {
+                return Err(format!("a value holding reference codes ({at:?}) passed to `{k2}`"));
+            }
         }
         let (gp, grc) = (format!("L::{}", gl.id), format!("Tuple2(L::{}::Root, List(mir::Proj))", gl.id));
         let gcode = |j: usize| code(&format!("{gp}::Root"), &format!("{gp}::Root::rc{j}"), "Nil[mir::Proj]");
@@ -1720,7 +1860,7 @@ impl<'a> Gen<'a> {
     /// value: (the result's L type, the `Option` term). `Err` (stuck) for a
     /// call `mir::arch` does not read.
     fn arch_call(&mut self, fx: &mut FnCx, a: &ArchCall, args: &[Operand], dest: &Place) -> R<(String, String)> {
-        let cm = super::arch::model(self.m, a, &fx.f.target_features)?;
+        let cm = super::arch::model(self.m, a, &self.facts(fx))?;
         super::arch::loaded(self.k.env, cm)?;
         let imms = super::arch::immediates(cm, a)?;
         if args.len() != cm.params.len() {
@@ -1881,14 +2021,307 @@ impl<'a> Gen<'a> {
                 let e = binds(&vals, &[sl.clone(), "Usize".into(), "Usize".into()], &ot, "a", some(&ot, &format!("leaf::slice_get_range {et} a0 a1 a2")));
                 self.result(fx, dest, os, &ot, &e)
             }
+            // core's `IterMut<'_, T>` (A-S4): the slice's code and the next index
+            (super::Model::IterMutNew, [sl]) => {
+                let rc = fx.rc.clone();
+                let it = format!("Tuple2({rc}, Usize)");
+                let e = map(&rc, &it, &self.operand(fx, sl)?, "q", &format!("tuple2[{rc}, Usize](q, 0usize)"));
+                self.result(fx, dest, os, &it, &e)
+            }
+            (super::Model::IterMutIntoIter, [x]) => {
+                let it = format!("Tuple2({}, Usize)", fx.rc);
+                let e = self.operand(fx, x)?;
+                self.result(fx, dest, os, &it, &e)
+            }
+            (super::Model::IterMutNext, [a]) => self.iter_mut_next(fx, elem, a, dest, os),
             _ => Err(format!("the model {model:?} with {} arguments", args.len())),
         }
+    }
+
+    /// `<IterMut<'_, T> as Iterator>::next(&mut it)` (A-S4): at index `i`
+    /// below the slice's length, the reference code of element `i` (the
+    /// slice's code with `PIndex(i)`) and the index one further; else `None`
+    /// with the iterator unchanged. Each element is yielded once, in order,
+    /// so two codes it yields are never the same element: the disjointness
+    /// that the write-backs through them rely on.
+    fn iter_mut_next(&mut self, fx: &mut FnCx, elem: &Ty, a: &Operand, dest: &Place, os: &str) -> R<String> {
+        let Ty::Ref(true, itty) = op_ty(&fx.f, a)? else { return Err("`IterMut::next` without a `&mut` receiver".into()) };
+        if super::iter_mut_elem(self.m, &itty).as_ref() != Some(elem) {
+            return Err(format!("`IterMut::next` of {itty:?}"));
+        }
+        let (rc, st, root) = (fx.rc.clone(), fx.st(), fx.root());
+        let it = format!("Tuple2({rc}, Usize)");
+        let et = self.ty(elem)?;
+        let (n_it, n_sl) = (fx.need(Target::Ty((*itty).clone())), fx.need(Target::Ty(Ty::Slice(Box::new(elem.clone())))));
+        let orc = format!("Option({rc})");
+        // (`test_fault`: every element yielded is the first, the codes
+        // overlap; never set by a build)
+        let yielded_index = if test_fault::iter_mut_overlaps() { "0usize" } else { "i" };
+        let next = code_app(&root, "q", &format!("Cons[mir::Proj](mir::Proj::PIndex({yielded_index}), Nil[mir::Proj])"));
+        let yielded = format!("let r : {orc} = {}; {}", some(&rc, &next), self.write(fx, dest, "r")?);
+        let advanced = bind(&st, &st, &format!("{} (tuple2[{rc}, Usize](q, #wadd_usize(i, 1usize)))", fx.through("write", &n_it, "qi")), "s", &yielded);
+        let done = format!("let r : {orc} = {}; {}", none(&rc), self.write(fx, dest, "r")?);
+        let step = mat(&format!("#lt_usize(i, fst(sl))"), "Bool", &format!("Option({st})"), &format!("| false => {done} | true => {advanced}"));
+        let body = mat("itv", &it, &format!("Option({st})"), &format!("| tuple2(q, i) => {}", bind(&format!("(Slice {et})"), &st, &fx.through("deref", &n_sl, "q"), "sl", &step)));
+        let e = bind(&rc, &st, &self.operand(fx, a)?, "qi", &bind(&it, &st, &fx.through("deref", &n_it, "qi"), "itv", &body));
+        Ok(bind(&st, &st, os, "s", &e))
+    }
+
+    /// `<[T]>::split_at_mut(s, mid)` (a model: core's MIR forms raw pointers):
+    /// a panic unless `mid <= len` (where core's panics, `mid > len`), else
+    /// the codes of the halves, `s`'s code with `PRange(0, mid)` and with
+    /// `PRange(mid, len)`. The two ranges do not overlap, so the write-backs
+    /// through them never touch the same element (as `IterMut`'s codes,
+    /// A-S4). A mutable outcome (`mir::Res(St)`).
+    fn split_at_mut(&mut self, fx: &mut FnCx, elem: &Ty, args: &[Operand], dest: &Place, os: &str) -> R<String> {
+        let [sl, mid] = args else { return Err("`split_at_mut` with other than two arguments".into()) };
+        let (Ty::Ref(true, st), Ty::Int(false, 0)) = (op_ty(&fx.f, sl)?, op_ty(&fx.f, mid)?) else { return Err("`split_at_mut` of other than a `&mut [T]` and a `usize`".into()) };
+        if *st != Ty::Slice(Box::new(elem.clone())) {
+            return Err(format!("`split_at_mut` of {st:?} as a slice of {elem:?}"));
+        }
+        let (rc, st_, root) = (fx.rc.clone(), fx.st(), fx.root());
+        let et = self.ty(elem)?;
+        let n_sl = fx.need(Target::Ty(Ty::Slice(Box::new(elem.clone()))));
+        let half = |lo: &str, hi: &str| code_app(&root, "q", &format!("Cons[mir::Proj](mir::Proj::PRange({lo}, {hi}), Nil[mir::Proj])"));
+        let pair = format!("tuple2[{rc}, {rc}]({}, {})", half("0usize", "m"), half("m", "fst(sv)"));
+        let w = self.write(fx, dest, "r")?;
+        let split = mat("#le_usize(m, fst(sv))", "Bool", &format!("mir::Res({st_})"), &format!("| false => mir::Res::Panic[{st_}] | true => let r : Tuple2({rc}, {rc}) = {pair}; {}", res_of(&st_, &w)));
+        let e = bindr(&rc, &st_, &self.operand(fx, sl)?, "q", &bindr(&format!("(Slice {et})"), &st_, &fx.through("deref", &n_sl, "q"), "sv", &bindr("Usize", &st_, &self.operand(fx, mid)?, "m", &split)));
+        Ok(bindr(&st_, &st_, os, "s", &e))
     }
 
     /// The state `os`, then the result `r` (the `Option(rt)` term `e`) written to `dest`.
     fn result(&mut self, fx: &mut FnCx, dest: &Place, os: &str, rt: &str, e: &str) -> R<String> {
         let st = fx.st();
         Ok(bind(&st, &st, os, "s", &bind(rt, &st, e, "r", &self.write(fx, dest, "r")?)))
+    }
+}
+
+// ----- raw pointers in crate code (docs/mir-lift.md §20.10) -----------------
+
+impl<'a> Gen<'a> {
+    /// The target features a body runs with: its own (`#[target_feature]`
+    /// and what they imply), and the target's statically enabled ones once
+    /// `mir::load` has bound them to the build's (`Sbmir::static_facts`,
+    /// DESIGN-UNSAFE-SIMD A-S3).
+    fn facts(&self, fx: &FnCx) -> Vec<String> {
+        fx.f.target_features.iter().chain(self.m.static_facts.iter().flatten()).cloned().collect()
+    }
+
+    /// The base of the pointer local an operand reads: its family's
+    /// formation's (`ptr::bases`).
+    fn ptr_base(&self, fx: &FnCx, o: &Operand) -> R<super::ptr::Base> {
+        let (Operand::Copy(p) | Operand::Move(p)) = o else { return Err("a pointer that is no local".into()) };
+        if !p.proj.is_empty() {
+            return Err("a pointer read through a projection (it went through memory)".into());
+        }
+        match fx.bases.get(&p.local) {
+            Some(Ok(b)) => Ok(b.clone()),
+            Some(Err(e)) => Err(e.clone()),
+            None => Err(format!("the pointer `_{}` comes from no admitted formation", p.local)),
+        }
+    }
+
+    /// The pointer a formation makes (an `Option(mir::Ptr(RC))` term): from
+    /// the code `src` of a mutable reference, `PMut(code, 0, size)` (the
+    /// base's size: static, or a slice's length through the code); from the
+    /// value `src` of a shared reference, `PShr(bytes(value), 0)` (a
+    /// snapshot, as `&T` is read).
+    fn formation(&mut self, fx: &mut FnCx, mutable: bool, base: &Ty, src: &str) -> R<String> {
+        let rc = fx.rc.clone();
+        let pt = format!("mir::Ptr({rc})");
+        if !mutable {
+            let bt = self.ty(base)?;
+            let bytes = super::ptr::bytes_text(base, "v")?;
+            return Ok(map(&bt, &pt, src, "v", &format!("mir::Ptr::PShr[{rc}]({bytes}, 0usize)")));
+        }
+        if let Some(n) = super::ptr::size_of(base) {
+            super::ptr::plain(base)?;
+            return Ok(map(&rc, &pt, src, "q", &format!("mir::Ptr::PMut[{rc}](q, 0usize, {n}usize)")));
+        }
+        let Ty::Slice(e) = base else { return Err(format!("a base of {base:?}")) };
+        super::ptr::plain(e)?;
+        let t = super::ptr::size_of(e).ok_or("a slice of unsized elements")?;
+        let (n, bt) = (fx.need(Target::Ty(base.clone())), self.ty(base)?);
+        Ok(bind(&rc, &pt, src, "q", &map(&bt, &pt, &fx.through("deref", &n, "q"), "sl", &format!("mir::Ptr::PMut[{rc}](q, 0usize, #int_to_sat_usize(#imul(#cast_usize_int(fst(sl)), {t}int)))"))))
+    }
+
+    /// `&raw mut place` / `&raw const place` (crate code; the window rule's
+    /// verdict on it).
+    fn addr_of(&mut self, fx: &mut FnCx, mutable: bool, q: &Place, at: &Loc) -> R<String> {
+        if !fx.f.local {
+            return Err("`&raw` in library code (pointers are read in crate code only)".into());
+        }
+        super::window::verdict_for(&fx.f, at, if mutable { "&raw mut" } else { "&raw const" })?;
+        let base = place_ty(&fx.f, q)?;
+        match &base {
+            Ty::Slice(e) => super::ptr::plain(e)?,
+            t => super::ptr::plain(t)?,
+        }
+        let src = if mutable { self.borrow(fx, q)? } else { self.read(fx, q)? };
+        self.formation(fx, mutable, &base, &src)
+    }
+
+    /// A pointer moved by `k` elements of `pointee` (`add`; `sub`: back;
+    /// `offset`: an `isize` count): `None` (stuck) outside `0..=size`, even
+    /// without an access.
+    fn ptr_move(&mut self, fx: &mut FnCx, p: &Operand, k: &Operand, neg: bool, signed: bool, pointee: &Ty) -> R<String> {
+        if !fx.f.local {
+            return Err("pointer arithmetic in library code (pointers are read in crate code only)".into());
+        }
+        super::ptr::plain(pointee)?;
+        let t = super::ptr::size_of(pointee).ok_or("a pointee without a size")?;
+        let rc = fx.rc.clone();
+        let pt = format!("mir::Ptr({rc})");
+        let (kt, kint) = if signed { ("U64", "mem::isize_int kk") } else { ("Usize", "#cast_usize_int(kk)") };
+        let d = format!("#imul({kint}, {t}int)");
+        let d = if neg { format!("#ineg({d})") } else { d };
+        let (pv, kv) = (self.operand(fx, p)?, self.operand(fx, k)?);
+        Ok(bind(&pt, &pt, &pv, "pp", &bind(kt, &pt, &kv, "kk", &format!("mem::ptr_move {rc} pp ({d})"))))
+    }
+
+    /// A call of an admitted pointer helper (§20.10, A-S7): a formation (its
+    /// window verdict), a cast (the same pointer), an offset.
+    #[allow(clippy::too_many_arguments)]
+    fn helper_call(&mut self, fx: &mut FnCx, b: usize, k2: &str, h: Result<(super::ptr::Helper, Ty), String>, args: &[Operand], dest: &Place, os: &str) -> R<String> {
+        let def = self.m.fns.get(k2).map(|g| g.def.clone()).unwrap_or_default();
+        if !fx.f.local {
+            return Err(format!("the pointer helper `{def}` in library code (pointers are read in crate code only)"));
+        }
+        let (h, pointee) = h?;
+        let dt = place_ty(&fx.f, dest)?;
+        let dtt = self.ty(&dt)?;
+        let e = match h {
+            super::ptr::Helper::Form { mutable, slice } => {
+                let at = fx.f.blocks[b].term_loc.clone();
+                super::window::verdict_for(&fx.f, &at, &def)?;
+                if !dest.proj.is_empty() {
+                    return Err("a pointer formed into a projection (it goes through memory)".into());
+                }
+                let base = match fx.bases.get(&dest.local) {
+                    Some(Ok(b)) => b.ty.clone(),
+                    Some(Err(e)) => return Err(e.clone()),
+                    None => return Err("a formation without a base".into()),
+                };
+                // (a shared slice formation snapshots the slice itself)
+                let base = if !mutable && slice { Ty::Slice(Box::new(pointee.clone())) } else { base };
+                let src = self.operand(fx, args.first().ok_or("a formation without its reference")?)?;
+                self.formation(fx, mutable, &base, &src)?
+            }
+            super::ptr::Helper::Cast => self.operand(fx, args.first().ok_or("a cast without its pointer")?)?,
+            super::ptr::Helper::Move { neg, signed } => {
+                let [p, k] = args else { return Err("an offset without its two arguments".into()) };
+                self.ptr_move(fx, p, k, neg, signed, &pointee)?
+            }
+        };
+        self.result(fx, dest, os, &dtt, &e)
+    }
+
+    /// A load or a store through a pointer of crate code (§20.10): the
+    /// admitted row (`ptr::MEM_INTRINSICS`, its alignment), its validated
+    /// model, which must be a pure byte reinterpretation (A-S9), and the
+    /// features it needs. A load is the model applied to the `n` bytes at
+    /// the pointer's offset in the base's bytes (through the base's code for
+    /// `PMut`, the snapshot for `PShr`), `None` past the end; a store writes
+    /// the model's bytes there, through `PMut`'s code (a write back of the
+    /// base whose bytes they are), `None` through `PShr` or past the end.
+    fn mem_access(&mut self, fx: &mut FnCx, a: &ArchCall, args: &[Operand], dest: &Place, os: &str) -> R<String> {
+        if !fx.f.local {
+            return Err(format!("the load or store `{}` through a raw pointer outside crate code (pointers are read in crate code only, docs/mir-lift.md §20.10)", a.path));
+        }
+        let (cm, row) = super::arch::mem_model(self.m, a, &self.facts(fx))?;
+        super::arch::loaded(self.k.env, cm)?;
+        let (lane, n) = super::ptr::pure_reinterpretation(self.k.env, cm, row)?;
+        let mem = Ty::Array(Box::new(Ty::Int(false, lane.bits())), n as u64);
+        let p = args.first().ok_or("a load or store without its pointer")?;
+        let base = self.ptr_base(fx, p)?;
+        let (rc, st) = (fx.rc.clone(), fx.st());
+        let pt = format!("mir::Ptr({rc})");
+        let (bt, mt) = (self.ty(&base.ty)?, self.ty(&mem)?);
+        let nb = format!("{}usize", row.bytes);
+        // the alignment its contract needs (A-S5): every current row is
+        // unaligned (1); a row needing `a` is read only for a base aligned
+        // to `a` (its elements' size) and an offset that is a multiple of `a`
+        // (else stuck, even where the address happens to be aligned)
+        let aligned = |body: String, rt: &str| -> R<String> {
+            if row.align <= 1 {
+                return Ok(body);
+            }
+            if base_align(&base.ty) % row.align != 0 {
+                return Err(format!("`{}` needs {}-byte alignment, which a base of {:?} does not give", a.path, row.align, base.ty));
+            }
+            Ok(bind("Usize", rt, &format!("mir::rem_usize off {}usize", row.align), "rr", &format!("match #eq_usize(rr, 0usize) : Bool as _ return Option({rt}) with | false => {} | true => {body} end", none(rt))))
+        };
+        let pv = self.operand(fx, p)?;
+        let len = if matches!(base.ty, Ty::Slice(_)) { Some("fst(v)") } else { None };
+        if !row.store {
+            let [_] = args else { return Err(format!("`{}` with {} arguments", a.path, args.len())) };
+            let dt = place_ty(&fx.f, dest)?;
+            if !super::arch::same_ty(&dt, cm.ret) {
+                return Err(format!("`{}`'s result as {dt:?}, not its model's {}", a.path, cm.ret.text()));
+            }
+            let rt = self.ty(&dt)?;
+            let model = cm.apply_text(&[], &["mm"])?;
+            let of = super::ptr::of_bytes_text(&mem, "bs", None)?;
+            let finish = bind(&mt, &rt, &of, "mm", &some(&rt, &model));
+            let read = |bytes: &str| aligned(bind("List(U8)", &rt, &format!("mem::read ({bytes}) off {nb}"), "bs", &finish), &rt);
+            let n_b = fx.need(Target::Ty(base.ty.clone()));
+            let mut_arm = bind(&bt, &rt, &fx.through("deref", &n_b, "q"), "v", &read(&super::ptr::bytes_text(&base.ty, "v")?)?);
+            let body = mat("ptr", &pt, &format!("Option({rt})"), &format!("| PMut(q, off, size) => {mut_arm} | PShr(bs0, off) => {}", read("bs0")?));
+            let e = bind(&pt, &rt, &pv, "ptr", &body);
+            return self.result(fx, dest, os, &rt, &e);
+        }
+        let [_, x] = args else { return Err(format!("`{}` with {} arguments", a.path, args.len())) };
+        let vt_mir = op_ty(&fx.f, x)?;
+        if cm.params.len() != 1 || !super::arch::same_ty(&vt_mir, cm.params[0].1) {
+            return Err(format!("`{}`'s vector of {vt_mir:?}, not its model's", a.path));
+        }
+        if !base.mutable {
+            return Err(format!("the store `{}` through a pointer formed from a shared reference (undefined behaviour, even after `cast_mut()`)", a.path));
+        }
+        let vt = self.ty(&vt_mir)?;
+        let xv = self.operand(fx, x)?;
+        let model = cm.apply_text(&[], &["xv"])?;
+        let n_b = fx.need(Target::Ty(base.ty.clone()));
+        let of = super::ptr::of_bytes_text(&base.ty, "bs2", len)?;
+        let written = bind(&bt, &st, &of, "v2", &format!("{} v2", fx.through("write", &n_b, "q")));
+        let wrote = bind("List(U8)", &st, &format!("mem::write ({}) off ({})", super::ptr::bytes_text(&base.ty, "v")?, super::ptr::bytes_text(&mem, "ww")?), "bs2", &written);
+        let mut_arm = bind(&bt, &st, &fx.through("deref", &n_b, "q"), "v", &format!("let ww : {mt} = {model}; {}", aligned(wrote, &st)?));
+        let body = mat("ptr", &pt, &format!("Option({st})"), &format!("| PMut(q, off, size) => {mut_arm} | PShr(bs0, off) => {}", none(&st)));
+        let stored = bind(&pt, &st, &pv, "ptr", &bind(&vt, &st, &xv, "xv", &body));
+        let after = bind(&st, &st, os, "s", &stored);
+        Ok(bind(&st, &st, &after, "s", &self.write(fx, dest, "tt")?))
+    }
+}
+
+/// Fault injection for the toolchain's own tests (never set by a build; a
+/// thread's setting reaches only the readings generated on that thread):
+/// the `IterMut` model of A-S4 broken so that every element it yields is the
+/// slice's first — codes that overlap, the disjointness its write-backs
+/// rely on lost — which the theorem of a loop over it must catch.
+pub mod test_fault {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ITER_MUT_OVERLAPS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Sets (or clears) the fault on this thread.
+    pub fn set_iter_mut_overlaps(on: bool) {
+        ITER_MUT_OVERLAPS.with(|c| c.set(on));
+    }
+
+    /// Whether the fault is set on this thread.
+    pub fn iter_mut_overlaps() -> bool {
+        ITER_MUT_OVERLAPS.with(|c| c.get())
+    }
+}
+
+/// The alignment of an admitted base type (its element's size for an array).
+fn base_align(t: &Ty) -> u64 {
+    match t {
+        Ty::Array(e, _) => base_align(e),
+        t => super::ptr::size_of(t).unwrap_or(1),
     }
 }
 

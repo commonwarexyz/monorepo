@@ -34,6 +34,9 @@ pub enum Ty {
     /// its public path (`core::arch::aarch64::uint8x16_t`), and its lane
     /// type and lane count as rustc lays it out (`__m128i` is two `i64`s).
     Simd(String, Box<Ty>, u64),
+    /// A raw pointer `(mutable, pointee)` (`*mut T`, `*const T`;
+    /// docs/DESIGN-UNSAFE-SIMD.md §1.2: read in crate code only).
+    Ptr(bool, Box<Ty>),
     Unsupported(String),
 }
 
@@ -71,6 +74,9 @@ pub struct AdtDef {
     pub key: String,
     pub path: String,
     pub is_enum: bool,
+    /// A union (`(kind union)`): its fields overlap, so it is never read as
+    /// the struct its variant lists ([`refuse_union_access`]).
+    pub is_union: bool,
     pub args: Vec<Ty>,
     pub variants: Vec<Variant>,
 }
@@ -143,6 +149,9 @@ pub enum Rvalue {
     Len(Place),
     Repeat(Operand, u64),
     Agg(AggKind, Vec<Operand>),
+    /// `&raw mut place` (`true`) / `&raw const place`: a pointer formation
+    /// (docs/DESIGN-UNSAFE-SIMD.md §1.3).
+    AddrOf(bool, Place),
     Unsupported(String),
 }
 
@@ -153,6 +162,11 @@ pub type Loc = Option<(String, usize, usize)>;
 pub enum Stmt {
     Assign(Place, Rvalue, Loc),
     Assume(Operand, Loc),
+    /// `StorageLive(l)` (`true`) / `StorageDead(l)`: no meaning for the
+    /// readings; printed in the unoptimized window extraction, where the
+    /// window rule reads a local's death inside a pointer's window
+    /// (docs/DESIGN-UNSAFE-SIMD.md §2.6).
+    Storage(bool, usize),
     Unsupported(String),
 }
 
@@ -239,6 +253,17 @@ pub struct Fn {
     /// The target features rustc compiles the body with (`#[target_feature]`
     /// and what it implies; empty: none).
     pub target_features: Vec<String>,
+    /// A function of the extracted crate (`(local)`): the narrow reading of
+    /// raw pointers applies to crate code only.
+    pub local: bool,
+    /// A declared `unsafe fn` (`(unsafe)`; a safe `#[target_feature]`
+    /// function is not).
+    pub unsafe_fn: bool,
+    /// The window rule's verdict on each pointer formation of the function
+    /// (by the formation's source position and what it calls), set by
+    /// `mir::load_window` from the unoptimized extraction (`None`: no window
+    /// extraction; every formation is then refused).
+    pub window: Option<Vec<super::window::Verdict>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -247,6 +272,9 @@ pub struct Sbmir {
     pub krate: String,
     pub module: String,
     pub overflow_checks: bool,
+    /// rustc's MIR optimization level the MIR was built at
+    /// (`-Zmir-opt-level`; `None`: an extraction older than the record).
+    pub mir_opt_level: Option<u32>,
     pub exclude: Vec<String>,
     pub sources: Vec<(String, String)>,
     pub roots: Vec<String>,
@@ -256,6 +284,25 @@ pub struct Sbmir {
     /// `None` for an extraction older than the record (no `core::arch` code
     /// is read from it).
     pub target: Option<(String, String)>,
+    /// The extraction prints raw pointers, `&raw`, pointer casts, each
+    /// function's locality and `unsafe`, and the target's static facts
+    /// (`(unsafe-reading 1)`): the narrow reading of existing `unsafe`
+    /// applies to it (an extraction without it is read with the blanket
+    /// refusal of `unsafe`).
+    pub unsafe_reading: bool,
+    /// The statically enabled (stable) target features of the extraction
+    /// (`(target-static-features ..)`), its byte order, `-C target-cpu` (as
+    /// given, `None`: the target's default) with the target's default CPU,
+    /// and `-C target-feature`.
+    pub static_features: Option<Vec<String>>,
+    pub endian: Option<String>,
+    pub target_cpu: Option<(Option<String>, String)>,
+    pub target_feature_flags: Option<String>,
+    /// The static features the readings count as facts: the extraction's,
+    /// once `mir::load` has checked them equal to the build's own
+    /// (`CARGO_CFG_TARGET_FEATURE`) and the flags they come from default
+    /// (DESIGN-UNSAFE-SIMD amendment A-S3); `None`: not bound, none count.
+    pub static_facts: Option<Vec<String>>,
 }
 
 fn err(what: &str, e: &Sx) -> String {
@@ -297,6 +344,14 @@ pub fn ty(e: &Sx) -> Result<Ty, String> {
             let lane = ty(t.get(1).ok_or_else(|| err("simd lane type", e))?)?;
             let n = t.get(2).and_then(Sx::num).ok_or_else(|| err("simd lane count", e))? as u64;
             Ty::Simd(path, Box::new(lane), n)
+        }
+        Some("ptr") => {
+            let m = match t.first().and_then(Sx::atom) {
+                Some("mut") => true,
+                Some("const") => false,
+                _ => return Err(err("pointer", e)),
+            };
+            Ty::Ptr(m, Box::new(ty(t.get(1).ok_or_else(|| err("pointee", e))?)?))
         }
         Some("unsupported") => Ty::Unsupported(t.first().and_then(Sx::str).unwrap_or("?").to_string()),
         _ => return Err(err("type", e)),
@@ -369,6 +424,40 @@ fn operand(e: &Sx) -> Result<Operand, String> {
     })
 }
 
+/// Statement `i` of `body` is `t = &raw const (fake) P` and the next one but
+/// storage markers is `d = PtrMetadata(move t)`, `t` a local: `(d, P)`, and
+/// `fused` the index of the second, which the caller skips (TRUSTED: the two
+/// are the length of the slice place `P`, `Len(P)`; the fake raw pointer
+/// has no other use there, and it is not read again in borrow-checked MIR
+/// after its move).
+fn fake_metadata(body: &[Sx], i: usize, fused: &mut Option<usize>) -> Result<Option<(Place, Place)>, String> {
+    let s = &body[i];
+    let (Some("assign"), [t, rv, ..]) = (s.head(), s.tail()) else { return Ok(None) };
+    if rv.head() != Some("addr-of") || rv.tail().first().and_then(Sx::atom) != Some("fake") {
+        return Ok(None);
+    }
+    let (t, p) = (place(t)?, place(rv.tail().get(1).ok_or_else(|| err("addr-of place", rv))?)?);
+    if !t.proj.is_empty() {
+        return Ok(None);
+    }
+    for (j, n) in body.iter().enumerate().skip(i + 1) {
+        match (n.head(), n.tail()) {
+            (Some("storage-live" | "storage-dead"), _) => continue,
+            (Some("assign"), [d, rv2, ..]) if rv2.head() == Some("un") && rv2.tail().first().and_then(Sx::atom) == Some("ptr-metadata") => {
+                return Ok(match rv2.tail().get(1).map(operand).transpose()? {
+                    Some(Operand::Move(q)) if q.local == t.local && q.proj.is_empty() => {
+                        *fused = Some(j);
+                        Some((place(d)?, p))
+                    }
+                    _ => None,
+                });
+            }
+            _ => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
 fn rvalue(e: &Sx) -> Result<Rvalue, String> {
     let t = e.tail();
     let w = |i: usize| t.get(i).and_then(Sx::atom).map(str::to_string).ok_or_else(|| err("rvalue", e));
@@ -382,11 +471,24 @@ fn rvalue(e: &Sx) -> Result<Rvalue, String> {
         Some("discr") => Rvalue::Discr(place(&t[0])?),
         Some("len") => Rvalue::Len(place(&t[0])?),
         Some("repeat") => Rvalue::Repeat(operand(&t[0])?, t[1].num().ok_or_else(|| err("repeat", e))? as u64),
+        Some("addr-of") => {
+            let m = match t.first().and_then(Sx::atom) {
+                Some("mut") => true,
+                Some("const") => false,
+                // (read only fused with the `PtrMetadata` that is its one use:
+                // `block_stmts`)
+                Some("fake") => return Ok(Rvalue::Unsupported(format!("a raw borrow for its metadata {e} (not followed by its `PtrMetadata`)"))),
+                _ => return Err(err("addr-of", e)),
+            };
+            Rvalue::AddrOf(m, place(t.get(1).ok_or_else(|| err("addr-of place", e))?)?)
+        }
         Some("agg") => {
             let k = &t[0];
             let kind = match k.head() {
                 Some("tuple") => AggKind::Tuple,
                 Some("array") => AggKind::Array(ty(&k.tail()[0])?),
+                // a union's aggregate writes one field (`(union-field f)`): not read
+                Some("adt") if k.tail().iter().any(|x| x.head() == Some("union-field")) => return Ok(Rvalue::Unsupported(format!("an aggregate of a union {k}"))),
                 Some("adt") => AggKind::Adt(ty(&k.tail()[0])?, k.tail()[1].num().ok_or_else(|| err("variant", k))? as usize),
                 Some("closure") => AggKind::Closure(ty(&k.tail()[0])?),
                 _ => return Ok(Rvalue::Unsupported(k.to_string())),
@@ -503,7 +605,7 @@ fn item(e: &Sx) -> Result<Item, String> {
 fn function(e: &Sx) -> Result<Fn, String> {
     let t = e.tail();
     let key = t.first().and_then(Sx::str).ok_or_else(|| err("fn key", e))?.to_string();
-    let mut f = Fn { key, kind: String::new(), def: String::new(), args: vec![], item: Item::Shim, span: None, argc: 0, spread_arg: None, locals: vec![], debug: vec![], blocks: vec![], has_body: true, target_features: vec![] };
+    let mut f = Fn { key, kind: String::new(), def: String::new(), args: vec![], item: Item::Shim, span: None, argc: 0, spread_arg: None, locals: vec![], debug: vec![], blocks: vec![], has_body: true, target_features: vec![], local: false, unsafe_fn: false, window: None };
     for x in &t[1..] {
         match x.head() {
             Some("kind") => f.kind = x.tail()[0].atom().unwrap_or("").to_string(),
@@ -514,6 +616,8 @@ fn function(e: &Sx) -> Result<Fn, String> {
             Some("argc") => f.argc = x.tail()[0].num().unwrap_or(0) as usize,
             Some("spread-arg") => f.spread_arg = x.tail()[0].num().map(|v| v as usize),
             Some("nobody") => f.has_body = false,
+            Some("local") => f.local = true,
+            Some("unsafe") => f.unsafe_fn = true,
             Some("target-features") => {
                 f.target_features = x.tail().iter().map(|a| a.str().map(str::to_string).ok_or_else(|| err("target feature", x))).collect::<Result<_, _>>()?;
             }
@@ -540,11 +644,31 @@ fn function(e: &Sx) -> Result<Fn, String> {
                 if bt.len() < 2 || bt.first().and_then(Sx::num) != Some(f.blocks.len() as u128) {
                     return Err(err("blocks out of order", x));
                 }
+                let body = &bt[1..bt.len() - 1];
                 let mut stmts = Vec::new();
-                for s in &bt[1..bt.len() - 1] {
+                // (the statement a fusion replaces the pair with, at the second's index)
+                let mut fused: Option<(usize, Stmt)> = None;
+                for (i, s) in body.iter().enumerate() {
+                    if let Some((j, _)) = &fused
+                        && *j == i
+                    {
+                        stmts.push(fused.take().map(|f| f.1).unwrap());
+                        continue;
+                    }
+                    // `t = &raw const (fake) P; .. d = PtrMetadata(move t)` (only
+                    // storage markers between): rustc's length of the slice
+                    // place `P` (`s.len()` of a `&mut [T]`, read without a
+                    // reborrow): `d = Len(P)`; `t` holds a pointer used for
+                    // its metadata only, and is not read again
+                    let mut at = None;
+                    if let Some((d, p)) = fake_metadata(body, i, &mut at)? {
+                        fused = at.map(|j| (j, Stmt::Assign(d, Rvalue::Len(p), loc(s.tail()))));
+                        continue;
+                    }
                     stmts.push(match s.head() {
                         Some("assign") => Stmt::Assign(place(&s.tail()[0])?, rvalue(&s.tail()[1])?, loc(s.tail())),
                         Some("assume") => Stmt::Assume(operand(&s.tail()[0])?, loc(s.tail())),
+                        Some(k @ ("storage-live" | "storage-dead")) => Stmt::Storage(k == "storage-live", s.tail().first().and_then(Sx::num).ok_or_else(|| err("storage marker", s))? as usize),
                         _ => Stmt::Unsupported(s.to_string()),
                     });
                 }
@@ -570,21 +694,44 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
             Some("crate") => m.krate = t[0].str().unwrap_or("").to_string(),
             Some("module") => m.module = t[0].str().unwrap_or("").to_string(),
             Some("overflow-checks") => m.overflow_checks = t[0].atom() == Some("on"),
+            Some("mir-opt-level") => m.mir_opt_level = Some(t.first().and_then(Sx::num).ok_or_else(|| err("mir-opt-level", e))? as u32),
             Some("target") => {
                 let (Some(triple), Some(arch)) = (t.first().and_then(Sx::str), t.get(1).and_then(Sx::str)) else { return Err(err("target", e)) };
                 m.target = Some((triple.to_string(), arch.to_string()));
             }
+            Some("unsafe-reading") => {
+                if t.first().and_then(Sx::num) != Some(1) {
+                    return Err(err("unsafe-reading version", e));
+                }
+                m.unsafe_reading = true;
+            }
+            Some("target-static-features") => m.static_features = Some(t.iter().map(|x| x.str().map(str::to_string).ok_or_else(|| err("static feature", e))).collect::<Result<_, _>>()?),
+            Some("endian") => m.endian = Some(t.first().and_then(Sx::atom).ok_or_else(|| err("endian", e))?.to_string()),
+            Some("target-cpu") => {
+                let given = match t.first() {
+                    Some(x) if x.atom() == Some("default") => None,
+                    Some(x) => Some(x.str().ok_or_else(|| err("target-cpu", e))?.to_string()),
+                    None => return Err(err("target-cpu", e)),
+                };
+                m.target_cpu = Some((given, t.get(1).and_then(Sx::str).ok_or_else(|| err("target-cpu default", e))?.to_string()));
+            }
+            Some("target-feature-flags") => m.target_feature_flags = Some(t.first().and_then(Sx::str).ok_or_else(|| err("target-feature-flags", e))?.to_string()),
             Some("exclude") => m.exclude = t.iter().filter_map(Sx::str).map(str::to_string).collect(),
             Some("source") => m.sources.push((t[0].str().unwrap_or("").to_string(), t[1].str().unwrap_or("").to_string())),
             Some("root") => m.roots.push(t[0].str().unwrap_or("").to_string()),
             Some("note") => {}
             Some("adt-def") => {
                 let key = t[0].str().unwrap_or("").to_string();
-                let mut d = AdtDef { key: key.clone(), path: String::new(), is_enum: false, args: vec![], variants: vec![] };
+                let mut d = AdtDef { key: key.clone(), path: String::new(), is_enum: false, is_union: false, args: vec![], variants: vec![] };
                 for x in &t[1..] {
                     match x.head() {
                         Some("path") => d.path = x.tail()[0].str().unwrap_or("").to_string(),
-                        Some("kind") => d.is_enum = x.tail()[0].atom() == Some("enum"),
+                        Some("kind") => match x.tail().first().and_then(Sx::atom) {
+                            Some("struct") => {}
+                            Some("enum") => d.is_enum = true,
+                            Some("union") => d.is_union = true,
+                            _ => return Err(err("adt kind", x)),
+                        },
                         Some("args") => d.args = x.tail().first().map(|a| a.tail_all().iter().map(ty).collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default(),
                         Some("variant") => {
                             let v = x.tail();
@@ -620,5 +767,88 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
     if version != Some(1) {
         return Err(format!(".sbmir format version {version:?}; this reader reads version 1"));
     }
+    refuse_union_access(&mut m);
     Ok(m)
+}
+
+/// Every access to a union's fields made unsupported, in both readings
+/// (stuck in L, refused by S): a field projection of a place of union type
+/// (a read, a write or a borrow of the field), a union's aggregate and a
+/// constant of union type. A union's fields overlap, so reading one is a
+/// type pun (`unsafe` in Rust, possibly in followed library MIR, where the
+/// lift's `unsafe` refusal never looks); read as the struct the adt-def
+/// lists, it would be a wrong value. A union value moved or copied whole is
+/// read as before. A place behind a `Deref` of anything but a reference has
+/// no type here: both readings refuse that `Deref` already.
+fn refuse_union_access(m: &mut Sbmir) {
+    let adts = &m.adts;
+    let union = |t: &Ty| matches!(t, Ty::Adt(k) if adts.get(k).is_some_and(|d| d.is_union));
+    let place = |locals: &[(Ty, bool)], p: &mut Place| {
+        let mut t = locals.get(p.local).map(|l| l.0.clone());
+        for pr in p.proj.iter_mut() {
+            let Some(cur) = t.take() else { return };
+            if union(&cur) && matches!(pr, Proj::Field(..) | Proj::Downcast(_)) {
+                *pr = Proj::Unsupported(format!("{pr:?} of a union {cur:?}"));
+                return;
+            }
+            t = match (&*pr, cur) {
+                (Proj::Deref, Ty::Ref(_, inner)) => Some(*inner),
+                (Proj::Field(_, ft), _) => Some(ft.clone()),
+                (Proj::Index(_), Ty::Array(e, _) | Ty::Slice(e)) => Some(*e),
+                (Proj::Downcast(_), cur) => Some(cur),
+                _ => None,
+            };
+        }
+    };
+    fn konst(union: &dyn std::ops::Fn(&Ty) -> bool, c: &mut Const) {
+        match c {
+            Const::Agg(t, ..) | Const::Zst(t) if union(t) => *c = Const::Unsupported(format!("a constant of a union {t:?}")),
+            Const::Agg(_, _, fs) => fs.iter_mut().for_each(|f| konst(union, f)),
+            Const::Ref(inner) | Const::Item(_, _, inner) => konst(union, inner),
+            _ => {}
+        }
+    }
+    let operand = |locals: &[(Ty, bool)], o: &mut Operand| match o {
+        Operand::Copy(p) | Operand::Move(p) => place(locals, p),
+        Operand::Const(c) => konst(&union, c),
+        Operand::RuntimeChecks(_) => {}
+    };
+    for f in m.fns.values_mut() {
+        let locals = &f.locals;
+        for b in f.blocks.iter_mut() {
+            for s in b.stmts.iter_mut() {
+                match s {
+                    Stmt::Assign(p, rv, _) => {
+                        place(locals, p);
+                        if let Rvalue::Agg(AggKind::Adt(t, _), _) = rv
+                            && union(t)
+                        {
+                            *rv = Rvalue::Unsupported(format!("an aggregate of a union {t:?}"));
+                        }
+                        match rv {
+                            Rvalue::Use(o) | Rvalue::Un(_, o) | Rvalue::Cast(_, o, _) | Rvalue::Repeat(o, _) => operand(locals, o),
+                            Rvalue::Bin(_, a, b) | Rvalue::Checked(_, a, b) => {
+                                operand(locals, a);
+                                operand(locals, b);
+                            }
+                            Rvalue::Ref(_, p) | Rvalue::Discr(p) | Rvalue::Len(p) | Rvalue::AddrOf(_, p) => place(locals, p),
+                            Rvalue::Agg(_, os) => os.iter_mut().for_each(|o| operand(locals, o)),
+                            Rvalue::Unsupported(_) => {}
+                        }
+                    }
+                    Stmt::Assume(o, _) => operand(locals, o),
+                    Stmt::Storage(..) | Stmt::Unsupported(_) => {}
+                }
+            }
+            match &mut b.term {
+                Term::Switch(o, ..) | Term::Assert(o, ..) => operand(locals, o),
+                Term::Drop(p, ..) => place(locals, p),
+                Term::Call(_, args, dest, _) => {
+                    args.iter_mut().for_each(|o| operand(locals, o));
+                    place(locals, dest);
+                }
+                Term::Goto(_) | Term::Return | Term::Unreachable | Term::Resume | Term::Abort | Term::Unsupported(_) => {}
+            }
+        }
+    }
 }

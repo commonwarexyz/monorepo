@@ -1995,12 +1995,22 @@ impl<'c, 'a> Cx<'c, 'a> {
         Expr::new(ExprKind::Call { callee, args: es }, ret, span)
     }
 
+    /// The target's statically enabled features, counted for a function
+    /// read from rustc's MIR (its structured reading follows the literal
+    /// reading's rule, docs/DESIGN-UNSAFE-SIMD.md §4: a CPU running the
+    /// binary has them; the literal reading checks the real condition,
+    /// bound to the build's), none for user code (DESIGN.md §9.3).
+    fn static_features(&self) -> Vec<String> {
+        if self.lift && !self.ghost { self.ck.res.target.features.iter().cloned().collect() } else { Vec::new() }
+    }
+
     /// The §9.3 feature rule for the current function.
     fn require_features(&mut self, needed: &[&str], what: &str, span: Span) {
         if self.ghost {
             return;
         }
-        let missing: Vec<&str> = needed.iter().copied().filter(|f| !self.features.iter().any(|g| g == f)).collect();
+        let statics = self.static_features();
+        let missing: Vec<&str> = needed.iter().copied().filter(|f| !self.features.iter().any(|g| g == f) && !statics.iter().any(|g| g == f)).collect();
         if !missing.is_empty() {
             self.push(
                 Diagnostic::error(DiagKind::Feature, span, format!("{what} requires target feature(s) {}", missing.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")))
@@ -2012,6 +2022,42 @@ impl<'c, 'a> Cx<'c, 'a> {
 
     fn intrinsic_call(&mut self, i: intrinsics::IntrinsicId, mut imms: Vec<i64>, args: &[syn::Expr], span: Span) -> Expr {
         let info = intrinsics::get(i);
+        // the structured reading of a load or store through a pointer of
+        // crate code (docs/mir-lift.md §20.10; the lift writes these into
+        // functions read from MIR only): the intrinsic's validated model on
+        // the bytes. A load takes the `n` bytes it reads (its model's memory
+        // type, `[u8; n]`) and gives the vector; a store takes the vector
+        // and gives the bytes it writes. Ghost code (laws, proofs) speaks of
+        // them the same way: it has no pointers.
+        if info.pointer_args && (self.lift || self.ghost) && imms.is_empty() {
+            let path = format!("core::arch::{}::{}", info.arch.name(), info.name);
+            let uint = |b: u32| match b {
+                8 => Some(crate::hir::UintTy::U8),
+                16 => Some(crate::hir::UintTy::U16),
+                32 => Some(crate::hir::UintTy::U32),
+                64 => Some(crate::hir::UintTy::U64),
+                _ => None,
+            };
+            let mem = |t: sandblaster_targets::coretext::CoreTy| match t {
+                sandblaster_targets::coretext::CoreTy::Vector(l, n) => uint(l.bits()).map(|u| Ty::Array(Box::new(Ty::Uint(u)), n as u64)),
+                sandblaster_targets::coretext::CoreTy::Word(_) => None,
+            };
+            let vec = |t: sandblaster_targets::coretext::CoreTy| match t {
+                sandblaster_targets::coretext::CoreTy::Vector(l, n) => intrinsics::VecTy::ALL.into_iter().find(|v| v.arch() == info.arch && uint(l.bits()).is_some_and(|u| v.lanes() == (u, n as u64))).map(Ty::Vector),
+                sandblaster_targets::coretext::CoreTy::Word(_) => None,
+            };
+            let sig = sandblaster_targets::coretext::find_by_path(&path).and_then(|cm| match (cm.params, info.ret == Ty::unit()) {
+                ([(_, m)], false) => Some((vec![mem(*m)?], info.ret.clone())),
+                ([(_, v)], true) => Some((vec![vec(*v)?], mem(cm.ret)?)),
+                _ => None,
+            });
+            let Some((params, ret)) = sig else {
+                self.push(Diagnostic::error(DiagKind::RawPointer, span, format!("`{}`: no model to read its memory through", info.name)));
+                return Self::error_expr(span);
+            };
+            self.require_features(info.features, &format!("intrinsic `{}`", info.name), span);
+            return self.fixed_call(Callee::Intrinsic(i, vec![]), &params, ret, args, span);
+        }
         if info.pointer_args {
             self.push(Diagnostic::error(DiagKind::RawPointer, span, format!("`{}` takes raw pointers and cannot be called from user code", info.name)).note("take and return vector values, or build them with the modeled intrinsics; a pointer load or store needs `unsafe`, which verified code never contains: it stays in unverified host code (DESIGN.md §2, §16.4)"));
             return Self::error_expr(span);
@@ -2065,7 +2111,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => {}
         }
         if !sig.target_features.is_empty() && !self.ghost {
-            let missing: Vec<String> = sig.feature_set.iter().filter(|f| !self.features.contains(f)).cloned().collect();
+            let statics = self.static_features();
+            let missing: Vec<String> = sig.feature_set.iter().filter(|f| !self.features.contains(f) && !statics.contains(f)).cloned().collect();
             if !missing.is_empty() {
                 self.push(
                     Diagnostic::error(DiagKind::Feature, span, format!("calling a `#[target_feature]` function requires feature(s) {}", missing.join(", ")))
@@ -2723,6 +2770,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let mut p = self.place(&ix.expr)?;
                 let ty = match &p.ty {
                     Ty::Array(t, _) => (**t).clone(),
+                    // an element of a slice state of a function read from
+                    // MIR (its `&mut [T]` parameter, docs/mir-lift.md §20.10)
+                    Ty::Ref(inner) if self.lift && !self.ghost && p.projs.is_empty() && matches!(&**inner, Ty::Slice(_)) => match &**inner {
+                        Ty::Slice(t) => (**t).clone(),
+                        _ => return None,
+                    },
                     Ty::Ref(_) => {
                         self.err(DiagKind::MutRef, span, "cannot assign through a shared reference");
                         return None;

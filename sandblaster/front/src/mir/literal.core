@@ -26,9 +26,11 @@ inductive mir::Str { | str }
 
 -- A projection of a place, stored in a reference code: a field, a variant
 -- (downcast), an array element (the index's value when the place was
--- evaluated). `Deref` is never stored: a place through a reference
--- continues from the reference's own root and path.
-inductive mir::Proj { | PField(i : Usize) | PDown(v : Usize) | PIndex(i : Usize) }
+-- evaluated), the elements `lo..hi` of an array or a slice (a subslice:
+-- `split_at_mut`'s halves, docs/mir-lift.md §20.4). `Deref` is never stored:
+-- a place through a reference continues from the reference's own root and
+-- path.
+inductive mir::Proj { | PField(i : Usize) | PDown(v : Usize) | PIndex(i : Usize) | PRange(lo : Usize, hi : Usize) }
 
 -- A reference code: its root (a local or cell of the frame) and its path.
 def[prelude] rc::fst : (R : Type) -> (q : Tuple2(R, List(mir::Proj))) -> R :=
@@ -186,6 +188,26 @@ def[prelude] mir::array_set : (T : Type) -> (N : Usize) -> (a : Array T N) -> (i
 def[prelude] mir::as_slice : (T : Type) -> (N : Usize) -> (a : Array T N) -> Option(Slice T) :=
   fun (T : Type) (N : Usize) (a : Array T N) =>
     if #le_int(#cast_usize_int(N), ISIZE_MAX) as .h return Option(Slice T) then Some[Slice T](array::as_slice T N a .h) else None[Slice T]
+-- The index `lo + i` of element `i` of the range `lo..hi` of a sequence of
+-- `n` elements: `None` unless `lo <= hi <= n` and `i < hi - lo` (then
+-- `lo + i < hi <= n`: the sum does not wrap).
+def[prelude] mir::range_index : (n : Usize) -> (lo : Usize) -> (hi : Usize) -> (i : Usize) -> Option(Usize) :=
+  fun (n : Usize) (lo : Usize) (hi : Usize) (i : Usize) =>
+    if #le_usize(lo, hi) return Option(Usize) then
+      (if #le_usize(hi, n) return Option(Usize) then
+         (if #lt_int(#cast_usize_int(i), #isub(#cast_usize_int(hi), #cast_usize_int(lo))) return Option(Usize)
+          then Some[Usize](#wadd_usize(lo, i))
+          else None[Usize])
+       else None[Usize])
+    else None[Usize]
+
+-- the elements `lo..hi` of a slice, as a slice (failure unless `lo <= hi <= len`)
+def[prelude] mir::slice_range : (T : Type) -> (s : Slice T) -> (lo : Usize) -> (hi : Usize) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (lo : Usize) (hi : Usize) =>
+    if #le_usize(lo, hi) as .h0 return Option(Slice T) then
+      (if #le_usize(hi, fst(s)) as .h1 return Option(Slice T) then Some[Slice T](slice::range T s lo hi .h0 .h1) else None[Slice T])
+    else None[Slice T]
+
 -- the first `k` elements of a slice (failure past its length)
 def[prelude] mir::prefix : (T : Type) -> (s : Slice T) -> (k : Usize) -> Option(Slice T) :=
   fun (T : Type) (s : Slice T) (k : Usize) =>
@@ -194,6 +216,11 @@ def[prelude] mir::prefix : (T : Type) -> (s : Slice T) -> (k : Usize) -> Option(
 def[prelude] mir::suffix : (T : Type) -> (s : Slice T) -> (k : Usize) -> Option(Slice T) :=
   fun (T : Type) (s : Slice T) (k : Usize) =>
     mir::map Tuple2(Slice T, Slice T) (Slice T) (slice::split_at_checked T s k) (fun (p : Tuple2(Slice T, Slice T)) => match p : Tuple2(Slice T, Slice T) as _ return Slice T with | tuple2(a, b) => b end)
+-- the elements `lo..hi` of an array, as a slice (failure unless `lo <= hi <= N`)
+def[prelude] mir::array_range : (T : Type) -> (N : Usize) -> (a : Array T N) -> (lo : Usize) -> (hi : Usize) -> Option(Slice T) :=
+  fun (T : Type) (N : Usize) (a : Array T N) (lo : Usize) (hi : Usize) =>
+    mir::bind (Slice T) (Slice T) (mir::as_slice T N a) (fun (s : Slice T) => mir::slice_range T s lo hi)
+
 -- `bswap` (the byte-order swap intrinsic): its bytes reversed, by shifts and
 -- masks (so that the word normalizer sees through it)
 def[prelude] mir::bswap_u16 : (x : U16) -> U16 :=
@@ -208,6 +235,146 @@ def[prelude] mir::bswap_u64 : (x : U64) -> U64 :=
                                    #or_u64(#and_u64(#wshr_u64(x, 40u32), 65280u64), #wshr_u64(x, 56u32))))
 def[prelude] mir::bswap_usize : (x : Usize) -> Usize :=
   fun (x : Usize) => #cast_u64_usize(mir::bswap_u64 (#cast_usize_u64(x)))
+
+-- RAW POINTERS IN CRATE CODE (docs/DESIGN-UNSAFE-SIMD.md §2; docs/mir-lift.md
+-- §20.10). A pointer of crate code (`C`: the function's code type): a mutable
+-- formation's base, held as its reference code, with the byte offset and the
+-- base's size in bytes; or a shared formation's snapshot of the base's bytes,
+-- with the byte offset. A store through `PShr`, an offset outside
+-- `0..=size` and an access past the end are `None` (stuck), never a value.
+inductive mir::Ptr (C : Type) { | PMut(code : C, off : Usize, size : Usize) | PShr(bytes : List(U8), off : Usize) }
+
+-- The elements a[i], a[i+1], .., a[i+k-1] of an array (fewer past its end),
+-- each through `f`, concatenated: the array's eta-expansion, with a concrete
+-- spine for literal `i` and `k` whatever `a` is.
+def[prelude] mem::elems : (T : Type) -> (N : Usize) -> (U : Type) -> (f : T -> List(U)) -> (a : Array T N) -> (i : Usize) -> (k : Int) -> List(U) :=
+  fun (T : Type) (N : Usize) (U : Type) (f : T -> List(U)) (a : Array T N) (i : Usize) (k : Int) =>
+    if #le_int(k, 0int) as .c return List(U) then Nil[U] else
+      if #lt_usize(i, N) as .h return List(U) then
+        seq::append U (f (array::index T N a i .h)) (rec(T, N, U, f, a, #wadd_usize(i, 1usize), #isub(k, 1int);
+          pair(Sigma (_ : Eq(Bool, #le_int(0int, #isub(k, 1int)), true)), Eq(Bool, #lt_int(#isub(k, 1int), k), true),
+               linarith([c : Eq(Bool, #le_int(k, 0int), false)]; Eq(Bool, #le_int(0int, #isub(k, 1int)), true); []),
+               linarith([]; Eq(Bool, #lt_int(#isub(k, 1int), k), true); []))))
+      else Nil[U]
+  measure (k)
+
+-- The elements s[i], s[i+1], .., s[i+k-1] of a slice (fewer past its end),
+-- each through `f`, concatenated (a slice's bytes; a concrete spine when
+-- `k` and the slice's length are literals).
+def[prelude] mem::slice_elems : (T : Type) -> (U : Type) -> (f : T -> List(U)) -> (s : Slice T) -> (i : Usize) -> (k : Int) -> List(U) :=
+  fun (T : Type) (U : Type) (f : T -> List(U)) (s : Slice T) (i : Usize) (k : Int) =>
+    if #le_int(k, 0int) as .c return List(U) then Nil[U] else
+      if #lt_usize(i, fst(s)) as .h return List(U) then
+        seq::append U (f (slice::index T s i .h)) (rec(T, U, f, s, #wadd_usize(i, 1usize), #isub(k, 1int);
+          pair(Sigma (_ : Eq(Bool, #le_int(0int, #isub(k, 1int)), true)), Eq(Bool, #lt_int(#isub(k, 1int), k), true),
+               linarith([c : Eq(Bool, #le_int(k, 0int), false)]; Eq(Bool, #le_int(0int, #isub(k, 1int)), true); []),
+               linarith([]; Eq(Bool, #lt_int(#isub(k, 1int), k), true); []))))
+      else Nil[U]
+  measure (k)
+
+-- A list of exactly `N` elements as an array (`None` for another length).
+-- (Its length is bound first: the proof then mentions the number, not the
+-- list, whose read-back would be copied into it at each mention.)
+def[prelude] mem::arr_of_list : (T : Type) -> (N : Usize) -> (l : List(T)) -> Option(Array T N) :=
+  fun (T : Type) (N : Usize) (l : List(T)) =>
+    let n : Int = seq::len T l;
+    if #le_int(n, #cast_usize_int(N)) as .h0 return Option(Array T N) then
+      (if #le_int(#cast_usize_int(N), n) as .h1 return Option(Array T N) then
+         Some[Array T N](pair(Array T N, l,
+           linarith([h0 : Eq(Bool, #le_int(n, #cast_usize_int(N)), true), h1 : Eq(Bool, #le_int(#cast_usize_int(N), n), true)];
+                    Eq(Int, n, #cast_usize_int(N)); [])))
+       else None[Array T N])
+    else None[Array T N]
+
+-- The one element of a list of exactly one (the byte of a `u8`).
+def[prelude] mem::one : (T : Type) -> (l : List(T)) -> Option(T) :=
+  fun (T : Type) (l : List(T)) =>
+    match l : List(T) as _ return Option(T) with
+    | Nil => None[T]
+    | Cons(x, t) => match t : List(T) as _ return Option(T) with | Nil => Some[T](x) | Cons(y, u) => None[T] end
+    end
+
+-- `n` elements, each of `k` bytes read by `of` from consecutive `k`-byte
+-- pieces of `bs` (little-endian words, arrays of them), and nothing left
+-- over; `None` otherwise.
+def[prelude] mem::pieces : (T : Type) -> (k : Int) -> (of : List(U8) -> Option(T)) -> (n : Int) -> (bs : List(U8)) -> Option(List(T)) :=
+  fun (T : Type) (k : Int) (of : List(U8) -> Option(T)) (n : Int) (bs : List(U8)) =>
+    if #le_int(n, 0int) as .c return Option(List(T)) then
+      (match bs : List(U8) as _ return Option(List(T)) with | Nil => Some[List(T)](Nil[T]) | Cons(b, r) => None[List(T)] end)
+    else
+      mir::bind T (List(T)) (of (seq::take U8 bs k)) (fun (x : T) =>
+        mir::map (List(T)) (List(T)) (rec(T, k, of, #isub(n, 1int), seq::drop U8 bs k;
+            pair(Sigma (_ : Eq(Bool, #le_int(0int, #isub(n, 1int)), true)), Eq(Bool, #lt_int(#isub(n, 1int), n), true),
+                 linarith([c : Eq(Bool, #le_int(n, 0int), false)]; Eq(Bool, #le_int(0int, #isub(n, 1int)), true); []),
+                 linarith([]; Eq(Bool, #lt_int(#isub(n, 1int), n), true); []))))
+          (fun (xs : List(T)) => Cons[T](x, xs)))
+  measure (n)
+
+-- A list of exactly `n` elements as a slice (`None` for another length).
+def[prelude] mem::slice_of_list : (T : Type) -> (n : Usize) -> (l : List(T)) -> Option(Slice T) :=
+  fun (T : Type) (n : Usize) (l : List(T)) =>
+    if #le_int(seq::len T l, #cast_usize_int(n)) as .h0 return Option(Slice T) then
+      (if #le_int(#cast_usize_int(n), seq::len T l) as .h1 return Option(Slice T) then
+         (if #le_int(#cast_usize_int(n), ISIZE_MAX) as .h2 return Option(Slice T) then
+            Some[Slice T](slice::mk T n l .pair(SliceOk T n l,
+              linarith([h0 : Eq(Bool, #le_int(seq::len T l, #cast_usize_int(n)), true), h1 : Eq(Bool, #le_int(#cast_usize_int(n), seq::len T l), true)];
+                       Eq(Int, seq::len T l, #cast_usize_int(n)); []),
+              h2))
+          else None[Slice T])
+       else None[Slice T])
+    else None[Slice T]
+
+-- `n` bytes of `bs` from byte `off`: `None` unless `off + n ≤ len bs` (an
+-- access past the end).
+def[prelude] mem::read : (bs : List(U8)) -> (off : Usize) -> (n : Usize) -> Option(List(U8)) :=
+  fun (bs : List(U8)) (off : Usize) (n : Usize) =>
+    if #le_int(#iadd(#cast_usize_int(off), #cast_usize_int(n)), seq::len U8 bs) return Option(List(U8))
+    then Some[List(U8)](seq::take U8 (seq::drop U8 bs (#cast_usize_int(off))) (#cast_usize_int(n)))
+    else None[List(U8)]
+
+-- `bs` with the bytes `w` written from byte `off`: `None` unless
+-- `off + len w ≤ len bs`.
+def[prelude] mem::write : (bs : List(U8)) -> (off : Usize) -> (w : List(U8)) -> Option(List(U8)) :=
+  fun (bs : List(U8)) (off : Usize) (w : List(U8)) =>
+    if #le_int(#iadd(#cast_usize_int(off), seq::len U8 w), seq::len U8 bs) return Option(List(U8))
+    then Some[List(U8)](seq::append U8 (seq::take U8 bs (#cast_usize_int(off))) (seq::append U8 w (seq::drop U8 bs (#iadd(#cast_usize_int(off), seq::len U8 w)))))
+    else None[List(U8)]
+
+-- The offset `off + d` (`d` an `Int`) when it stays within `0..=size` (Rust's
+-- `add`, `sub` and `offset` are undefined behaviour outside the allocation,
+-- even without an access; the base is stricter than the allocation): `None`
+-- otherwise.
+def[prelude] mem::moved : (off : Usize) -> (d : Int) -> (size : Int) -> Option(Usize) :=
+  fun (off : Usize) (d : Int) (size : Int) =>
+    if #le_int(0int, #iadd(#cast_usize_int(off), d)) return Option(Usize) then
+      (if #le_int(#iadd(#cast_usize_int(off), d), size) return Option(Usize)
+       then Some[Usize](#int_to_sat_usize(#iadd(#cast_usize_int(off), d)))
+       else None[Usize])
+    else None[Usize]
+
+-- A pointer moved by `d` bytes (`add(k)` is `d = k·size_of::<T>()`).
+def[prelude] mem::ptr_move : (C : Type) -> (p : mir::Ptr(C)) -> (d : Int) -> Option(mir::Ptr(C)) :=
+  fun (C : Type) (p : mir::Ptr(C)) (d : Int) =>
+    match p : mir::Ptr(C) as _ return Option(mir::Ptr(C)) with
+    | PMut(q, off, size) => mir::map Usize (mir::Ptr(C)) (mem::moved off d (#cast_usize_int(size))) (fun (o : Usize) => mir::Ptr::PMut[C](q, o, size))
+    | PShr(bs, off) => mir::map Usize (mir::Ptr(C)) (mem::moved off d (seq::len U8 bs)) (fun (o : Usize) => mir::Ptr::PShr[C](bs, o))
+    end
+
+-- The signed value of an `isize`'s bits.
+def[prelude] mem::isize_int : (k : U64) -> Int :=
+  fun (k : U64) => if #lt_u64(k, 9223372036854775808u64) return Int then #cast_u64_int(k) else #isub(#cast_u64_int(k), 18446744073709551616int)
+
+-- `s` with element `i` replaced by `v` (`None` past its end): the write of a
+-- slice element through a reference code.
+def[prelude] mir::slice_set : (T : Type) -> (s : Slice T) -> (i : Usize) -> (v : T) -> Option(Slice T) :=
+  fun (T : Type) (s : Slice T) (i : Usize) (v : T) =>
+    if #lt_usize(i, fst(s)) return Option(Slice T) then
+      Some[Slice T](slice::mk T fst(s) (seq::update T fst(snd(s)) (#cast_usize_int(i)) v)
+        .pair(SliceOk T fst(s) (seq::update T fst(snd(s)) (#cast_usize_int(i)) v),
+              eq::trans Int (seq::len T (seq::update T fst(snd(s)) (#cast_usize_int(i)) v)) (seq::len T fst(snd(s))) (#cast_usize_int(fst(s)))
+                (seq::len_update T fst(snd(s)) (#cast_usize_int(i)) v) (slice::ok_len T s),
+              slice::ok_bound T s))
+    else None[Slice T]
 
 -- LEAVES (each emitted into a reading that calls it; a leaf with a `&mut`
 -- argument takes its referent and returns the new referent with the result)

@@ -115,6 +115,9 @@ const EVALS: usize = 400;
 const ROUNDS: usize = 4;
 /// Kernel steps per evaluation.
 const STEPS: u64 = 500_000_000;
+/// The largest input (scalar elements, [`Gen::elems`]) the check builds:
+/// a larger one (a 65,536-entry table of an engine) is skipped, named.
+const MAX_INPUT_ELEMS: u64 = 1 << 16;
 /// Wall-clock limit of the harness run.
 const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 /// The harness module appended to the source copy.
@@ -799,11 +802,39 @@ impl<'a> Gen<'a> {
                 skip(&mut er, why, rep);
                 continue;
             }
+            // (an input of more than `MAX_INPUT_ELEMS` elements: each kernel
+            // evaluation would build it whole, beyond the per-function budget)
+            if let Some(n) = params.iter().map(|t| self.elems(t)).find(|n| *n > MAX_INPUT_ELEMS) {
+                skip(&mut er, format!("an input holds {n} elements (a table of the engine, fixed in its type): beyond the check's evaluation budget ({MAX_INPUT_ELEMS})"), rep);
+                continue;
+            }
             let invariant_arg = params.iter().any(|t| self.has_invariant(t));
             rep.entries.push(er);
             plans.push(Plan { e, index: rep.entries.len() - 1, g, params, ret: f.ret.clone(), comps, state_of, callee, invariant_arg, pre, pre_dom, panic_only: e.opaque_ret });
         }
         plans
+    }
+
+    /// The number of scalar elements a value of `t` holds (arrays multiplied
+    /// out, a sequence or slice counted as one element: its length is the
+    /// generator's), saturating.
+    fn elems(&self, t: &Ty) -> u64 {
+        self.elems_at(t, 0)
+    }
+
+    fn elems_at(&self, t: &Ty, depth: u32) -> u64 {
+        if depth > 16 {
+            return 1;
+        }
+        match t.peel_refs() {
+            Ty::Array(e, n) => (*n).saturating_mul(self.elems_at(e, depth + 1)),
+            Ty::Tuple(ts) => ts.iter().map(|x| self.elems_at(x, depth + 1)).fold(0u64, u64::saturating_add).max(1),
+            Ty::Adt(id, args) => match self.fields_of(*id, args) {
+                Some((_, fs)) => fs.iter().map(|(_, x)| self.elems_at(x, depth + 1)).fold(0u64, u64::saturating_add).max(1),
+                None => 1,
+            },
+            _ => 1,
+        }
     }
 
     fn has_invariant(&self, t: &Ty) -> bool {
@@ -1643,6 +1674,10 @@ const PRELUDE: &str = r#"
         ($($t:ty),*) => { $(impl __W for $t { fn w(&self, o: &mut ::std::string::String) { o.push_str(&::std::format!("{}", self)); } })* };
     }
     __w_num!(u8, u16, u32, u64, usize);
+    // a `u128` as the lift reads it: its (low, high) 64-bit words
+    impl __W for u128 {
+        fn w(&self, o: &mut ::std::string::String) { o.push('['); __W::w(&(*self as u64), o); o.push(','); __W::w(&((*self >> 64) as u64), o); o.push(']'); }
+    }
     impl __W for bool {
         fn w(&self, o: &mut ::std::string::String) { o.push_str(if *self { "true" } else { "false" }); }
     }
@@ -1781,10 +1816,16 @@ impl Emit<'_, '_> {
 
     fn ctor(&mut self, path: &str, shape: Shape, fields: &[FieldDef], args: &[Ty]) -> Result<String, String> {
         let mut parts = Vec::new();
+        // (an in-place struct's fields as the source writes them)
+        let host: Option<Vec<(String, String)>> = self.g.ip.as_ref().and_then(|ip| ip.host_fields.get(path.rsplit("::").next().unwrap_or(path)).cloned());
         for f in fields {
             let ft = f.ty.subst(args);
             // a `PhantomData` field (its type arguments erased by the lift)
-            let value = if self.g.ip.is_some() && self.g.is_phantom(&ft) { "::core::marker::PhantomData".to_string() } else { format!("{}(t)", self.reader(&ft)?) };
+            let mut value = if self.g.ip.is_some() && self.g.is_phantom(&ft) { "::core::marker::PhantomData".to_string() } else { format!("{}(t)", self.reader(&ft)?) };
+            if let Some(h) = host.as_ref().and_then(|h| h.iter().find(|(n, _)| Some(n) == f.name.as_ref()))
+            {
+                value = in_place::host_field_value(&h.1, value);
+            }
             parts.push(match shape {
                 Shape::Named => format!("{}: {value}", f.name.clone().unwrap_or_default()),
                 _ => value,
