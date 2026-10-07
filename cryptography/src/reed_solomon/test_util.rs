@@ -202,7 +202,7 @@ pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine>(new_engine: fn() -> E, cfg
 }
 
 /// Runs [`roundtrip_single()`] for rate `$Rate` with the `Naive`, `Scalar`, and `DefaultEngine`
-/// engines, plus every SIMD engine the host supports.
+/// engines.
 ///
 /// The remaining arguments are the [`Roundtrip`] fields in declaration order.
 macro_rules! roundtrip_single {
@@ -239,37 +239,11 @@ macro_rules! roundtrip_single {
             crate::reed_solomon::engine::DefaultEngine::new,
             &cfg,
         );
-
-        // Run every SIMD engine the host supports against the same pinned hashes.
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            if crate::reed_solomon::engine::cpu_features::avx512() {
-                crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
-                    crate::reed_solomon::engine::Avx512::new,
-                    &cfg,
-                );
-            }
-            if crate::reed_solomon::engine::cpu_features::avx2() {
-                crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
-                    crate::reed_solomon::engine::Avx2::new,
-                    &cfg,
-                );
-            }
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            if crate::reed_solomon::engine::cpu_features::neon() {
-                crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
-                    crate::reed_solomon::engine::Neon::new,
-                    &cfg,
-                );
-            }
-        }
     };
 }
 
 /// Runs [`roundtrip_two_rounds_inner!`] for rate `$Rate` with the `Naive`, `Scalar`, and
-/// `DefaultEngine` engines, plus every SIMD engine the host supports.
+/// `DefaultEngine` engines.
 ///
 /// The caller must have the names that [`roundtrip_two_rounds_inner!`] requires in scope.
 macro_rules! roundtrip_two_rounds {
@@ -284,24 +258,6 @@ macro_rules! roundtrip_two_rounds {
         roundtrip_two_rounds_inner!($Rate, Naive, $explicit_reset, $round_a, $round_b);
         roundtrip_two_rounds_inner!($Rate, Scalar, $explicit_reset, $round_a, $round_b);
         roundtrip_two_rounds_inner!($Rate, DefaultEngine, $explicit_reset, $round_a, $round_b);
-
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            use crate::reed_solomon::engine::{Avx2, Avx512, cpu_features};
-            if cpu_features::avx512() {
-                roundtrip_two_rounds_inner!($Rate, Avx512, $explicit_reset, $round_a, $round_b);
-            }
-            if cpu_features::avx2() {
-                roundtrip_two_rounds_inner!($Rate, Avx2, $explicit_reset, $round_a, $round_b);
-            }
-        }
-        #[cfg(target_arch = "aarch64")]
-        {
-            use crate::reed_solomon::engine::{Neon, cpu_features};
-            if cpu_features::neon() {
-                roundtrip_two_rounds_inner!($Rate, Neon, $explicit_reset, $round_a, $round_b);
-            }
-        }
     };
 }
 

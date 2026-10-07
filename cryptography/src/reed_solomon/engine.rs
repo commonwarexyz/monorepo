@@ -34,16 +34,7 @@
 /// Runtime CPU feature detection used to select and guard SIMD engines.
 ///
 /// Each function returns whether the current CPU supports the named engine's features.
-// TODO(https://github.com/commonwarexyz/monorepo/issues/4414): Bump cpufeatures and remove this workaround.
-#[allow(
-    unfulfilled_lint_expectations,
-    reason = "stable Rust does not emit this nightly-only deprecation"
-)]
-#[expect(
-    deprecated,
-    reason = "tracked by https://github.com/commonwarexyz/monorepo/issues/4414"
-)]
-pub(crate) mod cpu_features {
+mod cpu_features {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx512, "avx512f", "gfni");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -52,9 +43,9 @@ pub(crate) mod cpu_features {
     cpufeatures::new!(has_neon, "neon");
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    pub(crate) use self::{has_avx2::get as avx2, has_avx512::get as avx512};
+    pub(super) use self::{has_avx2::get as avx2, has_avx512::get as avx512};
     #[cfg(target_arch = "aarch64")]
-    pub(crate) use has_neon::get as neon;
+    pub(super) use has_neon::get as neon;
 }
 
 #[cfg(target_arch = "aarch64")]
