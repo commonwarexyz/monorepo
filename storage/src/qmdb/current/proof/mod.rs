@@ -117,6 +117,55 @@ pub fn required_chunks<F: Graftable, const N: usize>(
     }))
 }
 
+/// Ops-tree positions [RangeProof::new] reads from storage to prove `range` over a tree of
+/// `leaves` leaves with the given `inactivity_floor`, in strictly increasing order.
+///
+/// This allows a storage adapter to fetch every node a proof needs in one batch before building
+/// it. `N` is the bitmap chunk size in bytes and must be a nonzero power of two.
+///
+/// # Errors
+///
+/// Returns [merkle::Error::Empty] for an empty range and [merkle::Error::RangeOutOfBounds] for a
+/// range that ends beyond `leaves`.
+pub fn range_proof_positions<F: Graftable, const N: usize>(
+    leaves: Location<F>,
+    inactivity_floor: Location<F>,
+    range: Range<Location<F>>,
+) -> Result<impl Iterator<Item = Position<F>>, Error<F>> {
+    let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
+        leaves,
+        inactivity_floor,
+        grafting::height::<N>(),
+    )?;
+    let blueprint = merkle::Blueprint::new(leaves, inactive_peaks, qmdb::ROOT_BAGGING, range)?;
+    let mut positions: Vec<_> = blueprint.required_positions().collect();
+    positions.sort_unstable();
+    positions.dedup();
+    Ok(positions.into_iter())
+}
+
+/// Ops-tree positions [constant::OperationProof::new] reads from storage to prove the operation
+/// at `loc` over a tree of `leaves` leaves with the given `inactivity_floor`, in strictly
+/// increasing order.
+///
+/// This allows a storage adapter to fetch every node a proof needs in one batch before building
+/// it. `N` is the bitmap chunk size in bytes and must be a nonzero power of two.
+///
+/// # Errors
+///
+/// Returns [merkle::Error::LocationOverflow] if `loc` exceeds [merkle::Family::MAX_LEAVES] and
+/// [merkle::Error::RangeOutOfBounds] if `loc` >= `leaves`.
+pub fn operation_proof_positions<F: Graftable, const N: usize>(
+    leaves: Location<F>,
+    inactivity_floor: Location<F>,
+    loc: Location<F>,
+) -> Result<impl Iterator<Item = Position<F>>, Error<F>> {
+    let end = loc
+        .checked_add(1)
+        .ok_or(merkle::Error::LocationOverflow(loc))?;
+    range_proof_positions::<F, N>(leaves, inactivity_floor, loc..end)
+}
+
 /// Witness that a particular `ops_root` is committed by a `current` canonical root.
 ///
 /// See the [Canonical root structure](self#canonical-root-structure) section in the module
@@ -2467,6 +2516,27 @@ mod tests {
         }
     }
 
+    struct RecordingStorage<'a, S> {
+        inner: &'a S,
+        reads: Mutex<BTreeSet<u64>>,
+    }
+
+    impl<F: Family, S: Storage<F>> Storage<F> for RecordingStorage<'_, S> {
+        type Digest = S::Digest;
+
+        fn size(&self) -> Position<F> {
+            self.inner.size()
+        }
+
+        async fn get_node(
+            &self,
+            position: Position<F>,
+        ) -> Result<Option<S::Digest>, merkle::Error<F>> {
+            self.reads.lock().insert(*position);
+            self.inner.get_node(position).await
+        }
+    }
+
     async fn fixture<F: Graftable>(
         leaves: u64,
         pruned: u64,
@@ -2510,14 +2580,14 @@ mod tests {
                 let (bitmap, ops, grafted) = fixture::<F>(leaves, pruned).await;
                 let hasher = qmdb::hasher::<Sha256>();
                 let ops_root = ops.root(&hasher, 0).unwrap();
-                let storage = grafting::Storage::<F, Sha256, _, _>::new(
+                let grafted_storage = grafting::Storage::<F, Sha256, _, _>::new(
                     &grafted,
                     grafting::height::<1>(),
                     &ops,
                 );
                 let root = db::compute_db_root::<F, Sha256, _, _, 1>(
                     &bitmap,
-                    &storage,
+                    &grafted_storage,
                     Location::new(leaves),
                     db::partial_chunk::<_, 1>(&bitmap),
                     floor,
@@ -2537,6 +2607,28 @@ mod tests {
                     .unwrap()
                     .collect::<Vec<_>>();
                     assert!(required.windows(2).all(|pair| pair[0] < pair[1]));
+                    let ops_leaves = Location::new(leaves);
+                    let positions = location
+                        .map_or_else(
+                            || {
+                                range_proof_positions::<F, 1>(ops_leaves, floor, floor..ops_leaves)
+                                    .unwrap()
+                                    .collect::<Vec<_>>()
+                            },
+                            |loc| {
+                                operation_proof_positions::<F, 1>(ops_leaves, floor, loc)
+                                    .unwrap()
+                                    .collect()
+                            },
+                        )
+                        .into_iter()
+                        .map(|pos| *pos)
+                        .collect::<Vec<_>>();
+                    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+                    let storage = RecordingStorage {
+                        inner: &grafted_storage,
+                        reads: Mutex::new(BTreeSet::new()),
+                    };
                     let preloaded = PreloadedBitmap {
                         bitmap: &bitmap,
                         chunks: required
@@ -2594,15 +2686,35 @@ mod tests {
                         read_chunks, required,
                         "leaves={leaves}, pruned={pruned}, location={location:?}",
                     );
+                    assert_eq!(
+                        storage.reads.into_inner().into_iter().collect::<Vec<_>>(),
+                        positions,
+                        "leaves={leaves}, pruned={pruned}, location={location:?}",
+                    );
                 }
             }
         }
     }
 
     #[test_async]
-    async fn required_chunks_match_constructor_reads() {
+    async fn required_reads_match_constructor_reads() {
         check_constructor_reads::<mmr::Family>().await;
         check_constructor_reads::<mmb::Family>().await;
+    }
+
+    #[test]
+    fn operation_proof_positions_rejects_invalid_locations() {
+        type F = mmr::Family;
+        let leaves = Location::<F>::new(8);
+        let floor = Location::new(0);
+        assert!(matches!(
+            operation_proof_positions::<F, 1>(leaves, floor, leaves),
+            Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
+        ));
+        assert!(matches!(
+            operation_proof_positions::<F, 1>(leaves, floor, Location::new(u64::MAX)),
+            Err(Error::Merkle(merkle::Error::LocationOverflow(_)))
+        ));
     }
 
     #[test]
