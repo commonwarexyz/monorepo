@@ -1163,10 +1163,10 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             .keys()
             .rev()
             .take(2)
-            .last()
+            .next_back()
             .map_or(u64::MAX, |&blob| blob.max(floor_blob));
 
-        Self {
+        let mut recovery = Self {
             context,
             cfg,
             partition,
@@ -1180,7 +1180,33 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             halt_after_data_removal: false,
         }
         .inspect(max_size.unwrap_or(u64::MAX), first_suspect)
-        .await
+        .await?;
+
+        // Without a cap, every scanned prefix ends above the offsets watermark, so a torn suffix
+        // is a crash artifact: drop it now so reads through this handle, which may probe a few
+        // bytes past a frame, never reach a lost page. A cap can place a lost page below the
+        // on-disk watermark, so publication truncates instead, after lowering the watermark.
+        if max_size.is_none() {
+            for (&blob, scan) in recovery.recovered_scans.iter_mut() {
+                if !scan.torn {
+                    continue;
+                }
+                let writer = recovery
+                    .pending
+                    .remove(&blob)
+                    .expect("scanned blob is present");
+                warn!(
+                    blob,
+                    new_size = scan.valid_size,
+                    "crash repair: truncating torn suffix"
+                );
+                recovery
+                    .pending
+                    .insert(blob, writer.truncate(scan.valid_size).await?);
+                scan.torn = false;
+            }
+        }
+        Ok(recovery)
     }
 
     /// Positions stored items may occupy, from the offsets checkpoint and blob names without
@@ -1416,9 +1442,9 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 )));
             }
 
-            // Inspection leaves data untouched. Publication truncates a torn blob only after
-            // lowering the offsets watermark, since a cap can place a lost page below the on-disk
-            // watermark.
+            // Inspection only records the scanned prefix. An unbounded open truncates a torn
+            // suffix right away; a bounded one defers to publication, after lowering the offsets
+            // watermark, since a cap can place a lost page below the on-disk watermark.
             self.recovered_scans.insert(
                 blob,
                 BlobScan {
@@ -6649,8 +6675,8 @@ mod tests {
         });
     }
 
-    /// Opening leaves a blob with a lost interior page untouched until publication, and
-    /// publication truncates it to the frames before the hole.
+    /// An unbounded open truncates a blob with a lost interior page to its scanned prefix right
+    /// away; a bounded open leaves it untouched and defers to publication.
     #[test_traced]
     fn test_variable_recovery_defers_hole_truncation_to_publication() {
         let executor = deterministic::Runner::default();
@@ -6684,21 +6710,42 @@ mod tests {
                 sizes.push(size);
             }
 
-            // Inspection selects the frames before the hole without changing either blob.
-            for (child, cap) in [("unbounded", None), ("bounded", Some(25))] {
-                let pending = Recovery::<_, u64>::open(context.child(child), cfg.clone(), cap)
+            // A bounded open selects the frames before the hole without changing either blob: a
+            // cap can place a lost page below the on-disk watermark, so it defers to publication.
+            let pending = Recovery::<_, u64>::open(context.child("bounded"), cfg.clone(), Some(25))
+                .await
+                .unwrap();
+            assert_eq!(pending.bounds, 0..21);
+            drop(pending);
+            for (blob, &size) in sizes.iter().enumerate() {
+                let (_, inspected) = context
+                    .open(&cfg.data_partition(), &(blob as u64).to_be_bytes())
                     .await
                     .unwrap();
-                assert_eq!(pending.bounds, 0..21);
-                drop(pending);
-                for (blob, &size) in sizes.iter().enumerate() {
-                    let (_, inspected) = context
-                        .open(&cfg.data_partition(), &(blob as u64).to_be_bytes())
-                        .await
-                        .unwrap();
-                    assert_eq!(inspected, size, "{child} open changed blob {blob}");
-                }
+                assert_eq!(inspected, size, "bounded open changed blob {blob}");
             }
+
+            // An unbounded open's scanned prefix always ends above the offsets watermark, so it
+            // truncates blob 0's torn suffix right away instead of deferring to publication. The
+            // gap still makes blob 1 unreachable, so it is left for publication to drop.
+            let pending = Recovery::<_, u64>::open(context.child("unbounded"), cfg.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(pending.bounds, 0..21);
+            drop(pending);
+            let (_, blob0_after) = context
+                .open(&cfg.data_partition(), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert!(
+                blob0_after < sizes[0],
+                "unbounded open left blob 0's torn suffix in place at {blob0_after}"
+            );
+            let (_, blob1_after) = context
+                .open(&cfg.data_partition(), &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert_eq!(blob1_after, sizes[1], "unbounded open changed blob 1");
 
             // Publication keeps the 21 frames and drops everything after the hole.
             let mut journal = Journal::<_, u64>::init(context.child("published"), cfg.clone())
@@ -6711,6 +6758,49 @@ mod tests {
             let appended;
             (journal, appended) = journal.append(&4242).await.unwrap();
             assert_eq!(appended, 21);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Reading the last retained item through an unpublished handle must not reach a lost page.
+    /// The frame-length probe reads up to five bytes, so a two-byte frame ending at the torn
+    /// page's boundary crosses into it unless the torn suffix is already gone.
+    #[test_traced]
+    fn test_variable_recovery_reads_short_frame_before_lost_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config::<()> {
+                partition: "variable-short-frame".into(),
+                items_per_section: NZU64!(1000),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(10)),
+                write_buffer: NZUsize!(2048),
+                replay_buffer: NZUsize!(2048),
+            };
+            let mut journal = Journal::<_, u8>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..100u8 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            journal.commit().await.unwrap();
+
+            // Two-byte frames fill each 64-byte page exactly. Tearing page 2 (bytes 128..192)
+            // leaves 64 frames, the last ending where the torn page begins.
+            corrupt_page(&context, &cfg.data_partition(), &0u64.to_be_bytes(), 2, 64).await;
+            let pending = Recovery::<_, u8>::open(context.child("recover"), cfg.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!(pending.bounds, 0..64);
+            assert_eq!(pending.read(63).await.unwrap(), 63);
+            drop(pending);
+
+            let journal = Journal::<_, u8>::init(context.child("published"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..64);
+            assert_eq!(journal.read(63).await.unwrap(), 63);
             journal.destroy().await.unwrap();
         });
     }
