@@ -10,7 +10,7 @@ url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
 
-*Update (10/7/26): Incoming leaders can prepare proposals before parent certification. Applications can permit early publication when they trust the outgoing leader not to equivocate. Preparation is an application opt-in, and the default still waits for certification.*
+*Update (10/7/26): [Pipelined handoffs](https://github.com/commonwarexyz/monorepo/pull/4739) let an incoming leader build its first proposal before the outgoing leader's final view certifies. With rotating leaders, this can cut network-bound view time from two network trips to one. Applications opt in, and the default still waits for certification. Publishing a proposal early trusts the outgoing leader not to equivocate and to complete its term.*
 
 Simplex can now produce blocks as fast as its leader can build them.
 
