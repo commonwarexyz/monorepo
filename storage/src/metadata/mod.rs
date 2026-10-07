@@ -29,11 +29,12 @@
 //! (otherwise, we would not be guaranteed to recover the latest complete state from disk on
 //! restart as half of a blob could be old data and half new data).
 //!
-//! # Delta Writes
+//! # Writing Updates
 //!
-//! If the set of keys and the length of values are stable, [Metadata] will only write an update's
-//! delta to disk (rather than rewriting the entire metadata). This makes [Metadata] a great choice
-//! for maintaining even large collections of data (with the majority rarely modified).
+//! When keys and encoded value sizes are stable, [Metadata] combines updates into one write if
+//! the complete encoded metadata is at most 4 KiB. Larger stores write only the changed values,
+//! version, and checksum. This reduces I/O submissions for small checkpoints while keeping
+//! writes small for large collections with infrequent changes.
 //!
 //! # Example
 //!
@@ -139,14 +140,14 @@ mod tests {
                     .await
                     .unwrap();
 
-            // Seed both mirrors so equal-size updates take the incremental branch.
+            // Seed both metadata copies so equal-size updates take the incremental branch.
             metadata.put(key.clone(), vec![1; 8]);
             metadata = metadata.sync().await.unwrap();
             metadata = metadata.sync().await.unwrap();
             recordings.clear();
             pending.arm();
 
-            // Non-pipelined incremental writes request cache bypass and retain a trailing sync.
+            // Small non-pipelined updates request durability with one complete write.
             metadata.put(key.clone(), vec![2; 8]);
             metadata = drive_pending_syncs(&pending, metadata.sync())
                 .await
@@ -154,28 +155,16 @@ mod tests {
             assert_options(
                 &recordings,
                 &[],
-                &[
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                ],
+                &[WriteOptions::SYNC | WriteOptions::DONT_CACHE],
             );
             assert_durability(&pending, 1, 0, 0);
 
-            // Pipelined incremental writes request cache bypass and retain a started sync.
+            // Small pipelined updates use one complete write followed by a background sync.
             metadata.put(key.clone(), vec![3; 8]);
             let (next, handle) = metadata.start_sync().await.unwrap();
             metadata = next;
             drive_pending_syncs(&pending, handle).await.unwrap();
-            assert_options(
-                &recordings,
-                &[],
-                &[
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                    WriteOptions::DONT_CACHE,
-                ],
-            );
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
             assert_durability(&pending, 2, 1, 1);
 
             // A growing pipelined rewrite requests cache bypass and retains a started sync.
@@ -212,7 +201,7 @@ mod tests {
             assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
             assert_durability(&pending, 6, 3, 3);
 
-            // Both populated mirrors request cache bypass when reloaded.
+            // Both populated metadata copies request cache bypass when reloaded.
             drop(metadata);
             let metadata = Metadata::<_, U64, Vec<u8>>::init(recording.child("second"), cfg)
                 .await
@@ -223,6 +212,60 @@ mod tests {
                 &[],
             );
             metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_overwrite_submission_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            // Version, u64 key, Vec length prefix, and CRC occupy 22 bytes at these sizes.
+            // Exercise both sides of the contiguous-write limit with identical update semantics.
+            for value_len in [4_074, 4_075] {
+                let (recording, recordings) = RecordingContext::new(context.child("boundary"));
+                let cfg = Config {
+                    partition: format!("overwrite-boundary-{value_len}"),
+                    codec_config: ((0..).into(), ()),
+                };
+                let key = U64::new(1);
+                let mut metadata =
+                    Metadata::<_, U64, Vec<u8>>::init(recording.child("seed"), cfg.clone())
+                        .await
+                        .unwrap();
+                metadata.put(key.clone(), vec![1; value_len]);
+
+                for pipelined in [false, true] {
+                    // Opening discards the diff record, so repopulate both metadata copies before
+                    // checking the steady-state overwrite path.
+                    metadata = metadata.sync().await.unwrap();
+                    metadata = metadata.sync().await.unwrap();
+                    recordings.clear();
+                    let value = vec![if pipelined { 3 } else { 2 }; value_len];
+                    metadata.put(key.clone(), value.clone());
+                    if pipelined {
+                        let (next, handle) = metadata.start_sync().await.unwrap();
+                        metadata = next;
+                        handle.await.unwrap();
+                    } else {
+                        metadata = metadata.sync().await.unwrap();
+                    }
+                    let options = if value_len == 4_074 {
+                        vec![if pipelined {
+                            WriteOptions::DONT_CACHE
+                        } else {
+                            WriteOptions::SYNC | WriteOptions::DONT_CACHE
+                        }]
+                    } else {
+                        vec![WriteOptions::DONT_CACHE; 3]
+                    };
+                    assert_options(&recordings, &[], &options);
+                    drop(metadata);
+                    metadata = Metadata::init(recording.child("reopen"), cfg.clone())
+                        .await
+                        .unwrap();
+                    assert_eq!(metadata.get(&key), Some(&value));
+                }
+                metadata.destroy().await.unwrap();
+            }
         });
     }
 
@@ -1222,7 +1265,7 @@ mod tests {
             );
 
             // Mix a same-size update with a size-changing update. The overwrite
-            // scan updates the mirror for the smaller key before the size change
+            // scan updates the encoded buffer for the smaller key before the size change
             // forces a rewrite, which must discard that partial mutation.
             metadata.put(U64::new(20), vec![0xBB; 100]);
             metadata.put(U64::new(30), vec![0xCC; 150]);
@@ -1787,7 +1830,7 @@ mod tests {
 
     #[test_traced]
     fn test_bytes_values_reload() {
-        // Retained byte fields remain independent of later mirror overwrites
+        // Retained byte fields remain independent of later encoded buffer overwrites
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
@@ -1804,7 +1847,7 @@ mod tests {
             metadata = metadata.sync().await.unwrap();
             drop(metadata);
 
-            // Reload, then overwrite an equal-size value twice to exercise both mirrors
+            // Reload, then overwrite an equal-size value twice to exercise both metadata copies
             let mut metadata =
                 Metadata::<_, U64, Bytes>::init(context.child("second"), cfg.clone())
                     .await

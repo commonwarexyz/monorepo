@@ -14,6 +14,9 @@ use tracing::{debug, warn};
 /// The names of the two blobs that store metadata.
 const BLOB_NAMES: [&[u8]; 2] = [b"left", b"right"];
 
+/// Maximum encoded metadata size to write in one operation.
+const CONTIGUOUS_WRITE_LIMIT: usize = 4_096;
+
 /// Information about a value in a [Wrapper].
 struct Info {
     start: usize,
@@ -168,8 +171,8 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             return Ok(Loaded::Valid(BTreeMap::new(), Wrapper::empty(blob)));
         }
 
-        // The full encoded blob remains in the in-memory mirror after decoding, so request that
-        // pages brought in by this read need not remain in the OS page cache.
+        // The encoded buffer is retained after decoding, so pages read here need not remain
+        // in the OS page cache.
         let len: usize = len.try_into().expect("blob too large for platform");
         let buf = blob
             .read_at(0, len, ReadOptions::DONT_CACHE)
@@ -401,7 +404,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let target = &mut self.state.blobs[target_cursor];
 
         // Determine if we can overwrite existing data in place, updating the
-        // in-memory mirror for equal-size values as we go. If any value changes
+        // encoded buffer for equal-size values as we go. If any value changes
         // encoded length, subsequent offsets shift and the blob must be rebuilt.
         let mut overwrite = true;
         if key_order_changed < past_version {
@@ -435,41 +438,54 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
             let checksum = Crc32::checksum(&target.data.as_ref()[..checksum_index]);
             (&mut target.data.as_mut()[checksum_index..]).put_u32(checksum);
 
-            // Freeze the mirror so async writes can hold zero-copy slices, then recover the
-            // mutable mirror after all writes complete. Since the mirror remains authoritative,
+            // Freeze the encoded buffer so async writes can hold zero-copy slices, then recover
+            // the mutable buffer after all writes complete. Since we retain the buffer in memory,
             // every write requests cache bypass.
             let data = std::mem::take(&mut target.data).freeze();
 
-            // Write each modified value from the frozen mirror, followed by the
-            // version and checksum.
-            let writes = target
-                .modified
-                .iter()
-                .map(|key| {
-                    let info = target.lengths.get(key).expect("key must exist");
-                    let start = info.start;
-                    let end = start + info.length;
-                    target.blob.write_at(
-                        start as u64,
-                        data.slice(start..end),
-                        WriteOptions::DONT_CACHE,
-                    )
-                })
-                .chain([
-                    target
-                        .blob
-                        .write_at(0, data.slice(0..u64::SIZE), WriteOptions::DONT_CACHE),
-                    target.blob.write_at(
-                        checksum_index as u64,
-                        data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
-                        WriteOptions::DONT_CACHE,
-                    ),
-                ]);
-            try_join_all(writes).await?;
+            let contiguous = data.len() <= CONTIGUOUS_WRITE_LIMIT;
+            if contiguous {
+                // This write includes every changed byte, so it can request durability directly.
+                // Pipelined syncs retain a separate completion handle.
+                let options = if pipelined {
+                    WriteOptions::DONT_CACHE
+                } else {
+                    WriteOptions::SYNC | WriteOptions::DONT_CACHE
+                };
+                target.blob.write_at(0, data.clone(), options).await?;
+            } else {
+                // Larger metadata stores write only modified values, the version, and the checksum.
+                let writes = target
+                    .modified
+                    .iter()
+                    .map(|key| {
+                        let info = target.lengths.get(key).expect("key must exist");
+                        let start = info.start;
+                        let end = start + info.length;
+                        target.blob.write_at(
+                            start as u64,
+                            data.slice(start..end),
+                            WriteOptions::DONT_CACHE,
+                        )
+                    })
+                    .chain([
+                        target
+                            .blob
+                            .write_at(0, data.slice(0..u64::SIZE), WriteOptions::DONT_CACHE),
+                        target.blob.write_at(
+                            checksum_index as u64,
+                            data.slice(checksum_index..checksum_index + crc32::Digest::SIZE),
+                            WriteOptions::DONT_CACHE,
+                        ),
+                    ]);
+                try_join_all(writes).await?;
+            }
             let sync = if pipelined {
                 Some(target.blob.start_sync().await)
             } else {
-                target.blob.sync().await?;
+                if !contiguous {
+                    target.blob.sync().await?;
+                }
                 None
             };
 
@@ -501,7 +517,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         // rewrites still resize the persisted blob.
         let target_data_len = target.data.len();
 
-        // Reuse the existing blob mirror when its allocation is already large enough.
+        // Reuse the encoded buffer when its allocation is already large enough.
         let mut next_data = if target.data.capacity() >= next_data_len {
             let mut data = std::mem::take(&mut target.data);
             data.clear();
@@ -524,8 +540,7 @@ impl<E: Context, K: Span, V: Codec> Inner<E, K, V> {
         let next_data = next_data.freeze();
         let shrinking = next_data.len() < target_data_len;
 
-        // The encoded blob becomes the authoritative in-memory mirror below, so every write
-        // requests cache bypass.
+        // We retain the encoded buffer in memory below, so every write requests cache bypass.
         let sync = if pipelined {
             target
                 .blob
