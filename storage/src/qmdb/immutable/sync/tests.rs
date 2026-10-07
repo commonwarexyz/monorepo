@@ -1,19 +1,21 @@
-//! Generic sync tests for immutable databases.
+//! Sync tests for immutable databases.
 //!
-//! This module defines a [`SyncTestHarness`] trait and generic test functions parameterized
-//! over the harness, so the same tests can run against any combination of merkle family
-//! (MMR, MMB) and database variant. Per-harness concrete `#[test]` functions are expanded
-//! by the [`sync_tests!`] macro.
+//! The harness contract and the shared sync tests live in [`crate::qmdb::sync::harness`]. This
+//! module implements the harness for immutable databases and adds immutable-specific tests to
+//! the modules the shared macro generates.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{self, Location, full::Config as MerkleConfig},
+    merkle::{Location, full::Config as MerkleConfig},
     qmdb::{
         self,
         immutable::{self, variable::Operation},
         sync::{
-            self, Engine, Target,
-            engine::{Config, NextStep},
+            self, Target,
+            engine::Config,
+            harness::{
+                ConfigOf, DbOf, JournalOf, OpOf, PAGE_CACHE_SIZE, PAGE_SIZE, SyncTestHarness,
+                compact_engine_config, prune_boxed,
+            },
         },
     },
     translator::TwoCap,
@@ -25,63 +27,16 @@ use commonware_math::algebra::Random;
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, channel::mpsc, non_empty_range};
+use commonware_utils::{NZU64, NZUsize, TestRng, non_empty_range};
 use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
-use std::{
-    collections::HashMap,
-    future::Future,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
-    sync::Arc,
-};
+use std::{future::Future, num::NonZeroU64, sync::Arc};
 
-pub(crate) type DbOf<H> = <H as SyncTestHarness>::Db;
-pub(crate) type OpOf<H> = <DbOf<H> as qmdb::sync::Database>::Op;
-pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
-pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
-
-const PAGE_SIZE: NonZeroU16 = NZU16!(77);
-const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
-
-/// Wraps [`SyncTestHarness::prune`] with a heap-allocated state machine (the future embeds
-/// the database twice and exceeds the size lint in the deepest test).
-#[boxed]
-async fn prune_boxed<H: SyncTestHarness>(db: H::Db, loc: Location<H::Family>) -> H::Db {
-    H::prune(db, loc).await
-}
-
-/// Harness that abstracts per-family details so the generic tests below can operate on
-/// any immutable database.
-pub(crate) trait SyncTestHarness: Sized + 'static {
-    type Family: merkle::Family;
-    type Db: qmdb::sync::Database<
-            Family = Self::Family,
-            Context = deterministic::Context,
-            Digest = sha256::Digest,
-            Config: Clone,
-        > + Sync;
-    type Key: Clone + Eq + std::hash::Hash + Send + Sync + 'static;
+/// Immutable-specific harness methods used by the immutable-only sync tests.
+pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
+    type Key: Send + Sync + 'static;
     type Value: Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static;
-    type Metadata: Clone + PartialEq + std::fmt::Debug + Send + Sync + 'static;
 
-    fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self>;
-    fn create_ops(n: usize) -> Vec<OpOf<Self>>;
-    fn create_ops_seeded(n: usize, seed: u64) -> Vec<OpOf<Self>>;
-    fn sample_metadata() -> Self::Metadata;
-
-    fn init_db(ctx: deterministic::Context) -> impl Future<Output = Self::Db> + Send;
-    fn init_db_with_config(
-        ctx: deterministic::Context,
-        config: ConfigOf<Self>,
-    ) -> impl Future<Output = Self::Db> + Send;
-    fn destroy(db: Self::Db) -> impl Future<Output = ()> + Send;
-    fn db_sync(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
-
-    fn apply_ops(
-        db: Self::Db,
-        ops: Vec<OpOf<Self>>,
-        metadata: Option<Self::Metadata>,
-    ) -> impl Future<Output = Self::Db> + Send;
     fn apply_ops_with_floor(
         db: Self::Db,
         ops: Vec<OpOf<Self>>,
@@ -90,630 +45,13 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     ) -> impl Future<Output = Self::Db> + Send;
     fn commit(db: Self::Db) -> impl Future<Output = Self::Db> + Send;
     fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family>;
-    fn prune(db: Self::Db, loc: Location<Self::Family>) -> impl Future<Output = Self::Db> + Send;
-
-    fn bounds(db: &Self::Db) -> std::ops::Range<Location<Self::Family>>;
-    fn db_root(db: &Self::Db) -> sha256::Digest;
-    fn get_metadata(db: &Self::Db) -> impl Future<Output = Option<Self::Metadata>> + Send;
     fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)>;
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
 
-// ===== Generic tests =====
+// ===== Immutable-specific tests =====
 
-pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(target_db_ops);
-        let target_db =
-            H::apply_ops(target_db, target_ops.clone(), Some(H::sample_metadata())).await;
-        let bounds = H::bounds(&target_db);
-        let target_op_count = bounds.end;
-        let target_oldest_retained_loc = bounds.start;
-        let target_root = H::db_root(&target_db);
-
-        let mut expected_kvs: HashMap<H::Key, H::Value> = HashMap::new();
-        for op in &target_ops {
-            if let Some((key, value)) = H::op_kv(op) {
-                expected_kvs.insert(key.clone(), value.clone());
-            }
-        }
-
-        let db_config = H::config(&format!("sync_client_{}", context.next_u64()), &context);
-
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            db_config: db_config.clone(),
-            fetch_batch_size,
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(target_oldest_retained_loc, target_op_count),
-            },
-            context: context.child("client"),
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-        let got_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        let bounds = H::bounds(&got_db);
-        assert_eq!(bounds.end, target_op_count);
-        assert_eq!(bounds.start, target_oldest_retained_loc);
-        assert_eq!(H::db_root(&got_db), target_root);
-
-        for (key, expected_value) in &expected_kvs {
-            let synced_value = H::lookup(&got_db, key).await;
-            assert_eq!(synced_value, Some(expected_value.clone()));
-        }
-
-        let new_ops = H::create_ops_seeded(target_db_ops, 1);
-        let got_db = H::apply_ops(got_db, new_ops.clone(), None).await;
-        let target_db = Arc::try_unwrap(target_db)
-            .unwrap_or_else(|_| panic!("target_db should have no other references"));
-        let target_db = H::apply_ops(target_db, new_ops, None).await;
-
-        for key in expected_kvs.keys() {
-            let a = H::lookup(&got_db, key).await;
-            let b = H::lookup(&target_db, key).await;
-            assert_eq!(a, b);
-        }
-
-        H::destroy(got_db).await;
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_sync_empty_to_nonempty<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_db = H::apply_ops(target_db, vec![], Some(H::sample_metadata())).await;
-
-        let bounds = H::bounds(&target_db);
-        let target_op_count = bounds.end;
-        let target_oldest_retained_loc = bounds.start;
-        let target_root = H::db_root(&target_db);
-
-        let db_config = H::config(&format!("empty_sync_{}", context.next_u64()), &context);
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            db_config,
-            fetch_batch_size: NZU64!(10),
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(target_oldest_retained_loc, target_op_count),
-            },
-            context: context.child("client"),
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-        let got_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        let bounds = H::bounds(&got_db);
-        assert_eq!(bounds.end, target_op_count);
-        assert_eq!(bounds.start, target_oldest_retained_loc);
-        assert_eq!(H::db_root(&got_db), target_root);
-        assert_eq!(H::get_metadata(&got_db).await, Some(H::sample_metadata()));
-
-        H::destroy(got_db).await;
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("Failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(10);
-        let target_db =
-            H::apply_ops(target_db, target_ops.clone(), Some(H::sample_metadata())).await;
-
-        let target_root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db);
-        let lower_bound = bounds.start;
-        let op_count = bounds.end;
-
-        let db_config = H::config("persistence-test", &context);
-        let client_context = context.child("client");
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            db_config: db_config.clone(),
-            fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(lower_bound, op_count),
-            },
-            context: client_context.child("client"),
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        assert_eq!(H::db_root(&synced_db), target_root);
-        let expected_root = H::db_root(&synced_db);
-        let bounds = H::bounds(&synced_db);
-        let expected_op_count = bounds.end;
-        let expected_oldest_retained_loc = bounds.start;
-
-        H::db_sync(synced_db).await;
-        let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
-
-        assert_eq!(H::db_root(&reopened_db), expected_root);
-        let bounds = H::bounds(&reopened_db);
-        assert_eq!(bounds.end, expected_op_count);
-        assert_eq!(bounds.start, expected_oldest_retained_loc);
-
-        for op in &target_ops {
-            if let Some((key, expected_value)) = H::op_kv(op) {
-                let got = H::lookup(&reopened_db, key).await;
-                assert_eq!(got, Some(expected_value.clone()));
-            }
-        }
-
-        H::destroy(reopened_db).await;
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("Failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-    JournalOf<H>: Contiguous,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let initial_ops = H::create_ops(50);
-        let target_db = H::apply_ops(target_db, initial_ops.clone(), None).await;
-
-        let bounds = H::bounds(&target_db);
-        let initial_lower_bound = bounds.start;
-        let initial_upper_bound = bounds.end;
-        let initial_root = H::db_root(&target_db);
-
-        let additional_ops = H::create_ops_seeded(25, 1);
-        let target_db = H::apply_ops(target_db, additional_ops.clone(), None).await;
-        let final_upper_bound = H::bounds(&target_db).end;
-        let final_root = H::db_root(&target_db);
-
-        let target_db = Arc::new(target_db);
-
-        let (update_sender, update_receiver) = mpsc::channel(1);
-        let client = {
-            let config = Config {
-                context: context.child("client"),
-                db_config: H::config(&format!("update_test_{}", context.next_u64()), &context),
-                target: Target {
-                    root: initial_root,
-                    range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-                },
-                source: target_db.clone(),
-                fetch_batch_size: NZU64!(2),
-                max_outstanding_requests: 10,
-                apply_batch_size: NZU64!(1024),
-                update_rx: Some(update_receiver),
-                finish_rx: None,
-                reached_target_tx: None,
-                max_retained_roots: 1,
-            };
-            let mut client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
-            loop {
-                client = match client.step().await.unwrap() {
-                    NextStep::Continue(new_client) => new_client,
-                    NextStep::Complete(_) => panic!("client should not be complete"),
-                };
-                let log_size = Contiguous::bounds(client.journal()).end;
-                if log_size > *initial_lower_bound {
-                    break client;
-                }
-            }
-        };
-
-        update_sender
-            .send(Target {
-                root: final_root,
-                range: non_empty_range!(initial_lower_bound, final_upper_bound),
-            })
-            .await
-            .unwrap();
-
-        let synced_db = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced_db), final_root);
-
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("Failed to unwrap Arc"));
-        {
-            let bounds = H::bounds(&synced_db);
-            let target_bounds = H::bounds(&target_db);
-            assert_eq!(bounds.end, target_bounds.end);
-            assert_eq!(bounds.start, target_bounds.start);
-            assert_eq!(H::db_root(&synced_db), H::db_root(&target_db));
-        }
-
-        let all_ops: Vec<_> = initial_ops.iter().chain(additional_ops.iter()).collect();
-        for op in all_ops {
-            if let Some((key, expected_value)) = H::op_kv(op) {
-                let got = H::lookup(&synced_db, key).await;
-                assert_eq!(got, Some(expected_value.clone()));
-            }
-        }
-
-        H::destroy(synced_db).await;
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(30);
-        let target_db = H::apply_ops(target_db, target_ops[..29].to_vec(), None).await;
-
-        let target_root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db);
-        let lower_bound = bounds.start;
-        let op_count = bounds.end;
-
-        let target_db = H::apply_ops(target_db, target_ops[29..].to_vec(), None).await;
-
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            db_config: H::config(&format!("subset_{}", context.next_u64()), &context),
-            fetch_batch_size: NZU64!(10),
-            target: Target {
-                root: target_root,
-                range: non_empty_range!(lower_bound, op_count),
-            },
-            context: context.child("client"),
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        assert_eq!(H::db_root(&synced_db), target_root);
-        assert_eq!(H::bounds(&synced_db).end, op_count);
-
-        H::destroy(synced_db).await;
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let original_ops = H::create_ops(50);
-
-        let target_db = H::init_db(context.child("target")).await;
-        let sync_db_config = H::config(&format!("partial_{}", context.next_u64()), &context);
-        let client_context = context.child("client");
-        let sync_db =
-            H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
-
-        let target_db = H::apply_ops(target_db, original_ops.clone(), None).await;
-        H::apply_ops(sync_db, original_ops, None).await;
-
-        let last_op = H::create_ops_seeded(1, 1);
-        let target_db = H::apply_ops(target_db, last_op, None).await;
-        let root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db);
-        let lower_bound = bounds.start;
-        let upper_bound = bounds.end;
-
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            db_config: sync_db_config,
-            fetch_batch_size: NZU64!(10),
-            target: Target {
-                root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
-            context: context.child("sync"),
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-        let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        assert_eq!(H::bounds(&sync_db).end, upper_bound);
-        assert_eq!(H::db_root(&sync_db), root);
-
-        H::destroy(sync_db).await;
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_ops = H::create_ops(40);
-
-        let target_db = H::init_db(context.child("target")).await;
-        let sync_config = H::config(&format!("exact_{}", context.next_u64()), &context);
-        let client_context = context.child("client");
-        let sync_db =
-            H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
-
-        let target_db = H::apply_ops(target_db, target_ops.clone(), None).await;
-        H::apply_ops(sync_db, target_ops, None).await;
-
-        let root = H::db_root(&target_db);
-        let bounds = H::bounds(&target_db);
-        let lower_bound = bounds.start;
-        let upper_bound = bounds.end;
-
-        let source = Arc::new(target_db);
-        let config = Config {
-            db_config: sync_config,
-            fetch_batch_size: NZU64!(10),
-            target: Target {
-                root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
-            context: context.child("sync"),
-            source: source.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: None,
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 8,
-        };
-        let sync_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        assert_eq!(H::bounds(&sync_db).end, upper_bound);
-        assert_eq!(H::db_root(&sync_db), root);
-
-        H::destroy(sync_db).await;
-        let target_db = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(100);
-        let target_db = H::apply_ops(target_db, target_ops, None).await;
-
-        let target_db = H::prune(target_db, Location::new(10)).await;
-
-        let bounds = H::bounds(&target_db);
-        let initial_lower_bound = bounds.start;
-        let initial_upper_bound = bounds.end;
-        let initial_root = H::db_root(&target_db);
-
-        let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            context: context.child("client"),
-            db_config: H::config(&format!("lb-dec-{}", context.next_u64()), &context),
-            fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 10,
-            update_rx: Some(update_receiver),
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 1,
-        };
-        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
-
-        update_sender
-            .send(Target {
-                root: initial_root,
-                range: non_empty_range!(
-                    initial_lower_bound.checked_sub(1).unwrap(),
-                    initial_upper_bound
-                ),
-            })
-            .await
-            .unwrap();
-
-        // The non-advancing update is discarded and the sync completes at the original target.
-        let synced_db = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced_db), initial_root);
-        H::destroy(synced_db).await;
-
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(50);
-        let target_db = H::apply_ops(target_db, target_ops, None).await;
-
-        let bounds = H::bounds(&target_db);
-        let initial_lower_bound = bounds.start;
-        let initial_upper_bound = bounds.end;
-        let initial_root = H::db_root(&target_db);
-
-        let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            context: context.child("client"),
-            db_config: H::config(&format!("ub-dec-{}", context.next_u64()), &context),
-            fetch_batch_size: NZU64!(5),
-            target: Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 10,
-            update_rx: Some(update_receiver),
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 1,
-        };
-        let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
-
-        update_sender
-            .send(Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound - 1),
-            })
-            .await
-            .unwrap();
-
-        // The non-advancing update is discarded and the sync completes at the original target.
-        let synced_db = client.sync().await.unwrap();
-        assert_eq!(H::db_root(&synced_db), initial_root);
-        H::destroy(synced_db).await;
-
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(100);
-        let target_db = H::apply_ops(target_db, target_ops, None).await;
-
-        let bounds = H::bounds(&target_db);
-        let initial_lower_bound = bounds.start;
-        let initial_upper_bound = bounds.end;
-        let initial_root = H::db_root(&target_db);
-
-        let more_ops = H::create_ops_seeded(5, 1);
-        let target_db = H::apply_ops(target_db, more_ops, None).await;
-
-        let target_db = H::prune(target_db, Location::new(10)).await;
-        let target_db = H::apply_ops(target_db, vec![], None).await;
-
-        let bounds = H::bounds(&target_db);
-        let final_lower_bound = bounds.start;
-        let final_upper_bound = bounds.end;
-        let final_root = H::db_root(&target_db);
-
-        assert_ne!(final_lower_bound, initial_lower_bound);
-        assert_ne!(final_upper_bound, initial_upper_bound);
-
-        let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            context: context.child("client"),
-            db_config: H::config(&format!("bounds_inc_{}", context.next_u64()), &context),
-            fetch_batch_size: NZU64!(1),
-            target: Target {
-                root: initial_root,
-                range: non_empty_range!(initial_lower_bound, initial_upper_bound),
-            },
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 1,
-            update_rx: Some(update_receiver),
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 1,
-        };
-
-        update_sender
-            .send(Target {
-                root: final_root,
-                range: non_empty_range!(final_lower_bound, final_upper_bound),
-            })
-            .await
-            .unwrap();
-
-        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        assert_eq!(H::db_root(&synced_db), final_root);
-        let bounds = H::bounds(&synced_db);
-        assert_eq!(bounds.end, final_upper_bound);
-        assert_eq!(bounds.start, final_lower_bound);
-
-        H::destroy(synced_db).await;
-        let target_db =
-            Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("Failed to unwrap Arc"));
-        H::destroy(target_db).await;
-    });
-}
-
-pub(crate) fn test_sync_nonzero_floor<H: SyncTestHarness>()
+pub(crate) fn test_sync_nonzero_floor<H: ImmutableSyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -784,61 +122,6 @@ where
                 );
             }
         }
-
-        H::destroy(synced_db).await;
-        H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")))
-            .await;
-    });
-}
-
-pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
-where
-    OpOf<H>: Encode + Clone,
-    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
-{
-    let executor = deterministic::Runner::default();
-    executor.start(|mut context| async move {
-        let target_db = H::init_db(context.child("target")).await;
-        let target_ops = H::create_ops(10);
-        let target_db = H::apply_ops(target_db, target_ops, None).await;
-
-        let bounds = H::bounds(&target_db);
-        let lower_bound = bounds.start;
-        let upper_bound = bounds.end;
-        let root = H::db_root(&target_db);
-
-        let (update_sender, update_receiver) = mpsc::channel(1);
-        let target_db = Arc::new(target_db);
-        let config = Config {
-            context: context.child("client"),
-            db_config: H::config(&format!("done_{}", context.next_u64()), &context),
-            fetch_batch_size: NZU64!(20),
-            target: Target {
-                root,
-                range: non_empty_range!(lower_bound, upper_bound),
-            },
-            source: target_db.clone(),
-            apply_batch_size: NZU64!(1024),
-            max_outstanding_requests: 10,
-            update_rx: Some(update_receiver),
-            finish_rx: None,
-            reached_target_tx: None,
-            max_retained_roots: 1,
-        };
-
-        let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
-
-        let _ = update_sender
-            .send(Target {
-                root: sha256::Digest::from([2u8; 32]),
-                range: non_empty_range!(lower_bound + 1, upper_bound + 1),
-            })
-            .await;
-
-        assert_eq!(H::db_root(&synced_db), root);
-        let bounds = H::bounds(&synced_db);
-        assert_eq!(bounds.end, upper_bound);
-        assert_eq!(bounds.start, lower_bound);
 
         H::destroy(synced_db).await;
         H::destroy(Arc::try_unwrap(target_db).unwrap_or_else(|_| panic!("failed to unwrap Arc")))
@@ -951,8 +234,6 @@ pub(crate) mod harnesses {
     impl<F: Family> SyncTestHarness for VariableHarness<F> {
         type Family = F;
         type Db = VariableDb<F>;
-        type Key = sha256::Digest;
-        type Value = sha256::Digest;
         type Metadata = sha256::Digest;
 
         fn config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
@@ -1001,23 +282,6 @@ pub(crate) mod harnesses {
             variable_apply_ops::<F>(db, ops, metadata).await
         }
 
-        async fn apply_ops_with_floor(
-            db: Self::Db,
-            ops: Vec<OpOf<Self>>,
-            metadata: Option<Self::Metadata>,
-            floor: Location<Self::Family>,
-        ) -> Self::Db {
-            variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
-        }
-
-        async fn commit(db: Self::Db) -> Self::Db {
-            db.commit().await.unwrap()
-        }
-
-        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
-            db.inactivity_floor_loc()
-        }
-
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
             // Advance the inactivity floor to `loc` via a commit before pruning,
             // since prune requires the floor to be at or beyond the prune target.
@@ -1039,6 +303,37 @@ pub(crate) mod harnesses {
             db.get_metadata().await.unwrap()
         }
 
+        async fn assert_ops_applied(db: &Self::Db, ops: &[OpOf<Self>]) {
+            for op in ops {
+                if let Some((key, expected_value)) = Self::op_kv(op) {
+                    let got = Self::lookup(db, key).await;
+                    assert_eq!(got.as_ref(), Some(expected_value));
+                }
+            }
+        }
+    }
+
+    impl<F: Family> ImmutableSyncTestHarness for VariableHarness<F> {
+        type Key = sha256::Digest;
+        type Value = sha256::Digest;
+
+        async fn apply_ops_with_floor(
+            db: Self::Db,
+            ops: Vec<OpOf<Self>>,
+            metadata: Option<Self::Metadata>,
+            floor: Location<Self::Family>,
+        ) -> Self::Db {
+            variable_apply_ops_with_floor::<F>(db, ops, metadata, floor).await
+        }
+
+        async fn commit(db: Self::Db) -> Self::Db {
+            db.commit().await.unwrap()
+        }
+
+        fn inactivity_floor_loc(db: &Self::Db) -> Location<Self::Family> {
+            db.inactivity_floor_loc()
+        }
+
         fn op_kv(op: &OpOf<Self>) -> Option<(&Self::Key, &Self::Value)> {
             match op {
                 Operation::Set(key, value) => Some((key, value)),
@@ -1055,92 +350,28 @@ pub(crate) mod harnesses {
     pub(crate) type VariableMmbHarness = VariableHarness<mmb::Family>;
 }
 
-// ===== Test Generation Macro =====
+// ===== Test Generation =====
 
-macro_rules! sync_tests {
-    ($harness:ty, $mod_name:ident) => {
-        mod $mod_name {
-            use super::harnesses;
-            use commonware_macros::test_traced;
-            use rstest::rstest;
-            use std::num::NonZeroU64;
-
-            #[rstest]
-            #[case::singleton_batch_size_one(1, 1)]
-            #[case::singleton_batch_size_gt_db_size(1, 2)]
-            #[case::batch_size_one(1000, 1)]
-            #[case::floor_div_db_batch_size(1000, 3)]
-            #[case::floor_div_db_batch_size_2(1000, 999)]
-            #[case::div_db_batch_size(1000, 100)]
-            #[case::db_size_eq_batch_size(1000, 1000)]
-            #[case::batch_size_gt_db_size(1000, 1001)]
-            fn test_sync(#[case] target_db_ops: usize, #[case] fetch_batch_size: u64) {
-                super::test_sync::<$harness>(
-                    target_db_ops,
-                    NonZeroU64::new(fetch_batch_size).unwrap(),
-                );
-            }
-
-            #[test_traced("WARN")]
-            fn test_sync_empty_to_nonempty() {
-                super::test_sync_empty_to_nonempty::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_sync_database_persistence() {
-                super::test_sync_database_persistence::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_during_sync() {
-                super::test_target_update_during_sync::<$harness>();
-            }
-
-            #[test]
-            fn test_sync_subset_of_target_database() {
-                super::test_sync_subset_of_target_database::<$harness>();
-            }
-
-            #[test]
-            fn test_sync_use_existing_db_partial_match() {
-                super::test_sync_use_existing_db_partial_match::<$harness>();
-            }
-
-            #[test]
-            fn test_sync_use_existing_db_exact_match() {
-                super::test_sync_use_existing_db_exact_match::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_lower_bound_decrease() {
-                super::test_target_update_lower_bound_decrease::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_upper_bound_decrease() {
-                super::test_target_update_upper_bound_decrease::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_bounds_increase() {
-                super::test_target_update_bounds_increase::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_target_update_on_done_client() {
-                super::test_target_update_on_done_client::<$harness>();
-            }
-
-            #[test_traced("WARN")]
-            fn test_sync_nonzero_floor() {
-                super::test_sync_nonzero_floor::<$harness>();
-            }
+/// Emits the immutable-specific sync tests for `$harness`.
+macro_rules! immutable_sync_tests {
+    ($harness:ty) => {
+        #[test_traced("WARN")]
+        fn test_sync_nonzero_floor() {
+            super::test_sync_nonzero_floor::<$harness>();
         }
     };
 }
 
-sync_tests!(harnesses::VariableMmrHarness, variable_mmr);
-sync_tests!(harnesses::VariableMmbHarness, variable_mmb);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::VariableMmrHarness,
+    variable_mmr,
+    immutable_sync_tests
+);
+crate::qmdb::sync::harness::sync_tests!(
+    harnesses::VariableMmbHarness,
+    variable_mmb,
+    immutable_sync_tests
+);
 
 /// A completed sync journal reuses local pinned nodes only when the persisted state can
 /// authenticate the target: a target starting below the local pruning boundary is declined,
@@ -1207,36 +438,6 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         );
         drop(journal);
     });
-}
-
-/// Engine configuration for a compact sync over the one-operation range ending at the target.
-fn compact_engine_config<DB, S>(
-    context: DB::Context,
-    source: S,
-    target: sync::CompactTarget<DB::Family, DB::Digest>,
-    db_config: DB::Config,
-) -> sync::engine::Config<DB, S>
-where
-    DB: sync::Database,
-    S: sync::SourceFor<DB>,
-    DB::Op: Encode,
-{
-    sync::engine::Config {
-        context,
-        db_config,
-        fetch_batch_size: NZU64!(1),
-        target: sync::Target {
-            root: target.root,
-            range: non_empty_range!(target.size - 1, target.size),
-        },
-        source,
-        apply_batch_size: NZU64!(1024),
-        max_outstanding_requests: 1,
-        update_rx: None,
-        finish_rx: None,
-        reached_target_tx: None,
-        max_retained_roots: 1,
-    }
 }
 
 mod compact_variable {
