@@ -1,6 +1,6 @@
 use crate::{
     Context,
-    journal::{authenticated, contiguous::Contiguous},
+    journal::authenticated,
     merkle::{Family, Location},
     qmdb::sync::{Journal, Target},
 };
@@ -121,7 +121,7 @@ where
     H: Hasher,
     S: Strategy,
     J: Journal<F, Context = E>
-        + Contiguous<Item: commonware_codec::EncodeShared + crate::qmdb::operation::Floored<F>>,
+        + authenticated::ReplayEncoded<Item: crate::qmdb::operation::Floored<F>>,
     J::Config: Clone,
 {
     let start = target.range.start();
@@ -193,7 +193,9 @@ where
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::fixed, merkle::mmr::Family as F, qmdb::keyless::fixed::Operation,
+        journal::contiguous::{Contiguous, fixed},
+        merkle::mmr::Family as F,
+        qmdb::keyless::fixed::Operation,
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::Sequential;

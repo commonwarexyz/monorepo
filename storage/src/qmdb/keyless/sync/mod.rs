@@ -19,7 +19,9 @@ where
     F: Family,
     E: Context,
     V: Codec,
-    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
+    C: Mutable<Item = Operation<F, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, V>>
+        + crate::journal::authenticated::ReplayEncoded,
     C::Config: Clone + Send,
     H: Hasher,
     S: Strategy,

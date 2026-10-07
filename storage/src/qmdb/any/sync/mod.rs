@@ -51,7 +51,7 @@ where
     U: Update,
     I: IndexFactory + SnapshotBuild<F>,
     H: Hasher,
-    C: Mutable<Item = Operation<F, U>> + 'static,
+    C: Mutable<Item = Operation<F, U>> + crate::journal::authenticated::ReplayEncoded + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
 {
@@ -89,6 +89,7 @@ where
     E: Context + Spawner,
     C: Mutable<Item = Operation<F, U>>
         + sync::Journal<F, Context = E, Op = Operation<F, U>>
+        + crate::journal::authenticated::ReplayEncoded
         + 'static,
     <C as sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,

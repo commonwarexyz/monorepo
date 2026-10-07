@@ -1,12 +1,10 @@
 //! Durable state of an operation range being imported by synchronization.
 
-use super::{APPLY_BATCH_SIZE, Config, Error, Frontier, Tree, metrics::Metrics};
+use super::{APPLY_BATCH_SIZE, Config, Error, Frontier, ReplayEncoded, Tree, metrics::Metrics};
 use crate::{
     Context,
-    journal::contiguous::Contiguous,
     merkle::{Family, Location, hasher::Hasher},
 };
-use commonware_codec::EncodeShared;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 
@@ -86,7 +84,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Import<F, E, D, S> {
         inactive: usize,
     ) -> Result<Local<D>, Error<F>>
     where
-        C: Contiguous<Item: EncodeShared>,
+        C: ReplayEncoded,
         H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
     {
         let Some(boundary) = self.frontier.boundary() else {

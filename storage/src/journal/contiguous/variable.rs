@@ -28,8 +28,8 @@ use crate::{
         Error,
         durability::Barrier,
         frame::{
-            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
-            read_frame_at,
+            FrameInfo, Limited, decode_item, decode_length_prefix, decompress, encode_frame_into,
+            find_frame, read_frame_at,
         },
     },
 };
@@ -47,7 +47,7 @@ use futures::{
 #[cfg(test)]
 use std::future::pending;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     iter::once,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -231,6 +231,46 @@ struct ReplayState<'a, B: RBlob, V: Codec> {
     _marker: PhantomData<V>,
 }
 
+impl<B: RBlob, V: Codec> ReplayState<'_, B, V> {
+    /// Buffer the next frame and read its header. Returns the payload size and the offset of the
+    /// following frame.
+    async fn next_frame(&mut self) -> Result<(usize, u64), Error> {
+        // A short read before a frame header is corruption for replay: bounds and offsets say
+        // this item exists, so EOF here means the data blob is shorter than expected.
+        if !self.replay.ensure(MAX_U32_VARINT_SIZE).await? && self.replay.remaining() == 0 {
+            return Err(Error::Corruption(format!(
+                "data blob {} ended before position {}",
+                self.blob, self.pos
+            )));
+        }
+
+        // Keep the initial byte count for classifying a failed header read.
+        let before_remaining = self.replay.remaining();
+        let (item_size, varint_len) = self.replay.read_length().map_err(|err| {
+            if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
+                Error::Corruption(format!(
+                    "incomplete frame header in data blob {} at offset {}",
+                    self.blob, self.offset
+                ))
+            } else {
+                err
+            }
+        })?;
+        if !self.replay.ensure(item_size).await? {
+            return Err(Error::Corruption(format!(
+                "incomplete frame in data blob {} at offset {}",
+                self.blob, self.offset
+            )));
+        }
+        let next_offset = self
+            .offset
+            .checked_add(varint_len as u64)
+            .and_then(|offset| offset.checked_add(item_size as u64))
+            .ok_or(Error::OffsetOverflow)?;
+        Ok((item_size, next_offset))
+    }
+}
+
 impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V> {
     type Item = V;
 
@@ -246,70 +286,13 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
             if self.pos == self.end_pos {
                 return (!batch.is_empty()).then_some((batch, self));
             }
-
-            // A short read before a frame header is corruption for replay: bounds and offsets say
-            // this item exists, so EOF here means the data blob is shorter than expected.
-            match self.replay.ensure(MAX_U32_VARINT_SIZE).await {
-                Ok(true) => {}
-                Ok(false) if self.replay.remaining() == 0 => {
-                    batch.push(Err(Error::Corruption(format!(
-                        "data blob {} ended before position {}",
-                        self.blob, self.pos
-                    ))));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
-                }
-                Ok(false) => {}
+            let (item_size, next_offset) = match self.next_frame().await {
+                Ok(frame) => frame,
                 Err(err) => {
                     batch.push(Err(err));
                     self.pos = self.end_pos;
                     return Some((batch, self));
                 }
-            }
-
-            // Keep the initial byte count for classifying a failed header read.
-            let before_remaining = self.replay.remaining();
-            let (item_size, varint_len) = match self.replay.read_length() {
-                Ok(result) => result,
-                Err(err) => {
-                    if self.replay.is_exhausted() || before_remaining < MAX_U32_VARINT_SIZE {
-                        batch.push(Err(Error::Corruption(format!(
-                            "incomplete frame header in data blob {} at offset {}",
-                            self.blob, self.offset
-                        ))));
-                    } else {
-                        batch.push(Err(err));
-                    }
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
-                }
-            };
-
-            match self.replay.ensure(item_size).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    batch.push(Err(Error::Corruption(format!(
-                        "incomplete frame in data blob {} at offset {}",
-                        self.blob, self.offset
-                    ))));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
-                }
-                Err(err) => {
-                    batch.push(Err(err));
-                    self.pos = self.end_pos;
-                    return Some((batch, self));
-                }
-            }
-
-            let next_offset = self
-                .offset
-                .checked_add(varint_len as u64)
-                .and_then(|offset| offset.checked_add(item_size as u64));
-            let Some(next_offset) = next_offset else {
-                batch.push(Err(Error::OffsetOverflow));
-                self.pos = self.end_pos;
-                return Some((batch, self));
             };
             let item_len = next_offset - self.offset;
 
@@ -353,6 +336,48 @@ impl<B: RBlob, V: CodecShared> super::ReplayBatchState for ReplayState<'_, B, V>
                 return Some((batch, self));
             }
         }
+    }
+}
+
+/// Copies the stored encodings of varint-framed items, one blob at a time.
+#[commonware_macros::stability(ALPHA)]
+struct EncodedReader<'a, B: RBlob, V: Codec> {
+    /// Remaining blobs, in order.
+    states: VecDeque<ReplayState<'a, B, V>>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: RBlob, V: CodecShared> authenticated::EncodedReader for EncodedReader<'_, B, V> {
+    async fn read(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        ends: &mut Vec<usize>,
+        max_items: usize,
+        max_bytes: usize,
+    ) -> Result<usize, Error> {
+        let mut read = 0;
+        while read < max_items && bytes.len() < max_bytes {
+            let Some(state) = self.states.front_mut() else {
+                break;
+            };
+            if state.pos == state.end_pos {
+                self.states.pop_front();
+                continue;
+            }
+            let (item_size, next_offset) = state.next_frame().await?;
+            let start = bytes.len();
+            state.replay.append_to(bytes, item_size);
+            if state.compressed {
+                let item = decompress(&bytes[start..])?;
+                bytes.truncate(start);
+                bytes.extend_from_slice(&item);
+            }
+            ends.push(bytes.len());
+            state.pos += 1;
+            state.offset = next_offset;
+            read += 1;
+        }
+        Ok(read)
     }
 }
 
@@ -2678,6 +2703,23 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
 }
 
 #[commonware_macros::stability(ALPHA)]
+impl<E: Context, V: CodecShared> authenticated::ReplayEncoded for Journal<E, V> {
+    async fn replay_encoded(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+    ) -> Result<impl authenticated::EncodedReader, Error> {
+        let reader = self.0.reader();
+        let states = reader
+            .replay_states(range, buffer, ReadOptions::default())
+            .await?;
+        Ok(EncodedReader {
+            states: states.into(),
+        })
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
 impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
     type Recovery = Recovery<E, V>;
 
@@ -2854,11 +2896,12 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{
                 checkpoint::Checkpoint,
-                tests::{init_sync, run_contiguous_tests},
+                tests::{init_sync, read_encoded, run_contiguous_tests},
             },
         },
         utils::{codec::View, storage_pool_allocated_bytes},
     };
+    use commonware_codec::Encode as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPoolConfig, BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage,
@@ -5447,6 +5490,63 @@ mod tests {
             ));
 
             journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `replay_encoded` yields each item's encoding from a pruned, mid-section start through an
+    /// unsynced tail, within the read limits, with and without compression.
+    #[test_traced]
+    fn test_variable_replay_encoded() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for (label, compression) in [("plain", None), ("compressed", Some(3))] {
+                let cfg = Config {
+                    partition: format!("replay-encoded-{label}"),
+                    items_per_section: NZU64!(3),
+                    compression,
+                    codec_config: ((..=4096).into(), ()),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(64),
+                };
+                let items: Vec<Vec<u8>> = (0..25u8)
+                    .map(|i| (0..(i as usize * 37) % 250).map(|j| i ^ j as u8).collect())
+                    .collect();
+                let mut journal = Journal::<_, Vec<u8>>::init(context.child(label), cfg)
+                    .await
+                    .unwrap();
+                for item in &items[..20] {
+                    (journal, _) = journal.append(item).await.unwrap();
+                }
+                journal = journal.sync().await.unwrap();
+                (journal, _) = journal.prune(4).await.unwrap();
+                for item in &items[20..] {
+                    (journal, _) = journal.append(item).await.unwrap();
+                }
+
+                let start = 5;
+                let mut expected = Vec::new();
+                let mut expected_ends = Vec::new();
+                for item in &items[start..] {
+                    expected.extend_from_slice(&item.encode());
+                    expected_ends.push(expected.len());
+                }
+                for (max_items, max_bytes) in
+                    [(usize::MAX, usize::MAX), (2, usize::MAX), (usize::MAX, 1)]
+                {
+                    let mut reader = authenticated::ReplayEncoded::replay_encoded(
+                        &journal,
+                        start as u64..25,
+                        NZUsize!(64),
+                    )
+                    .await
+                    .unwrap();
+                    let (bytes, ends) = read_encoded(&mut reader, max_items, max_bytes).await;
+                    assert_eq!(bytes, expected);
+                    assert_eq!(ends, expected_ends);
+                }
+                journal.destroy().await.unwrap();
+            }
         });
     }
 

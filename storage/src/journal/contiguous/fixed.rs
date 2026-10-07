@@ -156,7 +156,7 @@ use commonware_runtime::{
 use commonware_utils::Cached;
 use futures::{FutureExt as _, Stream, future::try_join_all};
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, VecDeque, btree_map::Entry},
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -185,10 +185,6 @@ fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Resul
 }
 
 /// Build a replay stream over the retained blob range.
-///
-/// The stream is split into one state per blob so replay can start at a mid-blob pruning boundary,
-/// stop at the journal's logical end, and avoid reading across blob files. `buffer` is a byte
-/// budget for each blob replay, not an item count.
 fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     blobs: &Blobs<'a, B>,
     bounds: Range<u64>,
@@ -197,6 +193,23 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
     buffer: NonZeroUsize,
     read_options: ReadOptions,
 ) -> Result<impl Stream<Item = Result<(u64, A), Error>> + Send + use<'a, B, A>, Error> {
+    let states = replay_states(blobs, bounds, items_per_blob, range, buffer, read_options)?;
+    Ok(super::replay_stream_from_states(states))
+}
+
+/// Build one replay state per blob in the retained blob range.
+///
+/// Replay is split by blob so it can start at a mid-blob pruning boundary, stop at the journal's
+/// logical end, and avoid reading across blob files. `buffer` is a byte budget for each blob
+/// replay, not an item count.
+fn replay_states<'a, B: RBlob, A: CodecFixedShared>(
+    blobs: &Blobs<'a, B>,
+    bounds: Range<u64>,
+    items_per_blob: NonZeroU64,
+    range: Range<u64>,
+    buffer: NonZeroUsize,
+    read_options: ReadOptions,
+) -> Result<Vec<FixedReplayState<'a, B, A>>, Error> {
     if range.start > range.end || range.end > bounds.end {
         return Err(Error::ItemOutOfRange(if range.start > range.end {
             range.start
@@ -242,8 +255,7 @@ fn replay_stream<'a, B: RBlob, A: CodecFixedShared>(
             });
         }
     }
-
-    Ok(super::replay_stream_from_states(states))
+    Ok(states)
 }
 
 /// Replay state for one fixed-size blob.
@@ -314,6 +326,53 @@ impl<B: RBlob, A: CodecFixedShared> super::ReplayBatchState for FixedReplayState
         }
         self.pos = next_pos;
         Some((batch, self))
+    }
+}
+
+/// Copies the stored encodings of fixed-size items, one blob at a time.
+#[commonware_macros::stability(ALPHA)]
+struct EncodedReader<'a, B: RBlob, A> {
+    /// Remaining blobs, in order.
+    states: VecDeque<FixedReplayState<'a, B, A>>,
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<B: RBlob, A: CodecFixedShared> authenticated::EncodedReader for EncodedReader<'_, B, A> {
+    async fn read(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        ends: &mut Vec<usize>,
+        max_items: usize,
+        max_bytes: usize,
+    ) -> Result<usize, Error> {
+        let mut read = 0;
+        while read < max_items && bytes.len() < max_bytes {
+            let Some(state) = self.states.front_mut() else {
+                break;
+            };
+            if state.pos == state.end_pos {
+                self.states.pop_front();
+                continue;
+            }
+            if !state.replay.ensure(A::SIZE).await? {
+                return Err(Error::Corruption(format!(
+                    "blob ended before position {}",
+                    state.pos
+                )));
+            }
+
+            // Copy every whole item already buffered, within the limits.
+            let count = (state.replay.remaining() / A::SIZE)
+                .min(max_items - read)
+                .min(usize::try_from(state.end_pos - state.pos).unwrap_or(usize::MAX))
+                .min((max_bytes - bytes.len()).div_ceil(A::SIZE));
+            let start = bytes.len();
+            state.replay.append_to(bytes, count * A::SIZE);
+            ends.extend((1..=count).map(|i| start + i * A::SIZE));
+            state.pos += count as u64;
+            read += count;
+        }
+        Ok(read)
     }
 }
 
@@ -2110,6 +2169,28 @@ impl<E: Context, A: CodecFixedShared> authenticated::BackingRecovery for Recover
 }
 
 #[commonware_macros::stability(ALPHA)]
+impl<E: Context, A: CodecFixedShared> authenticated::ReplayEncoded for Journal<E, A> {
+    async fn replay_encoded(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+    ) -> Result<impl authenticated::EncodedReader, Error> {
+        let blobs = self.0.blobs.reader();
+        let states = replay_states::<_, A>(
+            &blobs,
+            self.0.bounds.clone(),
+            self.0.items_per_blob,
+            range,
+            buffer,
+            ReadOptions::default(),
+        )?;
+        Ok(EncodedReader {
+            states: states.into(),
+        })
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
 impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A> {
     type Recovery = Recovery<E, A>;
 
@@ -2261,8 +2342,11 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{journal::contiguous::Contiguous as _, utils::codec::View};
-    use commonware_codec::FixedSize;
+    use crate::{
+        journal::contiguous::{Contiguous as _, tests::read_encoded},
+        utils::codec::View,
+    };
+    use commonware_codec::{Encode as _, FixedSize};
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -4002,6 +4086,56 @@ mod tests {
                 .map(|_| ())
                 .unwrap_err();
             assert!(matches!(err, Error::ItemOutOfRange(10)));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// `replay_encoded` yields each item's encoding from a pruned, mid-blob start through an
+    /// unsynced tail, within the read limits.
+    #[test_traced]
+    fn test_fixed_journal_replay_encoded() {
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
+            let mut journal = Journal::init(context.child("storage"), cfg).await.unwrap();
+            for i in 0u64..40 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            (journal, _) = journal.prune(10).await.unwrap();
+            for i in 40u64..45 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+
+            let start = 12;
+            let expected: Vec<u8> = (start..45).flat_map(|i| test_digest(i).encode()).collect();
+            let size = Digest::SIZE;
+            for (max_items, max_bytes) in
+                [(usize::MAX, usize::MAX), (5, usize::MAX), (usize::MAX, 1)]
+            {
+                let mut reader =
+                    authenticated::ReplayEncoded::replay_encoded(&journal, start..45, NZUsize!(64))
+                        .await
+                        .unwrap();
+                let (bytes, ends) = read_encoded(&mut reader, max_items, max_bytes).await;
+                assert_eq!(bytes, expected);
+                assert_eq!(
+                    ends,
+                    (1..=expected.len() / size)
+                        .map(|i| i * size)
+                        .collect::<Vec<_>>()
+                );
+            }
+
+            // Positions below the pruning boundary are rejected.
+            let err = authenticated::ReplayEncoded::replay_encoded(&journal, 0..45, NZUsize!(64))
+                .await
+                .map(|_| ())
+                .unwrap_err();
+            assert!(matches!(err, Error::ItemPruned(0)));
 
             journal.destroy().await.unwrap();
         });

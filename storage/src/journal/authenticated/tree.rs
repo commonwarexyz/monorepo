@@ -10,21 +10,21 @@
 //! - Batches only append, so a cached digest never changes.
 //! - At most one fill of a region runs at a time.
 
-use super::{Config, metrics::Metrics};
+use super::{Config, EncodedReader, ReplayEncoded, metrics::Metrics};
 use crate::{
-    journal::{Error as JournalError, contiguous::Contiguous},
+    journal::contiguous::Contiguous,
     merkle::{self, Family, Location, Position, Readable, batch, hasher::Hasher, mem::Mem},
 };
 use commonware_codec::{Encode, EncodeShared};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_runtime::{ReadOptions, telemetry::metrics::GaugeExt as _};
+use commonware_runtime::telemetry::metrics::GaugeExt as _;
 use commonware_utils::{
     bitmap::BitMap,
     cache::Cache,
     sync::{AsyncMutex, RwLock},
 };
-use futures::{Stream, StreamExt as _, TryStreamExt as _, stream};
+use futures::{StreamExt as _, TryStreamExt as _, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
     num::{NonZeroU64, NonZeroUsize},
@@ -303,7 +303,7 @@ pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     regions: Regions<D>,
     strategy: S,
     replay_buffer: NonZeroUsize,
-    /// Encoded bytes hashed per replay batch. A larger item forms its own batch.
+    /// Encoded bytes after which a replay batch ends.
     hash_batch_bytes: usize,
 }
 
@@ -360,7 +360,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         batch_size: NonZeroU64,
     ) -> Result<Self, super::Error<F>>
     where
-        C: Contiguous<Item: EncodeShared>,
+        C: ReplayEncoded,
         H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
     {
         if !end.is_valid()
@@ -370,67 +370,47 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         {
             return Err(merkle::Error::RangeOutOfBounds(end).into());
         }
-        let replay = journal
-            .replay_range(
-                *self.leaves()..*end,
-                self.replay_buffer,
-                ReadOptions::default(),
-            )
-            .await?
-            .fuse();
-        futures::pin_mut!(replay);
+        let mut reader = journal
+            .replay_encoded(*self.leaves()..*end, self.replay_buffer)
+            .await?;
+        let max_items = usize::try_from(batch_size.get()).unwrap_or(usize::MAX);
         let max_bytes = self.hash_batch_bytes;
-        let mut carry = None;
-        let mut next =
-            Self::read_encoded(&mut replay, &mut carry, *end, batch_size.get(), max_bytes).await?;
+        let mut loc = self.leaves();
+        let mut next = Self::read_encoded(&mut reader, loc, max_items, max_bytes).await?;
         // Read each batch while the previous one hashes.
         while !next.leaves.is_empty() {
+            loc += next.leaves.len() as u64;
             let encoded = std::mem::replace(&mut next, Encoded::new());
             (self, next) = futures::try_join!(
                 self.apply_encoded(hasher, encoded),
-                Self::read_encoded(&mut replay, &mut carry, *end, batch_size.get(), max_bytes),
+                Self::read_encoded(&mut reader, loc, max_items, max_bytes),
             )?;
         }
         Ok(self)
     }
 
-    /// Read the next replay batch, ending before `end`. An item that would overflow a non-empty
-    /// batch is held in `carry` for the next one.
-    async fn read_encoded<T: Encode>(
-        replay: &mut (impl Stream<Item = Result<(u64, T), JournalError>> + Unpin),
-        carry: &mut Option<(u64, T)>,
-        end: u64,
-        max_items: u64,
+    /// Read the next replay batch, whose first item is at `loc`.
+    async fn read_encoded(
+        reader: &mut impl EncodedReader,
+        loc: Location<F>,
+        max_items: usize,
         max_bytes: usize,
     ) -> Result<Encoded<F>, super::Error<F>> {
         let mut encoded = Encoded::new();
-        loop {
-            let (loc, item) = match carry.take() {
-                Some(next) => next,
-                None => match replay.try_next().await? {
-                    Some(next) => next,
-                    None => break,
-                },
-            };
-            let size = item.encode_size();
-            if encoded.leaves.is_empty() {
-                // Size the batch from its first item, within the byte budget, to avoid regrowth.
-                let items = end
-                    .saturating_sub(loc)
-                    .min(max_items)
-                    .min((max_bytes / size.max(1)) as u64) as usize;
-                encoded.leaves.reserve(items);
-                encoded
-                    .bytes
-                    .reserve(size.saturating_mul(items).min(max_bytes));
-            } else if encoded.leaves.len() as u64 >= max_items
-                || size > max_bytes.saturating_sub(encoded.bytes.len())
-            {
-                *carry = Some((loc, item));
-                break;
-            }
-            encoded.push(F::location_to_position(Location::new(loc)), &item);
-        }
+        let mut ends = Vec::new();
+        reader
+            .read(&mut encoded.bytes, &mut ends, max_items, max_bytes)
+            .await?;
+        let mut start = 0;
+        encoded.leaves = ends
+            .into_iter()
+            .zip(*loc..)
+            .map(|(end, loc)| {
+                let leaf = (F::location_to_position(Location::new(loc)), start..end);
+                start = end;
+                leaf
+            })
+            .collect();
         Ok(encoded)
     }
 
@@ -842,7 +822,7 @@ mod tests {
     };
     use commonware_cryptography::{Sha256, sha256::Digest as D};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{Runner as _, deterministic, reschedule};
+    use commonware_runtime::{ReadOptions, Runner as _, deterministic, reschedule};
     use commonware_utils::NZU64;
     use std::{
         ops::Range,
@@ -923,6 +903,43 @@ mod tests {
                 stream::iter(range)
                     .then(move |loc| async move { Ok((loc, self.read(loc).await?)) }),
             )
+        }
+    }
+
+    struct OperationsReader<'a> {
+        ops: &'a Operations,
+        range: Range<u64>,
+    }
+
+    impl EncodedReader for OperationsReader<'_> {
+        async fn read(
+            &mut self,
+            bytes: &mut Vec<u8>,
+            ends: &mut Vec<usize>,
+            max_items: usize,
+            max_bytes: usize,
+        ) -> Result<usize, JournalError> {
+            let mut read = 0;
+            while read < max_items && bytes.len() < max_bytes {
+                let Some(loc) = self.range.next() else {
+                    break;
+                };
+                bytes.extend_from_slice(&self.ops.read(loc).await?.encode());
+                ends.push(bytes.len());
+                read += 1;
+            }
+            Ok(read)
+        }
+    }
+
+    impl ReplayEncoded for Operations {
+        async fn replay_encoded(
+            &self,
+            range: Range<u64>,
+            _: NonZeroUsize,
+        ) -> Result<impl EncodedReader, JournalError> {
+            assert!(range.start >= self.bounds.start && range.end <= self.bounds.end);
+            Ok(OperationsReader { ops: self, range })
         }
     }
 

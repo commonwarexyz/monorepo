@@ -687,7 +687,10 @@ where
         start: Location<F>,
         pins: Vec<H::Digest>,
         apply_batch_size: NonZeroU64,
-    ) -> Result<Self, Error<F>> {
+    ) -> Result<Self, Error<F>>
+    where
+        C: ReplayEncoded,
+    {
         let Import {
             frontier,
             metrics,
@@ -722,7 +725,10 @@ where
         journal: &C,
         hasher: &StandardHasher<H>,
         apply_batch_size: NonZeroU64,
-    ) -> Result<Tree<F, H::Digest, S>, Error<F>> {
+    ) -> Result<Tree<F, H::Digest, S>, Error<F>>
+    where
+        C: ReplayEncoded,
+    {
         let end = Location::new(journal.bounds().end);
         merkle.replay(journal, hasher, end, apply_batch_size).await
     }
@@ -1326,8 +1332,32 @@ where
     Ok(0)
 }
 
+/// A journal that can read back its items' encodings without decoding the items.
+pub trait ReplayEncoded: Contiguous<Item: EncodeShared> {
+    /// Read the encodings of the items in `range`, in order.
+    fn replay_encoded(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+    ) -> impl Future<Output = Result<impl EncodedReader, JournalError>> + Send;
+}
+
+/// Sequential reader of item encodings, returned by [ReplayEncoded::replay_encoded].
+pub trait EncodedReader: Send {
+    /// Append the encodings of up to `max_items` next items to `bytes`, pushing the end offset of
+    /// each to `ends`. Stops early once `bytes` is at least `max_bytes` long. Returns the number
+    /// read, which is zero only at the end of the range.
+    fn read(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        ends: &mut Vec<usize>,
+        max_items: usize,
+        max_bytes: usize,
+    ) -> impl Future<Output = Result<usize, JournalError>> + Send;
+}
+
 /// A [Mutable] journal that can back an authenticated [Journal].
-pub trait Backing<E: Context>: Mutable {
+pub trait Backing<E: Context>: Mutable + ReplayEncoded {
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send + Sync;
 

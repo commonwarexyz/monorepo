@@ -29,6 +29,26 @@ pub(super) async fn init_sync<E: crate::Context, J: crate::journal::authenticate
     Ok(journal)
 }
 
+/// Read every remaining encoding, at most `max_items` and about `max_bytes` per call.
+pub(super) async fn read_encoded(
+    reader: &mut impl crate::journal::authenticated::EncodedReader,
+    max_items: usize,
+    max_bytes: usize,
+) -> (Vec<u8>, Vec<usize>) {
+    let (mut bytes, mut ends) = (Vec::new(), Vec::new());
+    loop {
+        let limit = bytes.len().saturating_add(max_bytes);
+        let read = reader
+            .read(&mut bytes, &mut ends, max_items, limit)
+            .await
+            .unwrap();
+        if read == 0 {
+            return (bytes, ends);
+        }
+        assert!(read <= max_items);
+    }
+}
+
 /// Run the full suite of generic tests on a [Contiguous] implementation.
 ///
 /// The factory receives a test identifier, a unique invocation index, and an optional cap.
