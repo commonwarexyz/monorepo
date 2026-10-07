@@ -2588,7 +2588,6 @@ mod tests {
                     let planned = merkle::range_proof_positions(ops_leaves, range).unwrap();
                     let positions = planned.iter().map(|pos| **pos).collect::<Vec<_>>();
                     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-                    // An adapter fetches the plan in one batch and builds from memory.
                     let fetched: BTreeMap<_, _> = planned
                         .iter()
                         .copied()

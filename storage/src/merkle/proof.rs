@@ -741,12 +741,86 @@ impl<F: Family> Subtree<F> {
     }
 }
 
-/// Return the peaks of a tree of `leaves` that overlap `range`, validating both the range and the
-/// declared `inactive_peaks` boundary.
+/// The peaks of a structure of `leaves` leaves partitioned around a range, with the path siblings
+/// a proof of the range reads from the peaks it overlaps.
 ///
-/// The returned subtrees are bagging-independent: `Blueprint::new`'s prefix/suffix accumulator
-/// layout depends on bagging, but the per-peak partition of the proven range does not.
-///
+/// This is everything a range proof reads from the structure. How the peaks outside the range are
+/// then folded or listed in the proof depends on the bagging policy and the inactive-peak
+/// boundary, which [Blueprint] layers on top.
+pub(crate) struct Plan<F: Family> {
+    /// Peaks entirely before the range, in peak order.
+    before: Vec<Subtree<F>>,
+    /// Peaks overlapping the range, in peak order; never empty.
+    overlapping: Vec<Subtree<F>>,
+    /// Peak positions entirely after the range, in peak order.
+    after: Vec<Position<F>>,
+    /// Path siblings of the overlapping peaks, in left-first DFS order.
+    siblings: Vec<Position<F>>,
+}
+
+impl<F: Family> Plan<F> {
+    pub(crate) fn new(
+        leaves: Location<F>,
+        range: &Range<Location<F>>,
+    ) -> Result<Self, super::Error<F>> {
+        if range.is_empty() {
+            return Err(super::Error::Empty);
+        }
+        let end_minus_one = range
+            .end
+            .checked_sub(1)
+            .expect("can't underflow because range is non-empty");
+        if end_minus_one >= leaves {
+            return Err(super::Error::RangeOutOfBounds(range.end));
+        }
+        let size = Position::try_from(leaves)?;
+
+        let mut before = Vec::new();
+        let mut overlapping = Vec::new();
+        let mut after = Vec::new();
+        let mut leaf_start = Location::new(0);
+        for (pos, height) in F::peaks(size) {
+            let peak = Subtree {
+                pos,
+                height,
+                leaf_start,
+            };
+            leaf_start = peak.leaf_end();
+            if peak.is_before(range) {
+                before.push(peak);
+            } else if peak.leaf_start >= range.end {
+                after.push(pos);
+            } else {
+                overlapping.push(peak);
+            }
+        }
+        assert!(
+            !overlapping.is_empty(),
+            "at least one peak must contain range elements"
+        );
+
+        let mut siblings = Vec::new();
+        for peak in &overlapping {
+            peak.collect_siblings(range, &mut siblings);
+        }
+        Ok(Self {
+            before,
+            overlapping,
+            after,
+            siblings,
+        })
+    }
+
+    /// Every position a proof of the range reads, in no particular order.
+    pub(crate) fn positions(&self) -> impl Iterator<Item = Position<F>> + '_ {
+        self.before
+            .iter()
+            .map(|peak| peak.pos)
+            .chain(self.after.iter().copied())
+            .chain(self.siblings.iter().copied())
+    }
+}
+
 /// Blueprint for a range proof, separating fold-prefix peaks from nodes that must be fetched.
 pub(crate) struct Blueprint<F: Family> {
     /// Total number of leaves in the structure this blueprint was built for.
@@ -788,78 +862,42 @@ impl<F: Family> Blueprint<F> {
         bagging: Bagging,
         range: Range<Location<F>>,
     ) -> Result<Self, super::Error<F>> {
-        if range.is_empty() {
-            return Err(super::Error::Empty);
-        }
-        let end_minus_one = range
-            .end
-            .checked_sub(1)
-            .expect("can't underflow because range is non-empty");
-        if end_minus_one >= leaves {
-            return Err(super::Error::RangeOutOfBounds(range.end));
-        }
-
-        let size = Position::try_from(leaves)?;
-
-        let mut fold_prefix = Vec::new();
-        let mut prefix_active_peaks = Vec::new();
-        let mut after_peaks = Vec::new();
-        let mut suffix_peaks = Vec::new();
-        let mut range_peaks = Vec::new();
-        let mut leaf_cursor = Location::new(0);
-
-        let mut peak_index = 0;
-        for (peak_pos, height) in F::peaks(size) {
-            let leaf_start = leaf_cursor;
-            let leaf_end = leaf_start + (1u64 << height);
-
-            if leaf_end <= range.start {
-                if peak_index < inactive_peaks || bagging == Bagging::ForwardFold {
-                    fold_prefix.push(Subtree {
-                        pos: peak_pos,
-                        height,
-                        leaf_start,
-                    });
-                } else {
-                    prefix_active_peaks.push(Subtree {
-                        pos: peak_pos,
-                        height,
-                        leaf_start,
-                    });
-                }
-            } else if leaf_start >= range.end {
-                if bagging == Bagging::BackwardFold && peak_index >= inactive_peaks {
-                    suffix_peaks.push(peak_pos);
-                } else {
-                    after_peaks.push(peak_pos);
-                }
-            } else {
-                range_peaks.push(Subtree {
-                    pos: peak_pos,
-                    height,
-                    leaf_start,
-                });
-            }
-            leaf_cursor = leaf_end;
-            peak_index += 1;
-        }
+        let Plan {
+            before,
+            overlapping,
+            after,
+            siblings,
+        } = Plan::new(leaves, &range)?;
         // `inactive_peaks` is a global boundary over the tree's peaks, not just the peaks before
         // this range. It may point into or beyond the proven range; reconstruction then folds the
         // same global boundary and the final root comparison rejects non-canonical proofs.
-        if inactive_peaks > peak_index {
+        if inactive_peaks > before.len() + overlapping.len() + after.len() {
             return Err(super::Error::InvalidProof);
         }
 
-        assert!(
-            !range_peaks.is_empty(),
-            "at least one peak must contain range elements"
-        );
+        let mut fold_prefix = Vec::new();
+        let mut prefix_active_peaks = Vec::new();
+        for (index, peak) in before.into_iter().enumerate() {
+            if index < inactive_peaks || bagging == Bagging::ForwardFold {
+                fold_prefix.push(peak);
+            } else {
+                prefix_active_peaks.push(peak);
+            }
+        }
+        let first_after = fold_prefix.len() + prefix_active_peaks.len() + overlapping.len();
+        let mut after_peaks = Vec::new();
+        let mut suffix_peaks = Vec::new();
+        for (offset, pos) in after.into_iter().enumerate() {
+            if bagging == Bagging::BackwardFold && first_after + offset >= inactive_peaks {
+                suffix_peaks.push(pos);
+            } else {
+                after_peaks.push(pos);
+            }
+        }
 
         let mut fetch_nodes: Vec<_> = prefix_active_peaks.iter().map(|s| s.pos).collect();
         fetch_nodes.extend_from_slice(&after_peaks);
-        for peak in &range_peaks {
-            peak.collect_siblings(&range, &mut fetch_nodes);
-        }
+        fetch_nodes.extend(siblings);
 
         Ok(Self {
             leaves,
@@ -868,7 +906,7 @@ impl<F: Family> Blueprint<F> {
             prefix_active_peaks,
             after_peaks,
             suffix_peaks,
-            range_peaks,
+            range_peaks: overlapping,
             fetch_nodes,
         })
     }
@@ -905,15 +943,6 @@ impl<F: Family> Blueprint<F> {
             .map(|s| s.pos)
             .chain(self.fetch_nodes.iter().copied())
             .chain(self.suffix_peaks.iter().copied())
-    }
-
-    /// The positions of [Self::required_positions] in strictly increasing order, as a batched
-    /// storage read requires.
-    pub(crate) fn positions(&self) -> Vec<Position<F>> {
-        let mut positions: Vec<_> = self.required_positions().collect();
-        positions.sort_unstable();
-        positions.dedup();
-        positions
     }
 
     /// Split a proof's digest vector according to this blueprint's range-proof layout.
@@ -1039,9 +1068,10 @@ pub fn range_proof_positions<F: Family>(
     leaves: Location<F>,
     range: Range<Location<F>>,
 ) -> Result<Vec<Position<F>>, super::Error<F>> {
-    // Inactive peaks and bagging only shape the layout the blueprint also computes, which is
-    // discarded here, so any values give the same read set.
-    Ok(Blueprint::new(leaves, 0, Bagging::ForwardFold, range)?.positions())
+    let mut positions: Vec<_> = Plan::new(leaves, &range)?.positions().collect();
+    positions.sort_unstable();
+    positions.dedup();
+    Ok(positions)
 }
 
 /// Build a range proof for `range` over a structure of `leaves` leaves from the digests at
@@ -1093,9 +1123,7 @@ pub fn multi_proof_positions<F: Family>(
         if !loc.is_valid_index() {
             return Err(super::Error::LocationOverflow(*loc));
         }
-        // As in range_proof_positions, the layout parameters do not affect the read set.
-        let bp = Blueprint::new(leaves, 0, Bagging::ForwardFold, *loc..*loc + 1)?;
-        acc.extend(bp.required_positions());
+        acc.extend(Plan::new(leaves, &(*loc..*loc + 1))?.positions());
         Ok(acc)
     })?;
     Ok(positions.into_iter().collect())
@@ -1152,9 +1180,11 @@ mod tests {
                                 range.clone(),
                             )
                             .unwrap();
+                            let mut read: Vec<_> = blueprint.required_positions().collect();
+                            read.sort_unstable();
+                            read.dedup();
                             assert_eq!(
-                                blueprint.positions(),
-                                positions,
+                                read, positions,
                                 "leaves={leaves} range={start}..{end} bagging={bagging:?} inactive_peaks={inactive_peaks}"
                             );
                         }
