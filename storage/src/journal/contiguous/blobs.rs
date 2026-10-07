@@ -675,6 +675,7 @@ impl<'a, B: RBlob> Replay<'a, B> {
     }
 
     /// Move the next `len` bytes, which must be buffered, to the end of `out`.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) fn append_to(&mut self, out: &mut Vec<u8>, mut len: usize) {
         out.reserve(len);
         while len > 0 {

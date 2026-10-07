@@ -315,8 +315,11 @@ mod harnesses {
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn try_init_db_with_config(
+            ctx: Context,
+            config: ConfigOf<Self>,
+        ) -> Result<Self::Db, crate::qmdb::Error<F>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -362,8 +365,11 @@ mod harnesses {
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn try_init_db_with_config(
+            ctx: Context,
+            config: ConfigOf<Self>,
+        ) -> Result<Self::Db, crate::qmdb::Error<F>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -409,8 +415,11 @@ mod harnesses {
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn try_init_db_with_config(
+            ctx: Context,
+            config: ConfigOf<Self>,
+        ) -> Result<Self::Db, crate::qmdb::Error<F>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -456,8 +465,11 @@ mod harnesses {
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(ctx: Context, config: ConfigOf<Self>) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        async fn try_init_db_with_config(
+            ctx: Context,
+            config: ConfigOf<Self>,
+        ) -> Result<Self::Db, crate::qmdb::Error<F>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -789,6 +801,13 @@ macro_rules! current_sync_tests_for_harness {
             #[test_traced]
             fn test_local_operations_authenticate_below_floor() {
                 crate::qmdb::any::sync::tests::test_local_operations_authenticate_below_floor::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_sync_rejected_import_blocks_open_until_resync() {
+                crate::qmdb::any::sync::tests::test_sync_rejected_import_blocks_open_until_resync::<
+                    $harness,
+                >();
             }
         }
     };

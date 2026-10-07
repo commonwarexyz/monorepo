@@ -134,11 +134,19 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     /// Initialize a database
     fn init_db(ctx: deterministic::Context) -> impl std::future::Future<Output = Self::Db> + Send;
 
+    /// Initialize a database with a config, returning any initialization error.
+    fn try_init_db_with_config(
+        ctx: deterministic::Context,
+        config: ConfigOf<Self>,
+    ) -> impl std::future::Future<Output = Result<Self::Db, qmdb::Error<Self::Family>>> + Send;
+
     /// Initialize a database with a config
     fn init_db_with_config(
         ctx: deterministic::Context,
         config: ConfigOf<Self>,
-    ) -> impl std::future::Future<Output = Self::Db> + Send;
+    ) -> impl std::future::Future<Output = Self::Db> + Send {
+        Self::try_init_db_with_config(ctx, config).map(Result::unwrap)
+    }
 
     /// Apply operations to a database and commit.
     fn apply_ops(
@@ -2471,6 +2479,75 @@ pub(crate) fn test_local_operations_authenticate_below_floor<H: SyncTestHarness>
     });
 }
 
+/// A reused local prefix that diverges from the target fails root verification. The database
+/// stays unopenable until a later sync discards the divergent operations and completes.
+pub(crate) fn test_sync_rejected_import_blocks_open_until_resync<H: SyncTestHarness>()
+where
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let source = H::apply_ops(
+            H::init_db(context.child("source")).await,
+            H::create_ops(100),
+        )
+        .await;
+        let target = Target {
+            root: H::sync_target_root(&source),
+            range: non_empty_range!(Location::new(0), source.bounds().end),
+        };
+        let source = Arc::new(source);
+
+        // Retain a divergent prefix that stops short of the target.
+        let config = H::config(&context.next_u64().to_string(), &context);
+        let client = H::init_db_with_config(context.child("divergent"), config.clone()).await;
+        let client = H::apply_ops(client, H::create_ops_seeded(10, 1)).await;
+        assert!(client.bounds().end < target.range.end());
+        drop(client);
+
+        let engine_config = |context: deterministic::Context| Config {
+            db_config: config.clone(),
+            fetch_batch_size: NZU64!(10),
+            target: target.clone(),
+            context,
+            source: source.clone(),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 0,
+        };
+        let result: Result<DbOf<H>, _> = sync::sync(engine_config(context.child("first"))).await;
+        assert!(matches!(
+            result,
+            Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+        ));
+        assert!(matches!(
+            H::try_init_db_with_config(context.child("blocked"), config.clone()).await,
+            Err(qmdb::Error::Authenticated(
+                crate::journal::authenticated::Error::IncompleteSync
+            ))
+        ));
+
+        let synced: DbOf<H> = sync::sync(engine_config(context.child("second")))
+            .await
+            .unwrap();
+        assert_eq!(H::sync_target_root(&synced), target.root);
+        drop(synced);
+        let reopened = H::init_db_with_config(context.child("reopened"), config.clone()).await;
+        assert_eq!(H::sync_target_root(&reopened), target.root);
+        reopened.destroy().await.unwrap();
+        Arc::try_unwrap(source)
+            .unwrap_or_else(|_| panic!("failed to unwrap Arc"))
+            .destroy()
+            .await
+            .unwrap();
+    });
+}
+
 mod harnesses {
     use super::SyncTestHarness;
     use crate::{
@@ -2620,11 +2697,11 @@ mod harnesses {
             crate::qmdb::any::ordered::fixed::test::create_test_db(ctx).await
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -2684,11 +2761,11 @@ mod harnesses {
             crate::qmdb::any::ordered::variable::test::create_test_db(ctx).await
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::ordered::variable::test::VarConfig,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -2744,11 +2821,11 @@ mod harnesses {
             crate::qmdb::any::unordered::fixed::test::create_test_db(ctx).await
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -2808,11 +2885,11 @@ mod harnesses {
             crate::qmdb::any::unordered::variable::test::create_test_db(ctx).await
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::unordered::variable::test::VarConfig,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -2880,11 +2957,11 @@ mod harnesses {
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -2970,11 +3047,11 @@ mod harnesses {
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::ordered::variable::test::VarConfig,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -3055,11 +3132,11 @@ mod harnesses {
             Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -3144,11 +3221,11 @@ mod harnesses {
             Self::Db::init(ctx, config, None).await.unwrap()
         }
 
-        async fn init_db_with_config(
+        async fn try_init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::unordered::variable::test::VarConfig,
-        ) -> Self::Db {
-            Self::Db::init(ctx, config, None).await.unwrap()
+        ) -> Result<Self::Db, crate::qmdb::Error<Self::Family>> {
+            Self::Db::init(ctx, config, None).await
         }
 
         async fn apply_ops(
@@ -3336,6 +3413,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_local_operations_authenticate_below_floor() {
                 super::test_local_operations_authenticate_below_floor::<$harness>();
+            }
+
+            #[test_traced("WARN")]
+            fn test_sync_rejected_import_blocks_open_until_resync() {
+                super::test_sync_rejected_import_blocks_open_until_resync::<$harness>();
             }
         }
     };

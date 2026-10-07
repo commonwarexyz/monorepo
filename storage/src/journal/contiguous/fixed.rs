@@ -155,8 +155,10 @@ use commonware_runtime::{
 };
 use commonware_utils::Cached;
 use futures::{FutureExt as _, Stream, future::try_join_all};
+#[commonware_macros::stability(ALPHA)]
+use std::collections::VecDeque;
 use std::{
-    collections::{BTreeMap, VecDeque, btree_map::Entry},
+    collections::{BTreeMap, btree_map::Entry},
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},

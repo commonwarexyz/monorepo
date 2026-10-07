@@ -21,15 +21,15 @@ use super::{
     position_to_blob,
 };
 #[commonware_macros::stability(ALPHA)]
-use crate::journal::authenticated;
+use crate::journal::{authenticated, frame::decompress};
 use crate::{
     Context, SyncCompletion,
     journal::{
         Error,
         durability::Barrier,
         frame::{
-            FrameInfo, Limited, decode_item, decode_length_prefix, decompress, encode_frame_into,
-            find_frame, read_frame_at,
+            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
+            read_frame_at,
         },
     },
 };
@@ -44,10 +44,12 @@ use futures::{
     FutureExt as _, Stream,
     future::{try_join, try_join_all},
 };
+#[commonware_macros::stability(ALPHA)]
+use std::collections::VecDeque;
 #[cfg(test)]
 use std::future::pending;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     iter::once,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},

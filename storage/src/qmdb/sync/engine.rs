@@ -780,16 +780,43 @@ mod tests {
     use super::*;
     use crate::{
         merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::source,
+        qmdb::sync::{SyncState, source},
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, non_empty_range};
+    use commonware_utils::{NZU64, non_empty_range, sync::Mutex};
     use std::convert::Infallible;
+
+    /// What the engine asked of the database's import state and result.
+    #[derive(Clone, Debug, PartialEq)]
+    enum Event {
+        Staged(Location<MmrFamily>, Vec<sha256::Digest>),
+        Built(Vec<sha256::Digest>),
+        Rejected,
+        Persisted,
+    }
+
+    type Log = Arc<Mutex<Vec<Event>>>;
+
+    /// Import state that records what it is asked to stage.
+    struct Recorder(Log);
+
+    impl SyncState<MmrFamily, sha256::Digest> for Recorder {
+        async fn stage(
+            self,
+            location: Location<MmrFamily>,
+            pins: Vec<sha256::Digest>,
+        ) -> Result<Self, qmdb::Error<MmrFamily>> {
+            self.0.lock().push(Event::Staged(location, pins));
+            Ok(self)
+        }
+    }
 
     #[derive(Clone)]
     struct TestConfig {
         journal_size: u64,
+        root: sha256::Digest,
+        log: Log,
     }
 
     struct TestJournal {
@@ -837,7 +864,10 @@ mod tests {
         }
     }
 
-    struct TestDb;
+    struct TestDb {
+        root: sha256::Digest,
+        log: Log,
+    }
 
     impl Database for TestDb {
         type Config = TestConfig;
@@ -847,14 +877,14 @@ mod tests {
         type Hasher = Sha256;
         type Journal = TestJournal;
         type Op = i32;
-        type SyncState = ();
+        type SyncState = Recorder;
 
         /// A journal that reaches the target authenticates locally.
         async fn open_sync_journal(
             context: &Self::Context,
             config: &Self::Config,
             target: &Target<Self::Family, Self::Digest>,
-        ) -> Result<((), Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<MmrFamily>>
+        ) -> Result<(Recorder, Self::Journal, Option<Vec<Self::Digest>>), qmdb::Error<MmrFamily>>
         {
             let journal = TestJournal::open(
                 context.child("journal"),
@@ -864,31 +894,37 @@ mod tests {
             .await?;
             let pins = (journal.size() >= *target.range.end()).then(Vec::new);
             let journal = journal.resize(target.range.start()).await?;
-            Ok(((), journal, pins))
+            Ok((Recorder(config.log.clone()), journal, pins))
         }
 
         async fn from_sync_result(
             _context: Self::Context,
-            _config: Self::Config,
+            config: Self::Config,
             _journal: Self::Journal,
             _state: Self::SyncState,
-            _pinned_nodes: Vec<Self::Digest>,
+            pinned_nodes: Vec<Self::Digest>,
             _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
             _apply_batch_size: NonZeroU64,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
-            Ok(Self)
+            config.log.lock().push(Event::Built(pinned_nodes));
+            Ok(Self {
+                root: config.root,
+                log: config.log,
+            })
         }
 
         async fn persist_sync_result(self) -> Result<Self, qmdb::Error<Self::Family>> {
+            self.log.lock().push(Event::Persisted);
             Ok(self)
         }
 
         async fn reject_sync_result(self) -> Result<(), qmdb::Error<Self::Family>> {
+            self.log.lock().push(Event::Rejected);
             Ok(())
         }
 
         fn root(&self) -> Self::Digest {
-            sha256::Digest::from([0u8; 32])
+            self.root
         }
     }
 
@@ -930,7 +966,11 @@ mod tests {
             max_outstanding_requests: 1,
             fetch_batch_size: NZU64!(1),
             apply_batch_size: NZU64!(1),
-            db_config: TestConfig { journal_size },
+            db_config: TestConfig {
+                journal_size,
+                root: sha256::Digest::from([0u8; 32]),
+                log: Log::default(),
+            },
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -961,6 +1001,59 @@ mod tests {
                 operations: vec![99],
             })),
         }
+    }
+
+    /// A boundary response's pinned nodes are staged at the boundary and handed to the database.
+    /// A result whose root differs from the target is rejected rather than persisted.
+    #[test]
+    fn boundary_pins_are_staged_and_mismatched_roots_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            for (label, root, outcome) in [
+                ("mismatch", [0u8; 32], Event::Rejected),
+                ("match", [1u8; 32], Event::Persisted),
+            ] {
+                let mut config = test_engine_config(context.child(label), 5);
+                config.db_config.root = sha256::Digest::from(root);
+                let log = config.db_config.log.clone();
+                let mut engine = Engine::new(config).await.unwrap();
+                engine.outstanding_requests.retain(|_| false);
+                let id = insert_pending_request(
+                    &mut engine,
+                    Request::Boundary {
+                        size: Location::new(10),
+                        start: Location::new(5),
+                    },
+                );
+                let pins = vec![sha256::Digest::from([7u8; 32])];
+                let engine = engine
+                    .handle_fetch_result(IndexedFetchResult {
+                        id,
+                        result: Ok(Some(Response::Boundary {
+                            proof: Proof {
+                                leaves: Location::new(10),
+                                inactive_peaks: 0,
+                                digests: vec![],
+                            },
+                            op: 5,
+                            pinned_nodes: pins.clone(),
+                        })),
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(engine.pinned_nodes, Some(pins.clone()));
+
+                let result = engine.complete().await;
+                assert_eq!(result.is_ok(), outcome == Event::Persisted);
+                assert_eq!(
+                    *log.lock(),
+                    [
+                        Event::Staged(Location::new(5), pins.clone()),
+                        Event::Built(pins),
+                        outcome,
+                    ]
+                );
+            }
+        });
     }
 
     #[test]

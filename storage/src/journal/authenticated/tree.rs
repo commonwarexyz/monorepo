@@ -386,6 +386,9 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 Self::read_encoded(&mut reader, loc, max_items, max_bytes),
             )?;
         }
+        if self.leaves() != end {
+            return Err(merkle::Error::DataCorrupted("replay ended before its range").into());
+        }
         Ok(self)
     }
 
