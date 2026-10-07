@@ -46,7 +46,7 @@
 //! - You are willing to perform full application verification before casting a notarize vote.
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, Epochable, Prepared, Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, Epochable, Handoff, Relay, Reporter,
     marshal::{
         Update,
         application::gates::{self, GateOutcome, Gates},
@@ -593,14 +593,14 @@ where
     ES: Epocher,
 {
     #[allow(clippy::async_yields_async)]
-    #[tracing::instrument(name = "marshal.inline.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn prepare(
+    #[tracing::instrument(name = "marshal.inline.handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn handoff(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
-    ) -> oneshot::Receiver<Prepared<Self::Digest>> {
-        let policy = self.application.handoff(&consensus_context);
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let policy = self.application.handoff_policy(&consensus_context);
         let context = self.context.clone();
-        gates::prepare(
+        gates::handoff(
             &*context,
             self,
             policy,

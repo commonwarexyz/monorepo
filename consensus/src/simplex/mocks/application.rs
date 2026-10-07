@@ -3,7 +3,7 @@
 
 use super::relay::Relay;
 use crate::{
-    Automaton as Au, CertifiableAutomaton as CAu, Prepared, Publication, Relay as Re,
+    Automaton as Au, CertifiableAutomaton as CAu, Handoff, HandoffPolicy, Relay as Re,
     simplex::{Plan, types::Context},
     types::{Epoch, Round},
 };
@@ -32,9 +32,9 @@ pub enum Message<D: Digest, P: PublicKey> {
         context: Context<D, P>,
         response: oneshot::Sender<D>,
     },
-    Prepare {
+    Handoff {
         context: Context<D, P>,
-        response: oneshot::Sender<Prepared<D>>,
+        response: oneshot::Sender<Handoff<D>>,
     },
     Verify {
         context: Context<D, P>,
@@ -90,13 +90,13 @@ impl<D: Digest, P: PublicKey> Au for Mailbox<D, P> {
 }
 
 impl<D: Digest, P: PublicKey> CAu for Mailbox<D, P> {
-    async fn prepare(
+    async fn handoff(
         &mut self,
         context: Self::Context,
-    ) -> oneshot::Receiver<Prepared<Self::Digest>> {
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send_lossy(Message::Prepare { context, response });
+            .send_lossy(Message::Handoff { context, response });
         receiver
     }
 
@@ -139,8 +139,8 @@ type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Sen
 
 /// Handler that takes ownership of the handoff proposal the mock would send and
 /// its response so tests can decide when it completes.
-type HandoffProposeController<D> =
-    Box<dyn Fn(Round, Prepared<D>, oneshot::Sender<Prepared<D>>) + Send + 'static>;
+type HandoffController<D> =
+    Box<dyn Fn(Round, Handoff<D>, oneshot::Sender<Handoff<D>>) + Send + 'static>;
 
 /// Observer invoked on every `Message::Verify` request. Used by tests to
 /// detect spurious verification calls.
@@ -202,7 +202,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     drop_proposals: bool,
     stall_proposals: bool,
-    handoff: Option<Publication>,
+    handoff: HandoffPolicy,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -218,7 +218,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
 
     /// Receives each built handoff proposal with its response sender, so a test
     /// decides when and how to respond.
-    handoff_propose_controller: Option<HandoffProposeController<H::Digest>>,
+    handoff_controller: Option<HandoffController<H::Digest>>,
 
     /// Invoked on every `Message::Verify` request received by the application.
     /// Used by tests to detect spurious verification requests (e.g. after replay
@@ -229,7 +229,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     /// (used when `stall_proposals` is set).
     pending_proposes: Vec<oneshot::Sender<H::Digest>>,
     /// Handoff response senders held alive while `stall_proposals` is set.
-    pending_handoff_proposes: Vec<oneshot::Sender<Prepared<H::Digest>>>,
+    pending_handoffs: Vec<oneshot::Sender<Handoff<H::Digest>>>,
 
     /// Senders held alive to simulate certifications that hang indefinitely
     /// (used by [`Certifier::Pending`]).
@@ -265,7 +265,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 fail_verification: false,
                 drop_proposals: false,
                 stall_proposals: false,
-                handoff: None,
+                handoff: HandoffPolicy::Wait,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -273,10 +273,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 seen: HashMap::new(),
                 verified: HashSet::new(),
                 propose_observer: None,
-                handoff_propose_controller: None,
+                handoff_controller: None,
                 verify_observer: None,
                 pending_proposes: Vec::new(),
-                pending_handoff_proposes: Vec::new(),
+                pending_handoffs: Vec::new(),
                 pending_certifications: Vec::new(),
             },
             Mailbox::new(sender),
@@ -299,9 +299,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.stall_proposals = stall;
     }
 
-    /// Sets the publication permission returned with handoff proposals, or
-    /// `None` to stage every handoff until its parent certifies.
-    pub const fn set_handoff(&mut self, handoff: Option<Publication>) {
+    /// Sets the policy used to answer handoff proposal requests.
+    pub const fn set_handoff(&mut self, handoff: HandoffPolicy) {
         self.handoff = handoff;
     }
 
@@ -313,11 +312,8 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.propose_observer = Some(observer);
     }
 
-    pub fn set_handoff_propose_controller(
-        &mut self,
-        controller: HandoffProposeController<H::Digest>,
-    ) {
-        self.handoff_propose_controller = Some(controller);
+    pub fn set_handoff_controller(&mut self, controller: HandoffController<H::Digest>) {
+        self.handoff_controller = Some(controller);
     }
 
     pub fn set_verify_observer(&mut self, observer: VerifyObserver<H, P>) {
@@ -495,30 +491,31 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         let digest = self.propose(context).await;
                         response.send_lossy(digest);
                     }
-                    Message::Prepare {
+                    Message::Handoff {
                         context,
                         response,
                     } => {
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
-                        let Some(publication) = self.handoff else {
-                            response.send_lossy(Prepared::Stage);
-                            continue;
+                        let respond = match self.handoff {
+                            HandoffPolicy::Publish => Handoff::Publish,
+                            HandoffPolicy::Stage => Handoff::Stage,
+                            HandoffPolicy::Wait => {
+                                response.send_lossy(Handoff::Wait);
+                                continue;
+                            }
                         };
                         if self.stall_proposals {
-                            self.pending_handoff_proposes.push(response);
+                            self.pending_handoffs.push(response);
                             continue;
                         }
                         if self.drop_proposals {
                             continue;
                         }
                         let round = context.round;
-                        let proposal = Prepared::Proposed {
-                            payload: self.propose(context).await,
-                            publication,
-                        };
-                        if let Some(controller) = &self.handoff_propose_controller {
+                        let proposal = respond(self.propose(context).await);
+                        if let Some(controller) = &self.handoff_controller {
                             controller(round, proposal, response);
                         } else {
                             response.send_lossy(proposal);

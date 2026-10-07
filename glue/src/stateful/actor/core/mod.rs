@@ -295,7 +295,7 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Handoff, Publication, Reporter as _,
+        Application as _, CertifiableBlock as _, HandoffPolicy, Reporter as _,
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
@@ -394,11 +394,10 @@ mod tests {
             .await;
             let plan =
                 SyncPlan::init(context.child("plan"), "stateful-handoff-policy-stateful").await;
-            let publication = Publication::Early;
             let (_stateful, mailbox) = Stateful::new(
                 context.child("stateful"),
                 Config {
-                    application: TestApp::with_handoff(Handoff::Prepare(publication)),
+                    application: TestApp::with_handoff(HandoffPolicy::Publish),
                     db_config: (),
                     provider: (),
                     marshal: (marshal.mailbox.clone(), marshal.floor),
@@ -418,8 +417,8 @@ mod tests {
             let _guards = marshal.guards;
             let block = TestBlock::new(1, 1);
             assert_eq!(
-                mailbox.handoff(&block.context()),
-                Handoff::Prepare(publication),
+                mailbox.handoff_policy(&block.context()),
+                HandoffPolicy::Publish,
             );
         });
     }

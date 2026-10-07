@@ -1,5 +1,5 @@
 use crate::{
-    Automaton, Handoff, Prepared,
+    Automaton, Handoff, HandoffPolicy,
     marshal::core::{Mailbox, Variant, durability::Durable as _},
     types::Round,
 };
@@ -207,40 +207,34 @@ pub(crate) async fn forward<T, U>(
 
 /// Answers a handoff request through `automaton`'s ordinary proposal path.
 ///
-/// [`Handoff::Stage`] resolves the receiver immediately. With
-/// [`Handoff::Prepare`], the built candidate is sent with the granted
-/// publication permission, and closing the receiver cancels the build.
-pub(crate) async fn prepare<E, A>(
+/// [`HandoffPolicy::Wait`] resolves the receiver immediately. Otherwise, the built
+/// candidate is sent in the response the policy names, and closing the receiver
+/// cancels the build.
+pub(crate) async fn handoff<E, A>(
     context: &E,
     automaton: &mut A,
-    policy: Handoff,
+    policy: HandoffPolicy,
     round: Round,
     consensus_context: A::Context,
-) -> oneshot::Receiver<Prepared<A::Digest>>
+) -> oneshot::Receiver<Handoff<A::Digest>>
 where
     E: Spawner + Metrics,
     A: Automaton,
 {
     let (tx, rx) = oneshot::channel();
-    let publication = match policy {
-        Handoff::Prepare(publication) => publication,
-        Handoff::Stage => {
-            tx.send_lossy(Prepared::Stage);
+    let respond = match policy {
+        HandoffPolicy::Publish => Handoff::Publish,
+        HandoffPolicy::Stage => Handoff::Stage,
+        HandoffPolicy::Wait => {
+            tx.send_lossy(Handoff::Wait);
             return rx;
         }
     };
     let proposal = automaton.propose(consensus_context).await;
     context
-        .child("prepare")
+        .child("handoff")
         .with_attribute("round", round)
-        .spawn(move |_| {
-            forward(tx, proposal, move |payload| {
-                Some(Prepared::Proposed {
-                    payload,
-                    publication,
-                })
-            })
-        });
+        .spawn(move |_| forward(tx, proposal, move |payload| Some(respond(payload))));
     rx
 }
 

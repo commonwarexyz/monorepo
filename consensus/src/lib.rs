@@ -174,31 +174,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
-    /// Controls when consensus may publish a prepared handoff proposal.
-    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-    pub enum Publication {
-        /// Wait until the proposal's parent certifies or finalizes before publication.
-        Held,
-        /// Permit early relay and the proposer's notarize vote before parent certification.
+    /// An application's response to a handoff proposal request.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum Handoff<D> {
+        /// Permit relay and the proposer's notarize vote before parent certification.
         ///
         /// This trusts the outgoing leader not to equivocate and to complete its term: the
         /// proposal is usable only if every uncertified view it builds on certifies.
-        Early,
-    }
-
-    /// An application's response to a handoff proposal request.
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum Prepared<D> {
-        /// The candidate is ready. Consensus applies its publication permission before
-        /// relaying or voting.
-        Proposed {
-            /// Prepared or reused candidate.
-            payload: D,
-            /// When consensus may publish this candidate.
-            publication: Publication,
-        },
-        /// Ask consensus to request an ordinary proposal after the parent certifies.
-        Stage,
+        Publish(D),
+        /// Stage the candidate until its parent certifies or finalizes.
+        Stage(D),
+        /// Request an ordinary proposal after the parent certifies.
+        Wait,
     }
 
     /// CertifiableAutomaton extends [Automaton] with the ability to certify payloads before finalization.
@@ -209,12 +196,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub trait CertifiableAutomaton: Automaton {
         /// Generate a payload for a term-start proposal whose parent is not yet certified.
         ///
-        /// Returning [`Prepared::Proposed`] commits the application to the same
-        /// verification and certification obligations as returning a payload from
-        /// [`Automaton::propose`]. With [`Publication::Held`],
-        /// consensus holds the candidate until its parent certifies or finalizes.
+        /// Returning [`Handoff::Publish`] or [`Handoff::Stage`] commits the application to
+        /// the same verification and certification obligations as returning a payload from
+        /// [`Automaton::propose`].
         ///
-        /// With [`Prepared::Stage`], consensus issues an ordinary
+        /// With [`Handoff::Wait`], consensus issues an ordinary
         /// [`Automaton::propose`] for the same context once the parent certifies, unless it
         /// has already voted to nullify this view.
         ///
@@ -233,15 +219,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// [`Automaton::propose`] for the same context follows if the parent certifies and
         /// consensus has not voted to nullify this view, or a request on a replacement parent
         /// once one is selectable.
-        fn prepare(
+        fn handoff(
             &mut self,
             _context: Self::Context,
-        ) -> impl Future<Output = oneshot::Receiver<Prepared<Self::Digest>>> + Send
+        ) -> impl Future<Output = oneshot::Receiver<Handoff<Self::Digest>>> + Send
         {
             #[allow(clippy::async_yields_async)]
             async move {
                 let (sender, receiver) = oneshot::channel();
-                sender.send_lossy(Prepared::Stage);
+                sender.send_lossy(Handoff::Wait);
                 receiver
             }
         }
@@ -349,14 +335,15 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
 
-    /// An application's preparation policy for a term handoff.
+    /// An application's policy for a term handoff.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    pub enum Handoff {
-        /// Prepare or reuse a candidate before parent certification. The permission
-        /// controls when consensus may publish it.
-        Prepare(Publication),
-        /// Wait for the parent to certify before proposing.
+    pub enum HandoffPolicy {
+        /// Prepare or reuse a candidate and respond with [`Handoff::Publish`].
+        Publish,
+        /// Prepare or reuse a candidate and respond with [`Handoff::Stage`].
         Stage,
+        /// Wait for the parent to certify before proposing.
+        Wait,
     }
 
     /// Application is a minimal interface for standard implementations that operate over a stream
@@ -396,10 +383,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
 
         /// Decide whether to prepare a proposal before its parent certifies.
         ///
-        /// With [`Handoff::Prepare`], the marshal uses its ordinary proposal path.
-        /// Recovery and epoch-boundary reproposal may reuse a block without invoking
-        /// [`Self::propose`]. The supplied [`Publication`] controls when consensus
-        /// may publish the candidate. With [`Handoff::Stage`], consensus
+        /// With [`HandoffPolicy::Publish`] or [`HandoffPolicy::Stage`], the marshal uses its
+        /// ordinary proposal path. Recovery and epoch-boundary reproposal may reuse a block
+        /// without invoking [`Self::propose`]. With [`HandoffPolicy::Wait`], consensus
         /// waits for parent certification before requesting an ordinary proposal. The
         /// returned policy is final for the request.
         ///
@@ -414,18 +400,18 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// parent certifies and it has not voted to nullify the proposal's view, or a proposal
         /// on a replacement parent once one is selectable.
         ///
-        /// [`Publication::Early`] trusts the outgoing leader. The
+        /// [`HandoffPolicy::Publish`] trusts the outgoing leader. The
         /// context names the parent by view and digest, and its leader field names the
         /// incoming leader, not the outgoing one. Identify the outgoing leader from the
         /// elector's schedule or authenticated metadata for the parent's consensus round. A
         /// verified parent block can name an earlier proposer in its embedded context, as
         /// with an epoch-boundary reproposal. If that identity or trust is uncertain, prepare
-        /// with [`Publication::Held`].
+        /// with [`HandoffPolicy::Stage`].
         ///
         /// This method runs synchronously on the proposal path. Do not block on I/O.
-        /// If readiness is uncertain, return [`Handoff::Stage`].
-        fn handoff(&self, _context: &Self::Context) -> Handoff {
-            Handoff::Stage
+        /// If readiness is uncertain, return [`HandoffPolicy::Wait`].
+        fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
+            HandoffPolicy::Wait
         }
 
         /// Verify a block produced by the application's proposer, relative to its ancestry.

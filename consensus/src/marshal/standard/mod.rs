@@ -61,8 +61,7 @@ mod tests {
     mod pipeline;
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, Handoff, Heightable, Prepared, Publication, Relay,
-        Reporter,
+        Automaton, CertifiableAutomaton, Handoff, HandoffPolicy, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -2201,13 +2200,13 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
-        async fn prepare(
+        async fn handoff(
             &mut self,
             context: Self::Context,
-        ) -> oneshot::Receiver<Prepared<Self::Digest>> {
+        ) -> oneshot::Receiver<Handoff<Self::Digest>> {
             match self {
-                Self::Inline(inline) => inline.prepare(context).await,
-                Self::Deferred(deferred) => deferred.prepare(context).await,
+                Self::Inline(inline) => inline.handoff(context).await,
+                Self::Deferred(deferred) => deferred.handoff(context).await,
             }
         }
 
@@ -3618,15 +3617,14 @@ mod tests {
                 );
 
                 // A failed build closes the handoff response as it closes the ordinary one.
-                let failing_app =
-                    MockVerifyingApp::new().with_handoff(Handoff::Prepare(Publication::Held));
+                let failing_app = MockVerifyingApp::new().with_handoff(HandoffPolicy::Stage);
                 let mut failing = Wrapper::new(
                     kind,
                     context.child("failed_handoff"),
                     failing_app,
                     marshal.clone(),
                 );
-                let handoff_rx = failing.prepare(non_boundary_context.clone()).await;
+                let handoff_rx = failing.handoff(non_boundary_context.clone()).await;
                 assert!(
                     handoff_rx.await.is_err(),
                     "{kind:?}: handoff response should close when application returns no block"
@@ -3634,7 +3632,7 @@ mod tests {
 
                 // Dropping a handoff response must cancel the ordinary build it forwards.
                 let (gated_app, started, dropped) = MockVerifyingApp::new()
-                    .with_handoff(Handoff::Prepare(Publication::Early))
+                    .with_handoff(HandoffPolicy::Publish)
                     .with_proposal_gate();
                 let mut gated = Wrapper::new(
                     kind,
@@ -3642,7 +3640,7 @@ mod tests {
                     gated_app,
                     marshal.clone(),
                 );
-                let response = gated.prepare(non_boundary_context.clone()).await;
+                let response = gated.handoff(non_boundary_context.clone()).await;
                 started.await.expect("handoff build should start");
                 drop(response);
                 assert!(dropped.await.is_err(), "handoff build should be cancelled");
@@ -3678,11 +3676,11 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
-                let handoff_rx = wrapper.prepare(reproposal_context.clone()).await;
+                let handoff_rx = wrapper.handoff(reproposal_context.clone()).await;
                 assert_eq!(
                     handoff_rx.await.expect("handoff decision missing"),
-                    Prepared::Stage,
-                    "{kind:?}: application staging must precede automatic boundary reproposal"
+                    Handoff::Wait,
+                    "{kind:?}: application Wait must precede automatic boundary reproposal"
                 );
 
                 let reproposal_rx = wrapper.propose(reproposal_context).await;
@@ -3706,7 +3704,6 @@ mod tests {
 
                 // An accepted handoff uses the automatic boundary re-proposal path
                 // without invoking the application builder.
-                let publication = Publication::Early;
                 let pipeline_round =
                     Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));
                 let pipeline_context = Ctx {
@@ -3714,21 +3711,17 @@ mod tests {
                     leader: default_leader(),
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
-                let pipeline_app =
-                    MockVerifyingApp::new().with_handoff(Handoff::Prepare(publication));
+                let pipeline_app = MockVerifyingApp::new().with_handoff(HandoffPolicy::Publish);
                 let mut pipeline = Wrapper::new(
                     kind,
                     context.child("pipeline_wrapper"),
                     pipeline_app,
                     marshal.clone(),
                 );
-                let pipeline_rx = pipeline.prepare(pipeline_context.clone()).await;
+                let pipeline_rx = pipeline.handoff(pipeline_context.clone()).await;
                 assert_eq!(
                     pipeline_rx.await.expect("pipeline result missing"),
-                    Prepared::Proposed {
-                        payload: boundary_digest,
-                        publication,
-                    },
+                    Handoff::Publish(boundary_digest),
                     "{kind:?}: accepted handoff should forward its publication permission"
                 );
                 let certify_rx = pipeline.certify(pipeline_round, boundary_digest).await;
@@ -3792,8 +3785,7 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::new(1), tip.digest()),
                 };
-                let mut app =
-                    MockVerifyingApp::new().with_handoff(Handoff::Prepare(Publication::Held));
+                let mut app = MockVerifyingApp::new().with_handoff(HandoffPolicy::Stage);
                 app.propose_result = Some(B::new::<Sha256>(
                     handoff_context.clone(),
                     tip.digest(),
@@ -3806,7 +3798,7 @@ mod tests {
                     app,
                     marshal.clone(),
                 );
-                let response = deferred.prepare(handoff_context).await.await;
+                let response = deferred.handoff(handoff_context).await.await;
                 assert_eq!(
                     response.is_ok(),
                     built,

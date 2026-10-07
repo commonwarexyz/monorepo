@@ -28,9 +28,9 @@ impl crate::Application<Runtime> for PipelineApp {
     type SigningScheme = S;
     type Input = ();
 
-    fn handoff(&self, _: &Ctx) -> Handoff {
+    fn handoff_policy(&self, _: &Ctx) -> HandoffPolicy {
         self.policies.fetch_add(1, Ordering::SeqCst);
-        Handoff::Prepare(Publication::Held)
+        HandoffPolicy::Stage
     }
 
     async fn propose(
@@ -247,7 +247,7 @@ fn retained_pipeline_handoff(first: First) {
                             assert_ne!(
                                 vote.view(),
                                 round.view(),
-                                "default handoff mode must not vote before parent certification"
+                                "default handoff policy must not vote before parent certification"
                             );
                         },
                         _ = context.sleep_until(quiet_until) => break,

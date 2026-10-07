@@ -64,8 +64,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, Heightable, Prepared,
-        Publication, Relay, Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Handoff, HandoffPolicy,
+        Heightable, Relay, Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -4989,10 +4989,9 @@ mod tests {
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
 
-            // Request `Early` rather than the conservative `Held` to show that the
+            // Request `Publish` rather than the conservative `Stage` to show that the
             // handoff forwards the application's permission.
-            let publication = Publication::Early;
-            let mock_app = mock_app.with_handoff(Handoff::Prepare(publication));
+            let mock_app = mock_app.with_handoff(HandoffPolicy::Publish);
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -5005,18 +5004,13 @@ mod tests {
 
             // Handoff requests use the ordinary proposal reuse path.
             let decision = marshaled
-                .prepare(ctx)
+                .handoff(ctx)
                 .await
                 .await
                 .expect("handoff proposal must return a decision");
-            let Prepared::Proposed {
-                payload: commitment,
-                publication: forwarded,
-            } = decision
-            else {
-                panic!("application accepted handoff but marshal deferred");
+            let Handoff::Publish(commitment) = decision else {
+                panic!("application published handoff but marshal responded {decision:?}");
             };
-            assert_eq!(forwarded, publication);
             assert_eq!(
                 commitment, commitment_a,
                 "handoff must reuse the block marshal already persisted for this round"

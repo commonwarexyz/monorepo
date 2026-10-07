@@ -12,7 +12,7 @@ pub struct Peer<P: PublicKey> {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum HandoffEventKind {
     Requested,
-    Staged,
+    WaitReturned,
     CandidateReturned,
     Held,
     PublishedBeforeCertification,

@@ -80,8 +80,8 @@
 //! ```
 
 use crate::{
-    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
-    Prepared, Relay, Reporter,
+    Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Handoff,
+    Heightable, Relay, Reporter,
     marshal::{
         Update,
         application::{
@@ -1121,14 +1121,14 @@ where
     ES: Epocher,
 {
     #[allow(clippy::async_yields_async)]
-    #[tracing::instrument(name = "marshal.coding.prepare", level = "info", skip_all, fields(round = %consensus_context.round))]
-    async fn prepare(
+    #[tracing::instrument(name = "marshal.coding.handoff", level = "info", skip_all, fields(round = %consensus_context.round))]
+    async fn handoff(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
-    ) -> oneshot::Receiver<Prepared<Self::Digest>> {
-        let policy = self.application.handoff(&consensus_context);
+    ) -> oneshot::Receiver<Handoff<Self::Digest>> {
+        let policy = self.application.handoff_policy(&consensus_context);
         let context = self.context.clone();
-        gates::prepare(
+        gates::handoff(
             &*context,
             self,
             policy,

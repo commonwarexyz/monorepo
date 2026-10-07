@@ -160,10 +160,13 @@ impl Simplex for SimplexSecp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        FuzzInput, HANDOFF_MODES, N4F1C3, Standard, fuzz, strategy::StrategyChoice,
+        FuzzInput, HANDOFF_POLICIES, N4F1C3, Standard, fuzz, strategy::StrategyChoice,
         utils::Partition,
     };
-    use commonware_consensus::types::{TermLength, ViewDelta};
+    use commonware_consensus::{
+        HandoffPolicy,
+        types::{TermLength, ViewDelta},
+    };
     use commonware_macros::{test_group, test_traced};
     use commonware_utils::NZU32;
     use proptest::prelude::*;
@@ -182,7 +185,7 @@ mod tests {
             term_length,
             optimistic_views: ViewDelta::new(term_length.get()),
             heterogeneous_optimism: true,
-            handoff: None,
+            handoff: HandoffPolicy::Wait,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }
@@ -248,7 +251,7 @@ mod tests {
         (
             any::<u64>(),
             prop::sample::select(TERM_LENGTH_BOUNDARIES.as_slice()),
-            prop::sample::select(HANDOFF_MODES.as_slice()),
+            prop::sample::select(HANDOFF_POLICIES.as_slice()),
         )
             .prop_map(move |(seed, term_length, handoff)| FuzzInput {
                 handoff,
