@@ -159,11 +159,11 @@ impl Simplex for SimplexSecp256r1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FuzzInput, N4F1C3, Standard, fuzz, strategy::StrategyChoice, utils::Partition};
-    use commonware_consensus::{
-        HandoffPublication,
-        types::{TermLength, ViewDelta},
+    use crate::{
+        FuzzInput, HANDOFF_MODES, N4F1C3, Standard, fuzz, strategy::StrategyChoice,
+        utils::Partition,
     };
+    use commonware_consensus::types::{TermLength, ViewDelta};
     use commonware_macros::{test_group, test_traced};
     use commonware_utils::NZU32;
     use proptest::prelude::*;
@@ -243,13 +243,6 @@ mod tests {
     fn test_bls12381_threshold_minsig_connected() {
         fuzz::<SimplexBls12381MinSig, Standard>(test_input(SEED, TEST_CONTAINERS, TermLength::ONE));
     }
-
-    /// Honest handoff modes: defer every handoff, prepare and hold, or publish early.
-    const HANDOFF_MODES: [Option<HandoffPublication>; 3] = [
-        None,
-        Some(HandoffPublication::AfterCertification),
-        Some(HandoffPublication::AllowBeforeCertification),
-    ];
 
     fn property_test_strategy() -> impl Strategy<Value = FuzzInput> {
         (

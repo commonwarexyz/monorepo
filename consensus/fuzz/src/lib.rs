@@ -62,6 +62,13 @@ const MAX_SLEEP_DURATION: Duration = Duration::from_secs(15);
 const NAMESPACE: &[u8] = b"consensus_fuzz";
 const MAX_RAW_BYTES: usize = 32_768;
 
+/// Honest handoff modes: defer every handoff, prepare and hold, or publish early.
+pub const HANDOFF_MODES: [Option<HandoffPublication>; 3] = [
+    None,
+    Some(HandoffPublication::AfterCertification),
+    Some(HandoffPublication::AllowBeforeCertification),
+];
+
 /// Network configuration for fuzz testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Configuration {
@@ -162,11 +169,7 @@ impl Arbitrary<'_> for FuzzInput {
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
         let heterogeneous_optimism = u.arbitrary()?;
-        let handoff = match u.int_in_range(0..=2)? {
-            0 => None,
-            1 => Some(HandoffPublication::AfterCertification),
-            _ => Some(HandoffPublication::AllowBeforeCertification),
-        };
+        let handoff = *u.choose(&HANDOFF_MODES)?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,

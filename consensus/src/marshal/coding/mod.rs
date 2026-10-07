@@ -4986,10 +4986,12 @@ mod tests {
             // only if the stored block is reused as-is and certification
             // resolves through the durability gate registered by the
             // recovery staging.
-            // A non-default permission catches a defaulted publication.
-            let publication = HandoffPublication::AllowBeforeCertification;
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
+
+            // A publication other than the first variant shows that the handoff
+            // forwards the application's permission.
+            let publication = HandoffPublication::AllowBeforeCertification;
             let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Prepare(publication));
             let cfg = MarshaledConfig {
                 application: mock_app,
