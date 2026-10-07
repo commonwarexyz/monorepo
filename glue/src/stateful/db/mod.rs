@@ -588,7 +588,9 @@ pub struct SyncEngineConfig {
     /// value stalls sync. Keep this at or below the `max_serve_ops` every peer uses.
     pub fetch_batch_size: NonZeroU64,
 
-    /// Number of operations applied per local apply step.
+    /// Number of operations read and hashed per batch when a synced database rebuilds its Merkle
+    /// structure at the end of sync, and when sync derives pinned nodes after the lower bound
+    /// moves. Bounds the memory that work uses.
     pub apply_batch_size: NonZeroU64,
 
     /// Maximum number of outstanding requests for operations. Requests for pinned nodes are

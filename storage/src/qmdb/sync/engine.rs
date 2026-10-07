@@ -1,6 +1,9 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{Family, Location},
+    merkle::{
+        Family, Location,
+        mem::{self, Mem},
+    },
     qmdb::{
         self,
         sync::{
@@ -29,6 +32,11 @@ use std::{
 
 /// Number of newer updates after which the first escape is replaced. Each replacement doubles it.
 const ESCAPE_UPDATES: usize = 2;
+
+/// Most operations a target update derives pinned nodes over. Derivation reads and hashes them on
+/// the engine task, which handles no responses or updates meanwhile, so a longer move of the lower
+/// bound fetches the boundary instead.
+const MAX_DERIVED_OPERATIONS: u64 = 1 << 16;
 
 /// What handling a fetch result leaves the engine to do.
 enum Fetched<DB: Database> {
@@ -233,6 +241,49 @@ where
     }
 }
 
+/// Returns the pinned nodes at `range.end` from the pinned nodes at `range.start` and the
+/// operations in `range`, read from `journal` in chunks of at most `chunk` operations.
+async fn derive_pinned_nodes<F, H, J>(
+    journal: &J,
+    pinned_nodes: Vec<H::Digest>,
+    range: Range<Location<F>>,
+    chunk: NonZeroU64,
+) -> Result<Vec<H::Digest>, qmdb::Error<F>>
+where
+    F: Family,
+    H: Hasher,
+    J: Journal<F>,
+    J::Op: Encode,
+{
+    let hasher = qmdb::hasher::<H>();
+    let mut merkle = Mem::init(mem::Config {
+        nodes: Vec::new(),
+        pruning_boundary: range.start,
+        pinned_nodes,
+    })?;
+
+    // Fold each chunk into the structure and prune behind it.
+    let mut start = range.start;
+    while start < range.end {
+        let end = start
+            .checked_add(chunk.get())
+            .map_or(range.end, |end| end.min(range.end));
+        let ops = journal.read_range(start..end).await.map_err(Into::into)?;
+        let batch = merkle
+            .new_batch()
+            .add_many(&hasher, &ops)
+            .merkleize(&merkle, &hasher);
+        merkle
+            .apply_batch(&batch)
+            .expect("batch extends the structure");
+        merkle
+            .prune(end)
+            .expect("chunk end is within the structure");
+        start = end;
+    }
+    Ok(merkle.node_digests_to_pin(range.end))
+}
+
 /// Wait for the next synchronization event.
 /// Returns `None` when there are no outstanding requests and no channels to wait on.
 async fn wait_for_event<F: Family, Op: Send, D: Digest, E: Send>(
@@ -292,7 +343,9 @@ where
     pub max_outstanding_requests: NonZeroUsize,
     /// Maximum operations to fetch per batch
     pub fetch_batch_size: NonZeroU64,
-    /// Number of operations to apply in a single batch
+    /// Number of operations read and hashed per batch when the Merkle structure is rebuilt from
+    /// the synced journal at the end of sync, and when pinned nodes are derived after the lower
+    /// bound moves. Bounds the memory that work uses.
     pub apply_batch_size: NonZeroU64,
     /// Database-specific configuration
     pub db_config: DB::Config,
@@ -344,6 +397,9 @@ where
     fetched_operations: BTreeMap<Location<DB::Family>, Vec<DB::Op>>,
 
     /// Pinned merkle nodes at `target.range.start()`, used for database construction.
+    ///
+    /// They are recovered from local Merkle state, extracted from boundary proofs, or derived
+    /// across a lower bound move.
     pinned_nodes: Option<Vec<DB::Digest>>,
 
     /// The current sync target (root digest and operation bounds)
@@ -358,7 +414,8 @@ where
     /// Maximum operations to fetch in a single batch
     fetch_batch_size: NonZeroU64,
 
-    /// Number of operations to apply in a single batch
+    /// Number of operations per batch when rebuilding the Merkle structure at the end of sync or
+    /// deriving pinned nodes
     apply_batch_size: NonZeroU64,
 
     /// Journal that operations are applied to during sync
@@ -621,30 +678,36 @@ where
         }
     }
 
-    /// Reset sync state for a target update.
+    /// Reset sync state for a target update, given the pinned nodes at a moved lower bound if they
+    /// are known.
     ///
-    /// Keeps fetched operations. Keeps pinned nodes only while the lower bound is unchanged.
-    /// Keeps outstanding requests, whatever target size they were issued for, except those below a
-    /// moved lower bound and operations requests at it. Each request verifies against the root it
-    /// was issued with.
+    /// Keeps fetched operations. Keeps pinned nodes while the lower bound is unchanged, and
+    /// otherwise takes `pinned_nodes`. Keeps outstanding requests, whatever target size they were
+    /// issued for, except those below a moved lower bound and, at it, an operations request while
+    /// the pinned nodes are unknown or a boundary request once they are known. Each request
+    /// verifies against the root it was issued with.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
+        pinned_nodes: Option<Vec<DB::Digest>>,
     ) -> Result<Self, Error<DB, S>> {
         let start_moved = self.target.range.start() != new_target.range.start();
         self.journal = self.journal.resize(new_target.range.start()).await?;
         if start_moved {
-            self.pinned_nodes = None;
+            self.pinned_nodes = pinned_nodes;
         }
 
         // A source may prune up to the new lower bound, so a request below a moved bound may
         // never be answered. Requests are also tracked by start location, so an operations request
-        // kept at the new bound would block the boundary request there.
+        // kept at the new bound would block the boundary request there, which is only needed while
+        // the pinned nodes are unknown.
         let new_start = new_target.range.start();
+        let known = self.pinned_nodes.is_some();
         self.outstanding_requests.retain(|request| {
             !start_moved
                 || request.start() > new_start
-                || (request.start() == new_start && matches!(request, Request::Boundary { .. }))
+                || (request.start() == new_start
+                    && known != matches!(request, Request::Boundary { .. }))
         });
 
         self.target = new_target;
@@ -906,7 +969,31 @@ where
                 // Deferred updates' boundary requests are at or below the new lower bound, so the
                 // reset cancels them or keeps one at it as the new target's.
                 self.deferred = Deferred::Empty;
-                let mut updated_self = self.reset_for_target_update(new_target).await?;
+
+                // Derive the pinned nodes at a lower bound moved within the journal from those at
+                // the current bound (none at zero) instead of fetching them.
+                let old_start = self.target.range.start();
+                let new_start = new_target.range.start();
+                let distance = (*new_start).saturating_sub(*old_start);
+                let pinned_nodes = if (1..=MAX_DERIVED_OPERATIONS).contains(&distance)
+                    && self.journal.size() >= *new_start
+                    && self.pinned_nodes_ready()
+                {
+                    Some(
+                        derive_pinned_nodes::<_, DB::Hasher, _>(
+                            &self.journal,
+                            self.pinned_nodes.take().unwrap_or_default(),
+                            old_start..new_start,
+                            self.apply_batch_size,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                let mut updated_self = self
+                    .reset_for_target_update(new_target, pinned_nodes)
+                    .await?;
                 updated_self.record_progress();
                 updated_self.schedule_requests();
                 Ok(NextStep::Continue(updated_self))
@@ -933,8 +1020,9 @@ where
                 let unused = matches!(fetched, Fetched::Unused);
                 if let Fetched::Adopt(update, op, pinned_nodes) = fetched {
                     let start = update.range.start();
-                    self = self.reset_for_target_update(update).await?;
-                    self.pinned_nodes = Some(pinned_nodes);
+                    self = self
+                        .reset_for_target_update(update, Some(pinned_nodes))
+                        .await?;
                     self.fetched_operations
                         .entry(start)
                         .or_insert_with(|| vec![op]);
@@ -1065,17 +1153,22 @@ where
 mod tests {
     use super::*;
     use crate::{
-        merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::source,
+        merkle::{
+            full,
+            mmb::Family as MmbFamily,
+            mmr::{Family as MmrFamily, Proof},
+        },
+        qmdb::sync::{journal::Memory, source},
     };
     use commonware_cryptography::{Sha256, sha256};
-    use commonware_runtime::{Runner as _, deterministic};
-    use commonware_utils::{NZU64, NZUsize, non_empty_range};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Runner as _, buffer::paged::CacheRef, deterministic};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
     use std::{
         convert::Infallible,
         sync::{
             Arc,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
         },
     };
 
@@ -1095,6 +1188,8 @@ mod tests {
 
     struct TestJournal {
         size: u64,
+        /// Number of operations read.
+        reads: AtomicU64,
     }
 
     impl Journal<MmrFamily> for TestJournal {
@@ -1108,11 +1203,14 @@ mod tests {
             size: Self::Config,
             _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
         ) -> Result<Self, Self::Error> {
-            Ok(Self { size })
+            Ok(Self {
+                size,
+                reads: AtomicU64::new(0),
+            })
         }
 
         async fn resize(mut self, start: Location<MmrFamily>) -> Result<Self, Self::Error> {
-            self.size = *start;
+            self.size = self.size.max(*start);
             Ok(self)
         }
 
@@ -1127,6 +1225,15 @@ mod tests {
         async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
             self.size += ops.len() as u64;
             Ok(self)
+        }
+
+        async fn read_range(
+            &self,
+            range: Range<Location<MmrFamily>>,
+        ) -> Result<Vec<Self::Op>, Self::Error> {
+            let len = *range.end - *range.start;
+            self.reads.fetch_add(len, Ordering::SeqCst);
+            Ok(vec![0; len as usize])
         }
     }
 
@@ -1265,7 +1372,7 @@ mod tests {
                 root: sha256::Digest::from([2; 32]),
                 range: non_empty_range!(Location::new(6), Location::new(12)),
             };
-            let mut engine = engine.reset_for_target_update(next).await.unwrap();
+            let mut engine = engine.reset_for_target_update(next, None).await.unwrap();
             assert!(engine.pinned_nodes.is_none());
 
             // The boundary response sets pinned nodes without replacing the batch.
@@ -1327,7 +1434,10 @@ mod tests {
                 root: sha256::Digest::from([2u8; 32]),
                 range: non_empty_range!(Location::new(7), Location::new(12)),
             };
-            let mut engine = engine.reset_for_target_update(new_target).await.unwrap();
+            let mut engine = engine
+                .reset_for_target_update(new_target, None)
+                .await
+                .unwrap();
             assert_eq!(engine.outstanding_requests.len(), 0);
             assert!(engine.outstanding_requests.remove(old_id).is_none());
 
@@ -1382,7 +1492,7 @@ mod tests {
                     range: non_empty_range!(Location::new(5), Location::new(end)),
                 };
                 root += 1;
-                engine = engine.reset_for_target_update(next).await.unwrap();
+                engine = engine.reset_for_target_update(next, None).await.unwrap();
                 assert!(engine.outstanding_requests.contains(&Location::new(5)));
                 assert!(engine.outstanding_requests.contains(&Location::new(8)));
                 assert_eq!(engine.outstanding_requests.len(), 2);
@@ -1396,7 +1506,7 @@ mod tests {
                     range: non_empty_range!(Location::new(start), Location::new(end)),
                 };
                 root += 1;
-                engine = engine.reset_for_target_update(next).await.unwrap();
+                engine = engine.reset_for_target_update(next, None).await.unwrap();
                 assert!(engine.outstanding_requests.contains(&Location::new(8)));
                 assert_eq!(engine.outstanding_requests.len(), 1);
             }
@@ -1440,7 +1550,7 @@ mod tests {
                 root: sha256::Digest::from([2; 32]),
                 range: non_empty_range!(Location::new(8), Location::new(14)),
             };
-            let engine = engine.reset_for_target_update(next).await.unwrap();
+            let engine = engine.reset_for_target_update(next, None).await.unwrap();
             assert!(!engine.outstanding_requests.contains(&Location::new(5)));
             assert!(!engine.outstanding_requests.contains(&Location::new(6)));
             assert!(engine.outstanding_requests.contains(&Location::new(9)));
@@ -1472,7 +1582,7 @@ mod tests {
                 root: sha256::Digest::from([2; 32]),
                 range: non_empty_range!(Location::new(6), Location::new(12)),
             };
-            let mut engine = engine.reset_for_target_update(next).await.unwrap();
+            let mut engine = engine.reset_for_target_update(next, None).await.unwrap();
             engine.schedule_requests();
 
             // Both requests are cancelled. Scheduling issues the boundary request at the new lower
@@ -1513,7 +1623,7 @@ mod tests {
                 root: sha256::Digest::from([2; 32]),
                 range: non_empty_range!(Location::new(5), Location::new(12)),
             };
-            let engine = engine.reset_for_target_update(next).await.unwrap();
+            let engine = engine.reset_for_target_update(next, None).await.unwrap();
             assert_eq!(engine.fetched_operations, fetched);
             assert_eq!(engine.pinned_nodes, Some(pinned));
 
@@ -1522,7 +1632,7 @@ mod tests {
                 root: sha256::Digest::from([3; 32]),
                 range: non_empty_range!(Location::new(9), Location::new(14)),
             };
-            let engine = engine.reset_for_target_update(next).await.unwrap();
+            let engine = engine.reset_for_target_update(next, None).await.unwrap();
             assert_eq!(engine.fetched_operations, fetched);
             assert!(engine.pinned_nodes.is_none());
 
@@ -1531,6 +1641,300 @@ mod tests {
             let engine = engine.apply_operations().await.unwrap();
             assert_eq!(engine.journal.size(), 10);
             assert!(engine.fetched_operations.is_empty());
+        });
+    }
+
+    /// Checks that pinned nodes derived from a journal match those a persisted Merkle structure
+    /// serves, for lower bounds at and above zero and several chunk sizes.
+    async fn derived_pinned_nodes_match_merkle<F: Family>(context: deterministic::Context) {
+        const OPS: u64 = 50;
+
+        // Persist a structure over the encoded operations.
+        let hasher = qmdb::hasher::<Sha256>();
+        let config = full::Config {
+            journal_partition: "derive-journal".into(),
+            metadata_partition: "derive-metadata".into(),
+            items_per_blob: NZU64!(7),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+            strategy: Sequential,
+            page_cache: CacheRef::from_pooler(&context, NZU16!(111), NZUsize!(5)),
+        };
+        let mut merkle =
+            full::Merkle::<F, _, sha256::Digest, Sequential>::init(context, &hasher, config)
+                .await
+                .unwrap();
+        let ops = (0..OPS).collect::<Vec<_>>();
+        let mut batch = merkle.new_batch();
+        for op in &ops {
+            batch = batch.add(&hasher, &op.encode());
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+
+        // Derive from each lower bound to each later one and compare with the structure.
+        for start in [0, 1, 5, 13] {
+            let start = Location::<F>::new(start);
+            let range = non_empty_range!(start, Location::new(OPS));
+            let journal = <Memory<F, (), u64> as Journal<F>>::new((), (), range)
+                .await
+                .unwrap();
+            let journal = journal
+                .append(ops[*start as usize..].to_vec())
+                .await
+                .unwrap();
+            let pinned = merkle.pinned_nodes_at(start).await.unwrap();
+            for end in *start + 1..=OPS {
+                let end = Location::new(end);
+                let expected = merkle.pinned_nodes_at(end).await.unwrap();
+                for chunk in [NZU64!(1), NZU64!(4), NZU64!(64)] {
+                    let derived = derive_pinned_nodes::<F, Sha256, _>(
+                        &journal,
+                        pinned.clone(),
+                        start..end,
+                        chunk,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(derived, expected, "start={start} end={end} chunk={chunk}");
+                }
+            }
+        }
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn derived_pinned_nodes_match_merkle_mmr() {
+        deterministic::Runner::default().start(derived_pinned_nodes_match_merkle::<MmrFamily>);
+    }
+
+    #[test]
+    fn derived_pinned_nodes_match_merkle_mmb() {
+        deterministic::Runner::default().start(derived_pinned_nodes_match_merkle::<MmbFamily>);
+    }
+
+    /// Deriving from pinned nodes of the wrong count fails instead of panicking.
+    #[test]
+    fn derive_rejects_mismatched_pinned_nodes() {
+        deterministic::Runner::default().start(|_context| async move {
+            let range = non_empty_range!(Location::<MmrFamily>::new(5), Location::new(10));
+            let journal = <Memory<MmrFamily, (), u64> as Journal<MmrFamily>>::new((), (), range)
+                .await
+                .unwrap();
+            let journal = journal.append(vec![5, 6, 7, 8, 9]).await.unwrap();
+            let result = derive_pinned_nodes::<MmrFamily, Sha256, _>(
+                &journal,
+                Vec::new(),
+                Location::new(5)..Location::new(8),
+                NZU64!(4),
+            )
+            .await;
+            assert!(result.is_err());
+        });
+    }
+
+    /// Placeholder pinned nodes for a lower bound at `start`.
+    fn pinned_at(start: u64) -> Vec<sha256::Digest> {
+        let count = MmrFamily::nodes_to_pin(Location::new(start)).count();
+        vec![sha256::Digest::from([7; 32]); count]
+    }
+
+    /// Handles `update`, which the engine must adopt rather than defer.
+    async fn adopt(
+        engine: Engine<TestDb, TestSource>,
+        update: Target<MmrFamily, sha256::Digest>,
+    ) -> Engine<TestDb, TestSource> {
+        let NextStep::Continue(engine) = engine
+            .handle_event(Event::TargetUpdate(update.clone()))
+            .await
+            .unwrap()
+        else {
+            panic!("a target update must not complete sync");
+        };
+        assert_eq!(engine.target, update);
+        engine
+    }
+
+    /// An update whose lower bound moves within the journal derives its pinned nodes, keeps the
+    /// operations request at the new bound, and requests no boundary.
+    #[test]
+    fn target_update_derives_pinned_nodes_within_journal() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 8, Arc::new(AtomicUsize::new(0)));
+            let mut engine = Engine::new(config).await.unwrap();
+            engine.outstanding_requests.retain(|_| false);
+            engine.pinned_nodes = Some(pinned_at(5));
+
+            // The request at the journal tip leaves a gap, so the update is not deferred.
+            let at_tip = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(8),
+                max_ops: NZU64!(1),
+            };
+            insert_pending_request(&mut engine, at_tip);
+            let engine = adopt(
+                engine,
+                Target {
+                    root: sha256::Digest::from([2; 32]),
+                    range: non_empty_range!(Location::new(8), Location::new(14)),
+                },
+            )
+            .await;
+            assert_eq!(
+                engine.pinned_nodes.map(|nodes| nodes.len()),
+                Some(pinned_at(8).len())
+            );
+            assert_eq!(engine.journal.reads.load(Ordering::SeqCst), 3);
+            assert_eq!(
+                engine.outstanding_requests.requests().collect::<Vec<_>>(),
+                vec![at_tip]
+            );
+        });
+    }
+
+    /// Pinned nodes are derived over at most [`MAX_DERIVED_OPERATIONS`] operations. A longer move
+    /// of the lower bound requests the boundary instead.
+    #[test]
+    fn target_update_derives_pinned_nodes_up_to_limit() {
+        deterministic::Runner::default().start(|context| async move {
+            for (label, distance) in [
+                ("limit", MAX_DERIVED_OPERATIONS),
+                ("beyond", MAX_DERIVED_OPERATIONS + 1),
+            ] {
+                let derived = distance <= MAX_DERIVED_OPERATIONS;
+                let new_start = 5 + distance;
+                let mut config = test_engine_config(
+                    context.child(label),
+                    new_start,
+                    Arc::new(AtomicUsize::new(0)),
+                );
+                config.target.range =
+                    non_empty_range!(Location::new(5), Location::new(new_start + 1));
+                config.apply_batch_size = NZU64!(1 << 16);
+                let mut engine = Engine::new(config).await.unwrap();
+                engine.outstanding_requests.retain(|_| false);
+                engine.pinned_nodes = Some(pinned_at(5));
+
+                let engine = adopt(
+                    engine,
+                    Target {
+                        root: sha256::Digest::from([2; 32]),
+                        range: non_empty_range!(
+                            Location::new(new_start),
+                            Location::new(new_start + 6)
+                        ),
+                    },
+                )
+                .await;
+                assert_eq!(engine.pinned_nodes.is_some(), derived, "{label}");
+                let reads = engine.journal.reads.load(Ordering::SeqCst);
+                assert_eq!(reads, if derived { distance } else { 0 }, "{label}");
+                let at_start = engine.outstanding_requests.requests().next();
+                assert_eq!(
+                    matches!(at_start, Some(Request::Boundary { .. })),
+                    !derived,
+                    "{label}"
+                );
+            }
+        });
+    }
+
+    /// An update whose lower bound moves past the journal tip, or away from a bound whose pinned
+    /// nodes are unknown, derives nothing and requests the boundary.
+    #[test]
+    fn target_update_without_derivation_requests_boundary() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let mut engine = Engine::new(config).await.unwrap();
+            engine.outstanding_requests.retain(|_| false);
+            engine.pinned_nodes = Some(pinned_at(5));
+
+            // A lower bound past the journal tip.
+            let mut engine = adopt(
+                engine,
+                Target {
+                    root: sha256::Digest::from([2; 32]),
+                    range: non_empty_range!(Location::new(6), Location::new(12)),
+                },
+            )
+            .await;
+            assert!(engine.pinned_nodes.is_none());
+            assert!(matches!(
+                engine.outstanding_requests.requests().next(),
+                Some(Request::Boundary { start, .. }) if start == Location::new(6)
+            ));
+
+            // A lower bound at the journal tip, moved from one whose pinned nodes are unknown.
+            engine.journal.size = 8;
+            let engine = adopt(
+                engine,
+                Target {
+                    root: sha256::Digest::from([3; 32]),
+                    range: non_empty_range!(Location::new(8), Location::new(14)),
+                },
+            )
+            .await;
+            assert!(engine.pinned_nodes.is_none());
+            assert!(matches!(
+                engine.outstanding_requests.requests().next(),
+                Some(Request::Boundary { start, .. }) if start == Location::new(8)
+            ));
+            assert_eq!(engine.journal.reads.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    /// A deferred update adopted once the current target is reached derives its pinned nodes and
+    /// cancels the boundary request issued while it was deferred.
+    #[test]
+    fn adopted_deferred_update_derives_pinned_nodes() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            let (mut engine, operations) = tail_engine(config, true).await;
+            engine.pinned_nodes = Some(pinned_at(5));
+
+            // An update behind the operations request at 5 fetches its boundary at 8.
+            let update = Target {
+                root: sha256::Digest::from([2; 32]),
+                range: non_empty_range!(Location::new(8), Location::new(14)),
+            };
+            let NextStep::Continue(mut engine) = engine
+                .handle_event(Event::TargetUpdate(update.clone()))
+                .await
+                .unwrap()
+            else {
+                panic!("a deferred update must not complete sync");
+            };
+            assert!(engine.outstanding_requests.contains(&Location::new(8)));
+
+            // The current target is reached, and the next step adopts the update.
+            engine
+                .handle_fetch_result(IndexedFetchResult {
+                    id: operations,
+                    result: Ok(Some(Response::Operations {
+                        proof: Proof {
+                            leaves: Location::new(10),
+                            inactive_peaks: 0,
+                            digests: vec![],
+                        },
+                        operations: vec![5, 6, 7, 8, 9],
+                    })),
+                })
+                .unwrap();
+            let engine = engine.apply_operations().await.unwrap();
+            let NextStep::Continue(engine) = engine.step().await.unwrap() else {
+                panic!("engine should adopt the deferred update instead of completing");
+            };
+            assert_eq!(engine.target, update);
+            assert_eq!(
+                engine.pinned_nodes.map(|nodes| nodes.len()),
+                Some(pinned_at(8).len())
+            );
+            assert_eq!(engine.journal.reads.load(Ordering::SeqCst), 3);
+            let requests = engine.outstanding_requests.requests().collect::<Vec<_>>();
+            assert!(matches!(
+                requests[..],
+                [Request::Operations { start, .. }] if start == Location::new(10)
+            ));
         });
     }
 

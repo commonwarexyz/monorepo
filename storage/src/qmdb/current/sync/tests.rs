@@ -797,6 +797,20 @@ macro_rules! current_sync_tests_for_harness {
             fn test_local_pinned_nodes_below_floor() {
                 crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
             }
+
+            #[test_traced]
+            fn test_target_update_derives_pinned_nodes_within_journal() {
+                crate::qmdb::any::sync::tests::test_target_update_derives_pinned_nodes::<
+                    $harness,
+                >(true);
+            }
+
+            #[test_traced]
+            fn test_target_update_derives_pinned_nodes_from_unpruned_target() {
+                crate::qmdb::any::sync::tests::test_target_update_derives_pinned_nodes::<
+                    $harness,
+                >(false);
+            }
         }
     };
 }

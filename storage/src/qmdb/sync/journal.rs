@@ -3,7 +3,7 @@ use crate::{
     merkle::{Family, Location},
 };
 use commonware_utils::range::NonEmptyRange;
-use std::future::Future;
+use std::{future::Future, ops::Range};
 
 /// Journal of operations used by a [super::Database]
 pub trait Journal<F: Family>: Sized + Send {
@@ -47,6 +47,12 @@ pub trait Journal<F: Family>: Sized + Send {
 
     /// Append a non-empty batch of operations.
     fn append(self, ops: Vec<Self::Op>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+
+    /// Read the operations in `range`, which must lie within the retained operations.
+    fn read_range(
+        &self,
+        range: Range<Location<F>>,
+    ) -> impl Future<Output = Result<Vec<Self::Op>, Self::Error>> + Send;
 }
 
 impl<F, E, V> Journal<F> for crate::journal::contiguous::variable::Journal<E, V>
@@ -89,6 +95,11 @@ where
     async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
         let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
+    }
+
+    async fn read_range(&self, range: Range<Location<F>>) -> Result<Vec<Self::Op>, Self::Error> {
+        let positions = (*range.start..*range.end).collect::<Vec<_>>();
+        Contiguous::read_many(self, &positions).await
     }
 }
 
@@ -133,6 +144,11 @@ where
         let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
     }
+
+    async fn read_range(&self, range: Range<Location<F>>) -> Result<Vec<Self::Op>, Self::Error> {
+        let positions = (*range.start..*range.end).collect::<Vec<_>>();
+        Contiguous::read_many(self, &positions).await
+    }
 }
 
 /// An in-memory operation journal.
@@ -153,7 +169,7 @@ impl<F, E, Op> Journal<F> for Memory<F, E, Op>
 where
     F: Family,
     E: Send,
-    Op: Send + Sync,
+    Op: Clone + Send + Sync,
 {
     type Context = E;
     type Config = ();
@@ -194,6 +210,18 @@ where
     async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
         self.ops.extend(ops);
         Ok(self)
+    }
+
+    async fn read_range(&self, range: Range<Location<F>>) -> Result<Vec<Self::Op>, Self::Error> {
+        if range.start < self.start {
+            return Err(crate::journal::Error::ItemPruned(*range.start).into());
+        }
+        let start = (*range.start - *self.start) as usize;
+        let end = (*range.end).saturating_sub(*self.start) as usize;
+        self.ops
+            .get(start..end)
+            .map(<[Op]>::to_vec)
+            .ok_or_else(|| crate::journal::Error::ItemOutOfRange(*range.end).into())
     }
 }
 
@@ -256,6 +284,13 @@ mod tests {
             // Appends extend the size.
             let journal = journal.append(vec![1, 2, 3]).await.unwrap();
             assert_eq!(journal.size(), 13);
+
+            // Reads return held ops and reject ranges outside them.
+            let read =
+                |start: u64, end: u64| journal.read_range(Location::new(start)..Location::new(end));
+            assert_eq!(read(11, 13).await.unwrap(), vec![2, 3]);
+            assert!(read(9, 11).await.is_err());
+            assert!(read(12, 14).await.is_err());
 
             // A resize within the retained ops drains the prefix.
             let journal = journal.resize(Location::new(12)).await.unwrap();

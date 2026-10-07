@@ -349,7 +349,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "std"))]
     pub(crate) fn node_digests_to_pin(&self, prune_loc: Location<F>) -> Vec<D> {
         F::nodes_to_pin(prune_loc)
             .map(|pos| *self.get_node_unchecked(pos))

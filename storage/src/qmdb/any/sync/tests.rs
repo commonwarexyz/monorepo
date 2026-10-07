@@ -2973,6 +2973,131 @@ where
     }
 }
 
+/// Test that a target update moving the floor within the synced journal derives pinned nodes
+/// locally instead of requesting a boundary. The first target is pruned to its floor when `prune`
+/// is set, so its pinned nodes come from a boundary request, and needs none otherwise.
+pub(crate) fn test_target_update_derives_pinned_nodes<H: SyncTestHarness>(prune: bool)
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Build a source whose boundary is above zero, pruned to it when requested. A
+        // chunk-aligned boundary needs more operations before it moves above zero.
+        let mut db = H::init_db(context.child("source")).await;
+        db = H::apply_ops(db, H::create_ops(256)).await;
+        let mut rounds = 0;
+        while db.sync_boundary() == Location::new(0) {
+            rounds += 1;
+            assert!(rounds < 64, "boundary must move above zero");
+            db = H::apply_ops(db, H::create_ops(256)).await;
+        }
+        let floor = if prune {
+            let floor = db.sync_boundary();
+            db = db.prune(floor).await.unwrap();
+            assert!(floor > Location::new(0));
+            floor
+        } else {
+            Location::new(0)
+        };
+        let target = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(floor, db.bounds().end),
+        };
+        let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+        let log = Arc::new(Mutex::new(GateLog {
+            open: true,
+            held: Vec::new(),
+            served: Vec::new(),
+        }));
+
+        // Sync with an explicit finish so the engine waits at each reached target.
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let (finish_tx, finish_rx) = mpsc::channel(1);
+        let (reached_tx, mut reached_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            target: target.clone(),
+            source: GatedSource {
+                inner: source_db.clone(),
+                log: log.clone(),
+            },
+            fetch_batch_size: NZU64!(32),
+            apply_batch_size: NZU64!(16),
+            max_outstanding_requests: NZUsize!(4),
+            update_rx: Some(update_rx),
+            finish_rx: Some(finish_rx),
+            reached_target_tx: Some(reached_tx),
+        };
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // A pruned first target fetches its pinned nodes with a boundary request. An
+            // unpruned first target needs none.
+            assert_eq!(reached_rx.recv().await.unwrap(), target);
+            let boundary = Request::Boundary {
+                size: target.range.end(),
+                start: target.range.start(),
+            };
+            assert_eq!(log.lock().served.contains(&boundary), prune);
+            let issued = log.lock().served.len();
+
+            // Commit and prune the source until the floor moves within the synced journal.
+            let next = {
+                let mut guard = source_db.write().await;
+                let mut db = guard.take().unwrap();
+                let mut round = 0;
+                loop {
+                    round += 1;
+                    assert!(round < 1024, "floor must move");
+                    db = H::apply_ops(db, H::create_ops_seeded(1, round)).await;
+                    if db.sync_boundary() > target.range.start() {
+                        break;
+                    }
+                }
+                let floor = db.sync_boundary();
+                let db = db.prune(floor).await.unwrap();
+                let next = Target {
+                    root: H::sync_target_root(&db),
+                    range: non_empty_range!(floor, db.bounds().end),
+                };
+                *guard = Some(db);
+                next
+            };
+            assert!(next.range.start() > target.range.start());
+            assert!(next.range.start() <= target.range.end());
+
+            // The engine reaches the next target with operation requests only.
+            update_tx.send(next.clone()).await.unwrap();
+            assert_eq!(reached_rx.recv().await.unwrap(), next);
+            let requests = log.lock().served[issued..].to_vec();
+            assert!(!requests.is_empty());
+            for request in requests {
+                assert!(
+                    matches!(request, Request::Operations { .. }),
+                    "{request:?} must not be issued"
+                );
+            }
+            finish_tx.send(()).await.unwrap();
+        };
+        let (synced, ()) = futures::join!(sync, drive);
+
+        // Sync completes at the latest target.
+        let db = source_db.write().await.take().unwrap();
+        assert_eq!(synced.root(), db.root());
+
+        synced.destroy().await.unwrap();
+        db.destroy().await.unwrap();
+    });
+}
+
 /// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
 /// floor.
 pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
@@ -3908,6 +4033,16 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_follows_random_target_updates() {
                 super::test_sync_follows_random_target_updates::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_target_update_derives_pinned_nodes_within_journal() {
+                super::test_target_update_derives_pinned_nodes::<$harness>(true);
+            }
+
+            #[test_traced]
+            fn test_target_update_derives_pinned_nodes_from_unpruned_target() {
+                super::test_target_update_derives_pinned_nodes::<$harness>(false);
             }
 
             #[test_traced]
