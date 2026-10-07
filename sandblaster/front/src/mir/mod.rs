@@ -39,6 +39,7 @@
 //! check compares every read function, and the literal reading of it,
 //! with rustc's build of the source.
 
+pub mod arch;
 pub mod cfg;
 pub mod checked;
 pub mod gate;
@@ -123,6 +124,10 @@ pub struct ModuleNames {
     /// The host models of `#[lift(host)]` modules other than enums
     /// (SEMANTICS.md §19.10).
     pub host: HostModels,
+    /// The build's target architecture (`aarch64`): an extraction that
+    /// records another one is refused (`None`: not checked, the toolchain's
+    /// own tests of extractions without a recorded target).
+    pub target_arch: Option<String>,
 }
 
 /// Host models a library type of rustc's MIR is read as (SEMANTICS.md
@@ -448,6 +453,12 @@ impl Names for ModuleNames {
                     syn::parse_quote!(&#t)
                 }
             },
+            // a `core::arch` vector (§20.9): its `core::arch` path, which the
+            // front end reads as its model representation
+            Ty::Simd(p, lane, n) => {
+                arch::vector(p, lane, *n)?;
+                return syn::parse_str(p).map_err(|e| format!("the vector type `{p}`: {e}"));
+            }
             Ty::Adt(k) => {
                 let d = m.adts.get(k).ok_or_else(|| format!("no ADT `{k}`"))?;
                 if let Some(p) = self.transparent_path(m, k) {
@@ -726,6 +737,13 @@ pub fn load(text: &str, sources: &dyn std::ops::Fn(&str) -> Option<Vec<u8>>, mut
     }
     if !m.overflow_checks {
         return Err("the .sbmir file was extracted without overflow checks (the workspace's profiles build with them)".into());
+    }
+    // MIR of another architecture is not what this build compiles (its
+    // `core::arch` and `cfg(target_arch)` code is another's)
+    if let (Some((triple, arch)), Some(build)) = (&m.target, &names.target_arch)
+        && arch != build
+    {
+        return Err(format!("the MIR was extracted for `{triple}` ({arch}), but this build is for {build}: extract it for the build's target (`extract.sh --target`)"));
     }
     for (path, hash) in &m.sources {
         let Some(bytes) = sources(path) else { return Err(format!("the .sbmir file names the source `{path}`, which does not exist")) };

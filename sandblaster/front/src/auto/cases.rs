@@ -636,18 +636,35 @@ impl<'a> Engine<'a> {
             });
         }
         lits.sort();
-        for c in lits.into_iter().take(12) {
-            if c > sandblaster_kernel::prim::max_of(w) {
-                break;
-            }
-            let g = self.cmp_goal(st, PrimOp::Le(w), x, &lit_v(w, c.clone()))?;
-            if let Some(g) = g
-                && self.lin_prove(st, &g, false)?.is_some()
-            {
-                return Ok(Some(c));
+        let max = sandblaster_kernel::prim::max_of(w);
+        lits.retain(|c| *c <= max);
+        lits.truncate(64);
+        // `x ≤ c` is monotone in `c`: the smallest provable candidate by
+        // bisection (the literals of an eta-expanded array's lanes would
+        // crowd out the bound a linear scan of the first few reaches)
+        let Some(last) = lits.last().cloned() else { return Ok(None) };
+        if !self.le_provable(st, w, x, &last)? {
+            return Ok(None);
+        }
+        let (mut lo, mut hi) = (0usize, lits.len() - 1);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.le_provable(st, w, x, &lits[mid])? {
+                hi = mid;
+            } else {
+                lo = mid + 1;
             }
         }
-        Ok(None)
+        Ok(Some(lits[hi].clone()))
+    }
+
+    /// Is `x ≤ c` provable by linarith (without enrichment)?
+    fn le_provable(&mut self, st: &St, w: Width, x: &V, c: &BigInt) -> R<bool> {
+        let g = self.cmp_goal(st, PrimOp::Le(w), x, &lit_v(w, c.clone()))?;
+        Ok(match g {
+            Some(g) => self.lin_prove(st, &g, false)?.is_some(),
+            None => false,
+        })
     }
 
     /// `Eq(Bool, op(a, b), true)`.

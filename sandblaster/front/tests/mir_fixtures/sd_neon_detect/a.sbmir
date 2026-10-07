@@ -1,0 +1,22 @@
+;; rustc's MIR of `fx_sd_neon_detect::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_sd_neon_detect")
+(module "fx_sd_neon_detect::a")
+(overflow-checks on)
+(target "arm64-apple-macosx" "aarch64")
+(exclude)
+(source "src/a.rs" "a5056a75eb5dff85539b406fbe87c6e1e5ec1aa0cdd50e5cdacdb8fb70c5e20f")
+(root "fx_sd_neon_detect::a::has_sm4")
+(fn "fx_sd_neon_detect::a::has_sm4"
+  (kind root) (def "fx_sd_neon_detect::a::has_sm4") (args ())
+  (item fn "has_sm4")
+  (span "src/a.rs" 4 1)
+  (argc 0)
+  (locals
+    (0 bool mut))
+  (bb 0
+    (call (leaf "std_detect::detect::arch::aarch64::__is_feature_detected::sm4" ()) (args) (p 0) 1))
+  (bb 1
+    (return (at "src/a.rs" 6 2)))
+)

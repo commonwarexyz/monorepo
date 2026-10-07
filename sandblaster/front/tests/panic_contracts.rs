@@ -757,11 +757,13 @@ fn a_changed_panic_contract_is_never_equivalent() {
 /// Negative twin: a change that leaves the panic contract alone is not
 /// caught by the panic-contract rule; it goes to the kernel comparison as
 /// before. `succ`'s `ensures` restated under its unchanged panic contract:
-/// both directions of the `ensures` are proven (the class is then the
-/// domain comparison's; today it does not prove a domain with a no-panic
-/// clause, so it stays conservative). The same restatement with no panic
-/// contract on either side: kernel-proven equivalent, and accepted by
-/// `--equivalent-only`.
+/// the domain (whose no-panic clause `Not(p)` is an irrelevant hypothesis,
+/// proven from the other side's `h_req0` the way the kernel checks an
+/// irrelevant position) and both directions of the `ensures` are proven:
+/// kernel-proven equivalent, and accepted by `--equivalent-only`. A weaker
+/// restatement under the same panic contract is weakened, never
+/// equivalent. The same restatement with no panic contract on either side:
+/// kernel-proven equivalent too.
 #[test]
 fn a_change_that_keeps_the_panic_contract_is_still_compared_by_the_kernel() {
     let exact = laws(EXACT);
@@ -770,9 +772,20 @@ fn a_change_that_keeps_the_panic_contract_is_still_compared_by_the_kernel() {
     let (d, same) = diff(&exact, &restated, "succ");
     assert!(!same, "the kernel statement changed");
     let key = fn_key(&surface_of(&exact), "succ");
-    let (what, _, reason) = &d[&key];
+    let (what, class, reason) = &d[&key];
     assert_eq!(*what, What::Changed, "{reason}");
-    assert!(!reason.contains("panic contract") && reason.starts_with("domain: ") && reason.contains("ensures: old ⇒ new proven; new ⇒ old proven"), "{reason}");
+    assert!(!reason.contains("panic contract") && reason.starts_with("domain: unchanged") && reason.contains("ensures: old ⇒ new proven; new ⇒ old proven"), "{reason}");
+    assert_eq!(*class, Some(Class::Equivalent), "{reason}");
+    assert!(equivalent_only(&exact, &restated).contains(&key), "{d:#?}");
+    // twin: a weaker `ensures` under the same panic contract (still true of
+    // the code): the domain is the same, only old ⇒ new holds
+    let weaker = exact.replace("ensures(|ret: u64| ret as Int == x as Int + 1);", "ensures(|ret: u64| ret as Int > x as Int);");
+    assert_ne!(weaker, exact);
+    let (d, _) = diff(&exact, &weaker, "succ");
+    let (what, class, reason) = &d[&key];
+    assert_eq!((*what, *class), (What::Changed, Some(Class::Weakened)), "{reason}");
+    assert!(reason.starts_with("domain: unchanged") && reason.contains("ensures: old ⇒ new proven; new ⇒ old not proven"), "{reason}");
+    assert!(!equivalent_only(&exact, &weaker).contains(&key), "{d:#?}");
     // the same restatement with no panic contract on either side (`succ`'s
     // overflow a precondition): compared, and equivalent
     let pre = laws([EXACT[0], "requires(x < 18446744073709551615u64);", EXACT[2]]);
@@ -785,6 +798,41 @@ fn a_change_that_keeps_the_panic_contract_is_still_compared_by_the_kernel() {
     assert!(equivalent_only(&pre, &pre_restated).contains(&key), "{d:#?}");
     // and with no change at all, nothing is reported
     assert!(diff(&exact, &exact, "succ").0.is_empty());
+}
+
+/// The classifier proves a hypothesis the stronger side binds irrelevantly
+/// (a `requires`, a no-panic clause `Not(p)`) as the kernel checks that
+/// irrelevant position: from the other side's irrelevant hypotheses too
+/// (the old check, a relevant one, rejected the proof `.h` and reported the
+/// hypothesis as not implied). Negative twins: a stronger hypothesis is not
+/// proven from a weaker one, and a relevant parameter (a disjunction is
+/// data, not a proposition) is not given an irrelevant one — the assembled
+/// comparison is checked by the kernel as a whole either way.
+#[test]
+fn an_irrelevant_hypothesis_is_proven_as_the_kernel_checks_irrelevant_positions() {
+    let c = checked(&laws(EXACT));
+    sandblaster_front::elab::with_big_stack(|| {
+        let k = c.krate.as_ref().unwrap();
+        let mut chain = sandblaster_front::elab::ProverChain::standard();
+        let out = sandblaster_front::elab::elaborate(k, &mut chain, &sandblaster_front::elab::Options::default());
+        let (surface, terms) = sandblaster_front::surface::compute_with_terms(&out, k, &c.sm, &sandblaster_front::surface::SurfaceOptions::default());
+        let mut cl = specdiff::Classifier::new(&out, &surface, &terms, Vec::new());
+        let t = |s: &str| out.env.parse_term(&[], s).unwrap_or_else(|e| panic!("{s}: {e}"));
+        let lt = |k: u64| format!("Eq(Bool, #lt_u64(x, {k}u64), true)");
+        // `.h : Not(x < k)` (the shape of a no-panic clause)
+        let irr_not = |k: u64| t(&format!("(x : U64) -> (.h : Not ({})) -> Eq(Bool, true, true)", lt(k)));
+        assert_eq!(cl.implies_closed(&irr_not(5), &irr_not(5)), Ok(()));
+        assert_eq!(cl.implies_closed(&irr_not(4), &irr_not(5)), Ok(()));
+        let r = cl.implies_closed(&irr_not(5), &irr_not(4));
+        assert!(r.as_ref().is_err_and(|e| e.contains("a hypothesis of the stronger side is not implied")), "{r:?}");
+        // a relevant `x < 5 ∨ 9 < x` (data) from an irrelevant one: refused
+        // before the kernel sees it; the converse is accepted
+        let rel_or = t(&format!("(x : U64) -> (h : Or ({}) (Eq(Bool, #lt_u64(9u64, x), true))) -> Eq(Bool, true, true)", lt(5)));
+        let irr_or = t(&format!("(x : U64) -> (.h : Or ({}) (Eq(Bool, #lt_u64(9u64, x), true))) -> Eq(Bool, true, true)", lt(5)));
+        let r = cl.implies_closed(&rel_or, &irr_or);
+        assert!(r.as_ref().is_err_and(|e| e.contains("the parameters differ")), "{r:?}");
+        assert_eq!(cl.implies_closed(&irr_or, &rel_or), Ok(()));
+    });
 }
 
 /// The panic contracts of a verified root as checked in: the gate run on

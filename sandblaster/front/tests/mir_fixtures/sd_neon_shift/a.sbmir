@@ -1,0 +1,100 @@
+;; rustc's MIR of `fx_sd_neon_shift::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_sd_neon_shift")
+(module "fx_sd_neon_shift::a")
+(overflow-checks on)
+(target "arm64-apple-macosx" "aarch64")
+(exclude)
+(source "src/a.rs" "2f319b1e64c6cfea92884463821a34781dcdf657fb21c2f522aeb26bd16e7fac")
+(root "fx_sd_neon_shift::a::mul_nibbles")
+(root "fx_sd_neon_shift::a::lookup")
+(root "fx_sd_neon_shift::a::mul_twice")
+(root "fx_sd_neon_shift::a::has_neon")
+(fn "fx_sd_neon_shift::a::mul_nibbles"
+  (kind root) (def "fx_sd_neon_shift::a::mul_nibbles") (args ())
+  (item fn "mul_nibbles")
+  (span "src/a.rs" 10 1)
+  (target-features "neon")
+  (argc 3)
+  (locals
+    (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut)
+    (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (3 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (4 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (5 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (6 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut)
+    (7 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (8 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "lo" (p 2) (arg 2))
+  (debug "hi" (p 3) (arg 3))
+  (debug "mask" (p 4))
+  (debug "l" (p 5))
+  (debug "h" (p 7))
+  (bb 0
+    (call (arch "core::arch::aarch64::vdupq_n_u8" (imms) (features "neon") safe value) (args (int u8 15)) (p 4) 1 (at "src/a.rs" 11 16)))
+  (bb 1
+    (call (arch "core::arch::aarch64::vandq_u8" (imms) (features "neon") safe value) (args (copy (p 1)) (copy (p 4))) (p 6) 2 (at "src/a.rs" 12 28)))
+  (bb 2
+    (call (arch "core::arch::aarch64::vqtbl1q_u8" (imms) (features "neon") safe value) (args (copy (p 2)) (move (p 6))) (p 5) 3 (at "src/a.rs" 12 13)))
+  (bb 3
+    (call (arch "core::arch::aarch64::vshrq_n_u8" (imms 3) (features "neon") safe value) (args (copy (p 1))) (p 8) 4 (at "src/a.rs" 13 28)))
+  (bb 4
+    (call (arch "core::arch::aarch64::vqtbl1q_u8" (imms) (features "neon") safe value) (args (copy (p 3)) (move (p 8))) (p 7) 5 (at "src/a.rs" 13 13)))
+  (bb 5
+    (call (arch "core::arch::aarch64::veorq_u8" (imms) (features "neon") safe value) (args (copy (p 5)) (copy (p 7))) (p 0) 6 (at "src/a.rs" 14 5)))
+  (bb 6
+    (return (at "src/a.rs" 15 2)))
+)
+(fn "fx_sd_neon_shift::a::lookup"
+  (kind root) (def "fx_sd_neon_shift::a::lookup") (args ())
+  (item fn "lookup")
+  (span "src/a.rs" 19 1)
+  (target-features "neon")
+  (argc 2)
+  (locals
+    (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut)
+    (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm))
+  (debug "table" (p 1) (arg 1))
+  (debug "idx" (p 2) (arg 2))
+  (bb 0
+    (call (arch "core::arch::aarch64::vqtbl1q_u8" (imms) (features "neon") safe value) (args (copy (p 1)) (copy (p 2))) (p 0) 1 (at "src/a.rs" 20 5)))
+  (bb 1
+    (return (at "src/a.rs" 21 2)))
+)
+(fn "fx_sd_neon_shift::a::mul_twice"
+  (kind root) (def "fx_sd_neon_shift::a::mul_twice") (args ())
+  (item fn "mul_twice")
+  (span "src/a.rs" 25 1)
+  (target-features "neon")
+  (argc 3)
+  (locals
+    (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut)
+    (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (3 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (4 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut))
+  (debug "x" (p 1) (arg 1))
+  (debug "lo" (p 2) (arg 2))
+  (debug "hi" (p 3) (arg 3))
+  (bb 0
+    (call (fn "fx_sd_neon_shift::a::mul_nibbles") (args (copy (p 1)) (copy (p 2)) (copy (p 3))) (p 4) 1 (at "src/a.rs" 26 17)))
+  (bb 1
+    (call (fn "fx_sd_neon_shift::a::mul_nibbles") (args (move (p 4)) (copy (p 2)) (copy (p 3))) (p 0) 2 (at "src/a.rs" 26 5)))
+  (bb 2
+    (return (at "src/a.rs" 27 2)))
+)
+(fn "fx_sd_neon_shift::a::has_neon"
+  (kind root) (def "fx_sd_neon_shift::a::has_neon") (args ())
+  (item fn "has_neon")
+  (span "src/a.rs" 31 1)
+  (argc 0)
+  (locals
+    (0 bool mut))
+  (bb 0
+    (assign (p 0) (use (int bool 1)))
+    (return (at "src/a.rs" 33 2)))
+)

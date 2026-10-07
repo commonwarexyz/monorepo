@@ -245,6 +245,34 @@ name = "fx-rw-mix"
 version = "0.0.0"
 
 [[package]]
+name = "fx-sd-neon"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-neon-detect"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-neon-lane"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-neon-nomodel"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-neon-ptr"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-neon-shift"
+version = "0.0.0"
+
+[[package]]
+name = "fx-sd-x86"
+version = "0.0.0"
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"

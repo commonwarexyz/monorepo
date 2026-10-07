@@ -20,7 +20,7 @@ const HEADER: &str = r#"(sbmir 1)
 fn names() -> ModuleNames {
     let mut host = BTreeMap::new();
     host.insert("Error".to_string(), vec!["EndOfBuffer".to_string()]);
-    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums: host, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default() }
+    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums: host, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None }
 }
 
 fn load(body: &str) -> Result<mir::Loaded, String> {

@@ -1,0 +1,43 @@
+;; rustc's MIR of `fx_sd_neon_ptr::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_sd_neon_ptr")
+(module "fx_sd_neon_ptr::a")
+(overflow-checks on)
+(target "arm64-apple-macosx" "aarch64")
+(exclude)
+(source "src/a.rs" "b2895ce713a4ad09826047e0e5a788c90202a5f73ccfaaeb1bb9d310bab75983")
+(root "fx_sd_neon_ptr::a::load")
+(fn "fx_sd_neon_ptr::a::load"
+  (kind root) (def "fx_sd_neon_ptr::a::load") (args ())
+  (item fn "load")
+  (span "src/a.rs" 6 1)
+  (argc 1)
+  (locals
+    (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut)
+    (1 (ref shared (array u8 16)) imm)
+    (2 (unsupported "type RawPtr(Ty { id: 6, kind: RigidTy(Uint(U8)) }, Not)") mut)
+    (3 (ref shared (slice u8)) mut))
+  (debug "a" (p 1) (arg 1))
+  (bb 0
+    (assign (p 3) (cast unsize (copy (p 1)) (ref shared (slice u8))) (at "src/a.rs" 7 23))
+    (call (fn "core::slice::<impl [u8]>::as_ptr") (args (move (p 3))) (p 2) 1 (at "src/a.rs" 7 23)))
+  (bb 1
+    (call (arch "core::arch::aarch64::vld1q_u8" (imms) (features "neon") unsafe pointer) (args (move (p 2))) (p 0) 2 (at "src/a.rs" 7 14)))
+  (bb 2
+    (return (at "src/a.rs" 8 2)))
+)
+(fn "core::slice::<impl [u8]>::as_ptr"
+  (kind callee) (def "core::slice::<impl [T]>::as_ptr") (args (u8))
+  (item inherent (slice u8) "as_ptr")
+  (argc 1)
+  (locals
+    (0 (unsupported "type RawPtr(Ty { id: 6, kind: RigidTy(Uint(U8)) }, Not)") mut)
+    (1 (ref shared (slice u8)) imm)
+    (2 (unsupported "type RawPtr(Ty { id: 9, kind: RigidTy(Slice(Ty { id: 6, kind: RigidTy(Uint(U8)) })) }, Not)") mut))
+  (debug "self" (p 1) (arg 1))
+  (bb 0
+    (assign (p 2) (unsupported "rvalue AddressOf(Const, (*_1))"))
+    (assign (p 0) (cast (unsupported "PtrToPtr") (copy (p 2)) (unsupported "type RawPtr(Ty { id: 6, kind: RigidTy(Uint(U8)) }, Not)")))
+    (return))
+)

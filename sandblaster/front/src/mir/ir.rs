@@ -30,6 +30,10 @@ pub enum Ty {
     Closure(String, Box<Ty>),
     /// A function item (zero-sized).
     FnDef(String, Vec<Ty>),
+    /// A `#[repr(simd)]` vector of `core::arch` (`docs/mir-lift.md` §20.9):
+    /// its public path (`core::arch::aarch64::uint8x16_t`), and its lane
+    /// type and lane count as rustc lays it out (`__m128i` is two `i64`s).
+    Simd(String, Box<Ty>, u64),
     Unsupported(String),
 }
 
@@ -157,9 +161,28 @@ pub enum Callee {
     Fn(String),
     Leaf(String, Vec<Ty>),
     Intrinsic(String, Vec<Ty>),
+    /// A call of a `core::arch` intrinsic (`docs/mir-lift.md` §20.9).
+    Arch(ArchCall),
     Diverge(String),
     Unextracted(String),
     Unsupported(String),
+}
+
+/// A call of a `core::arch` intrinsic as `sandblaster-mirx` printed it:
+/// never followed into its body, read as the target model of its path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArchCall {
+    /// Its public path (`core::arch::aarch64::vshrq_n_u8`).
+    pub path: String,
+    /// Its const generic immediates (stdarch's `const N: i32`), by value.
+    pub imms: Vec<i128>,
+    /// The target features rustc compiles the intrinsic with (its own and
+    /// the features they imply).
+    pub features: Vec<String>,
+    /// Declared safe (a value intrinsic); `false`: an `unsafe fn`.
+    pub safe: bool,
+    /// A parameter or the result is a raw pointer (a load or a store).
+    pub pointer: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +236,9 @@ pub struct Fn {
     pub debug: Vec<(String, usize)>,
     pub blocks: Vec<Block>,
     pub has_body: bool,
+    /// The target features rustc compiles the body with (`#[target_feature]`
+    /// and what it implies; empty: none).
+    pub target_features: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -226,6 +252,10 @@ pub struct Sbmir {
     pub roots: Vec<String>,
     pub adts: BTreeMap<String, AdtDef>,
     pub fns: BTreeMap<String, Fn>,
+    /// The target the MIR was built for: (LLVM triple, `target_arch`);
+    /// `None` for an extraction older than the record (no `core::arch` code
+    /// is read from it).
+    pub target: Option<(String, String)>,
 }
 
 fn err(what: &str, e: &Sx) -> String {
@@ -262,6 +292,12 @@ pub fn ty(e: &Sx) -> Result<Ty, String> {
         Some("adt") => Ty::Adt(t.first().and_then(Sx::str).ok_or_else(|| err("adt", e))?.to_string()),
         Some("closure") => Ty::Closure(t.first().and_then(Sx::str).ok_or_else(|| err("closure", e))?.to_string(), Box::new(t.get(1).map(ty).transpose()?.unwrap_or(Ty::Unit))),
         Some("fndef") => Ty::FnDef(t.first().and_then(Sx::str).ok_or_else(|| err("fndef", e))?.to_string(), t.get(1).map(|a| a.tail_all().iter().map(ty).collect::<Result<Vec<_>, _>>()).transpose()?.unwrap_or_default()),
+        Some("simd") => {
+            let path = t.first().and_then(Sx::str).ok_or_else(|| err("simd", e))?.to_string();
+            let lane = ty(t.get(1).ok_or_else(|| err("simd lane type", e))?)?;
+            let n = t.get(2).and_then(Sx::num).ok_or_else(|| err("simd lane count", e))? as u64;
+            Ty::Simd(path, Box::new(lane), n)
+        }
         Some("unsupported") => Ty::Unsupported(t.first().and_then(Sx::str).unwrap_or("?").to_string()),
         _ => return Err(err("type", e)),
     })
@@ -376,6 +412,30 @@ fn callee(e: &Sx) -> Result<Callee, String> {
         Some("fn") => Callee::Fn(s0()?),
         Some("leaf") => Callee::Leaf(s0()?, tys(1)?),
         Some("intrinsic") => Callee::Intrinsic(s0()?, tys(1)?),
+        Some("arch") => {
+            // `(arch PATH (imms v..) (features "f"..) safe|unsafe value|pointer)`:
+            // anything else (an immediate rustc_public could not read) is unsupported
+            let path = s0()?;
+            let list = |head: &str| t.iter().find(|x| x.head() == Some(head)).map(|x| x.tail().to_vec());
+            let (Some(imms), Some(feats)) = (list("imms"), list("features")) else { return Ok(Callee::Unsupported(e.to_string())) };
+            let imms: Option<Vec<i128>> = imms.iter().map(|x| x.atom().and_then(|a| a.parse::<i128>().ok())).collect();
+            let feats: Option<Vec<String>> = feats.iter().map(|x| x.str().map(str::to_string)).collect();
+            let word = |w: &str| t.iter().any(|x| x.atom() == Some(w));
+            let safe = match (word("safe"), word("unsafe")) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => return Ok(Callee::Unsupported(e.to_string())),
+            };
+            let pointer = match (word("pointer"), word("value")) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => return Ok(Callee::Unsupported(e.to_string())),
+            };
+            match (imms, feats) {
+                (Some(imms), Some(features)) => Callee::Arch(ArchCall { path, imms, features, safe, pointer }),
+                _ => Callee::Unsupported(e.to_string()),
+            }
+        }
         Some("diverge") => Callee::Diverge(s0()?),
         Some("unextracted") => Callee::Unextracted(s0()?),
         _ => Callee::Unsupported(e.to_string()),
@@ -443,7 +503,7 @@ fn item(e: &Sx) -> Result<Item, String> {
 fn function(e: &Sx) -> Result<Fn, String> {
     let t = e.tail();
     let key = t.first().and_then(Sx::str).ok_or_else(|| err("fn key", e))?.to_string();
-    let mut f = Fn { key, kind: String::new(), def: String::new(), args: vec![], item: Item::Shim, span: None, argc: 0, spread_arg: None, locals: vec![], debug: vec![], blocks: vec![], has_body: true };
+    let mut f = Fn { key, kind: String::new(), def: String::new(), args: vec![], item: Item::Shim, span: None, argc: 0, spread_arg: None, locals: vec![], debug: vec![], blocks: vec![], has_body: true, target_features: vec![] };
     for x in &t[1..] {
         match x.head() {
             Some("kind") => f.kind = x.tail()[0].atom().unwrap_or("").to_string(),
@@ -454,6 +514,9 @@ fn function(e: &Sx) -> Result<Fn, String> {
             Some("argc") => f.argc = x.tail()[0].num().unwrap_or(0) as usize,
             Some("spread-arg") => f.spread_arg = x.tail()[0].num().map(|v| v as usize),
             Some("nobody") => f.has_body = false,
+            Some("target-features") => {
+                f.target_features = x.tail().iter().map(|a| a.str().map(str::to_string).ok_or_else(|| err("target feature", x))).collect::<Result<_, _>>()?;
+            }
             Some("locals") => {
                 for l in x.tail() {
                     let v = l.tail_all();
@@ -507,6 +570,10 @@ pub fn parse(text: &str) -> Result<Sbmir, String> {
             Some("crate") => m.krate = t[0].str().unwrap_or("").to_string(),
             Some("module") => m.module = t[0].str().unwrap_or("").to_string(),
             Some("overflow-checks") => m.overflow_checks = t[0].atom() == Some("on"),
+            Some("target") => {
+                let (Some(triple), Some(arch)) = (t.first().and_then(Sx::str), t.get(1).and_then(Sx::str)) else { return Err(err("target", e)) };
+                m.target = Some((triple.to_string(), arch.to_string()));
+            }
             Some("exclude") => m.exclude = t.iter().filter_map(Sx::str).map(str::to_string).collect(),
             Some("source") => m.sources.push((t[0].str().unwrap_or("").to_string(), t[1].str().unwrap_or("").to_string())),
             Some("root") => m.roots.push(t[0].str().unwrap_or("").to_string()),

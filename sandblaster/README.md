@@ -1,9 +1,10 @@
 # sandblaster
 
-**Write very complex, very optimized Rust and know it is right.**
+**Prove the complex Rust you already have, SIMD included, against short
+laws a human reviewed.**
 
-Humans review short laws. Agents write the code and the proofs. A small
-dependently typed kernel checks them, on the code rustc compiles.
+Humans review the laws. Agents write the proofs. A small dependently typed
+kernel checks them, on the code rustc compiles.
 sandblaster reads existing Rust as it is: the item skeleton from the
 source, every function body from rustc's own MIR. Nothing is generated,
 rewritten or printed for rustc. `cargo build` fails unless
@@ -38,19 +39,23 @@ LAWS.rs, PROOF.rs ──syn──┘                          │              �
                        §15 gates, SPEC.lock, lift conformance ──▶ verdict
 ```
 
-**Optimized code is the crate's own Rust.** An agent writes the fast
-version in the host crate and proves it meets the same laws, or equals a
-short reference stated in the laws file. If the lock diff is empty, there is
-nothing to review for correctness; the reviewer reads the benchmark.
-sandblaster used to include a proven auto-optimizer. On code it was not
+**The prover and the verifier are the product.** sandblaster writes no new
+optimized code. It proves the code a crate already has, as written, meets
+its laws, or equals a short reference stated in the laws file (for
+hardware-specific code, usually the crate's own portable version: a SIMD
+engine equal to its scalar engine). A later change to the code whose lock
+diff is empty needs no correctness review. sandblaster used to include a
+proven auto-optimizer. On code it was not
 built for it changed nothing (about 1.00× against rustc, held-out and on
 real Commonware code), so it was removed along with the code printer and
-the QMDB fixture (2026-10-05; DESIGN.md, North star and §19). The hardware
+the QMDB fixture (2026-10-05; DESIGN.md, North star and §19); the pilots
+that would have had agents write and verify faster versions of Commonware
+functions were dropped on 2026-10-06. The hardware
 instruction semantics stay first-class: the intrinsic models
 (`sandblaster/targets`: NEON, SHA-2/3, SSE to AVX-512, SHA-NI, GFNI), each
 validated natively against the hardware, are what proofs over SIMD code
-are about (DESIGN.md §9); reading `core::arch` calls from MIR is the next
-step (C8).
+are about (DESIGN.md §9); reading `core::arch` calls from MIR (C8) is the
+first priority.
 
 ## Verified Commonware code in this tree
 
@@ -82,7 +87,7 @@ cargo run -p sandblaster-cli -- mutate storage/sandblaster/mmr   # on demand: vo
 
 | path | what |
 | --- | --- |
-| [`DESIGN.md`](DESIGN.md) | the design: the model (laws, references, implementation), the trusted base, the §15 gates, proof techniques, roadmap, what was removed |
+| [`DESIGN.md`](DESIGN.md) | the design: the model (laws, references, code), the trusted base, the §15 gates, proof techniques, roadmap, what was removed |
 | [`SEMANTICS.md`](SEMANTICS.md) | the elaboration semantics (trusted; hashed into every lock) |
 | [`kernel/`](kernel) | `sandblaster-kernel`, the trusted kernel; [`AUDIT.md`](kernel/AUDIT.md) walks through every rule |
 | [`front/`](front) | `sandblaster-front`: front end, elaborator, `auto`, the lift and the MIR reading, the §15 gates, the lock, the counterexample engine, conformance |
@@ -119,8 +124,9 @@ into a `&mut [u8]` too short for it panics inside `bytes`, outside the
 verified code). An overflow panic holds in a build with overflow checks
 on, as every profile of this workspace sets them. Verified code is safe
 Rust, for good: `unsafe` is out of scope (no memory model for raw
-pointers, no unsafe standard-library APIs). The work now is proof techniques and laws
-for complex optimized code: lockstep and coupled-loop proofs between an
-implementation and its reference, bit-trick automation, and per-function
-checking, driven by pilots on real Commonware hot paths (DESIGN.md
-§16–§18).
+pointers, no unsafe standard-library APIs). The work now is the prover and
+the verifier on complex existing code, SIMD first: reading `core::arch`
+intrinsic calls from MIR onto the retained models, lockstep and
+coupled-loop proofs between code and its reference (a SIMD engine against
+its scalar engine), bit-trick automation, and per-function checking
+(DESIGN.md §16–§18).

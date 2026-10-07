@@ -511,6 +511,9 @@ fn extract<'tcx>(tcx: rustc_middle::ty::TyCtxt<'tcx>) -> ControlFlow<(), ()> {
     let _ = writeln!(out, "(crate {})", q(&krate.name));
     let _ = writeln!(out, "(module {})", q(&prefix));
     let _ = writeln!(out, "(overflow-checks {})", if tcx.sess.overflow_checks() { "on" } else { "off" });
+    // the target the MIR was built for (its `core::arch` and `cfg(target_*)`
+    // code is that target's): the build refuses MIR of another architecture
+    let _ = writeln!(out, "(target {} {})", q(&tcx.sess.target.llvm_target), q(&tcx.sess.target.arch.to_string()));
     let _ = writeln!(out, "(exclude{})", exclude.iter().map(|e| format!(" {}", q(e))).collect::<String>());
     for (f, h) in &ex.spans.files {
         let _ = writeln!(out, "(source {} {})", q(f), q(h));
@@ -595,6 +598,14 @@ impl<'tcx> Ex<'tcx> {
         let _ = writeln!(s, "  {item}");
         if let Some((f, l, c)) = self.spans.loc(inst.def.span()) {
             let _ = writeln!(s, "  (span {} {l} {c})", q(&f));
+        }
+        // the target features rustc compiles the body with (its own
+        // `#[target_feature]` and what they imply; a closure's inherited):
+        // a call of a `core::arch` intrinsic needs the intrinsic's
+        if let Some(fs) = self.fn_features(inst)
+            && !fs.is_empty()
+        {
+            let _ = writeln!(s, "  (target-features{})", fs.iter().map(|f| format!(" {}", q(f))).collect::<String>());
         }
         let Some(body) = inst.body() else {
             let _ = writeln!(s, "  (nobody))");
@@ -761,6 +772,11 @@ impl<'tcx> Ex<'tcx> {
                     format!("(ref {} {e})", if matches!(m, Mutability::Mut) { "mut" } else { "shared" })
                 }
                 RigidTy::Adt(def, args) => {
+                    // a `#[repr(simd)]` vector (stdarch's `uint8x16_t`,
+                    // `__m128i`): its path, lane type and lane count
+                    if let Some(s) = self.simd_ty(t, def) {
+                        return s;
+                    }
                     let k = stable_names(&format!("{t}"));
                     self.adts.entry(k.clone()).or_insert((def, args.clone()));
                     format!("(adt {})", q(&k))
@@ -1241,6 +1257,11 @@ impl<'tcx> Ex<'tcx> {
             return format!("(unsupported {})", q("call of a non-function constant"));
         };
         let dname = def.name();
+        // a `core::arch` intrinsic (by its definition in core's `core_arch`):
+        // a leaf the reader gives the meaning of its target model, never followed
+        if let Some(leaf) = self.arch_leaf(def, args) {
+            return leaf;
+        }
         let a = self.args(args);
         if is_leaf_trait_method(&dname) || self.is_model_call(def, args) {
             return format!("(leaf {} {a})", q(&dname));
@@ -1296,6 +1317,106 @@ impl Ex<'_> {
         let erase = |t: &Ty| tcx.erase_and_anonymize_regions(rustc_public::rustc_internal::internal(tcx, *t));
         self.models.iter().any(|(k, ty)| trait_matches(k, &tpath) && erase(ty) == erase(st))
     }
+
+    /// The target features rustc compiles an item instance's body with
+    /// (`codegen_fn_attrs`: its own `#[target_feature]` with the features
+    /// they imply, a closure's inherited ones), sorted.
+    fn fn_features(&self, inst: &Instance) -> Option<Vec<String>> {
+        let tcx = self.tcx;
+        let ii = rustc_public::rustc_internal::internal(tcx, inst.clone());
+        let rustc_middle::ty::InstanceKind::Item(did) = ii.def else { return None };
+        let mut fs: Vec<String> = tcx.codegen_fn_attrs(did).target_features.iter().map(|f| f.name.to_string()).collect();
+        fs.sort();
+        fs.dedup();
+        Some(fs)
+    }
+
+    /// A `#[repr(simd)]` vector type: `(simd "core::arch::<arch>::<name>"
+    /// <lane type> <lanes>)`, its lanes as rustc lays them out
+    /// (`simd_size_and_type`); `None` for any other ADT. Only stdarch's
+    /// vector types are written by their `core::arch` path; any other
+    /// `#[repr(simd)]` type is unsupported.
+    fn simd_ty(&mut self, t: Ty, def: AdtDef) -> Option<String> {
+        let tcx = self.tcx;
+        let did = rustc_public::rustc_internal::internal(tcx, def.def_id());
+        if !tcx.adt_def(did).repr().simd() {
+            return None;
+        }
+        let Some(path) = arch_path(tcx, did) else {
+            return Some(format!("(unsupported {})", q(&format!("the SIMD type `{t}` (not one of core::arch)"))));
+        };
+        let it = rustc_public::rustc_internal::internal(tcx, t);
+        let (n, elem) = it.simd_size_and_type(tcx);
+        let e = self.ty(rustc_public::rustc_internal::stable(elem));
+        Some(format!("(simd {} {e} {n})", q(&path)))
+    }
+
+    /// A call of a `core::arch` intrinsic: `(arch "core::arch::<arch>::<name>"
+    /// (imms ..) (features ..) safe|unsafe value|pointer)` — its const
+    /// generic immediates (stdarch's `const N: i32`, by value), the target
+    /// features the intrinsic itself is compiled with (`codegen_fn_attrs`),
+    /// whether it is an `unsafe fn` and whether a parameter or its result
+    /// is a raw pointer (the loads and stores). `None`: not an intrinsic of
+    /// `core::arch` (by the definition's crate and module, and its public
+    /// path).
+    fn arch_leaf(&mut self, def: rustc_public::ty::FnDef, args: &GenericArgs) -> Option<String> {
+        let tcx = self.tcx;
+        let did = rustc_public::rustc_internal::internal(tcx, def.def_id());
+        let path = arch_path(tcx, did)?;
+        let mut imms = Vec::new();
+        for a in &args.0 {
+            match a {
+                GenericArgKind::Lifetime(_) => {}
+                GenericArgKind::Const(c) => imms.push(match c.kind() {
+                    TyConstKind::Value(ty, alloc) => {
+                        let v = if ty.kind().is_signed() { alloc.read_int().map(|v| v.to_string()) } else { alloc.read_uint().map(|v| v.to_string()) };
+                        match v {
+                            Ok(v) if ty.kind().is_integral() => v,
+                            _ => format!("(unsupported {})", q("a non-integer immediate")),
+                        }
+                    }
+                    other => format!("(unsupported {})", q(&format!("immediate {other:?}"))),
+                }),
+                GenericArgKind::Type(t) => return Some(format!("(unsupported {})", q(&format!("the intrinsic `{path}` at the type {t:?}")))),
+            }
+        }
+        let attrs = tcx.codegen_fn_attrs(did);
+        let mut feats: Vec<String> = attrs.target_features.iter().map(|f| f.name.to_string()).collect();
+        feats.sort();
+        feats.dedup();
+        let sig = tcx.fn_sig(did).skip_binder().skip_binder();
+        // (a safe `#[target_feature]` function's signature is `unsafe` for
+        // function pointers; rustc's own unsafety check reads it as declared
+        // safe through `safe_target_features`)
+        let safe = matches!(sig.safety(), rustc_hir::Safety::Safe) || attrs.safe_target_features;
+        let pointer = sig.inputs_and_output.iter().any(|t| t.is_raw_ptr() || t.is_fn_ptr());
+        Some(format!(
+            "(arch {} (imms{}) (features{}) {} {})",
+            q(&path),
+            imms.iter().map(|i| format!(" {i}")).collect::<String>(),
+            feats.iter().map(|f| format!(" {}", q(f))).collect::<String>(),
+            if safe { "safe" } else { "unsafe" },
+            if pointer { "pointer" } else { "value" }
+        ))
+    }
+}
+
+/// The public `core::arch` path of an item of core's `core_arch` module
+/// (`core::arch::aarch64::vandq_u8`, `core::arch::x86_64::__m128i`), from
+/// the path rustc shows for it (`std::arch::..` through std's re-export):
+/// `None` for an item of any other crate or module.
+fn arch_path(tcx: rustc_middle::ty::TyCtxt<'_>, did: rustc_span::def_id::DefId) -> Option<String> {
+    use rustc_middle::ty::print::{with_no_trimmed_paths, with_no_visible_paths};
+    if tcx.crate_name(did.krate).as_str() != "core" {
+        return None;
+    }
+    let def = with_no_visible_paths!(with_no_trimmed_paths!(tcx.def_path_str(did)));
+    if !def.starts_with("core::core_arch::") {
+        return None;
+    }
+    let shown = with_no_trimmed_paths!(tcx.def_path_str(did));
+    let rest = shown.strip_prefix("std::arch::").or_else(|| shown.strip_prefix("core::arch::"))?;
+    Some(format!("core::arch::{rest}"))
 }
 
 /// Trait methods the reader treats as leaves whatever the receiver: the
@@ -1311,4 +1432,10 @@ fn is_leaf_fn(d: &str, key: &str) -> bool {
         // `Vec::push` (the reader's `vec_push` model of a `Vec` state)
         || d == "std::vec::Vec::<T, A>::push"
         || d == "alloc::vec::Vec::<T, A>::push"
+        // runtime CPU feature detection (`is_x86_feature_detected!`,
+        // `is_aarch64_feature_detected!` of a feature the target does not
+        // enable statically): a cache in a static, never followed; the reader
+        // refuses it by name (a statically enabled feature's detection is
+        // the constant `true` in the MIR already)
+        || d.starts_with("std_detect::")
 }

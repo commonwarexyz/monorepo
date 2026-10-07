@@ -791,7 +791,12 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// code only; DESIGN.md §15.3, [`Coercion::View`]): `&T ↦ α(T)`,
     /// `Nat ↦ Int`, `uN ↦ Nat | Int`, `&[T]`/`[T; N]`/`Seq<T>` ↦
     /// `Seq<α(T)>`, `[T; N] ↦ [α(T); N]`, `Option`/tuples componentwise, a
-    /// type with a `#[view]` to its view type (and on through coercions).
+    /// type with a `#[view]` to its view type (and on through coercions),
+    /// and a `core::arch` vector to the array of its lanes, lane 0 first
+    /// (`uint8x16_t ↦ [u8; 16]`, `__m128i ↦ [u8; 16]` little-endian: the
+    /// models' representation, `docs/mir-lift.md` §20.9), and on to `Seq`;
+    /// that array to the vector (the same kernel value). Ghost `v[i]` reads
+    /// lane `i` through this coercion.
     pub fn view_coercible(&self, from: &Ty, to: &Ty) -> bool {
         self.view_coercible_d(from, to, 0)
     }
@@ -807,6 +812,13 @@ impl<'c, 'a> Cx<'c, 'a> {
         let sub = |a: &Ty, b: &Ty| a == b || self.view_coercible_d(a, b, depth + 1);
         match (f, to) {
             (Ty::Nat, Ty::Int) | (Ty::Uint(_), Ty::Nat | Ty::Int) => true,
+            (Ty::Vector(v), _) => {
+                let (lane, n) = v.lanes();
+                sub(&Ty::Array(Box::new(Ty::Uint(lane)), n), to)
+            }
+            // and back: the array of its lanes is the vector (ghost code
+            // builds a vector of given lanes this way, `[k; 16]`)
+            (Ty::Array(e, n), Ty::Vector(v)) => matches!(&**e, Ty::Uint(u) if v.lanes() == (*u, *n)),
             (Ty::Slice(e) | Ty::Array(e, _) | Ty::Seq(e), Ty::Seq(e2)) => sub(e, e2),
             (Ty::Array(e, n), Ty::Array(e2, m)) => n == m && sub(e, e2),
             (Ty::Option(a), Ty::Option(b)) => sub(a, b),

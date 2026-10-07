@@ -170,8 +170,8 @@ impl<'a> Engine<'a> {
             return v;
         }
         let a = self.quote(st, &r.ty);
-        let to = st.quote_at(self.env, &r.to, &r.ty);
-        let from = st.quote_at(self.env, &r.from, &r.ty);
+        let to = self.quote_typed(st, &r.to, &r.ty);
+        let from = self.quote_typed(st, &r.from, &r.ty);
         // fact: Eq(ty, to, from); sym gives Eq(ty, from, to)
         self.sym(&a, &to, &from, &v)
     }
@@ -191,6 +191,20 @@ impl<'a> Engine<'a> {
     pub fn motive_e(&mut self, st: &St, t: &V, a: &V, from: &V, want_e: bool) -> R<Option<Motive>> {
         self.tick()?;
         let d = st.depth();
+        // memoized (see [`Engine::motive_memo`]); a search stopped by the
+        // budget is not a result and is not stored
+        let ptr = |v: &V| Rc::as_ptr(v) as *const () as usize;
+        let key = (ptr(t), ptr(from), ptr(a), d, want_e);
+        if let Some((_, _, _, m)) = self.motive_memo.get(&key) {
+            return Ok(m.clone());
+        }
+        let m = self.motive_uncached(st, t, a, from, want_e)?;
+        self.motive_memo.insert(key, (t.clone(), from.clone(), a.clone(), m.clone()));
+        Ok(m)
+    }
+
+    fn motive_uncached(&mut self, st: &St, t: &V, a: &V, from: &V, want_e: bool) -> R<Option<Motive>> {
+        let d = st.depth();
         let g_tm = self.quote(st, t);
         // a motive is about as large as the proposition it abstracts, and
         // type-checking it costs several steps per node: propositions far
@@ -200,7 +214,7 @@ impl<'a> Engine<'a> {
             self.note(format!("no motive: the proposition has more than {MAX_MOTIVE_NODES} nodes"));
             return Ok(None);
         }
-        let f_tm = st.quote_at(self.env, from, a);
+        let f_tm = self.quote_typed(st, from, a);
         let a_tm = self.quote(st, a);
         // a read-back the goal could not afford is a placeholder (the goal is
         // exhausted, `meter::charge_quote`): there is nothing to abstract, and
@@ -314,8 +328,8 @@ impl<'a> Engine<'a> {
         let Some(m) = self.motive_e(st, t, a, from, false)? else { return Ok(None) };
         let Some(t2) = self.motive_at(st, &m.body, to)? else { return Ok(None) };
         let a_tm = self.quote(st, a);
-        let f_tm = st.quote_at(self.env, from, a);
-        let t_tm = st.quote_at(self.env, to, a);
+        let f_tm = self.quote_typed(st, from, a);
+        let t_tm = self.quote_typed(st, to, a);
         let e_tf = self.sym(&a_tm, &f_tm, &t_tm, &e_ft);
         let pre = if m.has_e { vec![mk::refl(a_tm.clone(), f_tm.clone())] } else { vec![] };
         Ok(Some((t2, Cont { depth: st.depth(), ty: a_tm, lhs: t_tm, rhs: f_tm, eq: e_tf, motive: m.body, pre })))
@@ -335,7 +349,7 @@ impl<'a> Engine<'a> {
         let Some(mut ty2) = self.motive_at(st, &m.body, to)? else { return Ok(None) };
         let d = st.depth();
         let a_tm = self.quote(st, a);
-        let f_tm = st.quote_at(self.env, from, a);
+        let f_tm = self.quote_typed(st, from, a);
         // λ(e :Irr Eq(a, from, from)). h — the fact's type depends on e only
         // in proof positions, so `h` has the motive's type at `from` by
         // conversion.
@@ -343,7 +357,7 @@ impl<'a> Engine<'a> {
         let mut proof: Tm = Rc::new(Term::Transport {
             ty: a_tm,
             lhs: f_tm,
-            rhs: st.quote_at(self.env, to, a),
+            rhs: self.quote_typed(st, to, a),
             eq: e_ft.clone(),
             motive: m.body.clone(),
             val,
@@ -379,87 +393,302 @@ impl<'a> Engine<'a> {
         // `f(n', xs) == g(..)`): rewrite an occurring side to the other,
         // once per fact and branch, so that congruence or conversion can
         // finish (`f(n + 1 - 1, xs) == g(..)` becomes `f(n + 1 - 1, xs) ==
-        // f(n', xs)`).
+        // f(n', xs)`). Rewrites that keep the target in the facts' terms
+        // come first: a term other facts mention (a path equation's
+        // `f(c.0, ..).3 == Ok(d)`, an induction hypothesis's `f(c.0, ..)`)
+        // is rewritten to one no other fact mentions only when nothing else
+        // applies, after aligning the target with the equations' terms
+        // ([`Engine::align_with_equations`]): the facts could not meet the
+        // target again.
+        let mut deferred: Vec<(Fact, bool)> = Vec::new();
         for f in st.scan_facts().iter().rev() {
-            if st.used_eqs.contains(&f.lvl) {
-                continue;
-            }
-            let Some((ty, l, r)) = as_eq(&f.ty) else { continue };
-            if as_neu(l).is_none() || as_neu(r).is_none() || (as_var(l).is_some() && as_var(r).is_some()) {
-                continue;
-            }
-            for (from, to, rev) in [(r, l, true), (l, r, false)] {
-                if !key_of(from).is_some_and(|k| keys.contains(&k)) {
-                    continue;
-                }
-                // a variable is never rewritten away here; a stuck term is
-                // rewritten to a variable only when the variable occurs in it
-                // (`drop(xs, 0) == xs`): the target shrinks, so this cannot loop
-                if as_var(from).is_some() || (as_var(to).is_some() && !self.occurs_in(st, to, from)) {
-                    continue;
-                }
-                // a side that occurs inside the other (`L = append(take(L, n),
-                // drop(L, n))`): rewriting it only grows the target, and the
-                // rewritten copies of the fact would repeat it forever
-                if self.occurs_in(st, from, to) {
-                    continue;
-                }
-                // the same equation as one used already (either way round)
-                let mut again = false;
-                for (a, b) in st.used_eq_sides.clone() {
-                    if (self.conv(st.depth(), &a, from)? && self.conv(st.depth(), &b, to)?) || (self.conv(st.depth(), &a, to)? && self.conv(st.depth(), &b, from)?) {
-                        again = true;
-                        break;
+            for rev in [true, false] {
+                match self.stuck_eq_candidate(st, f, rev, &keys)? {
+                    None => {}
+                    Some(false) => deferred.push((f.clone(), rev)),
+                    Some(true) => {
+                        if let Some(res) = self.rewrite_stuck_eq(st, t, f, rev)? {
+                            return Ok(Some(res));
+                        }
                     }
                 }
-                if again {
+            }
+        }
+        if let Some(res) = self.align_with_equations(st, t)? {
+            return Ok(Some(res));
+        }
+        for (f, rev) in deferred {
+            if self.trace {
+                self.note(format!("rewrite into terms no other fact mentions (fact h{}{})", f.lvl, if rev { ", reversed" } else { "" }));
+            }
+            if let Some(res) = self.rewrite_stuck_eq(st, t, &f, rev)? {
+                return Ok(Some(res));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether the equation fact `f` (between two stuck terms, used right to
+    /// left if `rev`) may rewrite the target (whose head keys are `keys`):
+    /// `None` if not, `Some(keeps)` if so, `keeps` telling whether the
+    /// rewrite keeps the target in the terms of the other facts (see
+    /// [`Engine::rewrite_with_facts`]).
+    fn stuck_eq_candidate(&mut self, st: &St, f: &Fact, rev: bool, keys: &[Key]) -> R<Option<bool>> {
+        if st.used_eqs.contains(&f.lvl) {
+            return Ok(None);
+        }
+        let Some((_, l, r)) = as_eq(&f.ty) else { return Ok(None) };
+        if as_neu(l).is_none() || as_neu(r).is_none() || (as_var(l).is_some() && as_var(r).is_some()) {
+            return Ok(None);
+        }
+        let (from, to) = if rev { (r, l) } else { (l, r) };
+        if !key_of(from).is_some_and(|k| keys.contains(&k)) {
+            return Ok(None);
+        }
+        let d = st.depth();
+        // a variable is never rewritten away here; a stuck term is
+        // rewritten to a variable only when the variable occurs in it
+        // (`drop(xs, 0) == xs`): the target shrinks, so this cannot loop
+        if as_var(from).is_some() || (as_var(to).is_some() && !self.mentions(d, to, from)?) {
+            return Ok(None);
+        }
+        // a side that occurs inside the other (`L = append(take(L, n),
+        // drop(L, n))`): rewriting it only grows the target, and the
+        // rewritten copies of the fact would repeat it forever
+        if self.mentions(d, from, to)? {
+            return Ok(None);
+        }
+        // the same equation as one used already (either way round)
+        for (a, b) in st.used_eq_sides.clone() {
+            if (self.conv(st.depth(), &a, from)? && self.conv(st.depth(), &b, to)?) || (self.conv(st.depth(), &a, to)? && self.conv(st.depth(), &b, from)?) {
+                return Ok(None);
+            }
+        }
+        let keeps = !self.mentioned_elsewhere(st, from, f)? || self.mentioned_elsewhere(st, to, f)?;
+        if !keeps && self.trace {
+            let shown = self.show(st, from);
+            self.note(format!("keep `{shown}` (other facts mention it): fact h{} deferred", f.lvl));
+        }
+        Ok(Some(keeps))
+    }
+
+    /// Rewrite the target with the equation fact `f` between two stuck
+    /// terms (right to left if `rev`), recording it as used.
+    fn rewrite_stuck_eq(&mut self, st: &mut St, t: &V, f: &Fact, rev: bool) -> R<Option<(V, Cont)>> {
+        let Some((ty, l, r)) = as_eq(&f.ty) else { return Ok(None) };
+        let (from, to) = if rev { (r, l) } else { (l, r) };
+        let rule = EqRule { ty: ty.clone(), from: from.clone(), to: to.clone(), lvl: f.lvl, rev };
+        let e = self.rule_proof(st, &rule);
+        let attempt = self.rewrite(st, t, ty, from, to, e)?;
+        if attempt.is_none() && self.trace {
+            let shown = self.show(st, from);
+            self.note(format!("no rewrite with fact h{} ({}): {shown}", f.lvl, if rev { "reversed" } else { "forward" }));
+        }
+        let Some(res) = attempt else { return Ok(None) };
+        st.used_eqs.push(f.lvl);
+        st.used_eq_sides.push((from.clone(), to.clone()));
+        if self.trace {
+            let shown = self.show(st, &res.0);
+            self.note(format!("rewrite with an equation between stuck terms (fact h{}{}): {shown}", f.lvl, if rev { ", reversed" } else { "" }));
+        }
+        Ok(Some(res))
+    }
+
+    /// Step 6, alignment: an equation between two stuck terms (an induction
+    /// hypothesis `f(c.0, a..) == g(..)`) none of whose sides occurs in the
+    /// target, while the target has an application of the same global whose
+    /// arguments differ from the side's only where other such equations
+    /// relate them (`f(left_half(s), a..)` with the fact `c.0 ==
+    /// left_half(s)`): the first differing argument is rewritten to the
+    /// side's, so the equation applies next. A target that an earlier
+    /// rewrite moved away from an induction hypothesis's terms (or that an
+    /// unfolding produced in other words) is moved back to them. The
+    /// rewrite uses a context equation, at most once per branch and
+    /// direction, so the target only moves to terms the facts already name.
+    fn align_with_equations(&mut self, st: &mut St, t: &V) -> R<Option<(V, Cont)>> {
+        const MAX_DIFFS: usize = 2;
+        let d = st.depth();
+        // the global applications of the target: the head of every neutral
+        // headed by a global (`f(a..)` of `f(a..).0`, of `match f(a..) ..`)
+        let mut apps: Vec<V> = Vec::new();
+        let mut heads: Vec<GlobalId> = Vec::new();
+        walk(t, &mut |x| {
+            if let Value::Neu(n) = &**x
+                && let Head::Global { def, args } = &n.head
+                && args.iter().any(|a| matches!(a, Arg::Rel(_)))
+            {
+                apps.push(prefix(n, 0));
+                if !heads.contains(def) {
+                    heads.push(*def);
+                }
+            }
+            true
+        });
+        if apps.is_empty() {
+            return Ok(None);
+        }
+        let eqs: Vec<(u32, V, V, V)> = st
+            .scan_facts()
+            .iter()
+            .filter_map(|f| {
+                let (ty, l, r) = as_eq(&f.ty)?;
+                (as_neu(l).is_some() && as_neu(r).is_some() && (as_var(l).is_none() || as_var(r).is_none())).then(|| (f.lvl, ty.clone(), l.clone(), r.clone()))
+            })
+            .collect();
+        for (lvl, _, l, r) in eqs.iter().rev() {
+            for z in [l, r] {
+                let Some((zdef, zargs)) = as_global_app(z) else { continue };
+                if !heads.contains(&zdef) {
                     continue;
                 }
-                let rule = EqRule { ty: ty.clone(), from: from.clone(), to: to.clone(), lvl: f.lvl, rev };
-                let e = self.rule_proof(st, &rule);
-                let attempt = self.rewrite(st, t, ty, from, to, e)?;
-                if attempt.is_none() && self.trace {
-                    let shown = self.show(st, from);
-                    self.note(format!("no rewrite with fact h{} ({}): {shown}", f.lvl, if rev { "reversed" } else { "forward" }));
-                }
-                if let Some(res) = attempt {
-                    st.used_eqs.push(f.lvl);
-                    st.used_eq_sides.push((from.clone(), to.clone()));
-                    if self.trace {
-                        let shown = self.show(st, &res.0);
-                        self.note(format!("rewrite with an equation between stuck terms (fact h{}{}): {shown}", f.lvl, if rev { ", reversed" } else { "" }));
+                for a in &apps {
+                    let Some((adef, aargs)) = as_global_app(a) else { continue };
+                    if adef != zdef || aargs.len() != zargs.len() {
+                        continue;
                     }
-                    return Ok(Some(res));
+                    super::meter::spend(aargs.len() as u64);
+                    // the relevant arguments in which `a` differs from the side
+                    let mut diffs: Vec<(V, V)> = Vec::new();
+                    let mut shape = true;
+                    for (x, y) in aargs.iter().zip(zargs.iter()) {
+                        match (x, y) {
+                            (Arg::Rel(x), Arg::Rel(y)) => {
+                                if !self.conv(d, x, y)? {
+                                    diffs.push((x.clone(), y.clone()));
+                                }
+                            }
+                            (Arg::Irr(_), Arg::Irr(_)) => {}
+                            _ => shape = false,
+                        }
+                        if !shape || diffs.len() > MAX_DIFFS {
+                            shape = false;
+                            break;
+                        }
+                    }
+                    if !shape || diffs.is_empty() {
+                        continue;
+                    }
+                    // every differing pair related by another stuck equation:
+                    // the first one's rewrite (target argument to the side's)
+                    let mut first: Option<(u32, bool, V, V, V)> = None;
+                    let mut all = true;
+                    for (x, y) in &diffs {
+                        let mut found = None;
+                        for (glvl, gty, gl, gr) in &eqs {
+                            if glvl == lvl {
+                                continue;
+                            }
+                            if self.conv(d, gl, x)? && self.conv(d, gr, y)? {
+                                found = Some((*glvl, false, gty.clone(), gl.clone(), gr.clone()));
+                                break;
+                            }
+                            if self.conv(d, gr, x)? && self.conv(d, gl, y)? {
+                                found = Some((*glvl, true, gty.clone(), gr.clone(), gl.clone()));
+                                break;
+                            }
+                        }
+                        match found {
+                            Some(fd) => {
+                                if first.is_none() {
+                                    first = Some(fd);
+                                }
+                            }
+                            None => {
+                                all = false;
+                                break;
+                            }
+                        }
+                    }
+                    let (true, Some((glvl, rev, gty, from, to))) = (all, first) else { continue };
+                    if st.aligned.contains(&(glvl, rev)) {
+                        continue;
+                    }
+                    let rule = EqRule { ty: gty.clone(), from: from.clone(), to: to.clone(), lvl: glvl, rev };
+                    let e = self.rule_proof(st, &rule);
+                    if let Some(res) = self.rewrite(st, t, &gty, &from, &to, e)? {
+                        st.aligned.push((glvl, rev));
+                        st.used_eq_sides.push((from, to));
+                        if self.trace {
+                            let shown = self.show(st, z);
+                            self.note(format!("align the target with fact h{lvl} (fact h{glvl}{}): {shown}", if rev { ", reversed" } else { "" }));
+                        }
+                        return Ok(Some(res));
+                    }
                 }
             }
         }
         Ok(None)
     }
 
-    /// Whether the value `x` occurs (syntactically, after quoting) inside
-    /// the value `y`.
-    fn occurs_in(&mut self, st: &St, x: &V, y: &V) -> bool {
-        let (xt, yt) = (self.quote(st, x), self.quote(st, y));
-        fn go(env: &sandblaster_kernel::api::Env, t: &Tm, x: &Tm, b: u32, seen: &mut std::collections::HashSet<(*const Term, u32)>, budget: &mut u32) -> bool {
-            if *budget == 0 || !seen.insert((Rc::as_ptr(t), b)) {
-                return false;
-            }
-            *budget -= 1;
-            if std::mem::discriminant(&**t) == std::mem::discriminant(&**x) {
-                let xb = if b == 0 { x.clone() } else { shift(x, b as i64) };
-                if env.alpha_eq_relevant(t, &xb, &|a, c| a == c) {
-                    return true;
-                }
-            }
-            let mut found = false;
-            crate::elab::tm::children_depth(t, &mut |c, k| {
-                if !found && go(env, c, x, b + k, seen, budget) {
-                    found = true;
-                }
-            });
-            found
+    /// Whether a rewrite rule among the facts other than the equation `f`
+    /// (and its copies) mentions the value `x`: an equation with a stuck
+    /// side (a path equation `f(c.0, ..).3 == Ok(d)`, an induction
+    /// hypothesis, a contract `c.0 == left_half(s)`), whose rewrites need
+    /// the target to keep `x`.
+    fn mentioned_elsewhere(&mut self, st: &St, x: &V, f: &Fact) -> R<bool> {
+        // memoized by the values, the depth and the facts (a branch's facts
+        // only grow: their number and the last one name them)
+        let ptr = |v: &V| Rc::as_ptr(v) as *const () as usize;
+        let last = st.facts.last().map(|g| g.ty.clone()).unwrap_or_else(|| x.clone());
+        let key = (ptr(x), ptr(&f.ty), st.depth(), st.facts.len(), ptr(&last));
+        if let Some((_, _, _, b)) = self.mention_memo.get(&key) {
+            return Ok(*b);
         }
-        go(self.env, &yt, &xt, 0, &mut std::collections::HashSet::new(), &mut 20_000)
+        let b = self.mentioned_elsewhere_uncached(st, x, f)?;
+        self.mention_memo.insert(key, (x.clone(), f.ty.clone(), last, b));
+        Ok(b)
+    }
+
+    fn mentioned_elsewhere_uncached(&mut self, st: &St, x: &V, f: &Fact) -> R<bool> {
+        let d = st.depth();
+        let Some((_, fl, fr)) = as_eq(&f.ty) else { return Ok(false) };
+        let (fl, fr) = (fl.clone(), fr.clone());
+        let rules: Vec<V> = st.facts.iter().filter(|g| g.lvl != f.lvl && as_eq(&g.ty).is_some_and(|(_, l, r)| as_neu(l).is_some() || as_neu(r).is_some())).map(|g| g.ty.clone()).collect();
+        for ty in rules {
+            let Some((_, l, r)) = as_eq(&ty) else { continue };
+            if !self.mentions(d, x, &ty)? {
+                continue;
+            }
+            // a copy of `f` (a conjunct derived twice, its reverse)
+            if (self.conv(d, l, &fl)? && self.conv(d, r, &fr)?) || (self.conv(d, l, &fr)? && self.conv(d, r, &fl)?) {
+                continue;
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Whether the value `y` contains a node convertible with the stuck
+    /// value `x` (a neutral, or a prefix of one: `c.0` in `c.0.pos`),
+    /// searching only the neutrals with `x`'s head (closures are not
+    /// entered); memoized by the values' addresses and the depth
+    /// ([`Engine::occurs_memo`]).
+    fn mentions(&mut self, d: u32, x: &V, y: &V) -> R<bool> {
+        let key = (Rc::as_ptr(x) as *const () as usize, Rc::as_ptr(y) as *const () as usize, d);
+        if let Some((_, _, b)) = self.occurs_memo.get(&key) {
+            return Ok(*b);
+        }
+        let Some(xn) = as_neu(x) else { return Ok(false) };
+        let (xk, xlen) = (key_of(x), xn.spine.len());
+        let mut cands: Vec<V> = Vec::new();
+        walk(y, &mut |v| {
+            if let Value::Neu(n) = &**v
+                && key_of(v) == xk
+                && n.spine.len() >= xlen
+            {
+                cands.push(if n.spine.len() == xlen { v.clone() } else { prefix(n, xlen) });
+            }
+            true
+        });
+        let mut found = false;
+        for c in cands {
+            if self.conv(d, &c, x)? {
+                found = true;
+                break;
+            }
+        }
+        self.occurs_memo.insert(key, (x.clone(), y.clone(), found));
+        Ok(found)
     }
 
     /// Step 6 for equations between two variables (`x == y`, including
@@ -1428,7 +1657,12 @@ impl<'a> Engine<'a> {
             if f.lvl == rule.lvl || st.rewritten.contains(&(f.lvl, rule.lvl)) || (matches!(&*f.ty, Value::Sigma { .. }) && std::env::var_os("SANDBLASTER_X_SIGMA").is_none()) {
                 continue;
             }
-            if !self.has_scrutinee(st, &f.ty, &rule.from)? && !(fixes_var(rule) && self.mentions_level(st, &f.ty, as_var(&rule.from).unwrap_or(u32::MAX))) {
+            // (a variable fixed to a literal is also substituted where it is
+            // an argument of a folded recursive application, which the
+            // literal may let compute: `a[i]` at a symbolic `i` is a folded
+            // `seq::index` of the array's lanes, and `i == 3` makes it `a[3]`)
+            let var = as_var(&rule.from).unwrap_or(u32::MAX);
+            if !self.has_scrutinee(st, &f.ty, &rule.from)? && !(fixes_var(rule) && (self.mentions_level(st, &f.ty, var) || self.in_folded_app(&f.ty, var))) {
                 continue;
             }
             let e = self.rule_proof(st, rule);
@@ -1471,6 +1705,7 @@ impl<'a> Engine<'a> {
         'outer: while steps < MAX_STEPS {
             let mut stuck = Vec::new();
             self.collect_stuck(&ty, &mut stuck);
+            let lanes = self.lane_models_of(&stuck);
             let rules = self.fact_rules(st);
             for s in stuck {
                 let StuckKind::Scrut { ind, .. } = s.kind else { continue };
@@ -1510,6 +1745,13 @@ impl<'a> Engine<'a> {
                     }
                     None => undecided.push(s.val.clone()),
                 }
+            }
+            // a hardware model read at a literal lane: its lane ([`super::lanes`])
+            if let Some((ty2, p2)) = self.lane_step_prop(st, &ty, &proof, lanes)? {
+                ty = ty2;
+                proof = p2;
+                steps += 1;
+                continue 'outer;
             }
             // the cast normal form (the target gets the same one)
             if let Some((from, to, e)) = self.cast_norm_step(st, &ty)? {
@@ -1620,6 +1862,27 @@ impl<'a> Engine<'a> {
         }
         let t = self.quote(st, v);
         super::abstraction::free_levels(&t, st.depth()).contains(&l)
+    }
+
+    /// Does the variable of level `l` occur in the arguments of a folded
+    /// application of a recursive global in the value?
+    fn in_folded_app(&self, v: &V, l: u32) -> bool {
+        let mut stuck = Vec::new();
+        self.collect_stuck(v, &mut stuck);
+        stuck.iter().any(|s| match (&s.kind, &*s.val) {
+            (StuckKind::App { def }, Value::Neu(Neutral { head: Head::Global { args, .. }, .. })) if self.is_recursive(*def) => args.iter().any(|a| {
+                let Arg::Rel(x) = a else { return false };
+                let mut found = false;
+                walk(x, &mut |y| {
+                    if matches!(&**y, Value::Neu(n) if matches!(n.head, Head::Var(h) if h.0 == l)) {
+                        found = true;
+                    }
+                    !found
+                });
+                found
+            }),
+            _ => false,
+        })
     }
 
     /// Does `ty` contain a stuck match whose scrutinee converts with `s`?

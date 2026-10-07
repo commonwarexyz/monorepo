@@ -197,6 +197,64 @@ fn a_false_law_of_the_mmr_is_not_proven() {
     assert!(errors.iter().any(|e| e.contains("to_nearest_size_rounds_down")), "{}", errors.join("\n"));
 }
 
+/// The verifier's `reconstruct_digest` against its law `rebuild`, with no
+/// case lemmas: at a node the search meets the code's halves
+/// (`children()`), its `?` exits and its pushes with the law's
+/// `left_half`/`right_half` through the recursive calls' induction
+/// hypotheses — the prover gap that the verifier's `rebuild_case_node` and
+/// four `node_*` lemmas worked around (`auto::rewrite`: alignment with the
+/// equations' terms, and rewrites that keep the target in the facts'
+/// terms first). Only what the function reaches is elaborated. Negative
+/// twin: a law (and its step lemma) that hashes a node's halves the other
+/// way round is not met by the code — its contract's obligations, and
+/// only those, stay unproven — and nothing is rejected by the kernel.
+#[test]
+fn the_verifier_reconstruction_is_proven_without_case_lemmas() {
+    const F: &str = "crate::merkle::proof::Subtree::reconstruct_digest";
+    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // the law and its step lemma (`rebuild_step`, still true of the swapped
+    // law) swapped together: only the code's contract fails
+    let swap = |file: &str, from: &str, to: &str| -> (String, String) {
+        let text = std::fs::read_to_string(root(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        assert_eq!(text.matches(from).count(), 1, "{file}: `{from}` must occur once");
+        (file.to_string(), text.replacen(from, to, 1))
+    };
+    let swapped = Overlay(vec![
+        swap(
+            "storage/sandblaster/verifier/LAWS.rs",
+            "crate::__lift::Result::Ok(sha256(node_message(s.pos.0, dl, dr))),",
+            "crate::__lift::Result::Ok(sha256(node_message(s.pos.0, dr, dl))),",
+        ),
+        swap(
+            "storage/sandblaster/verifier/PROOF.rs",
+            "node_message(s.pos.0, dl, dr))),\n                    ),\n                }\n            }\n        }\n    }));\n    by_unfolding(crate::laws::rebuild);",
+            "node_message(s.pos.0, dr, dl))),\n                    ),\n                }\n            }\n        }\n    }));\n    by_unfolding(crate::laws::rebuild);",
+        ),
+    ]);
+    for (fs, holds) in [(&Overlay(Vec::new()), true), (&swapped, false)] {
+        let c = check_on(VERIFIER, fs, &TargetInfo::aarch64_apple_darwin());
+        assert!(c.ok(), "{}", c.render());
+        let k = c.krate.as_ref().unwrap();
+        let items = elab::order::filter_closure(k, [k.find(F).expect("the function")]);
+        let opts = elab::Options { items: Some(std::sync::Arc::new(items)), ..elab::Options::default() };
+        let (status, unproven, rendered) = elab::with_big_stack(|| {
+            let out = elab::elaborate(k, &mut ProverChain::standard(), &opts);
+            // the contract's obligations are the definition `F::ensures`
+            let status = out.defs.iter().find(|d| d.name == format!("{F}::ensures")).map(|d| d.status.clone());
+            let unproven: Vec<String> = out.obligations.iter().filter(|o| !o.proven()).map(|o| o.def.clone()).collect();
+            (status, unproven, out.diags.render(&c.sm))
+        });
+        assert!(!rendered.contains("rejected by the kernel") && !rendered.contains("the kernel rejected"), "{rendered}");
+        if holds {
+            assert_eq!(status, Some(DefStatus::Checked), "{rendered}");
+            assert!(unproven.is_empty(), "unproven: {unproven:?}\n{rendered}");
+        } else {
+            assert!(status.as_ref().is_some_and(|s| *s != DefStatus::Checked), "a swapped node hash was met: {status:?}");
+            assert!(!unproven.is_empty() && unproven.iter().all(|d| d.starts_with(F)), "{unproven:?}");
+        }
+    }
+}
+
 /// The MMR verifies on x86_64 too: its proofs (exec code, laws, lemmas;
 /// the lifted functions' contracts name the laws file, so the ghost items
 /// are elaborated as well) check with every obligation proven. (No lock

@@ -1,0 +1,78 @@
+;; rustc's MIR of `fx_sd_x86::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_sd_x86")
+(module "fx_sd_x86::a")
+(overflow-checks on)
+(target "x86_64-apple-macosx" "x86_64")
+(exclude)
+(source "src/a.rs" "38a3e74f90fb33eb5728ee858956c099510938238c725d46e42d23bdd0685ef7")
+(root "fx_sd_x86::a::lookup")
+(root "fx_sd_x86::a::mul_split")
+(root "fx_sd_x86::a::lookup_masked")
+(fn "fx_sd_x86::a::lookup"
+  (kind root) (def "fx_sd_x86::a::lookup") (args ())
+  (item fn "lookup")
+  (span "src/a.rs" 8 1)
+  (target-features "sse" "sse2" "sse3" "ssse3")
+  (argc 2)
+  (locals
+    (0 (simd "core::arch::x86_64::__m128i" i64 2) mut)
+    (1 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (2 (simd "core::arch::x86_64::__m128i" i64 2) imm))
+  (debug "table" (p 1) (arg 1))
+  (debug "idx" (p 2) (arg 2))
+  (bb 0
+    (call (arch "core::arch::x86_64::_mm_shuffle_epi8" (imms) (features "sse" "sse2" "sse3" "ssse3") safe value) (args (copy (p 1)) (copy (p 2))) (p 0) 1 (at "src/a.rs" 9 5)))
+  (bb 1
+    (return (at "src/a.rs" 10 2)))
+)
+(fn "fx_sd_x86::a::mul_split"
+  (kind root) (def "fx_sd_x86::a::mul_split") (args ())
+  (item fn "mul_split")
+  (span "src/a.rs" 15 1)
+  (target-features "sse" "sse2" "sse3" "ssse3")
+  (argc 4)
+  (locals
+    (0 (simd "core::arch::x86_64::__m128i" i64 2) mut)
+    (1 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (2 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (3 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (4 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (5 (simd "core::arch::x86_64::__m128i" i64 2) mut)
+    (6 (simd "core::arch::x86_64::__m128i" i64 2) mut))
+  (debug "lo_n" (p 1) (arg 1))
+  (debug "hi_n" (p 2) (arg 2))
+  (debug "lo" (p 3) (arg 3))
+  (debug "hi" (p 4) (arg 4))
+  (bb 0
+    (call (arch "core::arch::x86_64::_mm_shuffle_epi8" (imms) (features "sse" "sse2" "sse3" "ssse3") safe value) (args (copy (p 3)) (copy (p 1))) (p 5) 1 (at "src/a.rs" 16 19)))
+  (bb 1
+    (call (arch "core::arch::x86_64::_mm_shuffle_epi8" (imms) (features "sse" "sse2" "sse3" "ssse3") safe value) (args (copy (p 4)) (copy (p 2))) (p 6) 2 (at "src/a.rs" 16 47)))
+  (bb 2
+    (call (arch "core::arch::x86_64::_mm_xor_si128" (imms) (features "sse" "sse2") safe value) (args (move (p 5)) (move (p 6))) (p 0) 3 (at "src/a.rs" 16 5)))
+  (bb 3
+    (return (at "src/a.rs" 17 2)))
+)
+(fn "fx_sd_x86::a::lookup_masked"
+  (kind root) (def "fx_sd_x86::a::lookup_masked") (args ())
+  (item fn "lookup_masked")
+  (span "src/a.rs" 21 1)
+  (target-features "sse" "sse2" "sse3" "ssse3")
+  (argc 3)
+  (locals
+    (0 (simd "core::arch::x86_64::__m128i" i64 2) mut)
+    (1 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (2 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (3 (simd "core::arch::x86_64::__m128i" i64 2) imm)
+    (4 (simd "core::arch::x86_64::__m128i" i64 2) mut))
+  (debug "table" (p 1) (arg 1))
+  (debug "idx" (p 2) (arg 2))
+  (debug "mask" (p 3) (arg 3))
+  (bb 0
+    (call (arch "core::arch::x86_64::_mm_and_si128" (imms) (features "sse" "sse2") safe value) (args (copy (p 2)) (copy (p 3))) (p 4) 1 (at "src/a.rs" 22 29)))
+  (bb 1
+    (call (arch "core::arch::x86_64::_mm_shuffle_epi8" (imms) (features "sse" "sse2" "sse3" "ssse3") safe value) (args (copy (p 1)) (move (p 4))) (p 0) 2 (at "src/a.rs" 22 5)))
+  (bb 2
+    (return (at "src/a.rs" 23 2)))
+)

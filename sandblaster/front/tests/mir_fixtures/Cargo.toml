@@ -61,4 +61,11 @@ members = [
     "rm_orig",
     "rm_wrong",
     "rw_mix",
+    "sd_neon",
+    "sd_neon_detect",
+    "sd_neon_lane",
+    "sd_neon_nomodel",
+    "sd_neon_ptr",
+    "sd_neon_shift",
+    "sd_x86",
 ]

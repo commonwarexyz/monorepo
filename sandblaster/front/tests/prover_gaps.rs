@@ -995,3 +995,138 @@ fn domain_mp_other(s: u64, m: u64, t: u64) {
     refuted(&r, "domain_mp_open");
     refuted(&r, "domain_mp_other");
 }
+
+// ---------------------------------------------------------------------------
+// 11. Shifts by a variable amount (C4)
+// ---------------------------------------------------------------------------
+
+/// A shift by a non-literal amount `s` below the width: `1 << s` is `2^s`,
+/// `x << s` (checked or wrapping) is `x · 2^s` when that fits, `MAX >> s`
+/// is `2^(w − s) − 1` and its complement has `w − s` trailing zeros, a
+/// power `2^e` has `e` trailing zeros, `(a + b) · 2^e` distributes, and
+/// shifts of ordered values are ordered (`a ≤ b` gives `a >> s ≤ b >> s`,
+/// and `a << s ≤ b << s` when `b << s` fits).
+/// Each is one lemma of `lemmas/bits_shift.core` (the amount enumerated
+/// once, in the library), instantiated by `auto` at the shift atoms; the
+/// storage proofs' 64-case ladders (`shl_one`, `wshl_one`, `wshl_exact`,
+/// `mask_facts`, `tz_pow2`, `chunk_facts`) are gone. Negative twins: a
+/// product that may not fit, an off-by-one power, a mask one bit short,
+/// a strict order of shifts of equal values, a larger shift that
+/// overflows.
+#[test]
+fn shifts_by_a_variable_amount() {
+    let r = run_plain(
+        r#"
+/// `1 << s`.
+#[lemma]
+fn shl_one(s: u32) {
+    requires(s < 64u32);
+    ensures((1u64 << s) as Int == pow2(s as Int));
+    follows();
+}
+/// The wrapping form (the literal reading's `<<`).
+#[lemma]
+fn wshl_one(s: u32) {
+    requires(s < 64u32);
+    ensures(1u64.wrapping_shl(s) as Int == pow2(s as Int));
+    follows();
+}
+/// A product that fits.
+#[lemma]
+fn shl_mul(x: u64, s: u32) {
+    requires(s < 64u32 && (x as Int) * pow2(s as Int) < pow2(64));
+    ensures((x << s) as Int == (x as Int) * pow2(s as Int));
+    follows();
+}
+/// At another width, wrapping.
+#[lemma]
+fn wshl_mul8(x: u8, s: u32) {
+    requires(s < 8u32 && (x as Int) * pow2(s as Int) < 256);
+    ensures(x.wrapping_shl(s) as Int == (x as Int) * pow2(s as Int));
+    follows();
+}
+/// The mask of `64 - k` ones and its complement's trailing zeros.
+#[lemma]
+fn mask(k: u32) {
+    requires(k < 64u32);
+    ensures((u64::MAX >> k) as Int == pow2(64 - (k as Int)) - 1 && ((!(u64::MAX >> k)).trailing_zeros() as Int) == 64 - (k as Int));
+    follows();
+}
+/// `chunk_peaks`'s bounds: a sum times a power (linked to the code's
+/// `(c + 1) << g`), and the next power.
+#[lemma]
+fn chunk(c: u64, g: u32) {
+    requires(g <= 62u32 && ((c as Int) + 1) * pow2(g as Int) <= pow2(62));
+    ensures((c as Int) + 1 <= pow2(62)
+        && ((c as Int) + 1) * pow2(g as Int) == (c as Int) * pow2(g as Int) + pow2(g as Int)
+        && ((c + 1u64) << g) as Int == ((c as Int) + 1) * pow2(g as Int)
+        && (c << g) as Int == (c as Int) * pow2(g as Int)
+        && ((1u64 << (g + 1u32)) as Int) == 2 * pow2(g as Int));
+    follows();
+}
+/// A power's trailing zeros (the library lemma by name).
+#[lemma]
+fn tz(t: u64, e: Int) {
+    requires(0 <= e && e < 64 && (t as Int) == pow2(e));
+    ensures((t.trailing_zeros() as Int) == e);
+    sandblaster::lemmas::bits::tz_pow2_u64(t, e);
+    follows();
+}
+/// Ordered values, ordered shifts.
+#[lemma]
+fn shr_mono(a: u64, b: u64, s: u32) {
+    requires(s < 64u32 && a <= b);
+    ensures((a >> s) <= (b >> s));
+    follows();
+}
+/// The same for `<<`, when the larger one fits.
+#[lemma]
+fn shl_mono(a: u32, b: u32, s: u32) {
+    requires(s < 32u32 && a <= b && (b as Int) * pow2(s as Int) < pow2(32));
+    ensures((a << s) <= (b << s));
+    follows();
+}
+/// Negative twin: equal values shift to equal values.
+#[lemma]
+fn shr_mono_strict(a: u64, b: u64, s: u32) {
+    requires(s < 64u32 && a <= b);
+    ensures((a >> s) < (b >> s));
+    follows();
+}
+/// Negative twin: the larger one may overflow.
+#[lemma]
+fn shl_mono_nofit(a: u32, b: u32, s: u32) {
+    requires(s < 32u32 && a <= b);
+    ensures((a << s) <= (b << s));
+    follows();
+}
+/// Negative twin: the product may not fit.
+#[lemma]
+fn shl_mul_nofit(x: u64, s: u32) {
+    requires(s < 64u32);
+    ensures((x << s) as Int == (x as Int) * pow2(s as Int));
+    follows();
+}
+/// Negative twin: off by one.
+#[lemma]
+fn shl_one_off(s: u32) {
+    requires(s < 64u32);
+    ensures((1u64 << s) as Int == pow2(s as Int) + 1);
+    follows();
+}
+/// Negative twin: a mask one bit short.
+#[lemma]
+fn mask_short(k: u32) {
+    requires(k < 64u32);
+    ensures((u64::MAX >> k) as Int == pow2(63 - (k as Int)) - 1);
+    follows();
+}
+"#,
+    );
+    for name in ["shl_one", "wshl_one", "shl_mul", "wshl_mul8", "mask", "chunk", "tz", "shr_mono", "shl_mono"] {
+        proven(&r, name);
+    }
+    for name in ["shl_mul_nofit", "shl_one_off", "mask_short", "shr_mono_strict", "shl_mono_nofit"] {
+        refuted(&r, name);
+    }
+}

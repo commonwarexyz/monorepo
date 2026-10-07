@@ -2085,6 +2085,28 @@ impl<'m> Reader<'m> {
                 cont(self, env, out)
             }
             Callee::Intrinsic(name, _) => self.err(fr, format!("the intrinsic `{name}`")),
+            // a `core::arch` intrinsic (§20.9): the same call in the subset,
+            // which the front end elaborates to the intrinsic's target model;
+            // the pointer loads and stores, and `unsafe` intrinsics, refused
+            Callee::Arch(a) => {
+                if cx.probe {
+                    return Err("probe: arch call".into());
+                }
+                if !a.safe || a.pointer {
+                    return self.err(fr, format!("the intrinsic `{}` takes or returns a raw pointer or is an `unsafe fn`: refused (verified code is safe Rust; whether shipped `unsafe` SIMD code may be split into safe vector arithmetic and unverified loads and stores is the user's open decision, DESIGN.md §16.4, §18 decision 9)", a.path));
+                }
+                let mut es = Vec::new();
+                for x in args {
+                    es.push(self.operand_expr(fr, x, &env, out)?.0);
+                }
+                let path: syn::Path = syn::parse_str(&a.path).map_err(|e| format!("the intrinsic path `{}`: {e}", a.path))?;
+                let imms: Vec<syn::LitInt> = a.imms.iter().map(|v| syn::LitInt::new(&v.to_string(), proc_macro2::Span::call_site())).collect();
+                let e: syn::Expr = if imms.is_empty() { syn::parse_quote!(#path(#(#es),*)) } else { syn::parse_quote!(#path::<#(#imms),*>(#(#es),*)) };
+                let v = self.bind(e, false, None, out);
+                self.assign(fr, dest, v, &mut env, out)?;
+                cont(self, env, out)
+            }
+            Callee::Leaf(path, _) if super::arch::detection(path).is_some() => self.err(fr, super::arch::detection(path).unwrap_or_default()),
             Callee::Leaf(path, tys) => {
                 if cx.probe {
                     return Err("probe: leaf call".into());

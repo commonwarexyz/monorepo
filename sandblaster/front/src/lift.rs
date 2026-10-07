@@ -127,6 +127,8 @@ pub struct LiftSource {
     /// not lifted, read as library code): paths and texts, for its source
     /// check.
     pub mir_extra: Vec<(String, Vec<u8>)>,
+    /// The build's target architecture (`aarch64`): the `.sbmir` must be of it.
+    pub target_arch: String,
 }
 
 /// What a lifted module is, for module-mode emission (`driver::gates`,
@@ -539,6 +541,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
     // `#[lift(mir = ..)]` modules (name, DSL path without `crate::`, text,
     // declaration) and the lifted source files the MIR must match
     let mut mir_texts: Vec<(String, String, String, Span)> = Vec::new();
+    let target_arch: Option<String> = sources.first().map(|s| s.target_arch.clone());
     let dsl_modules: Vec<String> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| s.module_path.clone()).collect();
     let mir_files: Vec<(String, Vec<u8>)> = sources.iter().filter(|s| !s.ghost && !s.host).map(|s| (s.path_display.clone(), s.text.clone().into_bytes())).chain(sources.iter().flat_map(|s| s.mir_extra.clone())).collect();
     for s in &sources {
@@ -627,7 +630,7 @@ pub fn lift(sources: Vec<LiftSource>, diags: &mut Diagnostics) -> (Vec<LiftResul
             let open: BTreeMap<String, String> = cx.open.instances.iter().map(|(t, p)| (t.clone(), path_key(p).trim_start_matches("crate::").to_string())).collect();
             let consts: BTreeMap<(String, String), bool> = cx.open.assoc_consts.iter().map(|(t, c)| ((t.clone(), c.clone()), cx.open.const_fns.contains(&open::const_name(t, c)))).collect();
             let invariant_types = cx.attach_ty.keys().map(|k| k.rsplit("::").next().unwrap_or(k).to_string()).collect();
-            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types, host: mir_host.clone() };
+            let names = crate::mir::ModuleNames { module: String::new(), sealed: sealed.clone(), host_enums: host_enums.clone(), requires, open, dsl_modules: dsl_modules.clone(), current: Default::default(), consts, invariant_types, host: mir_host.clone(), target_arch: target_arch.clone() };
             let lookup = |p: &str| -> Option<Vec<u8>> { files.iter().find(|(f, _)| f.ends_with(&format!("/{p}")) || f == p).map(|(_, b)| b.clone()) };
             match crate::mir::load(text, &lookup, names, suffix) {
                 Ok(l) => {
@@ -1681,6 +1684,16 @@ impl Ctx {
             match t {
                 syn::UseTree::Path(p) => {
                     let first = p.ident.to_string();
+                    // `core::arch::<arch>` (and std's re-export of it): the
+                    // vector types and intrinsics the front end resolves
+                    // against its target library (docs/mir-lift.md §20.9)
+                    if matches!(first.as_str(), "core" | "std")
+                        && let syn::UseTree::Path(a) = &*p.tree
+                        && a.ident == "arch"
+                        && matches!(&*a.tree, syn::UseTree::Path(m) if m.ident == "aarch64" || m.ident == "x86_64")
+                    {
+                        return true;
+                    }
                     if matches!(first.as_str(), "bytes" | "core" | "std" | "alloc" | "sealed") {
                         return false;
                     }
@@ -2093,7 +2106,16 @@ impl Ctx {
             // (a block, an `unsafe fn` or `impl` inside, a macro's argument),
             // as the expression reading refuses an `unsafe` block
             if let Some(sp) = first_unsafe(f.block.to_token_stream()) {
-                self.err(sp, "`unsafe` in a lifted function: verified code is safe Rust (DESIGN.md §2); code that needs `unsafe` stays unverified host code");
+                // (a `core::arch` load or store through a raw pointer is
+                // named: the reason the SIMD code needs `unsafe`)
+                let mut loads = Vec::new();
+                pointer_intrinsics(f.block.to_token_stream(), &mut loads);
+                let named = if loads.is_empty() {
+                    String::new()
+                } else {
+                    format!("; the raw-pointer load/store {} is refused with it: pointer loads and stores need `unsafe`, and whether shipped `unsafe` SIMD code may be split into safe vector arithmetic and unverified loads and stores is the user's open decision (DESIGN.md §16.4, §18 decision 9; docs/mir-lift.md §20.9): build the vectors with value intrinsics and leave the loads and stores to unverified host code", loads.iter().map(|l| format!("`{l}`")).collect::<Vec<_>>().join(", "))
+                };
+                self.err(sp, format!("`unsafe` in a lifted function: verified code is safe Rust (DESIGN.md §2); code that needs `unsafe` stays unverified host code{named}"));
             }
             let n = self.mir_read.len();
             let (b, h) = self.mir_body(&mut f.sig, &akey, self_ty.as_ref(), &state_names, &state_tys);
@@ -4546,8 +4568,12 @@ fn derives_of(attrs: &[syn::Attribute]) -> Vec<String> {
     out
 }
 
+/// The attributes of a source function the lifted function keeps: its
+/// documentation, `#[allow]`s and `#[target_feature]` (the features the
+/// structured reading's intrinsic calls need, as rustc's calls do:
+/// docs/mir-lift.md §20.9).
 fn keep_fn_attrs(attrs: &[syn::Attribute]) -> Vec<syn::Attribute> {
-    attrs.iter().filter(|a| a.path().is_ident("doc") || a.path().is_ident("allow")).cloned().collect()
+    attrs.iter().filter(|a| a.path().is_ident("doc") || a.path().is_ident("allow") || a.path().is_ident("target_feature")).cloned().collect()
 }
 
 fn is_delegation(f: &syn::ImplItemFn, m: &str) -> bool {
@@ -4615,6 +4641,24 @@ fn conjoin_ensures(es: Vec<syn::Expr>) -> Result<Option<syn::Expr>, String> {
             }
             let all: Vec<syn::Expr> = std::iter::once(first).chain(rest).collect();
             Ok(Some(syn::parse_quote!(#((#all))&&*)))
+        }
+    }
+}
+
+/// The `core::arch` loads and stores through raw pointers named in `ts`
+/// (the target library's pointer-taking intrinsics, `vld1q_u8`,
+/// `_mm_loadu_si128`, ..), in order of first mention.
+fn pointer_intrinsics(ts: TokenStream, out: &mut Vec<String>) {
+    for t in ts {
+        match t {
+            TokenTree::Ident(i) => {
+                let s = i.to_string();
+                if crate::intrinsics::table().iter().any(|x| x.pointer_args && x.name == s) && !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+            TokenTree::Group(g) => pointer_intrinsics(g.stream(), out),
+            _ => {}
         }
     }
 }

@@ -1,8 +1,11 @@
 # sandblaster — design (v3)
 
 *Formerly rustoleum. v3 (2026-10-05) is the refocus: the toolchain no longer
-optimizes, prints or ships code. It proves that the optimized Rust a crate
-already contains meets short laws a human reviewed.*
+optimizes, prints or ships code. It proves that the Rust a crate already
+contains, including SIMD and other hardware-specific code, meets short laws
+a human reviewed. Since 2026-10-06 the prover and the verifier are the whole
+product: the optimization pilots were dropped and no new optimized code is
+written.*
 
 This document is the contract for everyone working on sandblaster. Section
 numbers are stable anchors: code comments, `SEMANTICS.md`, the docs and the
@@ -24,12 +27,24 @@ document disagree, the code is the fact and this document has a bug.
 
 ## North star
 
-AI agents write most code now. Writing code is cheap; trusting it is not.
-sandblaster's pitch:
+AI agents write most code now. Writing code is cheap; trusting it is not,
+and the code that most needs trust already exists: complex, hand-optimized,
+often SIMD or otherwise hardware-specific. sandblaster's pitch:
 
-> **Write very complex, very optimized Rust and know it is right.** Humans
-> review short laws. Agents write the code and the proofs. A small kernel
-> checks them, on the code rustc compiles.
+> **Prove the complex Rust you already have, SIMD included, against short
+> laws a human reviewed.** Humans review the laws. Agents write the proofs.
+> A small kernel checks them, on the code rustc compiles.
+
+**The prover and the verifier are the product.** sandblaster writes no new
+optimized code and plans none. The auto-optimizer was removed on 2026-10-05
+(Honest evidence, below), and on 2026-10-06 the pilots that would have had
+agents write faster versions of Commonware functions and verify them were
+dropped (user direction, verbatim: "focus on improving the prover/verifier
+(especially covering SIMD code)...remove all new optimizations"). What
+grows is what the prover can read and prove of existing code: SIMD
+intrinsics read from MIR (C8, §16.4), bit tricks (C4), loops that do not
+step in line with their reference (C5), and the time a proof takes to check
+(C6).
 
 ### The model: three layers
 
@@ -37,11 +52,10 @@ sandblaster's pitch:
 | --- | --- | --- | --- |
 | **Laws** | agent drafts, human approves | the human | `LAWS.rs`: the laws, the vocabulary they use with known answers (`#[example]`), the contract of every function host code can call, type invariants. All of it, and nothing else, is in `SPEC.lock`. |
 | **Reference** | depends on its kind (below) | the human, when it is on the surface | what defines behavior: the laws' vocabulary, a reference spec in `LAWS.rs`, or the original code kept as ghost code |
-| **Implementation** | agent | nobody has to | the crate's own Rust, verified as written from rustc's MIR, plus the proofs (`PROOF.rs`) that tie it to the laws |
+| **Implementation** | the crate's authors (code); agent (proofs) | nobody has to | the crate's own Rust, verified as written from rustc's MIR, plus the proofs (`PROOF.rs`) that tie it to the laws |
 
-**Optimized code is the crate's own Rust.** Speed comes from code an agent
-writes directly in the host crate. Nothing in the toolchain derives,
-rewrites, lowers or prints code for rustc. The build reads the item skeleton
+**The code is the crate's own Rust, verified as written.** Nothing in the
+toolchain derives, rewrites, lowers or prints code for rustc. The build reads the item skeleton
 from the source and every function body from rustc's MIR. A trusted literal
 reading L of the MIR is tied by one kernel theorem per function to the
 structured reading S that the laws and proofs are about (§1.1 item 8). What
@@ -50,22 +64,24 @@ rustc compiles is what was proven.
 **Laws are the only human surface.** A reviewer reads `LAWS.rs` and its
 vocabulary, never the code or the proofs. A law states what callers
 observe, never how it is computed (§15.1). The lock (§15.6) hashes exactly
-the review surface, so a proof refactor or an optimization that keeps the
-surface leaves the lock unchanged. **An optimization PR whose lock diff is
-empty needs no correctness review**: the build proved the new code meets
-the old laws. The reviewer reads the benchmark.
+the review surface, so a proof refactor, or a change to the code that keeps
+the surface, leaves the lock unchanged. **A code change whose lock diff is
+empty needs no correctness review**: the build proved the changed code meets
+the old laws.
 
 **References and "implementation equals reference" are laws.** Determinacy
 (§15.5) forces something in the laws file to define each host-callable
-function completely. That something is the reference. It comes in four
+function completely. That something is the reference. For hardware-specific
+code the natural reference is usually the crate's own portable version: a
+SIMD engine is proven equal to the scalar engine beside it. It comes in four
 kinds:
 
 | kind | when to use it | on the surface? | example |
 | --- | --- | --- | --- |
 | **the laws' vocabulary** (a characterization) | the laws alone determine the function | yes: it is the vocabulary | `to_nearest_size` is the largest valid size at most `size`; varint `write` appends `varint(x)` and `read` is its canonical left inverse |
 | **a reference spec in `LAWS.rs`** | callers depend on incidental behavior (which error, how much input is read, side outputs) and no short characterization exists | yes, read in full | the verifier's `rebuild` (about 40 lines), which `reconstruct_digest`'s contract equates it with |
-| **a pinned original** (not built, C2) | existing code has no laws, and "behaves exactly like the code that shipped" is the guarantee wanted | yes, as one item, reviewed for provenance, not content | Reed–Solomon `Scalar::mul` defining `Neon::mul` (pilot C) |
-| **a proof copy** (not built, C2) | the laws determine the function, but their proofs follow the original's structure and one equivalence lemma is cheaper | no: a proof internal cannot weaken anything | the varint byte loop under a word-at-a-time `read` |
+| **a pinned original** (not built, C2) | existing code has no laws, and "behaves exactly like the code that shipped" is the guarantee wanted | yes, as one item, reviewed for provenance, not content | Reed–Solomon `Scalar::mul` defining the existing `Neon::mul` (§18) |
+| **a proof copy** (not built, C2) | the laws determine the function, but their proofs follow the original's structure and one equivalence lemma is cheaper | no: a proof internal cannot weaken anything | a scalar loop as the proof route to a SIMD engine's laws |
 
 Prefer the first kind: a characterization frees the implementation
 completely. Use the second only for behavior callers rely on that no short
@@ -118,8 +134,8 @@ panicking (§1.1 item 7); about the host code the verified functions call
 through the buffer traits, modeled without a capacity (a write into a
 `&mut [u8]` too short for it panics inside `bytes`); that
 the laws say what the author meant (that is the reviewer's reading, helped
-by known answers and the on-demand spec-mutation tool, §15.7); or that the
-code is fast (only a benchmark says that, §17).
+by known answers and the on-demand spec-mutation tool, §15.7); or anything
+about speed.
 
 ### Honest evidence
 
@@ -134,29 +150,51 @@ code is fast (only a benchmark says that, §17).
   line of the optimizer and of its shipping layer (lowered copies, IDE
   twins, the round trip, shipped-code theorems) cost review, trusted base
   and build time. It was removed (§19).
-* **The one big win was agent-written.** The six-probe `to_nearest_size`
-  (2026-10-01), written by an agent and proven equal to the binary search,
-  was reported as about 40× faster, but without an A/A control. It is a
-  hypothesis until pilot A measures it (§18).
-* **Hardware first, not yet on MIR.** About 23.6k lines of SIMD
+* **The one big win was agent-written, and never measured fairly.** The
+  six-probe `to_nearest_size` (2026-10-01), written by an agent and proven
+  equal to the binary search, was reported as about 40× faster, but
+  without an A/A control. Measuring it was pilot A, dropped on 2026-10-06
+  with every other plan for new optimized code, so the claim stays
+  unconfirmed. What it does show is that the proof techniques of §16.1
+  (a) and (b) work. Unverified, A/A-controlled prototypes of the dropped
+  pilot B were mixed: a word-at-a-time varint encoded 1.04–2.90× faster
+  across five distributions but ran at 0.72× and 0.88× on 9–10-byte
+  values, and a "fast" `pos_to_height` ran at 0.70–0.73×
+  (`recovery/refocus/pilotB`, outside the repository).
+* **Hardware first, now on MIR (first slice).** About 23.6k lines of SIMD
   instruction models (x86 to AVX-512, NEON, SHA-2) served the dialect and
-  the code the toolchain printed; no verified Commonware module used one
-  yet. They are **kept** (user decision, 2026-10-05): very optimized code
-  uses SIMD and other intrinsics, and proofs over it need the instruction
-  semantics, validated natively (§9). What the models do not reach yet is
-  code verified as written: reading `core::arch` calls from MIR is C8.
-  Commonware's fastest SIMD (the SHA-256 pair and x16 kernels) is inline
-  assembly, which MIR cannot read.
+  the code the toolchain printed. They are **kept** (user decision,
+  2026-10-05): very optimized code uses SIMD and other intrinsics, and
+  proofs over it need the instruction semantics, validated natively (§9).
+  Since 2026-10-06 safe `core::arch` code is read from MIR onto them (C8's
+  first slice, §16.4): a NEON nibble multiply (the shape of Reed–Solomon's
+  `mul_128`) verifies in place against scalar reference laws, with the
+  lift conformance check running it natively, and an SSSE3 PSHUFB
+  counterpart reads onto the x86 models.
+
+  No Commonware module is verified yet. Its SIMD engines are `unsafe`
+  throughout: raw-pointer loads and stores, and `unsafe` blocks that
+  rustc forces around value intrinsics in inlined helpers. Whether they
+  may be split into safe vector arithmetic and unverified load/store
+  wrappers is the user's open decision (9). Reading the `unsafe` code
+  itself would reverse decision (1).
+
+  The C8 survey (`recovery/prover-simd/SIMD-SURVEY.md`, outside the
+  repository) found none of Commonware's SIMD functions readable as
+  written today, and three of curve25519's AVX-512 helpers readable
+  after C8's second slice. Commonware's fastest SIMD (the SHA-256 pair
+  and x16 kernels) is inline assembly, which MIR cannot read.
 * **Proof size plans were optimistic.** QMDB planned about 1.1k proof lines
   and built 15.4k, for prover gaps (symbolic powers of two, `&`/`|` with no
-  arithmetic meaning, arrays expanded byte by byte). Optimized code hits
-  those gaps hardest; closing them is the main work (§16).
+  arithmetic meaning, arrays expanded byte by byte). Complex existing code
+  (bit tricks, SIMD lanes) hits those gaps hardest; closing them is the
+  main work (§16).
 * **Gates were not at agent speed.** Spec mutation as a build gate made the
   cold storage build take 8 h 11 min; without it the same build takes
   19 min. Mutation is now a tool you run when you want it (§15.7).
 
-Every speed claim cites an A/A-controlled benchmark of the new code
-against the code it replaces, on a stated input distribution (§17).
+sandblaster makes no speed claims. It does not change what rustc compiles;
+the speed of verified code is its authors' business.
 
 ### Why sandblaster, against its rivals
 
@@ -165,7 +203,7 @@ against the code it replaces, on a stated input distribution (§17).
 | Agents already write it well | yes | Rust plus proof code | partly | new language | yes: it is Rust |
 | Verifies existing crates in place | — | inside `verus!` blocks | no | no | yes, from rustc's MIR |
 | What a human reads | code | code, invariants, triggers, ghost code | proofs | laws | laws only |
-| Hand-optimized code | unchecked | proven, proof code beside it | n/a | own runtime | proven as written against the laws or a reference |
+| Existing hand-optimized and SIMD code | unchecked | proven, proof code beside it | n/a | own runtime | proven as written from MIR against the laws or a reference (intrinsics from MIR: C8) |
 | Guards against weak or gamed laws | — | no | no | no | yes: determinacy, law rules, known answers, lock diffs |
 | Trusted base | rustc | Z3 plus Verus | small kernel | a TypeScript checker | small kernel; solvers and search never trusted |
 
@@ -183,9 +221,12 @@ comparison of §17 decides with data.
 3. **The laws file is the definition; the implementation is free.** Laws
    characterize; references are short and written for a reader; equivalence
    is a law or a lemma.
-4. **Measure before proving.** A body is optimized only after an
-   unverified prototype wins on a stated distribution; proofs are never
-   spent on non-wins.
+4. **No new optimized code.** sandblaster verifies the code a crate has.
+   It does not generate, rewrite or propose faster code, and its roadmap
+   is prover and verifier capability, not speed. Where existing code must
+   change to be verifiable at all (an `unsafe` SIMD engine split into safe
+   vector arithmetic and unverified loads, §18), the change keeps its
+   behavior and its machine code, and it is the user's decision.
 5. **Gates are mandatory; review tools are on demand.** No flag skips a
    proof or a §15 gate. Spec mutation and LR8 run when an author or
    reviewer asks (`sandblaster mutate`).
@@ -219,7 +260,7 @@ comparison of §17 decides with data.
 | Verus | Inline proofs in Rust, Z3 trusted. sandblaster: own proof-term kernel, no SMT in the TCB, Bend-style laws, §15 gates against weak laws, code read from MIR. |
 | Creusot / Prusti | Contracts on Rust, external provers. Same differences. |
 | Aeneas / hax | Safe Rust to Lean/F*/Coq. sandblaster keeps the prover in-process (`cargo build` is the gate) and reads rustc's own MIR. |
-| fiat-crypto / Jasmin | Verified fast code against a simple reference: the same line, for hand-optimized Rust. |
+| fiat-crypto / Jasmin | Verified fast code against a simple reference: the same relation, for existing hand-optimized Rust read from MIR. |
 | Kani | Bounded model checking; no unbounded laws. |
 | Bend 2 | The model for laws and proofs (`LAWS.rs`, `PROOF.rs`, proof by computation, induction by recursion). |
 | K framework | Semantics first: elaborator = semantics, kernel evaluator = reference interpreter, differential tests against native code. |
@@ -312,12 +353,17 @@ lift, is not listed there yet (§19, stale text).
      function, a callee's panic, an index leaf past the end), `Stuck` for
      everything else that gives no value (out of fuel, undefined
      behaviour, an unmodeled construct; `docs/mir-lift.md` §20.4). Files:
-     the generator `mir/literal.rs` (1,436 code lines; 1,297 before C1) and
-     its library `literal.core` (203; 186); the theorem statements
-     `mir/stmt.rs` (240; 213); the parse `mir/ir.rs` and `sexp.rs` (482,
-     131); names and load checks `mir/mod.rs` (531); the printer `mirx`
-     (1,122: a rustc driver on the pinned nightly of the stable release; its
-     output is checked in with the sources' SHA-256). Then the gate's
+     the generator `mir/literal.rs` (1,476 code lines; 1,436 before C8,
+     1,297 before C1) and its library `literal.core` (203; 186); its
+     reading of `core::arch` code `mir/arch.rs` (111, C8: a vector type as
+     its model representation, an intrinsic call as its validated target
+     model, `docs/mir-lift.md` §20.9); the theorem statements `mir/stmt.rs`
+     (240; 213); the parse `mir/ir.rs` and `sexp.rs` (529; 482 before C8,
+     131); names and load checks `mir/mod.rs` (542; 531, the check that the
+     MIR is of the build's architecture included); the printer `mirx`
+     (1,208; 1,122 before C8: a rustc driver on the pinned nightly of the
+     stable release; its output is checked in with the sources' SHA-256 and
+     the target it was built for). Then the gate's
      trusted check `mir/gate.rs` (176; 159, plus about 30 at its call site
      `driver::gates::theorem_gate`): L enters the kernel only through it,
      and a function is accepted only when its MIR instance is that
@@ -331,10 +377,15 @@ lift, is not listed there yet (§19, stale text).
      when each precondition, a panic contract's no-panic clause included,
      is α-equal to its declared contract's clause) and the lift glue (about
      300, the panic contract's attachment and no-panic clause included).
-     **About 4.69k code lines in all** (4.45k before C1, which added about
-     237: the outcome split and `must_panic` with its tables of panic
-     functions and message constructors in L, the `Assert` kinds that
-     panic, the panic statement, the gate's second theorem, the glue).
+     **About 5.01k code lines in all** (4.69k before C8's first slice,
+     which added about 325: `mir/arch.rs`, the vector type and the call in
+     L, their parse, the target check, the printer's vector types and
+     intrinsic leaves, the lift's kept `#[target_feature]`; and 10 in the
+     ghost language's elaboration, item 6, for the lane view of vectors;
+     4.45k before C1, which added about 237: the outcome split and
+     `must_panic` with its tables of panic functions and message
+     constructors in L, the `Assert` kinds that panic, the panic statement,
+     the gate's second theorem, the glue).
    * **The theorem.** S (`mir/read.rs` 2,975, steered by `mir/cfg.rs` 298)
      is untrusted. Every build checks, per lifted function,
      `L::thm::f : Π x̄ (pre). Σ k. Π n (k ≤ len n). run n b0 (Ret init(x̄))
@@ -404,7 +455,6 @@ sandblaster/          (in the Commonware monorepo)
                       differential harness (src/hw, src/diff), the evidence records and their tool
                       (`sandblaster-targets-evidence`), the kernel cross-checks (feature `kernel`).
   memguard/           process-wide allocation cap (resource safety, not TCB).
-  bench/shipped-harness/  the measurement harness for pilots (own workspace; §17).
 ```
 
 Shipped code has **no runtime dependency** on sandblaster.
@@ -1034,12 +1084,19 @@ optimizer and the same day's stage "retain-hardware" restored them from
   `sandblaster::arch` are refused (`target::NO_VARIANTS`,
   `target::NO_ARCH_HELPERS`). Pointer-taking loads and stores cannot be
   called from the dialect.
-* **Not yet:** code verified as written. The lift's L does not read
-  `core::arch` calls from MIR yet; that is capability C8 (§16.4, §18).
-  `elab/semantics.rs` loads only `<arch>.core`, so the x86 AVX models
-  (`x86_64_avx.core`) are validated and hashed into the header but not
-  loaded for elaboration (the file is hashed into the lock's `builtins`
-  line; loading them is part of C8).
+* **Code verified as written** (C8's first slice, 2026-10-06; §16.4,
+  `docs/mir-lift.md` §20.9): safe `core::arch` code read from MIR in both
+  readings — a vector type as its model representation, an intrinsic call
+  as its validated model (L, `mir/arch.rs`), the same call in the subset
+  (S) — with the feature rule checked on MIR, pointer loads and stores and
+  runtime feature detection refused.
+* **Not yet:** `elab/semantics.rs` loads only `<arch>.core`, so the x86
+  AVX models (`x86_64_avx.core`) are validated and hashed into the header
+  but not loaded for elaboration (the file is hashed into the lock's
+  `builtins` line; loading them is a lock change): AVX2 and AVX-512 calls
+  read from MIR are refused. Intrinsics the surface table `intrinsics.rs`
+  does not list (`_mm_set1_epi8`, `_mm_srli_epi64`) are refused by S; it is
+  hashed into the `builtins` line too.
 
 ### 9.8 Word algebra: `BvRefl` and `bvnorm` (TCB)
 
@@ -1191,7 +1248,7 @@ build.
   non-recursive helpers) needs `#[mirrors_impl(justification = "..")]` plus
   independent examples, else `error[spec-mirrors-impl]`.
 
-**Writing laws for optimized code** (guidance; the rules below enforce
+**Writing laws for complex code** (guidance; the rules below enforce
 part of it):
 
 1. State what callers observe, never how it is computed. Characterize by
@@ -1634,7 +1691,7 @@ Each becomes mandatory in the release that lands it.
 
 ---------------------------------------------------------------------------
 
-## 16. Proof techniques for optimized code
+## 16. Proof techniques for complex and SIMD code
 
 None of these needs a kernel change. Every new step is untrusted search
 producing a kernel-checked term, or a checker written in the kernel's
@@ -1645,14 +1702,14 @@ models, by native validation, §9).
 
 | technique | today | gap | closing it (capability, §18) |
 | --- | --- | --- | --- |
-| summary-preserving replacement | works: `PROOF.rs` summaries, `opaque()` | none for pilot A | — |
+| summary-preserving replacement | works: `PROOF.rs` summaries, `opaque()` | none | — |
 | characterization (laws determine `f`) | works: uniqueness lemmas, `complete_p` | `complete_p` not reused as a step | a step that instantiates it |
 | lockstep, implementation against reference | DSL only (`elab/lockstep.rs`); the walker relates L to S | two MIR-read functions | C3 |
 | coupled loops (product programs) | — | missing | C5 |
 | loops with invariants | loop attachments, loop lemmas, fuel functions | iterator adapters; fold matching | per-adapter models; fold matching |
-| bit tricks | `bvnorm`, K1 bit-count axioms, `stdlib::bits`, proof by computation | symbolic shifts and masks, carries, `u128` | C4, then C11 |
-| SIMD lanes | models retained and validated (§9); dialect code proven over them | reading `core::arch` from MIR (S and L), loads, dispatch | C8 |
-| documented panics | built and applied: panic contracts (`panics_when`, the panic theorem; §16.5); panic lemmas restate a condition in the code's terms | a panic reached only after many loop iterations (the panic walk's fuel bound); panics inside lifted callees' loops; shifts by a variable amount need a per-amount lemma (C4) | a panic loop lemma, when a pilot needs one |
+| bit tricks | `bvnorm`, K1 bit-count axioms, `stdlib::bits`, proof by computation; shifts by a variable amount (`lemmas/bits_shift.core`, §16.3) | leading zeros as bounds (a case per value), carries, popcount across a split, `u128` | C4, then C11 |
+| SIMD lanes | models retained and validated (§9); safe `core::arch` code read from MIR (S and L) onto them and proven lane by lane against scalar references (C8's first slice); ghost lane indexing `v[i]` and lane steps (`auto::lanes`, §16.4) | AVX models not loaded; loads and stores (`unsafe`); runtime dispatch; a table-lookup lane (`vqtbl1q_u8`) and a lane split with per-lane case analysis (a PSHUFB lane law needs 256 enumerated cases today) | C8 (second slice) |
+| documented panics | built and applied: panic contracts (`panics_when`, the panic theorem; §16.5); panic lemmas restate a condition in the code's terms | a panic reached only after many loop iterations (the panic walk's fuel bound); panics inside lifted callees' loops | a panic loop lemma, when a verified function needs one |
 | `unsafe` | refused, and out of scope for good (§2, §16.5) | — | — |
 | proof reuse and stability | per-module verdicts; theorem and mutant caches | per-function checking; cross-root reuse | C6, C7 |
 
@@ -1662,26 +1719,29 @@ From cheapest to most expensive.
 
 * **(a) Summary-preserving replacement (works).** Law proofs use a
   function's proof-internal summary (an `ensures` attached in `PROOF.rs`;
-  with `opaque()` the only thing callers see). Replace the body, prove the
-  same summary for the new body, and every law proof stays. Example: the
-  six-probe `to_nearest_size` of `7e9851b3ba` proved the same `ensures` as
-  today's binary search, with one search invariant per helper and about
+  with `opaque()` the only thing callers see). When the code changes, prove
+  the same summary for the changed body, and every law proof stays.
+  Example (an experiment, never shipped): the six-probe `to_nearest_size`
+  of `7e9851b3ba` proved the same `ensures` as today's binary search, with one search invariant per helper and about
   200 proof lines for 37 code lines.
 * **(b) Characterization (works).** When the laws determine `f`, any body
-  meeting them equals `f`: `to_nearest_size_by_search` proved fast ==
-  original because both are `mmr_size` of the largest leaf count that fits
+  meeting them equals `f`: `to_nearest_size_by_search` proved the six-probe
+  version equal to the binary search because both are `mmr_size` of the largest leaf count that fits
   (about 30 lines). No reference is needed.
 * **(c) Lockstep (DSL only today).** `elab/lockstep.rs` walks an exec body
   and a `#[model]` spec together: tests split with their path equations,
   contradicting arms close at once, calls meet calls, leftover equations go
   to the prover. Nothing relates two MIR-read functions, so the verifier
-  tied `reconstruct_digest` to `rebuild` with hand-written step lemmas.
+  ties `reconstruct_digest` to `rebuild` with a hand-written step lemma
+  (`rebuild_step`; its five case lemmas went when the search learned to
+  align the code's terms with the law's, 2026-10-06).
   C3 extends it to lifted functions and pinned originals: the core tool for
-  "branchless rewrite of a branchy function" or "table instead of
-  computation".
-* **(d) Coupled loops (missing).** Optimized loops rarely step in line
-  with the original (unrolled by `k`, 16 lanes per step, a word against a
-  byte at a time, early exit against a full scan). C5: a coupling
+  existing branch-free code against a branchy reference, or a table
+  against the computation it caches.
+* **(d) Coupled loops (missing).** Fast existing loops rarely step in
+  line with their reference (unrolled by `k`, 16 lanes per step against
+  one, a word against a byte at a time, early exit against a full scan);
+  a SIMD engine's loop against its scalar engine's is the standard case. C5: a coupling
   attachment names both loops, the step ratio and an invariant over both
   programs' variables; the toolchain builds the product lemma by measure
   recursion on the implementation's loop, advancing the reference `k`
@@ -1718,12 +1778,27 @@ Today: `BvRefl` decides word equalities (§9.8; it proved ARMv8 SHA-2
 `trailing_zeros` are kernel-defined sums over bits; `linarith` decides
 linear integer arithmetic; `front/stdlib/bits.rs` proves `pow2`,
 `popcount`, alignment and zero-count facts one bit at a time; proof by
-computation covers finite domains. Missing, with evidence: symbolic shift
-amounts (the verifier proves `1 << b == 2^b` by 64 cases); masks and shifts
-as arithmetic for symbolic `k` (`x & (2^k − 1) == x % 2^k`, `x >> k == x /
-2^k`, disjoint `|` as `+`); popcount across a split; `u128` (L reads it as
-unmodeled, so widening multiplies get no theorem). In order: a bridge
-library registered as `auto` rules (C4); `by_enumeration` (C4); `u128` as a
+computation covers finite domains. Shifts by a variable amount (C4, built
+2026-10-06): `front/lemmas/bits_shift.core` (generated by
+`auto::bitlib`, each lemma enumerating the amount once, in the library)
+states for `u8`–`u64` that `1 << s` is `2^s`, `x << s` (checked or
+wrapping) is `x · 2^s` when that fits, `MAX >> s` is `2^(w − s) − 1` with
+`w − s` trailing zeros in its complement, `2^e` has `e` trailing zeros,
+`(a + b) · 2^e` distributes, and shifts of ordered values are ordered;
+`auto` instantiates them at the shift atoms of a goal (`auto::arith`), next
+to `bits_pow2.core`'s `x >> s == x / 2^s`. The storage proofs' 64-case
+ladders (`shl_one`, `wshl_one`, `wshl_exact`, `mask_facts`, `tz_pow2`,
+`chunk_facts`) are gone; where a large goal needs a shift fact at once
+(the MMR's `new_pos`, the verifier's `children` entry facts) the proof
+names the library lemma (`bits::shl_one_u64(h)`): `auto` finds the
+instance by itself, but in `new_pos` that search took about 20 s more.
+Missing, with evidence: leading zeros as bounds
+(`2^(w−1−lz) ≤ x < 2^(w−lz)`: the MMR's `lz_bits_chain` and varint's
+`lz_bits_*` prove it a case per value, 176 cases); masks for a symbolic `k`
+(`x & (2^k − 1) == x % 2^k`) and disjoint `|` as `+`; popcount across a
+split; `u128` (L reads it as unmodeled, so widening multiplies get no
+theorem). In order: the rest of the bridge library registered as `auto`
+rules (C4); `by_enumeration` (C4); `u128` as a
 pair of `u64` in L's library and the lift prelude, conformance-tested (C4,
 +100–200 trusted lines); later, only if a spike shows it pays,
 bit-blasting: an untrusted SAT solver's LRAT certificate checked by a
@@ -1732,62 +1807,141 @@ proof (C11). That would match Verus's `by (bit_vector)` without new trust.
 
 ### 16.4 SIMD lanes
 
-The models are retained and validated (§9), and dialect code is proven over
-them today (`front/tests/hardware.rs`: a NEON function's contract proven
-over `vdupq_n_u32`, `vaddq_u32` and `vgetq_lane_u32`, the models pinned in
-the lock). Code verified as written needs **C8: reading `core::arch`
-intrinsic calls in host Rust from MIR onto the retained models**, in both
-readings:
+The models are retained and validated (§9). **C8's first slice is built
+(2026-10-06; `docs/mir-lift.md` §20.9 is normative): safe `core::arch`
+code is read from rustc's MIR onto the retained models, in both
+readings.**
 
-* **S** (the structured reading, untrusted). The lift reads the source
-  through the front end, which already resolves `core::arch`, types vector
-  values and elaborates intrinsic calls to the models. Missing: lifted
-  modules with `#[target_feature]` functions end to end (attachments,
-  contracts over vector values). Code older than Rust 1.87 that wraps
-  value-only intrinsics in `unsafe` blocks is first made safe (they are
-  safe calls inside a `#[target_feature]` function now); loads are host
-  code (below).
-* **L** (the literal reading, trusted). `mirx` must print a call to a
-  `core::arch` function as an intrinsic leaf (its stdarch path, its const
-  generic immediates: rustc has already turned legacy immediate arguments
-  into const generics) and print vector types (`#[repr(simd)]` structs);
-  `mir/ir.rs` parses them; the L generator reads a vector local as the
-  model's `Array(lane, lanes)` and an intrinsic call as an application of
-  the model global, with the immediates' range proofs, and reads a call
-  whose model is missing as unmodeled (no theorem); `stmt.rs` and the gate
-  accept model globals in what an `L::thm` may reach; the feature rule is
-  checked on MIR (the function's `#[target_feature]` set, which `mirx`
-  prints, covers each model's features). Trusted: +150–300 lines of L and
-  `mirx`.
-* **Loads and stores** take raw pointers and need `unsafe`, which verified
-  code never contains (§2, §16.5). A verified SIMD function takes and
-  returns vectors and arrays and builds its vectors with value-only
-  intrinsics (safe inside a `#[target_feature]` function since Rust 1.87);
-  the loads that feed it, and any `transmute` between a vector and an
-  array, stay in unverified host code at the boundary. (The `unsafe`
-  load/store templates of the removed `sandblaster::arch` helpers left
-  `intrinsics.rs` with C1's lock acceptance, which changed every lock's
-  `builtins` line. The pointer forms' models in `targets` and their
-  surface entries, marked not callable, are unreachable under this
-  policy; the models are hashed into every lock's `target` line.)
-* **The walker and the theorem gate** treat model applications as opaque
-  leaves equal on both sides; lane-wise proofs use `bvnorm` per lane.
-* **Dispatch.** A `#[target_feature]` function called from code without the
-  feature (behind `is_aarch64_feature_detected!`) reads the detection as an
-  unknown boolean; every branch is proven equal to the reference.
-* **Conformance.** The lift conformance check runs the intrinsic code
-  natively (NEON on this machine; SSE/AVX2 under Rosetta 2; AVX-512 only on
-  x86 hosts).
-* **The AVX models.** Loading `x86_64_avx.core` for elaboration changes
-  `elab/semantics.rs`, hashed into the lock's `builtins` line: four varint
-  item hashes are restated (not their statements) at that acceptance.
+* **The extraction** (`mirx`) records the target (MIR of another
+  architecture is refused at load), each function's target features
+  (rustc's codegen set), `core::arch` vector types (`#[repr(simd)]` structs
+  of core's `core_arch`, by public path, with rustc's lanes) and intrinsic
+  calls as leaves (public path, const generic immediates by value, the
+  intrinsic's features, its safety and pointer use), never followed into
+  stdarch's bodies; `std_detect` calls are leaves too.
+* **L** (trusted, `mir/arch.rs` with one arm of `literal.rs`): a vector is
+  the front end's model representation (`intrinsics::VecTy`; the bits must
+  agree with rustc's layout), an intrinsic call is its core model's global
+  applied to the immediates (each with its range proofs) and the arguments
+  — only for a declared-safe, pointer-free intrinsic whose model has its
+  exact path, is validated (the fail-closed evidence verdict) and is the
+  library's loaded `def[intrinsic]`, in a body compiled with every feature
+  the intrinsic and its model need, with immediates in range and arguments
+  of the model's types. Anything else is stuck (no theorem), named.
+* **S** (untrusted, `read.rs`): the same call in the subset, which the
+  front end elaborates to the same model (an intrinsic without a loaded
+  model makes the function deferred, never trusted). The lift keeps the
+  function's `#[target_feature]` (the dialect's feature rule is rustc's:
+  statically enabled features do not count for a safe call in Rust 1.98
+  either) and its `use core::arch::..` items.
+* **The walker and the theorem gate** needed nothing new: a model
+  application is a neutral head on symbolic arguments, the same term on
+  both sides, and the models are defined before L is loaded, so the
+  gate's check 3 accepts them.
+* **Laws over vectors**: in ghost code a vector is the array of its lanes
+  (and back), so a law states a vector function lane by lane against a
+  scalar reference (`mul_nibbles(x, lo, hi) == mul_lanes(x, lo, hi)`).
+  `bv()` proves such laws when the reference has the model's shape at
+  each lane's conditions (NEON TBL); where it has another (PSHUFB's model
+  tests bit 7 in a plain `if`, the elaborated reference's `if` carries its
+  path equation), the proof enumerates one lane's 256 index bytes in a
+  lemma and moves each lane to it: about 25 proof lines for one PSHUFB.
+  That is the prover gap of this slice.
+* **Lanes in proofs** (the prover track, 2026-10-06). Ghost code
+  indexes a vector: `v[i]` is lane `i` of its model's `Array(lane, n)`,
+  lane 0 first (through the lane view above; exec code still reads a lane
+  with the lane intrinsic). A model is a `def[intrinsic]`, folded on
+  symbolic data (§5.6), so its lane `k` was reached only by `BvRefl`;
+  `auto` now unfolds a model read at a literal lane once (`Delta`, in the
+  target and in facts, `auto::lanes`): the models are lane-wise maps, so
+  the lane is the scalar operation (`vaddq_u32(a, b)[2]` is `a[2] +w b[2]`)
+  for linear arithmetic and the bit lemmas, and a symbolic lane `i < n` is
+  split into the literal ones. Nibble splits (`x & 15`, `x >> 4`), lane
+  sums exact under lane bounds, carry splits and the x86 byte lanes of a
+  32-bit sum are proven this way (`front/tests/hardware.rs`). Not yet: a
+  table lookup (`vqtbl1q_u8`, whose lane is the dependent `if k < 16 as .h
+  then t[k] else 0`): deciding `k < 16` after the step builds a motive
+  whose read-back holds `Erased`, so Reed–Solomon's split-table step is
+  still open. A lane step whose result reads back with such a hidden proof
+  is not taken (a lane of `_mm_and_si128` fed to the PSHUFB reference's
+  `if`, in `sd_x86`'s masked lookup), and the search goes on as before
+  lane steps existed; one step is tried per model application, not per
+  lane read.
+* **Conformance** runs `#[target_feature]` code natively (the harness
+  transmutes lane arrays and calls the original in `unsafe`): the NEON
+  fixture compared 1,201 inputs on 4 functions, the literal reading on
+  193, with 0 mismatches, on this machine. x86 code is compared on x86
+  hosts only.
+* **Feature detection**: a statically enabled feature's detection is the
+  constant `true` in the MIR (read as such); a runtime detection (a call
+  into `std_detect`, cpufeatures' atomic) is refused by both readings. In
+  safe Rust a runtime detection cannot guard a call of a
+  `#[target_feature]` function (the call needs `unsafe`), so every real
+  dispatcher is `unsafe` today; the planned reading (an unknown boolean
+  fixed for the run; the function read twice, the two structured readings
+  proven equal) waits for a function that needs it.
+* **Loads and stores** take raw pointers and need `unsafe`: refused, the
+  load named (`vld1q_u8`). A verified SIMD function takes and returns
+  vectors and builds them with value intrinsics; the loads that feed it
+  stay in unverified host code. Whether shipped `unsafe` SIMD engines may
+  be split that way is the user's open decision (§18, decision 9). A
+  proof-checked reading of the loads and stores themselves (raw pointers
+  from slices, with in-bounds obligations) would reverse decision (1)
+  for that class. The C8 survey (stage notes
+  `sandblaster-wt/recovery/prover-simd/SIMD-SURVEY.md`, outside the
+  repository) costs it at 300–500 trusted lines and 10–20 agent-days,
+  and does not propose it.
+* Trusted: about 325 code lines of L, the parse, names, printer and lift
+  glue, and 10 in the ghost language's elaboration (the lane view), against
+  the 150–300 planned.
 
-Estimate: a first slice (value-only NEON intrinsics in a `#[target_feature]`
-function, no dispatch) 8–12 agent-days; with dispatch, x86 and tests 15–25
-agent-days. Commonware's intrinsic code is the
-Reed–Solomon engines and curve25519's backends (pilot C); the SHA-256
-kernels are inline assembly, out of scope for any MIR-level tool. A cheaper
-first step is SWAR in safe Rust (eight byte lanes in a `u64`, pilot B).
+**What Commonware's code needs** (the C8 survey, measured on rustc's MIR
+of the four intrinsic modules: 563 intrinsic call sites of 62
+intrinsics). None of its SIMD functions is readable as written today:
+
+* **`unsafe` around value intrinsics.** rustc refuses
+  `#[inline(always)]` together with `#[target_feature]`, and a statically
+  enabled feature does not make a call safe. So the inlined helpers wrap
+  their value intrinsics in `unsafe` (curve25519's NEON backend, the
+  Reed–Solomon `mul_128`s).
+* **Raw-pointer loads and stores** (155 call sites).
+* **SHA-256 is inline assembly**, as is curve25519's `mul19`. Assembly
+  is out of scope for any MIR-level tool.
+* **Missing or unloaded models.** 15 of the 62 intrinsics are read today
+  (validated and loaded). 17 have validated AVX models that are not
+  loaded. 17 have no model.
+* **Reader gaps unrelated to SIMD:**
+  * `core::array::from_fn`, whose MIR builds a `MaybeUninit` array (14
+    roots);
+  * closures passed as values;
+  * `&mut` slices of arrays and `ShardsRefMut` (every Reed–Solomon
+    transform).
+
+**Next** (C8's second slice):
+
+1. A closer that splits an array equation into lanes and decides each
+   lane's conditions by cases (the PSHUFB lemma's 256 cases become one
+   step).
+2. `core::array::from_fn` and `<[T; N]>::map` as modeled leaves in both
+   readings.
+3. Loading the AVX models (`x86_64_avx.core`: a lock change of every
+   `builtins` line, four varint item hashes restated) with their surface
+   entries.
+
+With these, curve25519's AVX-512 `add_raw`, `sub_raw` and `reduce_regs`
+are readable as written (verified on an AVX-512 host).
+
+The rest waits for decision (9)'s split:
+
+* **Reed–Solomon's NEON `mul_128`/`muladd_128`.** Every model they call
+  is validated and loaded today.
+* **The SSSE3 engine.** It needs `_mm_set1_epi8` and `_mm_srli_epi64`,
+  with x86 evidence.
+* **curve25519's NEON helpers**, including `mul_regs` and `square_regs`.
+  They need 10 NEON lane-map models (`vshl_n_u32` first, 90 call sites).
+
+SWAR code in safe Rust (eight byte lanes in a `u64`), where it exists,
+needs no intrinsic reading, only the bit automation (C4).
 
 ### 16.5 Panic contracts (C1, built), and no `unsafe`
 
@@ -1876,7 +2030,7 @@ fn to_nearest_size_contract() {
   needs it); a loop header costs one of 64 units of fuel and the walk
   follows at most 48 split tests or loop iterations on one path, so a
   panic reached only after many loop iterations is not proven yet (a
-  panic loop lemma, when a pilot needs one). The walk's arithmetic is
+  panic loop lemma, when a verified function needs one). The walk's arithmetic is
   linear in the literal reading's terms; where the laws' vocabulary is not
   (`2^h` against `1 << h`, `size > MAX_NODES` against `leading_zeros`), a
   **panic lemma** of the proof file restates the condition in the code's
@@ -1898,18 +2052,18 @@ fn to_nearest_size_contract() {
   walker's panic mode is `Walker::panic_walk`.
 
 Total equivalence on every input, including where the original loops or
-returns garbage, is not offered: it would oblige an optimization to
-reproduce undocumented misbehavior.
+returns garbage, is not offered: it would oblige every change to the code
+to reproduce undocumented misbehavior.
 
 **No `unsafe`, for good** (user decision, 2026-10-05: "then remove it").
 Proof-justified `unsafe` in shipped Commonware code is not part of the
 model, now or later: verified code stays `#![forbid(unsafe_code)]` (§2),
 there is no capability for unsafe standard-library APIs
-(`get_unchecked`, ...) and no memory model for raw pointers. A hot path
-that needs `unsafe` is either rewritten in safe Rust (an optimizer's
-`get_unchecked` usually becomes a bounds check the compiler removes, or a
-safe API such as `chunks_exact`), or stays unverified host code outside
-the verified files.
+(`get_unchecked`, ...) and no memory model for raw pointers. Existing code
+that uses `unsafe` is either restructured in safe Rust without changing
+its behavior (a `get_unchecked` usually becomes a bounds check the
+compiler removes, or a safe API such as `chunks_exact`), or stays
+unverified host code outside the verified files.
 
 ### 16.6 Proof reuse and stability
 
@@ -1930,40 +2084,32 @@ measured, not assumed (§17).
 
 ## 17. The agent workflow and what we measure
 
-**The loop.** (0) Pick a hot function by profile; if it is not verified,
-verify it as written first. (1) Prototype the optimized body unverified and
-measure it; go on only if it wins on a stated distribution (the pilot-B
-prototypes show why: a "fast" `pos_to_height` ran at 0.70–0.73×, a fast
-varint lost on 9–10-byte values). (2) Choose the reference: usually keep the
-summary or prove the laws. (3) Edit the host file in place; keep the
-signature, the documented panics and their messages; keep new helpers
-private and out of modules with host children. (4) Re-extract the MIR of
-every root that records the edited file. (5) Differential check,
-implementation against reference, natively on the conformance inputs
-(seconds; to build, C2). (6) Prove: safety (mostly automatic), the MIR
-theorem (automatic; a failure is a toolchain bug, not the agent's), the
-summary or equivalence lemma, the panic contract. (7) Full build: a pure
-optimization leaves the lock diff empty. (8) Report the speedup, proof
+**The loop.** (0) Pick existing code to verify: a module's host-callable
+functions, hardware-specific code first wherever the prover can read it.
+(1) Draft the laws with known answers and let §15 say what is missing
+(determinacy, the counterexample engine, `sandblaster mutate`). (2) Choose
+the reference: usually the laws' vocabulary; for a SIMD engine, the crate's
+scalar engine (a pinned original, C2, until laws state it). (3) Extract the
+MIR of every root that records the file. (4) Differential check, code
+against reference, natively on the conformance inputs (seconds; to build,
+C2). (5) Prove: safety (mostly automatic), the MIR theorem (automatic; a
+failure is a toolchain bug, not the agent's), the laws, the panic
+contracts. (6) Full build; a human reviews the lock diff. (7) Report proof
 lines, check times, agent time and every toolchain gap met, each fixed
-generically.
+generically in the prover, never by reshaping the code (principle 1).
 
 **Feedback** the agent gets, as text and JSON: a counterexample (input and
 both outputs); an unproven obligation (goal, facts, what was tried); a
 failed lockstep (where the sides diverge, the equation left); a failed MIR
 theorem (the path of splits, both sides); a failed panic contract.
 
-**Measured per pilot.** Speedup over the original with
-`bench/shipped-harness` (`run.sh --probe <dir> --base <rev>`: the crates at
-the base commit against the worktree's own, in one binary): every
-subject compiled alike from one source, an A/A copy of the original, three
-builds (default, 64-byte aligned, no overflow checks), the machine-code
-identity check, at least 21 interleaved rounds, medians and p10–p90, a
-frozen input distribution including a realistic one, and the end-to-end
-effect on that workload. Also: human review (lock-diff items, reviewer
+**Measured per verified module.** Human review (lock-diff items, reviewer
 minutes, reviewed lines per verified line); agent effort (wall clock,
 tokens, failed attempts, toolchain fixes counted apart); proof lines per
-implementation line; kernel and build times; churn under three to five
-realistic follow-up edits; each toolchain gap with its trusted-base delta.
+code line; kernel and build times; churn under three to five realistic
+follow-up edits of the host code; each toolchain gap with its trusted-base
+delta. Speed is not measured: verification does not change what rustc
+compiles.
 
 | measure | today | target |
 | --- | --- | --- |
@@ -1972,17 +2118,18 @@ realistic follow-up edits; each toolchain gap with its trusted-base delta.
 | proof feedback after a one-function edit | whole root: about 231 s (MMR), about 10 s (verifier), several minutes (varint) | ≤ 60 s |
 | cold verified build of storage | 19 min (8 h 11 min with mutation as a gate) | ≤ 15 min |
 | kernel time of one MIR theorem | 0.001–0.66 s | ≤ 1 s |
-| proof lines per implementation line | about 5:1 (six-probe search), about 40:1 (Newton) | ≤ 5:1 without loops, ≤ 10:1 with; above 20:1 is a toolchain gap |
-| lock diff of a pure optimization | — | 0 items |
-| law-proof lines changed by an implementation-only change | 0 (the MIR move) | 0 |
+| proof lines per code line | about 5:1 (the six-probe experiment), about 40:1 (Newton) | ≤ 5:1 without loops, ≤ 10:1 with; above 20:1 is a toolchain gap |
+| lock diff of a code change that keeps the laws | — | 0 items |
+| law-proof lines changed by a code-only change | 0 (the MIR move) | 0 |
 
-**Against Verus.** Same component (pilot A: `to_nearest_size` and
-`is_valid_size` with the six-probe search, against the same laws), same
-agent model, same time box. Measure specification lines, proof annotation
-lines, verification time, time to green, tokens and added trust; record
-whether Verus needed host-code changes, whether its specification
-determines the function, and churn. If Verus wins clearly on time to green
-and proof size even after C4, that is a strategic finding for the user.
+**Against Verus.** Same existing component (the MMR's `to_nearest_size`
+and `is_valid_size` as written; once C8 exists, a SIMD function such as a
+Reed–Solomon NEON `mul`), against the same laws, same agent model, same
+time box. Measure specification lines, proof annotation lines,
+verification time, time to green, tokens and added trust; record whether
+Verus needed host-code changes, whether its specification determines the
+function, and churn. If Verus wins clearly on time to green and proof size
+even after C4, that is a strategic finding for the user.
 
 ---------------------------------------------------------------------------
 
@@ -1990,8 +2137,7 @@ and proof size even after C4, that is a strategic finding for the user.
 
 **Done (2026-10-05):** the removal (§19); spec mutation off the build path;
 the three roots re-verified with header-only lock re-accepts; the hardware
-semantics restored (§9; another header-only re-accept); the measurement
-harness restored for pilots (§17); **C1, panic contracts** (§16.5: the
+semantics restored (§9; another header-only re-accept); **C1, panic contracts** (§16.5: the
 Panic/Stuck split of L, `panics_when`, the panic theorem and its gate
 check, the walker's panic mode; +about 230 trusted lines, more than the
 +60–120 planned: the tables of panic functions and message constructors
@@ -2001,59 +2147,74 @@ proven; varint's functions do not panic on their own; no trusted line: the walk 
 disjunctions and takes panic lemmas, `auto` reads negated disjunctions;
 the two storage locks' changes wait for review).
 
-**Pilot A: MMR `to_nearest_size` and `is_valid_size`.** Replace the binary
-search in `storage/src/merkle/mmr/iterator.rs` by the six-probe search
-(private helpers in `iterator.rs`, whose only child is `tests`);
-`is_valid_size` becomes `size <= MAX_NODES && to_nearest_size(size) ==
-size`. Proof: summary-preserving (§16.1 a) and characterization (b); no law
-changes. `to_nearest_size`'s documented panic is already a panic contract
-(C1 applied); the new body keeps its `assert!` and the panic theorem
-proves it again. **Exit:** the lock diff is empty; 0 law and law-proof
-lines changed; ≤ 300 new proof lines; ≤ 1
-agent-day to green; MMR check time within 10% of
-today; a speedup measured by §17 (target ≥ 10× on a uniform distribution of
-bit lengths, the realistic one reported beside it). Then the Verus
-comparison.
+**2026-10-06:** the optimization pilots were dropped (A: a faster MMR
+search; B: a word-at-a-time varint; C: a SIMD engine planned as a port),
+with their measurement harness `bench/shipped-harness`. The roadmap is
+prover and verifier capability on existing code, SIMD first. The same day
+**C8's first slice** landed (§16.4, `docs/mir-lift.md` §20.9): safe
+`core::arch` code read from MIR in both readings onto the validated
+models; a NEON nibble multiply verified in place against scalar
+references with native conformance, an SSSE3 counterpart on the x86
+models, the twins refused (+about 335 trusted lines, item 8 and item 6).
 
 **Capabilities, in order** (agent-days are focused agent work with tests):
 
 | # | capability | forcing example | trusted base | agent-days |
 | --- | --- | --- | --- | ---: |
-| C1 | **done** (2026-10-05): panic contracts (Panic/Stuck split, `panics_when`), seeded from the gate's panic statement at `4a0e5a23fc` (§16.5) | pilot A | +about 230 | — |
-| C2 | pinned originals and proof copies (`#[lift(reference)]` via `mirx --inject`, provenance check, native differential check) | pilots B, C | one item kind | 3–5 |
-| C3 | lockstep for lifted functions | pilot B, verifier | none | 5–8 |
-| C4 | bit bridge library, `by_enumeration`, `u128` as pairs | pilot B | `u128`: +100–200 | 9–16 |
-| C5 | coupled loops | pilot B | none | 8–15 |
-| C6 | per-function checking, summary lint, library spec mutation once per version | every pilot's loop time | small | 11–21 |
+| C1 | **done** (2026-10-05): panic contracts (Panic/Stuck split, `panics_when`), seeded from the gate's panic statement at `4a0e5a23fc` (§16.5) | the MMR's and the verifier's documented panics | +about 230 | — |
+| C2 | pinned originals and proof copies (`#[lift(reference)]` via `mirx --inject`, provenance check, native differential check) | Reed–Solomon `Scalar::mul` as the SIMD engines' reference | one item kind | 3–5 |
+| C3 | lockstep for lifted functions | the verifier (`reconstruct_digest` against `rebuild`); a SIMD engine against its scalar engine | none | 5–8 |
+| C4 | bit bridge library, `by_enumeration`, `u128` as pairs | `position_to_location`, the verifier's shifts, Reed–Solomon's `u128` | `u128`: +100–200 | 9–16 |
+| C5 | coupled loops | a SIMD engine's loop against its scalar loop | none | 8–15 |
+| C6 | per-function checking, summary lint, library spec mutation once per version | every root's check time | small | 11–21 |
 | C7 | contract schemas (one reviewed line generates a newtype's routine contracts), views on lifted types, host-callable by name, cross-root reuse | review cost; a representation change of `PeakIterator` | +150–350 | 13–23 |
-| C8 | reading `core::arch` value intrinsic calls in host Rust from MIR (S and L) onto the retained models; dispatch (§16.4; loads and stores need `unsafe`, out of scope) | pilot C | +150–300 (models already item 4) | 8–12 first slice; 15–25 in all |
+| C8 | **first slice done** (2026-10-06): `core::arch` value intrinsic calls read from MIR (S and L) onto the retained models, the feature rule on MIR, laws over vector lanes. Next: a lane-split closer, `core::array::from_fn`/`map` leaves, the AVX models loaded with their surface entries; after decision (9), the missing NEON and SSE models (§16.4; loads, stores and dispatchers need `unsafe` and stay host code) | Reed–Solomon's NEON and x86 engines, curve25519's backends | +about 335 so far (models already item 4) | second slice 7–13 |
 | C11 | (research) bit-blasting with a checked certificate checker | after C4, if bit proofs still dominate | none | 5 spike, then 20–40 |
 
-**Pilot B: a harder safe case.** Criteria: safe Rust, a real hot path with a
-measured win on a realistic distribution, laws already complete, at least
-two capabilities pilot A did not need. On preliminary, unverified,
-A/A-controlled prototype numbers (the pilot-B stage's
-`recovery/refocus/pilotB`, outside the repository), codec's varint
-on one 64-bit word fits best: encode 1.04–2.90× across five distributions
-and decode 1.02–1.44×, but 0.72× and 0.88× on 9–10-byte values, so the fast
-path must be guarded or fixed. Its 16 laws are complete and short, and its
-proof is the largest of the three modules. It needs C3 or C5 and C4; decode
-also needs a decision on `Buf::chunk` (a prefix of the remaining bytes whose
-length depends on segmentation: the model must state that nondeterminism).
-**Exit:** lock diff empty; equivalence proof ≤ 10× the implementation's
-lines; ≤ 5 agent-days once its capabilities exist; every gap fixed
-generically.
+**Order.** SIMD first: C8's first slice (done: value-only NEON and SSSE3
+intrinsics in `#[target_feature]` functions, read from MIR in both
+readings, proven on fixtures), then its second slice (the lane-split
+closer first), then C4 and C2, C3 and C5 as the first target needs them.
+C6 runs alongside: check time limits every target.
 
-**Pilot C (gated): SIMD against a scalar reference.** Reed–Solomon
-`Neon::mul` against `Scalar::mul` (the crate already treats the scalar
-engine as the reference). Needs C8, `u128` and a proof that the NEON tables
-are the nibble split of the scalar ones. Verified code is safe Rust
-(decision 1, §16.5), and today's engine is `unsafe` throughout (13
-`unsafe` in `engine_neon.rs`: `unsafe fn mul_neon`, raw-pointer loads and
-stores), so the pilot first splits it: the vector arithmetic as safe
-`#[target_feature]` functions over vectors and arrays (verified), the loads
-and stores in thin unverified wrappers. 15–25 agent-days after that split
-(the models are retained, so decision 2 is taken).
+**First target: Commonware's SIMD as written.** Reed–Solomon's
+`Neon::mul` against `Scalar::mul`. The crate already treats the scalar
+engine as the reference; the x86 engines can be checked the same way on
+x86 hosts. It needs:
+
+* C8;
+* `u128` (C4);
+* C2, or laws for `Scalar::mul`;
+* a proof that the NEON tables are the nibble split of the scalar ones.
+
+Verified code is safe Rust (§16.5), and today's engine is `unsafe`
+throughout. `engine_neon.rs` has 13 `unsafe`: `unsafe fn mul_neon`,
+raw-pointer loads and stores, and `unsafe` blocks around value
+intrinsics, which rustc forces on `#[inline(always)]` helpers (§16.4).
+So the engine is verifiable only after a split that keeps its behavior
+and machine code: the vector arithmetic as safe `#[target_feature]`
+functions over vectors and arrays (verified), the loads and stores in
+thin unverified wrappers. That split is decision (9).
+
+After the split:
+
+* `mul_128`'s arithmetic needs no new model: every intrinsic it calls is
+  validated and loaded.
+* It has the shape of C8's fixture, with 4 tables and 2 outputs instead
+  of 2 and 1.
+* The transforms also need the reader to handle `&mut` slices of arrays
+  and the engine's `ShardsRefMut`.
+
+15–25 agent-days after the split. Measured by the C8 survey, the only
+Commonware SIMD functions readable as written are three of curve25519's
+AVX-512 helpers (`add_raw`, `sub_raw`, `reduce_regs`), after C8's second
+slice, on an AVX-512 host.
+
+**Second target: existing bit-level code.** `position_to_location`'s
+Newton steps (about 820 proof lines for about 20 code lines, §16.1 f) and
+the verifier's 64-case `1 << b` lemmas (§16.3). C4 should shrink both;
+measured as proof lines and check time before and after, with no change to
+the code.
 
 **Decisions for the user:** (1) proof-justified `unsafe` in shipped
 Commonware code: **taken** (2026-10-05: "then remove it"; verified code
@@ -2065,17 +2226,20 @@ existing code (pinned originals); (4) the `Buf::chunk` buffer model; (5)
 when to move varint in place (a lock change: `Decoder::new`/`feed` become
 host-callable and need contracts); (6) whether a kernel change is ever on
 the table (this design assumes not); (7) **taken** (2026-10-05): the
-hardware parts of `intrinsics.rs` and `elab/semantics.rs` stay (§9).
+hardware parts of `intrinsics.rs` and `elab/semantics.rs` stay (§9); (8)
+**taken** (2026-10-06): no new optimized code, the pilots are dropped
+(North star); (9) whether shipped `unsafe` SIMD engines may be split,
+without changing their behavior or machine code, into safe vector
+arithmetic (verified) and thin load/store wrappers (unverified), which the
+first target needs.
 
-**Stop rules.** If after C3–C5 the pilots still need more than 20 proof
-lines per implementation line, or more than two agent-weeks for a function
-the size of pilot B's, verified optimization pays only for a handful of very
-hot functions: stop adding capabilities and report. Expect most value from
-verifying existing optimized code and a few agent optimizations in
-genuinely naive spots, not broad speedups. Keep a running count of trusted
-lines per stage. If contract schemas and views do not shrink in-place laws
-files, the review surface grows with every verified file: measure reviewed
-lines per verified line on every pilot.
+**Stop rules.** If after C3–C5 a verified function still needs more than 20
+proof lines per code line, or the first target more than two agent-weeks
+once C8 exists, report to the user before adding capabilities: the gap is
+in the prover, and that is a strategic finding. Keep a running count of
+trusted lines per stage. If contract schemas and views do not shrink
+in-place laws files, the review surface grows with every verified file:
+measure reviewed lines per verified line on every module.
 
 ---------------------------------------------------------------------------
 
@@ -2099,7 +2263,7 @@ in git:
 | the shipping layer: `#[lift(opt)]`, `#[rewrite]`, `#[specialize]`, lowering, lowered copies and declarations, IDE twins, the lifted round trip, `L::shipped`/`L::pshipped`, relocation, fail-closed stubs | `front/src/driver/lowered.rs`, `lower.rs`, `roundtrip.rs`, `relocate.rs`, `mir/gate.rs`, `mir/stmt.rs` | it shipped optimizer output real code never got |
 | the canonical code printer, crate mode, `sandblaster emit`, `profile` | `front/src/canon.rs`, `driver.rs` | nothing is printed for rustc |
 | the hardware parts that served only the optimizer or native-dialect authoring: tuning tables, `#[implements]`, `VariantEquiv` variants, multiversioning and dispatch, the lane lemmas, `sandblaster::arch` | `targets/evidence/tuning-*`, `targets/src/evidence/tuning.rs`, `front/lemmas/lanes/`, `sandblaster/src/arch/` | the models themselves are kept (§9) |
-| benchmarks, held-out sets, fairness gates, `rulegen`, the optimizer corpus | `bench/` (`shipped-harness` and `samecode.py` are back, repurposed for pilots, §17), `rulegen/`, `front/tests/fairness_*` | they judged the optimizer |
+| benchmarks, held-out sets, fairness gates, `rulegen`, the optimizer corpus | `bench/`, `rulegen/`, `front/tests/fairness_*` (`bench/shipped-harness` and `samecode.py` came back for the pilots on 2026-10-05 and left with them on 2026-10-06, last at `081c5da718`) | they judged the optimizer, then the pilots |
 | the QMDB port and its design | `fixtures/qmdb/`, `docs/qmdb-spec-design.md` | a dialect crate; the verified roots replace it as large examples |
 | spec mutation as a gate | `driver::gates` | now the on-demand tool (§15.7) |
 | the development build `compile_lifted_pending_gates` | removed earlier, in `4a0e5a23fc` itself | no transitional mode |
@@ -2142,5 +2306,8 @@ before. Stale today:
     still says "canonical dialect" in items 2 and 7 (it means the exec
     subset now) and does not list item 8, the lift.
 
-At the same acceptance: fold `docs/mir-lift.md` §20 into SEMANTICS.md §19.
+At the same acceptance: fold `docs/mir-lift.md` §20 into SEMANTICS.md §19
+(§20.9's `core::arch` reading included), and add to SEMANTICS.md §13 the
+ghost language's lane view of vectors (a vector coerces to the array of
+its lanes and back; `==` on vectors in ghost code), built on 2026-10-06.
 (The hardware parts of `intrinsics.rs` and `elab/semantics.rs` stay: §9.)

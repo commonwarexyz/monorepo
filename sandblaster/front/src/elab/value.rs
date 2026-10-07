@@ -258,6 +258,11 @@ impl Conv<'_> {
     /// A closed core term of type `t` for the JSON value `j`.
     pub fn term(&self, t: &Ty, j: &J) -> Result<Tm, String> {
         let bool_ = self.env.bool_ind();
+        // a `core::arch` vector is the array of its lanes (docs/mir-lift.md §20.9)
+        if let Ty::Vector(v) = t.peel_refs() {
+            let (lane, n) = v.lanes();
+            return self.term(&Ty::Array(Box::new(Ty::Uint(lane)), n), j);
+        }
         Ok(match t.peel_refs() {
             Ty::Bool => match j {
                 J::Bool(b) => mk::bool_lit(bool_, *b),
@@ -408,6 +413,10 @@ impl Conv<'_> {
     pub fn json(&self, t: &Ty, v: &V) -> Result<J, String> {
         let bool_ = self.env.bool_ind();
         let stuck = |v: &V| format!("the value is stuck (not a normal form): {}", self.show(v));
+        if let Ty::Vector(vt) = t.peel_refs() {
+            let (lane, n) = vt.lanes();
+            return self.json(&Ty::Array(Box::new(Ty::Uint(lane)), n), v);
+        }
         Ok(match t.peel_refs() {
             Ty::Bool => match &**v {
                 Value::Ctor { ind, ctor, .. } if *ind == bool_ => J::Bool(*ctor == 1),

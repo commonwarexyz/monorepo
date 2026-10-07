@@ -701,7 +701,8 @@ impl Loader<'_> {
         let path_display = self.sm.path(cfile).display().to_string();
         let text = self.sm.get(cfile).map(|f| f.text.clone()).unwrap_or_default();
         let mir_extra = mir.as_deref().map(|t| self.mir_extra_sources(t, &path_display)).unwrap_or_default();
-        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, path_display, text, mir_extra });
+        let target_arch = self.target.arch.name().to_string();
+        self.lift_sources.push(crate::lift::LiftSource { module_index: c, file: cfile, ast: cast, ghost, name, unverified: opts.unverified.clone(), decl_span: span, host: opts.host, opts, children, module_path, mir, path_display, text, mir_extra, target_arch });
         c
     }
 

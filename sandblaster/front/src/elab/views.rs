@@ -17,6 +17,8 @@
 //! | `(A₀, …)` | `(B₀, …)` | `(α π₀ x, …)` |
 //! | a type with `#[view]` | its view type `V` (and on) | `α(T::view x)` |
 //! | a one-field struct with `#[invariant]` (S2) | the field's type (and on) | `α(π₀ x)` |
+//! | a `core::arch` vector (`uint8x16_t`) | the array of its lanes `[u8; 16]` (and on) | `x` (the same kernel type, `docs/mir-lift.md` §20.9) |
+//! | the array of a vector's lanes | the vector | `x` |
 //!
 //! A type's `#[view]` is the kernel definition `T::view : Π(A..). T(A..)
 //! → V` (`DefKind::Spec`, a spec item: spec-closed, printed and locked):
@@ -110,6 +112,12 @@ impl<'a> Elab<'a> {
         }
         match (&f, to) {
             (Ty::Nat, Ty::Int) => Ok(x),
+            // a vector is the array of its lanes in the kernel already
+            (Ty::Vector(v), _) => {
+                let (lane, n) = v.lanes();
+                self.abstraction_d(&Ty::Array(Box::new(Ty::Uint(lane)), n), to, x, span, depth + 1)
+            }
+            (Ty::Array(..), Ty::Vector(_)) => Ok(x),
             (Ty::Uint(w), Ty::Nat | Ty::Int) => Ok(mk::prim(PrimOp::Cast { from: w.width(), to: Width::Int }, vec![x], vec![])),
             (Ty::Slice(e), Ty::Seq(e2)) => {
                 let l = mk::fst(mk::snd(x));

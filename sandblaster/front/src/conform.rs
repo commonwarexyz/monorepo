@@ -692,6 +692,19 @@ struct Gen<'a> {
     pre_out: Option<&'a elab::Output>,
 }
 
+/// A `core::arch` vector as the array of its lanes, lane 0 first (its
+/// kernel value; the harness transmutes between the two, which is the
+/// lanes' memory order on the little-endian targets).
+fn lanes_ty(t: &Ty) -> Option<Ty> {
+    match t.peel_refs() {
+        Ty::Vector(v) => {
+            let (lane, n) = v.lanes();
+            Some(Ty::Array(Box::new(Ty::Uint(lane)), n))
+        }
+        _ => None,
+    }
+}
+
 fn tkey(t: &Ty) -> String {
     format!("{t:?}")
 }
@@ -942,6 +955,7 @@ impl<'a> Gen<'a> {
 
     fn rust_ty(&self, t: &Ty) -> Result<String, String> {
         Ok(match t {
+            Ty::Vector(v) => v.path(),
             Ty::Bool => "bool".into(),
             Ty::Uint(u) => u.name().into(),
             Ty::Tuple(ts) if ts.is_empty() => "()".into(),
@@ -959,6 +973,9 @@ impl<'a> Gen<'a> {
     // -- candidate values ----------------------------------------------------
 
     fn val_j(&self, t: &Ty, v: &Val) -> Option<J> {
+        if let Some(a) = lanes_ty(t) {
+            return self.val_j(&a, v);
+        }
         Some(match (t.peel_refs(), v) {
             (_, Val::Bool(b)) => J::Bool(*b),
             (_, Val::Int(n)) => J::Num(n.to_string()),
@@ -1000,6 +1017,9 @@ impl<'a> Gen<'a> {
 
     /// Candidate values of a parameter type (cached by type).
     fn pool(&mut self, t: &Ty, depth: u32) -> Vec<J> {
+        if let Some(a) = lanes_ty(t) {
+            return self.pool(&a, depth);
+        }
         let t = t.peel_refs().clone();
         let k = tkey(&t);
         if let Some(p) = self.pools.get(&k) {
@@ -1186,6 +1206,9 @@ impl<'a> Gen<'a> {
     // -- outcome classes and mutation ----------------------------------------
 
     fn shape(&self, t: &Ty, j: &J) -> String {
+        if let Some(a) = lanes_ty(t) {
+            return self.shape(&a, j);
+        }
         match (t.peel_refs(), j) {
             (Ty::Uint(_), J::Num(_)) => format!("b{}", num(j).map(|n| 128 - n.leading_zeros()).unwrap_or(0)),
             (Ty::Seq(_) | Ty::Array(..), J::Arr(xs)) => format!("L{}", xs.len()),
@@ -1231,6 +1254,9 @@ impl<'a> Gen<'a> {
     }
 
     fn mutate(&mut self, t: &Ty, j: &J, depth: u32) -> J {
+        if let Some(a) = lanes_ty(t) {
+            return self.mutate(&a, j, depth);
+        }
         let t = t.peel_refs().clone();
         match (&t, j) {
             (Ty::Bool, J::Bool(b)) => J::Bool(!b),
@@ -1701,6 +1727,13 @@ impl Emit<'_, '_> {
         let name = if home.is_empty() { local.clone() } else { format!("{home}::{local}") };
         self.readers.insert(rt.clone(), (name.clone(), String::new(), home.clone()));
         let body = match t {
+            // the lanes, then the vector of them (`transmute`: harness code,
+            // never verified; lane 0 at the lowest address)
+            Ty::Vector(_) => {
+                let a = lanes_ty(t).ok_or("lanes")?;
+                let (r, at) = (self.reader(&a)?, self.g.rust_ty(&a)?);
+                format!("{{ let a: {at} = {r}(t); unsafe {{ ::core::mem::transmute::<{at}, {rt}>(a) }} }}")
+            }
             Ty::Bool => "t.n() != 0".to_string(),
             Ty::Uint(u) => format!("t.n() as {}", u.name()),
             Ty::Tuple(ts) if ts.is_empty() => "()".into(),
@@ -1769,6 +1802,17 @@ impl Emit<'_, '_> {
     fn writer(&mut self, t: &Ty) -> Result<(), String> {
         let t = t.peel_refs();
         match t {
+            // a vector is written as the array of its lanes
+            Ty::Vector(_) => {
+                let rt = self.g.rust_ty(t)?;
+                if self.writers.contains_key(&rt) {
+                    return Ok(());
+                }
+                let at = self.g.rust_ty(&lanes_ty(t).ok_or("lanes")?)?;
+                let code = format!("    impl __W for {rt} {{ fn w(&self, o: &mut ::std::string::String) {{ let a: {at} = unsafe {{ ::core::mem::transmute::<{rt}, {at}>(*self) }}; __W::w(&a, o); }} }}\n");
+                self.writers.insert(rt, (code, self.g.ip_home(t)));
+                Ok(())
+            }
             Ty::Tuple(ts) => {
                 if ts.len() > 3 {
                     return Err("tuples of more than 3 components have no writer".into());
@@ -1856,6 +1900,9 @@ impl Emit<'_, '_> {
 
 /// The input tokens of a value (the order the readers read them).
 fn tokens(g: &Gen<'_>, t: &Ty, j: &J, out: &mut Vec<String>) -> Result<(), String> {
+    if let Some(a) = lanes_ty(t) {
+        return tokens(g, &a, j, out);
+    }
     let bad = || format!("the value {} does not fit {t:?}", j.render());
     match (t.peel_refs(), j) {
         (Ty::Bool, J::Bool(b)) => out.push(if *b { "1" } else { "0" }.into()),
@@ -1971,7 +2018,10 @@ fn entry_fn(em: &mut Emit<'_, '_>, g: &Gen<'_>, pi: usize, p: &Plan<'_>, vis: &s
     for t in &p.comps {
         em.writer(t)?;
     }
-    s.push_str(&format!("        let ret = {}({});\n        let mut o = ::std::string::String::new();\n        o.push('[');\n", p.callee, call_args.join(", ")));
+    // (`unsafe`: a `#[target_feature]` original is called from the
+    // harness, which is not compiled with its features; the CPU running the
+    // check has them, or the call is not made: docs/mir-lift.md §20.9)
+    s.push_str(&format!("        let ret = unsafe {{ {}({}) }};\n        let mut o = ::std::string::String::new();\n        o.push('[');\n", p.callee, call_args.join(", ")));
     let mut first = true;
     for &i in &p.state_of {
         if !first {

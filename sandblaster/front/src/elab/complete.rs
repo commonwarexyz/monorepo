@@ -735,7 +735,18 @@ impl<'a> Elab<'a> {
         }
         if !blocked.is_empty() || !hyp_problems.is_empty() {
             rec.status = SectionStatus::Blocked;
-            rec.problems = blocked.iter().map(|b| if self.hw_items.contains(b) { format!("`{}` is a hardware function whose core model is deferred (§9.2)", path(*b)) } else { format!("`{}` did not verify", path(*b)) }).collect();
+            rec.problems = blocked
+                .iter()
+                .map(|b| {
+                    if self.hw_items.contains(b) {
+                        // (the reason: which intrinsic has no model)
+                        let why = self.deferred.iter().find(|(id, _)| id == b).map(|(_, w)| format!(": {w}")).unwrap_or_default();
+                        format!("`{}` is a hardware function whose core model is deferred (§9.2){why}", path(*b))
+                    } else {
+                        format!("`{}` did not verify", path(*b))
+                    }
+                })
+                .collect();
             rec.problems.extend(hyp_problems);
             let why = if blocked.is_empty() { "a hypothesis did not verify" } else { "a member did not verify" };
             rec.complete = published.iter().map(|p| (*p, DefStatus::Blocked(why.into()))).collect();

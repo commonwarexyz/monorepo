@@ -1683,7 +1683,7 @@ through), geomean 1.002 / 1.004 against an A/A of 1.016 / 0.996; the model
 predicted 0.90, 0.70 and 0.95 for them, and they measure 1.00 (`mix64`, the
 same machine code as rustc's), 1.00 (`next_power_of_two`) and 1.08 / 1.12 /
 1.07 (`read_u32_le`, slower in all three binaries). The
-shipped code (`bench/shipped-harness/REPORT.md`): codec's varint, storage's
+shipped code (`bench/shipped-harness/REPORT.md` at `4a0e5a23fc`; the harness left with the pilots on 2026-10-06): codec's varint, storage's
 MMR and the verifier's first set as the two crates compile them, against the
 original Commonware functions: the same instructions in all 33 functions
 (28 identical outright, 5 apart from each copy's constant-data addresses,

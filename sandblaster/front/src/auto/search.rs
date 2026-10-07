@@ -110,6 +110,9 @@ pub struct Engine<'a> {
     pub lin_rule_cache: BTreeMap<u32, Rc<Vec<super::ematch::LinRule>>>,
     /// Quoted values by (value address, depth) ([`Engine::quote`]).
     quote_cache: RefCell<super::util::FxMap<(usize, u32), (V, Tm)>>,
+    /// Typed read-backs by (value address, type address, depth)
+    /// ([`Engine::quote_typed`]).
+    quote_typed_cache: RefCell<super::util::FxMap<(usize, usize, u32), (V, V, Tm)>>,
     rec_cache: RefCell<BTreeMap<u32, bool>>,
     /// Whether a ground value holds a metavariable, by value address (the
     /// value kept alive): e-matching asks it at every binding
@@ -160,6 +163,23 @@ pub struct Engine<'a> {
     /// bounds ([`super::arith`]) are for goals, not for probes, which run on
     /// every node.
     pub lin_probe: bool,
+    /// Whether a value mentions another (`mentions`, `super::rewrite`), by
+    /// the two values' addresses and the depth (the memo keeps both values
+    /// alive, so an address is never reused): the rewriting steps ask it of
+    /// the same fact sides at every node.
+    pub occurs_memo: super::util::FxMap<(usize, usize, u32), (V, V, bool)>,
+    /// [`Engine::motive_e`] by the target's, the abstracted value's and its
+    /// type's addresses, the depth and `want_e` (the values kept alive): a
+    /// motive is a function of these alone (its free variables are bound
+    /// where the values were made, so their types are the same in every
+    /// branch that shares the values), and the search builds the same one
+    /// many times (a case split's or a rewrite's motive on an unchanged
+    /// target, at every node that tries it).
+    pub motive_memo: super::util::FxMap<(usize, usize, usize, u32, bool), (V, V, V, Option<super::rewrite::Motive>)>,
+    /// `mentioned_elsewhere` (`super::rewrite`) by the term's and
+    /// the equation's addresses, the depth and the facts (their number and
+    /// the last one), the values kept alive.
+    pub mention_memo: super::util::FxMap<(usize, usize, u32, usize, usize), (V, V, V, bool)>,
 }
 
 impl<'a> Engine<'a> {
@@ -182,6 +202,7 @@ impl<'a> Engine<'a> {
             relevant: false,
             lin_rule_cache: BTreeMap::new(),
             quote_cache: RefCell::new(super::util::FxMap::default()),
+            quote_typed_cache: RefCell::new(super::util::FxMap::default()),
             rec_cache: RefCell::new(BTreeMap::new()),
             meta_memo: super::util::FxMap::default(),
             in_atom_congr: false,
@@ -195,6 +216,9 @@ impl<'a> Engine<'a> {
             lin_round: None,
             ctor_split_inds: Vec::new(),
             lin_probe: false,
+            occurs_memo: super::util::FxMap::default(),
+            motive_memo: super::util::FxMap::default(),
+            mention_memo: super::util::FxMap::default(),
         }
     }
 
@@ -329,6 +353,20 @@ impl<'a> Engine<'a> {
         // not cached
         if !matches!(&*t, Term::Erased) {
             self.quote_cache.borrow_mut().insert(key, (v.clone(), t.clone()));
+        }
+        t
+    }
+
+    /// [`St::quote_at`] memoized like [`Engine::quote`], by the value's and
+    /// the type's addresses and the depth (the values kept alive).
+    pub fn quote_typed(&self, st: &St, v: &V, ty: &V) -> Tm {
+        let key = (Rc::as_ptr(v) as usize, Rc::as_ptr(ty) as usize, st.depth());
+        if let Some((_, _, t)) = self.quote_typed_cache.borrow().get(&key) {
+            return t.clone();
+        }
+        let t = st.quote_at(self.env, v, ty);
+        if !matches!(&*t, Term::Erased) {
+            self.quote_typed_cache.borrow_mut().insert(key, (v.clone(), ty.clone(), t.clone()));
         }
         t
     }
@@ -1241,6 +1279,10 @@ impl<'a> Engine<'a> {
             return Ok(Some((t2, vec![c])));
         }
         if let Some((t2, c)) = self.rewrite_rules(st, t)? {
+            st.rewrites += 1;
+            return Ok(Some((t2, vec![c])));
+        }
+        if let Some((t2, c)) = self.lane_step(st, t)? {
             st.rewrites += 1;
             return Ok(Some((t2, vec![c])));
         }

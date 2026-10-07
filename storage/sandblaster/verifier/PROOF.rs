@@ -8,187 +8,17 @@ use crate::merkle::{Digest, Location, Position};
 use crate::merkle::hasher::Standard;
 
 // ---------------------------------------------------------------------------
-// Powers of two (as in `sandblaster/mmr/PROOF.rs`)
+// Positions (`Family::children`)
 // ---------------------------------------------------------------------------
-
-/// Equal exponents, equal powers.
-#[lemma]
-fn pow2_eq(a: Int, b: Int) {
-    requires(a == b);
-    ensures(pow2(a) == pow2(b));
-    rewrite(a == b);
-    follows();
-}
-
-/// Congruence: equal shift amounts, equal powers.
-#[lemma]
-fn shl_cong(b: u32, j: u32) {
-    requires(b < 64u32 && b == j);
-    ensures(1u64 << b == 1u64 << j);
-    follows();
-}
-
-/// `1 << b` is `2^b` (one case per amount).
-#[lemma]
-fn shl_one(b: u32) {
-    requires(b < 64u32);
-    ensures((1u64 << b) as Int == pow2(b as Int));
-    if b <= 0u32 { assert(b == 0u32); shl_cong(b, 0u32); pow2_eq(b as Int, 0); follows(); }
-    else if b <= 1u32 { assert(b == 1u32); shl_cong(b, 1u32); pow2_eq(b as Int, 1); follows(); }
-    else if b <= 2u32 { assert(b == 2u32); shl_cong(b, 2u32); pow2_eq(b as Int, 2); follows(); }
-    else if b <= 3u32 { assert(b == 3u32); shl_cong(b, 3u32); pow2_eq(b as Int, 3); follows(); }
-    else if b <= 4u32 { assert(b == 4u32); shl_cong(b, 4u32); pow2_eq(b as Int, 4); follows(); }
-    else if b <= 5u32 { assert(b == 5u32); shl_cong(b, 5u32); pow2_eq(b as Int, 5); follows(); }
-    else if b <= 6u32 { assert(b == 6u32); shl_cong(b, 6u32); pow2_eq(b as Int, 6); follows(); }
-    else if b <= 7u32 { assert(b == 7u32); shl_cong(b, 7u32); pow2_eq(b as Int, 7); follows(); }
-    else if b <= 8u32 { assert(b == 8u32); shl_cong(b, 8u32); pow2_eq(b as Int, 8); follows(); }
-    else if b <= 9u32 { assert(b == 9u32); shl_cong(b, 9u32); pow2_eq(b as Int, 9); follows(); }
-    else if b <= 10u32 { assert(b == 10u32); shl_cong(b, 10u32); pow2_eq(b as Int, 10); follows(); }
-    else if b <= 11u32 { assert(b == 11u32); shl_cong(b, 11u32); pow2_eq(b as Int, 11); follows(); }
-    else if b <= 12u32 { assert(b == 12u32); shl_cong(b, 12u32); pow2_eq(b as Int, 12); follows(); }
-    else if b <= 13u32 { assert(b == 13u32); shl_cong(b, 13u32); pow2_eq(b as Int, 13); follows(); }
-    else if b <= 14u32 { assert(b == 14u32); shl_cong(b, 14u32); pow2_eq(b as Int, 14); follows(); }
-    else if b <= 15u32 { assert(b == 15u32); shl_cong(b, 15u32); pow2_eq(b as Int, 15); follows(); }
-    else if b <= 16u32 { assert(b == 16u32); shl_cong(b, 16u32); pow2_eq(b as Int, 16); follows(); }
-    else if b <= 17u32 { assert(b == 17u32); shl_cong(b, 17u32); pow2_eq(b as Int, 17); follows(); }
-    else if b <= 18u32 { assert(b == 18u32); shl_cong(b, 18u32); pow2_eq(b as Int, 18); follows(); }
-    else if b <= 19u32 { assert(b == 19u32); shl_cong(b, 19u32); pow2_eq(b as Int, 19); follows(); }
-    else if b <= 20u32 { assert(b == 20u32); shl_cong(b, 20u32); pow2_eq(b as Int, 20); follows(); }
-    else if b <= 21u32 { assert(b == 21u32); shl_cong(b, 21u32); pow2_eq(b as Int, 21); follows(); }
-    else if b <= 22u32 { assert(b == 22u32); shl_cong(b, 22u32); pow2_eq(b as Int, 22); follows(); }
-    else if b <= 23u32 { assert(b == 23u32); shl_cong(b, 23u32); pow2_eq(b as Int, 23); follows(); }
-    else if b <= 24u32 { assert(b == 24u32); shl_cong(b, 24u32); pow2_eq(b as Int, 24); follows(); }
-    else if b <= 25u32 { assert(b == 25u32); shl_cong(b, 25u32); pow2_eq(b as Int, 25); follows(); }
-    else if b <= 26u32 { assert(b == 26u32); shl_cong(b, 26u32); pow2_eq(b as Int, 26); follows(); }
-    else if b <= 27u32 { assert(b == 27u32); shl_cong(b, 27u32); pow2_eq(b as Int, 27); follows(); }
-    else if b <= 28u32 { assert(b == 28u32); shl_cong(b, 28u32); pow2_eq(b as Int, 28); follows(); }
-    else if b <= 29u32 { assert(b == 29u32); shl_cong(b, 29u32); pow2_eq(b as Int, 29); follows(); }
-    else if b <= 30u32 { assert(b == 30u32); shl_cong(b, 30u32); pow2_eq(b as Int, 30); follows(); }
-    else if b <= 31u32 { assert(b == 31u32); shl_cong(b, 31u32); pow2_eq(b as Int, 31); follows(); }
-    else if b <= 32u32 { assert(b == 32u32); shl_cong(b, 32u32); pow2_eq(b as Int, 32); follows(); }
-    else if b <= 33u32 { assert(b == 33u32); shl_cong(b, 33u32); pow2_eq(b as Int, 33); follows(); }
-    else if b <= 34u32 { assert(b == 34u32); shl_cong(b, 34u32); pow2_eq(b as Int, 34); follows(); }
-    else if b <= 35u32 { assert(b == 35u32); shl_cong(b, 35u32); pow2_eq(b as Int, 35); follows(); }
-    else if b <= 36u32 { assert(b == 36u32); shl_cong(b, 36u32); pow2_eq(b as Int, 36); follows(); }
-    else if b <= 37u32 { assert(b == 37u32); shl_cong(b, 37u32); pow2_eq(b as Int, 37); follows(); }
-    else if b <= 38u32 { assert(b == 38u32); shl_cong(b, 38u32); pow2_eq(b as Int, 38); follows(); }
-    else if b <= 39u32 { assert(b == 39u32); shl_cong(b, 39u32); pow2_eq(b as Int, 39); follows(); }
-    else if b <= 40u32 { assert(b == 40u32); shl_cong(b, 40u32); pow2_eq(b as Int, 40); follows(); }
-    else if b <= 41u32 { assert(b == 41u32); shl_cong(b, 41u32); pow2_eq(b as Int, 41); follows(); }
-    else if b <= 42u32 { assert(b == 42u32); shl_cong(b, 42u32); pow2_eq(b as Int, 42); follows(); }
-    else if b <= 43u32 { assert(b == 43u32); shl_cong(b, 43u32); pow2_eq(b as Int, 43); follows(); }
-    else if b <= 44u32 { assert(b == 44u32); shl_cong(b, 44u32); pow2_eq(b as Int, 44); follows(); }
-    else if b <= 45u32 { assert(b == 45u32); shl_cong(b, 45u32); pow2_eq(b as Int, 45); follows(); }
-    else if b <= 46u32 { assert(b == 46u32); shl_cong(b, 46u32); pow2_eq(b as Int, 46); follows(); }
-    else if b <= 47u32 { assert(b == 47u32); shl_cong(b, 47u32); pow2_eq(b as Int, 47); follows(); }
-    else if b <= 48u32 { assert(b == 48u32); shl_cong(b, 48u32); pow2_eq(b as Int, 48); follows(); }
-    else if b <= 49u32 { assert(b == 49u32); shl_cong(b, 49u32); pow2_eq(b as Int, 49); follows(); }
-    else if b <= 50u32 { assert(b == 50u32); shl_cong(b, 50u32); pow2_eq(b as Int, 50); follows(); }
-    else if b <= 51u32 { assert(b == 51u32); shl_cong(b, 51u32); pow2_eq(b as Int, 51); follows(); }
-    else if b <= 52u32 { assert(b == 52u32); shl_cong(b, 52u32); pow2_eq(b as Int, 52); follows(); }
-    else if b <= 53u32 { assert(b == 53u32); shl_cong(b, 53u32); pow2_eq(b as Int, 53); follows(); }
-    else if b <= 54u32 { assert(b == 54u32); shl_cong(b, 54u32); pow2_eq(b as Int, 54); follows(); }
-    else if b <= 55u32 { assert(b == 55u32); shl_cong(b, 55u32); pow2_eq(b as Int, 55); follows(); }
-    else if b <= 56u32 { assert(b == 56u32); shl_cong(b, 56u32); pow2_eq(b as Int, 56); follows(); }
-    else if b <= 57u32 { assert(b == 57u32); shl_cong(b, 57u32); pow2_eq(b as Int, 57); follows(); }
-    else if b <= 58u32 { assert(b == 58u32); shl_cong(b, 58u32); pow2_eq(b as Int, 58); follows(); }
-    else if b <= 59u32 { assert(b == 59u32); shl_cong(b, 59u32); pow2_eq(b as Int, 59); follows(); }
-    else if b <= 60u32 { assert(b == 60u32); shl_cong(b, 60u32); pow2_eq(b as Int, 60); follows(); }
-    else if b <= 61u32 { assert(b == 61u32); shl_cong(b, 61u32); pow2_eq(b as Int, 61); follows(); }
-    else if b <= 62u32 { assert(b == 62u32); shl_cong(b, 62u32); pow2_eq(b as Int, 62); follows(); }
-    else if b <= 63u32 { assert(b == 63u32); shl_cong(b, 63u32); pow2_eq(b as Int, 63); follows(); }
-    else { by_contradiction(); }
-}
 
 /// `children`: `1 << height` is `2^height`; its panic theorem's walk
 /// uses `children_panics`.
 #[lift_attach(crate::merkle::mmr::Family::children)]
 fn children_facts() {
     at_start! {
-        crate::proofs::shl_one(height);
+        sandblaster::lemmas::bits::shl_one_u64(height);
     }
     panic_lemma(crate::proofs::children_panics);
-}
-
-/// Congruence: equal amounts, equal wrapping shifts.
-#[lemma]
-fn wshlx_cong(x: u64, b: u32, j: u32) {
-    requires(b == j);
-    ensures(x.wrapping_shl(b) == x.wrapping_shl(j));
-    follows();
-}
-
-/// `1.wrapping_shl(b)` is `2^b` below 64: the literal reading's `1 << b`
-/// (MIR's `Shl` masks its amount; one case per amount, as `shl_one`).
-#[lemma]
-fn wshl_one(b: u32) {
-    requires(b < 64u32);
-    ensures((1u64.wrapping_shl(b) as Int) == pow2(b as Int));
-    if b <= 0u32 { assert(b == 0u32); wshlx_cong(1u64, b, 0u32); pow2_eq(b as Int, 0); follows(); }
-    else if b <= 1u32 { assert(b == 1u32); wshlx_cong(1u64, b, 1u32); pow2_eq(b as Int, 1); follows(); }
-    else if b <= 2u32 { assert(b == 2u32); wshlx_cong(1u64, b, 2u32); pow2_eq(b as Int, 2); follows(); }
-    else if b <= 3u32 { assert(b == 3u32); wshlx_cong(1u64, b, 3u32); pow2_eq(b as Int, 3); follows(); }
-    else if b <= 4u32 { assert(b == 4u32); wshlx_cong(1u64, b, 4u32); pow2_eq(b as Int, 4); follows(); }
-    else if b <= 5u32 { assert(b == 5u32); wshlx_cong(1u64, b, 5u32); pow2_eq(b as Int, 5); follows(); }
-    else if b <= 6u32 { assert(b == 6u32); wshlx_cong(1u64, b, 6u32); pow2_eq(b as Int, 6); follows(); }
-    else if b <= 7u32 { assert(b == 7u32); wshlx_cong(1u64, b, 7u32); pow2_eq(b as Int, 7); follows(); }
-    else if b <= 8u32 { assert(b == 8u32); wshlx_cong(1u64, b, 8u32); pow2_eq(b as Int, 8); follows(); }
-    else if b <= 9u32 { assert(b == 9u32); wshlx_cong(1u64, b, 9u32); pow2_eq(b as Int, 9); follows(); }
-    else if b <= 10u32 { assert(b == 10u32); wshlx_cong(1u64, b, 10u32); pow2_eq(b as Int, 10); follows(); }
-    else if b <= 11u32 { assert(b == 11u32); wshlx_cong(1u64, b, 11u32); pow2_eq(b as Int, 11); follows(); }
-    else if b <= 12u32 { assert(b == 12u32); wshlx_cong(1u64, b, 12u32); pow2_eq(b as Int, 12); follows(); }
-    else if b <= 13u32 { assert(b == 13u32); wshlx_cong(1u64, b, 13u32); pow2_eq(b as Int, 13); follows(); }
-    else if b <= 14u32 { assert(b == 14u32); wshlx_cong(1u64, b, 14u32); pow2_eq(b as Int, 14); follows(); }
-    else if b <= 15u32 { assert(b == 15u32); wshlx_cong(1u64, b, 15u32); pow2_eq(b as Int, 15); follows(); }
-    else if b <= 16u32 { assert(b == 16u32); wshlx_cong(1u64, b, 16u32); pow2_eq(b as Int, 16); follows(); }
-    else if b <= 17u32 { assert(b == 17u32); wshlx_cong(1u64, b, 17u32); pow2_eq(b as Int, 17); follows(); }
-    else if b <= 18u32 { assert(b == 18u32); wshlx_cong(1u64, b, 18u32); pow2_eq(b as Int, 18); follows(); }
-    else if b <= 19u32 { assert(b == 19u32); wshlx_cong(1u64, b, 19u32); pow2_eq(b as Int, 19); follows(); }
-    else if b <= 20u32 { assert(b == 20u32); wshlx_cong(1u64, b, 20u32); pow2_eq(b as Int, 20); follows(); }
-    else if b <= 21u32 { assert(b == 21u32); wshlx_cong(1u64, b, 21u32); pow2_eq(b as Int, 21); follows(); }
-    else if b <= 22u32 { assert(b == 22u32); wshlx_cong(1u64, b, 22u32); pow2_eq(b as Int, 22); follows(); }
-    else if b <= 23u32 { assert(b == 23u32); wshlx_cong(1u64, b, 23u32); pow2_eq(b as Int, 23); follows(); }
-    else if b <= 24u32 { assert(b == 24u32); wshlx_cong(1u64, b, 24u32); pow2_eq(b as Int, 24); follows(); }
-    else if b <= 25u32 { assert(b == 25u32); wshlx_cong(1u64, b, 25u32); pow2_eq(b as Int, 25); follows(); }
-    else if b <= 26u32 { assert(b == 26u32); wshlx_cong(1u64, b, 26u32); pow2_eq(b as Int, 26); follows(); }
-    else if b <= 27u32 { assert(b == 27u32); wshlx_cong(1u64, b, 27u32); pow2_eq(b as Int, 27); follows(); }
-    else if b <= 28u32 { assert(b == 28u32); wshlx_cong(1u64, b, 28u32); pow2_eq(b as Int, 28); follows(); }
-    else if b <= 29u32 { assert(b == 29u32); wshlx_cong(1u64, b, 29u32); pow2_eq(b as Int, 29); follows(); }
-    else if b <= 30u32 { assert(b == 30u32); wshlx_cong(1u64, b, 30u32); pow2_eq(b as Int, 30); follows(); }
-    else if b <= 31u32 { assert(b == 31u32); wshlx_cong(1u64, b, 31u32); pow2_eq(b as Int, 31); follows(); }
-    else if b <= 32u32 { assert(b == 32u32); wshlx_cong(1u64, b, 32u32); pow2_eq(b as Int, 32); follows(); }
-    else if b <= 33u32 { assert(b == 33u32); wshlx_cong(1u64, b, 33u32); pow2_eq(b as Int, 33); follows(); }
-    else if b <= 34u32 { assert(b == 34u32); wshlx_cong(1u64, b, 34u32); pow2_eq(b as Int, 34); follows(); }
-    else if b <= 35u32 { assert(b == 35u32); wshlx_cong(1u64, b, 35u32); pow2_eq(b as Int, 35); follows(); }
-    else if b <= 36u32 { assert(b == 36u32); wshlx_cong(1u64, b, 36u32); pow2_eq(b as Int, 36); follows(); }
-    else if b <= 37u32 { assert(b == 37u32); wshlx_cong(1u64, b, 37u32); pow2_eq(b as Int, 37); follows(); }
-    else if b <= 38u32 { assert(b == 38u32); wshlx_cong(1u64, b, 38u32); pow2_eq(b as Int, 38); follows(); }
-    else if b <= 39u32 { assert(b == 39u32); wshlx_cong(1u64, b, 39u32); pow2_eq(b as Int, 39); follows(); }
-    else if b <= 40u32 { assert(b == 40u32); wshlx_cong(1u64, b, 40u32); pow2_eq(b as Int, 40); follows(); }
-    else if b <= 41u32 { assert(b == 41u32); wshlx_cong(1u64, b, 41u32); pow2_eq(b as Int, 41); follows(); }
-    else if b <= 42u32 { assert(b == 42u32); wshlx_cong(1u64, b, 42u32); pow2_eq(b as Int, 42); follows(); }
-    else if b <= 43u32 { assert(b == 43u32); wshlx_cong(1u64, b, 43u32); pow2_eq(b as Int, 43); follows(); }
-    else if b <= 44u32 { assert(b == 44u32); wshlx_cong(1u64, b, 44u32); pow2_eq(b as Int, 44); follows(); }
-    else if b <= 45u32 { assert(b == 45u32); wshlx_cong(1u64, b, 45u32); pow2_eq(b as Int, 45); follows(); }
-    else if b <= 46u32 { assert(b == 46u32); wshlx_cong(1u64, b, 46u32); pow2_eq(b as Int, 46); follows(); }
-    else if b <= 47u32 { assert(b == 47u32); wshlx_cong(1u64, b, 47u32); pow2_eq(b as Int, 47); follows(); }
-    else if b <= 48u32 { assert(b == 48u32); wshlx_cong(1u64, b, 48u32); pow2_eq(b as Int, 48); follows(); }
-    else if b <= 49u32 { assert(b == 49u32); wshlx_cong(1u64, b, 49u32); pow2_eq(b as Int, 49); follows(); }
-    else if b <= 50u32 { assert(b == 50u32); wshlx_cong(1u64, b, 50u32); pow2_eq(b as Int, 50); follows(); }
-    else if b <= 51u32 { assert(b == 51u32); wshlx_cong(1u64, b, 51u32); pow2_eq(b as Int, 51); follows(); }
-    else if b <= 52u32 { assert(b == 52u32); wshlx_cong(1u64, b, 52u32); pow2_eq(b as Int, 52); follows(); }
-    else if b <= 53u32 { assert(b == 53u32); wshlx_cong(1u64, b, 53u32); pow2_eq(b as Int, 53); follows(); }
-    else if b <= 54u32 { assert(b == 54u32); wshlx_cong(1u64, b, 54u32); pow2_eq(b as Int, 54); follows(); }
-    else if b <= 55u32 { assert(b == 55u32); wshlx_cong(1u64, b, 55u32); pow2_eq(b as Int, 55); follows(); }
-    else if b <= 56u32 { assert(b == 56u32); wshlx_cong(1u64, b, 56u32); pow2_eq(b as Int, 56); follows(); }
-    else if b <= 57u32 { assert(b == 57u32); wshlx_cong(1u64, b, 57u32); pow2_eq(b as Int, 57); follows(); }
-    else if b <= 58u32 { assert(b == 58u32); wshlx_cong(1u64, b, 58u32); pow2_eq(b as Int, 58); follows(); }
-    else if b <= 59u32 { assert(b == 59u32); wshlx_cong(1u64, b, 59u32); pow2_eq(b as Int, 59); follows(); }
-    else if b <= 60u32 { assert(b == 60u32); wshlx_cong(1u64, b, 60u32); pow2_eq(b as Int, 60); follows(); }
-    else if b <= 61u32 { assert(b == 61u32); wshlx_cong(1u64, b, 61u32); pow2_eq(b as Int, 61); follows(); }
-    else if b <= 62u32 { assert(b == 62u32); wshlx_cong(1u64, b, 62u32); pow2_eq(b as Int, 62); follows(); }
-    else if b <= 63u32 { assert(b == 63u32); wshlx_cong(1u64, b, 63u32); pow2_eq(b as Int, 63); follows(); }
-    else { by_contradiction(); }
 }
 
 /// `children`'s panic condition as its code tests it: a height of 64 or
@@ -198,12 +28,8 @@ fn wshl_one(b: u32) {
 fn children_panics(pos: Position, height: u32) {
     requires(height >= 64u32 || (pos.0 as Int) < pow2(height as Int));
     ensures(height >= 64u32 || pos.0 < 1u64.wrapping_shl(height));
-    if height >= 64u32 {
-        follows();
-    } else {
-        wshl_one(height);
-        follows();
-    }
+    // below 64, `1 << height` is `2^height`
+    by_cases(height >= 64u32);
 }
 
 // ---------------------------------------------------------------------------
@@ -229,8 +55,8 @@ fn children_of_subtree_facts() {
     opaque();
     at_start! {
         crate::proofs::shape_bounds(self);
-        crate::proofs::shl_one(self.height);
-        crate::proofs::shl_one(self.height - 1u32);
+        sandblaster::lemmas::bits::shl_one_u64(self.height);
+        sandblaster::lemmas::bits::shl_one_u64(self.height - 1u32);
         crate::stdlib::bits::pow2_step(self.height as Int);
         crate::stdlib::bits::pow2_step((self.height as Int) + 1);
         crate::proofs::right_start(self);
@@ -288,7 +114,7 @@ fn leaf_end_facts() {
     opaque();
     at_start! {
         crate::proofs::shape_bounds(self);
-        crate::proofs::shl_one(self.height);
+        sandblaster::lemmas::bits::shl_one_u64(self.height);
     }
     ensures(|ret: crate::merkle::Location| (ret.0 as Int) == (self.leaf_start.0 as Int) + pow2(self.height as Int));
 }
@@ -434,15 +260,6 @@ fn is_outside_summary() {
     ensures(|ret: bool| ret == crate::laws::disjoint(self, *range));
 }
 
-/// `is_outside` is `disjoint`.
-#[lemma]
-fn is_outside_is_disjoint(s: crate::merkle::proof::Subtree, range: core::ops::Range<crate::merkle::Location>) {
-    requires(crate::laws::well_shaped(s));
-    ensures(s.is_outside(&range) == crate::laws::disjoint(s, range));
-    let o = s.is_outside(&range);
-    follows();
-}
-
 /// A word whose value is `i` is `i as u64`.
 #[lemma]
 fn u64_of_int(x: u64, i: Int) {
@@ -456,15 +273,6 @@ fn u64_of_int(x: u64, i: Int) {
 fn location_inj(p: crate::merkle::Location, q: crate::merkle::Location) {
     requires(p.0 == q.0);
     ensures(p == q);
-    follows();
-}
-
-/// The children of a well-shaped subtree above the leaves are its halves.
-#[lemma]
-fn children_are_halves(s: crate::merkle::proof::Subtree) {
-    requires(crate::laws::well_shaped(s) && s.height >= 1u32);
-    ensures(s.children() == (crate::laws::left_half(s), crate::laws::right_half(s)));
-    let c = s.children();
     follows();
 }
 
@@ -823,100 +631,13 @@ fn rebuild_step(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Lo
     by_unfolding(crate::laws::rebuild);
 }
 
-/// `rebuild` one step on a node, as `reconstruct_digest`'s tests find it
-/// (the conclusion is a fact of its node branch, whose path facts are the
-/// hypotheses).
-#[lemma]
-fn rebuild_case_node(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
-    requires(crate::laws::well_shaped(s));
-    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (match crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).3 {
-        crate::__lift::Result::Err(e) => (crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).0, crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).1, crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected).2, crate::__lift::Result::Err(e)),
-        crate::__lift::Result::Ok(dl) => crate::proofs::after_left(s, range, siblings, crate::laws::rebuild(crate::laws::left_half(s), range, elements, siblings, cursor, collected), dl),
-    }))));
-    is_outside_is_disjoint(s, range);
-    if crate::laws::disjoint(s, range) {
-        assert(s.is_outside(&range) == true, { follows(); });
-        follows();
-    } else if s.height == 0u32 {
-        assert((s.height == 0u32) == true, { follows(); });
-        follows();
-    } else {
-        rebuild_node(s, range, elements, siblings, cursor, collected);
-        follows();
-    }
-}
-
-/// A node whose left half fails: the left half's state and error (a
-/// forward rule: its hypotheses are the left half's induction hypothesis
-/// and the code's path facts, its conclusion the node's value).
-#[lemma]
-fn node_left_fails(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
-    requires(crate::laws::well_shaped(s));
-    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|x: crate::merkle::proof::ReconstructionError| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Err(x), crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (t.0, t.1, t.2, crate::__lift::Result::Err(x)))))))));
-    rebuild_case_node(s, range, elements, siblings, cursor, collected);
-    if s.height >= 1u32 {
-        children_are_halves(s);
-        follows();
-    } else {
-        follows();
-    }
-}
-
-/// A node whose right half fails: the right half's state and error.
-#[lemma]
-fn node_right_fails(s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
-    requires(crate::laws::well_shaped(s));
-    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dl: Digest| forall(|u: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|x: crate::merkle::proof::ReconstructionError| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Ok(dl), implies(u == crate::laws::rebuild(s.children().1, range, t.0, siblings, t.1, t.2), implies(u.3 == crate::__lift::Result::Err(x), crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (u.0, u.1, u.2, crate::__lift::Result::Err(x)))))))))))));
-    rebuild_case_node(s, range, elements, siblings, cursor, collected);
-    if s.height >= 1u32 {
-        children_are_halves(s);
-        follows();
-    } else {
-        follows();
-    }
-}
-
-/// A node whose halves both rebuild, collecting: the right half's elements
-/// and cursor, the two halves' pairs pushed, and the node digest (in the
-/// words `reconstruct_digest` computes them; the last hypothesis is
-/// `node_digest`'s summary at its call).
-#[lemma]
-fn node_rebuilds_collecting(h: Standard, s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
-    requires(crate::laws::well_shaped(s));
-    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dl: Digest| forall(|u: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dr: Digest| forall(|c: Seq<(Position, Digest)>| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Ok(dl), implies(u == crate::laws::rebuild(s.children().1, range, t.0, siblings, t.1, t.2), implies(u.3 == crate::__lift::Result::Ok(dr), implies(h.node_digest(s.pos, &dl, &dr) == crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr)), implies(u.2 == Some(c), crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (u.0, u.1, Some(crate::__lift_model::vec_push(crate::__lift_model::vec_push(c, (s.children().0.pos, dl)), (s.children().1.pos, dr))), crate::__lift::Result::Ok(h.node_digest(s.pos, &dl, &dr)))))))))))))))));
-    rebuild_case_node(s, range, elements, siblings, cursor, collected);
-    if s.height >= 1u32 {
-        children_are_halves(s);
-        follows();
-    } else {
-        follows();
-    }
-}
-
-/// A node whose halves both rebuild, not collecting.
-#[lemma]
-fn node_rebuilds_quietly(h: Standard, s: crate::merkle::proof::Subtree, range: crate::__lift::Range<Location>, elements: &[&[u8]], siblings: &[Digest], cursor: usize, collected: Option<Seq<(Position, Digest)>>) {
-    requires(crate::laws::well_shaped(s));
-    ensures(implies(s.is_outside(&range) == false, implies((s.height == 0u32) == false, forall(|t: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dl: Digest| forall(|u: (&[&[u8]], usize, Option<Seq<(Position, Digest)>>, crate::__lift::Result<Digest, crate::merkle::proof::ReconstructionError>)| forall(|dr: Digest| implies(t == crate::laws::rebuild(s.children().0, range, elements, siblings, cursor, collected), implies(t.3 == crate::__lift::Result::Ok(dl), implies(u == crate::laws::rebuild(s.children().1, range, t.0, siblings, t.1, t.2), implies(u.3 == crate::__lift::Result::Ok(dr), implies(h.node_digest(s.pos, &dl, &dr) == crate::sha256::sha256(crate::laws::node_message(s.pos.0, dl, dr)), implies(u.2 == None, crate::laws::rebuild(s, range, elements, siblings, cursor, collected) == (u.0, u.1, None, crate::__lift::Result::Ok(h.node_digest(s.pos, &dl, &dr))))))))))))))));
-    rebuild_case_node(s, range, elements, siblings, cursor, collected);
-    if s.height >= 1u32 {
-        children_are_halves(s);
-        follows();
-    } else {
-        follows();
-    }
-}
-
-/// `reconstruct_digest`: `rebuild`'s step at its arguments, and at a node
-/// its step in the words the code computes it (`children`, `vec_push`).
+/// `reconstruct_digest`: `rebuild`'s step at its arguments (at a node, the
+/// prover meets the code's `children()` halves, `?` exits and pushes with
+/// `rebuild`'s halves through the recursive calls' induction hypotheses).
 #[lift_attach(crate::merkle::proof::Subtree::reconstruct_digest)]
 fn reconstruct_digest_facts() {
     at_start! {
         crate::proofs::rebuild_step(self, *range, elements, siblings, cursor, collected);
-        crate::proofs::node_left_fails(self, *range, elements, siblings, cursor, collected);
-        crate::proofs::node_right_fails(self, *range, elements, siblings, cursor, collected);
-        crate::proofs::node_rebuilds_collecting(*hasher, self, *range, elements, siblings, cursor, collected);
-        crate::proofs::node_rebuilds_quietly(*hasher, self, *range, elements, siblings, cursor, collected);
     }
 }
 

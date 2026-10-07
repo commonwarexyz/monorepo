@@ -83,6 +83,14 @@ FIXTURES = [
     ("rm_wrong", "rm_wrong", "a", "a.sbmir", []),
     # tests/panic_contracts.rs: documented panics as panic contracts
     ("pc_guard", "pc_guard", "a", "a.sbmir", []),
+    # tests/simd.rs: `core::arch` code read from MIR (C8, docs/mir-lift.md §20.9)
+    ("sd_neon", "sd_neon", "a", "a.sbmir", []),
+    ("sd_neon_shift", "sd_neon_shift", "a", "a.sbmir", []),
+    ("sd_neon_lane", "sd_neon_lane", "a", "a.sbmir", []),
+    ("sd_neon_ptr", "sd_neon_ptr", "a", "a.sbmir", []),
+    ("sd_neon_nomodel", "sd_neon_nomodel", "a", "a.sbmir", []),
+    ("sd_neon_detect", "sd_neon_detect", "a", "a.sbmir", []),
+    ("sd_x86", "sd_x86", "a", "a.sbmir", ["--target", "x86_64-apple-darwin"]),
 ]
 
 # crates of the workspace that are dependencies only (no MIR of their own)

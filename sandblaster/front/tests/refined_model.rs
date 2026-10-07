@@ -1,6 +1,6 @@
-//! The refined model's pattern on a small fixture (DESIGN.md, North star:
-//! "the laws file is the definition; the implementation is free", and the
-//! statements E1 and E2 of "implementation equals reference").
+//! The verifier on bit-level code, on a small fixture (DESIGN.md, North
+//! star: "the laws file is the definition; the code is free", and the
+//! statements E1 and E2 of "code equals reference").
 //!
 //! A host crate's own file `src/a.rs` defines `min_u64(a, b)`. It is
 //! verified in place, as written, from rustc's MIR, exactly as
@@ -15,12 +15,12 @@
 //!
 //! * `mir_fixtures/rm_orig`: the straightforward code (`if a < b { a } else
 //!   { b }`). Its gates accept a lock, and it verifies against it.
-//! * `mir_fixtures/rm_fast`: the same function optimized, branch-free
-//!   (`b ^ ((a ^ b) & mask)`, `mask` all ones when `a < b`). The lock its
-//!   gates accept is the original's, byte for byte (an optimization changes
-//!   no reviewed line), and it verifies against that lock with the same
-//!   law and the same proof.
-//! * `mir_fixtures/rm_wrong` (the negative twin): the optimization with a
+//! * `mir_fixtures/rm_fast`: the same function written branch-free, as
+//!   bit-level code often is (`b ^ ((a ^ b) & mask)`, `mask` all ones when
+//!   `a < b`). The lock its gates accept is the straightforward version's,
+//!   byte for byte (a different body changes no reviewed line), and it
+//!   verifies against that lock with the same law and the same proof.
+//! * `mir_fixtures/rm_wrong` (the negative twin): the branch-free code with a
 //!   classic slip, the comparison bit used as the mask without negating it
 //!   to all ones (so `min_u64(0, 2)` is 2). The same laws, proof and lock:
 //!   the law is not proven, no lock can be accepted, and the build gives no
@@ -43,7 +43,7 @@ use sandblaster_front::target::TargetInfo;
 type Code = (&'static str, &'static str);
 
 const ORIG: Code = (include_str!("mir_fixtures/rm_orig/src/a.rs"), include_str!("mir_fixtures/rm_orig/a.sbmir"));
-const FAST: Code = (include_str!("mir_fixtures/rm_fast/src/a.rs"), include_str!("mir_fixtures/rm_fast/a.sbmir"));
+const BRANCH_FREE: Code = (include_str!("mir_fixtures/rm_fast/src/a.rs"), include_str!("mir_fixtures/rm_fast/a.sbmir"));
 const WRONG: Code = (include_str!("mir_fixtures/rm_wrong/src/a.rs"), include_str!("mir_fixtures/rm_wrong/a.sbmir"));
 
 const ROOT: &str = "#![forbid(unsafe_code)]\nuse sandblaster::prelude::*;\n\n#[lift(in_place, mir = \"a.sbmir\")]\n#[path = \"../../src/a.rs\"]\nmod a;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"LAWS.rs\"]\nmod laws;\n\n#[cfg(sandblaster)]\n#[lift]\n#[path = \"PROOF.rs\"]\nmod proof;\n\npub use a::min_u64;\n";
@@ -216,7 +216,7 @@ fn gate_note(o: &BuildOutcome, gate: &str) -> String {
 }
 
 #[test]
-fn an_optimized_function_meets_the_original_laws_and_a_wrong_one_is_refused() {
+fn branch_free_code_meets_the_same_laws_and_a_wrong_variant_is_refused() {
     let mut s = Scratch::new("main");
 
     // the original: its gates accept a lock, and it verifies against it
@@ -225,26 +225,26 @@ fn an_optimized_function_meets_the_original_laws_and_a_wrong_one_is_refused() {
     let o = s.build(&with_lock(files(ORIG), &lock));
     verified("the original", &o);
 
-    // the optimization: the same laws file, so the same lock byte for byte
+    // the branch-free code: the same laws file, so the same lock byte for byte
     // (nothing for a reviewer to read), and a verdict against it with the
     // same proof
-    assert_ne!(FAST.0, ORIG.0);
-    let fast_lock = s.accept(&files(FAST)).unwrap_or_else(|e| panic!("the optimization's gates:\n{e}"));
-    assert_eq!(fast_lock, lock, "an optimization changes no locked byte");
-    let o = s.build(&with_lock(files(FAST), &lock));
-    verified("the optimization", &o);
-    eprintln!("the optimization: {}\n  {}", gate_note(&o, "mir-theorems"), gate_note(&o, "lift-conformance"));
+    assert_ne!(BRANCH_FREE.0, ORIG.0);
+    let bf_lock = s.accept(&files(BRANCH_FREE)).unwrap_or_else(|e| panic!("the branch-free code's gates:\n{e}"));
+    assert_eq!(bf_lock, lock, "a different body changes no locked byte");
+    let o = s.build(&with_lock(files(BRANCH_FREE), &lock));
+    verified("the branch-free code", &o);
+    eprintln!("the branch-free code: {}\n  {}", gate_note(&o, "mir-theorems"), gate_note(&o, "lift-conformance"));
 
-    // a wrong optimization: the law is false for it (the kernel evaluator
+    // a wrong branch-free variant: the law is false for it (the kernel evaluator
     // gives 2 for `min_u64(0, 2)`, where the reference says 0), so it is not
     // proven, no lock can be accepted and the build against the lock gives
     // no verdict
-    assert_eq!((eval(ORIG, 0, 2), eval(FAST, 0, 2), eval(WRONG, 0, 2)), ("0".to_string(), "0".to_string(), "2".to_string()));
-    let e = s.accept(&files(WRONG)).expect_err("a wrong optimization must not get a lock");
+    assert_eq!((eval(ORIG, 0, 2), eval(BRANCH_FREE, 0, 2), eval(WRONG, 0, 2)), ("0".to_string(), "0".to_string(), "2".to_string()));
+    let e = s.accept(&files(WRONG)).expect_err("a wrong variant must not get a lock");
     assert!(e.contains(LAW), "the refusal names the law:\n{e}");
     let o = s.build(&with_lock(files(WRONG), &lock));
-    assert!(!o.ok, "a wrong optimization got a verdict: {:?}", o.cargo);
+    assert!(!o.ok, "a wrong variant got a verdict: {:?}", o.cargo);
     assert!(o.stderr.contains(LAW), "the refusal names the law:\n{}", o.stderr);
-    eprintln!("the wrong optimization, refused:\n{}", o.stderr.lines().filter(|l| l.contains("error")).take(4).collect::<Vec<_>>().join("\n"));
-    assert!(!o.outputs.iter().any(|(p, c)| p.ends_with("m-verified.txt") && c.contains("VERIFIED +")), "a verified record for a wrong optimization");
+    eprintln!("the wrong variant, refused:\n{}", o.stderr.lines().filter(|l| l.contains("error")).take(4).collect::<Vec<_>>().join("\n"));
+    assert!(!o.outputs.iter().any(|(p, c)| p.ends_with("m-verified.txt") && c.contains("VERIFIED +")), "a verified record for a wrong variant");
 }

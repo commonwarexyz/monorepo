@@ -23,245 +23,13 @@ fn pow2_eq(a: Int, b: Int) {
     follows();
 }
 
-/// Congruence: equal shift amounts, equal masks.
-#[lemma]
-fn shr_cong(k: u32, j: u32) {
-    requires(k < 64u32 && k == j);
-    ensures(u64::MAX >> k == u64::MAX >> j);
-    follows();
-}
-
-/// Congruence: equal shift amounts, equal powers.
-#[lemma]
-fn shl_cong(b: u32, j: u32) {
-    requires(b < 64u32 && b == j);
-    ensures(1u64 << b == 1u64 << j);
-    follows();
-}
-
-/// Congruence: equal words, equal trailing zeros.
-#[lemma]
-fn tz_cong(t: u64, c: u64) {
-    requires(t == c);
-    ensures(t.trailing_zeros() == c.trailing_zeros());
-    follows();
-}
-
 /// `u64::MAX >> k` is `64 - k` ones; its complement has `64 - k` trailing
-/// zeros (one case per amount).
+/// zeros (`auto`'s shift facts).
 #[lemma]
 fn mask_facts(k: u32) {
     requires(k < 64u32);
     ensures((u64::MAX >> k) as Int == pow2(64 - (k as Int)) - 1 && ((!(u64::MAX >> k)).trailing_zeros() as Int) == 64 - (k as Int));
-    if k <= 0u32 { assert(k == 0u32); shr_cong(k, 0u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 0u32)); pow2_eq(64 - (k as Int), 64); follows(); }
-    else if k <= 1u32 { assert(k == 1u32); shr_cong(k, 1u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 1u32)); pow2_eq(64 - (k as Int), 63); follows(); }
-    else if k <= 2u32 { assert(k == 2u32); shr_cong(k, 2u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 2u32)); pow2_eq(64 - (k as Int), 62); follows(); }
-    else if k <= 3u32 { assert(k == 3u32); shr_cong(k, 3u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 3u32)); pow2_eq(64 - (k as Int), 61); follows(); }
-    else if k <= 4u32 { assert(k == 4u32); shr_cong(k, 4u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 4u32)); pow2_eq(64 - (k as Int), 60); follows(); }
-    else if k <= 5u32 { assert(k == 5u32); shr_cong(k, 5u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 5u32)); pow2_eq(64 - (k as Int), 59); follows(); }
-    else if k <= 6u32 { assert(k == 6u32); shr_cong(k, 6u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 6u32)); pow2_eq(64 - (k as Int), 58); follows(); }
-    else if k <= 7u32 { assert(k == 7u32); shr_cong(k, 7u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 7u32)); pow2_eq(64 - (k as Int), 57); follows(); }
-    else if k <= 8u32 { assert(k == 8u32); shr_cong(k, 8u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 8u32)); pow2_eq(64 - (k as Int), 56); follows(); }
-    else if k <= 9u32 { assert(k == 9u32); shr_cong(k, 9u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 9u32)); pow2_eq(64 - (k as Int), 55); follows(); }
-    else if k <= 10u32 { assert(k == 10u32); shr_cong(k, 10u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 10u32)); pow2_eq(64 - (k as Int), 54); follows(); }
-    else if k <= 11u32 { assert(k == 11u32); shr_cong(k, 11u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 11u32)); pow2_eq(64 - (k as Int), 53); follows(); }
-    else if k <= 12u32 { assert(k == 12u32); shr_cong(k, 12u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 12u32)); pow2_eq(64 - (k as Int), 52); follows(); }
-    else if k <= 13u32 { assert(k == 13u32); shr_cong(k, 13u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 13u32)); pow2_eq(64 - (k as Int), 51); follows(); }
-    else if k <= 14u32 { assert(k == 14u32); shr_cong(k, 14u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 14u32)); pow2_eq(64 - (k as Int), 50); follows(); }
-    else if k <= 15u32 { assert(k == 15u32); shr_cong(k, 15u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 15u32)); pow2_eq(64 - (k as Int), 49); follows(); }
-    else if k <= 16u32 { assert(k == 16u32); shr_cong(k, 16u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 16u32)); pow2_eq(64 - (k as Int), 48); follows(); }
-    else if k <= 17u32 { assert(k == 17u32); shr_cong(k, 17u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 17u32)); pow2_eq(64 - (k as Int), 47); follows(); }
-    else if k <= 18u32 { assert(k == 18u32); shr_cong(k, 18u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 18u32)); pow2_eq(64 - (k as Int), 46); follows(); }
-    else if k <= 19u32 { assert(k == 19u32); shr_cong(k, 19u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 19u32)); pow2_eq(64 - (k as Int), 45); follows(); }
-    else if k <= 20u32 { assert(k == 20u32); shr_cong(k, 20u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 20u32)); pow2_eq(64 - (k as Int), 44); follows(); }
-    else if k <= 21u32 { assert(k == 21u32); shr_cong(k, 21u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 21u32)); pow2_eq(64 - (k as Int), 43); follows(); }
-    else if k <= 22u32 { assert(k == 22u32); shr_cong(k, 22u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 22u32)); pow2_eq(64 - (k as Int), 42); follows(); }
-    else if k <= 23u32 { assert(k == 23u32); shr_cong(k, 23u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 23u32)); pow2_eq(64 - (k as Int), 41); follows(); }
-    else if k <= 24u32 { assert(k == 24u32); shr_cong(k, 24u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 24u32)); pow2_eq(64 - (k as Int), 40); follows(); }
-    else if k <= 25u32 { assert(k == 25u32); shr_cong(k, 25u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 25u32)); pow2_eq(64 - (k as Int), 39); follows(); }
-    else if k <= 26u32 { assert(k == 26u32); shr_cong(k, 26u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 26u32)); pow2_eq(64 - (k as Int), 38); follows(); }
-    else if k <= 27u32 { assert(k == 27u32); shr_cong(k, 27u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 27u32)); pow2_eq(64 - (k as Int), 37); follows(); }
-    else if k <= 28u32 { assert(k == 28u32); shr_cong(k, 28u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 28u32)); pow2_eq(64 - (k as Int), 36); follows(); }
-    else if k <= 29u32 { assert(k == 29u32); shr_cong(k, 29u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 29u32)); pow2_eq(64 - (k as Int), 35); follows(); }
-    else if k <= 30u32 { assert(k == 30u32); shr_cong(k, 30u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 30u32)); pow2_eq(64 - (k as Int), 34); follows(); }
-    else if k <= 31u32 { assert(k == 31u32); shr_cong(k, 31u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 31u32)); pow2_eq(64 - (k as Int), 33); follows(); }
-    else if k <= 32u32 { assert(k == 32u32); shr_cong(k, 32u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 32u32)); pow2_eq(64 - (k as Int), 32); follows(); }
-    else if k <= 33u32 { assert(k == 33u32); shr_cong(k, 33u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 33u32)); pow2_eq(64 - (k as Int), 31); follows(); }
-    else if k <= 34u32 { assert(k == 34u32); shr_cong(k, 34u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 34u32)); pow2_eq(64 - (k as Int), 30); follows(); }
-    else if k <= 35u32 { assert(k == 35u32); shr_cong(k, 35u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 35u32)); pow2_eq(64 - (k as Int), 29); follows(); }
-    else if k <= 36u32 { assert(k == 36u32); shr_cong(k, 36u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 36u32)); pow2_eq(64 - (k as Int), 28); follows(); }
-    else if k <= 37u32 { assert(k == 37u32); shr_cong(k, 37u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 37u32)); pow2_eq(64 - (k as Int), 27); follows(); }
-    else if k <= 38u32 { assert(k == 38u32); shr_cong(k, 38u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 38u32)); pow2_eq(64 - (k as Int), 26); follows(); }
-    else if k <= 39u32 { assert(k == 39u32); shr_cong(k, 39u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 39u32)); pow2_eq(64 - (k as Int), 25); follows(); }
-    else if k <= 40u32 { assert(k == 40u32); shr_cong(k, 40u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 40u32)); pow2_eq(64 - (k as Int), 24); follows(); }
-    else if k <= 41u32 { assert(k == 41u32); shr_cong(k, 41u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 41u32)); pow2_eq(64 - (k as Int), 23); follows(); }
-    else if k <= 42u32 { assert(k == 42u32); shr_cong(k, 42u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 42u32)); pow2_eq(64 - (k as Int), 22); follows(); }
-    else if k <= 43u32 { assert(k == 43u32); shr_cong(k, 43u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 43u32)); pow2_eq(64 - (k as Int), 21); follows(); }
-    else if k <= 44u32 { assert(k == 44u32); shr_cong(k, 44u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 44u32)); pow2_eq(64 - (k as Int), 20); follows(); }
-    else if k <= 45u32 { assert(k == 45u32); shr_cong(k, 45u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 45u32)); pow2_eq(64 - (k as Int), 19); follows(); }
-    else if k <= 46u32 { assert(k == 46u32); shr_cong(k, 46u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 46u32)); pow2_eq(64 - (k as Int), 18); follows(); }
-    else if k <= 47u32 { assert(k == 47u32); shr_cong(k, 47u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 47u32)); pow2_eq(64 - (k as Int), 17); follows(); }
-    else if k <= 48u32 { assert(k == 48u32); shr_cong(k, 48u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 48u32)); pow2_eq(64 - (k as Int), 16); follows(); }
-    else if k <= 49u32 { assert(k == 49u32); shr_cong(k, 49u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 49u32)); pow2_eq(64 - (k as Int), 15); follows(); }
-    else if k <= 50u32 { assert(k == 50u32); shr_cong(k, 50u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 50u32)); pow2_eq(64 - (k as Int), 14); follows(); }
-    else if k <= 51u32 { assert(k == 51u32); shr_cong(k, 51u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 51u32)); pow2_eq(64 - (k as Int), 13); follows(); }
-    else if k <= 52u32 { assert(k == 52u32); shr_cong(k, 52u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 52u32)); pow2_eq(64 - (k as Int), 12); follows(); }
-    else if k <= 53u32 { assert(k == 53u32); shr_cong(k, 53u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 53u32)); pow2_eq(64 - (k as Int), 11); follows(); }
-    else if k <= 54u32 { assert(k == 54u32); shr_cong(k, 54u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 54u32)); pow2_eq(64 - (k as Int), 10); follows(); }
-    else if k <= 55u32 { assert(k == 55u32); shr_cong(k, 55u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 55u32)); pow2_eq(64 - (k as Int), 9); follows(); }
-    else if k <= 56u32 { assert(k == 56u32); shr_cong(k, 56u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 56u32)); pow2_eq(64 - (k as Int), 8); follows(); }
-    else if k <= 57u32 { assert(k == 57u32); shr_cong(k, 57u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 57u32)); pow2_eq(64 - (k as Int), 7); follows(); }
-    else if k <= 58u32 { assert(k == 58u32); shr_cong(k, 58u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 58u32)); pow2_eq(64 - (k as Int), 6); follows(); }
-    else if k <= 59u32 { assert(k == 59u32); shr_cong(k, 59u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 59u32)); pow2_eq(64 - (k as Int), 5); follows(); }
-    else if k <= 60u32 { assert(k == 60u32); shr_cong(k, 60u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 60u32)); pow2_eq(64 - (k as Int), 4); follows(); }
-    else if k <= 61u32 { assert(k == 61u32); shr_cong(k, 61u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 61u32)); pow2_eq(64 - (k as Int), 3); follows(); }
-    else if k <= 62u32 { assert(k == 62u32); shr_cong(k, 62u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 62u32)); pow2_eq(64 - (k as Int), 2); follows(); }
-    else if k <= 63u32 { assert(k == 63u32); shr_cong(k, 63u32); tz_cong(!(u64::MAX >> k), !(u64::MAX >> 63u32)); pow2_eq(64 - (k as Int), 1); follows(); }
-    else { by_contradiction(); }
-}
-
-/// `1 << b` is `2^b` (one case per amount).
-#[lemma]
-fn shl_one(b: u32) {
-    requires(b < 64u32);
-    ensures((1u64 << b) as Int == pow2(b as Int));
-    if b <= 0u32 { assert(b == 0u32); shl_cong(b, 0u32); pow2_eq(b as Int, 0); follows(); }
-    else if b <= 1u32 { assert(b == 1u32); shl_cong(b, 1u32); pow2_eq(b as Int, 1); follows(); }
-    else if b <= 2u32 { assert(b == 2u32); shl_cong(b, 2u32); pow2_eq(b as Int, 2); follows(); }
-    else if b <= 3u32 { assert(b == 3u32); shl_cong(b, 3u32); pow2_eq(b as Int, 3); follows(); }
-    else if b <= 4u32 { assert(b == 4u32); shl_cong(b, 4u32); pow2_eq(b as Int, 4); follows(); }
-    else if b <= 5u32 { assert(b == 5u32); shl_cong(b, 5u32); pow2_eq(b as Int, 5); follows(); }
-    else if b <= 6u32 { assert(b == 6u32); shl_cong(b, 6u32); pow2_eq(b as Int, 6); follows(); }
-    else if b <= 7u32 { assert(b == 7u32); shl_cong(b, 7u32); pow2_eq(b as Int, 7); follows(); }
-    else if b <= 8u32 { assert(b == 8u32); shl_cong(b, 8u32); pow2_eq(b as Int, 8); follows(); }
-    else if b <= 9u32 { assert(b == 9u32); shl_cong(b, 9u32); pow2_eq(b as Int, 9); follows(); }
-    else if b <= 10u32 { assert(b == 10u32); shl_cong(b, 10u32); pow2_eq(b as Int, 10); follows(); }
-    else if b <= 11u32 { assert(b == 11u32); shl_cong(b, 11u32); pow2_eq(b as Int, 11); follows(); }
-    else if b <= 12u32 { assert(b == 12u32); shl_cong(b, 12u32); pow2_eq(b as Int, 12); follows(); }
-    else if b <= 13u32 { assert(b == 13u32); shl_cong(b, 13u32); pow2_eq(b as Int, 13); follows(); }
-    else if b <= 14u32 { assert(b == 14u32); shl_cong(b, 14u32); pow2_eq(b as Int, 14); follows(); }
-    else if b <= 15u32 { assert(b == 15u32); shl_cong(b, 15u32); pow2_eq(b as Int, 15); follows(); }
-    else if b <= 16u32 { assert(b == 16u32); shl_cong(b, 16u32); pow2_eq(b as Int, 16); follows(); }
-    else if b <= 17u32 { assert(b == 17u32); shl_cong(b, 17u32); pow2_eq(b as Int, 17); follows(); }
-    else if b <= 18u32 { assert(b == 18u32); shl_cong(b, 18u32); pow2_eq(b as Int, 18); follows(); }
-    else if b <= 19u32 { assert(b == 19u32); shl_cong(b, 19u32); pow2_eq(b as Int, 19); follows(); }
-    else if b <= 20u32 { assert(b == 20u32); shl_cong(b, 20u32); pow2_eq(b as Int, 20); follows(); }
-    else if b <= 21u32 { assert(b == 21u32); shl_cong(b, 21u32); pow2_eq(b as Int, 21); follows(); }
-    else if b <= 22u32 { assert(b == 22u32); shl_cong(b, 22u32); pow2_eq(b as Int, 22); follows(); }
-    else if b <= 23u32 { assert(b == 23u32); shl_cong(b, 23u32); pow2_eq(b as Int, 23); follows(); }
-    else if b <= 24u32 { assert(b == 24u32); shl_cong(b, 24u32); pow2_eq(b as Int, 24); follows(); }
-    else if b <= 25u32 { assert(b == 25u32); shl_cong(b, 25u32); pow2_eq(b as Int, 25); follows(); }
-    else if b <= 26u32 { assert(b == 26u32); shl_cong(b, 26u32); pow2_eq(b as Int, 26); follows(); }
-    else if b <= 27u32 { assert(b == 27u32); shl_cong(b, 27u32); pow2_eq(b as Int, 27); follows(); }
-    else if b <= 28u32 { assert(b == 28u32); shl_cong(b, 28u32); pow2_eq(b as Int, 28); follows(); }
-    else if b <= 29u32 { assert(b == 29u32); shl_cong(b, 29u32); pow2_eq(b as Int, 29); follows(); }
-    else if b <= 30u32 { assert(b == 30u32); shl_cong(b, 30u32); pow2_eq(b as Int, 30); follows(); }
-    else if b <= 31u32 { assert(b == 31u32); shl_cong(b, 31u32); pow2_eq(b as Int, 31); follows(); }
-    else if b <= 32u32 { assert(b == 32u32); shl_cong(b, 32u32); pow2_eq(b as Int, 32); follows(); }
-    else if b <= 33u32 { assert(b == 33u32); shl_cong(b, 33u32); pow2_eq(b as Int, 33); follows(); }
-    else if b <= 34u32 { assert(b == 34u32); shl_cong(b, 34u32); pow2_eq(b as Int, 34); follows(); }
-    else if b <= 35u32 { assert(b == 35u32); shl_cong(b, 35u32); pow2_eq(b as Int, 35); follows(); }
-    else if b <= 36u32 { assert(b == 36u32); shl_cong(b, 36u32); pow2_eq(b as Int, 36); follows(); }
-    else if b <= 37u32 { assert(b == 37u32); shl_cong(b, 37u32); pow2_eq(b as Int, 37); follows(); }
-    else if b <= 38u32 { assert(b == 38u32); shl_cong(b, 38u32); pow2_eq(b as Int, 38); follows(); }
-    else if b <= 39u32 { assert(b == 39u32); shl_cong(b, 39u32); pow2_eq(b as Int, 39); follows(); }
-    else if b <= 40u32 { assert(b == 40u32); shl_cong(b, 40u32); pow2_eq(b as Int, 40); follows(); }
-    else if b <= 41u32 { assert(b == 41u32); shl_cong(b, 41u32); pow2_eq(b as Int, 41); follows(); }
-    else if b <= 42u32 { assert(b == 42u32); shl_cong(b, 42u32); pow2_eq(b as Int, 42); follows(); }
-    else if b <= 43u32 { assert(b == 43u32); shl_cong(b, 43u32); pow2_eq(b as Int, 43); follows(); }
-    else if b <= 44u32 { assert(b == 44u32); shl_cong(b, 44u32); pow2_eq(b as Int, 44); follows(); }
-    else if b <= 45u32 { assert(b == 45u32); shl_cong(b, 45u32); pow2_eq(b as Int, 45); follows(); }
-    else if b <= 46u32 { assert(b == 46u32); shl_cong(b, 46u32); pow2_eq(b as Int, 46); follows(); }
-    else if b <= 47u32 { assert(b == 47u32); shl_cong(b, 47u32); pow2_eq(b as Int, 47); follows(); }
-    else if b <= 48u32 { assert(b == 48u32); shl_cong(b, 48u32); pow2_eq(b as Int, 48); follows(); }
-    else if b <= 49u32 { assert(b == 49u32); shl_cong(b, 49u32); pow2_eq(b as Int, 49); follows(); }
-    else if b <= 50u32 { assert(b == 50u32); shl_cong(b, 50u32); pow2_eq(b as Int, 50); follows(); }
-    else if b <= 51u32 { assert(b == 51u32); shl_cong(b, 51u32); pow2_eq(b as Int, 51); follows(); }
-    else if b <= 52u32 { assert(b == 52u32); shl_cong(b, 52u32); pow2_eq(b as Int, 52); follows(); }
-    else if b <= 53u32 { assert(b == 53u32); shl_cong(b, 53u32); pow2_eq(b as Int, 53); follows(); }
-    else if b <= 54u32 { assert(b == 54u32); shl_cong(b, 54u32); pow2_eq(b as Int, 54); follows(); }
-    else if b <= 55u32 { assert(b == 55u32); shl_cong(b, 55u32); pow2_eq(b as Int, 55); follows(); }
-    else if b <= 56u32 { assert(b == 56u32); shl_cong(b, 56u32); pow2_eq(b as Int, 56); follows(); }
-    else if b <= 57u32 { assert(b == 57u32); shl_cong(b, 57u32); pow2_eq(b as Int, 57); follows(); }
-    else if b <= 58u32 { assert(b == 58u32); shl_cong(b, 58u32); pow2_eq(b as Int, 58); follows(); }
-    else if b <= 59u32 { assert(b == 59u32); shl_cong(b, 59u32); pow2_eq(b as Int, 59); follows(); }
-    else if b <= 60u32 { assert(b == 60u32); shl_cong(b, 60u32); pow2_eq(b as Int, 60); follows(); }
-    else if b <= 61u32 { assert(b == 61u32); shl_cong(b, 61u32); pow2_eq(b as Int, 61); follows(); }
-    else if b <= 62u32 { assert(b == 62u32); shl_cong(b, 62u32); pow2_eq(b as Int, 62); follows(); }
-    else if b <= 63u32 { assert(b == 63u32); shl_cong(b, 63u32); pow2_eq(b as Int, 63); follows(); }
-    else { by_contradiction(); }
-}
-
-/// A power of two's trailing zeros are its exponent (one case per exponent).
-#[lemma]
-fn tz_pow2(t: u64, e: Int) {
-    requires(0 <= e && e < 64 && (t as Int) == pow2(e));
-    ensures((t.trailing_zeros() as Int) == e);
-    if e <= 0 { assert(e == 0); pow2_eq(e, 0); tz_cong(t, 1u64); follows(); }
-    else if e <= 1 { assert(e == 1); pow2_eq(e, 1); tz_cong(t, 2u64); follows(); }
-    else if e <= 2 { assert(e == 2); pow2_eq(e, 2); tz_cong(t, 4u64); follows(); }
-    else if e <= 3 { assert(e == 3); pow2_eq(e, 3); tz_cong(t, 8u64); follows(); }
-    else if e <= 4 { assert(e == 4); pow2_eq(e, 4); tz_cong(t, 16u64); follows(); }
-    else if e <= 5 { assert(e == 5); pow2_eq(e, 5); tz_cong(t, 32u64); follows(); }
-    else if e <= 6 { assert(e == 6); pow2_eq(e, 6); tz_cong(t, 64u64); follows(); }
-    else if e <= 7 { assert(e == 7); pow2_eq(e, 7); tz_cong(t, 128u64); follows(); }
-    else if e <= 8 { assert(e == 8); pow2_eq(e, 8); tz_cong(t, 256u64); follows(); }
-    else if e <= 9 { assert(e == 9); pow2_eq(e, 9); tz_cong(t, 512u64); follows(); }
-    else if e <= 10 { assert(e == 10); pow2_eq(e, 10); tz_cong(t, 1024u64); follows(); }
-    else if e <= 11 { assert(e == 11); pow2_eq(e, 11); tz_cong(t, 2048u64); follows(); }
-    else if e <= 12 { assert(e == 12); pow2_eq(e, 12); tz_cong(t, 4096u64); follows(); }
-    else if e <= 13 { assert(e == 13); pow2_eq(e, 13); tz_cong(t, 8192u64); follows(); }
-    else if e <= 14 { assert(e == 14); pow2_eq(e, 14); tz_cong(t, 16384u64); follows(); }
-    else if e <= 15 { assert(e == 15); pow2_eq(e, 15); tz_cong(t, 32768u64); follows(); }
-    else if e <= 16 { assert(e == 16); pow2_eq(e, 16); tz_cong(t, 65536u64); follows(); }
-    else if e <= 17 { assert(e == 17); pow2_eq(e, 17); tz_cong(t, 131072u64); follows(); }
-    else if e <= 18 { assert(e == 18); pow2_eq(e, 18); tz_cong(t, 262144u64); follows(); }
-    else if e <= 19 { assert(e == 19); pow2_eq(e, 19); tz_cong(t, 524288u64); follows(); }
-    else if e <= 20 { assert(e == 20); pow2_eq(e, 20); tz_cong(t, 1048576u64); follows(); }
-    else if e <= 21 { assert(e == 21); pow2_eq(e, 21); tz_cong(t, 2097152u64); follows(); }
-    else if e <= 22 { assert(e == 22); pow2_eq(e, 22); tz_cong(t, 4194304u64); follows(); }
-    else if e <= 23 { assert(e == 23); pow2_eq(e, 23); tz_cong(t, 8388608u64); follows(); }
-    else if e <= 24 { assert(e == 24); pow2_eq(e, 24); tz_cong(t, 16777216u64); follows(); }
-    else if e <= 25 { assert(e == 25); pow2_eq(e, 25); tz_cong(t, 33554432u64); follows(); }
-    else if e <= 26 { assert(e == 26); pow2_eq(e, 26); tz_cong(t, 67108864u64); follows(); }
-    else if e <= 27 { assert(e == 27); pow2_eq(e, 27); tz_cong(t, 134217728u64); follows(); }
-    else if e <= 28 { assert(e == 28); pow2_eq(e, 28); tz_cong(t, 268435456u64); follows(); }
-    else if e <= 29 { assert(e == 29); pow2_eq(e, 29); tz_cong(t, 536870912u64); follows(); }
-    else if e <= 30 { assert(e == 30); pow2_eq(e, 30); tz_cong(t, 1073741824u64); follows(); }
-    else if e <= 31 { assert(e == 31); pow2_eq(e, 31); tz_cong(t, 2147483648u64); follows(); }
-    else if e <= 32 { assert(e == 32); pow2_eq(e, 32); tz_cong(t, 4294967296u64); follows(); }
-    else if e <= 33 { assert(e == 33); pow2_eq(e, 33); tz_cong(t, 8589934592u64); follows(); }
-    else if e <= 34 { assert(e == 34); pow2_eq(e, 34); tz_cong(t, 17179869184u64); follows(); }
-    else if e <= 35 { assert(e == 35); pow2_eq(e, 35); tz_cong(t, 34359738368u64); follows(); }
-    else if e <= 36 { assert(e == 36); pow2_eq(e, 36); tz_cong(t, 68719476736u64); follows(); }
-    else if e <= 37 { assert(e == 37); pow2_eq(e, 37); tz_cong(t, 137438953472u64); follows(); }
-    else if e <= 38 { assert(e == 38); pow2_eq(e, 38); tz_cong(t, 274877906944u64); follows(); }
-    else if e <= 39 { assert(e == 39); pow2_eq(e, 39); tz_cong(t, 549755813888u64); follows(); }
-    else if e <= 40 { assert(e == 40); pow2_eq(e, 40); tz_cong(t, 1099511627776u64); follows(); }
-    else if e <= 41 { assert(e == 41); pow2_eq(e, 41); tz_cong(t, 2199023255552u64); follows(); }
-    else if e <= 42 { assert(e == 42); pow2_eq(e, 42); tz_cong(t, 4398046511104u64); follows(); }
-    else if e <= 43 { assert(e == 43); pow2_eq(e, 43); tz_cong(t, 8796093022208u64); follows(); }
-    else if e <= 44 { assert(e == 44); pow2_eq(e, 44); tz_cong(t, 17592186044416u64); follows(); }
-    else if e <= 45 { assert(e == 45); pow2_eq(e, 45); tz_cong(t, 35184372088832u64); follows(); }
-    else if e <= 46 { assert(e == 46); pow2_eq(e, 46); tz_cong(t, 70368744177664u64); follows(); }
-    else if e <= 47 { assert(e == 47); pow2_eq(e, 47); tz_cong(t, 140737488355328u64); follows(); }
-    else if e <= 48 { assert(e == 48); pow2_eq(e, 48); tz_cong(t, 281474976710656u64); follows(); }
-    else if e <= 49 { assert(e == 49); pow2_eq(e, 49); tz_cong(t, 562949953421312u64); follows(); }
-    else if e <= 50 { assert(e == 50); pow2_eq(e, 50); tz_cong(t, 1125899906842624u64); follows(); }
-    else if e <= 51 { assert(e == 51); pow2_eq(e, 51); tz_cong(t, 2251799813685248u64); follows(); }
-    else if e <= 52 { assert(e == 52); pow2_eq(e, 52); tz_cong(t, 4503599627370496u64); follows(); }
-    else if e <= 53 { assert(e == 53); pow2_eq(e, 53); tz_cong(t, 9007199254740992u64); follows(); }
-    else if e <= 54 { assert(e == 54); pow2_eq(e, 54); tz_cong(t, 18014398509481984u64); follows(); }
-    else if e <= 55 { assert(e == 55); pow2_eq(e, 55); tz_cong(t, 36028797018963968u64); follows(); }
-    else if e <= 56 { assert(e == 56); pow2_eq(e, 56); tz_cong(t, 72057594037927936u64); follows(); }
-    else if e <= 57 { assert(e == 57); pow2_eq(e, 57); tz_cong(t, 144115188075855872u64); follows(); }
-    else if e <= 58 { assert(e == 58); pow2_eq(e, 58); tz_cong(t, 288230376151711744u64); follows(); }
-    else if e <= 59 { assert(e == 59); pow2_eq(e, 59); tz_cong(t, 576460752303423488u64); follows(); }
-    else if e <= 60 { assert(e == 60); pow2_eq(e, 60); tz_cong(t, 1152921504606846976u64); follows(); }
-    else if e <= 61 { assert(e == 61); pow2_eq(e, 61); tz_cong(t, 2305843009213693952u64); follows(); }
-    else if e <= 62 { assert(e == 62); pow2_eq(e, 62); tz_cong(t, 4611686018427387904u64); follows(); }
-    else if e <= 63 { assert(e == 63); pow2_eq(e, 63); tz_cong(t, 9223372036854775808u64); follows(); }
-    else { by_contradiction(); }
+    follows();
 }
 
 /// The bits a word needs: its width minus its leading zeros; zero needs
@@ -1723,7 +1491,7 @@ fn new_pos(s: u64) {
             && iter_ok(s, (u64::MAX >> s.leading_zeros()) - 1u64, 1u64 << (!(u64::MAX >> s.leading_zeros())).trailing_zeros())
             && plist(s, (u64::MAX >> s.leading_zeros()) - 1u64, 1u64 << (!(u64::MAX >> s.leading_zeros())).trailing_zeros()) == srow(0, s as Nat, 63));
     new_start(s);
-    shl_one((!(u64::MAX >> s.leading_zeros())).trailing_zeros());
+    sandblaster::lemmas::bits::shl_one_u64((!(u64::MAX >> s.leading_zeros())).trailing_zeros());
     new_list(s);
     lz_bits_u64(s);
     let k = s.leading_zeros();
@@ -1792,7 +1560,7 @@ fn next_peak(s: u64, p: u64, t: u64) {
             follows();
         }
     });
-    tz_pow2(t, log2(t as Nat));
+    sandblaster::lemmas::bits::tz_pow2_u64(t, log2(t as Nat));
     let h = (log2(t as Nat) as Int) - 1;
     peak_step(s as Nat, p as Nat, t as Nat);
     list_peak(s as Nat, p as Nat, t as Nat);
@@ -1822,7 +1590,7 @@ fn next_desc(s: u64, p: u64, t: u64) {
             follows();
         }
     });
-    tz_pow2(t, log2(t as Nat));
+    sandblaster::lemmas::bits::tz_pow2_u64(t, log2(t as Nat));
     let h = (log2(t as Nat) as Int) - 1;
     descend_step(s as Nat, p as Nat, t as Nat);
     list_descend(s as Nat, p as Nat, t as Nat);
@@ -1966,7 +1734,6 @@ fn valid_facts(s: u64) {
         fits_down(s as Nat, 63, b - 1);
         crate::stdlib::bits::pow2_mono(b, 63);
         let m = u64::MAX >> k;
-        shl_one((!m).trailing_zeros());
         let tt = 1u64 << (!m).trailing_zeros();
         pow2_eq((!m).trailing_zeros() as Int, b);
         log2_pow2(b);
@@ -2233,16 +2000,8 @@ fn pos_to_height_is_the_node_height(pos: Position) {
     follows();
 }
 
-/// Congruence: equal shift amounts, equal shifts.
-#[lemma]
-fn shlx_cong(x: u64, b: u32, j: u32) {
-    requires(b < 64u32 && b == j);
-    ensures(x << b == x << j);
-    follows();
-}
-
 /// `chunk_peaks`'s shifts: the chunk's bounds `c * 2^g` and `(c + 1) *
-/// 2^g` (at most `2^62`) and `2^(g+1)`, exactly (one case per height).
+/// 2^g` (at most `2^62`) and `2^(g+1)`, exactly.
 #[lemma]
 fn chunk_facts(c: u64, g: u32) {
     requires(g <= 62u32 && ((c as Int) + 1) * pow2(g as Int) <= pow2(62));
@@ -2251,70 +2010,7 @@ fn chunk_facts(c: u64, g: u32) {
         && ((c + 1u64) << g) as Int == ((c as Int) + 1) * pow2(g as Int)
         && (c << g) as Int == (c as Int) * pow2(g as Int)
         && ((1u64 << (g + 1u32)) as Int) == 2 * pow2(g as Int));
-    if g <= 0u32 { assert(g == 0u32); shlx_cong(c + 1u64, g, 0u32); shlx_cong(c, g, 0u32); shl_cong(g + 1u32, 1u32); pow2_eq(g as Int, 0); pow2_eq((g as Int) + 1, 1); follows(); }
-    else if g <= 1u32 { assert(g == 1u32); shlx_cong(c + 1u64, g, 1u32); shlx_cong(c, g, 1u32); shl_cong(g + 1u32, 2u32); pow2_eq(g as Int, 1); pow2_eq((g as Int) + 1, 2); sandblaster::lemmas::bits::shl_exact_u64_1(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_1(c); follows(); }
-    else if g <= 2u32 { assert(g == 2u32); shlx_cong(c + 1u64, g, 2u32); shlx_cong(c, g, 2u32); shl_cong(g + 1u32, 3u32); pow2_eq(g as Int, 2); pow2_eq((g as Int) + 1, 3); sandblaster::lemmas::bits::shl_exact_u64_2(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_2(c); follows(); }
-    else if g <= 3u32 { assert(g == 3u32); shlx_cong(c + 1u64, g, 3u32); shlx_cong(c, g, 3u32); shl_cong(g + 1u32, 4u32); pow2_eq(g as Int, 3); pow2_eq((g as Int) + 1, 4); sandblaster::lemmas::bits::shl_exact_u64_3(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_3(c); follows(); }
-    else if g <= 4u32 { assert(g == 4u32); shlx_cong(c + 1u64, g, 4u32); shlx_cong(c, g, 4u32); shl_cong(g + 1u32, 5u32); pow2_eq(g as Int, 4); pow2_eq((g as Int) + 1, 5); sandblaster::lemmas::bits::shl_exact_u64_4(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_4(c); follows(); }
-    else if g <= 5u32 { assert(g == 5u32); shlx_cong(c + 1u64, g, 5u32); shlx_cong(c, g, 5u32); shl_cong(g + 1u32, 6u32); pow2_eq(g as Int, 5); pow2_eq((g as Int) + 1, 6); sandblaster::lemmas::bits::shl_exact_u64_5(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_5(c); follows(); }
-    else if g <= 6u32 { assert(g == 6u32); shlx_cong(c + 1u64, g, 6u32); shlx_cong(c, g, 6u32); shl_cong(g + 1u32, 7u32); pow2_eq(g as Int, 6); pow2_eq((g as Int) + 1, 7); sandblaster::lemmas::bits::shl_exact_u64_6(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_6(c); follows(); }
-    else if g <= 7u32 { assert(g == 7u32); shlx_cong(c + 1u64, g, 7u32); shlx_cong(c, g, 7u32); shl_cong(g + 1u32, 8u32); pow2_eq(g as Int, 7); pow2_eq((g as Int) + 1, 8); sandblaster::lemmas::bits::shl_exact_u64_7(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_7(c); follows(); }
-    else if g <= 8u32 { assert(g == 8u32); shlx_cong(c + 1u64, g, 8u32); shlx_cong(c, g, 8u32); shl_cong(g + 1u32, 9u32); pow2_eq(g as Int, 8); pow2_eq((g as Int) + 1, 9); sandblaster::lemmas::bits::shl_exact_u64_8(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_8(c); follows(); }
-    else if g <= 9u32 { assert(g == 9u32); shlx_cong(c + 1u64, g, 9u32); shlx_cong(c, g, 9u32); shl_cong(g + 1u32, 10u32); pow2_eq(g as Int, 9); pow2_eq((g as Int) + 1, 10); sandblaster::lemmas::bits::shl_exact_u64_9(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_9(c); follows(); }
-    else if g <= 10u32 { assert(g == 10u32); shlx_cong(c + 1u64, g, 10u32); shlx_cong(c, g, 10u32); shl_cong(g + 1u32, 11u32); pow2_eq(g as Int, 10); pow2_eq((g as Int) + 1, 11); sandblaster::lemmas::bits::shl_exact_u64_10(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_10(c); follows(); }
-    else if g <= 11u32 { assert(g == 11u32); shlx_cong(c + 1u64, g, 11u32); shlx_cong(c, g, 11u32); shl_cong(g + 1u32, 12u32); pow2_eq(g as Int, 11); pow2_eq((g as Int) + 1, 12); sandblaster::lemmas::bits::shl_exact_u64_11(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_11(c); follows(); }
-    else if g <= 12u32 { assert(g == 12u32); shlx_cong(c + 1u64, g, 12u32); shlx_cong(c, g, 12u32); shl_cong(g + 1u32, 13u32); pow2_eq(g as Int, 12); pow2_eq((g as Int) + 1, 13); sandblaster::lemmas::bits::shl_exact_u64_12(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_12(c); follows(); }
-    else if g <= 13u32 { assert(g == 13u32); shlx_cong(c + 1u64, g, 13u32); shlx_cong(c, g, 13u32); shl_cong(g + 1u32, 14u32); pow2_eq(g as Int, 13); pow2_eq((g as Int) + 1, 14); sandblaster::lemmas::bits::shl_exact_u64_13(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_13(c); follows(); }
-    else if g <= 14u32 { assert(g == 14u32); shlx_cong(c + 1u64, g, 14u32); shlx_cong(c, g, 14u32); shl_cong(g + 1u32, 15u32); pow2_eq(g as Int, 14); pow2_eq((g as Int) + 1, 15); sandblaster::lemmas::bits::shl_exact_u64_14(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_14(c); follows(); }
-    else if g <= 15u32 { assert(g == 15u32); shlx_cong(c + 1u64, g, 15u32); shlx_cong(c, g, 15u32); shl_cong(g + 1u32, 16u32); pow2_eq(g as Int, 15); pow2_eq((g as Int) + 1, 16); sandblaster::lemmas::bits::shl_exact_u64_15(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_15(c); follows(); }
-    else if g <= 16u32 { assert(g == 16u32); shlx_cong(c + 1u64, g, 16u32); shlx_cong(c, g, 16u32); shl_cong(g + 1u32, 17u32); pow2_eq(g as Int, 16); pow2_eq((g as Int) + 1, 17); sandblaster::lemmas::bits::shl_exact_u64_16(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_16(c); follows(); }
-    else if g <= 17u32 { assert(g == 17u32); shlx_cong(c + 1u64, g, 17u32); shlx_cong(c, g, 17u32); shl_cong(g + 1u32, 18u32); pow2_eq(g as Int, 17); pow2_eq((g as Int) + 1, 18); sandblaster::lemmas::bits::shl_exact_u64_17(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_17(c); follows(); }
-    else if g <= 18u32 { assert(g == 18u32); shlx_cong(c + 1u64, g, 18u32); shlx_cong(c, g, 18u32); shl_cong(g + 1u32, 19u32); pow2_eq(g as Int, 18); pow2_eq((g as Int) + 1, 19); sandblaster::lemmas::bits::shl_exact_u64_18(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_18(c); follows(); }
-    else if g <= 19u32 { assert(g == 19u32); shlx_cong(c + 1u64, g, 19u32); shlx_cong(c, g, 19u32); shl_cong(g + 1u32, 20u32); pow2_eq(g as Int, 19); pow2_eq((g as Int) + 1, 20); sandblaster::lemmas::bits::shl_exact_u64_19(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_19(c); follows(); }
-    else if g <= 20u32 { assert(g == 20u32); shlx_cong(c + 1u64, g, 20u32); shlx_cong(c, g, 20u32); shl_cong(g + 1u32, 21u32); pow2_eq(g as Int, 20); pow2_eq((g as Int) + 1, 21); sandblaster::lemmas::bits::shl_exact_u64_20(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_20(c); follows(); }
-    else if g <= 21u32 { assert(g == 21u32); shlx_cong(c + 1u64, g, 21u32); shlx_cong(c, g, 21u32); shl_cong(g + 1u32, 22u32); pow2_eq(g as Int, 21); pow2_eq((g as Int) + 1, 22); sandblaster::lemmas::bits::shl_exact_u64_21(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_21(c); follows(); }
-    else if g <= 22u32 { assert(g == 22u32); shlx_cong(c + 1u64, g, 22u32); shlx_cong(c, g, 22u32); shl_cong(g + 1u32, 23u32); pow2_eq(g as Int, 22); pow2_eq((g as Int) + 1, 23); sandblaster::lemmas::bits::shl_exact_u64_22(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_22(c); follows(); }
-    else if g <= 23u32 { assert(g == 23u32); shlx_cong(c + 1u64, g, 23u32); shlx_cong(c, g, 23u32); shl_cong(g + 1u32, 24u32); pow2_eq(g as Int, 23); pow2_eq((g as Int) + 1, 24); sandblaster::lemmas::bits::shl_exact_u64_23(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_23(c); follows(); }
-    else if g <= 24u32 { assert(g == 24u32); shlx_cong(c + 1u64, g, 24u32); shlx_cong(c, g, 24u32); shl_cong(g + 1u32, 25u32); pow2_eq(g as Int, 24); pow2_eq((g as Int) + 1, 25); sandblaster::lemmas::bits::shl_exact_u64_24(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_24(c); follows(); }
-    else if g <= 25u32 { assert(g == 25u32); shlx_cong(c + 1u64, g, 25u32); shlx_cong(c, g, 25u32); shl_cong(g + 1u32, 26u32); pow2_eq(g as Int, 25); pow2_eq((g as Int) + 1, 26); sandblaster::lemmas::bits::shl_exact_u64_25(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_25(c); follows(); }
-    else if g <= 26u32 { assert(g == 26u32); shlx_cong(c + 1u64, g, 26u32); shlx_cong(c, g, 26u32); shl_cong(g + 1u32, 27u32); pow2_eq(g as Int, 26); pow2_eq((g as Int) + 1, 27); sandblaster::lemmas::bits::shl_exact_u64_26(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_26(c); follows(); }
-    else if g <= 27u32 { assert(g == 27u32); shlx_cong(c + 1u64, g, 27u32); shlx_cong(c, g, 27u32); shl_cong(g + 1u32, 28u32); pow2_eq(g as Int, 27); pow2_eq((g as Int) + 1, 28); sandblaster::lemmas::bits::shl_exact_u64_27(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_27(c); follows(); }
-    else if g <= 28u32 { assert(g == 28u32); shlx_cong(c + 1u64, g, 28u32); shlx_cong(c, g, 28u32); shl_cong(g + 1u32, 29u32); pow2_eq(g as Int, 28); pow2_eq((g as Int) + 1, 29); sandblaster::lemmas::bits::shl_exact_u64_28(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_28(c); follows(); }
-    else if g <= 29u32 { assert(g == 29u32); shlx_cong(c + 1u64, g, 29u32); shlx_cong(c, g, 29u32); shl_cong(g + 1u32, 30u32); pow2_eq(g as Int, 29); pow2_eq((g as Int) + 1, 30); sandblaster::lemmas::bits::shl_exact_u64_29(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_29(c); follows(); }
-    else if g <= 30u32 { assert(g == 30u32); shlx_cong(c + 1u64, g, 30u32); shlx_cong(c, g, 30u32); shl_cong(g + 1u32, 31u32); pow2_eq(g as Int, 30); pow2_eq((g as Int) + 1, 31); sandblaster::lemmas::bits::shl_exact_u64_30(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_30(c); follows(); }
-    else if g <= 31u32 { assert(g == 31u32); shlx_cong(c + 1u64, g, 31u32); shlx_cong(c, g, 31u32); shl_cong(g + 1u32, 32u32); pow2_eq(g as Int, 31); pow2_eq((g as Int) + 1, 32); sandblaster::lemmas::bits::shl_exact_u64_31(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_31(c); follows(); }
-    else if g <= 32u32 { assert(g == 32u32); shlx_cong(c + 1u64, g, 32u32); shlx_cong(c, g, 32u32); shl_cong(g + 1u32, 33u32); pow2_eq(g as Int, 32); pow2_eq((g as Int) + 1, 33); sandblaster::lemmas::bits::shl_exact_u64_32(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_32(c); follows(); }
-    else if g <= 33u32 { assert(g == 33u32); shlx_cong(c + 1u64, g, 33u32); shlx_cong(c, g, 33u32); shl_cong(g + 1u32, 34u32); pow2_eq(g as Int, 33); pow2_eq((g as Int) + 1, 34); sandblaster::lemmas::bits::shl_exact_u64_33(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_33(c); follows(); }
-    else if g <= 34u32 { assert(g == 34u32); shlx_cong(c + 1u64, g, 34u32); shlx_cong(c, g, 34u32); shl_cong(g + 1u32, 35u32); pow2_eq(g as Int, 34); pow2_eq((g as Int) + 1, 35); sandblaster::lemmas::bits::shl_exact_u64_34(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_34(c); follows(); }
-    else if g <= 35u32 { assert(g == 35u32); shlx_cong(c + 1u64, g, 35u32); shlx_cong(c, g, 35u32); shl_cong(g + 1u32, 36u32); pow2_eq(g as Int, 35); pow2_eq((g as Int) + 1, 36); sandblaster::lemmas::bits::shl_exact_u64_35(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_35(c); follows(); }
-    else if g <= 36u32 { assert(g == 36u32); shlx_cong(c + 1u64, g, 36u32); shlx_cong(c, g, 36u32); shl_cong(g + 1u32, 37u32); pow2_eq(g as Int, 36); pow2_eq((g as Int) + 1, 37); sandblaster::lemmas::bits::shl_exact_u64_36(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_36(c); follows(); }
-    else if g <= 37u32 { assert(g == 37u32); shlx_cong(c + 1u64, g, 37u32); shlx_cong(c, g, 37u32); shl_cong(g + 1u32, 38u32); pow2_eq(g as Int, 37); pow2_eq((g as Int) + 1, 38); sandblaster::lemmas::bits::shl_exact_u64_37(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_37(c); follows(); }
-    else if g <= 38u32 { assert(g == 38u32); shlx_cong(c + 1u64, g, 38u32); shlx_cong(c, g, 38u32); shl_cong(g + 1u32, 39u32); pow2_eq(g as Int, 38); pow2_eq((g as Int) + 1, 39); sandblaster::lemmas::bits::shl_exact_u64_38(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_38(c); follows(); }
-    else if g <= 39u32 { assert(g == 39u32); shlx_cong(c + 1u64, g, 39u32); shlx_cong(c, g, 39u32); shl_cong(g + 1u32, 40u32); pow2_eq(g as Int, 39); pow2_eq((g as Int) + 1, 40); sandblaster::lemmas::bits::shl_exact_u64_39(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_39(c); follows(); }
-    else if g <= 40u32 { assert(g == 40u32); shlx_cong(c + 1u64, g, 40u32); shlx_cong(c, g, 40u32); shl_cong(g + 1u32, 41u32); pow2_eq(g as Int, 40); pow2_eq((g as Int) + 1, 41); sandblaster::lemmas::bits::shl_exact_u64_40(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_40(c); follows(); }
-    else if g <= 41u32 { assert(g == 41u32); shlx_cong(c + 1u64, g, 41u32); shlx_cong(c, g, 41u32); shl_cong(g + 1u32, 42u32); pow2_eq(g as Int, 41); pow2_eq((g as Int) + 1, 42); sandblaster::lemmas::bits::shl_exact_u64_41(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_41(c); follows(); }
-    else if g <= 42u32 { assert(g == 42u32); shlx_cong(c + 1u64, g, 42u32); shlx_cong(c, g, 42u32); shl_cong(g + 1u32, 43u32); pow2_eq(g as Int, 42); pow2_eq((g as Int) + 1, 43); sandblaster::lemmas::bits::shl_exact_u64_42(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_42(c); follows(); }
-    else if g <= 43u32 { assert(g == 43u32); shlx_cong(c + 1u64, g, 43u32); shlx_cong(c, g, 43u32); shl_cong(g + 1u32, 44u32); pow2_eq(g as Int, 43); pow2_eq((g as Int) + 1, 44); sandblaster::lemmas::bits::shl_exact_u64_43(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_43(c); follows(); }
-    else if g <= 44u32 { assert(g == 44u32); shlx_cong(c + 1u64, g, 44u32); shlx_cong(c, g, 44u32); shl_cong(g + 1u32, 45u32); pow2_eq(g as Int, 44); pow2_eq((g as Int) + 1, 45); sandblaster::lemmas::bits::shl_exact_u64_44(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_44(c); follows(); }
-    else if g <= 45u32 { assert(g == 45u32); shlx_cong(c + 1u64, g, 45u32); shlx_cong(c, g, 45u32); shl_cong(g + 1u32, 46u32); pow2_eq(g as Int, 45); pow2_eq((g as Int) + 1, 46); sandblaster::lemmas::bits::shl_exact_u64_45(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_45(c); follows(); }
-    else if g <= 46u32 { assert(g == 46u32); shlx_cong(c + 1u64, g, 46u32); shlx_cong(c, g, 46u32); shl_cong(g + 1u32, 47u32); pow2_eq(g as Int, 46); pow2_eq((g as Int) + 1, 47); sandblaster::lemmas::bits::shl_exact_u64_46(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_46(c); follows(); }
-    else if g <= 47u32 { assert(g == 47u32); shlx_cong(c + 1u64, g, 47u32); shlx_cong(c, g, 47u32); shl_cong(g + 1u32, 48u32); pow2_eq(g as Int, 47); pow2_eq((g as Int) + 1, 48); sandblaster::lemmas::bits::shl_exact_u64_47(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_47(c); follows(); }
-    else if g <= 48u32 { assert(g == 48u32); shlx_cong(c + 1u64, g, 48u32); shlx_cong(c, g, 48u32); shl_cong(g + 1u32, 49u32); pow2_eq(g as Int, 48); pow2_eq((g as Int) + 1, 49); sandblaster::lemmas::bits::shl_exact_u64_48(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_48(c); follows(); }
-    else if g <= 49u32 { assert(g == 49u32); shlx_cong(c + 1u64, g, 49u32); shlx_cong(c, g, 49u32); shl_cong(g + 1u32, 50u32); pow2_eq(g as Int, 49); pow2_eq((g as Int) + 1, 50); sandblaster::lemmas::bits::shl_exact_u64_49(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_49(c); follows(); }
-    else if g <= 50u32 { assert(g == 50u32); shlx_cong(c + 1u64, g, 50u32); shlx_cong(c, g, 50u32); shl_cong(g + 1u32, 51u32); pow2_eq(g as Int, 50); pow2_eq((g as Int) + 1, 51); sandblaster::lemmas::bits::shl_exact_u64_50(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_50(c); follows(); }
-    else if g <= 51u32 { assert(g == 51u32); shlx_cong(c + 1u64, g, 51u32); shlx_cong(c, g, 51u32); shl_cong(g + 1u32, 52u32); pow2_eq(g as Int, 51); pow2_eq((g as Int) + 1, 52); sandblaster::lemmas::bits::shl_exact_u64_51(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_51(c); follows(); }
-    else if g <= 52u32 { assert(g == 52u32); shlx_cong(c + 1u64, g, 52u32); shlx_cong(c, g, 52u32); shl_cong(g + 1u32, 53u32); pow2_eq(g as Int, 52); pow2_eq((g as Int) + 1, 53); sandblaster::lemmas::bits::shl_exact_u64_52(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_52(c); follows(); }
-    else if g <= 53u32 { assert(g == 53u32); shlx_cong(c + 1u64, g, 53u32); shlx_cong(c, g, 53u32); shl_cong(g + 1u32, 54u32); pow2_eq(g as Int, 53); pow2_eq((g as Int) + 1, 54); sandblaster::lemmas::bits::shl_exact_u64_53(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_53(c); follows(); }
-    else if g <= 54u32 { assert(g == 54u32); shlx_cong(c + 1u64, g, 54u32); shlx_cong(c, g, 54u32); shl_cong(g + 1u32, 55u32); pow2_eq(g as Int, 54); pow2_eq((g as Int) + 1, 55); sandblaster::lemmas::bits::shl_exact_u64_54(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_54(c); follows(); }
-    else if g <= 55u32 { assert(g == 55u32); shlx_cong(c + 1u64, g, 55u32); shlx_cong(c, g, 55u32); shl_cong(g + 1u32, 56u32); pow2_eq(g as Int, 55); pow2_eq((g as Int) + 1, 56); sandblaster::lemmas::bits::shl_exact_u64_55(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_55(c); follows(); }
-    else if g <= 56u32 { assert(g == 56u32); shlx_cong(c + 1u64, g, 56u32); shlx_cong(c, g, 56u32); shl_cong(g + 1u32, 57u32); pow2_eq(g as Int, 56); pow2_eq((g as Int) + 1, 57); sandblaster::lemmas::bits::shl_exact_u64_56(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_56(c); follows(); }
-    else if g <= 57u32 { assert(g == 57u32); shlx_cong(c + 1u64, g, 57u32); shlx_cong(c, g, 57u32); shl_cong(g + 1u32, 58u32); pow2_eq(g as Int, 57); pow2_eq((g as Int) + 1, 58); sandblaster::lemmas::bits::shl_exact_u64_57(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_57(c); follows(); }
-    else if g <= 58u32 { assert(g == 58u32); shlx_cong(c + 1u64, g, 58u32); shlx_cong(c, g, 58u32); shl_cong(g + 1u32, 59u32); pow2_eq(g as Int, 58); pow2_eq((g as Int) + 1, 59); sandblaster::lemmas::bits::shl_exact_u64_58(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_58(c); follows(); }
-    else if g <= 59u32 { assert(g == 59u32); shlx_cong(c + 1u64, g, 59u32); shlx_cong(c, g, 59u32); shl_cong(g + 1u32, 60u32); pow2_eq(g as Int, 59); pow2_eq((g as Int) + 1, 60); sandblaster::lemmas::bits::shl_exact_u64_59(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_59(c); follows(); }
-    else if g <= 60u32 { assert(g == 60u32); shlx_cong(c + 1u64, g, 60u32); shlx_cong(c, g, 60u32); shl_cong(g + 1u32, 61u32); pow2_eq(g as Int, 60); pow2_eq((g as Int) + 1, 61); sandblaster::lemmas::bits::shl_exact_u64_60(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_60(c); follows(); }
-    else if g <= 61u32 { assert(g == 61u32); shlx_cong(c + 1u64, g, 61u32); shlx_cong(c, g, 61u32); shl_cong(g + 1u32, 62u32); pow2_eq(g as Int, 61); pow2_eq((g as Int) + 1, 62); sandblaster::lemmas::bits::shl_exact_u64_61(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_61(c); follows(); }
-    else if g <= 62u32 { assert(g == 62u32); shlx_cong(c + 1u64, g, 62u32); shlx_cong(c, g, 62u32); shl_cong(g + 1u32, 63u32); pow2_eq(g as Int, 62); pow2_eq((g as Int) + 1, 63); sandblaster::lemmas::bits::shl_exact_u64_62(c + 1u64); sandblaster::lemmas::bits::shl_exact_u64_62(c); follows(); }
-    else { by_contradiction(); }
+    follows();
 }
 
 /// `chunk_peaks`'s location checks (`is_valid`: at most `MAX_LEAVES`), in
@@ -2467,89 +2163,6 @@ fn chunk_peaks_facts() {
     panic_lemma(crate::proof::chunk_peaks_panics);
 }
 
-/// Congruence: equal amounts, equal wrapping shifts.
-#[lemma]
-fn wshlx_cong(x: u64, b: u32, j: u32) {
-    requires(b == j);
-    ensures(x.wrapping_shl(b) == x.wrapping_shl(j));
-    follows();
-}
-
-/// A shift by `g < 64` that does not overflow: the wrapping one (the
-/// literal reading's `x << g`: MIR's `Shl` masks its amount) is exact (one
-/// case per amount: a shift by a variable amount is a prover gap,
-/// DESIGN.md §16.3).
-#[lemma]
-fn wshl_exact(x: u64, g: u32) {
-    requires(g < 64u32 && (x as Int) * pow2(g as Int) < pow2(64));
-    ensures((x.wrapping_shl(g) as Int) == (x as Int) * pow2(g as Int));
-    if g <= 0u32 { assert(g == 0u32); wshlx_cong(x, g, 0u32); assert(x.wrapping_shl(0u32) == x, { bv(); }); pow2_eq(g as Int, 0); follows(); }
-    else if g <= 1u32 { assert(g == 1u32); wshlx_cong(x, g, 1u32); sandblaster::lemmas::bits::wshl_exact_u64_1(x); pow2_eq(g as Int, 1); follows(); }
-    else if g <= 2u32 { assert(g == 2u32); wshlx_cong(x, g, 2u32); sandblaster::lemmas::bits::wshl_exact_u64_2(x); pow2_eq(g as Int, 2); follows(); }
-    else if g <= 3u32 { assert(g == 3u32); wshlx_cong(x, g, 3u32); sandblaster::lemmas::bits::wshl_exact_u64_3(x); pow2_eq(g as Int, 3); follows(); }
-    else if g <= 4u32 { assert(g == 4u32); wshlx_cong(x, g, 4u32); sandblaster::lemmas::bits::wshl_exact_u64_4(x); pow2_eq(g as Int, 4); follows(); }
-    else if g <= 5u32 { assert(g == 5u32); wshlx_cong(x, g, 5u32); sandblaster::lemmas::bits::wshl_exact_u64_5(x); pow2_eq(g as Int, 5); follows(); }
-    else if g <= 6u32 { assert(g == 6u32); wshlx_cong(x, g, 6u32); sandblaster::lemmas::bits::wshl_exact_u64_6(x); pow2_eq(g as Int, 6); follows(); }
-    else if g <= 7u32 { assert(g == 7u32); wshlx_cong(x, g, 7u32); sandblaster::lemmas::bits::wshl_exact_u64_7(x); pow2_eq(g as Int, 7); follows(); }
-    else if g <= 8u32 { assert(g == 8u32); wshlx_cong(x, g, 8u32); sandblaster::lemmas::bits::wshl_exact_u64_8(x); pow2_eq(g as Int, 8); follows(); }
-    else if g <= 9u32 { assert(g == 9u32); wshlx_cong(x, g, 9u32); sandblaster::lemmas::bits::wshl_exact_u64_9(x); pow2_eq(g as Int, 9); follows(); }
-    else if g <= 10u32 { assert(g == 10u32); wshlx_cong(x, g, 10u32); sandblaster::lemmas::bits::wshl_exact_u64_10(x); pow2_eq(g as Int, 10); follows(); }
-    else if g <= 11u32 { assert(g == 11u32); wshlx_cong(x, g, 11u32); sandblaster::lemmas::bits::wshl_exact_u64_11(x); pow2_eq(g as Int, 11); follows(); }
-    else if g <= 12u32 { assert(g == 12u32); wshlx_cong(x, g, 12u32); sandblaster::lemmas::bits::wshl_exact_u64_12(x); pow2_eq(g as Int, 12); follows(); }
-    else if g <= 13u32 { assert(g == 13u32); wshlx_cong(x, g, 13u32); sandblaster::lemmas::bits::wshl_exact_u64_13(x); pow2_eq(g as Int, 13); follows(); }
-    else if g <= 14u32 { assert(g == 14u32); wshlx_cong(x, g, 14u32); sandblaster::lemmas::bits::wshl_exact_u64_14(x); pow2_eq(g as Int, 14); follows(); }
-    else if g <= 15u32 { assert(g == 15u32); wshlx_cong(x, g, 15u32); sandblaster::lemmas::bits::wshl_exact_u64_15(x); pow2_eq(g as Int, 15); follows(); }
-    else if g <= 16u32 { assert(g == 16u32); wshlx_cong(x, g, 16u32); sandblaster::lemmas::bits::wshl_exact_u64_16(x); pow2_eq(g as Int, 16); follows(); }
-    else if g <= 17u32 { assert(g == 17u32); wshlx_cong(x, g, 17u32); sandblaster::lemmas::bits::wshl_exact_u64_17(x); pow2_eq(g as Int, 17); follows(); }
-    else if g <= 18u32 { assert(g == 18u32); wshlx_cong(x, g, 18u32); sandblaster::lemmas::bits::wshl_exact_u64_18(x); pow2_eq(g as Int, 18); follows(); }
-    else if g <= 19u32 { assert(g == 19u32); wshlx_cong(x, g, 19u32); sandblaster::lemmas::bits::wshl_exact_u64_19(x); pow2_eq(g as Int, 19); follows(); }
-    else if g <= 20u32 { assert(g == 20u32); wshlx_cong(x, g, 20u32); sandblaster::lemmas::bits::wshl_exact_u64_20(x); pow2_eq(g as Int, 20); follows(); }
-    else if g <= 21u32 { assert(g == 21u32); wshlx_cong(x, g, 21u32); sandblaster::lemmas::bits::wshl_exact_u64_21(x); pow2_eq(g as Int, 21); follows(); }
-    else if g <= 22u32 { assert(g == 22u32); wshlx_cong(x, g, 22u32); sandblaster::lemmas::bits::wshl_exact_u64_22(x); pow2_eq(g as Int, 22); follows(); }
-    else if g <= 23u32 { assert(g == 23u32); wshlx_cong(x, g, 23u32); sandblaster::lemmas::bits::wshl_exact_u64_23(x); pow2_eq(g as Int, 23); follows(); }
-    else if g <= 24u32 { assert(g == 24u32); wshlx_cong(x, g, 24u32); sandblaster::lemmas::bits::wshl_exact_u64_24(x); pow2_eq(g as Int, 24); follows(); }
-    else if g <= 25u32 { assert(g == 25u32); wshlx_cong(x, g, 25u32); sandblaster::lemmas::bits::wshl_exact_u64_25(x); pow2_eq(g as Int, 25); follows(); }
-    else if g <= 26u32 { assert(g == 26u32); wshlx_cong(x, g, 26u32); sandblaster::lemmas::bits::wshl_exact_u64_26(x); pow2_eq(g as Int, 26); follows(); }
-    else if g <= 27u32 { assert(g == 27u32); wshlx_cong(x, g, 27u32); sandblaster::lemmas::bits::wshl_exact_u64_27(x); pow2_eq(g as Int, 27); follows(); }
-    else if g <= 28u32 { assert(g == 28u32); wshlx_cong(x, g, 28u32); sandblaster::lemmas::bits::wshl_exact_u64_28(x); pow2_eq(g as Int, 28); follows(); }
-    else if g <= 29u32 { assert(g == 29u32); wshlx_cong(x, g, 29u32); sandblaster::lemmas::bits::wshl_exact_u64_29(x); pow2_eq(g as Int, 29); follows(); }
-    else if g <= 30u32 { assert(g == 30u32); wshlx_cong(x, g, 30u32); sandblaster::lemmas::bits::wshl_exact_u64_30(x); pow2_eq(g as Int, 30); follows(); }
-    else if g <= 31u32 { assert(g == 31u32); wshlx_cong(x, g, 31u32); sandblaster::lemmas::bits::wshl_exact_u64_31(x); pow2_eq(g as Int, 31); follows(); }
-    else if g <= 32u32 { assert(g == 32u32); wshlx_cong(x, g, 32u32); sandblaster::lemmas::bits::wshl_exact_u64_32(x); pow2_eq(g as Int, 32); follows(); }
-    else if g <= 33u32 { assert(g == 33u32); wshlx_cong(x, g, 33u32); sandblaster::lemmas::bits::wshl_exact_u64_33(x); pow2_eq(g as Int, 33); follows(); }
-    else if g <= 34u32 { assert(g == 34u32); wshlx_cong(x, g, 34u32); sandblaster::lemmas::bits::wshl_exact_u64_34(x); pow2_eq(g as Int, 34); follows(); }
-    else if g <= 35u32 { assert(g == 35u32); wshlx_cong(x, g, 35u32); sandblaster::lemmas::bits::wshl_exact_u64_35(x); pow2_eq(g as Int, 35); follows(); }
-    else if g <= 36u32 { assert(g == 36u32); wshlx_cong(x, g, 36u32); sandblaster::lemmas::bits::wshl_exact_u64_36(x); pow2_eq(g as Int, 36); follows(); }
-    else if g <= 37u32 { assert(g == 37u32); wshlx_cong(x, g, 37u32); sandblaster::lemmas::bits::wshl_exact_u64_37(x); pow2_eq(g as Int, 37); follows(); }
-    else if g <= 38u32 { assert(g == 38u32); wshlx_cong(x, g, 38u32); sandblaster::lemmas::bits::wshl_exact_u64_38(x); pow2_eq(g as Int, 38); follows(); }
-    else if g <= 39u32 { assert(g == 39u32); wshlx_cong(x, g, 39u32); sandblaster::lemmas::bits::wshl_exact_u64_39(x); pow2_eq(g as Int, 39); follows(); }
-    else if g <= 40u32 { assert(g == 40u32); wshlx_cong(x, g, 40u32); sandblaster::lemmas::bits::wshl_exact_u64_40(x); pow2_eq(g as Int, 40); follows(); }
-    else if g <= 41u32 { assert(g == 41u32); wshlx_cong(x, g, 41u32); sandblaster::lemmas::bits::wshl_exact_u64_41(x); pow2_eq(g as Int, 41); follows(); }
-    else if g <= 42u32 { assert(g == 42u32); wshlx_cong(x, g, 42u32); sandblaster::lemmas::bits::wshl_exact_u64_42(x); pow2_eq(g as Int, 42); follows(); }
-    else if g <= 43u32 { assert(g == 43u32); wshlx_cong(x, g, 43u32); sandblaster::lemmas::bits::wshl_exact_u64_43(x); pow2_eq(g as Int, 43); follows(); }
-    else if g <= 44u32 { assert(g == 44u32); wshlx_cong(x, g, 44u32); sandblaster::lemmas::bits::wshl_exact_u64_44(x); pow2_eq(g as Int, 44); follows(); }
-    else if g <= 45u32 { assert(g == 45u32); wshlx_cong(x, g, 45u32); sandblaster::lemmas::bits::wshl_exact_u64_45(x); pow2_eq(g as Int, 45); follows(); }
-    else if g <= 46u32 { assert(g == 46u32); wshlx_cong(x, g, 46u32); sandblaster::lemmas::bits::wshl_exact_u64_46(x); pow2_eq(g as Int, 46); follows(); }
-    else if g <= 47u32 { assert(g == 47u32); wshlx_cong(x, g, 47u32); sandblaster::lemmas::bits::wshl_exact_u64_47(x); pow2_eq(g as Int, 47); follows(); }
-    else if g <= 48u32 { assert(g == 48u32); wshlx_cong(x, g, 48u32); sandblaster::lemmas::bits::wshl_exact_u64_48(x); pow2_eq(g as Int, 48); follows(); }
-    else if g <= 49u32 { assert(g == 49u32); wshlx_cong(x, g, 49u32); sandblaster::lemmas::bits::wshl_exact_u64_49(x); pow2_eq(g as Int, 49); follows(); }
-    else if g <= 50u32 { assert(g == 50u32); wshlx_cong(x, g, 50u32); sandblaster::lemmas::bits::wshl_exact_u64_50(x); pow2_eq(g as Int, 50); follows(); }
-    else if g <= 51u32 { assert(g == 51u32); wshlx_cong(x, g, 51u32); sandblaster::lemmas::bits::wshl_exact_u64_51(x); pow2_eq(g as Int, 51); follows(); }
-    else if g <= 52u32 { assert(g == 52u32); wshlx_cong(x, g, 52u32); sandblaster::lemmas::bits::wshl_exact_u64_52(x); pow2_eq(g as Int, 52); follows(); }
-    else if g <= 53u32 { assert(g == 53u32); wshlx_cong(x, g, 53u32); sandblaster::lemmas::bits::wshl_exact_u64_53(x); pow2_eq(g as Int, 53); follows(); }
-    else if g <= 54u32 { assert(g == 54u32); wshlx_cong(x, g, 54u32); sandblaster::lemmas::bits::wshl_exact_u64_54(x); pow2_eq(g as Int, 54); follows(); }
-    else if g <= 55u32 { assert(g == 55u32); wshlx_cong(x, g, 55u32); sandblaster::lemmas::bits::wshl_exact_u64_55(x); pow2_eq(g as Int, 55); follows(); }
-    else if g <= 56u32 { assert(g == 56u32); wshlx_cong(x, g, 56u32); sandblaster::lemmas::bits::wshl_exact_u64_56(x); pow2_eq(g as Int, 56); follows(); }
-    else if g <= 57u32 { assert(g == 57u32); wshlx_cong(x, g, 57u32); sandblaster::lemmas::bits::wshl_exact_u64_57(x); pow2_eq(g as Int, 57); follows(); }
-    else if g <= 58u32 { assert(g == 58u32); wshlx_cong(x, g, 58u32); sandblaster::lemmas::bits::wshl_exact_u64_58(x); pow2_eq(g as Int, 58); follows(); }
-    else if g <= 59u32 { assert(g == 59u32); wshlx_cong(x, g, 59u32); sandblaster::lemmas::bits::wshl_exact_u64_59(x); pow2_eq(g as Int, 59); follows(); }
-    else if g <= 60u32 { assert(g == 60u32); wshlx_cong(x, g, 60u32); sandblaster::lemmas::bits::wshl_exact_u64_60(x); pow2_eq(g as Int, 60); follows(); }
-    else if g <= 61u32 { assert(g == 61u32); wshlx_cong(x, g, 61u32); sandblaster::lemmas::bits::wshl_exact_u64_61(x); pow2_eq(g as Int, 61); follows(); }
-    else if g <= 62u32 { assert(g == 62u32); wshlx_cong(x, g, 62u32); sandblaster::lemmas::bits::wshl_exact_u64_62(x); pow2_eq(g as Int, 62); follows(); }
-    else if g <= 63u32 { assert(g == 63u32); wshlx_cong(x, g, 63u32); sandblaster::lemmas::bits::wshl_exact_u64_63(x); pow2_eq(g as Int, 63); follows(); }
-    else { by_contradiction(); }
-}
-
 /// `chunk_peaks`'s panic condition in the terms of its code: the chunk's
 /// end `w = (c + 1) << g` (the literal reading's wrapping `c + 1` and
 /// shift) is `s = chunk_end(c, g) = (c+1)·2^g` exactly, its set bits are
@@ -2570,7 +2183,8 @@ fn chunk_peaks_panics(size: Position, chunk_idx: u64, grafting_height: u32) {
     let a = chunk_idx.wrapping_add(1u64);
     assert((a as Int) == (chunk_idx as Int) + 1);
     assert((a as Int) * pow2(grafting_height as Int) == ((chunk_idx as Int) + 1) * pow2(grafting_height as Int));
-    wshl_exact(a, grafting_height);
+    // below 64 the shift is exact
+    assert(grafting_height < 64u32);
     let w = a.wrapping_shl(grafting_height);
     assert((w as Int) == ((chunk_idx as Int) + 1) * pow2(grafting_height as Int));
     crate::stdlib::bits::count_ones_u64(w);
@@ -2628,13 +2242,9 @@ fn position_to_location_is_sound(pos: Position, loc: Location) {
     }
 }
 
-/// `children`: `1 << height` is `2^height`; its panic theorem's walk
-/// uses `children_panics`.
+/// `children`: its panic theorem's walk uses `children_panics`.
 #[lift_attach(crate::merkle::mmr::Family::children)]
 fn children_facts() {
-    at_start! {
-        crate::proof::shl_one(height);
-    }
     panic_lemma(crate::proof::children_panics);
 }
 
@@ -2645,12 +2255,8 @@ fn children_facts() {
 fn children_panics(pos: Position, height: u32) {
     requires(height >= 64u32 || (pos.0 as Int) < pow2(height as Int));
     ensures(height >= 64u32 || pos.0 < 1u64.wrapping_shl(height));
-    if height >= 64u32 {
-        follows();
-    } else {
-        wshl_exact(1u64, height);
-        follows();
-    }
+    // below 64, `1 << height` is `2^height`
+    by_cases(height >= 64u32);
 }
 
 // ---------------------------------------------------------------------------
@@ -2680,7 +2286,7 @@ fn step_facts_u64(s: u64, p: u64, t: u64) {
                 follows();
             }
         });
-        tz_pow2(t, log2(t as Nat));
+        sandblaster::lemmas::bits::tz_pow2_u64(t, log2(t as Nat));
         assert(((t >> 1u32) as Int) == (t as Int) / 2, { follows(); });
         if p < s {
             by_unfolding(crate::laws::search_step);

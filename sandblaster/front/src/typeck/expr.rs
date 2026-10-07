@@ -1650,6 +1650,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             Ty::Bool | Ty::Uint(_) | Ty::Int | Ty::Nat => true,
             Ty::Tuple(ts) => ts.iter().all(|t| self.supports_eq(t)),
             Ty::Array(t, _) | Ty::Slice(t) | Ty::Option(t) | Ty::Ref(t) | Ty::Seq(t) => self.supports_eq(t),
+            // in ghost code, the equality of the lanes (no `PartialEq` in Rust)
+            Ty::Vector(_) => self.ghost,
             Ty::Adt(id, args) => {
                 let d = match &self.ck.hir_items[id.0 as usize] {
                     Some(ItemKind::Struct(s)) => s.derives,
@@ -1813,6 +1815,15 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         let b = self.infer(&i.expr);
         let b = self.autoderef(b);
+        // ghost `v[i]` on a hardware vector (§9.2): lane `i` of its model's
+        // `Array(lane, n)` (lane 0 first), indexed as that array
+        let b = match (&b.ty, self.ghost) {
+            (Ty::Vector(v), true) => {
+                let (lane, n) = v.lanes();
+                self.view_coerce_expr(b, &Ty::array(Ty::Uint(lane), n))
+            }
+            _ => b,
+        };
         if let (Ty::Seq(t), true) = (&b.ty, self.ghost) {
             // ghost `xs[i]` on a `Seq<T>`, `i: Nat` (§4.1)
             let t = (**t).clone();

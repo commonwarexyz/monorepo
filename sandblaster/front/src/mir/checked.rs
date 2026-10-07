@@ -1692,11 +1692,12 @@ impl Default for GateOptions<'_> {
 
 /// The identity of the literal reading's generator and library (amendment
 /// (g)): the trusted generator, the statement generator, the names and the
-/// parse it reads, `literal.core`, and `cfg.rs` (the untrusted shape facts
-/// the generator places fuel by: a change there changes L's text).
+/// parse it reads, `literal.core`, the reading of `core::arch` calls
+/// (`arch.rs`, §20.9), and `cfg.rs` (the untrusted shape facts the
+/// generator places fuel by: a change there changes L's text).
 pub(crate) fn generator_hash() -> String {
     let mut t = String::from("sandblaster-mir-theorem-generator/1\n");
-    for (n, s) in [("literal.rs", include_str!("literal.rs")), ("stmt.rs", include_str!("stmt.rs")), ("mod.rs", include_str!("mod.rs")), ("ir.rs", include_str!("ir.rs")), ("sexp.rs", include_str!("sexp.rs")), ("literal.core", super::literal::LIBRARY), ("cfg.rs", include_str!("cfg.rs"))] {
+    for (n, s) in [("literal.rs", include_str!("literal.rs")), ("stmt.rs", include_str!("stmt.rs")), ("mod.rs", include_str!("mod.rs")), ("ir.rs", include_str!("ir.rs")), ("sexp.rs", include_str!("sexp.rs")), ("literal.core", super::literal::LIBRARY), ("arch.rs", include_str!("arch.rs")), ("cfg.rs", include_str!("cfg.rs"))] {
         t.push_str(&format!("{n} {}\n", crate::surface::hex(&crate::surface::sha256(s.as_bytes()))));
     }
     crate::surface::hex(&crate::surface::sha256(t.as_bytes()))

@@ -1,0 +1,27 @@
+;; rustc's MIR of `fx_sd_neon_nomodel::a`, written by sandblaster-mirx: do not edit (re-run the extraction)
+(sbmir 1)
+(rustc "rustc 1.98.0-nightly (8b6558a02 2026-06-20)")
+(crate "fx_sd_neon_nomodel")
+(module "fx_sd_neon_nomodel::a")
+(overflow-checks on)
+(target "arm64-apple-macosx" "aarch64")
+(exclude)
+(source "src/a.rs" "384820f46be2ba6fc21f86e803c710a2e6aa8d37051782230d4fc635d4de8ce7")
+(root "fx_sd_neon_nomodel::a::add_bytes")
+(fn "fx_sd_neon_nomodel::a::add_bytes"
+  (kind root) (def "fx_sd_neon_nomodel::a::add_bytes") (args ())
+  (item fn "add_bytes")
+  (span "src/a.rs" 7 1)
+  (target-features "neon")
+  (argc 2)
+  (locals
+    (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut)
+    (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm)
+    (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm))
+  (debug "x" (p 1) (arg 1))
+  (debug "y" (p 2) (arg 2))
+  (bb 0
+    (call (arch "core::arch::aarch64::vaddq_u8" (imms) (features "neon") safe value) (args (copy (p 1)) (copy (p 2))) (p 0) 1 (at "src/a.rs" 8 5)))
+  (bb 1
+    (return (at "src/a.rs" 9 2)))
+)

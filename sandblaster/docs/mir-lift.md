@@ -16,7 +16,8 @@ reconstruction, in place) with its laws and proofs unchanged by the move
 three are verified with accepted locks. The source
 lift's reading of bodies is deleted (§6 step 3): bodies are read only from
 MIR, and a lifted exec module without `mir = ".."` is refused. The appendix
-(§20) is the normative reading; it joins SEMANTICS.md at the next acceptance
+(§20) is the normative reading (§20.9, since 2026-10-06: safe `core::arch`
+code, read onto the validated target models); it joins SEMANTICS.md at the next acceptance
 of the specification locks (SEMANTICS.md is part of every `SPEC.lock`'s
 `semantics` hash). This note records the decision, the design, the
 measurements and the plan to replace the source lift.
@@ -183,8 +184,9 @@ and lifted names, exactly as before.
   `PeakIterator::to_nearest_size`, `opt.rs`, once replaced it through a
   `#[rewrite]` lemma and measured about 40× faster than the original
   binary search on uniform-bit-length sizes, in a harness without an A/A
-  control; that shipping path was removed on 2026-10-05, and such code is
-  now simply written as the implementation and proven.) LAWS.rs is
+  control; that shipping path was removed on 2026-10-05, and since
+  2026-10-06 sandblaster writes no new optimized code: it verifies the code
+  a crate has, DESIGN.md, North star.) LAWS.rs is
   unchanged; PROOF.rs changes in one place (below). The lift conformance
   check of the in-place modules passes on the MIR-read bodies (§5).
 * commonware-storage's Merkle proof verifier, first set
@@ -471,7 +473,10 @@ at `&[u8]`/`&mut [u8]`; the reading never looks at that type (it reads the
 buffer traits' calls as §19.1's buffer model whatever the receiver). The
 file is checked in; the build refuses it when a source's hash differs,
 when it was extracted without overflow checks, or when the build's rustc
-is of another release (`1.98.x` against `1.98.0-nightly`).
+is of another release (`1.98.x` against `1.98.0-nightly`). Since
+2026-10-06 it also records the target (`(target ..)`; MIR of another
+architecture than the build's is refused), each function's target
+features, `core::arch` vector types and intrinsic calls (§20.9).
 
 Several modules of one crate are extracted together (`SBMIR_MODULE="a,b"`;
 calls between them are calls by name), open traits at their declared
@@ -582,6 +587,9 @@ shape of the output.
 | `uN::to_be_bytes(x)`, `<[T]>::get(s, i)` by a `usize` | the builtins `x.to_be_bytes()`, `s.get(i)` |
 | `PtrMetadata(s)` of a slice reference (`s.len()`) | the builtin `s.len()` |
 | signed operations | §19.3's two's complement reading |
+| a `core::arch` vector `(simd ..)` (§20.9) | its `core::arch` type, which the front end reads as its model representation |
+| a call of a `core::arch` intrinsic `(arch ..)` (§20.9) | the subset's call `core::arch::<arch>::<name>::<imms>(args)`, bound to a fresh variable; a pointer load or store, or an `unsafe` intrinsic, refused |
+| a runtime feature detection (a call into `std_detect`, §20.9) | refused |
 | everything else (raw pointers, function pointers, `Len`, any other `Transmute`, signed `CheckedMul`, runtime checks other than overflow checks, a call rustc did not let the extractor follow, loops in library code) | refused |
 
 A named variable bound to a constructor keeps the constructor known; where
@@ -610,7 +618,8 @@ so the structured reading of §20.2 (`read.rs`), the control-flow analyses
 and its driver (`crate::mir::checked`: planning, order, the verdict
 cache, reports) are untrusted proposers: a misreading there fails a theorem, never
 a verdict. Trusted: L's generator (`mir/literal.rs`) and library
-(`mir/literal.core`), the statement generator (`mir/stmt.rs`), the parse
+(`mir/literal.core`), its reading of `core::arch` calls (`mir/arch.rs`,
+§20.9), the statement generator (`mir/stmt.rs`), the parse
 L reads (`mir/ir.rs`, `mir/sexp.rs`), the names and load checks of
 `mir/mod.rs`, the printer `sandblaster-mirx`, the lift glue that lists
 each function read from MIR with its instance (`lift::MirContract`; that
@@ -777,6 +786,7 @@ outcome.
 | `Vec<T, Global>`, `Copied<slice::Iter<&[u8]>>`, a library newtype of a host model alias (`Digest([u8; 32])`) | the models `List(T)`, `Slice (Slice U8)`, the field's type |
 | core's `slice::Iter<'_, T>` (by exact path) | `Tuple2(Slice T, Usize)`: the slice and the index of the element it yields next (its raw pointers are never read) |
 | any other library ADT | L's own inductive (constructors `v<i>_<Name>`, MIR field types) |
+| a `core::arch` vector `(simd "core::arch::<arch>::<name>" lane n)` (§20.9) | its model representation `Array lane' lanes'` (`intrinsics::VecTy`), when rustc lays it out in as many bits |
 | `u128`, `i128`, `char`, anything else (raw pointers, function pointers, trait objects) | not modeled: the local's slot is `mir::Unmodeled` and every use of it `None` (before stage cs-assurance, `u128`/`i128` were read as 64-bit words) |
 
 **Data-free values.** A read of a place whose type holds no data (`()`,
@@ -847,6 +857,7 @@ extends the code `r` holds; `&place` is the value of the place.
 | `Unreachable`, `UnwindResume`, `Abort`, a call of another function that does not return | stuck; so is every other block from which every path ends in one |
 | `Call` of an instance with MIR | its `run` on the same fuel (a self-call: `rec` on one unit less, the continuation too) from its initial state: the parameters in their slots (a closure's spread from the tuple its callers pass), each callee cell holding the referent read through the caller's code for it (a nested cell: through the code its parent's referent holds; a held code in the callee's terms is the nested cell's own); after `Ret(out)`, each cell's final value written back through that code, then the result to the destination; the callee's `Panic` is the caller's, so is its stuck (`mir::then`). A code the callee returns, in a cell or its result (`&mut T`, `Option<&mut T>`), rooted at a callee cell, is the caller's code for that cell extended by its path; rooted at a callee local (dangling) it is `None` |
 | `Call` of a leaf | its model, below |
+| `Call` of a `core::arch` intrinsic `(arch ..)` (§20.9) | its validated target model applied to the immediates and the arguments (`mir::arch`), a total value; stuck when the call is not read (a pointer load or store, no target, no validated or loaded model, a missing target feature, an immediate out of range, another type) |
 | intrinsics `ctlz`, `cttz`, `ctpop`, `bswap`, `saturating_add/sub`, `*_with_overflow`, `rotate_left/right`, `cold_path` | their primitives (`bswap` by shifts and masks, so the word normalizer sees through it; a rotation's amount, a `u32`, taken modulo the width); `cold_path` is nothing |
 | `Call` of a function read as a model (`mod.rs`'s `Model`, by the exact path of its definition: core's slice iterator's `<[T]>::iter`, `<&[T] as IntoIterator>::into_iter`, `Iter::new`, `<Iter as Iterator>::next`; `<Range<usize> as SliceIndex<[T]>>::get`) | its leaf below, not its MIR (raw pointers); `next` through the iterator's code like a `&mut` leaf |
 | `Deref::deref` of a library newtype of bytes without MIR | its bytes as a slice |
@@ -1104,3 +1115,168 @@ checks test it, and test that the theorems catch what they should:
   in-place write it changes. A reading that adds a precondition the
   contract lacks (`ExtraRequires`, on the private free functions) is
   refused (§20.5).
+
+#### 20.9 `core::arch` code: vector types and intrinsic calls (C8, first slice)
+
+*Added 2026-10-06 (capability C8, first slice; DESIGN.md §16.4).* Safe
+SIMD code is read from rustc's MIR onto the target models of
+`sandblaster/targets` (DESIGN.md §1.1 item 4), in both readings. Pointer
+loads and stores, and any `unsafe`, stay refused. Verified code is safe
+Rust (DESIGN.md §16.5, decision 1). Whether shipped `unsafe` SIMD code may
+be split into safe vector arithmetic and unverified loads and stores is
+the user's open decision (DESIGN.md §18, decision 9).
+
+**The extraction** (`sandblaster-mirx`, trusted as a printer).
+
+| `.sbmir` | printed for | meaning |
+| --- | --- | --- |
+| `(target "arm64-apple-macosx" "aarch64")` | every extraction (from this stage on) | the target the MIR was built for: rustc's LLVM triple and `target_arch`. `mir::load` refuses MIR of another architecture than the build's (`CARGO_CFG_TARGET_ARCH`); an extraction without the record (older than it) loads, but no `core::arch` call in it is read. `extract.sh --target <triple>` extracts for another target than the host (`x86_64-apple-darwin` on an aarch64 machine) |
+| `(target-features "neon" ..)` | a function instance compiled with target features | the features rustc compiles the body with (`codegen_fn_attrs`): its own `#[target_feature]` and every feature they imply, a closure's inherited ones; absent when there are none |
+| `(simd "core::arch::aarch64::uint8x16_t" u8 16)` | a `#[repr(simd)]` type | its public `core::arch` path (rustc's visible path, `std::arch::..` read as `core::arch::..`, printed only for a type defined in core's `core_arch`; any other SIMD type is `(unsupported ..)`) and its lanes as rustc lays it out (`__m128i` is two `i64`s) |
+| `(arch "core::arch::aarch64::vshrq_n_u8" (imms 4) (features "neon") safe value)` | a call of a function defined in core's `core_arch` whose visible path is `std::arch::..`/`core::arch::..` | never followed into its body: its public path, its const generic immediates by value (stdarch's `const N: i32`), the target features the intrinsic is compiled with (its own and implied), `safe` or `unsafe` (declared safe: a safe signature, or a safe `#[target_feature]` function, rustc's `safe_target_features`), and `pointer` when a parameter or the result is a raw pointer (the loads and stores), else `value`; a type argument is `(unsupported ..)` |
+| `(leaf "std_detect::.." ())` | a call into `std_detect` | runtime feature detection (below), never followed |
+
+The parse (`ir.rs`, trusted) reads these exactly: a malformed target,
+vector or feature list is an error, and an `arch` call whose shape is not
+exactly the printed one (no `safe`/`unsafe`, both, an immediate that is
+not an integer, no `value`/`pointer`) is an unsupported callee, which both
+readings refuse.
+
+**Types** (both readings). A vector type is its model representation, the
+front end's (`intrinsics::VecTy`, hashed into every lock's `builtins`
+line): `Array(lane, lanes)`, lane 0 first — `uint8x16_t` is `Array U8
+16usize`, `uint32x4_t` `Array U32 4usize`, `__m128i` its sixteen bytes
+little-endian (`Array U8 16usize`). L reads it so only when rustc lays the
+type out in as many bits: lane for lane for a NEON type (unsigned lanes of
+the same width and count), in total for an x86 one (an untyped register
+rustc declares as `i64`s). Any other vector type is not modeled (L) and
+has no subset type (S, refused). `erase` is the identity on vectors (L and
+S read them alike).
+
+**Calls** (L: `crate::mir::arch`, trusted; one arm of `literal.rs`'s
+`call`). A call of an intrinsic is the application of its target model's
+global to its immediates (each a `U32` literal followed by its range
+proofs, by evaluation) and its arguments (a signed scalar, `_mm_set_epi64x`'s
+`i64`, as its two's-complement bits), a total value written to the call's
+destination. Nothing here is a table of its own: the model is the core
+model whose registered `core::arch` path is the call's path
+(`sandblaster_targets::coretext::find_by_path`: its global, immediates
+with their ranges, parameter and result types; TCB item 4). The call is
+read only when every one of these holds, and is otherwise **stuck** at its
+block (the function has no theorem; `LFn::faults` names the reason):
+
+1. the intrinsic is declared safe and takes and returns no raw pointer
+   (`vld1q_u8(ptr)`, `vst1q_u8`, `_mm_loadu_si128` are refused, named);
+2. the extraction records its target, of the intrinsic's architecture;
+3. a core model has the call's exact path;
+4. the model is **validated**: the fail-closed verdict of
+   `sandblaster_targets::evidence::validation` is `Validated` (current
+   hardware evidence for the model's source, its core text cross-checked by
+   the kernel at its current hash);
+5. the model's global is the one the target library loaded
+   (`elab::semantics::install`): a `def[intrinsic]` of the model's type
+   (a later definition may take over a name in the kernel; L never applies
+   a stand-in);
+6. the calling function's body is compiled with every target feature the
+   intrinsic needs — rustc's codegen set of the intrinsic and the model's
+   registered features, all among the body's (its `#[target_feature]` and
+   what they imply). This is rustc's own rule for a safe call (since Rust
+   1.86 statically enabled features do not count: "the neon target feature
+   being enabled in the build configuration does not remove the
+   requirement to list it in `#[target_feature]`"); L checks it again;
+7. the immediates are as many as the model's, each in its range, and the
+   arguments and the destination have the model's types.
+
+In S (`read.rs`, untrusted) the same call is the subset's call
+`core::arch::<arch>::<name>::<imms>(args)`, bound to a fresh variable;
+the front end resolves it against `intrinsics.rs` and the elaborator
+applies the same model global (an intrinsic without a loaded model makes
+the function *deferred*, never trusted, so it has no definition and no
+theorem). The lifted function keeps its source's `#[target_feature]`
+attribute, so the dialect's feature rule (DESIGN.md §9) applies to S as
+rustc's applies to the source; the lifted module keeps its `use
+core::arch::<arch>::..` items. The walker needs no rule of its own: a
+model application is a neutral head on symbolic arguments (an intrinsic
+unfolds only on closed ones, DESIGN.md §5.6), the same term on both sides.
+
+**Calls between `#[target_feature]` functions** are ordinary calls
+(§20.4): rustc allows a safe one only when the caller's features include
+the callee's, and S's typecheck checks the same.
+
+**Panics and stuck.** A value intrinsic's model is total: it never panics
+and is never undefined on its domain. Its immediates are const generics
+that rustc checks at compile time (`static_assert!`: a lane index, a shift
+amount or a table width out of range is a compile error, never a run-time
+panic), so no well-formed extraction has one out of range; L reads one as
+stuck, never as a panic, and so is every refused call. A call of an
+intrinsic is never `Panic`.
+
+**Feature detection.** `is_aarch64_feature_detected!` and
+`is_x86_feature_detected!` of a feature the target enables statically
+expand to `cfg!(target_feature = ..) || ..`, which rustc folds: the
+detection is the constant `true` in the MIR, read as that constant (the
+function then has one branch; `tests/simd.rs`, `has_neon`). Commonware's
+`cpu_features` helpers (cpufeatures' `new!`) are the constant `true` the
+same way when every feature is enabled statically
+(`__unless_target_features!`). A **runtime** detection — a feature the
+target does not enable statically — is a call into `std_detect` (a cache
+in a static, initialized by `cpuid` or the operating system), or
+cpufeatures' atomic and OS query: refused by both readings (L: stuck,
+"runtime feature detection"; S: refused), so a function that reads one has
+no theorem. Why not yet "both branches meet the laws": in safe Rust a
+runtime detection cannot guard a call of a `#[target_feature]` function
+(rustc requires `unsafe` for a call from a body without the features), so
+a safe dispatcher only chooses between two portable paths, and every
+dispatcher in Commonware is `unsafe` (refused for that reason first). The
+reading planned for when a verified function needs it: each detected
+feature is an unknown boolean, fixed for the run (the cache's answer), so
+the function is read twice, with the detection `true` and `false`; each
+literal reading gets its theorem against its own structured reading, and
+a lemma that the two structured readings are equal makes the laws (proven
+of one) hold of the MIR whatever the CPU answers.
+
+**Laws over vectors** (the ghost language; SEMANTICS.md §13 at the next
+acceptance). In ghost code a vector coerces to the array of its lanes,
+lane 0 first, and that array to the vector (the identity on the kernel
+value); `==` on vectors is the equality of their lanes. So a law states a
+vector function lane by lane against a scalar reference
+(`mul_nibbles(x, lo, hi) == mul_lanes(x, lo, hi)`, `mul_lanes` a spec over
+`[u8; 16]`). Exec code has no such coercion (Rust has none).
+
+**Conformance** (§20.8). The lift conformance check runs `#[target_feature]`
+code natively: the harness transmutes lane arrays to vectors and back and
+calls the original inside `unsafe` (the harness is not compiled with the
+function's features; the build machine must have them). NEON runs on
+aarch64 hosts; x86 code is compared on x86 hosts only.
+
+**Trusted** (code lines, no comments or tests): `mir/arch.rs` 111; in
+`literal.rs` the vector type and the call (+40); in `ir.rs` the target,
+features, vector type and call (+47); in `mod.rs` the vector names and the
+target check (+11); in `mirx` the target, features, vector types, arch and
+detection leaves (+86); in the lift the kept `#[target_feature]` and
+`core::arch` uses, the target's architecture and the named pointer loads
+(+30); in the ghost language's elaboration the lane view (+10, TCB item
+6). The models, `intrinsics.rs`'s vector table and the evidence verdict
+were trusted already (TCB items 4 and 2).
+
+**Not yet.** The AVX/AVX2/AVX-512 models are validated but not loaded for
+elaboration (`elab/semantics.rs` loads `<arch>.core` only; loading
+`x86_64_avx.core` changes the lock's `builtins` line), so their calls are
+refused ("not loaded"). An intrinsic the surface table `intrinsics.rs`
+does not list (`_mm_set_epi64x`, `_mm_set_epi32`) is refused by S even when
+L could read its model. An intrinsic without a model (`vaddq_u8`,
+`vextq_u8`, `vgetq_lane_u8`, `_mm_srli_epi64`, `_mm_set1_epi8`) is
+refused by both. Laws whose reference has another
+shape than the model at a lane condition need a case per lane value (the
+PSHUFB lane lemma of `tests/simd.rs`: 256 cases); a closer that splits an
+array equation into lanes and decides each lane's conditions is the next
+prover step.
+
+*Pinned by:* `tests/simd.rs` (the NEON fixture verified in place with its
+native conformance run, its twins, the x86 fixture, fault injection of an
+intrinsic's immediate, path and argument order), `tests/literal.rs`
+(`an_intrinsic_call_is_its_validated_model_and_refused_without_one`: the
+nibble multiply's reading against the hardware, each refusal with its
+reason; `an_intrinsic_call_in_mir_without_its_target_is_not_read`; the
+parse's twins in `the_parse_refuses_what_it_would_have_guessed`),
+`tests/hardware.rs` (`ghost_code_reads_a_vector_as_the_array_of_its_lanes`).

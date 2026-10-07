@@ -73,6 +73,8 @@ pub struct St {
     /// Rewrites and unfoldings performed on this path.
     pub rewrites: u32,
     pub deltas: u32,
+    /// Hardware models unfolded at a lane on this path ([`super::lanes`]).
+    pub lanes: u32,
     /// Remaining case-split depth.
     pub depth_left: u32,
     /// Counter for fresh binder names.
@@ -86,6 +88,10 @@ pub struct St {
     /// same equation (a copy made by a generalizing rewrite, or its
     /// reverse) is not used again.
     pub used_eq_sides: Vec<(V, V)>,
+    /// Equations between two stuck terms (by level, and whether used right
+    /// to left) that aligned an argument of the target with an equation's
+    /// side in this branch (`align_with_equations`, `super::rewrite`).
+    pub aligned: Vec<(u32, bool)>,
     /// (fact, rule) pairs (by level) already rewritten in this branch: a
     /// fact is rewritten by a rule once, whichever of the two is saturated
     /// first (a chain `a && (b && ..)` otherwise doubles its facts at every
@@ -121,11 +127,13 @@ impl St {
             instances: 0,
             rewrites: 0,
             deltas: 0,
+            lanes: 0,
             depth_left,
             fresh: 0,
             hints_done: false,
             used_eqs: Vec::new(),
             used_eq_sides: Vec::new(),
+            aligned: Vec::new(),
             rewritten: Vec::new(),
             expanded: Vec::new(),
             simp_lin: 0,

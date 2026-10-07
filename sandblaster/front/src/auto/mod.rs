@@ -20,10 +20,10 @@
 //! | 4. fact saturation: ∧ facts, short-circuit `&&` (dependent-match shape), `!b`, injectivity, `eq_sound`, method facts, simp lemmas | [`facts`], [`ematch`] (forward rules) |
 //! | 5. contradictions: constructor clash (incl. `true == false`), `Empty`, linarith infeasibility, `¬P` facts, `¬(a = b)` as `a < b ∨ a > b` | [`facts`], [`search`] (`contradiction`), [`cases`] (disequality splits) |
 //! | 6. rewriting with stuck-term equations (`Transport` + term-level abstraction, [`abstraction`]; variable equations substitute, induction-hypothesis-shaped equations between stuck terms rewrite once) | [`rewrite`] |
-//! | 7. axiom instantiation for `min max sat_sub sat_add div rem wshr wshl and or cast` atoms (piecewise ones decided or split), `mul_mono` for products of bounded factors; the bit-count bounds and wrapping-exactness lemmas of `lemmas/bits.core` ([`bitlib`]) for `count_ones leading_zeros trailing_zeros wadd wsub wmul wshl` atoms | [`arith`] (`enrich`) |
+//! | 7. axiom instantiation for `min max sat_sub sat_add div rem wshr wshl and or cast` atoms (piecewise ones decided or split), `mul_mono` for products of bounded factors; the bit-count bounds and wrapping-exactness lemmas of `lemmas/bits.core` ([`bitlib`]) for `count_ones leading_zeros trailing_zeros wadd wsub wmul wshl` atoms; the variable-shift lemmas of `lemmas/bits_shift.core` for shifts by a non-literal amount (`x · 2^s`, masks, ordered shifts) and products with a power of two | [`arith`] (`enrich`) |
 //! | 8. arithmetic decision of stuck comparisons | [`rewrite`] (`decide_scrutinee`) |
 //! | 9. arithmetic congruence | [`rewrite`] (`congruence`) |
-//! | 10. `Delta` unfolding that unblocks a match (recursive definitions; opaque ones only on an `Unfold` hint, §5.6) | [`rewrite`] (`delta_step`) |
+//! | 10. `Delta` unfolding that unblocks a match (recursive definitions; opaque ones only on an `Unfold` hint, §5.6); a hardware model read at a literal lane, in the target and in facts (§16.4) | [`rewrite`] (`delta_step`), [`lanes`] |
 //! | 11. bounded case splits (dependent match idiom with equations), finite enumeration (≤ 64 values) | [`cases`] |
 //! | 12. `BvRefl` | [`search`] (`try_bvrefl`) |
 //! | 13. linarith certificate search (simplex over exact rationals) on `Env::linearize` systems, then integer cuts and on-demand disequality splits | [`arith`], [`simplex`], [`rat`]; certificates of quoted proofs are re-derived by [`repair`] |
@@ -74,6 +74,7 @@ pub mod complete;
 pub mod congr;
 pub mod ematch;
 pub mod facts;
+pub mod lanes;
 pub mod lemmas;
 pub mod meter;
 pub mod names;

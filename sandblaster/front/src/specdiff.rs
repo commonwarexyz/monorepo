@@ -34,7 +34,13 @@
 //! from the new one's with the prover chain, its conclusion instantiated —
 //! and the **kernel checks** `Π(h : old). new` against it. Nothing here is
 //! trusted: an unproven direction only makes the classification weaker,
-//! and acceptance of a change is still a reviewed `SPEC.lock` diff.
+//! and acceptance of a change is still a reviewed `SPEC.lock` diff. A
+//! hypothesis the stronger side binds irrelevantly (a `requires`, a panic
+//! contract's no-panic clause `Not(p)`) is an argument in an irrelevant
+//! position of that term, where a proof may use the other side's
+//! irrelevant hypotheses (DESIGN.md §5.3); its proof is pre-checked the way
+//! the kernel checks such a position, every other proof relevantly, and the
+//! assembled term is checked as a whole either way.
 //!
 //! **Implementations are abstracted.** A law or contract constrains exec
 //! functions whose *bodies* are not part of the surface (a contract's hash
@@ -647,7 +653,18 @@ impl<'a> Classifier<'a> {
     }
 
     /// One prover goal (bounded), the result re-certified and checked.
-    fn prove(&mut self, ctx: &Ctx, facts: &[FactRef], target: V) -> Result<Tm, String> {
+    /// `Some((rel, t))` (`t` the target as a term of `ctx`): the proof is
+    /// the argument of a hypothesis bound with relevance `rel`, and is
+    /// checked as the kernel checks that position — an irrelevant one (a
+    /// `requires`, a panic contract's no-panic clause `Not(p)` in a
+    /// function's domain) lets a proof use the irrelevant variables of its
+    /// context (DESIGN.md §5.3, resurrection: `.h_req0 : Not(p)` proves
+    /// `Not(p)` there), a relevant one does not. `None`: a conclusion,
+    /// checked against the target. Either way the assembled comparison is
+    /// checked by the kernel as a whole ([`Classifier::implies`],
+    /// [`Classifier::prove_closed`]), so this check only decides which
+    /// proofs are worth assembling.
+    fn prove(&mut self, ctx: &Ctx, facts: &[FactRef], target: V, position: Option<(Rel, &Tm)>) -> Result<Tm, String> {
         self.goals += 1;
         let goal = Goal { id: ObligationId(u32::MAX - self.goals), kind: ObligationKind::LawGoal, span: Span::DUMMY, ctx: ctx.clone(), facts: facts.to_vec(), target, hints: vec![] };
         let env = &self.out.env;
@@ -655,7 +672,20 @@ impl<'a> Classifier<'a> {
         let p = self.chain.prove(env, &goal, &mut b).map_err(|f| format!("not proven: {}", f.goal.lines().next().unwrap_or("")))?;
         let p = crate::elab::recert::recertify(env, &goal.ctx, &p);
         let mut cb = Budget { steps: CHECK_BUDGET };
-        env.check(&goal.ctx, &p, &goal.target, &mut cb).map_err(|e| format!("the prover's proof was rejected: {}", first_line(&e.to_string())))?;
+        let checked = match position {
+            None => env.check(&goal.ctx, &p, &goal.target, &mut cb),
+            // as the kernel checks the proof's position, an argument bound
+            // relevantly or irrelevantly: `let h : P = p; true : Bool` (the
+            // value of a relevant `let` is a relevant position, an
+            // irrelevant `let`'s value `.h` is not)
+            Some((rel, ty)) => {
+                let bi = env.bool_ind();
+                let wrapped = mk::let_("h", rel, ty.clone(), p.clone(), mk::bool_lit(bi, true));
+                let bool_ty = self.eval(&goal.ctx, &mk::bool_ty(bi))?;
+                env.check(&goal.ctx, &wrapped, &bool_ty, &mut cb)
+            }
+        };
+        checked.map_err(|e| format!("the prover's proof was rejected: {}", first_line(&e.to_string())))?;
         Ok(p)
     }
 
@@ -691,7 +721,7 @@ impl<'a> Classifier<'a> {
             ctx = ctx.push(CtxEntry { name: name.clone(), rel: *rel, ty: dv, def: None });
         }
         let target = self.eval(&ctx, &concl)?;
-        let p = self.prove(&ctx, &facts, target)?;
+        let p = self.prove(&ctx, &facts, target, None)?;
         let term = lams(&abs.binders, lams(&bs, p));
         let tyv = self.eval(&Ctx::default(), &pis(&abs.binders, prop.clone()))?;
         let mut b = Budget { steps: CHECK_BUDGET };
@@ -736,12 +766,19 @@ impl<'a> Classifier<'a> {
             let inst = crate::elab::tm::subst_closed(dom, &vals);
             if is_prop(env, dom, 8) {
                 let target = self.eval(&ctx, &inst)?;
-                let p = self.prove(&ctx, &facts, target).map_err(|e| format!("a hypothesis of the stronger side is not implied ({e})"))?;
+                // the proof is `a`'s argument, in the position `a` binds it:
+                // an irrelevant one (its `requires`, a no-panic clause) may
+                // use `b`'s irrelevant hypotheses, a relevant one may not
+                let p = self.prove(&ctx, &facts, target, Some((*rel, &inst))).map_err(|e| format!("a hypothesis of the stronger side is not implied ({e})"))?;
                 vals.push(p.clone());
                 args.push((*rel, p));
             } else {
                 let lvl = *b_params.get(next).ok_or("the parameters differ")?;
                 next += 1;
+                // (a relevant parameter cannot be given an irrelevant one)
+                if *rel == Rel::Rel && ctx.entries[lvl.0 as usize].rel == Rel::Irr {
+                    return Err("the parameters differ (a relevant one is irrelevant on the other side)".into());
+                }
                 let want = self.eval(&ctx, &inst)?;
                 let have = ctx.entries[lvl.0 as usize].ty.clone();
                 let mut cb = Budget { steps: CHECK_BUDGET };
@@ -762,7 +799,7 @@ impl<'a> Classifier<'a> {
         facts.push(FactRef { lvl: Lvl(d), origin: FactOrigin::LemmaHyp, span: Span::DUMMY });
         let bc = shift(&b_concl, 1);
         let target = self.eval(&ctx2, &bc)?;
-        let r = self.prove(&ctx2, &facts, target).map_err(|e| format!("the conclusion is not implied ({e})"))?;
+        let r = self.prove(&ctx2, &facts, target, None).map_err(|e| format!("the conclusion is not implied ({e})"))?;
         let body = mk::let_("h_concl", Rel::Rel, qa, q_term, r);
         let term = lams(&abs.binders, mk::lam("h_old", Rel::Rel, a.clone(), lams(&b_bs, body)));
         let ty = pis(&abs.binders, mk::pi("h_old", Rel::Rel, a.clone(), b1));

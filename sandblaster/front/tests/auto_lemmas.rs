@@ -301,6 +301,37 @@ fn before_bits<T: Send + 'static>(f: impl FnOnce(&mut sandblaster_kernel::api::E
         .unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
 
+/// Run `f` on a big-stack thread with the prelude, the ghost library and
+/// the lemma files that precede `stop` (the environment a generated lemma
+/// file is generated in).
+fn before_file<T: Send + 'static>(stop: &'static str, f: impl FnOnce(&mut sandblaster_kernel::api::Env) -> T + Send + 'static) -> T {
+    std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(move || {
+            sandblaster_kernel::util::set_stack_limit(900 << 20);
+            let mut env = sandblaster_kernel::api::Env::with_prelude();
+            sandblaster_front::auto::lemmas::load_until(&mut env, Some(stop)).unwrap_or_else(|e| panic!("{e}"));
+            f(&mut env)
+        })
+        .expect("spawn")
+        .join()
+        .unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// `lemmas/bits_shift.core` (shifts by a variable amount, masks, products
+/// with powers of two) is the generator's output, certificates included
+/// (`SANDBLASTER_REGEN_BITS=1` rewrites it).
+#[test]
+fn shift_core_is_generated() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lemmas/bits_shift.core");
+    let text = before_file("bits_shift.core", |env| bitlib::shift_core_text(env, &mut budget()).unwrap_or_else(|e| panic!("{e}")));
+    if std::env::var_os("SANDBLASTER_REGEN_BITS").is_some() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(on_disk == text, "lemmas/bits_shift.core is stale: rerun with SANDBLASTER_REGEN_BITS=1");
+}
+
 /// `lemmas/bits.core` is the generator's output, certificates included
 /// (`SANDBLASTER_REGEN_BITS=1` rewrites it).
 #[test]

@@ -54,7 +54,7 @@ fn with_env(f: impl FnOnce(&mut Env) + Send) {
 fn names() -> ModuleNames {
     let mut host_enums = BTreeMap::new();
     host_enums.insert("Error".to_string(), vec!["EndOfBuffer".to_string()]);
-    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec!["crate::m".into()], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default() }
+    ModuleNames { module: String::new(), sealed: BTreeSet::new(), host_enums, requires: BTreeSet::new(), open: BTreeMap::new(), dsl_modules: vec!["crate::m".into()], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None }
 }
 
 /// The reading of a fixture, loaded (every instance with a body).
@@ -204,6 +204,148 @@ fn intrinsics_and_transmute_are_their_primitives() {
     });
 }
 
+// ---------------------------------------------------------------------------
+// `core::arch` intrinsics (C8, docs/mir-lift.md §20.9)
+// ---------------------------------------------------------------------------
+
+/// The target line of an extraction for aarch64 (an arch call is read only
+/// in MIR that records its target).
+const TARGET: &str = "(target \"arm64-apple-macosx\" \"aarch64\")\n";
+
+/// NEON calls of `core::arch` intrinsics: the nibble multiply (the shape of
+/// Reed–Solomon's `mul_128`), and its twins (no target feature, an
+/// immediate out of range, an argument of another type, a load through a
+/// raw pointer, an intrinsic without a validated model), a lane read and a
+/// lane write.
+const ARCH: &str = r#"(fn "k::m::nib" (kind root) (def "k::m::nib") (args ()) (item fn "nib") (target-features "neon") (argc 3)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (3 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (4 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (5 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (6 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (7 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (8 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut))
+  (bb 0 (call (arch "core::arch::aarch64::vdupq_n_u8" (imms) (features "neon") safe value) (args (int u8 15)) (p 4) 1))
+  (bb 1 (call (arch "core::arch::aarch64::vandq_u8" (imms) (features "neon") safe value) (args (copy (p 1)) (copy (p 4))) (p 6) 2))
+  (bb 2 (call (arch "core::arch::aarch64::vqtbl1q_u8" (imms) (features "neon") safe value) (args (copy (p 2)) (move (p 6))) (p 5) 3))
+  (bb 3 (call (arch "core::arch::aarch64::vshrq_n_u8" (imms 4) (features "neon") safe value) (args (copy (p 1))) (p 8) 4))
+  (bb 4 (call (arch "core::arch::aarch64::vqtbl1q_u8" (imms) (features "neon") safe value) (args (copy (p 3)) (move (p 8))) (p 7) 5))
+  (bb 5 (call (arch "core::arch::aarch64::veorq_u8" (imms) (features "neon") safe value) (args (copy (p 5)) (copy (p 7))) (p 0) 6))
+  (bb 6 (return)))
+(fn "k::m::nofeat" (kind root) (def "k::m::nofeat") (args ()) (item fn "nofeat") (argc 3)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (3 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (4 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (5 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (6 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (7 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (8 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut))
+  (bb 0 (call (arch "core::arch::aarch64::vdupq_n_u8" (imms) (features "neon") safe value) (args (int u8 15)) (p 4) 1))
+  (bb 1 (call (arch "core::arch::aarch64::vandq_u8" (imms) (features "neon") safe value) (args (copy (p 1)) (copy (p 4))) (p 6) 2))
+  (bb 2 (call (arch "core::arch::aarch64::vqtbl1q_u8" (imms) (features "neon") safe value) (args (copy (p 2)) (move (p 6))) (p 5) 3))
+  (bb 3 (call (arch "core::arch::aarch64::vshrq_n_u8" (imms 4) (features "neon") safe value) (args (copy (p 1))) (p 8) 4))
+  (bb 4 (call (arch "core::arch::aarch64::vqtbl1q_u8" (imms) (features "neon") safe value) (args (copy (p 3)) (move (p 8))) (p 7) 5))
+  (bb 5 (call (arch "core::arch::aarch64::veorq_u8" (imms) (features "neon") safe value) (args (copy (p 5)) (copy (p 7))) (p 0) 6))
+  (bb 6 (return)))
+(fn "k::m::shr9" (kind root) (def "k::m::shr9") (args ()) (item fn "shr9") (target-features "neon") (argc 1)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm))
+  (bb 0 (call (arch "core::arch::aarch64::vshrq_n_u8" (imms 9) (features "neon") safe value) (args (copy (p 1))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::badarg" (kind root) (def "k::m::badarg") (args ()) (item fn "badarg") (target-features "neon") (argc 2)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 u8 imm) (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm))
+  (bb 0 (call (arch "core::arch::aarch64::vandq_u8" (imms) (features "neon") safe value) (args (copy (p 1)) (copy (p 2))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::load" (kind root) (def "k::m::load") (args ()) (item fn "load") (target-features "neon") (argc 1)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 (unsupported "type RawPtr(u8)") imm))
+  (bb 0 (call (arch "core::arch::aarch64::vld1q_u8" (imms) (features "neon") unsafe pointer) (args (copy (p 1))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::add8" (kind root) (def "k::m::add8") (args ()) (item fn "add8") (target-features "neon") (argc 2)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm) (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm))
+  (bb 0 (call (arch "core::arch::aarch64::vaddq_u8" (imms) (features "neon") safe value) (args (copy (p 1)) (copy (p 2))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::lane2" (kind root) (def "k::m::lane2") (args ()) (item fn "lane2") (target-features "neon") (argc 1)
+  (locals (0 u32 mut) (1 (simd "core::arch::aarch64::uint32x4_t" u32 4) imm))
+  (bb 0 (call (arch "core::arch::aarch64::vgetq_lane_u32" (imms 2) (features "neon") safe value) (args (copy (p 1))) (p 0) 1))
+  (bb 1 (return)))
+(fn "k::m::set3" (kind root) (def "k::m::set3") (args ()) (item fn "set3") (target-features "neon") (argc 2)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 u8 imm) (2 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm))
+  (bb 0 (call (arch "core::arch::aarch64::vsetq_lane_u8" (imms 3) (features "neon") safe value) (args (copy (p 1)) (copy (p 2))) (p 0) 1))
+  (bb 1 (return)))
+"#;
+
+/// The lanes of a byte vector as core text.
+fn u8x16(b: [u8; 16]) -> String {
+    let l = b.iter().rev().fold("Nil[U8]".to_string(), |l, x| format!("Cons[U8]({x}u8, {l})"));
+    format!("pair(Array U8 16usize, {l}, refl(Int, 16int))")
+}
+
+/// What the NEON instructions compute on this machine (the comparison of
+/// the reading with rustc's semantics; the executable models' on another).
+fn native_nib(x: [u8; 16], lo: [u8; 16], hi: [u8; 16]) -> [u8; 16] {
+    #[cfg(target_arch = "aarch64")]
+    {
+        use core::arch::aarch64::*;
+        // SAFETY: test code; every aarch64 CPU has NEON, and the arrays
+        // and the vectors have the same size and lane order
+        unsafe {
+            let (x, lo, hi): (uint8x16_t, uint8x16_t, uint8x16_t) = (core::mem::transmute(x), core::mem::transmute(lo), core::mem::transmute(hi));
+            let r = veorq_u8(vqtbl1q_u8(lo, vandq_u8(x, vdupq_n_u8(0x0f))), vqtbl1q_u8(hi, vshrq_n_u8::<4>(x)));
+            core::mem::transmute::<uint8x16_t, [u8; 16]>(r)
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        core::array::from_fn(|i| lo[(x[i] & 15) as usize] ^ hi[(x[i] >> 4) as usize])
+    }
+}
+
+#[test]
+fn an_intrinsic_call_is_its_validated_model_and_refused_without_one() {
+    with_env(|env| {
+        let l = mir::load(&format!("{HEADER}{TARGET}{ARCH}"), &|_| None, names(), "m").expect("load");
+        let lit = checked::load_literal(env, &l.m, &l.names, &[], None).unwrap_or_else(|e| panic!("{e}"));
+        let fx = Fixture { m: l.m, names: l.names, lit };
+        // the nibble multiply against the hardware, on a few inputs
+        let mut seed = 0x5eed_u64;
+        let mut byte = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 56) as u8
+        };
+        for _ in 0..4 {
+            let (x, lo, hi): ([u8; 16], [u8; 16], [u8; 16]) = (std::array::from_fn(|_| byte()), std::array::from_fn(|_| byte()), std::array::from_fn(|_| byte()));
+            let want = native_nib(x, lo, hi);
+            same(env, &fx.run("nib", 0, &[&u8x16(x), &u8x16(lo), &u8x16(hi)]), &format!("mir::Res::Ret[Array U8 16usize]({})", u8x16(want)));
+        }
+        assert!(fx.lf("nib").faults.is_empty(), "{:?}", fx.lf("nib").faults);
+        // lane reads and writes
+        let w = "pair(Array U32 4usize, Cons[U32](10u32, Cons[U32](11u32, Cons[U32](12u32, Cons[U32](13u32, Nil[U32])))), refl(Int, 4int))";
+        same(env, &fx.run("lane2", 0, &[w]), "mir::Res::Ret[U32](12u32)");
+        let v: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let mut set = v;
+        set[3] = 99;
+        same(env, &fx.run("set3", 0, &["99u8", &u8x16(v)]), &format!("mir::Res::Ret[Array U8 16usize]({})", u8x16(set)));
+        // the twins: each call is stuck, named by its reason
+        let z = u8x16([0; 16]);
+        for (f, args, why) in [
+            ("nofeat", vec![z.as_str(), z.as_str(), z.as_str()], "needs target feature(s) neon"),
+            ("shr9", vec![z.as_str()], "outside its model's range 1..=8"),
+            ("badarg", vec!["0u8", z.as_str()], "argument `a` of Int(false, 8)"),
+            ("add8", vec![z.as_str(), z.as_str()], "has no model in the target library"),
+        ] {
+            let lf = fx.lf(f);
+            assert!(lf.faults.iter().any(|e| e.starts_with("bb0") && e.contains(why)), "{f}: {:?}", lf.faults);
+            let out = &lf.out_ty;
+            same(env, &fx.run(f, 4, &args), &format!("mir::Res::Stuck[{out}]"));
+        }
+        // a load through a raw pointer: refused (its parameter is no value either)
+        assert!(fx.lf("load").faults.iter().any(|e| e.contains("raw pointer") && e.contains("vld1q_u8")), "{:?}", fx.lf("load").faults);
+    });
+}
+
+#[test]
+fn an_intrinsic_call_in_mir_without_its_target_is_not_read() {
+    with_env(|env| {
+        // the same extraction without its `(target ..)` record (older than it)
+        let l = mir::load(&format!("{HEADER}{ARCH}"), &|_| None, names(), "m").expect("load");
+        let lit = checked::load_literal(env, &l.m, &l.names, &[], None).unwrap_or_else(|e| panic!("{e}"));
+        let fx = Fixture { m: l.m, names: l.names, lit };
+        assert!(fx.lf("nib").faults.iter().any(|e| e.contains("records no target")), "{:?}", fx.lf("nib").faults);
+        // and an extraction for another architecture is refused at its load
+        let mut n = names();
+        n.target_arch = Some("x86_64".into());
+        let e = mir::load(&format!("{HEADER}{TARGET}{ARCH}"), &|_| None, n, "m").expect_err("refused");
+        assert!(e.contains("extracted for `arm64-apple-macosx` (aarch64), but this build is for x86_64"), "{e}");
+    });
+}
+
 /// Findings of the review of the generator against the MIR reference
 /// (stage cs-assurance): readings that gave a value where rustc's
 /// semantics differ, each now `None` (or refused by the parse) with its twin.
@@ -304,6 +446,34 @@ fn the_parse_refuses_what_it_would_have_guessed() {
     ] {
         let e = parse(&bad).expect_err(what);
         assert!(e.contains(what), "{what}: {e}");
+    }
+    // `core::arch` (C8): a vector type, an intrinsic call, the target and a
+    // function's target features, each read exactly or refused
+    let arch = r#"(target "arm64-apple-macosx" "aarch64")
+(fn "k::m::g" (kind root) (def "k::m::g") (args ()) (item fn "g") (target-features "neon") (argc 1)
+  (locals (0 (simd "core::arch::aarch64::uint8x16_t" u8 16) mut) (1 (simd "core::arch::aarch64::uint8x16_t" u8 16) imm))
+  (bb 0 (call (arch "core::arch::aarch64::vshrq_n_u8" (imms 4) (features "neon") safe value) (args (copy (p 1))) (p 0) 1))
+  (bb 1 (return)))
+"#;
+    let m = parse(arch).expect("well-formed");
+    assert_eq!(m.target, Some(("arm64-apple-macosx".to_string(), "aarch64".to_string())));
+    let g = &m.fns["k::m::g"];
+    assert_eq!(g.target_features, ["neon"]);
+    assert_eq!(g.locals[1].0, mir::ir::Ty::Simd("core::arch::aarch64::uint8x16_t".into(), Box::new(mir::ir::Ty::Int(false, 8)), 16));
+    let mir::ir::Term::Call(mir::ir::Callee::Arch(a), ..) = &g.blocks[0].term else { panic!("an arch call") };
+    assert_eq!((a.path.as_str(), a.imms.as_slice(), a.features.as_slice(), a.safe, a.pointer), ("core::arch::aarch64::vshrq_n_u8", &[4i128][..], &["neon".to_string()][..], true, false));
+    for (bad, what) in [
+        (arch.replace("(target \"arm64-apple-macosx\" \"aarch64\")", "(target \"arm64-apple-macosx\")"), "target"),
+        (arch.replace("u8 16) mut", "u8) mut"), "simd lane count"),
+        (arch.replace("(target-features \"neon\")", "(target-features neon)"), "target feature"),
+    ] {
+        let e = parse(&bad).expect_err(what);
+        assert!(e.contains(what), "{what}: {e}");
+    }
+    // an intrinsic call whose shape is not exactly printed is no arch call
+    for bad in [arch.replace(" safe value", " value"), arch.replace(" safe value", " safe unsafe value"), arch.replace("(imms 4)", "(imms four)"), arch.replace(" value)", ")")] {
+        let m = parse(&bad).expect("parses");
+        assert!(matches!(&m.fns["k::m::g"].blocks[0].term, mir::ir::Term::Call(mir::ir::Callee::Unsupported(_), ..)), "{bad}");
     }
 }
 

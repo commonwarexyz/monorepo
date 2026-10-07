@@ -341,6 +341,8 @@ impl<'a> Gen<'a> {
             Ty::Adt(k) => self.adt(k)?.ty,
             Ty::Closure(_, caps) => self.ty(caps)?,
             Ty::FnDef(..) => "Unit".into(),
+            // a `core::arch` vector: its model representation (§20.9)
+            Ty::Simd(p, lane, n) => super::arch::core_ty_text(super::arch::vector(p, lane, *n)?),
             other => return Err(format!("the type {other:?}")),
         })
     }
@@ -1559,6 +1561,11 @@ impl<'a> Gen<'a> {
                 let after = self.leaf(fx, path, tys, args, dest, os)?;
                 return Ok(self.jump(fx, fx.rank(b), t, &after));
             }
+            // a `core::arch` intrinsic: its validated target model (§20.9)
+            Callee::Arch(a) => {
+                let (rt, e) = self.arch_call(fx, a, args, dest)?;
+                self.result(fx, dest, os, &rt, &e)?
+            }
             // core's slice iterator and range `get` (raw pointers): their models
             Callee::Fn(k2) if let Some((model, elem)) = self.m.fns.get(k2).and_then(super::model_of) => self.model_call(fx, model, &elem, args, dest, os)?,
             // `Deref::deref` of a library newtype of bytes (its MIR is not exported)
@@ -1707,6 +1714,46 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// A call of a `core::arch` intrinsic (§20.9, `mir::arch`): the model
+    /// global applied to the immediates (each with its range proofs, by
+    /// evaluation) and the arguments (a signed scalar as its bits), a total
+    /// value: (the result's L type, the `Option` term). `Err` (stuck) for a
+    /// call `mir::arch` does not read.
+    fn arch_call(&mut self, fx: &mut FnCx, a: &ArchCall, args: &[Operand], dest: &Place) -> R<(String, String)> {
+        let cm = super::arch::model(self.m, a, &fx.f.target_features)?;
+        super::arch::loaded(self.k.env, cm)?;
+        let imms = super::arch::immediates(cm, a)?;
+        if args.len() != cm.params.len() {
+            return Err(format!("`{}` called with {} argument(s); its model takes {}", a.path, args.len(), cm.params.len()));
+        }
+        let (mut vals, mut tys, mut xs) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, (o, (pname, pt))) in args.iter().zip(cm.params).enumerate() {
+            let ot = op_ty(&fx.f, o)?;
+            if !super::arch::same_ty(&ot, *pt) {
+                return Err(format!("`{}`'s argument `{pname}` of {ot:?}, not its model's {}", a.path, pt.text()));
+            }
+            let x = format!("a{i}");
+            xs.push(match &ot {
+                Ty::Simd(..) => x.clone(),
+                t => bits(t, &x).ok_or_else(|| format!("the bits of {t:?}"))?.1,
+            });
+            vals.push(self.operand(fx, o)?);
+            tys.push(self.ty(&ot)?);
+        }
+        let dt = place_ty(&fx.f, dest)?;
+        if !super::arch::same_ty(&dt, cm.ret) {
+            return Err(format!("`{}`'s result as {dt:?}, not its model's {}", a.path, cm.ret.text()));
+        }
+        let xr: Vec<&str> = xs.iter().map(String::as_str).collect();
+        let call = cm.apply_text(&imms, &xr)?;
+        let rt = self.ty(&dt)?;
+        let r = match &dt {
+            Ty::Simd(..) => call,
+            t => of_bits(t, &format!("({call})")),
+        };
+        Ok((rt.clone(), binds(&vals, &tys, &rt, "a", some(&rt, &r))))
+    }
+
     /// A leaf call (§20.4 "Leaves"): a library function without MIR whose
     /// meaning is a model of `literal.core` or of a host model. The state
     /// after it, a `mir::Res(St)`: an index leaf panics where core's `index`
@@ -1759,6 +1806,8 @@ impl<'a> Gen<'a> {
                 let vals = args.iter().map(|a| Ok((self.ty(&op_ty(&fx.f, a)?)?, self.operand(fx, a)?))).collect::<R<_>>()?;
                 (self.k.names.host_model_method(self.m, t, method).unwrap(), false, vals)
             }
+            // runtime feature detection (§20.9): refused, with its reason
+            _ if super::arch::detection(path).is_some() => return Err(super::arch::detection(path).unwrap_or_default()),
             _ => return Err(format!("the leaf `{path}` (no model)")),
         };
         let call = (0..vals.len()).fold(f, |c, i| format!("{c} a{i}"));

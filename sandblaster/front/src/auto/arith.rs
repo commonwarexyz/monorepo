@@ -972,13 +972,14 @@ impl<'a> Engine<'a> {
         let goal_divides = in_goal.iter().any(|a| matches!(&**a, Term::Prim { op: PrimOp::IDiv | PrimOp::IMod, args, .. } if matches!(&*args[1], Term::Lit { .. })));
         self.enrich_quotients(st, &in_goal, hyps, seen, model)?;
         self.enrich_pow2_pairs(st, &in_goal, hyps, seen)?;
+        self.enrich_shift_mono(st, &in_goal, hyps, seen)?;
         if !self.in_atom_congr {
             self.enrich_pow2_exponents(st, sys, points, goal_atoms, hyps, seen)?;
             // the argument equations of two atoms are linear facts or not at
             // all: no integer cuts for them (each costs a search per pair)
             self.in_atom_congr = true;
             let saved = std::mem::replace(&mut self.lin_no_cuts, true);
-            let r = self.enrich_atom_congruence(st, &atoms, hyps);
+            let r = self.enrich_atom_congruence(st, &atoms, hyps).and_then(|_| self.enrich_product_congruence(st, &atoms, hyps));
             self.lin_no_cuts = saved;
             self.in_atom_congr = false;
             r?;
@@ -1062,6 +1063,97 @@ impl<'a> Engine<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Product congruence: two product atoms `a · b` and `a' · b` (in
+    /// either order) whose other factors are equal by linear arithmetic
+    /// (`(c + 1) · 2^g` and `(c +ᵤ 1) as Int · 2^g`, the same product read
+    /// from a law and from the code's word) are linked by their equation,
+    /// proven by one transport over the differing factor.
+    fn enrich_product_congruence(&mut self, st: &St, atoms: &[Tm], hyps: &mut Vec<Hyp>) -> R<()> {
+        let products: Vec<Tm> = atoms.iter().filter(|a| is_product(a)).cloned().collect();
+        let mut tries = 0u32;
+        for i in 0..products.len() {
+            for j in (i + 1)..products.len() {
+                if let Some(h) = self.product_eq(st, &products[i], &products[j], hyps, &mut tries)? {
+                    hyps.push(h);
+                }
+                if tries > 16 {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The products of `t` linked to the products the hypotheses mention by
+    /// [`Self::product_eq`] (before a side condition about `t` is proven:
+    /// its products are not atoms of the round yet).
+    fn link_products(&mut self, st: &St, t: &Tm, hyps: &mut Vec<Hyp>) -> R<()> {
+        let mine: Vec<Tm> = products_in(t);
+        if mine.is_empty() {
+            return Ok(());
+        }
+        let theirs: Vec<Tm> = hyps.iter().flat_map(|(_, stated)| products_in(stated)).collect();
+        let mut tries = 0u32;
+        for a in &mine {
+            for b in &theirs {
+                if let Some(h) = self.product_eq(st, a, b, hyps, &mut tries)? {
+                    hyps.push(h);
+                }
+                if tries > 8 {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The equation of two products `x · o` and `y · o` (in either order)
+    /// with `x = y` by linear arithmetic over `hyps`, and its proof (one
+    /// transport); `None` if they share no factor, are the same, the
+    /// factors are not provably equal, or the equation is a hypothesis
+    /// already. `tries` counts the linarith calls.
+    fn product_eq(&mut self, st: &St, pa: &Tm, pb: &Tm, hyps: &[Hyp], tries: &mut u32) -> R<Option<Hyp>> {
+        let (Term::Prim { args: fa, .. }, Term::Prim { args: fb, .. }) = (&**pa, &**pb) else { return Ok(None) };
+        let same = |x: &Tm, y: &Tm| self.env.alpha_eq_relevant(x, y, &|p, q| p == q);
+        if same(pa, pb) {
+            return Ok(None);
+        }
+        let (a1, b1, a2, b2) = (&fa[0], &fa[1], &fb[0], &fb[1]);
+        // the factor that is the same, the pair to prove equal, and whether
+        // the differing factor is the left one (of `pa`)
+        let (x, y, other, left) = if same(b1, b2) {
+            (a1, a2, b1, true)
+        } else if same(a1, a2) {
+            (b1, b2, a1, false)
+        } else if same(a1, b2) {
+            (b1, a2, a1, false)
+        } else if same(b1, a2) {
+            (a1, b2, b1, true)
+        } else {
+            return Ok(None);
+        };
+        let it = mk::int_ty(Width::Int);
+        let mul = |l: Tm, r: Tm| sandblaster_kernel::prim::prim0(PrimOp::IMul, vec![l, r]);
+        let pfrom = if left { mul(x.clone(), other.clone()) } else { mul(other.clone(), x.clone()) };
+        let pto = if left { mul(y.clone(), other.clone()) } else { mul(other.clone(), y.clone()) };
+        let stmt = mk::eq(it.clone(), pfrom.clone(), pto);
+        if hyps.iter().any(|(_, s)| self.env.alpha_eq_relevant(s, &stmt, &|a, b| a == b)) {
+            return Ok(None);
+        }
+        *tries += 1;
+        let (Some(xv), Some(yv)) = (self.eval(st, x)?, self.eval(st, y)?) else { return Ok(None) };
+        let goal: V = Rc::new(Value::Eq { ty: Rc::new(Value::IntTy(Width::Int)), lhs: xv, rhs: yv });
+        let Some(p) = self.lin_with(st, hyps, &goal)? else { return Ok(None) };
+        // transport(Int, x, y, p, z. Eq(Int, P[x], P[z]), refl(Int, P[x]))
+        let o1 = shift(other, 1);
+        let (from1, at_z) = if left { (mul(shift(x, 1), o1.clone()), mul(mk::var(0), o1)) } else { (mul(o1.clone(), shift(x, 1)), mul(o1, mk::var(0))) };
+        let proof: Tm = Rc::new(Term::Transport { ty: it.clone(), lhs: x.clone(), rhs: y.clone(), eq: p, motive: mk::eq(it.clone(), from1, at_z), val: mk::refl(it, pfrom) });
+        if self.trace {
+            eprintln!("[auto] product congruence ({} nodes)", crate::elab::tm::size(&stmt));
+        }
+        Ok(Some((proof, stmt)))
     }
 
     /// Whether two applications of one global have, at some position, two
@@ -1360,6 +1452,64 @@ impl<'a> Engine<'a> {
                         hyps.push((pf, stmt));
                     }
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Shifts of ordered values by one non-literal amount (`bits_shift.core`,
+    /// C4): for two goal atoms `a >> s` and `b >> s` (checked or wrapping),
+    /// or `a << s` and `b << s` (checked, `b · 2^s` below `2^w`), with `s`
+    /// below the width and `a ≤ b` provable, the shifts are ordered
+    /// (`bits::<shr|wshr|shl>_mono_<w>`). A marker per ordered pair keeps a
+    /// later round from redoing it.
+    fn enrich_shift_mono(&mut self, st: &St, atoms: &[Tm], hyps: &mut Vec<Hyp>, seen: &mut Vec<Tm>) -> R<()> {
+        use PrimOp::*;
+        let prim = |op: PrimOp, a: Vec<Tm>| sandblaster_kernel::prim::prim0(op, a);
+        let to_int = |w: Width, t: Tm| sandblaster_kernel::prim::prim0(Cast { from: w, to: Width::Int }, vec![t]);
+        let mut shifts: Vec<(Tm, PrimOp, Width, Tm, Tm, Vec<Tm>)> = Vec::new();
+        for a in atoms {
+            if let Term::Prim { op, args, proofs } = &**a
+                && let Shr(w) | WShr(w) | Shl(w) = *op
+                && args.len() == 2
+                && !matches!(&*args[1], Term::Lit { .. })
+                && matches!(w, Width::U8 | Width::U16 | Width::U32 | Width::U64)
+            {
+                shifts.push((a.clone(), *op, w, args[0].clone(), args[1].clone(), proofs.clone()));
+            }
+        }
+        if shifts.len() < 2 || shifts.len() > 6 {
+            return Ok(());
+        }
+        let same = |x: &Tm, y: &Tm| self.env.alpha_eq_relevant(x, y, &|p, q| p == q);
+        for i in 0..shifts.len() {
+            for j in 0..shifts.len() {
+                let ((ta, op, w, a, s, pa), (tb, op2, _, b, s2, _)) = (&shifts[i], &shifts[j]);
+                if i == j || op != op2 || !same(s, s2) || same(a, b) {
+                    continue;
+                }
+                let key = prim(ISub, vec![tb.clone(), ta.clone()]);
+                if seen.iter().any(|k| same(k, &key)) {
+                    continue;
+                }
+                seen.push(key);
+                let hs = hyps.clone();
+                let Some(p) = self.shift_amount_ok(st, *op, *w, s, pa, &hs)? else { continue };
+                let Some(hab) = self.prove_cond(st, &prim(Le(*w), vec![a.clone(), b.clone()]), &hs)? else { continue };
+                let mut args = vec![(Rel::Rel, a.clone()), (Rel::Rel, b.clone()), (Rel::Rel, s.clone()), (Rel::Irr, p), (Rel::Irr, hab)];
+                let stem = match op {
+                    Shr(_) => "shr_mono",
+                    WShr(_) => "wshr_mono",
+                    _ => {
+                        let (Some(pow2), Some(n)) = (self.env.lookup_global("ghost::pow2"), w.bits()) else { continue };
+                        let pw = apps(mk::global(pow2), [(Rel::Rel, to_int(Width::U32, s.clone()))]);
+                        let fits = prim(Lt(Width::Int), vec![prim(IMul, vec![to_int(*w, b.clone()), pw]), mk::lit(Width::Int, BigInt::from(1) << n)]);
+                        let Some(q) = self.prove_cond(st, &fits, &hs)? else { continue };
+                        args.push((Rel::Irr, q));
+                        "shl_mono"
+                    }
+                };
+                self.push_lemma(st, &format!("bits::{stem}_{}", sfx(*w)), args, hyps)?;
             }
         }
         Ok(())
@@ -2044,12 +2194,34 @@ impl<'a> Engine<'a> {
                     if let Some(p) = p {
                         self.push_lemma(st, &name, vec![(Rel::Rel, args[0].clone()), (Rel::Rel, args[1].clone()), (Rel::Rel, p)], hyps)?;
                     }
+                    // `MAX >> s` is `2^(w − s) − 1` (`bits::max_shr_<w>`,
+                    // `bits::max_wshr_<w>`, C4)
+                    if is_lit_of(&args[0], sandblaster_kernel::prim::max_of(w))
+                        && let Some(p) = self.shift_amount_ok(st, op, w, &args[1], proofs, hyps)?
+                    {
+                        let stem = if matches!(op, Shr(_)) { "max_shr" } else { "max_wshr" };
+                        self.push_lemma(st, &format!("bits::{stem}_{}", sfx(w)), vec![(Rel::Rel, args[1].clone()), (Rel::Irr, p)], hyps)?;
+                    }
                 }
             }
             // The bit-count bounds are lemmas of `lemmas/bits.core` (derived
             // from the K1 definitions).
             CountOnes(w) => self.push_lemma(st, &format!("bits::count_ones_le_{}", sfx(w)), vec![(Rel::Rel, args[0].clone())], hyps)?,
             LeadingZeros(w) | TrailingZeros(w) => {
+                // the complement of a low mask `!(MAX >> s)` has `w − s`
+                // trailing zeros (`bits::max_shr_not_tz_<w>`, C4)
+                if matches!(op, TrailingZeros(_))
+                    && let Term::Prim { op: Not(_), args: ns, .. } = &*args[0]
+                    && let [n0] = ns.as_slice()
+                    && let Term::Prim { op: Shr(w2), args: rs, proofs: rp } = &**n0
+                    && *w2 == w
+                    && rs.len() == 2
+                    && is_lit_of(&rs[0], sandblaster_kernel::prim::max_of(w))
+                    && !matches!(&*rs[1], Term::Lit { .. })
+                    && let Some(p) = self.shift_amount_ok(st, Shr(w), w, &rs[1], rp, hyps)?
+                {
+                    self.push_lemma(st, &format!("bits::max_shr_not_tz_{}", sfx(w)), vec![(Rel::Rel, rs[1].clone()), (Rel::Irr, p)], hyps)?;
+                }
                 let stem = if matches!(op, LeadingZeros(_)) { "leading_zeros" } else { "trailing_zeros" };
                 self.push_lemma(st, &format!("bits::{stem}_le_{}", sfx(w)), vec![(Rel::Rel, args[0].clone())], hyps)?;
                 // the count of a complement `!y` (trailing ones): its value
@@ -2101,6 +2273,28 @@ impl<'a> Engine<'a> {
             }
             // (a checked `<<` too: its width obligation is irrelevant, so the
             // lemma's own proof of it converts with the atom's)
+            WShl(w) | Shl(w) if args.len() == 2 && !matches!(&*args[1], Term::Lit { .. }) => {
+                // by a non-literal amount below the width (`bits_shift.core`,
+                // C4): `1 << s` is `2^s`, `x << s` is `x · 2^s` when that
+                // fits (the checked shift's own width proof converts with
+                // the lemma's: its slot is irrelevant)
+                let Some(p) = self.shift_amount_ok(st, op, w, &args[1], proofs, hyps)? else { return Ok(()) };
+                let stem = if matches!(op, WShl(_)) { "wshl" } else { "shl" };
+                if is_lit_of(&args[0], 1u8) {
+                    self.push_lemma(st, &format!("bits::{stem}_one_{}", sfx(w)), vec![(Rel::Rel, args[1].clone()), (Rel::Irr, p)], hyps)?;
+                    return Ok(());
+                }
+                let Some(pow2) = self.env.lookup_global("ghost::pow2") else { return Ok(()) };
+                let Some(n) = w.bits() else { return Ok(()) };
+                let pw = apps(mk::global(pow2), [(Rel::Rel, to_int(Width::U32, args[1].clone()))]);
+                let fits = prim(Lt(Width::Int), vec![prim(IMul, vec![to_int(w, args[0].clone()), pw]), mk::lit(Width::Int, BigInt::from(1) << n)]);
+                // (the product `x · 2^s` against the hypotheses' products:
+                // `(c +ᵤ 1) as Int · 2^g` and a law's `(c + 1) · 2^g`)
+                self.link_products(st, &fits, hyps)?;
+                if let Some(q) = self.prove_cond(st, &fits, &hyps.clone())? {
+                    self.push_lemma(st, &format!("bits::{stem}_mul_pow2_{}", sfx(w)), vec![(Rel::Rel, args[0].clone()), (Rel::Rel, args[1].clone()), (Rel::Irr, p), (Rel::Irr, q)], hyps)?;
+                }
+            }
             WShl(w) | Shl(w) if args.len() == 2 => {
                 let stem = if matches!(op, WShl(_)) { "wshl_exact" } else { "shl_exact" };
                 if let Term::Lit { n: k, .. } = &*args[1]
@@ -2133,6 +2327,9 @@ impl<'a> Engine<'a> {
             // instance is linear in the atom and its factors.
             IMul if args.len() == 2 && !args.iter().any(|a| matches!(&**a, Term::Lit { .. })) => {
                 let (a, b) = (args[0].clone(), args[1].clone());
+                // a sum times a power of two distributes
+                // (`bits::pow2_mul_add`, C4: `(c + 1) · 2^g` against `c · 2^g`)
+                self.enrich_pow2_distribution(st, &a, &b, hyps)?;
                 // the facts of the `Nat` functions in the factors (`1 ≤
                 // pow2(x)`): a power inside a product is not an atom yet
                 self.nat_inner_facts(st, &a, hyps, 0)?;
@@ -2174,6 +2371,53 @@ impl<'a> Engine<'a> {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// A proof of `s < n` (`n` the bits of `w`) for the amount `s` of a
+    /// shift of width `w` by a non-literal amount, at one of the widths of
+    /// `bits_shift.core` (`u8`, `u16`, `u32`, `u64`): a checked shift's own
+    /// proof (when it is a proof term of its own: no search, on every
+    /// enrichment round of a goal that mentions the shift), else linarith.
+    fn shift_amount_ok(&mut self, st: &St, op: PrimOp, w: Width, s: &Tm, proofs: &[Tm], hyps: &[Hyp]) -> R<Option<Tm>> {
+        use PrimOp::*;
+        if !matches!(w, Width::U8 | Width::U16 | Width::U32 | Width::U64) || matches!(&**s, Term::Lit { .. }) {
+            return Ok(None);
+        }
+        if let (Shl(_) | Shr(_), Some(p)) = (op, proofs.first())
+            && !matches!(&**p, Term::Refl { .. } | Term::Erased)
+        {
+            return Ok(Some(p.clone()));
+        }
+        let Some(n) = w.bits() else { return Ok(None) };
+        let c = sandblaster_kernel::prim::prim0(Lt(Width::U32), vec![s.clone(), mk::lit(Width::U32, n)]);
+        self.prove_cond(st, &c, hyps)
+    }
+
+    /// `(x + y) · 2^e = x · 2^e + y · 2^e` (`bits::pow2_mul_add`) for a
+    /// product atom `a · b` of a sum and a `pow2` whose exponent is provably
+    /// in `0..=64`.
+    fn enrich_pow2_distribution(&mut self, st: &St, a: &Tm, b: &Tm, hyps: &mut Vec<Hyp>) -> R<()> {
+        use PrimOp::*;
+        let Some(pow2) = self.env.lookup_global("ghost::pow2") else { return Ok(()) };
+        for (sum, pw) in [(a, b), (b, a)] {
+            let Term::Prim { op: IAdd, args: xs, .. } = &**sum else { continue };
+            let Term::App { fun, arg: e, .. } = &**pw else { continue };
+            if !matches!(&**fun, Term::Global(g) if *g == pow2) || xs.len() != 2 {
+                continue;
+            }
+            let int = Width::Int;
+            let p = |op: PrimOp, x: Vec<Tm>| sandblaster_kernel::prim::prim0(op, x);
+            let hs = hyps.clone();
+            let (Some(h1), Some(h2)) = (
+                self.prove_cond(st, &p(Le(int), vec![mk::lit(int, 0u8), e.clone()]), &hs)?,
+                self.prove_cond(st, &p(Le(int), vec![e.clone(), mk::lit(int, 64u8)]), &hs)?,
+            ) else {
+                continue;
+            };
+            self.push_lemma(st, "bits::pow2_mul_add", vec![(Rel::Rel, xs[0].clone()), (Rel::Rel, xs[1].clone()), (Rel::Rel, e.clone()), (Rel::Irr, h1), (Rel::Irr, h2)], hyps)?;
+            return Ok(());
         }
         Ok(())
     }
@@ -2604,6 +2848,32 @@ fn nat_fact(f: &str) -> &'static str {
 }
 
 /// The width suffix of lemma names (`u64`).
+/// The products of two non-literal factors in `t` (a DAG walk).
+fn products_in(t: &Tm) -> Vec<Tm> {
+    fn go(t: &Tm, out: &mut Vec<Tm>, seen: &mut super::util::FxSet<*const Term>) {
+        if !seen.insert(Rc::as_ptr(t)) {
+            return;
+        }
+        if is_product(t) {
+            out.push(t.clone());
+        }
+        crate::elab::tm::children(t, &mut |c| go(c, out, seen));
+    }
+    let mut out = Vec::new();
+    go(t, &mut out, &mut super::util::FxSet::default());
+    out
+}
+
+/// A product of two non-literal factors (an atom of linear arithmetic).
+fn is_product(t: &Tm) -> bool {
+    matches!(&**t, Term::Prim { op: PrimOp::IMul, args, .. } if args.len() == 2 && !args.iter().any(|x| matches!(&**x, Term::Lit { .. })))
+}
+
+/// Whether `t` is the literal `n`.
+fn is_lit_of(t: &Tm, n: impl Into<BigInt>) -> bool {
+    matches!(&**t, Term::Lit { n: m, .. } if *m == n.into())
+}
+
 fn sfx(w: Width) -> &'static str {
     sandblaster_kernel::prim::width_suffix(w)
 }

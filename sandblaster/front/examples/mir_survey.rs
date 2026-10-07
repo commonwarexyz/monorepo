@@ -14,7 +14,7 @@ use sandblaster_front::mir::{self, ModuleNames};
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let text = std::fs::read_to_string(&args[0]).expect("read .sbmir");
-    let names = ModuleNames { module: String::new(), sealed: args.get(2).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default(), host_enums: BTreeMap::new(), requires: BTreeSet::new(), open: args.get(3).map(|s| s.split(',').filter_map(|kv| kv.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect()).unwrap_or_default(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default() };
+    let names = ModuleNames { module: String::new(), sealed: args.get(2).map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default(), host_enums: BTreeMap::new(), requires: BTreeSet::new(), open: args.get(3).map(|s| s.split(',').filter_map(|kv| kv.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect()).unwrap_or_default(), dsl_modules: vec![], current: Default::default(), consts: BTreeMap::new(), invariant_types: BTreeSet::new(), host: Default::default(), target_arch: None };
     // the sources the extraction names, relative to the crate directory
     // (`SBMIR_CRATE_DIR`, default: the current directory)
     let dir = std::path::PathBuf::from(std::env::var("SBMIR_CRATE_DIR").unwrap_or_else(|_| ".".into()));
