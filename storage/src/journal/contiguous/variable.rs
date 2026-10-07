@@ -9630,23 +9630,26 @@ mod tests {
         });
     }
 
-    /// Test contiguous variable journal with items_per_section=1.
-    ///
-    /// This is a regression test for a bug where reading from size()-1 fails
-    /// when using items_per_section=1, particularly after pruning and restart.
+    /// A config that stores one item per section under the given partition.
+    fn single_item_per_section_config(context: &deterministic::Context) -> Config<()> {
+        Config {
+            partition: "single-item-per-blob".into(),
+            items_per_section: NZU64!(1),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, LARGE_PAGE_SIZE, NZUsize!(10)),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+        }
+    }
+
+    /// With one item per section, appends, tail reads, pruning, appends past the prune, and a
+    /// restart all keep every retained position readable and the bounds intact.
     #[test_traced]
     fn test_single_item_per_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = Config {
-                partition: "single-item-per-blob".into(),
-                items_per_section: NZU64!(1),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-                replay_buffer: NZUsize!(1024),
-            };
+            let cfg = single_item_per_section_config(&context);
 
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
@@ -9749,8 +9752,18 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
 
-            // Fresh journal for this test
+    /// A one-item-per-section journal that is pruned and reopened keeps its bounds and reads every
+    /// retained position, including the tail. Reading the tail after a prune and restart once
+    /// failed for this configuration.
+    #[test_traced]
+    fn test_single_item_per_blob_restart_after_prune() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = single_item_per_section_config(&context);
+
             let mut journal = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
@@ -9789,9 +9802,18 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+        });
+    }
 
-            // This tests the scenario where prune removes everything.
-            // Callers must check bounds().is_empty() before reading.
+    /// Pruning every item of a one-item-per-section journal keeps its size, empties its bounds, and
+    /// reports the tail position as pruned until a new append.
+    #[test_traced]
+    fn test_single_item_per_blob_prune_all() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = single_item_per_section_config(&context);
+
+            // Callers must check bounds().is_empty() before reading once everything is pruned.
             let mut journal = Journal::<_, u64>::init(context.child("fifth"), cfg.clone())
                 .await
                 .unwrap();
