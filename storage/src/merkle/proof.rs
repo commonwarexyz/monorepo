@@ -1039,6 +1039,8 @@ pub fn range_proof_positions<F: Family>(
     leaves: Location<F>,
     range: Range<Location<F>>,
 ) -> Result<Vec<Position<F>>, super::Error<F>> {
+    // Inactive peaks and bagging only shape the layout the blueprint also computes, which is
+    // discarded here, so any values give the same read set.
     Ok(Blueprint::new(leaves, 0, Bagging::ForwardFold, range)?.positions())
 }
 
@@ -1091,6 +1093,7 @@ pub fn multi_proof_positions<F: Family>(
         if !loc.is_valid_index() {
             return Err(super::Error::LocationOverflow(*loc));
         }
+        // As in range_proof_positions, the layout parameters do not affect the read set.
         let bp = Blueprint::new(leaves, 0, Bagging::ForwardFold, *loc..*loc + 1)?;
         acc.extend(bp.required_positions());
         Ok(acc)
