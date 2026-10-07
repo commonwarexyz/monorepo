@@ -30,6 +30,9 @@ pub struct HandoffEvent {
 pub enum HandoffAbandonedReason {
     ViewExit,
     AncestrySuperseded,
+    AncestryInvalidated,
+    ParentNullify,
+    ViewNullify,
     ResponseClosed,
     IneligibleAtRecording,
 }

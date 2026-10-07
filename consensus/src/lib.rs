@@ -223,6 +223,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Return the receiver promptly and do any work behind it. Parent certification does
         /// not cancel this request. Consensus drops the receiver when it abandons the context,
         /// so stop pending work when the receiver closes.
+        ///
+        /// Consensus also drops the receiver once the parent can no longer be built on before
+        /// it certifies, as after a nullification in the parent's term, or once it votes to
+        /// nullify the parent's view or an earlier view of that term, since the application may
+        /// verify other blocks only after this build completes. An ordinary
+        /// [`Automaton::propose`] for the same context follows if the parent certifies, or a
+        /// request on a replacement parent once one is selectable.
         fn propose_handoff(
             &mut self,
             _context: Self::Context,
@@ -393,6 +400,12 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The application cannot revoke this decision. Publishing early trusts the outgoing
         /// consensus leader not to equivocate.
+        ///
+        /// Parent certification does not cancel a prepared build. Consensus cancels it once
+        /// the parent can no longer be built on before it certifies, as after a nullification
+        /// in the parent's term, or once it votes to nullify the parent's view or an earlier
+        /// view of that term. It then requests an ordinary proposal for the same context if the
+        /// parent certifies, or a proposal on a replacement parent once one is selectable.
         ///
         /// The context names the parent by view and digest. Its leader field names the
         /// incoming leader, not the outgoing one. Identify the outgoing leader from the

@@ -267,11 +267,25 @@
 //!   finalizes.
 //!
 //! Consensus checks ordinary proposal eligibility before publication. Parent certification
-//! does not cancel a pending request or discard a held candidate. Consensus discards pending,
-//! deferred, held, and closed requests on view exit. When a replacement parent supersedes their
-//! ancestry, consensus discards them and requests a proposal on the replacement. Restart also
-//! discards pending requests and held candidates. Other validators require explicitly certified
-//! ancestry before verifying a term-start proposal, and so before voting to notarize it.
+//! does not cancel a pending request or discard a held candidate.
+//!
+//! Consensus cancels a pending build once its captured ancestry is no longer valid, as after a
+//! nullification in the parent's term, even if no replacement parent is selectable yet. It also
+//! cancels it once the incoming leader votes to nullify the view it is waiting in, at or below
+//! the uncertified parent. While the leader waits in that view, it requests no new handoff on
+//! that parent. The application may verify other blocks only after the build completes, so the
+//! build could otherwise keep the parent, the view the leader waits in, or a fallback parent
+//! from certifying. A cancelled request waits as if the application had deferred it.
+//!
+//! When the parent of a deferred request certifies or finalizes, consensus requests an ordinary
+//! proposal for the same context, unless the leader has already voted to nullify the request's
+//! view. In that case, consensus drops the request, since no proposal can be recorded there.
+//!
+//! Consensus discards pending, deferred, held, and closed requests on view exit. When a
+//! replacement parent supersedes their ancestry, consensus discards them and requests a proposal
+//! on the replacement. Restart also discards pending requests and held candidates. Other
+//! validators require explicitly certified ancestry before verifying a term-start proposal, and
+//! so before voting to notarize it.
 //!
 //! Marshal applications use [`crate::Application::handoff_policy`] to choose
 //! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
@@ -301,10 +315,25 @@
 //! local relay attempts after proposal acceptance, classified by whether the exact captured
 //! parent has certified or finalized at that point. They do not imply network delivery.
 //!
-//! `handoff_abandoned` counts handoff requests or candidates discarded before publication,
-//! labeled by view exit, superseded ancestry, response closure, or ineligibility at recording.
-//! A closed response counts as response closure once its parent certifies or finalizes, or under
-//! view exit or superseded ancestry if one of those discards it first.
+//! `handoff_abandoned` counts handoff requests or candidates that consensus discards before
+//! publication, and pending builds that it cancels, by reason:
+//!
+//! * `ViewExit`: the request's view ended.
+//! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
+//!   selectable, so consensus requested a proposal on the replacement.
+//! * `ParentNullify`: a pending build was cancelled after a nullification in the parent's term
+//!   or a local nullify vote for the view the leader waits in, at or below the parent.
+//! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
+//!   invalid for another reason, such as a failed certification, before a replacement parent was
+//!   selectable.
+//! * `ViewNullify`: the parent of a deferred request certified after a local nullify vote for
+//!   the request's view.
+//! * `ResponseClosed`: the parent of a closed response certified or finalized.
+//! * `IneligibleAtRecording`: a returned candidate could not be recorded for its view.
+//!
+//! A cancelled build leaves its request deferred, so the request counts again if consensus later
+//! discards it. A closed response counts under view exit or superseded ancestry instead if one of
+//! those discards it first.
 //!
 //! Neither family tracks losses across restart or distinguishes newly built candidates from
 //! reused blocks.
@@ -789,8 +818,13 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng, channel::fallible::OneshotExt as _,
-        non_empty, ordered::Set, probability, sync::Mutex, test_rng,
+        Faults, N3f1, NZU16, NZU32, NZUsize, TestRng,
+        channel::{fallible::OneshotExt as _, oneshot},
+        non_empty,
+        ordered::Set,
+        probability,
+        sync::Mutex,
+        test_rng,
     };
     use engine::Engine;
     use futures::future::join_all;
@@ -2078,6 +2112,179 @@ mod tests {
                     reporter.nullifies.lock().is_empty(),
                     "expected nullification-free views"
                 );
+            }
+        });
+    }
+
+    /// The incoming leader's application may verify its handoff parent only after the
+    /// pending handoff build completes, so certifying the parent waits for that build. With
+    /// one validator offline, every certificate needs the incoming leader's vote. The
+    /// network resumes because the leader cancels the build once it votes to nullify the
+    /// parent's view.
+    #[test_traced]
+    fn test_pipelined_handoff_parent_nullify_releases_blocked_certification() {
+        let n = 4;
+        let epoch = Epoch::new(333);
+        let required = View::new(10);
+        let executor = deterministic::Runner::timed(Duration::from_secs(120));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"pipelined_handoff_blocked_certification", n);
+            let mut oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: probability!(1.0),
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // The outgoing term covers views 1 and 2, the incoming leader starts its term at
+            // view 3, and the offline validator leads the following term.
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(2)),
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let participant_set: Set<PublicKey> = participants.clone().try_into().unwrap();
+            let schedule: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(&participant_set);
+            let leader_of =
+                |view: u64| usize::from(schedule.elect(Round::new(epoch, View::new(view)), ()));
+            let incoming = leader_of(3);
+            let offline = leader_of(5);
+            assert!(![leader_of(1), incoming].contains(&offline));
+
+            // The incoming leader's application holds its view 3 handoff build and leaves
+            // the certification of view 2 to this test.
+            let build: Arc<Mutex<Option<oneshot::Sender<crate::HandoffProposal<D>>>>> =
+                Arc::default();
+            let certification: Arc<Mutex<Option<oneshot::Sender<bool>>>> = Arc::default();
+            let relay = Arc::new(mocks::relay::Relay::new());
+            let mut reporters = Vec::new();
+            for (idx, validator) in participants.iter().enumerate() {
+                if idx == offline {
+                    continue;
+                }
+                let context = context
+                    .child("validator")
+                    .with_attribute("public_key", validator);
+                let reporter_config = mocks::reporter::Config {
+                    participants: participants.clone().try_into().unwrap(),
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                };
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                reporters.push(reporter.clone());
+                let should_certify = if idx == incoming {
+                    let certification = certification.clone();
+                    mocks::application::Certifier::Controlled(Box::new(
+                        move |round, _, response| {
+                            if round.view() == View::new(2) {
+                                *certification.lock() = Some(response);
+                            } else {
+                                response.send_lossy(true);
+                            }
+                        },
+                    ))
+                } else {
+                    mocks::application::Certifier::Always
+                };
+                let application_cfg = mocks::application::Config::<Sha256, _> {
+                    relay: relay.clone(),
+                    me: validator.clone(),
+                    propose_latency: (1.0, 0.0),
+                    verify_latency: (1.0, 0.0),
+                    certify_latency: (1.0, 0.0),
+                    should_certify,
+                };
+                let (mut actor, application) = mocks::application::Application::new(
+                    context.child("application"),
+                    application_cfg,
+                );
+                if idx == incoming {
+                    actor.set_handoff(Some(HandoffPublication::AfterCertification));
+                    let build = build.clone();
+                    actor.set_handoff_propose_controller(Box::new(
+                        move |round, proposal, response| {
+                            if round.view() == View::new(3) {
+                                *build.lock() = Some(response);
+                            } else {
+                                response.send_lossy(proposal);
+                            }
+                        },
+                    ));
+                }
+                actor.start();
+
+                let cfg = config::Config {
+                    scheme: schemes[idx].clone(),
+                    elector: elector.clone(),
+                    blocker: oracle.control(validator.clone()),
+                    automaton: application.clone(),
+                    relay: application.clone(),
+                    reporter: reporter.clone(),
+                    strategy: Sequential,
+                    partition: validator.to_string(),
+                    mailbox_size: NZUsize!(1024),
+                    epoch,
+                    floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(epoch)),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(10),
+                    fetch_timeout: Duration::from_secs(1),
+                    view_retention: ViewDelta::new(10),
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(11),
+                        budget: SkipBudget::Participants,
+                    },
+                    replay_buffer: NZUsize!(1024 * 1024),
+                    write_buffer: NZUsize!(1024 * 1024),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    forward: ForwardPolicy::Disabled,
+                    track_historical_votes: false,
+                };
+                let engine = Engine::new(context.child("engine"), cfg);
+                let (pending, recovered, resolver) = registrations
+                    .remove(validator)
+                    .expect("validator should be registered");
+                engine.start(pending, recovered, resolver);
+            }
+
+            // Certify view 2 once the incoming leader cancels its build, as an application
+            // whose parent verification was queued behind that build would.
+            let deadline = context.current() + Duration::from_secs(60);
+            while !reporters.iter().all(|reporter| {
+                reporter
+                    .finalizations
+                    .lock()
+                    .keys()
+                    .any(|view| *view >= required)
+            }) {
+                if build.lock().as_ref().is_some_and(|build| build.is_closed())
+                    && let Some(response) = certification.lock().take()
+                {
+                    response.send_lossy(true);
+                }
+                assert!(
+                    context.current() < deadline,
+                    "network did not finalize past the blocked handoff"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert!(
+                build.lock().as_ref().is_some_and(|build| build.is_closed()),
+                "the incoming leader must cancel its handoff build"
+            );
+            for reporter in reporters.iter() {
+                reporter.assert_no_faults();
+                reporter.assert_no_invalid();
             }
         });
     }

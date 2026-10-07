@@ -511,8 +511,8 @@ mod tests {
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Application as _, CertifiableAutomaton as _, CertifiableBlock as _, HandoffPolicy,
-        HandoffPublication, Heightable as _, Reporter as _, Reporters,
+        Application as _, Automaton as _, CertifiableAutomaton as _, CertifiableBlock as _,
+        HandoffPolicy, HandoffPublication, Heightable as _, Reporter as _, Reporters,
         marshal::{
             Update,
             ancestry::{self, Ancestry},
@@ -1606,6 +1606,133 @@ mod tests {
                 },
             }
             proposal_release.closed().await;
+            actor.abort();
+            let _ = actor.await;
+            marshal.abort().await;
+        });
+    }
+
+    /// A handoff build can hold back certification of its own parent. Once a finalization
+    /// report is deferred behind the active build, verification of the parent queues behind
+    /// that report, so certifying the parent waits for the build. Dropping the handoff
+    /// response, as consensus does when it votes to nullify the parent's view, cancels the
+    /// build and lets the parent certify.
+    #[test]
+    fn cancelled_handoff_proposal_unblocks_parent_certification() {
+        deterministic::Runner::timed(Duration::from_secs(1_000)).start(|context| async move {
+            let (outgoing_gate, outgoing_started, outgoing_release) = application_gate();
+            let (parent_gate, mut parent_started, parent_release) = application_gate();
+            let (proposal_gate, proposal_started, _proposal_release) = application_gate();
+            let app = GatedApp {
+                verify_gates: Arc::new(Mutex::new(VecDeque::from([outgoing_gate, parent_gate]))),
+                proposal_gate: Arc::new(Mutex::new(Some(proposal_gate))),
+                verify_valid: true,
+                observed_contexts: Arc::default(),
+            };
+            let mut signing = context.child("signing");
+            let scheme = scheme_mocks::fixture(&mut signing, b"handoff-parent-certification", 1)
+                .schemes[0]
+                .clone();
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "handoff-parent-certification",
+                scheme,
+                None,
+                NZUsize!(8),
+                true,
+            )
+            .await;
+            let processor = Processor::new(
+                app.clone(),
+                test_databases(),
+                anchor(0, 0),
+                StatefulMetrics::new(&context),
+                None,
+            );
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor,
+                deferred_verifications: Vec::new(),
+            };
+            let actor = context.child("loop").spawn(move |_| processing.run());
+            let mut mailbox = Mailbox::new(sender, app);
+            let mut deferred = Deferred::new(
+                context.child("deferred"),
+                mailbox.clone(),
+                marshal.mailbox.clone(),
+                FixedEpocher::new(NZU64!(u64::MAX)),
+            );
+            let genesis = TestBlock::new(0, 0);
+            let outgoing = TestBlock::child(&genesis, 1);
+            let parent = TestBlock::child(&outgoing, 2);
+            for block in [&outgoing, &parent] {
+                assert!(
+                    marshal
+                        .mailbox
+                        .verified(block.context().round, Arc::new(block.clone()))
+                        .await
+                );
+            }
+
+            // The proposer has already verified the outgoing term's earlier block.
+            let mut verifier = mailbox.clone();
+            let mut verify_outgoing = Box::pin(verifier.verify(
+                (context.child("verify_outgoing"), outgoing.context()),
+                ancestry::from_iter([Arc::new(outgoing.clone()), Arc::new(genesis.clone())]),
+            ));
+            assert!(poll!(&mut verify_outgoing).is_pending());
+            outgoing_started
+                .await
+                .expect("outgoing verification should start");
+            outgoing_release
+                .send(())
+                .expect("outgoing verification should remain active");
+            assert!(verify_outgoing.await);
+
+            // The handoff build on the uncertified parent starts, and a finalization
+            // report is deferred behind it.
+            let handoff = deferred
+                .propose_handoff(TestBlock::child(&parent, 3).context())
+                .await;
+            proposal_started.await.expect("handoff build should start");
+            let (acknowledgement, mut waiter) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(outgoing.clone()), acknowledgement));
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(poll!(&mut waiter).is_pending());
+
+            // Certifying the parent waits for the build.
+            let optimistic = deferred.verify(parent.context(), parent.digest()).await;
+            assert_eq!(optimistic.await, Ok(true));
+            let mut certify = deferred
+                .certify(parent.context().round, parent.digest())
+                .await;
+            select! {
+                _ = &mut parent_started => {
+                    panic!("parent verification overtook the handoff build");
+                },
+                _ = context.sleep(Duration::from_secs(300)) => {},
+            }
+            assert!(poll!(&mut certify).is_pending());
+
+            // Dropping the handoff response cancels the build and admits the parent.
+            drop(handoff);
+            select! {
+                result = &mut parent_started => {
+                    result.expect("parent verification should start");
+                },
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("cancelled handoff build blocked parent verification");
+                },
+            }
+            parent_release
+                .send(())
+                .expect("parent verification should remain active");
+            assert_eq!(certify.await, Ok(true));
+            waiter.await.expect("finalization should be acknowledged");
             actor.abort();
             let _ = actor.await;
             marshal.abort().await;

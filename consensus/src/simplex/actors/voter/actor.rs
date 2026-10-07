@@ -113,8 +113,10 @@ enum ProposalState<D> {
     Regular(oneshot::Receiver<D>),
     /// The automaton has not answered a handoff request yet.
     Handoff(oneshot::Receiver<HandoffProposal<D>>),
-    /// A handoff the application declined until its parent certifies. An
-    /// ordinary request for the same context follows exact parent certification.
+    /// A handoff without a pending build: the application declined it until its parent
+    /// certifies, or we cancelled its build (see [`State::pending_handoff_abandonment`]). An
+    /// ordinary request for the same context follows exact parent certification, unless we
+    /// voted to nullify the request's view.
     Deferred,
     /// A volatile build result awaiting parent certification.
     Held(D),
@@ -533,8 +535,24 @@ impl<
             *pending_verify = None;
         }
 
+        // Cancel a pending handoff build once its captured ancestry is no longer valid, or once
+        // we vote to nullify the view we are waiting in, at or below its uncertified parent.
+        // The application may verify other blocks only after the build completes, so the build
+        // could keep the parent, the view we wait in, or a fallback parent from certifying.
+        // Dropping the receiver cancels the build. The request stays deferred: an ordinary
+        // request for the same context follows if the parent certifies, and supersession
+        // replaces it once another parent is selectable.
+        if let Some(Request(ProposalRequest::Handoff(context), _, state)) = pending_propose.as_mut()
+            && matches!(state, ProposalState::Handoff(_))
+            && let Some(reason) = self.state.pending_handoff_abandonment(context)
+        {
+            self.record_handoff_abandoned(reason);
+            *state = ProposalState::Deferred;
+        }
+
         // Advance a pending handoff once its exact parent certifies or finalizes. A
-        // deferred handoff becomes an ordinary request for the same context, a held
+        // deferred handoff becomes an ordinary request for the same context, unless we
+        // voted to nullify its view, where we can no longer record a proposal. A held
         // build becomes ready to publish, and a closed response forfeits the view.
         // Certification and finalization are recorded only in iterations that end with
         // a journal sync, and responses are polled only in later iterations, so nothing
@@ -543,6 +561,10 @@ impl<
             && self.state.proposal_parent_certified(request.context())
         {
             match state {
+                ProposalState::Deferred if self.state.voted_nullify(request.view()) => {
+                    *pending_propose = None;
+                    self.record_handoff_abandoned(HandoffAbandonedReason::ViewNullify);
+                }
                 ProposalState::Deferred => {
                     let context = request.context().clone();
                     *pending_propose = Some(

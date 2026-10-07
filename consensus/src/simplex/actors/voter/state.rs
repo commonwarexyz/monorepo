@@ -5,7 +5,7 @@ use crate::{
         Floor, Lookahead, Viewport,
         actors::span::MISSING_SPAN,
         elector::{Elector, Mode as _},
-        metrics::{Leader, Timeout, TimeoutReason},
+        metrics::{HandoffAbandonedReason, Leader, Timeout, TimeoutReason},
         scheme::Scheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
@@ -960,6 +960,16 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                     continue;
                 }
             };
+
+            // A term start on an uncertified parent is a pipelined handoff. Skip it while we
+            // wait in a view at or below that parent that we voted to nullify, without
+            // claiming the build request: if the parent certifies after all, the view becomes
+            // an ordinary candidate.
+            let is_handoff = view.is_term_start(self.term_length())
+                && !self.parent_certified((parent_view, parent_payload));
+            if is_handoff && self.gave_up_below(parent_view) {
+                continue;
+            }
             let Some(leader) = self
                 .views
                 .get_mut(&view)
@@ -972,9 +982,6 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
                 leader: leader.key,
                 parent: (parent_view, parent_payload),
             };
-            // A term start on an uncertified parent is a pipelined handoff.
-            let is_handoff =
-                view.is_term_start(self.term_length()) && !self.proposal_parent_certified(&context);
             return Some(if is_handoff {
                 ProposalRequest::Handoff(context)
             } else {
@@ -986,7 +993,47 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns whether the exact captured parent has certified or finalized.
     pub(super) fn proposal_parent_certified(&self, context: &Context<D, S::PublicKey>) -> bool {
-        self.explicit_ancestry_payload(context.parent.0) == Some(&context.parent.1)
+        self.parent_certified(context.parent)
+    }
+
+    /// Returns whether `parent` has certified or finalized with exactly this payload.
+    fn parent_certified(&self, (view, payload): (View, D)) -> bool {
+        self.explicit_ancestry_payload(view) == Some(&payload)
+    }
+
+    /// Returns whether we voted to nullify `view`.
+    pub(super) fn voted_nullify(&self, view: View) -> bool {
+        self.nullify_views.contains(&view)
+    }
+
+    /// Returns whether we voted to nullify the current view and that view is at or below
+    /// `parent`. We have then stopped waiting for `parent` to certify.
+    fn gave_up_below(&self, parent: View) -> bool {
+        self.view <= parent && self.voted_nullify(self.view)
+    }
+
+    /// Returns why a pending handoff build on `context` should stop, or `None` while its
+    /// result may still be used.
+    ///
+    /// A build on an uncertified parent stops once its captured ancestry is no longer valid,
+    /// even if no replacement parent is selectable yet. A nullification in the parent's
+    /// term is one such case. The build also stops once we vote to nullify the view we are
+    /// waiting in, at or below the parent. The application may verify other blocks only
+    /// after the build completes, so the build could keep the parent, the view we wait in,
+    /// or a fallback parent from certifying.
+    pub(super) fn pending_handoff_abandonment(
+        &self,
+        context: &Context<D, S::PublicKey>,
+    ) -> Option<HandoffAbandonedReason> {
+        let parent = context.parent.0;
+        if self.proposal_parent_certified(context) {
+            return None;
+        }
+        if self.gave_up_below(parent) || self.highest_nullification_in_term(parent).is_some() {
+            return Some(HandoffAbandonedReason::ParentNullify);
+        }
+        (!self.captured_parent_valid(context, self.find_parent(context.view())))
+            .then_some(HandoffAbandonedReason::AncestryInvalidated)
     }
 
     /// Records a proposal built by the automaton if its captured parent remains
