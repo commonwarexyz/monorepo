@@ -16,13 +16,18 @@ use commonware_storage::{
             FixedConfig as Config,
             db::Db as AnyDb,
             ordered::{Operation, Update},
+            traits::DbAny as _,
             value::FixedEncoding,
         },
+        floor::Proportional,
         verify_proof,
     },
     translator::EightCap,
 };
-use commonware_storage_fuzz::assert_ordered_neighbors;
+use commonware_storage_fuzz::{
+    assert_ordered_neighbors,
+    floor::{Plan, Recorder},
+};
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -58,7 +63,7 @@ enum QmdbOperation {
     Delete {
         key: RawKey,
     },
-    Commit,
+    Commit(Plan),
     OpCount,
     Root,
     Proof {
@@ -92,16 +97,19 @@ const PAGE_CACHE_SIZE: usize = 100;
 
 async fn commit_pending<F: MerkleFamily>(
     db: GenericDb<F>,
+    plan: &Plan,
     pending_writes: &mut Vec<(Key, Option<Value>)>,
     committed_state: &mut HashMap<RawKey, RawValue>,
     pending_inserts: &mut HashMap<RawKey, RawValue>,
     pending_deletes: &mut HashSet<RawKey>,
 ) -> GenericDb<F> {
+    let inherited = db.inactivity_floor_loc();
     let mut batch = db.new_batch();
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, None).await.unwrap();
+    let mut policy = Recorder::new(plan, |seed| Value::new([seed; 64]));
+    let merkleized = batch.merkleize(&db, None, &mut policy).await.unwrap();
     let (db, _) = db
         .apply_batch(merkleized)
         .await
@@ -111,6 +119,14 @@ async fn commit_pending<F: MerkleFamily>(
         committed_state.remove(&key);
     }
     committed_state.extend(pending_inserts.drain());
+
+    // Check the floor walk against the post-write state, then replay its decisions into it.
+    *committed_state = policy.check_raw(
+        committed_state.drain(),
+        inherited,
+        db.inactivity_floor_loc(),
+        db.bounds().end - 1,
+    );
     db
 }
 
@@ -181,6 +197,9 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             let mut all_keys: HashSet<RawKey> = HashSet::new();
             let mut pending_writes: Vec<(Key, Option<Value>)> = Vec::new();
 
+            // Every commit walks the floor under the plan of the most recent Commit operation.
+            let mut plan = Plan::Proportional;
+
             for op in operations.iter().take(MAX_OPS) {
                 db = match op {
                     QmdbOperation::Update { key, value } => {
@@ -208,16 +227,17 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         db
                     }
 
-                    QmdbOperation::Commit => {
+                    QmdbOperation::Commit(next) => {
+                        plan = next.clone();
                         commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
+                            db, &plan, &mut pending_writes, &mut committed_state,
                             &mut pending_inserts, &mut pending_deletes,
                         ).await
                     }
 
                     QmdbOperation::Root => {
                         let db = commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
+                            db, &plan, &mut pending_writes, &mut committed_state,
                             &mut pending_inserts, &mut pending_deletes,
                         ).await;
                         db.root();
@@ -226,7 +246,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
                     QmdbOperation::Proof { start_loc, max_ops } => {
                         let db = commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
+                            db, &plan, &mut pending_writes, &mut committed_state,
                             &mut pending_inserts, &mut pending_deletes,
                         ).await;
                         let actual_op_count = db.bounds().end;
@@ -253,7 +273,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
 
                     QmdbOperation::ArbitraryProof { start_loc, max_ops , proof_leaves, digests} => {
                         let db = commit_pending(
-                            db, &mut pending_writes, &mut committed_state,
+                            db, &plan, &mut pending_writes, &mut committed_state,
                             &mut pending_inserts, &mut pending_deletes,
                         ).await;
                         let actual_op_count = db.bounds().end;
@@ -322,7 +342,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             // Final commit to ensure all operations are persisted.
             if !pending_writes.is_empty() {
                 db = commit_pending(
-                    db, &mut pending_writes, &mut committed_state,
+                    db, &plan, &mut pending_writes, &mut committed_state,
                     &mut pending_inserts, &mut pending_deletes,
                 ).await;
             }
@@ -358,7 +378,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                 assert_neighbors(&db, &committed_state, key).await;
             }
 
-            let batch = db.new_batch().merkleize(&db, None).await.unwrap();
+            let batch = db.new_batch().merkleize(&db, None, &mut Proportional).await.unwrap();
             let (db, _) = db
                 .apply_batch(batch)
                 .await

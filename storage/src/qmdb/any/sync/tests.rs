@@ -2475,7 +2475,7 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb},
-        qmdb::any::value::VariableEncoding,
+        qmdb::{any::value::VariableEncoding, floor::Proportional},
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -2484,7 +2484,6 @@ mod harnesses {
     use commonware_utils::TestRng;
     use rand::Rng;
 
-    // ===== Family-generic op creation helpers =====
     //
     // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
     // are structurally identical across families.
@@ -2585,10 +2584,6 @@ mod harnesses {
         ops
     }
 
-    // ===== MMR harnesses (existing, unchanged) =====
-
-    // ----- Ordered/Fixed -----
-
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
@@ -2639,13 +2634,15 @@ mod harnesses {
             >,
         ) -> Self::Db {
             let db = crate::qmdb::any::ordered::fixed::test::apply_ops(db, ops).await;
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Ordered/Variable -----
 
     pub struct OrderedVariableHarness;
 
@@ -2703,15 +2700,13 @@ mod harnesses {
             let db = crate::qmdb::any::ordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Fixed -----
 
     pub struct UnorderedFixedHarness;
 
@@ -2763,13 +2758,15 @@ mod harnesses {
             >,
         ) -> Self::Db {
             let db = crate::qmdb::any::unordered::fixed::test::apply_ops(db, ops).await;
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Variable -----
 
     pub struct UnorderedVariableHarness;
 
@@ -2831,17 +2828,13 @@ mod harnesses {
             let db = crate::qmdb::any::unordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ===== MMB harnesses =====
-
-    // ----- Ordered/Fixed MMB -----
 
     pub struct OrderedFixedMmbHarness;
 
@@ -2911,15 +2904,20 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Ordered/Variable MMB -----
 
     pub struct OrderedVariableMmbHarness;
 
@@ -2996,19 +2994,20 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Fixed MMB -----
 
     pub struct UnorderedFixedMmbHarness;
 
@@ -3080,15 +3079,20 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Variable MMB -----
 
     pub struct UnorderedVariableMmbHarness;
 
@@ -3166,11 +3170,14 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -3178,8 +3185,6 @@ mod harnesses {
         }
     }
 }
-
-// ===== Test Generation Macro =====
 
 /// Macro to generate all standard sync tests for a given harness.
 macro_rules! sync_tests_for_harness {

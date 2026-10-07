@@ -34,15 +34,6 @@
 /// Runtime CPU feature detection used to select and guard SIMD engines.
 ///
 /// Each function returns whether the current CPU supports the named engine's features.
-// TODO(https://github.com/commonwarexyz/monorepo/issues/4414): Bump cpufeatures and remove this workaround.
-#[allow(
-    unfulfilled_lint_expectations,
-    reason = "stable Rust does not emit this nightly-only deprecation"
-)]
-#[expect(
-    deprecated,
-    reason = "tracked by https://github.com/commonwarexyz/monorepo/issues/4414"
-)]
 mod cpu_features {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx512, "avx512f", "gfni");

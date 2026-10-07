@@ -11,11 +11,14 @@ use commonware_storage::{
         contiguous::fixed::{Config as FConfig, Journal},
     },
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
-    qmdb::any::{
-        FixedConfig as Config,
-        db::Db as AnyDb,
-        ordered::{Operation, Update},
-        value::FixedEncoding,
+    qmdb::{
+        any::{
+            FixedConfig as Config,
+            db::Db as AnyDb,
+            ordered::{Operation, Update},
+            value::FixedEncoding,
+        },
+        floor::Proportional,
     },
     translator::EightCap,
 };
@@ -74,7 +77,10 @@ async fn commit_pending<F: MerkleFamily>(
     for (k, v) in pending_writes.drain(..) {
         batch = batch.write(k, v);
     }
-    let merkleized = batch.merkleize(&db, metadata).await.unwrap();
+    let merkleized = batch
+        .merkleize(&db, metadata, &mut Proportional)
+        .await
+        .unwrap();
     let (db, _) = db
         .apply_batch(merkleized)
         .await

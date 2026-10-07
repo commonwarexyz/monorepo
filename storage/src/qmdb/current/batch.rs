@@ -15,15 +15,16 @@ use crate::{
         Error,
         any::{
             self, ValueEncoding,
-            batch::{DiffCursors, DiffEntry, Staged as AnyStaged, StagedUpdates},
+            batch::{DiffCursors, DiffEntry, Staged as AnyStaged},
             operation::{Operation, update},
         },
-        bitmap::{Shared, fill_from},
+        bitmap::{Candidates, Shared, fill_from},
         chain::Bounds,
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
         },
+        floor::Policy,
         operation::Key,
     },
 };
@@ -38,11 +39,8 @@ use commonware_utils::{
 use core::ops::Range;
 use std::sync::Arc;
 
-/// Speculative chunk-level bitmap overlay.
-///
-/// Instead of tracking individual pushed bits and cleared locations, maintains materialized chunk
-/// bytes for every chunk that differs from the parent bitmap. This directly produces the chunk data
-/// needed for grafted MMR leaf computation.
+/// Speculative chunk-level bitmap overlay: materialized bytes for every chunk that differs from
+/// the parent bitmap, which grafted MMR leaf computation reads directly.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ChunkOverlay<const N: usize> {
     /// Dirty chunks: chunk_idx -> materialized chunk bytes.
@@ -142,24 +140,26 @@ impl<const N: usize> ChunkOverlay<N> {
     }
 }
 
-/// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Fills `out` with up to
-/// `limit` floor-raise candidates in `[floor, tip)`, returning the next `floor`. Skips
+/// Bitmap-accelerated candidate scan over a layered `BitmapBatch` chain. Fills `out` with up to
+/// `limit` floor candidates in `[floor, tip)`, returning the next scan location. Skips
 /// locations where the layered bitmap bit is unset (including locations superseded by
 /// uncommitted ancestors), avoiding I/O reads for inactive operations. Produces the same
 /// sequence as repeatedly calling the `next_candidate` test oracle over the chain.
 ///
-/// One scan iterator serves the whole batch: overlay chunks resolve lock-free and the
-/// committed base is locked once per untouched chunk, rather than several times per
-/// candidate. The iterator's chunk caching is sound here because bitmap mutators require
-/// `&mut` on the database, which cannot coexist with the `&db` a merkleize holds.
-pub(crate) fn fill_candidates<F: Graftable, const N: usize>(
-    bitmap: &BitmapBatch<N>,
-    floor: Location<F>,
-    tip: u64,
-    limit: usize,
-    out: &mut Vec<Location<F>>,
-) -> Location<F> {
-    Location::new(fill_from(bitmap, *floor, tip, limit, out))
+/// Each fill scans with one set-bit iterator: overlay chunks resolve lock-free and the applied
+/// base is locked once per untouched chunk, rather than several times per candidate. The
+/// iterator's chunk caching is sound here because bitmap mutators require `&mut` on the
+/// database, which cannot coexist with the `&db` a merkleize holds.
+impl<F: Graftable, const N: usize> Candidates<F> for &BitmapBatch<N> {
+    fn fill(
+        &mut self,
+        floor: Location<F>,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<Location<F>>,
+    ) -> Location<F> {
+        Location::new(fill_from(*self, *floor, tip, limit, out))
+    }
 }
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
@@ -278,7 +278,7 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// The inner any-layer batch that handles mutations, journal, and floor raise.
+    /// The inner any-layer batch that handles mutations, journal, and floor walk.
     inner: any::batch::UnmerkleizedBatch<F, H, U, S>,
 
     /// Parent's grafted MMR state.
@@ -503,7 +503,8 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with [`Policy`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
@@ -526,17 +527,19 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -545,21 +548,11 @@ where
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
-        // Overlap the update resolution with a committed-prefix candidate prefetch.
-        // Candidates come from the speculative `bitmap_parent` (the same source the floor
-        // raise scans below), clamped to the committed prefix inside the helper.
-        let (prepared, staged_updates, prefetched) = inner
-            .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+        let (prepared, staged) = inner
+            .resolve_updates_prefetched(updates, upserts, &db.any, &*policy, &bitmap_parent)
             .await?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                staged_updates,
-                Some(prefetched),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -575,7 +568,8 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Record updates for staged reads and upserts for unread keys, then merkleize.
+    /// Record updates for staged reads and upserts for unread keys, advance the inactivity floor
+    /// with [`Policy`], then merkleize.
     ///
     /// Consumes the staged handle and write vectors. Call [`expand`](Staged::expand) before this
     /// method if more keys must be read into the staged index space.
@@ -598,17 +592,19 @@ where
         skip_all,
         fields(updates = updates.len() as u64, upserts = upserts.len() as u64),
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -616,12 +612,10 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
+        let (inner, staged) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_walk(metadata, staged, &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -638,7 +632,8 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -649,15 +644,17 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -665,15 +662,9 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Unordered<K, V>>::new(),
-                None,
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -690,7 +681,8 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations, advance the inactivity floor with [`Policy`], merkleize,
+    /// and return an `Arc<MerkleizedBatch>`.
     ///
     /// # Errors
     ///
@@ -701,15 +693,17 @@ where
         level = "info",
         skip_all
     )]
-    pub async fn merkleize<E, C, I>(
+    pub async fn merkleize<E, C, I, P>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
+        policy: &mut P,
     ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
+        P: Policy<F, K, V::Value>,
     {
         let Self {
             inner,
@@ -717,14 +711,9 @@ where
             bitmap_parent,
         } = self;
         bitmap_parent.ensure_based_on(&db.any.bitmap)?;
-        // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(
-                metadata,
-                StagedUpdates::<F, update::Ordered<K, V>>::new(),
-                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
-            )
+            .merkleize_with_floor_walk(metadata, Vec::new(), &bitmap_parent, policy)
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -1317,12 +1306,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 
@@ -1350,12 +1340,13 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
-        async fn merkleize(
+        async fn merkleize<P: Policy<F, K, V::Value> + Send>(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
             metadata: Option<V::Value>,
+            policy: &mut P,
         ) -> Result<Self::Merkleized, crate::qmdb::Error<F>> {
-            self.merkleize(db, metadata).await
+            self.merkleize(db, metadata, policy).await
         }
     }
 
@@ -1537,8 +1528,6 @@ mod tests {
         }
     }
 
-    // ---- build_chunk_overlay tests ----
-
     #[test]
     fn chunk_overlay_pushes() {
         use crate::qmdb::any::value::FixedEncoding;
@@ -1683,11 +1672,10 @@ mod tests {
         assert_eq!(c0[2], 0x07);
     }
 
-    // ---- next_candidate tests ----
-
-    /// Single-step oracle for [`fill_candidates`]: return the next floor-raise candidate in
-    /// `[floor, tip)` over any [`bitmap::Readable`]. `fill_candidates_matches_oracle` proves
-    /// the production scan produces exactly this sequence over every chain shape.
+    /// Single-step oracle for [`Candidates::fill`]: return the next floor candidate in
+    /// `[floor, tip)` over any [`bitmap::Readable`]. `fill_candidates_matches_oracle` checks
+    /// that the production scan produces exactly this sequence over its constructed flat, layered,
+    /// and pruned chains.
     fn next_candidate<B: bitmap::Readable<N2>, const N2: usize>(
         bitmap: &B,
         floor: Location,
@@ -1790,7 +1778,7 @@ mod tests {
         // Sequence parity plus split-resume for one (chain, tip): the scan matches
         // single-stepping the oracle over the same chain, and any split point resumes
         // seamlessly via the returned continuation.
-        fn assert_matches(name: &str, chain: &BitmapBatch<N>, tip: u64) {
+        fn assert_matches(name: &str, mut chain: &BitmapBatch<N>, tip: u64) {
             for floor in 0..=tip {
                 let mut want = Vec::new();
                 let mut scan = Location::new(floor);
@@ -1800,8 +1788,8 @@ mod tests {
                 }
                 for split in 0..=want.len() {
                     let mut got = Vec::new();
-                    let next = fill_candidates(chain, Location::new(floor), tip, split, &mut got);
-                    fill_candidates(chain, next, tip, want.len() + 1, &mut got);
+                    let next = chain.fill(Location::new(floor), tip, split, &mut got);
+                    chain.fill(next, tip, want.len() + 1, &mut got);
                     assert_eq!(got, want, "{name} floor={floor} split={split}");
                 }
             }
@@ -1880,24 +1868,20 @@ mod tests {
 
             // Prefetch-then-live handoff: the prefetch is clamped to the committed
             // boundary and the live scan resumes from the continuation with the
-            // post-batch tip. Nothing the raise must revalidate may be lost across the
-            // handoff (false negatives are forbidden): every set bit in `[floor, len)`
+            // post-batch tip. The handoff emits exactly every set bit in `[floor, len)`
             // and every location in `[len, tip)`.
             let tip = len + 3;
             let cap = tip as usize;
             let pruned_bits = bitmap::Readable::<N>::pruned_bits(&chain);
             for floor in pruned_bits..=committed {
                 let mut got = Vec::new();
-                let next = fill_candidates(&chain, Location::new(floor), committed, cap, &mut got);
-                fill_candidates(&chain, next, tip, cap, &mut got);
-                assert!(got.is_sorted_by(|a, b| a < b), "{name} floor={floor}");
-                for loc in floor..tip {
-                    let must_emit = loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc);
-                    assert!(
-                        !must_emit || got.contains(&Location::new(loc)),
-                        "{name} floor={floor} lost {loc}"
-                    );
-                }
+                let next = (&chain).fill(Location::new(floor), committed, cap, &mut got);
+                (&chain).fill(next, tip, cap, &mut got);
+                let want: Vec<Location> = (floor..tip)
+                    .filter(|&loc| loc >= len || bitmap::Readable::<N>::get_bit(&chain, loc))
+                    .map(Location::new)
+                    .collect();
+                assert_eq!(got, want, "{name} floor={floor}");
             }
         }
     }
@@ -1934,9 +1918,9 @@ mod tests {
         // or appended, from whichever layer materialized the chunk last -- are emitted
         // ascending, and locations at or beyond the layered length up to `tip` are emitted
         // sequentially.
-        let scan = |chain: &BitmapBatch<N>, tip: u64| {
+        let scan = |mut chain: &BitmapBatch<N>, tip: u64| {
             let mut got = Vec::new();
-            fill_candidates(chain, Location::new(0), tip, 16, &mut got);
+            chain.fill(Location::new(0), tip, 16, &mut got);
             got
         };
         let want = |locs: &[u64]| locs.iter().copied().map(Location::new).collect::<Vec<_>>();
@@ -1970,12 +1954,11 @@ mod tests {
         // Chunk 0 bits come from the base, chunk 1 bits from the overlay (35 filtered,
         // the appended 41 emitted).
         let mut got = Vec::new();
-        fill_candidates(&chain, Location::new(0), 44, 16, &mut got);
+        (&chain).fill(Location::new(0), 44, 16, &mut got);
         let want: Vec<Location> = [1, 30, 33, 38, 41].into_iter().map(Location::new).collect();
         assert_eq!(got, want);
     }
 
-    // ---- trim_committed tests ----
     //
     // `trim_committed` is called from `MerkleizedBatch::new_batch` to strip any `Layer`s whose
     // overlays have already been absorbed into the shared committed bitmap by a prior apply.

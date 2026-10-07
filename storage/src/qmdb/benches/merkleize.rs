@@ -6,7 +6,7 @@
 //!
 //! - [`bench_merkleize`]: timing on a freshly seeded DB (no prior overwrites).
 //! - [`bench_merkleize_churned`]: timing after overwrite batches have accumulated inactive
-//!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
+//!   update operations above the inactivity floor, the workload the floor walk's bitmap skip
 //!   optimizes for.
 
 use crate::common::{
@@ -28,7 +28,10 @@ use commonware_storage::{
         contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
     },
     merkle,
-    qmdb::any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+    qmdb::{
+        any::traits::{DbAny, MerkleizedBatch, UnmerkleizedBatch as _},
+        floor::Proportional,
+    },
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng};
@@ -39,8 +42,6 @@ use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
 };
-
-// -- Type aliases --
 
 pub(crate) type AnyUFix = commonware_storage::qmdb::any::unordered::fixed::Db<
     commonware_storage::merkle::mmr::Family,
@@ -280,8 +281,6 @@ type CurOVar256Mmb = commonware_storage::qmdb::current::ordered::variable::Db<
     Rayon,
 >;
 
-// -- Config --
-
 // Use huge blobs to avoid iteration times being affected by blob boundary crossings.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const THREADS: NonZeroUsize = NZUsize!(8);
@@ -322,8 +321,6 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
         replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
-
-// -- DB constructors (eliminates repeated config boilerplate in match arms) --
 
 pub(crate) fn any_fix_cfg_with_cache(
     ctx: &(impl BufferPooler + Strategizer),
@@ -383,8 +380,6 @@ fn cur_var_cfg_with_cache(
     }
 }
 
-// -- Benchmark helpers --
-
 /// Apply overwrite batches before timing merkleization.
 ///
 /// This leaves inactive update operations above the inactivity floor, matching
@@ -402,7 +397,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 
     for _ in 0..churn_batches {
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         (db, _) = db.apply_batch(merkleized).await.unwrap();
     }
     let db = db.commit().await.unwrap();
@@ -412,7 +407,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
     for _ in 0..iters {
         let start = Instant::now();
         let batch = write_random_updates(db.new_batch(), num_updates, num_keys, &mut rng);
-        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let merkleized = batch.merkleize(&db, None, &mut Proportional).await.unwrap();
         black_box(merkleized.root());
         total += start.elapsed();
     }
@@ -519,7 +514,7 @@ where
             self.options.num_keys,
             &mut self.rng,
         );
-        self.parent = Some(batch.merkleize(db, None).await.unwrap());
+        self.parent = Some(batch.merkleize(db, None, &mut Proportional).await.unwrap());
     }
 
     async fn iter(&mut self) -> Self::Output {
@@ -545,7 +540,7 @@ where
                 &mut self.rng,
             )
         };
-        let merkleized = batch.merkleize(db, None).await.unwrap();
+        let merkleized = batch.merkleize(db, None, &mut Proportional).await.unwrap();
         merkleized.root()
     }
 
@@ -596,8 +591,6 @@ fn metric_value(encoded: &str, name: &str) -> u64 {
     }
     0
 }
-
-// -- Variant dispatch --
 
 macro_rules! variants {
     (
