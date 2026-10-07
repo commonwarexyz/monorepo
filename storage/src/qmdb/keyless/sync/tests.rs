@@ -1207,7 +1207,7 @@ pub(crate) mod harnesses {
     pub(crate) type CompactFixedMmbHarness = CompactFixedHarness<mmb::Family>;
 }
 
-// ===== Test Generation =====
+// ===== Test generation =====
 
 /// Emits the keyless-specific sync tests for `$harness`.
 macro_rules! keyless_sync_tests {

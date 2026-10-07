@@ -28,7 +28,7 @@ use commonware_runtime::{
 use commonware_utils::{NZU64, non_empty_range};
 use rand::Rng as _;
 
-// ===== Harness Implementations =====
+// ===== Harness implementations =====
 
 mod harnesses {
     use super::*;
@@ -662,7 +662,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
     });
 }
 
-// ===== Test Generation Macro =====
+// ===== Test generation =====
 
 /// Dispatches to the shared test functions in [crate::qmdb::any::sync::tests].
 macro_rules! sync_tests {
@@ -673,7 +673,7 @@ macro_rules! sync_tests {
             use rstest::rstest;
             use std::num::NonZeroU64;
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_source_fails() {
                 crate::qmdb::any::sync::tests::test_sync_source_fails::<$harness>();
             }
@@ -694,21 +694,21 @@ macro_rules! sync_tests {
                 );
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_subset_of_target_database() {
                 crate::qmdb::any::sync::tests::test_sync_subset_of_target_database::<$harness>(
                     1000,
                 );
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_use_existing_db_partial_match() {
                 crate::qmdb::any::sync::tests::test_sync_use_existing_db_partial_match::<$harness>(
                     1000,
                 );
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_use_existing_db_exact_match() {
                 crate::qmdb::any::sync::tests::test_sync_use_existing_db_exact_match::<$harness>(
                     1000,
@@ -737,24 +737,24 @@ macro_rules! sync_tests {
                 crate::qmdb::any::sync::tests::test_target_update_on_done_client::<$harness>();
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_waits_for_explicit_finish() {
                 crate::qmdb::any::sync::tests::test_sync_waits_for_explicit_finish::<$harness>();
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_handles_early_finish_signal() {
                 crate::qmdb::any::sync::tests::test_sync_handles_early_finish_signal::<$harness>();
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_fails_when_finish_sender_dropped() {
                 crate::qmdb::any::sync::tests::test_sync_fails_when_finish_sender_dropped::<
                     $harness,
                 >();
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_allows_dropped_reached_target_receiver() {
                 crate::qmdb::any::sync::tests::test_sync_allows_dropped_reached_target_receiver::<
                     $harness,
@@ -784,17 +784,17 @@ macro_rules! sync_tests {
                 );
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_database_persistence() {
                 crate::qmdb::any::sync::tests::test_sync_database_persistence::<$harness>();
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_sync_post_sync_usability() {
                 crate::qmdb::any::sync::tests::test_sync_post_sync_usability::<$harness>();
             }
 
-            #[test_traced]
+            #[test_traced("WARN")]
             fn test_local_pinned_nodes_below_floor() {
                 crate::qmdb::any::sync::tests::test_local_pinned_nodes_below_floor::<$harness>();
             }

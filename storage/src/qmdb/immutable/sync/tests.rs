@@ -805,7 +805,7 @@ pub(crate) mod harnesses {
     pub(crate) type CompactFixedMmbHarness = CompactFixedHarness<mmb::Family>;
 }
 
-// ===== Test Generation =====
+// ===== Test generation =====
 
 /// Emits the immutable-specific sync tests for `$harness`.
 macro_rules! immutable_sync_tests {
