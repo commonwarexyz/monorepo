@@ -521,10 +521,15 @@ where
         let Changeset { diff, metadata } = batch;
 
         let mut resolved = {
-            // Read each bucket in rounds sized by its unresolved batch keys. A sparse write stops
-            // at its matching update, while a batch covering the bucket reads all its updates
-            // together. A bucket leaves the rounds once its keys are resolved or its updates run
-            // out, which means its remaining keys are absent.
+            // Resolve each written key to its applied update, if any, by reading its
+            // translated-key bucket in rounds sized by the bucket's unresolved batch keys: a
+            // sparse write stops at its matching update, while a batch covering the bucket reads
+            // all its updates together.
+            //
+            // Keys sharing a translated key see the same bucket in the same order, so the
+            // bucket's first location identifies it. Each source pairs a bucket's unread
+            // locations with the number of its batch keys still unresolved. A key with an empty
+            // bucket is absent and needs no read.
             let mut buckets = HashMap::<Location, usize>::new();
             let mut sources: Vec<(_, usize)> = Vec::new();
             for key in diff.keys() {
@@ -539,6 +544,11 @@ where
                     sources.push((core::iter::once(first).chain(locations.copied()), 1));
                 }
             }
+
+            // A round takes from every live source as many unread locations as it has
+            // unresolved keys and reads them in one ascending batch. A source that yields
+            // nothing has run out, so its remaining keys are absent, and it leaves at the next
+            // round.
             let mut resolved = HashMap::new();
             let mut candidates = Vec::new();
             loop {
@@ -557,6 +567,9 @@ where
                 candidates.sort_unstable_by_key(|(loc, _)| *loc);
                 let positions: Vec<_> = candidates.iter().map(|(loc, _)| **loc).collect();
                 let read = self.log.read_many(&positions).await?;
+
+                // A read update resolves its key when the batch writes that key; a collision
+                // sibling the batch leaves alone is passed over.
                 for ((loc, index), op) in candidates.iter().zip(read) {
                     let key = op.into_key().expect("snapshot operation has key");
                     if diff.contains_key(&key) {
@@ -661,8 +674,16 @@ where
 
         // Each reached update appends at most one operation, and the commit follows.
         ops.reserve(reachable + 1);
+
+        // Candidates ascend, so the reachable ones below `start` form a prefix the log serves in
+        // one read; the rest are this batch's own writes, already in `ops`.
         let logged = candidates[..reachable].partition_point(|&loc| loc < start);
         let mut reads = self.log.read_many(&candidates[..logged]).await?.into_iter();
+
+        // Decide the reachable candidates in location order, taking each update from the read
+        // or from `ops`. A write relocates the key to the tip and an eviction removes it; either
+        // way the candidate's own location becomes inactive. A stop leaves the update active at
+        // the floor, where a later walk starts.
         for &loc in &candidates[..reachable] {
             let reached = walk.reach(Location::new(loc));
             assert!(reached, "candidate within the walk's reach");
