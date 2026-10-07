@@ -14,6 +14,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::range::contains_cyclic;
 use core::{
     future::Future,
+    mem,
     ops::{
         Bound::{self, Excluded, Included, Unbounded},
         RangeBounds,
@@ -330,13 +331,74 @@ where
     }
 }
 
+/// The keys around a batch's writes: the candidates for the successor of each written key, and
+/// the candidates for the predecessor of each key that joins or leaves the key set, each with the
+/// source its rewrite takes.
+///
+/// Callers push candidates as they resolve them and sort each list once before the lookups.
+pub(crate) struct Neighbors<K, S> {
+    /// Keys that may follow a written key; sorted and unique after [`Self::finish_next`].
+    pub(crate) next: Vec<K>,
+    /// Keys that may precede a key that joins or leaves, each with the source of its rewrite, or
+    /// `None` for a key whose own update carries its link. Later pushes carry fresher state for
+    /// a key; [`Self::finish_prev`] keeps the last.
+    pub(crate) prev: Vec<(K, Option<S>)>,
+}
+
+impl<K: Key, S: Send> Neighbors<K, S> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            next: Vec::new(),
+            prev: Vec::new(),
+        }
+    }
+
+    /// Sort the successor candidates for lookups, dropping the `removed` keys.
+    pub(crate) fn finish_next(&mut self, strategy: &impl Strategy, removed: impl Fn(&K) -> bool) {
+        strategy.sort_by(&mut self.next, |a, b| a.cmp(b));
+        self.next.dedup();
+        self.next.retain(|key| !removed(key));
+    }
+
+    /// Sort the predecessor candidates for claims, keeping the last push per key and dropping the
+    /// `removed` keys.
+    pub(crate) fn finish_prev(&mut self, strategy: &impl Strategy, removed: impl Fn(&K) -> bool) {
+        // The stable sort keeps a key's pushes in order; `dedup_by` keeps the first of each run,
+        // so the swap moves the later push into the kept slot.
+        strategy.sort_by(&mut self.prev, |a, b| a.0.cmp(&b.0));
+        self.prev.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                mem::swap(a, b);
+                true
+            } else {
+                false
+            }
+        });
+        self.prev.retain(|(key, _)| !removed(key));
+    }
+
+    /// Claim the rewrite of `key`'s predecessor: the predecessor, the source taken from it so a
+    /// predecessor shared by several keys is rewritten once, and the predecessor's successor
+    /// among the remaining keys. Returns `None` once the source is taken or absent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either candidate list is empty.
+    pub(crate) fn claim(&mut self, key: &K) -> Option<(&K, S, K)> {
+        let (prev, source) = find_prev_key_mut(key, &mut self.prev);
+        let source = source.take()?;
+        let next = find_next_key(prev, &self.next);
+        Some((prev, source, next))
+    }
+}
+
 /// Returns the next key to `key` within `possible_next` (a sorted, deduplicated slice). The
 /// result will "cycle around" to the first key if `key` is the last key.
 ///
 /// # Panics
 ///
 /// Panics if `possible_next` is empty.
-pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
+fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
     let idx = possible_next.partition_point(|k| k <= key);
     if idx < possible_next.len() {
         return possible_next[idx].clone();
@@ -383,7 +445,7 @@ pub(crate) fn find_next_key_ascending<K: Ord + Clone>(
 /// # Panics
 ///
 /// Panics if `possible_previous` is empty.
-pub(crate) fn find_prev_key_mut<'a, K: Ord, V>(
+fn find_prev_key_mut<'a, K: Ord, V>(
     key: &K,
     possible_previous: &'a mut [(K, V)],
 ) -> (&'a K, &'a mut V) {

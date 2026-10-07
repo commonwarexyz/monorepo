@@ -15,7 +15,7 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
+            ordered::{Neighbors, find_next_key_ascending},
         },
         bitmap::{Candidates, Shared},
         chain::{self, Bounds, Commitment},
@@ -55,11 +55,6 @@ type AncestorBaseLocs<K, F> = Vec<(K, Option<Location<F>>)>;
 /// its updates, and the location its selection stopped at. The floor walk takes it whole as its
 /// first round.
 type Prefetched<F, U> = (Round<F, U>, Location<F>);
-
-/// Sorted `(key, (value, loc))` vec consulted by `find_prev_key_mut` during ordered merkleization.
-/// Values are `None` for staged-resolved keys (skipped as updates) and for predecessors whose
-/// values have already been consumed by a rewrite. Candidate keys remain unchanged.
-type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
 /// Where a staged read or the floor walk's classification resolved its key's live operation: in
 /// the committed DB, or in an uncommitted ancestor's diff. Either way, the resolved location
@@ -176,13 +171,18 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .map(|idx| &entries[idx].1)
 }
 
-/// Returns whether sorted, deduplicated `items` contains `target`, advancing `cursor` past
-/// entries below it. Successive calls must use non-decreasing `target`s.
-fn sorted_contains<T: Ord>(items: &[T], cursor: &mut usize, target: &T) -> bool {
-    while items.get(*cursor).is_some_and(|item| item < target) {
+/// Returns whether `items`, sorted and unique by `key`, holds an item keyed `target`, advancing
+/// `cursor` past items keyed below it. Successive calls must use non-decreasing `target`s.
+fn sorted_contains_by<T, Q: Ord>(
+    items: &[T],
+    cursor: &mut usize,
+    target: &Q,
+    key: impl Fn(&T) -> &Q,
+) -> bool {
+    while items.get(*cursor).is_some_and(|item| key(item) < target) {
         *cursor += 1;
     }
-    items.get(*cursor) == Some(target)
+    items.get(*cursor).is_some_and(|item| key(item) == target)
 }
 
 /// Returns whether `staged` holds an update resolved at `target`, advancing `cursor` past updates
@@ -617,6 +617,38 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
     }
 }
 
+/// The keys nearer ancestors hold while the ancestor diffs are walked nearest first: a key's
+/// nearest entry, including a deletion, shadows the older entries for it.
+///
+/// A single ancestor cannot shadow itself and each diff's keys are unique, so a depth-1 chain
+/// keeps no set. The set hashes with ahash, which resists adversarial keys yet runs several times
+/// faster than SipHash on digest-sized keys, where hashing dominates the probe.
+struct Shadow<'a, K> {
+    seen: Option<AHashSet<&'a K>>,
+}
+
+impl<'a, K: Key> Shadow<'a, K> {
+    /// Prepare to walk `diffs`, ordered nearest first.
+    fn new<F: Family, V: 'a>(diffs: impl ExactSizeIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
+        let seen =
+            (diffs.len() > 1).then(|| AHashSet::with_capacity(diffs.map(|diff| diff.len()).sum()));
+        Self { seen }
+    }
+
+    /// The updates in `diff`, the next diff of the walk, for keys no nearer diff holds.
+    fn updates<F: Family, V>(
+        &mut self,
+        diff: &'a DiffSlice<K, F, V>,
+    ) -> impl Iterator<Item = (&'a K, Location<F>)> {
+        diff.iter().filter_map(move |(key, entry)| {
+            if self.seen.as_mut().is_some_and(|seen| !seen.insert(key)) {
+                return None;
+            }
+            entry.loc().map(|loc| (key, loc))
+        })
+    }
+}
+
 /// Resolve unresolved input slots against ancestor diffs, preserving final results by original
 /// input slot. The caller keeps `pending` in input order so DB fallthrough can do the same.
 ///
@@ -977,6 +1009,31 @@ where
             .collect())
     }
 
+    /// Read the updates at `locations`, dropping those an ancestor has superseded.
+    ///
+    /// The snapshot index reflects the committed state, so a location it holds is stale once a
+    /// live ancestor wrote the key elsewhere or deleted it. Admitting a stale update would
+    /// misclassify the key's mutation (a re-creation as an update, a redundant delete as live)
+    /// or steer the ordered neighbor search with a dead link; the ancestor's diff supplies the
+    /// key's live state instead. Every location must hold an update, as snapshot and
+    /// ancestor-diff locations do.
+    async fn read_live<R: Contiguous<Item = Operation<F, U>>>(
+        &self,
+        locations: &[Location<F>],
+        reader: &R,
+    ) -> Result<impl Iterator<Item = (U, Location<F>)>, crate::qmdb::Error<F>> {
+        let ops = self.read_ops(locations, &[], reader).await?;
+        let live = zip_eq(ops, locations.iter().copied()).filter_map(|(op, loc)| {
+            let Operation::Update(update) = op else {
+                unreachable!("snapshot locations hold updates");
+            };
+            locate(&self.ancestors, loc, update.key())
+                .is_some()
+                .then_some((update, loc))
+        });
+        Ok(live)
+    }
+
     /// Select the next round of floor candidates from `scan` and read the committed ones. Floor
     /// walks and staged prefetches both read candidates through here.
     ///
@@ -1030,7 +1087,7 @@ where
             let mut write = kept;
             for at in kept..candidates.len() {
                 let loc = candidates[at];
-                if sorted_contains(inactive, &mut inactive_at, &loc) {
+                if sorted_contains_by(inactive, &mut inactive_at, &loc, |item| item) {
                     continue;
                 }
                 candidates[write] = loc;
@@ -2549,41 +2606,21 @@ where
             });
         }
 
-        // Classify mutations into deleted, created, updated. `next_candidates` and
-        // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
-        // before `find_next_key` / `find_prev_key_mut` binary-search them.
-        let mut next_candidates: Vec<K> = Vec::new();
-        let mut prev_candidates: PrevCandidates<K, F, Cow<'_, V::Value>> = Vec::new();
+        // Classify mutations into deleted, created, updated, collecting the successor and
+        // predecessor candidates the link rewrites consult once they are sorted below.
+        let mut neighbors: Neighbors<K, (Cow<'_, V::Value>, Location<F>)> = Neighbors::new();
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
-
-        let ops = m.read_ops(&locations, &[], &db.log).await?;
-        for (op, &old_loc) in zip_eq(ops, &locations) {
+        for (update, old_loc) in m.read_live(&locations, &db.log).await? {
             let update::Ordered {
                 key,
                 value,
                 next_key,
-            } = match op {
-                Operation::Update(data) => data,
-                _ => unreachable!("snapshot should only reference Update operations"),
-            };
-
-            // A key resolved via the ancestor diff must only match at its ancestor-diff
-            // location. A stale snapshot collision (the pre-parent DB snapshot still
-            // containing the key's old location) must contribute nothing: consuming its
-            // mutation would misclassify a parent-deleted key's re-creation as an update
-            // (or its redundant delete as a live delete), and feeding its next_key or
-            // (key, old_loc) into the candidate sets would steer predecessor rewrites
-            // only on the pending-ancestor path (the applied-ancestor path never reads
-            // the superseded op).
-            if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key)
-                && entry.loc() != Some(old_loc)
-            {
-                continue;
-            }
-
-            next_candidates.push(next_key);
-            prev_candidates.push((key.clone(), (Some(Cow::Owned(value)), old_loc)));
+            } = update;
+            neighbors.next.push(next_key);
+            neighbors
+                .prev
+                .push((key.clone(), Some((Cow::Owned(value), old_loc))));
 
             let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
@@ -2604,7 +2641,7 @@ where
         let mut created: Vec<(K, V::Value, Option<Location<F>>)> =
             Vec::with_capacity(mutations.len());
         for (key, value, base_old_loc) in m.resolve_creates(mutations) {
-            next_candidates.push(key.clone());
+            neighbors.next.push(key.clone());
             created.push((key, value, base_old_loc));
         }
 
@@ -2635,42 +2672,30 @@ where
             });
         }
 
-        let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
-
-        for (op, &old_loc) in zip_eq(prev_results, &prev_locations) {
-            let data = match op {
-                Operation::Update(data) => data,
-                _ => unreachable!("expected update operation"),
-            };
-
-            // Same stale-location guard as the mutation classifier above: the snapshot scan
-            // sees only applied state, so a key the ancestor diff supersedes at another
-            // location (or deletes) is stale here and must not steer the predecessor search.
-            // The ancestor-diff walk below contributes the live version of such keys.
-            if let Some(entry) = resolve_in_ancestors(&m.ancestors, &data.key)
-                && entry.loc() != Some(old_loc)
-            {
-                continue;
-            }
-            next_candidates.push(data.next_key);
-            prev_candidates.push((data.key, (Some(Cow::Owned(data.value)), old_loc)));
+        // Those updates may precede the created and deleted keys, and their successors may
+        // follow the created keys.
+        for (update, old_loc) in m.read_live(&prev_locations, &db.log).await? {
+            neighbors.next.push(update.next_key);
+            neighbors
+                .prev
+                .push((update.key, Some((Cow::Owned(update.value), old_loc))));
         }
 
         // Merge staged-resolved records: they skip the journal re-read, and updates also skip the
         // index probe. Each record's cached successor feeds the successor candidates as the skipped
         // read would have.
         //
-        // An update also feeds its (key, loc) to the predecessor candidates without a value: the
-        // value is only consumed when the predecessor-rewrite loop emits an op for the key, and
-        // that loop skips every key present in `updated`. A deleted key is never a predecessor.
+        // An update is a predecessor candidate without a rewrite source: its own operation carries
+        // its link, and the predecessor rewrites skip every key present in `updated`. A deleted
+        // key is never a predecessor.
         //
         // An ancestor-resolved record's superseded base is re-resolved through the live ancestor
         // diffs when its operation is emitted below.
         for (key, sloc, old_next, value) in staged_updates {
             let loc = sloc.loc();
-            next_candidates.push(old_next);
+            neighbors.next.push(old_next);
             if let Some(value) = value {
-                prev_candidates.push((key.clone(), (None, loc)));
+                neighbors.prev.push((key.clone(), None));
                 updated.push((key, value, loc));
             } else {
                 deleted.push((key, loc));
@@ -2679,100 +2704,41 @@ where
         db.strategy().sort_by(&mut deleted, |a, b| a.0.cmp(&b.0));
         db.strategy().sort_by(&mut updated, |a, b| a.0.cmp(&b.0));
 
-        // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
-        // but are invisible to the base-DB-only `prev_translated_key` lookup above.
+        // Add the ancestors' live updates of keys this batch leaves alone: they may precede or
+        // follow this batch's mutations but are invisible to the base-DB-only
+        // `prev_translated_key` lookup above. Existing-key updates preserve membership, so their
+        // resolved successors suffice and no predecessor is rewritten.
         //
-        // Walk ancestors closest-first; a set tracks keys already seen so each key is processed
-        // only once (closest-ancestor's entry wins). We use AHashSet (keyed per-process via
-        // runtime-rng) instead of std's default SipHash: ahash is DoS-resistant for adversarial
-        // inputs but several times faster on 32-byte Digest keys, where SipHash dominates over
-        // the actual probe.
-        //
-        // Depth-1 chains skip the set entirely — a single ancestor can't shadow itself,
-        // and each diff's keys are unique by construction.
-        //
-        // Each diff is key-sorted, as are `updated`/`created`/`deleted`, so the handled check
+        // Each diff is key-sorted, as are `updated`/`created`/`deleted`, so the held check
         // advances three cursors in a sorted merge instead of three binary searches per key.
-        // Each diff records only its owning batch's changes, so active operations can be read
-        // directly from that batch's journal suffix.
-        //
-        // Existing-key updates preserve membership, so their resolved successors suffice and
-        // no predecessor is rewritten.
         let changes_membership = !created.is_empty() || !deleted.is_empty();
-        let candidate_ancestors = if changes_membership {
-            m.ancestors.as_slice()
-        } else {
-            &[][..]
-        };
-        let track_shadow = candidate_ancestors.len() > 1;
-        let seen_cap = if track_shadow {
-            candidate_ancestors.iter().map(|a| a.diff.len()).sum()
-        } else {
-            0
-        };
-        let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
-        for batch in candidate_ancestors.iter() {
-            let (mut ui, mut ci, mut di) = (0, 0, 0);
-            for (key, entry) in batch.diff.iter() {
-                if track_shadow && !seen.insert(key) {
-                    continue;
+        if changes_membership {
+            let mut shadow = Shadow::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
+            for batch in &m.ancestors {
+                let (mut ui, mut ci, mut di) = (0, 0, 0);
+                for (key, loc) in shadow.updates(&batch.diff) {
+                    if sorted_contains_by(&updated, &mut ui, key, |(k, ..)| k)
+                        || sorted_contains_by(&created, &mut ci, key, |(k, ..)| k)
+                        || sorted_contains_by(&deleted, &mut di, key, |(k, _)| k)
+                    {
+                        continue;
+                    }
+                    let data = batch.update_at(loc);
+                    neighbors.next.push(data.key.clone());
+                    neighbors.next.push(data.next_key.clone());
+                    neighbors
+                        .prev
+                        .push((data.key.clone(), Some((Cow::Borrowed(&data.value), loc))));
                 }
-                // Skip keys already handled by this batch's mutations.
-                while ui < updated.len() && updated[ui].0 < *key {
-                    ui += 1;
-                }
-                while ci < created.len() && created[ci].0 < *key {
-                    ci += 1;
-                }
-                while di < deleted.len() && deleted[di].0 < *key {
-                    di += 1;
-                }
-                if updated.get(ui).is_some_and(|(k, ..)| k == key)
-                    || created.get(ci).is_some_and(|(k, ..)| k == key)
-                    || deleted.get(di).is_some_and(|(k, _)| k == key)
-                {
-                    continue;
-                }
-                let DiffEntry::Active { loc, .. } = entry else {
-                    continue;
-                };
-                let index = (**loc - *batch.bounds.base.size) as usize;
-                let data = match &batch.journal_batch.items()[index] {
-                    Operation::Update(data) => data,
-                    _ => unreachable!("ancestor diff Active should reference Update op"),
-                };
-                next_candidates.push(data.key.clone());
-                next_candidates.push(data.next_key.clone());
-                prev_candidates.push((data.key.clone(), (Some(Cow::Borrowed(&data.value)), *loc)));
             }
         }
 
-        // Sort and deduplicate successor candidates for binary search.
-        db.strategy().sort_by(&mut next_candidates, |a, b| a.cmp(b));
-        next_candidates.dedup();
-
-        // Only membership changes require filtering deleted successors and preparing
-        // predecessor candidates for rewrites.
+        // Resolved operations can still reference keys deleted by this batch. Only membership
+        // changes consult the predecessor candidates.
+        let is_deleted = |key: &K| deleted.binary_search_by(|(k, _)| k.cmp(key)).is_ok();
+        neighbors.finish_next(db.strategy(), is_deleted);
         if changes_membership {
-            // Resolved operations can still reference keys deleted by this batch.
-            let is_deleted = |k: &K| deleted.binary_search_by(|(dk, _)| dk.cmp(k)).is_ok();
-            next_candidates.retain(|k| !is_deleted(k));
-
-            // `prev_candidates` is consulted only by the predecessor rewrites below. Duplicates
-            // can occur when the same key is pushed from multiple sources (main scan,
-            // prev_results, ancestor walk). Later pushes carry the freshest state (ancestor
-            // walk runs last), so dedup keeps the LAST push per key. `dedup_by` retains the
-            // first of each consecutive run; swap so the retained slot holds the later push.
-            prev_candidates.sort_by(|a, b| a.0.cmp(&b.0));
-            prev_candidates.dedup_by(|a, b| {
-                if a.0 == b.0 {
-                    std::mem::swap(a, b);
-                    true
-                } else {
-                    false
-                }
-            });
-            prev_candidates.retain(|(k, _)| !is_deleted(k));
+            neighbors.finish_prev(db.strategy(), is_deleted);
         }
 
         // Generate operations.
@@ -2802,7 +2768,7 @@ where
         let mut next_idx = 0;
         for (key, value, old_loc) in updated {
             let new_loc = m.base_state.size + ops.len() as u64;
-            let next_key = find_next_key_ascending(&key, &next_candidates, &mut next_idx);
+            let next_key = find_next_key_ascending(&key, &neighbors.next, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
                 value: value.clone(),
@@ -2828,7 +2794,7 @@ where
         let mut next_idx = 0;
         for (key, value, base_old_loc) in created {
             let new_loc = m.base_state.size + ops.len() as u64;
-            let next_key = find_next_key_ascending(&key, &next_candidates, &mut next_idx);
+            let next_key = find_next_key_ascending(&key, &neighbors.next, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
                 value: value.clone(),
@@ -2846,29 +2812,26 @@ where
         }
 
         // Update predecessors of created and deleted keys.
-        if !prev_candidates.is_empty() {
+        if !neighbors.prev.is_empty() {
             // The create/delete ranges stay fixed as predecessor rewrites are appended.
             for idx in created_range.chain(deleted_range) {
-                let key = &diff[idx].0;
-                let (prev_key, (prev_value, prev_loc)) =
-                    find_prev_key_mut(key, &mut prev_candidates);
+                let Some((prev_key, (prev_value, prev_loc), prev_next_key)) =
+                    neighbors.claim(&diff[idx].0)
+                else {
+                    continue;
+                };
 
                 // Only updated mutation keys can be candidates: creates have no live
-                // operation before this batch, and deletes are excluded from candidates.
+                // operation before this batch, and deletes are excluded from candidates. An
+                // update's own operation carries its link.
                 if lookup_sorted(&diff[updated_range.clone()], prev_key).is_some() {
                     continue;
                 }
-
-                // Taking the value ensures a shared predecessor is rewritten only once.
-                let Some(prev_value) = prev_value.take() else {
-                    continue;
-                };
                 let prev_value = prev_value.into_owned();
 
                 // Preserve the ordered links across creates and deletes by rewriting the
                 // predecessor with its existing value and its successor in the final key set.
                 let prev_new_loc = m.base_state.size + ops.len() as u64;
-                let prev_next_key = find_next_key(prev_key, &next_candidates);
                 ops.push(Operation::Update(update::Ordered {
                     key: prev_key.clone(),
                     value: prev_value.clone(),
@@ -2876,7 +2839,7 @@ where
                 }));
 
                 let prev_base_old_loc = resolve_in_ancestors(&m.ancestors, prev_key)
-                    .map_or(Some(*prev_loc), DiffEntry::base_old_loc);
+                    .map_or(Some(prev_loc), DiffEntry::base_old_loc);
 
                 diff.push((
                     prev_key.clone(),
@@ -2890,7 +2853,7 @@ where
         }
 
         // Release the candidate keys and values before the remaining phases run.
-        drop(prev_candidates);
+        drop(neighbors);
 
         // Committed locations superseded by this batch, which the floor walk sorts itself.
         let superseded_locs: Vec<_> = diff
@@ -2957,24 +2920,22 @@ where
         // The evicted keys and their surviving successors. No successor survives when the walk
         // evicted nothing or every key, and neither needs a link.
         let mut evicted: Vec<K> = Vec::new();
-        let mut next_candidates: Vec<K> = Vec::new();
+        let mut neighbors: Neighbors<K, Prev<F, V::Value>> = Neighbors::new();
         for decided in &decided {
             if decided.value.is_none() {
                 evicted.push(decided.key.clone());
-                next_candidates.push(decided.cached.clone());
+                neighbors.next.push(decided.cached.clone());
             }
         }
         evicted.sort();
         let is_evicted = |key: &K| evicted.binary_search(key).is_ok();
-        next_candidates.sort();
-        next_candidates.dedup();
-        next_candidates.retain(|key| !is_evicted(key));
-        if next_candidates.is_empty() {
+        neighbors.finish_next(db.strategy(), is_evicted);
+        if neighbors.next.is_empty() {
             return Ok(decided);
         }
-        let mut prev = Vec::new();
 
-        // Committed updates in each evicted key's bucket and the previous bucket.
+        // Committed updates in each evicted key's bucket and the previous bucket, for keys this
+        // batch leaves alone.
         let mut locations = Vec::new();
         for key in &evicted {
             locations.extend(db.snapshot.get(key).copied());
@@ -2984,48 +2945,29 @@ where
         }
         locations.sort_unstable();
         locations.dedup();
-        let read = self.read_ops(&locations, &[], &db.log).await?;
-        for (op, loc) in zip_eq(read, locations) {
-            let Operation::Update(data) = op else {
-                unreachable!("snapshot should only reference Update operations")
-            };
-
-            // A committed update is live only if this batch leaves its key alone and the
-            // nearest ancestor entry for the key, if any, is this update.
-            if lookup_sorted(&walked.diff, &data.key).is_some()
-                || locate(&self.ancestors, loc, &data.key).is_none()
-            {
-                continue;
+        for (update, loc) in self.read_live(&locations, &db.log).await? {
+            if lookup_sorted(&walked.diff, &update.key).is_none() {
+                neighbors
+                    .prev
+                    .push((update.key, Some(Prev::Committed(update.value, loc))));
             }
-            prev.push((data.key, Some(Prev::Committed(data.value, loc))));
         }
 
         // This batch's writes.
         for (key, entry) in &walked.diff {
             if let Some(loc) = entry.loc() {
-                prev.push((key.clone(), Some(Prev::Memory(loc))));
+                neighbors.prev.push((key.clone(), Some(Prev::Memory(loc))));
             }
         }
 
-        // Live ancestors' updates of keys this batch leaves alone, nearest ancestor first so
-        // a nearer entry shadows older ones. Each diff is key-sorted, as is this batch's, so
-        // one cursor per diff skips the keys this batch holds.
-        let track_shadow = self.ancestors.len() > 1;
-        let mut seen: AHashSet<&K> = AHashSet::new();
+        // Live ancestors' updates of keys this batch leaves alone. Each diff is key-sorted, as is
+        // this batch's, so one cursor per diff skips the keys this batch holds.
+        let mut shadow = Shadow::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
         for batch in &self.ancestors {
             let mut at = 0;
-            for (key, entry) in batch.diff.iter() {
-                if track_shadow && !seen.insert(key) {
-                    continue;
-                }
-                while walked.diff.get(at).is_some_and(|(held, _)| held < key) {
-                    at += 1;
-                }
-                if walked.diff.get(at).is_some_and(|(held, _)| held == key) {
-                    continue;
-                }
-                if let Some(loc) = entry.loc() {
-                    prev.push((key.clone(), Some(Prev::Memory(loc))));
+            for (key, loc) in shadow.updates(&batch.diff) {
+                if !sorted_contains_by(&walked.diff, &mut at, key, |(held, _)| held) {
+                    neighbors.prev.push((key.clone(), Some(Prev::Memory(loc))));
                 }
             }
         }
@@ -3034,33 +2976,23 @@ where
         // below, which keeps the last push per key.
         for (idx, decided) in decided.iter().enumerate() {
             if decided.value.is_some() {
-                prev.push((decided.key.clone(), Some(Prev::Decided(idx))));
+                neighbors
+                    .prev
+                    .push((decided.key.clone(), Some(Prev::Decided(idx))));
             }
         }
-        prev.sort_by(|a, b| a.0.cmp(&b.0));
-        prev.dedup_by(|a, b| {
-            if a.0 == b.0 {
-                mem::swap(a, b);
-                true
-            } else {
-                false
-            }
-        });
-        prev.retain(|(key, _)| !is_evicted(key));
+        neighbors.finish_prev(db.strategy(), is_evicted);
 
-        // Rewrite each evicted key's predecessor once. Taking the source ensures a
-        // predecessor shared by several evicted keys is rewritten once. An undecided
-        // predecessor is an active update the walk left in place, so its rewrite joins the
-        // decisions as a kept update with its new link. Classifying it now reads the same
-        // state as classifying it after the walk's decisions emit, since emitting a decision
-        // changes only the decided key's own entry.
+        // Rewrite each evicted key's predecessor once. An undecided predecessor is an active
+        // update the walk left in place, so its rewrite joins the decisions as a kept update
+        // with its new link. Classifying it now reads the same state as classifying it after
+        // the walk's decisions emit, since emitting a decision changes only the decided key's
+        // own entry.
         let walked_decisions = decided.len();
         for key in &evicted {
-            let (prev_key, slot) = find_prev_key_mut(key, &mut prev);
-            let Some(source) = slot.take() else {
+            let Some((prev_key, source, next_key)) = neighbors.claim(key) else {
                 continue;
             };
-            let next_key = find_next_key(prev_key, &next_candidates);
             let (value, loc) = match source {
                 Prev::Decided(idx) => {
                     decided[idx].cached = next_key;
@@ -3163,12 +3095,7 @@ where
                 .rev()
                 .chain(diff[end..].iter().rev())
                 .find_map(|(_, entry)| entry.loc())?;
-
-            // Active entries reference operations in their owning batch's journal suffix.
-            let index = (*loc - *batch.bounds.base.size) as usize;
-            let Operation::Update(data) = &batch.journal_batch.items()[index] else {
-                unreachable!("active diff entry must reference an update");
-            };
+            let data = batch.update_at(loc);
 
             // Successor queries use [start, end). Predecessor queries use (start, end].
             // Match the cyclic owner before the public methods suppress linear wraparound.
@@ -3211,6 +3138,16 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
             self.bounds.base.size,
             Arc::clone(self.journal_batch.items()),
         )
+    }
+
+    /// The update this batch wrote at `loc`, an active location in its diff.
+    fn update_at(&self, loc: Location<F>) -> &U {
+        let Operation::Update(update) =
+            &self.journal_batch.items()[(*loc - *self.bounds.base.size) as usize]
+        else {
+            unreachable!("active diff entries reference updates");
+        };
+        update
     }
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
@@ -5526,10 +5463,10 @@ pub(crate) mod tests {
         cursors.resolve(&1);
     }
 
-    /// `sorted_contains` matches `binary_search` for ascending queries over sorted, deduped
+    /// `sorted_contains_by` matches `binary_search` for ascending queries over sorted, deduped
     /// items.
     #[test]
-    fn sorted_contains_matches_binary_search() {
+    fn sorted_contains_by_matches_binary_search() {
         let mut rng = test_rng();
         for _ in 0..50 {
             let mut items: Vec<u64> = (0..rng.random_range(0..40))
@@ -5546,7 +5483,7 @@ pub(crate) mod tests {
             let mut cursor = 0;
             for q in queries {
                 assert_eq!(
-                    sorted_contains(&items, &mut cursor, &q),
+                    sorted_contains_by(&items, &mut cursor, &q, |item| item),
                     items.binary_search(&q).is_ok(),
                     "query {q} diverged"
                 );
