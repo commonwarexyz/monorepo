@@ -449,10 +449,7 @@ where
     }
 
     /// Create a speculative batch atop this journal.
-    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S>
-    where
-        C::Item: Encode,
-    {
+    pub fn new_batch(&self) -> UnmerkleizedBatch<F, H, C::Item, S> {
         let root = self.merkle.to_batch();
         UnmerkleizedBatch {
             inner: root.new_batch(),

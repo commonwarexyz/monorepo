@@ -33,6 +33,7 @@ use commonware_utils::{
 use futures::{FutureExt, pin_mut};
 use rand::Rng as _;
 use std::{
+    collections::BTreeSet,
     num::NonZeroU64,
     sync::{
         Arc,
@@ -1933,8 +1934,8 @@ where
         if request.size() == self.historical_target_size {
             if matches!(request, Request::Boundary { .. }) {
                 // Simulate a source that has not answered the old target's pinned-nodes
-                // request when the target changes. The update cancels the request and drops
-                // this pending future.
+                // request when the target changes. The update moves the lower bound, which
+                // cancels the request and drops this pending future.
                 return std::future::pending().await;
             }
 
@@ -2031,6 +2032,7 @@ where
         let verification_root = target_db.root();
 
         assert!(old_target.range.start() > Location::new(0));
+        assert!(new_target.range.start() > old_target.range.start());
         assert!(new_target.range.end() > old_target.range.end());
 
         let (release_historical_gap_tx, release_historical_gap_rx) = oneshot::channel();
@@ -2122,6 +2124,269 @@ where
     });
 }
 
+/// Requests seen by a [GatedSource].
+struct GateLog<F: merkle::Family> {
+    /// Whether new requests are served without waiting for release.
+    open: bool,
+    /// Unreleased requests that arrived while the gate was closed, with their release handles.
+    held: Vec<(Request<F>, oneshot::Sender<()>)>,
+    /// Requests the inner source answered.
+    served: Vec<Request<F>>,
+}
+
+impl<F: merkle::Family> GateLog<F> {
+    /// Held operation requests whose serve future is still alive.
+    fn live_operations(&self) -> impl Iterator<Item = Request<F>> + '_ {
+        self.held
+            .iter()
+            .filter(|(request, tx)| {
+                matches!(request, Request::Operations { .. }) && !tx.is_closed()
+            })
+            .map(|(request, _)| *request)
+    }
+}
+
+/// A source wrapper that holds each request until released while its gate is closed and records
+/// the requests the inner source answers.
+struct GatedSource<R, F: merkle::Family> {
+    inner: R,
+    log: Arc<Mutex<GateLog<F>>>,
+}
+
+impl<R, F> Source for GatedSource<R, F>
+where
+    F: merkle::Family,
+    R: Source<Family = F, Digest = Digest>,
+    R::Op: Send,
+{
+    type Family = F;
+    type Digest = Digest;
+    type Op = R::Op;
+    type Error = R::Error;
+
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        let release = {
+            let mut log = self.log.lock();
+            if log.open {
+                None
+            } else {
+                let (tx, rx) = oneshot::channel();
+                log.held.push((request, tx));
+                Some(rx)
+            }
+        };
+        if let Some(release) = release {
+            let _ = release.await;
+        }
+        let result = self.inner.serve(request).await;
+        if result.is_ok() {
+            self.log.lock().served.push(request);
+        }
+        result
+    }
+}
+
+/// Test that operations fetched ahead of the journal tip are applied without fetching them again
+/// across target updates that move the lower bound while the source prunes to each new lower
+/// bound. Operation requests above the final lower bound survive the final update, and requests
+/// that start below the pruned source are cancelled.
+///
+/// Before each update, the source commits and prunes until an in-flight operation request starts
+/// below the source's oldest retained operation and ends beyond the new lower bound. Each round
+/// first stores a fetched batch ahead of the held journal tip.
+pub(crate) fn test_target_updates_keep_operations_across_pruned_floors<H: SyncTestHarness>()
+where
+    Arc<AsyncRwLock<Option<DbOf<H>>>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
+    OpOf<H>: Encode,
+    JournalOf<H>: Contiguous,
+{
+    const OUTSTANDING: usize = 4;
+    const UPDATES: usize = 3;
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        // Build a source pruned to a floor above zero.
+        let mut db = H::init_db(context.child("source")).await;
+        db = H::apply_ops(db, H::create_ops(256)).await;
+        let floor = db.sync_boundary();
+        db = db.prune(floor).await.unwrap();
+        assert!(floor > Location::new(0));
+        let mut target = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(floor, db.bounds().end),
+        };
+        let source_db = Arc::new(AsyncRwLock::new(Some(db)));
+        let log = Arc::new(Mutex::new(GateLog {
+            open: false,
+            held: Vec::new(),
+            served: Vec::new(),
+        }));
+
+        // Start sync with a retention window that never evicts.
+        let (update_tx, update_rx) = mpsc::channel(1);
+        let config = Config {
+            context: context.child("client"),
+            db_config: H::config(&context.next_u64().to_string(), &context),
+            target: target.clone(),
+            source: GatedSource {
+                inner: source_db.clone(),
+                log: log.clone(),
+            },
+            fetch_batch_size: NZU64!(32),
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: OUTSTANDING,
+            update_rx: Some(update_rx),
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 64,
+        };
+
+        // Drive sync alongside the test. A sync error fails the test at once.
+        let sync = async {
+            sync::sync::<DbOf<H>, _>(config)
+                .await
+                .expect("sync must complete")
+        };
+        let drive = async {
+            // Wait for the boundary and operation requests of the first target.
+            while log.lock().held.len() < OUTSTANDING {
+                commonware_runtime::reschedule().await;
+            }
+
+            let mut seed = 1;
+            let mut stored = Vec::new();
+            let mut retained = Vec::new();
+            for _ in 0..UPDATES {
+                // Release the farthest in-flight operation request. The engine has stored its
+                // batch once it issues the next request.
+                let arrivals = {
+                    let mut log = log.lock();
+                    let farthest = log
+                        .live_operations()
+                        .max_by_key(|request| request.start())
+                        .expect("an operation request must be in flight");
+                    let index = log
+                        .held
+                        .iter()
+                        .position(|(request, _)| *request == farthest)
+                        .unwrap();
+                    let (request, tx) = log.held.swap_remove(index);
+                    tx.send(()).unwrap();
+                    stored.push(request);
+                    log.held.len()
+                };
+                while log.lock().held.len() == arrivals {
+                    commonware_runtime::reschedule().await;
+                }
+
+                // Commit and prune the source until an in-flight operation request starts below
+                // the source's oldest retained operation and ends beyond the new floor.
+                let next = loop {
+                    let mut guard = source_db.write().await;
+                    let db =
+                        H::apply_ops(guard.take().unwrap(), H::create_ops_seeded(1, seed)).await;
+                    seed += 1;
+                    let floor = db.sync_boundary();
+                    let db = db.prune(floor).await.unwrap();
+                    let oldest = db.bounds().start;
+                    let next = Target {
+                        root: H::sync_target_root(&db),
+                        range: non_empty_range!(floor, db.bounds().end),
+                    };
+                    *guard = Some(db);
+                    drop(guard);
+                    assert!(next.range.start() > target.range.start(), "floor must move");
+                    let straddled = log.lock().live_operations().any(|request| {
+                        request.start() > target.range.start()
+                            && request.start() < oldest
+                            && request
+                                .start()
+                                .checked_add(request.max_ops().get())
+                                .unwrap()
+                                > floor
+                    });
+                    if straddled {
+                        break next;
+                    }
+                    assert!(seed < 1000, "floor must straddle an in-flight request");
+                };
+
+                // Some in-flight operation requests start above the new floor.
+                retained = log
+                    .lock()
+                    .live_operations()
+                    .filter(|request| request.start() > next.range.start())
+                    .collect::<Vec<_>>();
+                assert!(!retained.is_empty());
+
+                // Send the update. The engine has handled it once it requests the new boundary.
+                update_tx.send(next.clone()).await.unwrap();
+                let boundary = Request::Boundary {
+                    size: next.range.end(),
+                    start: next.range.start(),
+                };
+                while !log
+                    .lock()
+                    .held
+                    .iter()
+                    .any(|(request, _)| *request == boundary)
+                {
+                    commonware_runtime::reschedule().await;
+                }
+                target = next;
+            }
+
+            // A batch stored before an update lies at or above the final floor.
+            let floor = target.range.start();
+            assert!(stored.iter().any(|request| request.start() >= floor));
+
+            // Stop updates and release every held request. Serving a request that starts below
+            // the pruned source fails sync.
+            drop(update_tx);
+            let held = {
+                let mut log = log.lock();
+                log.open = true;
+                std::mem::take(&mut log.held)
+            };
+            for (_, tx) in held {
+                let _ = tx.send(());
+            }
+            (floor, retained)
+        };
+        let (synced, (floor, retained)) = futures::join!(sync, drive);
+
+        // Sync completes at the latest target.
+        let db = source_db.write().await.take().unwrap();
+        assert_eq!(synced.root(), db.root());
+
+        // Operation requests in flight above the final floor survived the last update.
+        let served = std::mem::take(&mut log.lock().served);
+        for request in &retained {
+            assert!(served.contains(request), "{request:?} must be served");
+        }
+
+        // No location at or above the final floor was served by two operation requests.
+        let mut seen = BTreeSet::new();
+        for request in &served {
+            let Request::Operations {
+                size,
+                start,
+                max_ops,
+            } = *request
+            else {
+                continue;
+            };
+            let end = start.checked_add(max_ops.get()).unwrap().min(size);
+            for loc in *start.max(floor)..*end {
+                assert!(seen.insert(loc), "location {loc} refetched by {request:?}");
+            }
+        }
+
+        synced.destroy().await.unwrap();
+        db.destroy().await.unwrap();
+    });
+}
+
 /// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
 /// floor.
 pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
@@ -2176,7 +2441,7 @@ mod harnesses {
     use super::SyncTestHarness;
     use crate::{
         merkle::{self, mmb},
-        qmdb::any::value::VariableEncoding,
+        qmdb::{any::value::VariableEncoding, floor::Proportional},
         translator::TwoCap,
     };
     use commonware_cryptography::sha256::Digest;
@@ -2185,7 +2450,6 @@ mod harnesses {
     use commonware_utils::TestRng;
     use rand::Rng;
 
-    // ===== Family-generic op creation helpers =====
     //
     // `Operation<F, K, V>` is phantom in F for Update/Delete variants, so ops
     // are structurally identical across families.
@@ -2286,10 +2550,6 @@ mod harnesses {
         ops
     }
 
-    // ===== MMR harnesses (existing, unchanged) =====
-
-    // ----- Ordered/Fixed -----
-
     pub struct OrderedFixedHarness;
 
     impl SyncTestHarness for OrderedFixedHarness {
@@ -2340,13 +2600,15 @@ mod harnesses {
             >,
         ) -> Self::Db {
             let db = crate::qmdb::any::ordered::fixed::test::apply_ops(db, ops).await;
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Ordered/Variable -----
 
     pub struct OrderedVariableHarness;
 
@@ -2404,15 +2666,13 @@ mod harnesses {
             let db = crate::qmdb::any::ordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Fixed -----
 
     pub struct UnorderedFixedHarness;
 
@@ -2464,13 +2724,15 @@ mod harnesses {
             >,
         ) -> Self::Db {
             let db = crate::qmdb::any::unordered::fixed::test::apply_ops(db, ops).await;
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Variable -----
 
     pub struct UnorderedVariableHarness;
 
@@ -2532,17 +2794,13 @@ mod harnesses {
             let db = crate::qmdb::any::unordered::variable::test::apply_ops(db, ops).await;
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ===== MMB harnesses =====
-
-    // ----- Ordered/Fixed MMB -----
 
     pub struct OrderedFixedMmbHarness;
 
@@ -2612,15 +2870,20 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Ordered/Variable MMB -----
 
     pub struct OrderedVariableMmbHarness;
 
@@ -2697,19 +2960,20 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Fixed MMB -----
 
     pub struct UnorderedFixedMmbHarness;
 
@@ -2781,15 +3045,20 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None::<Digest>).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .merkleize(&db, None::<Digest>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             db.commit().await.unwrap()
         }
     }
-
-    // ----- Unordered/Variable MMB -----
 
     pub struct UnorderedVariableMmbHarness;
 
@@ -2867,11 +3136,14 @@ mod harnesses {
                     Operation::CommitFloor(_, _) => {}
                 }
             }
-            let merkleized = batch.merkleize(&db, None::<Vec<u8>>).await.unwrap();
+            let merkleized = batch
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
             let merkleized = db
                 .new_batch()
-                .merkleize(&db, None::<Vec<u8>>)
+                .merkleize(&db, None::<Vec<u8>>, &mut Proportional)
                 .await
                 .unwrap();
             let (db, _) = db.apply_batch(merkleized).await.unwrap();
@@ -2879,8 +3151,6 @@ mod harnesses {
         }
     }
 }
-
-// ===== Test Generation Macro =====
 
 /// Macro to generate all standard sync tests for a given harness.
 macro_rules! sync_tests_for_harness {
@@ -3022,6 +3292,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_waits_for_boundary_retry_after_target_update() {
                 super::test_sync_waits_for_boundary_retry_after_target_update::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_target_updates_keep_operations_across_pruned_floors() {
+                super::test_target_updates_keep_operations_across_pruned_floors::<$harness>();
             }
 
             #[test_traced]

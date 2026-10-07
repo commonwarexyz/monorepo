@@ -4,7 +4,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt::{Dealer, Info, Logs, Player, Reveal, deal},
         primitives::{sharing::Mode, variant::MinSig},
     },
-    ed25519::{Batch, PrivateKey, PublicKey},
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
@@ -145,17 +145,13 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
                             if concurrency > 1 {
                                 black_box(
                                     player
-                                        .finalize::<N3f1, Batch>(&mut finalize_rng, logs, &strategy)
+                                        .finalize::<N3f1>(&mut finalize_rng, logs, &strategy)
                                         .unwrap(),
                                 );
                             } else {
                                 black_box(
                                     player
-                                        .finalize::<N3f1, Batch>(
-                                            &mut finalize_rng,
-                                            logs,
-                                            &Sequential,
-                                        )
+                                        .finalize::<N3f1>(&mut finalize_rng, logs, &Sequential)
                                         .unwrap(),
                                 );
                             }

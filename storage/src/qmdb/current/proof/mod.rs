@@ -43,7 +43,7 @@ use crate::{
     },
 };
 use bytes::BufMut;
-use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
+use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write, varint::UInt};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
@@ -363,7 +363,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ) -> Result<D, merkle::Error<F>>
     where
         H: Hasher<Digest = D>,
-        O: Codec,
+        O: Encode,
     {
         let chunk_bits = chunk_bits(chunk_size).map_err(|_| merkle::Error::InvalidProof)?;
         if ops.is_empty() || chunks.is_empty() {
@@ -509,7 +509,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc` in
     /// the db with the provided root, and having the activity status described by `chunks`.
-    pub fn verify<H: Hasher<Digest = D>, O: Codec, const N: usize>(
+    pub fn verify<H: Hasher<Digest = D>, O: Encode, const N: usize>(
         &self,
         start_loc: Location<F>,
         ops: &[O],
@@ -528,7 +528,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
     ///
     /// This verifies the same proof and wire encoding as [Self::verify], accepting arrays,
     /// byte slices, or owned byte buffers without copying their contents.
-    pub fn verify_with_chunk_size<H: Hasher<Digest = D>, O: Codec>(
+    pub fn verify_with_chunk_size<H: Hasher<Digest = D>, O: Encode>(
         &self,
         start_loc: Location<F>,
         ops: &[O],
@@ -554,7 +554,7 @@ pub fn verify_proof_and_extract_digests<F, Op, H, D, const N: usize>(
 ) -> Result<Vec<(Position<F>, D)>, merkle::Error<F>>
 where
     F: Graftable,
-    Op: Codec,
+    Op: Encode,
     H: Hasher<Digest = D>,
     D: Digest,
 {
@@ -643,11 +643,11 @@ pub mod dynamic {
     /// # Examples
     ///
     /// ```
-    /// use commonware_codec::{Codec, Decode, Input};
+    /// use commonware_codec::{Decode, Encode, Input};
     /// use commonware_cryptography::{Sha256, sha256::Digest};
     /// use commonware_storage::{merkle::mmr, qmdb::current::proof::dynamic::OperationProof};
     ///
-    /// fn verify<O: Codec>(
+    /// fn verify<O: Encode>(
     ///     encoded: impl Input,
     ///     chunk_size: usize,
     ///     max_digests: usize,
@@ -675,7 +675,7 @@ mod tests {
         qmdb::current::{db, grafting},
     };
     use bytes::Bytes;
-    use commonware_codec::{Decode as _, DecodeExt as _, Encode as _};
+    use commonware_codec::{Decode as _, DecodeExt as _};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;

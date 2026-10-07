@@ -110,7 +110,7 @@ where
     E: Rng + Spawner + Metrics + Clock,
     A: ConsensusApplication<E, Block = B, Input = Input<I, V, C, B::Directory>>,
     A::Context: Send,
-    B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock + Clone,
+    B: ReshareBlock<Variant = V, Signer = C> + CertifiableBlock,
     V: Variant,
     C: Signer,
     I: Send,
@@ -206,7 +206,7 @@ where
         context: (E, Self::Context),
         ancestry: impl Ancestry<Self::Block>,
     ) -> bool {
-        let Some(tip) = ancestry.peek().cloned() else {
+        let Some(tip) = ancestry.peek() else {
             return self.inner.verify(context, ancestry).await;
         };
         let height = tip.height();

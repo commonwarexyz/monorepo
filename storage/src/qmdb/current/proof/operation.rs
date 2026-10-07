@@ -6,7 +6,7 @@ use crate::{
     qmdb::Error,
 };
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, util::at_least};
+use commonware_codec::{Buf, Encode, EncodeSize, Read, ReadExt as _, Write, util::at_least};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use tracing::debug;
@@ -60,7 +60,7 @@ impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
 impl<F: Graftable, D: Digest, C: AsRef<[u8]>> Proof<F, D, C> {
     /// Return true if the proof authenticates that `operation` is active in the database with
     /// the provided `root`.
-    pub fn verify<H: Hasher<Digest = D>, O: Codec>(&self, operation: O, root: &D) -> bool {
+    pub fn verify<H: Hasher<Digest = D>, O: Encode>(&self, operation: O, root: &D) -> bool {
         let chunk = self.chunk.as_ref();
         let Ok(bits) = chunk_bits(chunk.len()) else {
             debug!("proof verification failed, invalid chunk size");
