@@ -2904,7 +2904,12 @@ where
         let (floor, decided) = m
             .walk(&mut walked, superseded_locs, policy, prefetched, source, db)
             .await?;
-        m.repair_links(&mut walked, decided, db).await?;
+        let decided = m.repair_links(&walked, decided, db).await?;
+        walked.ops.reserve(decided.len() + 1);
+        walked.floor_diff.reserve(decided.len());
+        for decided in decided {
+            m.emit(&mut walked, decided);
+        }
         m.finish(walked, floor, metadata, db).await
     }
 }
@@ -2917,17 +2922,6 @@ enum Prev<F: Family, V> {
     Decided(usize),
 }
 
-/// A predecessor the ordered repair rewrites after the walk's decisions.
-struct Rewrite<K, V, F: Family> {
-    key: K,
-    /// The value when read from the committed log, else cloned from the update at `loc`.
-    value: Option<V>,
-    /// The predecessor's live update, which classifies its move.
-    loc: Location<F>,
-    /// The predecessor's successor once the evicted keys are gone.
-    next_key: K,
-}
-
 impl<F: Family, K, V, H, S: Strategy> Merkleizer<F, H, update::Ordered<K, V>, S>
 where
     K: Key,
@@ -2935,184 +2929,161 @@ where
     H: Hasher,
     Operation<F, update::Ordered<K, V>>: Codec,
 {
-    /// Emit the walk's `decided` updates and rewrite the predecessor of each evicted key to link
-    /// past it.
+    /// Extend the walk's `decided` updates with the rewrite of each evicted key's predecessor, so
+    /// that its link passes the key.
     ///
     /// An evicted key's predecessor in the final key set is the largest surviving key below it,
-    /// wrapping to the largest key. It lies among the active updates that may precede the key:
-    /// the committed updates in its translated-key bucket and in the previous bucket (stale ones
-    /// excluded, as during write resolution), this batch's writes, the live ancestors' updates,
-    /// and the updates the walk kept or replaced. Each evicted key's successor is in its cached
-    /// link, so the predecessor's new successor is the first surviving key after it among those.
+    /// wrapping to the largest key. It lies among the active updates that may precede the evicted
+    /// keys: the committed updates in their translated-key buckets and the buckets before those
+    /// (stale ones excluded, as during write resolution), this batch's writes, the live
+    /// ancestors' updates, and the updates the walk kept or replaced. Each evicted key's
+    /// successor is in its cached link, so the predecessor's new successor is the first surviving
+    /// key after it among those.
     ///
-    /// A kept or replaced predecessor's rewrite folds into the operation emitted for it. Every
-    /// other predecessor is rewritten once, in key order, after the decisions.
+    /// A kept or replaced predecessor's rewrite folds into its decision. Every other predecessor
+    /// is decided once as a kept update with its new link, in key order after the walk's
+    /// decisions.
     async fn repair_links<E, C, I, const N: usize>(
         &self,
-        walked: &mut Walked<F, update::Ordered<K, V>>,
+        walked: &Walked<F, update::Ordered<K, V>>,
         mut decided: Vec<Decided<F, update::Ordered<K, V>>>,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<(), crate::qmdb::Error<F>>
+    ) -> Result<Vec<Decided<F, update::Ordered<K, V>>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let mut evicted: Vec<K> = decided
-            .iter()
-            .filter(|decided| decided.value.is_none())
-            .map(|decided| decided.key.clone())
-            .collect();
+        // The evicted keys and their surviving successors. No successor survives when the walk
+        // evicted nothing or every key, and neither needs a link.
+        let mut evicted: Vec<K> = Vec::new();
+        let mut next_candidates: Vec<K> = Vec::new();
+        for decided in &decided {
+            if decided.value.is_none() {
+                evicted.push(decided.key.clone());
+                next_candidates.push(decided.cached.clone());
+            }
+        }
         evicted.sort();
         let is_evicted = |key: &K| evicted.binary_search(key).is_ok();
-
-        // The surviving successors of the evicted keys. None survive only if the walk evicted
-        // every key, which needs no links.
-        let mut next_candidates: Vec<K> = decided
-            .iter()
-            .filter(|decided| decided.value.is_none())
-            .map(|decided| decided.cached.clone())
-            .collect();
         next_candidates.sort();
         next_candidates.dedup();
         next_candidates.retain(|key| !is_evicted(key));
+        if next_candidates.is_empty() {
+            return Ok(decided);
+        }
+        let mut prev = Vec::new();
 
-        let mut rewrites = Vec::new();
-        if !next_candidates.is_empty() {
-            let mut prev = Vec::new();
-
-            // Committed updates in each evicted key's bucket and the previous bucket.
-            let mut locations = Vec::new();
-            for key in &evicted {
-                locations.extend(db.snapshot.get(key).copied());
-                if let Some((bucket, _)) = db.snapshot.prev_translated_key(key) {
-                    locations.extend(bucket.copied());
-                }
+        // Committed updates in each evicted key's bucket and the previous bucket.
+        let mut locations = Vec::new();
+        for key in &evicted {
+            locations.extend(db.snapshot.get(key).copied());
+            if let Some((bucket, _)) = db.snapshot.prev_translated_key(key) {
+                locations.extend(bucket.copied());
             }
-            locations.sort_unstable();
-            locations.dedup();
-            let read = self.read_ops(&locations, &[], &db.log).await?;
-            for (op, loc) in zip_eq(read, locations) {
-                let Operation::Update(data) = op else {
-                    unreachable!("snapshot should only reference Update operations")
-                };
+        }
+        locations.sort_unstable();
+        locations.dedup();
+        let read = self.read_ops(&locations, &[], &db.log).await?;
+        for (op, loc) in zip_eq(read, locations) {
+            let Operation::Update(data) = op else {
+                unreachable!("snapshot should only reference Update operations")
+            };
 
-                // A committed update is live only if this batch leaves its key alone and the
-                // nearest ancestor entry for the key, if any, is this update.
-                if lookup_sorted(&walked.diff, &data.key).is_some()
-                    || locate(&self.ancestors, loc, &data.key).is_none()
-                {
+            // A committed update is live only if this batch leaves its key alone and the
+            // nearest ancestor entry for the key, if any, is this update.
+            if lookup_sorted(&walked.diff, &data.key).is_some()
+                || locate(&self.ancestors, loc, &data.key).is_none()
+            {
+                continue;
+            }
+            prev.push((data.key, Some(Prev::Committed(data.value, loc))));
+        }
+
+        // This batch's writes.
+        for (key, entry) in &walked.diff {
+            if let Some(loc) = entry.loc() {
+                prev.push((key.clone(), Some(Prev::Memory(loc))));
+            }
+        }
+
+        // Live ancestors' updates of keys this batch leaves alone, nearest ancestor first so
+        // a nearer entry shadows older ones. Each diff is key-sorted, as is this batch's, so
+        // one cursor per diff skips the keys this batch holds.
+        let track_shadow = self.ancestors.len() > 1;
+        let mut seen: AHashSet<&K> = AHashSet::new();
+        for batch in &self.ancestors {
+            let mut at = 0;
+            for (key, entry) in batch.diff.iter() {
+                if track_shadow && !seen.insert(key) {
                     continue;
                 }
-                prev.push((data.key, Some(Prev::Committed(data.value, loc))));
-            }
-
-            // This batch's writes.
-            for (key, entry) in &walked.diff {
+                while walked.diff.get(at).is_some_and(|(held, _)| held < key) {
+                    at += 1;
+                }
+                if walked.diff.get(at).is_some_and(|(held, _)| held == key) {
+                    continue;
+                }
                 if let Some(loc) = entry.loc() {
                     prev.push((key.clone(), Some(Prev::Memory(loc))));
                 }
             }
+        }
 
-            // Live ancestors' updates of keys this batch leaves alone, nearest ancestor first so
-            // a nearer entry shadows older ones. Each diff is key-sorted, as is this batch's, so
-            // one cursor per diff skips the keys this batch holds.
-            let track_shadow = self.ancestors.len() > 1;
-            let mut seen: AHashSet<&K> = AHashSet::new();
-            for batch in &self.ancestors {
-                let mut at = 0;
-                for (key, entry) in batch.diff.iter() {
-                    if track_shadow && !seen.insert(key) {
-                        continue;
-                    }
-                    while walked.diff.get(at).is_some_and(|(held, _)| held < key) {
-                        at += 1;
-                    }
-                    if walked.diff.get(at).is_some_and(|(held, _)| held == key) {
-                        continue;
-                    }
-                    if let Some(loc) = entry.loc() {
-                        prev.push((key.clone(), Some(Prev::Memory(loc))));
-                    }
-                }
+        // The updates the walk kept or replaced come last so they win the deduplication
+        // below, which keeps the last push per key.
+        for (idx, decided) in decided.iter().enumerate() {
+            if decided.value.is_some() {
+                prev.push((decided.key.clone(), Some(Prev::Decided(idx))));
             }
-
-            // The updates the walk kept or replaced come last so they win the deduplication
-            // below, which keeps the last push per key.
-            for (idx, decided) in decided.iter().enumerate() {
-                if decided.value.is_some() {
-                    prev.push((decided.key.clone(), Some(Prev::Decided(idx))));
-                }
+        }
+        prev.sort_by(|a, b| a.0.cmp(&b.0));
+        prev.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                mem::swap(a, b);
+                true
+            } else {
+                false
             }
-            prev.sort_by(|a, b| a.0.cmp(&b.0));
-            prev.dedup_by(|a, b| {
-                if a.0 == b.0 {
-                    mem::swap(a, b);
-                    true
-                } else {
-                    false
-                }
-            });
-            prev.retain(|(key, _)| !is_evicted(key));
+        });
+        prev.retain(|(key, _)| !is_evicted(key));
 
-            // Rewrite each evicted key's predecessor once. Taking the source ensures a
-            // predecessor shared by several evicted keys is rewritten once.
-            for key in &evicted {
-                let (prev_key, slot) = find_prev_key_mut(key, &mut prev);
-                let Some(source) = slot.take() else {
+        // Rewrite each evicted key's predecessor once. Taking the source ensures a
+        // predecessor shared by several evicted keys is rewritten once. An undecided
+        // predecessor is an active update the walk left in place, so its rewrite joins the
+        // decisions as a kept update with its new link. Classifying it now reads the same
+        // state as classifying it after the walk's decisions emit, since emitting a decision
+        // changes only the decided key's own entry.
+        let walked_decisions = decided.len();
+        for key in &evicted {
+            let (prev_key, slot) = find_prev_key_mut(key, &mut prev);
+            let Some(source) = slot.take() else {
+                continue;
+            };
+            let next_key = find_next_key(prev_key, &next_candidates);
+            let (value, loc) = match source {
+                Prev::Decided(idx) => {
+                    decided[idx].cached = next_key;
                     continue;
-                };
-                let next_key = find_next_key(prev_key, &next_candidates);
-                let (value, loc) = match source {
-                    Prev::Decided(idx) => {
-                        decided[idx].cached = next_key;
-                        continue;
-                    }
-                    Prev::Committed(value, loc) => (Some(value), loc),
-                    Prev::Memory(loc) => (None, loc),
-                };
-                rewrites.push(Rewrite {
-                    key: prev_key.clone(),
-                    value,
-                    loc,
-                    next_key,
-                });
-            }
-            rewrites.sort_by(|a, b| a.key.cmp(&b.key));
-        }
-
-        // Each decision and rewrite appends one operation, and the CommitFloor follows.
-        walked.ops.reserve(decided.len() + rewrites.len() + 1);
-        walked.floor_diff.reserve(decided.len() + rewrites.len());
-        for decided in decided {
-            self.emit(walked, decided);
-        }
-
-        // A rewritten predecessor is an active update the walk left undecided, so its rewrite
-        // moves it as a kept update would.
-        for Rewrite {
-            key,
-            value,
-            loc,
-            next_key,
-        } in rewrites
-        {
-            let value = value
-                .unwrap_or_else(|| extract_update_value(self.peek_uncommitted(loc, &walked.ops)));
-            let mv = self
-                .classify(&walked.diff, loc, &key)
-                .expect("rewritten predecessor is active");
-            self.relocate(
-                walked,
-                update::Ordered {
-                    key,
-                    value,
-                    next_key,
+                }
+                Prev::Committed(value, loc) => (value, loc),
+                Prev::Memory(loc) => match self.peek_uncommitted(loc, &walked.ops) {
+                    Operation::Update(update) => (update.value.clone(), loc),
+                    _ => unreachable!("active operations are updates"),
                 },
+            };
+            let mv = self
+                .classify(&walked.diff, loc, prev_key)
+                .expect("rewritten predecessor is active");
+            decided.push(Decided {
+                key: prev_key.clone(),
+                cached: next_key,
                 mv,
-            );
+                value: Some(value),
+            });
         }
-        Ok(())
+        decided[walked_decisions..].sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(decided)
     }
 }
 
@@ -3620,14 +3591,6 @@ where
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
-    }
-}
-
-/// The value of an Update operation.
-fn extract_update_value<F: Family, U: update::Update>(op: &Operation<F, U>) -> U::Value {
-    match op {
-        Operation::Update(update) => update.value().clone(),
-        _ => unreachable!("active operations are updates"),
     }
 }
 
