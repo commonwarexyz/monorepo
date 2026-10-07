@@ -284,8 +284,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Stateful};
+    use super::{Config, Mailbox, Stateful};
     use crate::stateful::{
+        Application,
         actor::syncer::SyncPlan,
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
@@ -300,7 +301,9 @@ mod tests {
     };
     use commonware_cryptography::sha256::Digest as Sha256Digest;
     use commonware_macros::select;
-    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        Clock, Metrics, Runner as _, Spawner, Supervisor as _, deterministic,
+    };
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
@@ -308,6 +311,7 @@ mod tests {
         sync::Mutex,
     };
     use futures::poll;
+    use rand_core::Rng;
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
     /// Blocks startup before the actor begins polling its mailbox.
@@ -418,6 +422,19 @@ mod tests {
                 HandoffPolicy::Prepare(publication),
             );
         });
+    }
+
+    fn is_send<T: Send>(_: T) {}
+
+    /// [`Mailbox::subscribe_databases`] returns a `Send` future even for an application
+    /// that is not `Sync`, so callers can await it in spawned tasks.
+    #[allow(dead_code)]
+    fn assert_mailbox_futures_are_send<E, A>(mailbox: &Mailbox<E, A>)
+    where
+        E: Rng + Spawner + Metrics + Clock,
+        A: Application<E>,
+    {
+        is_send(mailbox.subscribe_databases());
     }
 
     #[test]

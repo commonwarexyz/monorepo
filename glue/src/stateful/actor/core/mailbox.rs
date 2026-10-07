@@ -238,14 +238,15 @@ where
     /// # Panics
     ///
     /// Panics if the actor stops before replying.
-    pub async fn subscribe_databases(&self) -> A::Databases {
-        let (response, receiver) = oneshot::channel();
-        let _ = self
-            .sender
-            .enqueue(Message::SubscribeDatabases { response });
-        receiver
-            .await
-            .expect("stateful actor dropped during subscribe_databases")
+    pub fn subscribe_databases(&self) -> impl Future<Output = A::Databases> + Send + use<E, A> {
+        let sender = self.sender.clone();
+        async move {
+            let (response, receiver) = oneshot::channel();
+            let _ = sender.enqueue(Message::SubscribeDatabases { response });
+            receiver
+                .await
+                .expect("stateful actor dropped during subscribe_databases")
+        }
     }
 }
 
