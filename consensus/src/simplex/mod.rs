@@ -248,7 +248,7 @@
 //! the parent certifies. The application decides, per request, whether to prepare a candidate
 //! and whether consensus may publish it before the parent certifies.
 //!
-//! Handoff requests require a [`elector::Static`] elector, which knows the incoming
+//! Handoff requests require a [`elector::Scheduled`] elector, which knows the incoming
 //! leader before the certificate that unlocks the term exists. A [`elector::Dynamic`] elector
 //! never pipelines handoffs. The incoming leader must also have voted for the outgoing term's
 //! final view or hold its notarization, and the outgoing term must have no nullification.
@@ -457,8 +457,8 @@
 //! complete while rejecting the other's proposal ancestry.
 //!
 //! Proposal verification repairs this split by requesting the first missing nullification or named
-//! parent from the proposal's elected leader, even below the certified floor. With an
-//! [`elector::Static`] elector, a term start's immediate predecessor may come from any
+//! parent from the proposal's elected leader, even below the certified floor. With a
+//! [`elector::Scheduled`] elector, a term start's immediate predecessor may come from any
 //! validator instead, because a pipelined proposer might not hold its certificate. The voter
 //! rechecks the full ancestry after each delivery and votes only once it is valid. The voter does
 //! not request an uncertified parent inside the optimistic issuance window: its certificate is
@@ -1700,7 +1700,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         RoundRobin: elector::Config<S>,
-        <RoundRobin as elector::Config<S>>::Elector: elector::Elector<S, Mode = elector::Static>,
+        <RoundRobin as elector::Config<S>>::Elector: elector::Elector<S, Mode = elector::Scheduled>,
     {
         let n = 5;
         let required_containers = View::new(50);
@@ -6852,7 +6852,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Static>,
+        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7063,7 +7063,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Static>,
+        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7279,7 +7279,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Static>,
+        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;
@@ -7519,7 +7519,7 @@ mod tests {
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
         L: elector::Config<S>,
-        L::Elector: elector::Elector<S, Mode = elector::Static>,
+        L::Elector: elector::Elector<S, Mode = elector::Scheduled>,
     {
         let n = 4;
         let quorum = quorum(n) as usize;

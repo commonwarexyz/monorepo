@@ -18,14 +18,14 @@
 //! Applications can implement [`Config`] and [`Elector`] for custom leader
 //! selection logic such as stake-weighted selection or other application-specific strategies.
 //!
-//! Each elector declares a [`Mode`]. A [`Static`] elector selects every leader from a schedule
+//! Each elector declares a [`Mode`]. A [`Scheduled`] elector selects every leader from a schedule
 //! fixed when it is built, so consensus can elect a term's incoming leader before the term's
 //! unlocking certificate exists, as [pipelined handoffs](crate::simplex#pipelined-handoff)
 //! require. A [`Dynamic`] elector derives leaders from that certificate and never pipelines
 //! handoffs.
 //!
 //! Declare `type Mode = Dynamic;` to receive `Option<&S::Certificate>` in `elect`, or
-//! `type Mode = Static;` to receive `()`. Generic callers convert the certificate with
+//! `type Mode = Scheduled;` to receive `()`. Generic callers convert the certificate with
 //! [`Mode::input`].
 //!
 //! # Usage
@@ -191,7 +191,7 @@ mod private {
 
 /// How an [`Elector`] uses the certificate that unlocks a round.
 ///
-/// This trait is sealed to [`Static`] and [`Dynamic`]. External types can implement
+/// This trait is sealed to [`Scheduled`] and [`Dynamic`]. External types can implement
 /// [`Elector`] and choose either mode.
 pub trait Mode: private::Sealed {
     /// What [`Elector::elect`] receives in place of the unlocking certificate.
@@ -210,7 +210,7 @@ pub trait Mode: private::Sealed {
 /// [`Elector::elect`] receives `()`, so consensus can also elect a term's incoming leader
 /// before the certificate that unlocks the term exists. It may then call [`Elector::elect`]
 /// several times per view, so keep election inexpensive.
-pub struct Static;
+pub struct Scheduled;
 
 /// [`Mode`] of an elector that derives leaders from the certificate that unlocks a round.
 ///
@@ -218,10 +218,10 @@ pub struct Static;
 /// only once the certificate exists, so these electors never pipeline handoffs.
 pub struct Dynamic;
 
-impl private::Sealed for Static {}
+impl private::Sealed for Scheduled {}
 impl private::Sealed for Dynamic {}
 
-impl Mode for Static {
+impl Mode for Scheduled {
     type Input<'a, C: 'a> = ();
 
     fn input<C>(_: Option<&C>) {}
@@ -257,7 +257,7 @@ pub type Input<'a, S, E> =
 /// A [`Dynamic`] elector receives the certificate that unlocked the target view, or `None`
 /// for view 1 (the first view after genesis). With stable leaders, a nullification
 /// certificate can skip to the next term start, so this is not necessarily a certificate
-/// from the immediately previous view. A [`Static`] elector receives `()` instead.
+/// from the immediately previous view. A [`Scheduled`] elector receives `()` instead.
 ///
 /// Whether certificate data is safe to use for leader selection depends on the
 /// certificate scheme. Certificates are not necessarily canonical: schemes that
@@ -273,13 +273,13 @@ pub type Input<'a, S, E> =
 /// and another via a nullification). With `term_length > 1`, those certificates
 /// may even be from different views. Implementations must return the same leader
 /// for every certificate that can unlock the round. [`RoundRobinElector`] is
-/// [`Static`], so it never receives a certificate. [`RandomElector`] uses the
+/// [`Scheduled`], so it never receives a certificate. [`RandomElector`] uses the
 /// recovered threshold seed signature, which is independent of vote type and quorum
 /// subset for a given round. [`Random`] does not support `term_length > 1` because
 /// certificates from different views carry different seed signatures.
 pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Whether [`Self::elect`] derives leaders from the unlocking certificate ([`Dynamic`])
-    /// or from a schedule fixed when the elector is built ([`Static`]).
+    /// or from a schedule fixed when the elector is built ([`Scheduled`]).
     type Mode: Mode;
 
     /// Returns the leadership term structure this elector was built with.
@@ -399,7 +399,7 @@ pub struct RoundRobinElector<S: Scheme> {
 }
 
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
-    type Mode = Static;
+    type Mode = Scheduled;
 
     fn terms(&self) -> Terms {
         self.terms

@@ -30,7 +30,7 @@
 //! Background repair cannot detect a split where one participant certifies a notarization while
 //! another holds a covering nullification. Proposal verification exposes the missing ancestry and
 //! targets the first gap at the proposal's leader. With a
-//! [`Static`](crate::simplex::elector::Static) elector, a term start's immediate
+//! [`Scheduled`](crate::simplex::elector::Scheduled) elector, a term start's immediate
 //! predecessor may instead come from any peer because a pipelined proposer might not hold its
 //! notarization yet.
 //! A blocked certification asks any peer, since the leader that withheld the certificate may never
