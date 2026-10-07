@@ -137,6 +137,7 @@ where
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(50), None).await;
 
+        // Start at the inactivity floor so the lower bound can rise twice under the same end.
         let initial_lower_bound = H::inactivity_floor_loc(&target_db);
         assert!(
             *initial_lower_bound > 1,
@@ -165,6 +166,8 @@ where
         };
         let client: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
+        // Both updates raise only the lower bound and keep the root, so adopting either would fail
+        // sync with an unchanged root.
         let first_target = Target {
             root,
             range: non_empty_range!(initial_lower_bound.checked_add(1).unwrap(), upper_bound),
@@ -176,7 +179,7 @@ where
         update_sender.send(first_target).await.unwrap();
         update_sender.send(second_target).await.unwrap();
 
-        // The non-advancing update is discarded and the sync completes at the original target.
+        // The non-advancing updates are discarded and the sync completes at the original target.
         let synced_db: H::Db = client.sync().await.unwrap();
         assert_eq!(H::canonical_root(&synced_db), H::canonical_root(&target_db));
         H::destroy(synced_db).await;
@@ -195,6 +198,8 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
+        // The client starts at the initial target and receives the advanced one only after
+        // reporting the first.
         let mut target_db = H::init_db(context.child("target")).await;
         target_db = H::apply_ops(target_db, H::create_ops(10), None).await;
         let initial_target = Target {
@@ -211,6 +216,8 @@ where
         };
         let updated_verification_root = H::canonical_root(&target_db);
 
+        // With finish and reached-target channels, the engine reports each reached target and
+        // then waits.
         let (update_sender, update_receiver) = mpsc::channel(1);
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         let (reached_sender, mut reached_receiver) = mpsc::channel(1);
@@ -232,6 +239,7 @@ where
         let sync_handle = sync::sync(config);
         pin_mut!(sync_handle);
 
+        // The initial target is reported, yet sync keeps waiting for the finish signal.
         select! {
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal");
@@ -246,6 +254,7 @@ where
             "sync must wait for explicit finish signal after reaching target"
         );
 
+        // An update after the initial target is reached is adopted, reported, and waited on.
         update_sender
             .send(updated_target.clone())
             .await
@@ -265,6 +274,7 @@ where
             "sync must still wait for explicit finish signal after updated target is reached"
         );
 
+        // The finish signal completes sync at the updated target.
         finish_sender
             .send(())
             .await
@@ -312,6 +322,7 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
 
+        // Each of three successive targets is sent only once the previous one is reached.
         target_db = H::apply_ops(target_db, H::create_ops(8), None).await;
         let initial_target = Target {
             root: H::db_root(&target_db),
@@ -340,6 +351,8 @@ where
         };
         let final_root = H::canonical_root(&target_db);
 
+        // Without a reached-target channel, the progress metrics are the only signal that a
+        // target is reached.
         let (update_sender, update_receiver) = mpsc::channel(1);
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         let target_db = Arc::new(target_db);
@@ -360,6 +373,7 @@ where
         let sync_handle = sync::sync(config);
         pin_mut!(sync_handle);
 
+        // Progress reaches the initial target size while sync waits for an update or finish.
         select! {
             _ = sync_handle.as_mut() => {
                 panic!("sync completed before explicit finish signal");
@@ -371,6 +385,7 @@ where
             "sync must wait for a target update or explicit finish after reaching the initial target"
         );
 
+        // Each adopted update is reached in the progress metrics while sync keeps waiting.
         update_sender
             .send(first_update.clone())
             .await
@@ -386,6 +401,7 @@ where
             "sync must wait for another update or explicit finish after reaching the first update"
         );
 
+        // The last update is reached the same way and leaves sync waiting for the finish signal.
         update_sender
             .send(second_update.clone())
             .await
@@ -401,6 +417,7 @@ where
             "sync must wait for explicit finish after reporting final progress"
         );
 
+        // The finish signal completes sync at the last update.
         finish_sender
             .send(())
             .await
@@ -438,6 +455,7 @@ where
         };
         let verification_root = H::canonical_root(&target_db);
 
+        // The finish signal is pending before the engine starts, while the target is unreached.
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         let (reached_sender, mut reached_receiver) = mpsc::channel(1);
         finish_sender
@@ -460,6 +478,8 @@ where
             max_retained_roots: 1,
         };
 
+        // An early finish waits for the target, so sync still completes the full range and
+        // reports reaching it.
         let synced_db: H::Db = sync::sync(config)
             .await
             .expect("sync should complete after early finish signal");
@@ -493,6 +513,7 @@ where
         let lower_bound = H::sync_boundary(&target_db);
         let upper_bound = H::bounds(&target_db).end;
 
+        // A finish channel whose sender is gone can never request completion.
         let (finish_sender, finish_receiver) = mpsc::channel(1);
         drop(finish_sender);
 
@@ -514,6 +535,7 @@ where
             max_retained_roots: 1,
         };
 
+        // Sync fails as soon as it observes the closed finish channel.
         let result: Result<H::Db, _> = sync::sync(config).await;
         assert!(matches!(
             result,
@@ -540,6 +562,7 @@ where
         let upper_bound = H::bounds(&target_db).end;
         let verification_root = H::canonical_root(&target_db);
 
+        // No observer receives reached-target notifications, so every notification is lost.
         let (reached_sender, reached_receiver) = mpsc::channel(1);
         drop(reached_receiver);
 
@@ -561,6 +584,7 @@ where
             max_retained_roots: 1,
         };
 
+        // A lost notification is not a sync error, so sync completes at the target.
         let synced_db: H::Db = sync::sync(config)
             .await
             .expect("sync should succeed when reached-target receiver is dropped");
@@ -950,6 +974,8 @@ where
 
         let db_config = H::config(&context.next_u64().to_string(), &context);
 
+        // The source corrupts the first boundary response's pinned nodes and offers the honest
+        // response as that request's only retry.
         let source = CorruptFirstPinnedNodesSource {
             context: Arc::new(context.child("source")),
             inner: Arc::new(target_db),
@@ -973,6 +999,7 @@ where
             max_retained_roots: 8,
         };
 
+        // Sync reaches the target root only if the corrupted candidate is rejected for the retry.
         let synced_db: H::Db = sync::sync(config).await.unwrap();
         assert_eq!(H::db_root(&synced_db), sync_root);
         H::destroy(synced_db).await;
@@ -1072,6 +1099,7 @@ where
     executor.start(|mut context| async move {
         let mut target_db = H::init_db(context.child("target")).await;
 
+        // Commit and prune until the floor is above zero, so the sync range needs a boundary.
         let mut seed = 0;
         loop {
             target_db = H::apply_ops(target_db, H::create_ops_seeded(32, seed), None).await;
@@ -1086,6 +1114,8 @@ where
             assert!(seed < 8, "expected prune floor to advance");
         }
 
+        // The new target raises both bounds, so adopting it cancels the old boundary request and
+        // needs a fresh boundary at a higher start.
         let old_target = Target {
             root: H::db_root(&target_db),
             range: non_empty_range!(
@@ -1108,6 +1138,8 @@ where
         assert!(new_target.range.start() > old_target.range.start());
         assert!(new_target.range.end() > old_target.range.end());
 
+        // The source stalls the old boundary and an old operation request, and answers the fresh
+        // boundary with an invalid candidate whose valid retry waits for a separate release.
         let (release_historical_gap_tx, release_historical_gap_rx) = oneshot::channel();
         let (release_boundary_retry_tx, release_boundary_retry_rx) = oneshot::channel();
         let target_db = Arc::new(target_db);
@@ -1141,6 +1173,8 @@ where
 
         let mut engine: Engine<H::Db, _> = Engine::new(config).await.unwrap();
 
+        // With the update and an early finish queued, the first step adopts the new target and
+        // cannot complete.
         update_sender.send(new_target.clone()).await.unwrap();
         finish_sender.send(()).await.unwrap();
 
@@ -1149,6 +1183,8 @@ where
             NextStep::Complete(_) => panic!("target update should not complete sync"),
         };
 
+        // Released old operations keep fetch results flowing, but the journal cannot grow and
+        // the target cannot be reported until the fresh boundary is accepted.
         let _ = release_historical_gap_tx.send(());
 
         let journal_start = engine.journal().bounds().end;
@@ -1180,6 +1216,8 @@ where
             "engine should not report reached-target while boundary state is missing"
         );
 
+        // Releasing the valid boundary candidate lets sync reach the new target and honor the
+        // early finish.
         let _ = release_boundary_retry_tx.send(());
 
         let synced_db = engine.sync().await.unwrap();

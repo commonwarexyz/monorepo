@@ -48,6 +48,8 @@ pub(crate) trait ImmutableSyncTestHarness: SyncTestHarness {
     fn lookup(db: &Self::Db, key: &Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
 
+/// A client synced over the full retained history of a target with a nonzero inactivity floor
+/// matches that floor and resolves only keys set at or above it.
 pub(crate) fn test_sync_nonzero_floor<H: ImmutableSyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -76,6 +78,8 @@ where
 
         assert_eq!(H::inactivity_floor_loc(&target_db), first_commit_end);
 
+        // Sync from the oldest retained operation, below the floor, so the client also receives
+        // the inactive first batch.
         let bounds = H::bounds(&target_db);
         let target_root = H::db_root(&target_db);
 

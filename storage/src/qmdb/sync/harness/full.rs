@@ -116,6 +116,9 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn assert_ops_absent(db: &Self::Db, ops: &[OpOf<Self>]) -> impl Future<Output = ()> + Send;
 }
 
+/// A client synced from the target's sync boundary matches the target's bounds, floor, and roots,
+/// keeps that state across a reopen, and stays in step with the target under further operations.
+/// The cases vary the target size against the fetch batch size.
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
     OpOf<H>: Encode + Clone,
@@ -123,6 +126,8 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
+        // Prune the target to its sync boundary so the sync range starts at its oldest retained
+        // operation.
         let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(target_db_ops);
         let target_db =
@@ -171,6 +176,8 @@ where
         assert_eq!(H::inactivity_floor_loc(&got_db), target_floor);
         assert_eq!(H::canonical_root(&got_db), target_canonical_root);
 
+        // The same new operations give both databases the same root, so the synced client is a
+        // usable continuation of the target.
         let new_ops = H::create_ops_seeded(target_db_ops, 1);
         let got_db = H::apply_ops(got_db, new_ops.clone(), None).await;
         let target_db = Arc::try_unwrap(target_db)
@@ -184,6 +191,8 @@ where
     });
 }
 
+/// An empty client synced to a target that holds only commits recovers the target's bounds, root,
+/// and commit metadata.
 pub(crate) fn test_sync_empty_to_nonempty<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -191,6 +200,8 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
+        // The target applies no operations, so its history holds only commits, the last carrying
+        // metadata.
         let target_db = H::init_db(context.child("target")).await;
         let target_db = H::apply_ops(target_db, vec![], Some(H::sample_metadata())).await;
 
@@ -232,6 +243,8 @@ where
     });
 }
 
+/// A synced database that is made durable and reopened keeps the target's root, bounds, and
+/// operations.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -239,6 +252,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
+        // The sync range spans the target's full retained history.
         let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(10);
         let target_db =
@@ -276,6 +290,7 @@ where
         let expected_op_count = bounds.end;
         let expected_oldest_retained_loc = bounds.start;
 
+        // A reopen from the same config must recover the synced state from storage alone.
         H::db_sync(synced_db).await;
         let reopened_db = H::init_db_with_config(context.child("reopened"), db_config).await;
 
@@ -302,6 +317,7 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
+        // The older target covers the shared base operations.
         let base_ops = H::create_ops(10);
         let older_source_config = H::config(&context.next_u64().to_string(), &context);
         let older_source =
@@ -316,6 +332,7 @@ where
         };
         let older_root = H::canonical_root(&older_source);
 
+        // The newer source extends the same base history, so its target ends past the older one.
         let newer_source_config = H::config(&context.next_u64().to_string(), &context);
         let newer_source =
             H::init_db_with_config(context.child("newer_source"), newer_source_config).await;
@@ -331,6 +348,7 @@ where
         let newer_root = H::canonical_root(&newer_source);
         assert!(newer_target.range.end() > older_target.range.end());
 
+        // Sync the client to the newer target first, leaving that state in its storage.
         let db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
         let older_source = Arc::new(older_source);
@@ -353,6 +371,7 @@ where
         assert_eq!(H::canonical_root(&synced_db), newer_root);
         drop(synced_db);
 
+        // Syncing the same storage to the older target must rewind it to the older state.
         let recovered_db: DbOf<H> = sync::sync(Config {
             db_config: db_config.clone(),
             fetch_batch_size: NZU64!(5),
@@ -374,6 +393,7 @@ where
         assert_eq!(H::sync_boundary(&recovered_db), older_target.range.start());
         drop(recovered_db);
 
+        // The rewind is durable, so a reopen recovers the older state.
         let reopened_db = H::init_db_with_config(client_context.child("reopened"), db_config).await;
         assert_eq!(H::canonical_root(&reopened_db), older_root);
         assert_eq!(H::bounds(&reopened_db).end, older_target.range.end());
@@ -391,6 +411,9 @@ where
     });
 }
 
+/// A client that has started applying operations adopts a target update and completes at the
+/// newer target with every operation applied. The cases vary the initial target size and the
+/// number of operations the update adds.
 pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
@@ -412,6 +435,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         // The source is shared so the target can advance while the client syncs.
         let target_db = Arc::new(AsyncRwLock::new(Some(target_db)));
 
+        // Step the client until it has applied an operation past the initial lower bound, so the
+        // update arrives mid-sync.
         let (update_sender, update_receiver) = mpsc::channel(1);
         let client = {
             let config = Config {
@@ -443,6 +468,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
             }
         };
 
+        // Advance the shared source and send its new target while the client is mid-sync.
         let additional_ops = H::create_ops_seeded(additional_ops, 1);
         let final_target = {
             let mut db_guard = target_db.write().await;
@@ -483,6 +509,8 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     });
 }
 
+/// A client synced to a historical target of a source that has since advanced matches that target
+/// and holds none of the later operations.
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -490,6 +518,8 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
+        // Record the target before the final operation, so it names a strict prefix of the
+        // source.
         let target_db = H::init_db(context.child("target")).await;
         let target_ops = H::create_ops(1000);
         let (synced_ops, later_ops) = target_ops.split_at(target_ops.len() - 1);
@@ -500,6 +530,7 @@ where
         let lower_bound = H::sync_boundary(&target_db);
         let op_count = H::bounds(&target_db).end;
 
+        // Advance the source past the target, so it must serve the target from history.
         let target_db = H::apply_ops(target_db, later_ops.to_vec(), None).await;
 
         let target_db = Arc::new(target_db);
@@ -521,6 +552,7 @@ where
         };
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
+        // The later operation lies past the target and must be absent from the client.
         assert_eq!(H::db_root(&synced_db), target_root);
         assert_eq!(H::canonical_root(&synced_db), target_canonical_root);
         assert_eq!(H::bounds(&synced_db).end, op_count);
@@ -534,6 +566,8 @@ where
     });
 }
 
+/// Syncing into client storage that has already applied a prefix of the target's operations
+/// yields the target's floor, roots, and operations.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -549,9 +583,11 @@ where
         let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
 
+        // The client applies the same operations as the target, then releases its storage.
         let target_db = H::apply_ops(target_db, original_ops.clone(), None).await;
         H::apply_ops(sync_db, original_ops.clone(), None).await;
 
+        // One more operation on the target leaves the client holding all but its tail.
         let last_op = H::create_ops_seeded(1, 1);
         let target_db = H::apply_ops(target_db, last_op.clone(), None).await;
         let root = H::db_root(&target_db);
@@ -592,6 +628,8 @@ where
     });
 }
 
+/// A client whose persisted state already equals the target completes without fetching from the
+/// source and keeps the target's state.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -606,6 +644,8 @@ where
         let sync_db =
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
 
+        // Both databases apply the same operations and prune to their sync boundaries, so the
+        // client's persisted state equals the target.
         let target_db = H::apply_ops(target_db, target_ops.clone(), None).await;
         let sync_db = H::apply_ops(sync_db, target_ops.clone(), None).await;
         let boundary = H::sync_boundary(&target_db);
@@ -649,6 +689,8 @@ where
     });
 }
 
+/// Updates that lower the target's lower bound do not advance the target and are discarded, even
+/// when they raise the upper bound.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -693,6 +735,8 @@ where
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
+        // Both updates keep the root, so adopting the one with a larger end would fail sync with
+        // an unchanged root.
         let lower_bound = initial_lower_bound.checked_sub(1).unwrap();
         for upper_bound in [
             initial_upper_bound,
@@ -719,6 +763,7 @@ where
     });
 }
 
+/// An update that lowers the target's upper bound does not advance the target and is discarded.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -754,6 +799,7 @@ where
         };
         let client: Engine<DbOf<H>, _> = Engine::new(config).await.unwrap();
 
+        // The update keeps the root and lower bound but ends one operation earlier.
         update_sender
             .send(Target {
                 root: initial_root,
@@ -774,6 +820,8 @@ where
     });
 }
 
+/// An update that raises both bounds is adopted, and the client completes with the updated
+/// target's bounds, floor, roots, and sync boundary.
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -791,9 +839,11 @@ where
         let initial_upper_bound = H::bounds(&target_db).end;
         let initial_root = H::db_root(&target_db);
 
+        // More operations move the target's upper bound.
         let more_ops = H::create_ops_seeded(5, 1);
         let target_db = H::apply_ops(target_db, more_ops, None).await;
 
+        // Pruning and a later commit move the target's inactivity floor.
         let target_db = H::prune(target_db, Location::new(10)).await;
         let target_db = H::apply_ops(target_db, vec![], None).await;
 
@@ -825,6 +875,7 @@ where
             max_retained_roots: 1,
         };
 
+        // Queue the update before sync starts, so it is pending from the first step.
         update_sender
             .send(Target {
                 root: final_root,
@@ -850,6 +901,7 @@ where
     });
 }
 
+/// An update sent after sync has returned leaves the synced database at the original target.
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
@@ -887,6 +939,7 @@ where
 
         let synced_db: DbOf<H> = sync::sync(config).await.unwrap();
 
+        // Sync has returned and dropped the update receiver, so the late update cannot reach it.
         let _ = update_sender
             .send(Target {
                 root: sha256::Digest::from([2u8; 32]),
@@ -907,6 +960,7 @@ where
     });
 }
 
+/// A source error is terminal, so sync over a source that fails every request returns an error.
 pub(crate) fn test_sync_source_fails<H: SyncTestHarness>()
 where
     OpOf<H>: Encode,

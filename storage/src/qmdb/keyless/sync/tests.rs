@@ -434,6 +434,8 @@ where
     });
 }
 
+/// A source pruned to a commit that declares its own location as the floor leaves a one-operation
+/// sync range, and syncing that range reproduces the source's root, bounds, and metadata.
 pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("single-op-{}", context.next_u64());
@@ -451,6 +453,8 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         )
         .await
         .unwrap();
+
+        // The first commit appends two values and keeps the floor at zero.
         let batch = source
             .new_batch()
             .append(vec![1, 2, 3])
@@ -479,6 +483,7 @@ pub(crate) fn test_replay_sync_single_op_range<F: Family>() {
         let target_root = source.root();
         let source = Arc::new(source);
 
+        // The sync range holds only the floor commit, so one boundary response supplies all of it.
         let client: DbOf<harnesses::VariableHarness<F>> = sync::sync(sync::engine::Config {
             context: context.child("client"),
             db_config: fine_config(&format!("{suffix}-client"), &context),

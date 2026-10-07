@@ -114,6 +114,7 @@ pub(crate) trait CompactSyncTestHarness: Sized + 'static {
     -> CompactOpOf<Self>;
 }
 
+/// A shared full-source slot that holds no database answers a compact fetch with `MissingSource`.
 pub(crate) fn test_compact_full_source_missing_reports_missing_source<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|_context| async move {
         let source: Arc<commonware_utils::sync::AsyncRwLock<Option<H::Full>>> =
@@ -130,9 +131,13 @@ pub(crate) fn test_compact_full_source_missing_reports_missing_source<H: Compact
     });
 }
 
+/// Compact sync from a full source reproduces the target's root, metadata, and inactivity floor,
+/// and that state survives a reopen.
 pub(crate) fn test_compact_sync_roundtrip<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-{}", context.next_u64());
+
+        // The source commits metadata and a nonzero floor that the client must reproduce.
         let source = H::init_full(context.child("source"), &suffix).await;
         let metadata = H::value(9);
         let floor = Location::new(2);
@@ -166,6 +171,7 @@ pub(crate) fn test_compact_sync_roundtrip<H: CompactSyncTestHarness>() {
         assert_eq!(H::inactivity_floor_loc(&client), floor);
         drop(client);
 
+        // The synced witness is durable, so a reopen recovers the same state.
         let reopened = H::init(context.child("reopen"), client_cfg, None).await;
         assert_eq!(H::root(&reopened), target.root);
         assert_eq!(H::metadata(&reopened), Some(metadata));
@@ -177,6 +183,8 @@ pub(crate) fn test_compact_sync_roundtrip<H: CompactSyncTestHarness>() {
     });
 }
 
+/// A compact sync rejects a boundary candidate whose proof fails verification and completes from
+/// the next candidate of the same request.
 pub(crate) fn test_compact_sync_recovers_after_invalid_proof<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-bad-proof-{}", context.next_u64());
@@ -185,6 +193,7 @@ pub(crate) fn test_compact_sync_recovers_after_invalid_proof<H: CompactSyncTestH
             H::apply_full(source, &[H::value(7)], Some(H::value(1)), Location::new(1)).await;
         let source = H::commit_full(source).await;
 
+        // Derive the bad candidate from the honest response, so only the proof differs.
         let bounds = H::full_bounds(&source);
         let target = sync::CompactTarget {
             root: H::full_root(&source),
@@ -200,6 +209,7 @@ pub(crate) fn test_compact_sync_recovers_after_invalid_proof<H: CompactSyncTestH
         // engine's size check and fails at verification itself.
         proof.digests.push(sha256::Digest::from([0xee; 32]));
 
+        // The source offers the bad candidate first and the honest one as its retry.
         let client: H::Db = sync::sync(compact_engine_config(
             context.child("client"),
             SequenceSource::new(vec![bad_state, good_state]),
@@ -216,6 +226,8 @@ pub(crate) fn test_compact_sync_recovers_after_invalid_proof<H: CompactSyncTestH
     });
 }
 
+/// A compact sync rejects a boundary candidate whose commit carries a tampered inactivity floor,
+/// which verification covers, and completes from the next candidate of the same request.
 pub(crate) fn test_compact_sync_recovers_after_tampered_commit_floor<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-bad-floor-{}", context.next_u64());
@@ -224,6 +236,7 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_commit_floor<H: CompactS
             H::apply_full(source, &[H::value(7)], Some(H::value(1)), Location::new(1)).await;
         let source = H::commit_full(source).await;
 
+        // Derive the bad candidate from the honest response, rewriting only the commit's floor.
         let bounds = H::full_bounds(&source);
         let target = sync::CompactTarget {
             root: H::full_root(&source),
@@ -237,6 +250,7 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_commit_floor<H: CompactS
         };
         *op = H::with_commit_floor(op.clone(), Location::new(0));
 
+        // The source offers the bad candidate first and the honest one as its retry.
         let sequence = SequenceSource::new(vec![bad_state, good_state]);
         let client: H::Db = sync::sync(compact_engine_config(
             context.child("client"),
@@ -247,6 +261,8 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_commit_floor<H: CompactS
         .await
         .unwrap();
 
+        // The verdicts show the engine judged the tampered candidate invalid and the honest one
+        // valid.
         assert_eq!(sequence.take_verdicts().await, vec![false, true]);
         assert_eq!(H::root(&client), target.root);
         H::destroy(client).await;
@@ -256,6 +272,8 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_commit_floor<H: CompactS
     });
 }
 
+/// A compact sync rejects a boundary candidate whose proof claims one fewer leaf than the target
+/// and completes from the next candidate of the same request.
 pub(crate) fn test_compact_sync_recovers_after_size_mismatch<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-bad-leaf-count-{}", context.next_u64());
@@ -264,6 +282,7 @@ pub(crate) fn test_compact_sync_recovers_after_size_mismatch<H: CompactSyncTestH
             H::apply_full(source, &[H::value(7)], Some(H::value(1)), Location::new(1)).await;
         let source = H::commit_full(source).await;
 
+        // Derive the bad candidate from the honest response, lowering only the proof's leaf count.
         let bounds = H::full_bounds(&source);
         let target = sync::CompactTarget {
             root: H::full_root(&source),
@@ -277,6 +296,7 @@ pub(crate) fn test_compact_sync_recovers_after_size_mismatch<H: CompactSyncTestH
         };
         proof.leaves -= 1;
 
+        // The source offers the bad candidate first and the honest one as its retry.
         let client: H::Db = sync::sync(compact_engine_config(
             context.child("client"),
             SequenceSource::new(vec![bad_state, good_state]),
@@ -293,6 +313,8 @@ pub(crate) fn test_compact_sync_recovers_after_size_mismatch<H: CompactSyncTestH
     });
 }
 
+/// A compact sync rejects a boundary candidate with a tampered pinned node and completes from the
+/// next candidate of the same request, persisting the honest state.
 pub(crate) fn test_compact_sync_recovers_after_tampered_pinned_nodes<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-bad-pinned-nodes-{}", context.next_u64());
@@ -306,6 +328,7 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_pinned_nodes<H: CompactS
         .await;
         let source = H::commit_full(source).await;
 
+        // Derive the bad candidate from the honest response, replacing only its first pinned node.
         let bounds = H::full_bounds(&source);
         let target = sync::CompactTarget {
             root: H::full_root(&source),
@@ -319,6 +342,7 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_pinned_nodes<H: CompactS
         };
         pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
+        // The source offers the bad candidate first and the honest one as its retry.
         let sequence = SequenceSource::new(vec![bad_state, good_state]);
 
         let client_cfg = H::config(&suffix, &context);
@@ -331,11 +355,14 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_pinned_nodes<H: CompactS
         .await
         .unwrap();
 
+        // The verdicts show the engine judged the tampered candidate invalid and the honest one
+        // valid.
         assert_eq!(sequence.take_verdicts().await, vec![false, true]);
         assert_eq!(H::target(&synced), target);
         assert_eq!(H::metadata(&synced), Some(H::value(7)));
         drop(synced);
 
+        // The accepted state is durable, so a reopen recovers it.
         let reopened = H::init(context.child("reopen"), client_cfg, None).await;
         assert_eq!(H::target(&reopened), target);
         assert_eq!(H::metadata(&reopened), Some(H::value(7)));
@@ -346,9 +373,13 @@ pub(crate) fn test_compact_sync_recovers_after_tampered_pinned_nodes<H: CompactS
     });
 }
 
+/// A full source serves a compact target below its tip, and the client reaches that historical
+/// root rather than the current one.
 pub(crate) fn test_compact_full_source_serves_historical_target<H: CompactSyncTestHarness>() {
     deterministic::Runner::default().start(|mut context| async move {
         let suffix = format!("compact-stale-full-{}", context.next_u64());
+
+        // The stale target is the source's state after its first commit.
         let source = H::init_full(context.child("source"), &suffix).await;
         let source =
             H::apply_full(source, &[H::value(1)], Some(H::value(1)), Location::new(1)).await;
@@ -358,6 +389,7 @@ pub(crate) fn test_compact_full_source_serves_historical_target<H: CompactSyncTe
             size: H::full_bounds(&source).end,
         };
 
+        // A second commit moves the source's tip past the stale target.
         let source =
             H::apply_full(source, &[H::value(4)], Some(H::value(2)), Location::new(2)).await;
         let source = H::commit_full(source).await;
@@ -442,6 +474,8 @@ pub(crate) fn test_compact_source_serves_retained_target<H: CompactSyncTestHarne
     });
 }
 
+/// A compact source reopened with a size bound durably rewinds to an earlier target and regrows a
+/// different suffix. It keeps serving retained targets and rejects a target from discarded history.
 pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale_target<
     H: CompactSyncTestHarness,
 >() {
@@ -450,6 +484,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         let source_cfg = H::config(&format!("{suffix}-source"), &context);
         let source = H::init(context.child("source_init"), source_cfg.clone(), None).await;
 
+        // The first commit fixes target1, the state the bounded reopen later returns to.
         let metadata1 = H::value(1);
         let floor1 = Location::new(1);
         let source = H::apply(source, &[H::value(10)], Some(metadata1.clone()), floor1).await;
@@ -457,6 +492,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         let target1 = H::target(&source);
         drop(source);
 
+        // A reopened source recovers target1 and serves it to a fresh client.
         let source = H::init(context.child("source_reopen"), source_cfg.clone(), None).await;
         assert_eq!(H::target(&source), target1);
 
@@ -474,6 +510,7 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         assert_eq!(H::inactivity_floor_loc(&served1), floor1);
         H::destroy(served1).await;
 
+        // Grow the source to target2, the history the bounded reopen discards.
         let source = H::init(context.child("source_resume"), source_cfg.clone(), None).await;
         let metadata2 = H::value(2);
         let floor2 = Location::new(2);
@@ -506,6 +543,8 @@ pub(crate) fn test_compact_source_reopen_bounded_initialization_regrow_and_stale
         assert_eq!(H::inactivity_floor_loc(&served2), floor1);
         H::destroy(served2).await;
 
+        // The rewind persists across an unbounded reopen, and a new commit regrows the source to
+        // target3, which differs from both earlier targets.
         let source = H::init(context.child("source_regrow"), source_cfg.clone(), None).await;
         assert_eq!(H::target(&source), target1);
         let metadata3 = H::value(3);
@@ -608,6 +647,7 @@ pub(crate) fn test_compact_sync_reuses_pruned_partition<H: CompactSyncTestHarnes
         assert_eq!(H::root(&synced), target.root);
         drop(synced);
 
+        // A reopen reads the reinitialized witness journal, so the synced root must survive it.
         let reopened = H::init(context.child("reopen"), client_cfg, None).await;
         assert_eq!(H::root(&reopened), target.root);
         H::destroy(reopened).await;
