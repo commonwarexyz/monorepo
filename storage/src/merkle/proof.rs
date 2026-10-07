@@ -1071,26 +1071,31 @@ where
     )
 }
 
-/// Returns the positions of the minimal set of nodes whose digests are required to prove the
-/// inclusion of the elements at the specified `locations`, using the provided root bagging.
-#[cfg(any(feature = "std", test))]
-pub(crate) fn nodes_required_for_multi_proof<F: Family>(
+/// Positions a multi-proof over `locations` reads from a structure of `leaves` leaves, in
+/// strictly increasing order: the union of [range_proof_positions] over each location, so it
+/// does not depend on bagging or inactive peaks either.
+///
+/// # Errors
+///
+/// Returns [super::Error::Empty] if `locations` is empty, [super::Error::LocationOverflow] if a
+/// location or `leaves` exceeds [Family::MAX_LEAVES], and [super::Error::RangeOutOfBounds] if a
+/// location is at or beyond `leaves`.
+pub fn multi_proof_positions<F: Family>(
     leaves: Location<F>,
-    inactive_peaks: usize,
-    bagging: Bagging,
     locations: &[Location<F>],
-) -> Result<BTreeSet<Position<F>>, super::Error<F>> {
+) -> Result<Vec<Position<F>>, super::Error<F>> {
     if locations.is_empty() {
         return Err(super::Error::Empty);
     }
-    locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
+    let positions = locations.iter().try_fold(BTreeSet::new(), |mut acc, loc| {
         if !loc.is_valid_index() {
             return Err(super::Error::LocationOverflow(*loc));
         }
-        let bp = Blueprint::new(leaves, inactive_peaks, bagging, *loc..*loc + 1)?;
+        let bp = Blueprint::new(leaves, 0, Bagging::ForwardFold, *loc..*loc + 1)?;
         acc.extend(bp.required_positions());
         Ok(acc)
-    })
+    })?;
+    Ok(positions.into_iter().collect())
 }
 
 #[cfg(feature = "arbitrary")]
@@ -1116,7 +1121,7 @@ mod tests {
         hasher::Standard,
         mem::Mem,
         mmb, mmr,
-        proof::{Blueprint, Proof, nodes_required_for_multi_proof},
+        proof::{Blueprint, Proof, multi_proof_positions},
     };
     use alloc::vec;
     use commonware_codec::{Decode, Encode, EncodeSize};
@@ -1183,6 +1188,54 @@ mod tests {
                 Err(Error::LocationOverflow(_))
             ));
         }
+    }
+
+    fn check_multi_proof_positions<F: Family>() {
+        for leaves in 1..=24u64 {
+            let locations = (0..leaves).map(Location::<F>::new).collect::<Vec<_>>();
+            let mut sets = locations.iter().map(|&loc| vec![loc]).collect::<Vec<_>>();
+            sets.extend((0..leaves).flat_map(|a| {
+                (a + 1..leaves).map(move |b| vec![Location::new(a), Location::new(b)])
+            }));
+            sets.push(locations.clone());
+            for set in sets {
+                let positions = multi_proof_positions(Location::new(leaves), &set).unwrap();
+                assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+                let mut union = set
+                    .iter()
+                    .flat_map(|&loc| {
+                        range_proof_positions(Location::new(leaves), loc..loc + 1).unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                union.sort_unstable();
+                union.dedup();
+                assert_eq!(positions, union, "leaves={leaves} locations={set:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn multi_proof_positions_union_single_element_plans() {
+        check_multi_proof_positions::<mmr::Family>();
+        check_multi_proof_positions::<mmb::Family>();
+    }
+
+    #[test]
+    fn multi_proof_positions_reject_invalid_inputs() {
+        type F = mmr::Family;
+        let leaves = Location::<F>::new(8);
+        assert!(matches!(
+            multi_proof_positions(leaves, &[Location::new(2), leaves]),
+            Err(Error::RangeOutOfBounds(_))
+        ));
+        assert!(matches!(
+            multi_proof_positions::<F>(leaves, &[]),
+            Err(Error::Empty)
+        ));
+        assert!(matches!(
+            multi_proof_positions(leaves, &[Location::new(u64::MAX)]),
+            Err(Error::LocationOverflow(_))
+        ));
     }
 
     fn test_digest(v: u8) -> D {
@@ -1322,8 +1375,7 @@ mod tests {
             let hasher = hasher_for_bagging(bagging);
             let first = active_start_for_shape::<F>(leaves, inactive_peaks, 12);
             let locations = [first, first + 5, first + 11];
-            let nodes = nodes_required_for_multi_proof(leaves, inactive_peaks, bagging, &locations)
-                .expect("test locations valid");
+            let nodes = multi_proof_positions(leaves, &locations).expect("test locations valid");
             let proof = Proof {
                 leaves,
                 inactive_peaks,
@@ -1430,9 +1482,7 @@ mod tests {
         ));
 
         let locations = &[Location::new(0), Location::new(5), Location::new(10)];
-        let nodes =
-            nodes_required_for_multi_proof(mem.leaves(), 0, Bagging::BackwardFold, locations)
-                .expect("valid locations");
+        let nodes = multi_proof_positions(mem.leaves(), locations).expect("valid locations");
         let multi_proof = Proof {
             leaves: mem.leaves(),
             inactive_peaks: 0,
@@ -1900,8 +1950,7 @@ mod tests {
         // Generate proof for non-contiguous single elements.
         let locations = &[Location::new(0), Location::new(5), Location::new(10)];
         let nodes_for_multi_proof =
-            nodes_required_for_multi_proof(mem.leaves(), 0, Bagging::ForwardFold, locations)
-                .expect("test locations valid");
+            multi_proof_positions(mem.leaves(), locations).expect("test locations valid");
         let digests = nodes_for_multi_proof
             .into_iter()
             .map(|pos| mem.get_node(pos).unwrap())
@@ -2066,8 +2115,7 @@ mod tests {
         // Generate multi-proof for the same positions.
         let locations = &[Location::new(0), Location::new(1)];
         let multi_proof_nodes =
-            nodes_required_for_multi_proof(mem.leaves(), 0, Bagging::ForwardFold, locations)
-                .expect("test locations valid");
+            multi_proof_positions(mem.leaves(), locations).expect("test locations valid");
         let digests = multi_proof_nodes
             .into_iter()
             .map(|pos| mem.get_node(pos).unwrap())
@@ -2172,7 +2220,7 @@ mod tests {
 
         // Empty locations for multi-proof.
         assert!(matches!(
-            nodes_required_for_multi_proof::<F>(leaves, 0, Bagging::ForwardFold, &[]),
+            multi_proof_positions::<F>(leaves, &[]),
             Err(crate::merkle::Error::Empty)
         ));
     }
@@ -2353,9 +2401,7 @@ mod tests {
         let root = plain_root(&mem, &hasher);
 
         let locations = &[Location::new(0), Location::new(5), Location::new(10)];
-        let nodes =
-            nodes_required_for_multi_proof(mem.leaves(), 0, Bagging::ForwardFold, locations)
-                .expect("valid locations");
+        let nodes = multi_proof_positions(mem.leaves(), locations).expect("valid locations");
         let digests = nodes
             .into_iter()
             .map(|pos| mem.get_node(pos).unwrap())

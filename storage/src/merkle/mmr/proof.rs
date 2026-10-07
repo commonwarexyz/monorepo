@@ -10,7 +10,7 @@ mod tests {
             Error, Family, Location, Position, StandardHasher as Standard, iterator::PeakIterator,
             mem::Mmr,
         },
-        proof::{Blueprint, nodes_required_for_multi_proof},
+        proof::{Blueprint, multi_proof_positions},
     };
     use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 
@@ -167,8 +167,7 @@ mod tests {
     #[test]
     fn test_max_location_multi_proof() {
         let max_loc = Family::MAX_LEAVES;
-        let result =
-            nodes_required_for_multi_proof(max_loc, 0, Bagging::ForwardFold, &[max_loc - 1]);
+        let result = multi_proof_positions(max_loc, &[max_loc - 1]);
         assert!(
             result.is_ok(),
             "Should be able to generate multi-proof for MAX_LEAVES"
@@ -176,8 +175,7 @@ mod tests {
 
         // MAX_LEAVES + 1 should be rejected.
         let invalid_loc = max_loc + 1;
-        let result_overflow =
-            nodes_required_for_multi_proof(invalid_loc, 0, Bagging::ForwardFold, &[max_loc]);
+        let result_overflow = multi_proof_positions(invalid_loc, &[max_loc]);
         assert!(
             result_overflow.is_err(),
             "Should reject location > MAX_LEAVES in multi-proof"

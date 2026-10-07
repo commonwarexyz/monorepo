@@ -12,16 +12,12 @@
 //! past state of the structure rather than its current state.
 
 use crate::merkle::{
-    Bagging, Error, Family, Location, Position, Proof, build_range_proof,
-    hasher::Hasher,
-    proof::{self as merkle_proof, Blueprint},
-    range_proof_positions,
-    storage::Storage,
+    Bagging, Error, Family, Location, Position, Proof, build_range_proof, hasher::Hasher,
+    multi_proof_positions, proof::Blueprint, range_proof_positions, storage::Storage,
 };
 use ahash::AHashMap;
 use commonware_cryptography::Digest;
 use core::ops::Range;
-use std::collections::BTreeSet;
 
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
 /// original range.
@@ -224,17 +220,8 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         locations: &[Location<F>],
         peaks: &[(Position<F>, D)],
     ) -> Result<Proof<F, D>, Error<F>> {
-        if locations.is_empty() {
-            return Err(Error::Empty);
-        }
-
         let leaves = Location::try_from(self.size)?;
-        let node_positions: BTreeSet<_> = merkle_proof::nodes_required_for_multi_proof(
-            leaves,
-            self.inactive_peaks,
-            self.bagging,
-            locations,
-        )?;
+        let node_positions = multi_proof_positions(leaves, locations)?;
 
         let peak_map: AHashMap<Position<F>, D> = peaks.iter().copied().collect();
 
@@ -333,7 +320,8 @@ pub async fn historical_range_proof<
 /// Return an inclusion proof for the elements at the specified locations. This is analogous to
 /// range_proof but supports non-contiguous locations.
 ///
-/// The proof commits to `inactive_peaks`; peak bagging is supplied by `bagging`.
+/// The proof commits to `inactive_peaks`. Fetches the digests at [multi_proof_positions] with
+/// [Storage::get_nodes].
 ///
 /// The order of positions does not affect the output (sorted internally).
 ///
@@ -346,23 +334,11 @@ pub async fn historical_range_proof<
 pub async fn multi_proof<F: Family, D: Digest, S: Storage<F, Digest = D>>(
     merkle: &S,
     inactive_peaks: usize,
-    bagging: Bagging,
     locations: &[Location<F>],
 ) -> Result<Proof<F, D>, Error<F>> {
-    if locations.is_empty() {
-        // Disallow proofs over empty element lists just as we disallow proofs over empty ranges.
-        return Err(Error::Empty);
-    }
-
-    // Collect all required node positions
-    let size = merkle.size();
-    let leaves = Location::try_from(size)?;
-    let positions: Vec<_> =
-        merkle_proof::nodes_required_for_multi_proof(leaves, inactive_peaks, bagging, locations)?
-            .into_iter()
-            .collect();
+    let leaves = Location::try_from(merkle.size())?;
+    let positions = multi_proof_positions(leaves, locations)?;
     let digests = merkle.get_nodes(&positions).await?;
-
     Ok(Proof {
         leaves,
         inactive_peaks,
@@ -692,9 +668,7 @@ mod tests {
                 .collect();
 
             // Direct multi-proof with the full witness verifies.
-            let direct = multi_proof(&mmb, inactive_peaks, Bagging::BackwardFold, &target)
-                .await
-                .unwrap();
+            let direct = multi_proof(&mmb, inactive_peaks, &target).await.unwrap();
             assert!(direct.verify_multi_inclusion(&hasher, &selected, &root));
 
             // Build a ProofStore from a backward-folded range proof over a single leaf.
