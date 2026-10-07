@@ -8181,13 +8181,8 @@ mod tests {
         side: usize,
     ) {
         actor.set_handoff(Some(HandoffPublication::AllowBeforeCertification));
-        let requested_view = Arc::new(Mutex::new(View::new(0)));
-        let observed_view = requested_view.clone();
-        actor.set_propose_observer(Box::new(move |context| {
-            *observed_view.lock() = context.view();
-        }));
-        actor.set_handoff_propose_controller(Box::new(move |proposal, response| {
-            if *requested_view.lock() <= prefix_end {
+        actor.set_handoff_propose_controller(Box::new(move |round, proposal, response| {
+            if round.view() <= prefix_end {
                 prefix_handoffs.lock()[side] += 1;
                 response.send_lossy(proposal);
             } else {

@@ -140,7 +140,7 @@ type ProposeObserver<H, P> = Box<dyn Fn(Context<<H as Hasher>::Digest, P>) + Sen
 /// Handler that takes ownership of the handoff proposal the mock would send and
 /// its response so tests can decide when it completes.
 type HandoffProposeController<D> =
-    Box<dyn Fn(HandoffProposal<D>, oneshot::Sender<HandoffProposal<D>>) + Send + 'static>;
+    Box<dyn Fn(Round, HandoffProposal<D>, oneshot::Sender<HandoffProposal<D>>) + Send + 'static>;
 
 /// Observer invoked on every `Message::Verify` request. Used by tests to
 /// detect spurious verification calls.
@@ -510,12 +510,13 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         if self.drop_proposals {
                             continue;
                         }
+                        let round = context.round;
                         let proposal = HandoffProposal::Proposed {
                             payload: self.propose(context).await,
                             publication,
                         };
                         if let Some(controller) = &self.handoff_propose_controller {
-                            controller(proposal, response);
+                            controller(round, proposal, response);
                         } else {
                             response.send_lossy(proposal);
                         }

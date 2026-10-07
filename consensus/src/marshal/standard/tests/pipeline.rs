@@ -19,7 +19,6 @@ struct PipelineApp {
     build_release: Arc<Mutex<Option<oneshot::Receiver<()>>>>,
     build_completed: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     policies: Arc<AtomicUsize>,
-    builds: Arc<AtomicUsize>,
     block: B,
 }
 
@@ -40,15 +39,10 @@ impl crate::Application<Runtime> for PipelineApp {
         _: impl Ancestry<B>,
         _: (),
     ) -> Option<B> {
-        assert_eq!(
-            self.builds.fetch_add(1, Ordering::SeqCst),
-            0,
-            "the retained handoff must not be replaced by an ordinary build"
-        );
         self.build_started
             .lock()
             .take()
-            .unwrap()
+            .expect("the retained handoff must not be replaced by an ordinary build")
             .send_lossy(context);
         let release = self.build_release.lock().take().unwrap();
         release.await.unwrap();
@@ -161,7 +155,6 @@ fn retained_pipeline_handoff(first: First) {
             build_release: Arc::new(Mutex::new(Some(build_release_rx))),
             build_completed: Arc::new(Mutex::new(Some(completed_tx))),
             policies: policies.clone(),
-            builds: Arc::new(AtomicUsize::new(0)),
             block,
         };
         let control = oracle.control(victim.clone());

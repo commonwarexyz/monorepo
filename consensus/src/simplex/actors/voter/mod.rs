@@ -375,7 +375,7 @@ mod tests {
             }));
         }
         if let Some(handoff_propose_responses) = handoff_propose_responses {
-            actor.set_handoff_propose_controller(Box::new(move |proposal, response| {
+            actor.set_handoff_propose_controller(Box::new(move |_, proposal, response| {
                 handoff_propose_responses.lock().push((proposal, response));
             }));
         }
