@@ -288,8 +288,8 @@ pub async fn range_proof<
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the
 /// structure had `leaves` leaves.
 ///
-/// Fetches the digests of the [RangePlan] with [Storage::get_nodes] and builds the proof from
-/// them.
+/// Lays out the proof of the [RangePlan], fetches its digests with [Storage::get_nodes], and
+/// builds the proof from them.
 ///
 /// # Errors
 ///
@@ -311,9 +311,10 @@ pub async fn historical_range_proof<
 ) -> Result<Proof<F, D>, Error<F>> {
     let plan = RangePlan::new(leaves, range)?;
     let positions = plan.positions();
+    let blueprint = Blueprint::from_plan(plan, inactive_peaks, hasher.root_bagging())?;
     let digests = merkle.get_nodes(&positions).await?;
     let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
-    plan.build(hasher, inactive_peaks, |pos| fetched.get(&pos).copied())
+    blueprint.build_proof(hasher, inactive_peaks, |pos| fetched.get(&pos).copied())
 }
 
 /// Return an inclusion proof for the elements at the specified locations. This is analogous to

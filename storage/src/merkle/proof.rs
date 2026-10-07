@@ -919,10 +919,12 @@ impl<F: Family> ElementPlan<F> {
     pub fn positions(&self) -> Vec<Position<F>> {
         self.range.positions()
     }
+}
 
-    /// The same plan as a range plan over `location..location + 1`.
-    pub fn into_range(self) -> RangePlan<F> {
-        self.range
+/// The same plan as a range plan over `location..location + 1`.
+impl<F: Family> From<ElementPlan<F>> for RangePlan<F> {
+    fn from(plan: ElementPlan<F>) -> Self {
+        plan.range
     }
 }
 
@@ -1194,7 +1196,7 @@ pub fn multi_proof_positions<F: Family>(
     }
     let mut positions = BTreeSet::new();
     for loc in locations {
-        let plan = ElementPlan::new(leaves, *loc)?.into_range();
+        let plan = RangePlan::from(ElementPlan::new(leaves, *loc)?);
         positions.extend(plan.reads());
     }
     Ok(positions.into_iter().collect())

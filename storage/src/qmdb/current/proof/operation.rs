@@ -74,13 +74,8 @@ impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
         if BitMap::<N>::to_chunk_index(*loc) < status.pruned_chunks() {
             return Err(Error::OperationPruned(loc));
         }
-        let range_proof = RangeProof::build::<H, N>(
-            status,
-            plan.into_range(),
-            get_node,
-            inactivity_floor,
-            ops_root,
-        )?;
+        let range_proof =
+            RangeProof::build::<H, N>(status, plan.into(), get_node, inactivity_floor, ops_root)?;
         let chunk = status.get_chunk(BitMap::<N>::to_chunk_index(*loc));
         Ok(Self {
             loc,
