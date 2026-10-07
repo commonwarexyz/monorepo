@@ -3,12 +3,14 @@ title: "Simplex, Pipelined"
 description: "Simplex can now produce blocks as fast as its leader can build them. In a global deployment of 50 validators, it sustained 200 blocks per second with 300ms finality to your browser."
 date: "August 12th, 2026"
 published-time: "2026-08-12T00:00:00Z"
-modified-time: "2026-08-13T00:00:00Z"
+modified-time: "2026-10-07T00:00:00Z"
 author: "Brendan Chou"
 author_twitter: "https://x.com/B_Chou"
 url: "https://commonware.xyz/blogs/pipelining-simplex"
 image: "https://commonware.xyz/imgs/pipelining-simplex.png"
 ---
+
+*Update (10/7/26): Incoming leaders can prepare proposals before parent certification. Applications can permit early publication when they trust the outgoing leader not to equivocate. Preparation is an application opt-in, and the default still waits for certification.*
 
 Simplex can now produce blocks as fast as its leader can build them.
 
