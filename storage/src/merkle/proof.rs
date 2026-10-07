@@ -834,11 +834,6 @@ impl<F: Family> RangePlan<F> {
         self.leaves
     }
 
-    /// The proven range.
-    pub const fn range(&self) -> &Range<Location<F>> {
-        &self.range
-    }
-
     /// Every position the proof reads, in no particular order.
     fn reads(&self) -> impl Iterator<Item = Position<F>> + '_ {
         self.before
