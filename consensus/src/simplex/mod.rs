@@ -254,18 +254,24 @@
 //! final view or hold its notarization, and the outgoing term must have no nullification.
 //! Otherwise, the leader uses the ordinary proposal path.
 //!
-//! | Handoff response | Consensus behavior |
-//! | --- | --- |
-//! | [`crate::HandoffProposal::AwaitCertification`] | Request an ordinary proposal after parent certification |
-//! | [`crate::HandoffProposal::Proposed`] with [`crate::HandoffPublication::AfterCertification`] | Hold until the exact parent certifies or finalizes |
-//! | [`crate::HandoffProposal::Proposed`] with [`crate::HandoffPublication::AllowBeforeCertification`] | Permit early relay and own notarize vote |
-//! | Closed response | Abandon the local proposal opportunity |
+//! Consensus handles each handoff response as follows:
+//!
+//! * [`crate::HandoffProposal::AwaitCertification`]: request an ordinary proposal once the
+//!   parent certifies.
+//! * [`crate::HandoffProposal::Proposed`] with [`crate::HandoffPublication::AfterCertification`]:
+//!   hold the candidate until the parent certifies or finalizes.
+//! * [`crate::HandoffProposal::Proposed`] with
+//!   [`crate::HandoffPublication::AllowBeforeCertification`]: permit early relay and the
+//!   proposer's own notarize vote.
+//! * Closed response: abandon the local proposal opportunity once the parent certifies or
+//!   finalizes.
 //!
 //! Consensus checks ordinary proposal eligibility before publication. Parent certification
-//! does not cancel a pending request or discard a held candidate. Consensus discards them on
-//! view exit or replacement of invalid ancestry. Restart also discards pending requests and
-//! held candidates. Other validators require explicitly certified ancestry before verifying
-//! or voting for a term-start proposal.
+//! does not cancel a pending request or discard a held candidate. Consensus discards pending,
+//! deferred, held, and closed requests on view exit. When a replacement parent supersedes their
+//! ancestry, consensus discards them and requests a proposal on the replacement. Restart also
+//! discards pending requests and held candidates. Other validators require explicitly certified
+//! ancestry before verifying a term-start proposal, and so before voting to notarize it.
 //!
 //! Marshal applications use [`crate::Application::handoff_policy`] to choose
 //! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
@@ -295,8 +301,11 @@
 //! local relay attempts after proposal acceptance, classified by whether the exact captured
 //! parent has certified or finalized at that point. They do not imply network delivery.
 //!
-//! `handoff_abandoned` counts requests or candidates discarded before publication, labeled by
-//! view exit, superseded ancestry, response closure, or ineligibility at recording.
+//! `handoff_abandoned` counts handoff requests or candidates discarded before publication,
+//! labeled by view exit, superseded ancestry, response closure, or ineligibility at recording.
+//! A closed response counts as response closure once its parent certifies or finalizes, or under
+//! view exit or superseded ancestry if one of those discards it first.
+//!
 //! Neither family tracks losses across restart or distinguishes newly built candidates from
 //! reused blocks.
 //!

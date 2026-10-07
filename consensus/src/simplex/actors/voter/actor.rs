@@ -121,6 +121,9 @@ enum ProposalState<D> {
     /// A held result whose parent has certified. The select loop consumes it only
     /// after the journal sync that follows that certification.
     Ready(D),
+    /// A handoff whose response closed. It forfeits the view once the exact parent
+    /// certifies or finalizes, unless a replacement parent supersedes it first.
+    Closed,
 }
 
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
@@ -531,11 +534,11 @@ impl<
         }
 
         // Advance a pending handoff once its exact parent certifies or finalizes. A
-        // deferred handoff becomes an ordinary request for the same context, and a held
-        // build becomes ready to publish. Certification and finalization are recorded
-        // only in iterations that end with a journal sync, and responses are polled only
-        // in later iterations, so nothing built on the parent is consumed before its
-        // evidence is durable.
+        // deferred handoff becomes an ordinary request for the same context, a held
+        // build becomes ready to publish, and a closed response forfeits the view.
+        // Certification and finalization are recorded only in iterations that end with
+        // a journal sync, and responses are polled only in later iterations, so nothing
+        // built on the parent is consumed before its evidence is durable.
         if let Some(Request(request, _, state)) = pending_propose.as_mut()
             && self.state.proposal_parent_certified(request.context())
         {
@@ -548,6 +551,13 @@ impl<
                     );
                 }
                 ProposalState::Held(payload) => *state = ProposalState::Ready(*payload),
+                ProposalState::Closed => {
+                    let view = request.view();
+                    *pending_propose = None;
+                    self.record_handoff_abandoned(HandoffAbandonedReason::ResponseClosed);
+                    self.state
+                        .trigger_timeout(view, TimeoutReason::MissingProposal);
+                }
                 _ => {}
             }
         }
@@ -731,9 +741,6 @@ impl<
         let proposed = match proposed {
             Ok(proposed) => proposed,
             Err(err) => {
-                if is_handoff {
-                    self.record_handoff_abandoned(HandoffAbandonedReason::ResponseClosed);
-                }
                 debug!(?err, round = ?context.round, "failed to propose container");
                 self.state
                     .trigger_timeout(context.view(), TimeoutReason::MissingProposal);
@@ -1275,9 +1282,9 @@ impl<
                 // Clear propose waiter
                 pending_propose = None;
 
-                // Retain a declined handoff or held build outside the round proposal
-                // slot until the parent certifies. The captured request and build latch
-                // remain active until promotion.
+                // Retain a declined, held, or closed handoff outside the round proposal
+                // slot until its parent resolves. The captured request and build latch
+                // remain active until then.
                 let proposed = match proposed {
                     Ok(ProposalResponse::Proposed(payload)) => Ok(payload),
                     Ok(ProposalResponse::Handoff(HandoffProposal::AwaitCertification)) => {
@@ -1295,6 +1302,10 @@ impl<
                             continue;
                         }
                         Ok(payload)
+                    }
+                    Err(_) if matches!(&request, ProposalRequest::Handoff(_)) => {
+                        pending_propose = Some(Request(request, span, ProposalState::Closed));
+                        continue;
                     }
                     Err(err) => Err(err),
                 };

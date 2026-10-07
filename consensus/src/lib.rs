@@ -210,16 +210,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// Returning [`HandoffProposal::Proposed`] commits the application to the same
         /// verification and certification obligations as returning a payload from
-        /// [`Automaton::propose`].
-        /// With [`HandoffProposal::AwaitCertification`], consensus issues an ordinary
-        /// [`Automaton::propose`] once the parent certifies. Closing the response abandons
-        /// the local proposal opportunity for this view. Parent certification does not retry it.
+        /// [`Automaton::propose`]. With [`HandoffPublication::AfterCertification`],
+        /// consensus holds the candidate until its parent certifies or finalizes.
         ///
-        /// Return the receiver promptly and do any work behind it. Parent certification
-        /// does not cancel this request. A pending response retains the proposal
-        /// opportunity until it resolves or consensus abandons the context. With
-        /// [`HandoffPublication::AfterCertification`], consensus holds the candidate
-        /// until its parent certifies or finalizes. Stop pending work when the receiver closes.
+        /// With [`HandoffProposal::AwaitCertification`], consensus issues an ordinary
+        /// [`Automaton::propose`] for the same context once the parent certifies.
+        ///
+        /// Closing the response abandons the local proposal opportunity for this view once
+        /// the parent certifies or finalizes, without a retry. If a replacement parent
+        /// supersedes the parent first, consensus requests a proposal on the replacement.
+        ///
+        /// Return the receiver promptly and do any work behind it. Parent certification does
+        /// not cancel this request. Consensus drops the receiver when it abandons the context,
+        /// so stop pending work when the receiver closes.
         fn propose_handoff(
             &mut self,
             _context: Self::Context,

@@ -5142,13 +5142,13 @@ mod tests {
         });
     }
 
-    /// A stalled proposal build on an abandoned outgoing tip must be
-    /// superseded while the incoming term-start view is still live.
-    #[test_traced]
-    fn test_pipelined_handoff_reissues_stalled_proposal_after_parent_nullification() {
+    /// Runs a pipelined handoff whose application never answers (or closes the response,
+    /// when `close_response` is set) and then nullifies the captured parent while the
+    /// incoming term-start view is still live. The voter must issue a replacement request
+    /// on the certified fallback before the leader timeout.
+    fn reissue_handoff_after_parent_nullification(namespace: &'static [u8], close_response: bool) {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"pipelined_handoff_reissues_stalled_proposal".to_vec();
         let epoch = Epoch::new(333);
         let term_length = TermLength::new(NZU32!(2));
         let executor = deterministic::Runner::timed(Duration::from_secs(20));
@@ -5157,7 +5157,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = ed25519::fixture(&mut context, &namespace, n);
+            } = ed25519::fixture(&mut context, namespace, n);
             let oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
                     .await;
@@ -5187,7 +5187,8 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
-                    stall_proposals: true,
+                    stall_proposals: !close_response,
+                    drop_proposals: close_response,
                     handoff: Some(HandoffPublication::AllowBeforeCertification),
                     ..Default::default()
                 },
@@ -5213,8 +5214,14 @@ mod tests {
                 [(View::new(3), View::new(2))]
             );
 
-            // Nullifying the captured parent enters view 3. The still-pending
-            // build must be replaced immediately with one on certified view 1.
+            // Nothing observable marks the voter consuming a closed response, so give
+            // it time to do so before the parent resolves.
+            if close_response {
+                context.sleep(Duration::from_millis(50)).await;
+            }
+
+            // Nullifying the captured parent enters view 3. The abandoned
+            // request must be replaced immediately with one on certified view 1.
             let (_, nullification_2) =
                 build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
             mailbox.recovered(Certificate::Nullification(nullification_2));
@@ -5236,6 +5243,27 @@ mod tests {
                 &[("AncestrySuperseded", 1)],
             );
         });
+    }
+
+    /// A stalled proposal build on an abandoned outgoing tip must be
+    /// superseded while the incoming term-start view is still live.
+    #[test_traced]
+    fn test_pipelined_handoff_reissues_stalled_proposal_after_parent_nullification() {
+        reissue_handoff_after_parent_nullification(
+            b"pipelined_handoff_reissues_stalled_proposal",
+            false,
+        );
+    }
+
+    /// A handoff response that closes before its parent resolves forfeits the
+    /// view only if that parent certifies. Nullifying the parent must still
+    /// offer the proposal opportunity on the certified fallback.
+    #[test_traced]
+    fn test_pipelined_handoff_reissues_closed_proposal_after_parent_nullification() {
+        reissue_handoff_after_parent_nullification(
+            b"pipelined_handoff_reissues_closed_proposal",
+            true,
+        );
     }
 
     /// A follower that entered a term start through a nullification of the outgoing
