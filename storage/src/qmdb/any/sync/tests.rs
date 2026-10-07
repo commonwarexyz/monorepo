@@ -80,7 +80,7 @@ pub(crate) trait FromSyncTestable: qmdb::sync::Database {
     ) -> impl std::future::Future<Output = Vec<Self::Digest>> + Send;
 }
 
-/// Test that empty operations arrays fetched do not cause panics when stored and applied
+/// An engine fed empty operation batches stores and applies them without panicking.
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -125,7 +125,7 @@ where
     });
 }
 
-/// Test that prune-only target updates (same end, larger start) are ignored.
+/// A target update that only raises the lower bound does not advance the target and is discarded.
 pub(crate) fn test_target_update_prune_only_ignored<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -189,7 +189,8 @@ where
     });
 }
 
-/// Test that explicit finish control waits for a finish signal even after reaching target.
+/// With explicit finish control, reaching the target reports it, and sync completes only once
+/// the finish signal arrives.
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -309,7 +310,8 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     }
 }
 
-/// Test progress metrics for reached targets across target updates and explicit finish.
+/// Without a reached-target channel, the progress metrics report each reached target, including
+/// adopted updates, while sync waits for the finish signal.
 pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_finish<
     H: SyncTestHarness,
 >()
@@ -436,7 +438,8 @@ where
     });
 }
 
-/// Test that a finish signal received before target completion still allows full sync.
+/// A finish signal that arrives before the target is reached still lets sync complete the full
+/// range and report reaching it.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -499,7 +502,8 @@ where
     });
 }
 
-/// Test that dropping finish sender without sending is treated as an error.
+/// A finish channel whose sender is dropped without a signal fails the sync, since completion can
+/// no longer be requested.
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -547,7 +551,7 @@ where
     });
 }
 
-/// Test that dropping reached-target receiver does not fail sync.
+/// Dropping the reached-target receiver loses its notifications but does not fail the sync.
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -598,7 +602,7 @@ where
     });
 }
 
-/// Test post-sync usability: after syncing, the database supports normal operations.
+/// A synced database accepts further operations, moving its root and bounds past the target.
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -651,7 +655,8 @@ where
     });
 }
 
-/// Test `from_sync_result` where the database has all operations in the target range.
+/// A database rebuilt through `from_sync_result` from a journal that holds the whole target range
+/// reproduces the target's bounds, floor, and sync boundary.
 pub(crate) fn test_from_sync_result_nonempty_to_nonempty_exact_match<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
@@ -698,7 +703,8 @@ where
     });
 }
 
-/// Test `from_sync_result` where the database has some but not all operations in the target range.
+/// Rebuilding onto storage that persisted only a prefix of the target range, from a journal that
+/// holds all of it, reproduces the target's bounds, floor, sync boundary, and root.
 pub(crate) fn test_from_sync_result_nonempty_to_nonempty_partial_match<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
@@ -774,8 +780,8 @@ where
     });
 }
 
-/// Test `from_sync_result` with an empty destination database syncing to a non-empty source.
-/// This tests the scenario where a sync client starts fresh with no existing data.
+/// A database rebuilt onto fresh storage from a pruned source's journal and pinned nodes
+/// reproduces the source's bounds, floor, sync boundary, and root.
 pub(crate) fn test_from_sync_result_empty_to_nonempty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
@@ -831,7 +837,8 @@ where
     });
 }
 
-/// Test `from_sync_result` with an empty source database syncing to an empty target database.
+/// A database rebuilt from a source that holds only its initial commit reproduces that commit
+/// and accepts further operations.
 pub(crate) fn test_from_sync_result_empty_to_empty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
@@ -1086,8 +1093,8 @@ where
     }
 }
 
-/// Test that reaching the journal target does not report completion while the pruned
-/// boundary retry is still outstanding.
+/// Reaching the journal target does not report completion while a boundary request for the
+/// updated target still awaits a valid retry.
 pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>:
@@ -1294,10 +1301,10 @@ where
     }
 }
 
-/// Test that operations fetched ahead of the journal tip are applied without fetching them again
-/// across target updates that move the lower bound while the source prunes to each new lower
-/// bound. Operation requests above the final lower bound survive the final update, and requests
-/// that start below the pruned source are cancelled.
+/// Operations fetched ahead of the journal tip are applied without a second fetch across target
+/// updates that move the lower bound while the source prunes to each new bound. Operation
+/// requests above the final lower bound survive the final update, and requests that start below
+/// the pruned source are cancelled.
 ///
 /// Before each update, the source commits and prunes until an in-flight operation request starts
 /// below the source's oldest retained operation and ends beyond the new lower bound. Each round
@@ -1496,8 +1503,8 @@ where
     });
 }
 
-/// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
-/// floor.
+/// Local pinned nodes are available for a target whose lower bound precedes the inactivity
+/// floor, where a floor taken from the lower bound would give a different root.
 pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
