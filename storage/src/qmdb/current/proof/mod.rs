@@ -248,8 +248,8 @@ pub struct RangeProofSpec<F: Family, D: Digest> {
 }
 
 impl<F: Graftable, D: Digest> RangeProof<F, D> {
-    /// Create a new range proof for the provided `range` of operations, fetching the digests at
-    /// [merkle::range_proof_positions] from `storage` and building with [Self::build].
+    /// Create a new range proof for the provided `range` of operations, fetching the digests of
+    /// its [merkle::RangePlan] from `storage` and building with [Self::build].
     pub async fn new<H: Hasher<Digest = D>, S: Storage<F, Digest = D>, const N: usize>(
         status: &impl BitmapReadable<N>,
         storage: &S,
@@ -258,37 +258,36 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         ops_root: D,
     ) -> Result<Self, Error<F>> {
         let ops_leaves = Location::try_from(storage.size())?;
-        let positions = merkle::range_proof_positions(ops_leaves, range.clone())?;
-        let digests = storage.get_nodes(&positions).await?;
-        let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
+        let plan = merkle::RangePlan::new(ops_leaves, range)?;
+        let digests = storage.get_nodes(plan.positions()).await?;
+        let fetched: AHashMap<_, _> = plan.positions().iter().copied().zip(digests).collect();
         Self::build::<H, N>(
             status,
-            ops_leaves,
+            plan,
             |pos| fetched.get(&pos).copied(),
             inactivity_floor,
-            range,
             ops_root,
         )
     }
 
-    /// Build a range proof for `range` from digests already in memory.
+    /// Build the range proof planned by `plan` from digests already in memory.
     ///
-    /// `get_node` supplies the ops-tree digest at each position of [merkle::range_proof_positions]
-    /// for `range` in a tree of `ops_leaves` leaves, and `status` the bitmap chunks of
-    /// [required_chunks]. `ops_leaves` and `status` must describe one consistent snapshot.
+    /// `get_node` supplies the ops-tree digest at each of the plan's positions, and `status` the
+    /// bitmap chunks of [required_chunks]. The plan's leaf count and `status` must describe one
+    /// consistent snapshot.
     ///
     /// # Errors
     ///
-    /// Returns the errors of [merkle::build_range_proof], and [Error::DataCorrupted] if the
-    /// bitmap and `ops_leaves` imply more than one pending chunk.
+    /// Returns the errors of [merkle::RangePlan::build], and [Error::DataCorrupted] if the bitmap
+    /// and the plan's leaf count imply more than one pending chunk.
     pub fn build<H: Hasher<Digest = D>, const N: usize>(
         status: &impl BitmapReadable<N>,
-        ops_leaves: Location<F>,
+        plan: merkle::RangePlan<F>,
         get_node: impl Fn(Position<F>) -> Option<D>,
         inactivity_floor: Location<F>,
-        range: Range<Location<F>>,
         ops_root: D,
     ) -> Result<Self, Error<F>> {
+        let ops_leaves = plan.leaves();
         let grafting_height = grafting::height::<N>();
         let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
             ops_leaves,
@@ -297,8 +296,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         )?;
 
         let hasher = qmdb::hasher::<H>();
-        let proof =
-            merkle::build_range_proof(&hasher, ops_leaves, inactive_peaks, range, get_node)?;
+        let proof = plan.build(&hasher, inactive_peaks, get_node)?;
 
         let partial_chunk_digest =
             partial_chunk::<_, N>(status).map(|(chunk, _)| hasher.digest(chunk.as_slice()));
@@ -2585,13 +2583,14 @@ mod tests {
                     assert!(required.windows(2).all(|pair| pair[0] < pair[1]));
                     let ops_leaves = Location::new(leaves);
                     let range = location.map_or(floor..ops_leaves, |loc| loc..loc + 1);
-                    let planned = merkle::range_proof_positions(ops_leaves, range).unwrap();
-                    let positions = planned.iter().map(|pos| **pos).collect::<Vec<_>>();
+                    let plan = merkle::RangePlan::new(ops_leaves, range).unwrap();
+                    let positions = plan.positions().iter().map(|pos| **pos).collect::<Vec<_>>();
                     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
-                    let fetched: BTreeMap<_, _> = planned
+                    let fetched: BTreeMap<_, _> = plan
+                        .positions()
                         .iter()
                         .copied()
-                        .zip(grafted_storage.get_nodes(&planned).await.unwrap())
+                        .zip(grafted_storage.get_nodes(plan.positions()).await.unwrap())
                         .collect();
                     let get_node = |pos: Position<F>| fetched.get(&pos).copied();
                     let storage = RecordingStorage {
@@ -2615,7 +2614,7 @@ mod tests {
                             .unwrap();
                         let built =
                             constant::OperationProof::<F, sha256::Digest, 1>::build::<Sha256>(
-                                &preloaded, ops_leaves, get_node, floor, loc, ops_root,
+                                &preloaded, plan, get_node, floor, ops_root,
                             )
                             .unwrap();
                         assert_eq!(built, proof);
@@ -2641,12 +2640,7 @@ mod tests {
                         .await
                         .unwrap();
                         let built = RangeProof::build::<Sha256, 1>(
-                            &preloaded,
-                            ops_leaves,
-                            get_node,
-                            floor,
-                            floor..Location::new(leaves),
-                            ops_root,
+                            &preloaded, plan, get_node, floor, ops_root,
                         )
                         .unwrap();
                         assert_eq!(built, proof);

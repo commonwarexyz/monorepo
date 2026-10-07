@@ -12,8 +12,8 @@
 //! past state of the structure rather than its current state.
 
 use crate::merkle::{
-    Bagging, Error, Family, Location, Position, Proof, build_range_proof, hasher::Hasher,
-    multi_proof_positions, proof::Blueprint, range_proof_positions, storage::Storage,
+    Bagging, Error, Family, Location, Position, Proof, RangePlan, hasher::Hasher,
+    multi_proof_positions, proof::Blueprint, storage::Storage,
 };
 use ahash::AHashMap;
 use commonware_cryptography::Digest;
@@ -288,8 +288,8 @@ pub async fn range_proof<
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the
 /// structure had `leaves` leaves.
 ///
-/// Fetches the digests at [range_proof_positions] with [Storage::get_nodes] and builds the proof
-/// with [build_range_proof].
+/// Fetches the digests of the [RangePlan] with [Storage::get_nodes] and builds the proof from
+/// them.
 ///
 /// # Errors
 ///
@@ -309,12 +309,10 @@ pub async fn historical_range_proof<
     range: Range<Location<F>>,
     inactive_peaks: usize,
 ) -> Result<Proof<F, D>, Error<F>> {
-    let positions = range_proof_positions(leaves, range.clone())?;
-    let digests = merkle.get_nodes(&positions).await?;
-    let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
-    build_range_proof(hasher, leaves, inactive_peaks, range, |pos| {
-        fetched.get(&pos).copied()
-    })
+    let plan = RangePlan::new(leaves, range)?;
+    let digests = merkle.get_nodes(plan.positions()).await?;
+    let fetched: AHashMap<_, _> = plan.positions().iter().copied().zip(digests).collect();
+    plan.build(hasher, inactive_peaks, |pos| fetched.get(&pos).copied())
 }
 
 /// Return an inclusion proof for the elements at the specified locations. This is analogous to

@@ -664,13 +664,9 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         range: Range<Location<F>>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
-        crate::merkle::proof::build_range_proof(
-            hasher,
-            self.leaves(),
-            inactive_peaks,
-            range,
-            |pos| Self::get_node(self, pos).or_else(|| base.get_node(pos)),
-        )
+        crate::merkle::RangePlan::new(self.leaves(), range)?.build(hasher, inactive_peaks, |pos| {
+            Self::get_node(self, pos).or_else(|| base.get_node(pos))
+        })
     }
 
     /// Items before this location have been pruned.
