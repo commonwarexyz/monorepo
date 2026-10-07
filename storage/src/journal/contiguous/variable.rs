@@ -5294,6 +5294,8 @@ mod tests {
                 .await
                 .expect("Failed to remove offsets metadata partition");
 
+            // Without the offsets partition the pruned prefix cannot be reconciled, so init reports
+            // corruption.
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -5332,11 +5334,14 @@ mod tests {
             let variable = variable.sync().await.unwrap();
             drop(variable);
 
+            // Lose the data partition while the offsets still describe every item.
             context
                 .remove(&cfg.data_partition(), None)
                 .await
                 .expect("Failed to remove data partition");
 
+            // Init aligns the offsets to the missing data, so the size survives but every item is
+            // pruned.
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should align offsets to match empty data");
@@ -5845,6 +5850,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Fill the journal so pruning everything leaves a nonzero size with nothing to read.
             for i in 0..100u64 {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
@@ -5853,6 +5859,7 @@ mod tests {
             assert_eq!(bounds.end, 100);
             assert_eq!(bounds.start, 0);
 
+            // Pruning everything keeps the size at 100 and leaves no readable position.
             let pruned;
             (journal, pruned) = journal.prune(100).await.unwrap();
             assert!(pruned);
@@ -5870,8 +5877,8 @@ mod tests {
                 ));
             }
 
+            // A reopen must recover the size and the empty bounds without any data blobs.
             journal.sync().await.unwrap();
-
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -5889,7 +5896,7 @@ mod tests {
                 ));
             }
 
-            // Next append should get position 100
+            // The next append continues at position 100, which becomes the only retained item.
             (journal, _) = journal.append(&10000).await.unwrap();
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 101);
@@ -6295,8 +6302,8 @@ mod tests {
             }
             // Offsets journal still has only 15 entries
 
+            // A reopen rebuilds the missing offsets by replaying the data blobs.
             variable.sync().await.unwrap();
-
             let variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -7254,8 +7261,8 @@ mod tests {
             // Keep offsets for positions 0-4, while data still contains all 25 items.
             let variable = variable.test_truncate_offsets(5).await.unwrap();
 
+            // A reopen rebuilds the truncated offsets from every data blob.
             variable.sync().await.unwrap();
-
             let mut variable = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -7785,6 +7792,7 @@ mod tests {
             assert_eq!(bounds.end, 10);
             assert_eq!(bounds.start, 0);
 
+            // Pruning the only blob leaves an empty journal whose size is still 10.
             (journal, _) = journal.prune(10).await.unwrap();
             let bounds = journal.bounds();
             assert_eq!(bounds.end, 10);
@@ -7804,6 +7812,7 @@ mod tests {
             // Close without syncing offsets
             drop(journal);
 
+            // A reopen must recover the unsynced offsets from the data appended after the prune.
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Should recover from crash after data sync but before offsets sync");
@@ -9651,6 +9660,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = single_item_per_section_config(&context);
 
+            // A fresh journal starts empty, and its first synced item is readable at the tail.
             let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -9673,6 +9683,7 @@ mod tests {
             let value = journal.read(journal.size() - 1).await.unwrap();
             assert_eq!(value, 0);
 
+            // Each further append fills its own section, and the tail stays readable at size() - 1.
             for i in 1..10u64 {
                 let pos;
                 (journal, pos) = journal.append(&(i * 100)).await.unwrap();
@@ -9689,9 +9700,9 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
 
+            // Pruning the first five positions keeps the size but moves the start. Reads below the
+            // start report ItemPruned while the tail stays readable.
             journal = journal.sync().await.unwrap();
-
-            // Prune to position 5 (removes positions 0-4)
             let pruned;
             (journal, pruned) = journal.prune(5).await.unwrap();
             assert!(pruned);
@@ -9719,7 +9730,7 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
 
-            // Append more items after pruning
+            // Appends after the prune continue at the old size, each readable at the tail.
             for i in 10..15u64 {
                 let pos;
                 (journal, pos) = journal.append(&(i * 100)).await.unwrap();
@@ -9730,8 +9741,8 @@ mod tests {
                 assert_eq!(value, i * 100);
             }
 
+            // A reopen recovers the size and pruned start, so every retained position reads back.
             journal.sync().await.unwrap();
-
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();

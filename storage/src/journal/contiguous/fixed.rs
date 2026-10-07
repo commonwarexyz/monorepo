@@ -6021,6 +6021,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = single_item_per_blob_config(&context);
 
+            // A fresh journal starts empty, and its first synced item is readable at the tail.
             let mut journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -6049,6 +6050,7 @@ mod tests {
                 .expect("failed to read");
             assert_eq!(value, test_digest(0));
 
+            // Each further append fills its own blob, and the tail stays readable at size() - 1.
             for i in 1..10u64 {
                 let pos;
                 (journal, pos) = journal
@@ -6071,9 +6073,9 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
 
+            // Pruning the first five positions keeps the size but moves the start. Reads below the
+            // start report ItemPruned while the tail stays readable.
             journal = journal.sync().await.expect("failed to sync");
-
-            // Prune to position 5 (removes positions 0-4)
             (journal, _) = journal.prune(5).await.expect("failed to prune");
 
             // Size should still be 10
@@ -6099,7 +6101,7 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
 
-            // Append more items after pruning
+            // Appends after the prune continue at the old size, each readable at the tail.
             for i in 10..15u64 {
                 let pos;
                 (journal, pos) = journal
@@ -6116,8 +6118,8 @@ mod tests {
                 assert_eq!(value, test_digest(i));
             }
 
+            // A reopen recovers the size and pruned start, so every retained position reads back.
             journal.sync().await.expect("failed to sync");
-
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
