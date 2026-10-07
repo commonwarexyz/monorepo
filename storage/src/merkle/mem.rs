@@ -338,14 +338,9 @@ impl<F: Family, D: Digest> Mem<F, D> {
         range: Range<Location<F>>,
         inactive_peaks: usize,
     ) -> Result<Proof<F, D>, Error<F>> {
-        merkle_proof::build_range_proof(
-            hasher,
-            self.leaves(),
-            inactive_peaks,
-            range,
-            |pos| self.get_node(pos),
-            Error::ElementPruned,
-        )
+        merkle_proof::build_range_proof(hasher, self.leaves(), inactive_peaks, range, |pos| {
+            self.get_node(pos)
+        })
     }
 
     /// Get the digests of nodes that need to be pinned at the provided pruning boundary.

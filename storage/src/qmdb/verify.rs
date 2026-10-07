@@ -144,14 +144,9 @@ mod tests {
         inactive_peaks: usize,
         range: Range<Location<F>>,
     ) -> Proof<F, Digest> {
-        build_range_proof(
-            hasher,
-            merkle.leaves(),
-            inactive_peaks,
-            range,
-            |pos| merkle.get_node(pos),
-            crate::merkle::Error::ElementPruned,
-        )
+        build_range_proof(hasher, merkle.leaves(), inactive_peaks, range, |pos| {
+            merkle.get_node(pos)
+        })
         .unwrap()
     }
 

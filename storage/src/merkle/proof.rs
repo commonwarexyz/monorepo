@@ -237,12 +237,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
         for (element, loc) in elements {
             let bp = &blueprints[loc];
             let proof = bp
-                .build_proof(
-                    hasher,
-                    self.inactive_peaks,
-                    |pos| node_digests.get(&pos).copied(),
-                    |_pos| (),
-                )
+                .build_proof(hasher, self.inactive_peaks, |pos| {
+                    node_digests.get(&pos).copied()
+                })
                 .expect("every node is present by construction");
 
             match proof.reconstruct_root_inner(hasher, &[element.as_ref()], *loc, None) {
@@ -910,9 +907,8 @@ impl<F: Family> Blueprint<F> {
             .chain(self.suffix_peaks.iter().copied())
     }
 
-    /// The positions of [Self::required_positions] in strictly increasing order, as
-    /// [super::storage::Storage::get_nodes] requires.
-    #[cfg(feature = "std")]
+    /// The positions of [Self::required_positions] in strictly increasing order, as a batched
+    /// storage read requires.
     pub(crate) fn positions(&self) -> Vec<Position<F>> {
         let mut positions: Vec<_> = self.required_positions().collect();
         positions.sort_unstable();
@@ -968,19 +964,19 @@ impl<F: Family> Blueprint<F> {
     /// contains:
     /// `[fold_acc? | prefix_active_peaks... | after_peaks... | suffix_acc? | siblings_dfs...]`.
     ///
-    /// Returns an error via `element_pruned` if `get_node` returns `None` for any required
-    /// position.
-    pub(crate) fn build_proof<D, H, E>(
+    /// Returns [super::Error::ElementPruned] for the first required position `get_node` cannot
+    /// supply.
+    pub(crate) fn build_proof<D, H>(
         &self,
         hasher: &H,
         inactive_peaks: usize,
         get_node: impl Fn(Position<F>) -> Option<D>,
-        element_pruned: impl Fn(Position<F>) -> E,
-    ) -> Result<Proof<F, D>, E>
+    ) -> Result<Proof<F, D>, super::Error<F>>
     where
         D: Digest,
         H: Hasher<F, Digest = D>,
     {
+        let node = |pos: Position<F>| get_node(pos).ok_or(super::Error::ElementPruned(pos));
         let mut digests = Vec::with_capacity(
             if self.fold_prefix.is_empty() { 0 } else { 1 }
                 + self.fetch_nodes.len()
@@ -988,10 +984,8 @@ impl<F: Family> Blueprint<F> {
         );
 
         if let Some((first_sub, rest)) = self.fold_prefix.split_first() {
-            let first = get_node(first_sub.pos).ok_or_else(|| element_pruned(first_sub.pos))?;
-            let acc = rest.iter().try_fold(first, |acc, sub| {
-                let d = get_node(sub.pos).ok_or_else(|| element_pruned(sub.pos))?;
-                Ok(hasher.fold(&acc, &d))
+            let acc = rest.iter().try_fold(node(first_sub.pos)?, |acc, sub| {
+                node(sub.pos).map(|d| hasher.fold(&acc, &d))
             })?;
             digests.push(acc);
         }
@@ -999,20 +993,18 @@ impl<F: Family> Blueprint<F> {
         // Active prefix peaks and after-peaks occupy the front of `fetch_nodes`.
         let sibling_start = self.sibling_start();
         for &pos in &self.fetch_nodes[..sibling_start] {
-            digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
+            digests.push(node(pos)?);
         }
         if let Some((last_pos, rest)) = self.suffix_peaks.split_last() {
-            let last = get_node(*last_pos).ok_or_else(|| element_pruned(*last_pos))?;
-            let acc = rest.iter().rev().try_fold(last, |acc, &pos| {
-                let d = get_node(pos).ok_or_else(|| element_pruned(pos))?;
-                Ok(hasher.fold(&d, &acc))
+            let acc = rest.iter().rev().try_fold(node(*last_pos)?, |acc, &pos| {
+                node(pos).map(|d| hasher.fold(&d, &acc))
             })?;
             digests.push(acc);
         }
 
         // DFS path siblings occupy the tail of `fetch_nodes`.
         for &pos in &self.fetch_nodes[sibling_start..] {
-            digests.push(get_node(pos).ok_or_else(|| element_pruned(pos))?);
+            digests.push(node(pos)?);
         }
 
         Ok(Proof {
@@ -1030,28 +1022,52 @@ impl<F: Family> Blueprint<F> {
 /// and 61 peak digests.
 pub const MAX_PROOF_DIGESTS_PER_ELEMENT: usize = 122;
 
-/// Build a range proof from a node-fetching closure. The bagging policy is read from `hasher`.
-/// This is the generic implementation shared by all Merkle families. The `element_pruned` closure
-/// is called when `get_node` returns `None` for a required position.
-pub(crate) fn build_range_proof<F, D, H, E>(
+/// Positions a range proof over `range` reads from a structure of `leaves` leaves, in strictly
+/// increasing order.
+///
+/// [build_range_proof] needs exactly these digests, so a storage adapter can fetch them in one
+/// batch before building. The read set does not depend on bagging or inactive peaks: every peak
+/// outside the range is read, whether it is emitted as a proof digest or folded into an
+/// accumulator, and every peak overlapping the range is rebuilt from its path siblings.
+///
+/// # Errors
+///
+/// Returns [super::Error::Empty] for an empty range, [super::Error::RangeOutOfBounds] for a range
+/// that ends beyond `leaves`, and [super::Error::LocationOverflow] if `leaves` exceeds
+/// [Family::MAX_LEAVES].
+pub fn range_proof_positions<F: Family>(
+    leaves: Location<F>,
+    range: Range<Location<F>>,
+) -> Result<Vec<Position<F>>, super::Error<F>> {
+    Ok(Blueprint::new(leaves, 0, Bagging::ForwardFold, range)?.positions())
+}
+
+/// Build a range proof for `range` over a structure of `leaves` leaves from the digests at
+/// [range_proof_positions], read through `get_node`.
+///
+/// The proof commits to `inactive_peaks`; the bagging policy is read from `hasher`.
+///
+/// # Errors
+///
+/// Returns the errors of [range_proof_positions], [super::Error::InvalidProof] if `inactive_peaks`
+/// exceeds the number of peaks, and [super::Error::ElementPruned] for the first required position
+/// `get_node` cannot supply.
+pub fn build_range_proof<F, D, H>(
     hasher: &H,
     leaves: Location<F>,
     inactive_peaks: usize,
     range: Range<Location<F>>,
     get_node: impl Fn(Position<F>) -> Option<D>,
-    element_pruned: impl Fn(Position<F>) -> E,
-) -> Result<Proof<F, D>, E>
+) -> Result<Proof<F, D>, super::Error<F>>
 where
     F: Family,
     D: Digest,
     H: Hasher<F, Digest = D>,
-    E: From<super::Error<F>>,
 {
     Blueprint::new(leaves, inactive_peaks, hasher.root_bagging(), range)?.build_proof(
         hasher,
         inactive_peaks,
         get_node,
-        element_pruned,
     )
 }
 
@@ -1109,6 +1125,65 @@ mod tests {
 
     type D = sha256::Digest;
     type H = Standard<Sha256>;
+
+    fn check_range_proof_positions<F: Family>() {
+        for leaves in 1..=24u64 {
+            let peaks = F::peaks(Position::try_from(Location::<F>::new(leaves)).unwrap()).count();
+            for start in 0..leaves {
+                for end in start + 1..=leaves {
+                    let range = Location::<F>::new(start)..Location::new(end);
+                    let positions =
+                        range_proof_positions(Location::new(leaves), range.clone()).unwrap();
+                    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+                    for bagging in [ForwardFold, BackwardFold] {
+                        for inactive_peaks in 0..=peaks {
+                            let blueprint = Blueprint::<F>::new(
+                                Location::new(leaves),
+                                inactive_peaks,
+                                bagging,
+                                range.clone(),
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                blueprint.positions(),
+                                positions,
+                                "leaves={leaves} range={start}..{end} bagging={bagging:?} inactive_peaks={inactive_peaks}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn range_proof_positions_independent_of_bagging_and_inactive_peaks() {
+        check_range_proof_positions::<mmr::Family>();
+        check_range_proof_positions::<mmb::Family>();
+    }
+
+    #[test]
+    fn range_proof_positions_reject_invalid_inputs() {
+        type F = mmr::Family;
+        let leaves = Location::<F>::new(8);
+        assert!(matches!(
+            range_proof_positions(leaves, leaves..leaves + 1),
+            Err(Error::RangeOutOfBounds(_))
+        ));
+        assert!(matches!(
+            range_proof_positions(leaves, Location::new(3)..Location::new(3)),
+            Err(Error::Empty)
+        ));
+        for leaves in [
+            Location::<F>::new(*F::MAX_LEAVES + 1),
+            Location::new(u64::MAX),
+        ] {
+            assert!(matches!(
+                range_proof_positions(leaves, Location::new(0)..Location::new(1)),
+                Err(Error::LocationOverflow(_))
+            ));
+        }
+    }
 
     fn test_digest(v: u8) -> D {
         <Sha256 as commonware_cryptography::Hasher>::hash(&[&[v]])
@@ -1208,15 +1283,11 @@ mod tests {
             let elements: Vec<_> = (*range.start..*range.end)
                 .map(|i| i.to_be_bytes())
                 .collect();
-            let proof: Proof<F, D> = build_range_proof(
-                &hasher,
-                leaves,
-                inactive_peaks,
-                range.clone(),
-                |pos| mem.get_node(pos),
-                Error::ElementPruned,
-            )
-            .unwrap();
+            let proof: Proof<F, D> =
+                build_range_proof(&hasher, leaves, inactive_peaks, range.clone(), |pos| {
+                    mem.get_node(pos)
+                })
+                .unwrap();
 
             assert_eq!(proof.inactive_peaks, inactive_peaks);
             assert!(
@@ -1317,12 +1388,7 @@ mod tests {
             + optimized.prefix_active_peaks.len()
             + optimized.after_peaks.len();
         let proof = optimized
-            .build_proof(
-                &hasher,
-                inactive_peaks,
-                |pos| mem.get_node(pos),
-                Error::ElementPruned,
-            )
+            .build_proof(&hasher, inactive_peaks, |pos| mem.get_node(pos))
             .unwrap();
 
         assert_eq!(position_keyed_len - proof.digests.len(), suffix_len - 1);
@@ -1349,14 +1415,10 @@ mod tests {
         let mem = build_raw::<mmb::Family>(&hasher, 123);
         let range = Location::new(2)..Location::new(3);
 
-        let generated: Result<Proof<mmb::Family, D>, Error<mmb::Family>> = build_range_proof(
-            &hasher,
-            mem.leaves(),
-            0,
-            range.clone(),
-            |pos| mem.get_node(pos),
-            Error::ElementPruned,
-        );
+        let generated: Result<Proof<mmb::Family, D>, Error<mmb::Family>> =
+            build_range_proof(&hasher, mem.leaves(), 0, range.clone(), |pos| {
+                mem.get_node(pos)
+            });
         let generated = generated.unwrap();
 
         let full_backward_root = mem.root(&hasher, 0).unwrap();
@@ -1392,14 +1454,10 @@ mod tests {
         // A zero inactive boundary is byte-identical to the corresponding full root.
         let split_root_value = mem.root(&hasher, 0).unwrap();
         assert_eq!(full_backward_root, split_root_value);
-        let split_proof: Result<Proof<mmb::Family, D>, Error<mmb::Family>> = build_range_proof(
-            &hasher,
-            mem.leaves(),
-            0,
-            range.clone(),
-            |pos| mem.get_node(pos),
-            Error::ElementPruned,
-        );
+        let split_proof: Result<Proof<mmb::Family, D>, Error<mmb::Family>> =
+            build_range_proof(&hasher, mem.leaves(), 0, range.clone(), |pos| {
+                mem.get_node(pos)
+            });
         let split_proof = split_proof.unwrap();
         assert!(split_proof.verify_range_inclusion(
             &hasher,

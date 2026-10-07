@@ -12,9 +12,10 @@
 //! past state of the structure rather than its current state.
 
 use crate::merkle::{
-    Bagging, Error, Family, Location, Position, Proof,
+    Bagging, Error, Family, Location, Position, Proof, build_range_proof,
     hasher::Hasher,
     proof::{self as merkle_proof, Blueprint},
+    range_proof_positions,
     storage::Storage,
 };
 use ahash::AHashMap;
@@ -300,6 +301,9 @@ pub async fn range_proof<
 /// Analogous to range_proof but for a previous database state. Specifically, the state when the
 /// structure had `leaves` leaves.
 ///
+/// Fetches the digests at [range_proof_positions] with [Storage::get_nodes] and builds the proof
+/// with [build_range_proof].
+///
 /// # Errors
 ///
 /// Returns [Error::LocationOverflow] if any location in `range` > [Family::MAX_LEAVES]
@@ -318,17 +322,12 @@ pub async fn historical_range_proof<
     range: Range<Location<F>>,
     inactive_peaks: usize,
 ) -> Result<Proof<F, D>, Error<F>> {
-    let bp = Blueprint::new(leaves, inactive_peaks, hasher.root_bagging(), range)?;
-    let positions = bp.positions();
+    let positions = range_proof_positions(leaves, range.clone())?;
     let digests = merkle.get_nodes(&positions).await?;
     let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
-
-    bp.build_proof(
-        hasher,
-        inactive_peaks,
-        |pos| fetched.get(&pos).copied(),
-        Error::ElementPruned,
-    )
+    build_range_proof(hasher, leaves, inactive_peaks, range, |pos| {
+        fetched.get(&pos).copied()
+    })
 }
 
 /// Return an inclusion proof for the elements at the specified locations. This is analogous to

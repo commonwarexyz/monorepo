@@ -670,7 +670,6 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
             inactive_peaks,
             range,
             |pos| Self::get_node(self, pos).or_else(|| base.get_node(pos)),
-            Error::ElementPruned,
         )
     }
 
