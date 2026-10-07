@@ -788,6 +788,9 @@ impl<F: Family> RangePlan<F> {
         }
         let size = Position::try_from(leaves)?;
 
+        // Peaks cover consecutive leaf spans in iteration order. A peak wholly outside the range
+        // enters the proof as one digest; a peak overlapping it is rebuilt from the proven
+        // elements and the siblings of their path, so only those siblings are read.
         let mut before = Vec::new();
         let mut overlapping = Vec::new();
         let mut after = Vec::new();
@@ -812,6 +815,8 @@ impl<F: Family> RangePlan<F> {
             "at least one peak must contain range elements"
         );
 
+        // Siblings are kept in left-first DFS order because the verifier replays the same walk
+        // to rebuild each overlapping peak; the sorted copy is only for batched storage reads.
         let mut siblings = Vec::new();
         for peak in &overlapping {
             peak.collect_siblings(&range, &mut siblings);
@@ -944,6 +949,9 @@ impl<F: Family> Blueprint<F> {
             return Err(super::Error::InvalidProof);
         }
 
+        // Peaks before the range fold into one prefix accumulator when they are inactive or the
+        // bagging is forward. Under backward bagging the active ones are folded only after the
+        // overlapping peaks, so they cannot be combined ahead of time and stay individual.
         let mut fold_prefix = Vec::new();
         let mut prefix_active_peaks = Vec::new();
         for (index, peak) in before.into_iter().enumerate() {
@@ -953,6 +961,10 @@ impl<F: Family> Blueprint<F> {
                 prefix_active_peaks.push(peak);
             }
         }
+
+        // Backward bagging starts its fold at the newest peak, so the active peaks after the
+        // range collapse into one suffix accumulator. The inactive boundary indexes the global
+        // peak order, so the after-peaks continue the count past the prefix and overlapping peaks.
         let first_after = fold_prefix.len() + prefix_active_peaks.len() + overlapping.len();
         let mut after_peaks = Vec::new();
         let mut suffix_peaks = Vec::new();
@@ -964,6 +976,8 @@ impl<F: Family> Blueprint<F> {
             }
         }
 
+        // Layout order of the fetched digests; `sibling_start` and `split_proof_digests` rely on
+        // it.
         let mut fetch_nodes: Vec<_> = prefix_active_peaks.iter().map(|s| s.pos).collect();
         fetch_nodes.extend_from_slice(&after_peaks);
         fetch_nodes.extend(siblings);
