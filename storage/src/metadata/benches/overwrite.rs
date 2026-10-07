@@ -41,6 +41,7 @@ fn bench_case<const SIZE: usize>(c: &mut Criterion, keys: u64, modified: u64, pi
                     for key in 0..modified {
                         metadata.put(key, value.clone());
                     }
+                    // Pipelined runs await the handle, so both modes time completion, not submission.
                     let start = Instant::now();
                     if pipelined {
                         let (next, handle) = metadata.start_sync().await.unwrap();
@@ -59,13 +60,15 @@ fn bench_case<const SIZE: usize>(c: &mut Criterion, keys: u64, modified: u64, pi
 }
 
 fn bench_overwrite(c: &mut Criterion) {
-    // Cases with fewer than 256 keys encode to at most 4 KiB and are written whole. 256 keys
-    // (4,108 bytes) is just above that limit.
+    // Cases with fewer than 256 keys encode to at most 4 KiB and are written whole. 255 keys
+    // (4,092 bytes) is the largest such store, and 256 keys (4,108 bytes) is just above the limit.
     bench_case::<8>(c, 1, 1, false);
     bench_case::<8>(c, 3, 1, false);
     bench_case::<8>(c, 3, 3, false);
     bench_case::<8>(c, 128, 1, false);
     bench_case::<8>(c, 128, 128, false);
+    bench_case::<8>(c, 255, 1, false);
+    bench_case::<8>(c, 255, 1, true);
     bench_case::<8>(c, 256, 1, false);
     bench_case::<8>(c, 1_024, 1, false);
     bench_case::<8>(c, 1_024, 128, false);

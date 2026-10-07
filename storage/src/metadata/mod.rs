@@ -314,17 +314,20 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::lost(PartialWriteMode::Prefix, probability!(0.0), 1)]
-    #[case::torn(PartialWriteMode::Subset, probability!(0.5), 1)]
-    #[case::retained(PartialWriteMode::Prefix, probability!(1.0), 2)]
+    #[case::lost(PartialWriteMode::Prefix, probability!(0.0), false)]
+    #[case::torn(PartialWriteMode::Subset, probability!(0.5), false)]
+    #[case::retained(PartialWriteMode::Prefix, probability!(1.0), true)]
     #[test_traced]
     fn test_overwrite_crash_during_background_sync(
         #[case] mode: PartialWriteMode,
         #[case] retention_rate: Probability,
-        #[case] recovered: u8,
+        #[case] update_survives: bool,
         #[values(FULL_OVERWRITE_LIMIT, FULL_OVERWRITE_LIMIT + 1)] store_len: usize,
+        #[values(2, 3)] durable: u8,
     ) {
-        let value_len = single_key_value_len(store_len);
+        // A second key (8-byte key, 1-byte length prefix, 8-byte value) never changes.
+        let value_len = single_key_value_len(store_len) - 17;
+        let stable = vec![0xEE; 8];
         let faults = FaultConfig::default().write(WriteConfig {
             failure_rate: probability!(0.0),
             retention_rate,
@@ -333,6 +336,7 @@ mod tests {
         let runner = deterministic::Runner::new(
             deterministic::Config::default().with_storage_fault_config(faults),
         );
+        let written = stable.clone();
         let ((), checkpoint) = runner.start_and_recover(|context| async move {
             // Started syncs park until released, so the crash lands before the overwrite is
             // durable and the retention policy decides which of its bytes survive.
@@ -340,8 +344,16 @@ mod tests {
                 inner: context,
                 pending: PendingSyncs::default(),
             };
-            let mut metadata = init_single_key(context, value_len).await;
-            metadata.put(U64::new(1), vec![2; value_len]);
+            let mut metadata = Metadata::init(context, single_key_config()).await.unwrap();
+            metadata.put(U64::new(2), written);
+
+            // Each sync makes one generation durable, alternating between the two copies, so the
+            // copies hold different generations and the update targets the older one.
+            for generation in 1..=durable {
+                metadata.put(U64::new(1), vec![generation; value_len]);
+                metadata = metadata.sync().await.unwrap();
+            }
+            metadata.put(U64::new(1), vec![durable + 1; value_len]);
             let (_metadata, _handle) = metadata.start_sync().await.unwrap();
         });
 
@@ -349,10 +361,13 @@ mod tests {
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context, single_key_config())
                 .await
                 .unwrap();
-            assert_eq!(
-                metadata.get(&U64::new(1)),
-                Some(&vec![recovered; value_len])
-            );
+            let expected = if update_survives {
+                durable + 1
+            } else {
+                durable
+            };
+            assert_eq!(metadata.get(&U64::new(1)), Some(&vec![expected; value_len]));
+            assert_eq!(metadata.get(&U64::new(2)), Some(&stable));
         });
     }
 
