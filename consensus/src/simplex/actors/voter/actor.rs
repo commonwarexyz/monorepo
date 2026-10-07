@@ -103,47 +103,28 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 enum ProposalResponse<D> {
     /// An ordinary candidate or a held candidate released after parent certification.
     Proposed(D),
-    /// A fresh response from a handoff request.
+    /// A response from a handoff request.
     Handoff(HandoffProposal<D>),
-}
-
-/// Pending automaton response for a regular or handoff proposal request.
-enum ProposalReceiver<D> {
-    Regular(oneshot::Receiver<D>),
-    Handoff(oneshot::Receiver<HandoffProposal<D>>),
 }
 
 /// Lifecycle of the pending proposal slot.
 enum ProposalState<D> {
-    /// The automaton has not responded yet.
-    Awaiting(ProposalReceiver<D>),
+    /// The automaton has not answered an ordinary request yet.
+    Regular(oneshot::Receiver<D>),
+    /// The automaton has not answered a handoff request yet.
+    Handoff(oneshot::Receiver<HandoffProposal<D>>),
     /// A handoff the application declined until its parent certifies. An
     /// ordinary request for the same context follows exact parent certification.
     Deferred,
-    /// A volatile build result awaiting durable parent certification.
+    /// A volatile build result awaiting parent certification.
     Held(D),
-    /// A held result whose parent has durably certified, awaiting proposal
-    /// eligibility checks.
+    /// A held result whose parent has certified. The select loop consumes it only
+    /// after the journal sync that follows that certification.
     Ready(D),
 }
 
 type PendingProposal<D, P> = Option<Request<ProposalRequest<D, P>, ProposalState<D>>>;
 type PendingVerification<D, P> = Option<Request<Context<D, P>, oneshot::Receiver<bool>>>;
-
-impl<D> Future for ProposalReceiver<D> {
-    type Output = Result<ProposalResponse<D>, oneshot::error::RecvError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            Self::Regular(receiver) => Pin::new(receiver)
-                .poll(cx)
-                .map(|result| result.map(ProposalResponse::Proposed)),
-            Self::Handoff(receiver) => Pin::new(receiver)
-                .poll(cx)
-                .map(|result| result.map(ProposalResponse::Handoff)),
-        }
-    }
-}
 
 /// Actor responsible for driving participation in the consensus protocol.
 pub struct Actor<
@@ -455,7 +436,7 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let receiver = async {
+        let state = async {
             debug!(
                 round = ?context.round,
                 handoff = matches!(&request, ProposalRequest::Handoff(_)),
@@ -464,16 +445,16 @@ impl<
             match &request {
                 ProposalRequest::Handoff(_) => {
                     self.record_handoff_event(HandoffEventKind::Requested);
-                    ProposalReceiver::Handoff(self.automaton.propose_handoff(context).await)
+                    ProposalState::Handoff(self.automaton.propose_handoff(context).await)
                 }
                 ProposalRequest::Regular(_) => {
-                    ProposalReceiver::Regular(self.automaton.propose(context).await)
+                    ProposalState::Regular(self.automaton.propose(context).await)
                 }
             }
         }
         .instrument(span.clone())
         .await;
-        Request(request, span, ProposalState::Awaiting(receiver))
+        Request(request, span, state)
     }
 
     /// Attempt to verify a proposed block.
@@ -481,7 +462,7 @@ impl<
     async fn try_verify(
         &mut self,
         resolver: &mut resolver::Mailbox<S, D>,
-    ) -> Option<Request<Context<D, S::PublicKey>, oneshot::Receiver<bool>>> {
+    ) -> PendingVerification<D, S::PublicKey> {
         // Check if we are ready to verify
         let (context, proposal) = match self.state.try_verify() {
             Verify::Ready(context, proposal) => (context, proposal),
@@ -549,16 +530,26 @@ impl<
             *pending_verify = None;
         }
 
-        // Replace a deferred handoff once its exact captured parent certifies.
-        // Dispatch can overlap the journal sync; responses are polled afterward.
-        if let Some(Request(request, _, ProposalState::Deferred)) = pending_propose.as_ref()
+        // Advance a pending handoff once its exact parent certifies or finalizes. A
+        // deferred handoff becomes an ordinary request for the same context, and a held
+        // build becomes ready to publish. Certification and finalization are recorded
+        // only in iterations that end with a journal sync, and responses are polled only
+        // in later iterations, so nothing built on the parent is consumed before its
+        // evidence is durable.
+        if let Some(Request(request, _, state)) = pending_propose.as_mut()
             && self.state.proposal_parent_certified(request.context())
         {
-            let context = request.context().clone();
-            *pending_propose = Some(
-                self.request_proposal(ProposalRequest::Regular(context))
-                    .await,
-            );
+            match state {
+                ProposalState::Deferred => {
+                    let context = request.context().clone();
+                    *pending_propose = Some(
+                        self.request_proposal(ProposalRequest::Regular(context))
+                            .await,
+                    );
+                }
+                ProposalState::Held(payload) => *state = ProposalState::Ready(*payload),
+                _ => {}
+            }
         }
 
         // State and Round prevent duplicate requests when both checkpoints
@@ -1236,19 +1227,15 @@ impl<
                 // delaying them.
                 self = self.prune_views().await;
 
-                // The prior iteration's sync_journal has completed. Promote held results
-                // here because reconcile_application_requests also runs before the sync.
-                if let Some(Request(request, _, state)) = pending_propose.as_mut()
-                    && let ProposalState::Held(payload) = state
-                    && self.state.proposal_parent_certified(request.context())
-                {
-                    *state = ProposalState::Ready(*payload);
-                }
-
                 // Prepare waiters
                 let propose_wait = async {
                     let proposed = match pending_propose.as_mut() {
-                        Some(Request(_, _, ProposalState::Awaiting(receiver))) => receiver.await,
+                        Some(Request(_, _, ProposalState::Regular(receiver))) => {
+                            receiver.await.map(ProposalResponse::Proposed)
+                        }
+                        Some(Request(_, _, ProposalState::Handoff(receiver))) => {
+                            receiver.await.map(ProposalResponse::Handoff)
+                        }
                         Some(Request(_, _, ProposalState::Ready(payload))) => {
                             Ok(ProposalResponse::Proposed(*payload))
                         }
