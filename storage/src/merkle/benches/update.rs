@@ -66,7 +66,7 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             };
                             mem.apply_batch(&batch).unwrap();
 
-                            // Randomly update leaves -- this is what we are benchmarking.
+                            // Randomly update leaves, which is what the benchmark measures.
                             let start = Instant::now();
                             for _ in 0..iters {
                                 // Simulate leaf-batching being the responsibility of the caller.
@@ -79,6 +79,13 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     leaf_map.insert(rand_leaf_loc, *new_element);
                                 }
 
+                                #[cfg_attr(
+                                    dylint_lib = "hash_iteration",
+                                    expect(
+                                        hash_iteration,
+                                        reason = "leaves are distinct and ancestors are sorted"
+                                    )
+                                )]
                                 let updates: Vec<(
                                     Location<F>,
                                     commonware_cryptography::sha256::Digest,

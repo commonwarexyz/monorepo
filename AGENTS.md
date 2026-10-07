@@ -45,6 +45,7 @@ Async protocol tests must use the deterministic runtime. Use `commonware_utils::
 
 - Keep `mod.rs` minimal, use `cfg_if!` for platform-specific implementations, and put imports at module scope.
 - Use `thiserror` for error types.
+- Hash-collection order varies between runs and breaks deterministic replay. Use `BTreeMap` or `BTreeSet` for collections that are iterated or whose dropped values wake another task, such as channel endpoints. The `hash_iteration` and `hash_drop` dylints flag both cases. A hot lookup map may stay hashed when its order cannot matter. Mark each flagged site with an `expect` stating why.
 - Label runtime actors with `context.child(...)`; use `context.shared(true).spawn()` for CPU-intensive work in async code.
 - Benchmark names use `module_path!()` and the format `module::operation/key=value key=value`.
 - When diagnosing a bug, add a failing test before claiming the cause. Mutable storage-operation failures are fatal: do not keep using that database instance or report its inconsistent state as a defect.

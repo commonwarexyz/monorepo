@@ -4053,6 +4053,10 @@ mod tests {
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for faults in faulter.values() {
+                        #[cfg_attr(
+                            dylint_lib = "hash_iteration",
+                            expect(hash_iteration, reason = "faults are counted or fail the test")
+                        )]
                         for fault in faults.iter() {
                             match fault {
                                 Activity::ConflictingNotarize(_) => {
@@ -5283,6 +5287,10 @@ mod tests {
                     assert_eq!(faults.len(), 1);
                     let faulter = faults.get(byz).expect("byzantine party is not faulter");
                     for faults in faulter.values() {
+                        #[cfg_attr(
+                            dylint_lib = "hash_iteration",
+                            expect(hash_iteration, reason = "faults are counted or fail the test")
+                        )]
                         for fault in faults.iter() {
                             match fault {
                                 Activity::NullifyFinalize(_) => {

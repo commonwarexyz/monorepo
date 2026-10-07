@@ -82,6 +82,13 @@ impl<P: PublicKey> SafeTip<P> {
 
         // Get the set of exiting validators.
         let mut exiting_vals = Vec::new();
+        #[cfg_attr(
+            dylint_lib = "hash_iteration",
+            expect(
+                hash_iteration,
+                reason = "each exiting tip resets to the default, so any order gives the same heaps"
+            )
+        )]
         for val in self.tips.keys() {
             if validators.position(val).is_none() {
                 exiting_vals.push(val.clone());

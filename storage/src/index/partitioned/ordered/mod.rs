@@ -11,7 +11,7 @@
 //!
 //! Each sorted-array insert is an O(occupancy) memmove, so a partition that grows large makes
 //! inserts expensive. When a partition's array reaches `SPILL_THRESHOLD` entries it converts to a
-//! `BTreeMap` (the `spilled` field) -- a supported alternate representation whose insert, lookup,
+//! `BTreeMap` (the `spilled` field), a supported alternate representation whose insert, lookup,
 //! and traversal are O(log occupancy). A partition reaches that size two ways:
 //!
 //! - *Adversarial grinding.* An order-preserving translator cannot randomize keys (that would break
@@ -22,8 +22,8 @@
 //!   entries, `P=2` past ~33M, while `P=3`'s 16.8M partitions push this past ~8.5B (so P=3 is
 //!   effectively unreachable under honest load).
 //!
-//! A partition also fills when a single key collects many values -- keys that collide on the full
-//! prefix, or repeated inserts of one key. The spill covers this too: it triggers on the total
+//! A partition also fills when a single key collects many values (keys that collide on the full
+//! prefix, or repeated inserts of one key). The spill covers this too: it triggers on the total
 //! value count, so a single over-full key still converts the partition and keeps inserts for the
 //! partition's other keys cheap. Values append to the end of a key's run. In the single-key case
 //! this makes inline inserts append-only, and after spilling they remain append-only in the run's
@@ -384,10 +384,12 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
         let len = worker.index.partitions.len();
 
         // Probe the spilled side-table by its (usually empty) key set rather than once per slot.
-        assert!(
-            self.spilled.keys().all(|&p| p < lo || p >= lo + len),
-            "install target range must be empty"
-        );
+        #[cfg_attr(
+            dylint_lib = "hash_iteration",
+            expect(hash_iteration, reason = "a range check has one result in any order")
+        )]
+        let empty = self.spilled.keys().all(|&p| p < lo || p >= lo + len);
+        assert!(empty, "install target range must be empty");
         for (local, partition) in worker.index.partitions.iter_mut().enumerate() {
             let global = lo + local;
             assert!(
@@ -399,6 +401,10 @@ impl<T: Translator, V: Send + Sync + 'static, const P: usize> Partitioned for In
 
         // Drain only the partitions that actually spilled (remapping local -> global), rather than
         // probing every slot in the range.
+        #[cfg_attr(
+            dylint_lib = "hash_iteration",
+            expect(hash_iteration, reason = "each drained entry moves to its own slot")
+        )]
         for (local, inner) in worker.index.spilled.drain() {
             self.spilled.insert(lo + local, inner);
         }

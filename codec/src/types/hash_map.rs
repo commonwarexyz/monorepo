@@ -14,8 +14,10 @@ use std::{collections::HashMap, hash::Hash};
 
 const HASHMAP_TYPE: &str = "HashMap";
 
-// ---------- HashMap ----------
-
+#[cfg_attr(
+    dylint_lib = "hash_iteration",
+    expect(hash_iteration, reason = "entries are sorted by key before encoding")
+)]
 impl<K: Ord + Write, V: Write, S> Write for HashMap<K, V, S> {
     fn write(&self, buf: &mut impl BufMut) {
         self.len().write(buf);
@@ -42,6 +44,10 @@ impl<K: Ord + Write, V: Write, S> Write for HashMap<K, V, S> {
     }
 }
 
+#[cfg_attr(
+    dylint_lib = "hash_iteration",
+    expect(hash_iteration, reason = "sizes are summed in any order")
+)]
 impl<K: EncodeSize, V: EncodeSize, S> EncodeSize for HashMap<K, V, S> {
     fn encode_size(&self) -> usize {
         // Start with the size of the length prefix
@@ -122,8 +128,6 @@ mod tests {
             .expect("decode_cfg failed for HashMap");
         assert_eq!(map, &decoded);
     }
-
-    // --- HashMap Tests ---
 
     #[test]
     fn test_empty_hashmap() {

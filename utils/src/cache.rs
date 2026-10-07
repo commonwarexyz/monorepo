@@ -335,6 +335,10 @@ impl<K: Hash + Eq, V> Cache<K, V> {
         }
         self.free.extend_from_slice(&dropped);
         let slots = &self.slots;
+        #[cfg_attr(
+            dylint_lib = "hash_iteration",
+            expect(hash_iteration, reason = "the predicate only reads liveness set above")
+        )]
         self.index.retain(|&mut slot| slots[slot].live);
     }
 
@@ -1831,6 +1835,10 @@ mod tests {
                 assert_eq!(self.topology[slot].next, main[(rank + 1) % main.len()]);
             }
 
+            #[cfg_attr(
+                dylint_lib = "hash_iteration",
+                expect(hash_iteration, reason = "the slots are collected into a set")
+            )]
             let indexed: BTreeSet<_> = self.index.iter().copied().collect();
             assert_eq!(indexed.len(), self.index.len(), "duplicate indexed slot");
             assert_eq!(indexed, resident);
@@ -2476,10 +2484,12 @@ mod tests {
             }
             assert_eq!(ghost.tail, previous);
             assert_eq!(actual, expected.iter().copied().collect::<Vec<_>>());
-            assert_eq!(
-                ghost.index.iter().copied().collect::<HashSet<_>>(),
-                linked_slots
-            );
+            #[cfg_attr(
+                dylint_lib = "hash_iteration",
+                expect(hash_iteration, reason = "the slots are collected into a set")
+            )]
+            let indexed: HashSet<_> = ghost.index.iter().copied().collect();
+            assert_eq!(indexed, linked_slots);
             assert_eq!(ghost.index.len(), expected.len());
             assert!(ghost.slots.len() <= capacity);
             let free = ghost.check_free_slots();

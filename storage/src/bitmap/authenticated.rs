@@ -543,6 +543,13 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
         }
 
         // Pre-hash dirty chunks into digests and update in the batch.
+        #[cfg_attr(
+            dylint_lib = "hash_iteration",
+            expect(
+                hash_iteration,
+                reason = "dirty chunks are distinct and their ancestors are sorted before hashing"
+            )
+        )]
         let updates: Vec<(Location, &[u8; N])> = self
             .state
             .dirty_chunks

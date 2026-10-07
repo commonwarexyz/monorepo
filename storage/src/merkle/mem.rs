@@ -453,6 +453,10 @@ impl<F: Family, D: Digest> Mem<F, D> {
             if committed {
                 continue;
             }
+            #[cfg_attr(
+                dylint_lib = "hash_iteration",
+                expect(hash_iteration, reason = "overwrites target distinct positions")
+            )]
             for (&pos, &digest) in overwrites.iter() {
                 self.overwrite(pos, digest);
             }
@@ -462,6 +466,10 @@ impl<F: Family, D: Digest> Mem<F, D> {
         }
 
         // Apply this batch's own data.
+        #[cfg_attr(
+            dylint_lib = "hash_iteration",
+            expect(hash_iteration, reason = "overwrites target distinct positions")
+        )]
         for (&pos, &digest) in batch.overwrites.iter() {
             self.overwrite(pos, digest);
         }
@@ -1453,8 +1461,6 @@ mod tests {
         let _ = Bagging::ForwardFold;
     }
 
-    // --- MMR tests ---
-
     #[test]
     fn mmr_empty() {
         empty::<crate::mmr::Family>();
@@ -1559,8 +1565,6 @@ mod tests {
     fn mmr_split_root_matches_recompute() {
         split_root_matches_recompute::<crate::mmr::Family>();
     }
-
-    // --- MMB tests ---
 
     #[test]
     fn mmb_empty() {

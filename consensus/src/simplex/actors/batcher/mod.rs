@@ -2158,6 +2158,10 @@ mod tests {
             let finalize_b = Finalize::sign(&schemes[1], proposal_b).unwrap();
             assert!(!round.add_network(sender.clone(), Vote::Finalize(finalize_b)));
             let faults = reporter.faults.lock();
+            #[cfg_attr(
+                dylint_lib = "hash_iteration",
+                expect(hash_iteration, reason = "the predicate only matches the activity variant")
+            )]
             let has_expected_fault = faults
                 .get(&sender)
                 .and_then(|sf| sf.get(&round_id.view()))
@@ -7632,6 +7636,13 @@ mod tests {
 
             // Verify conflicting evidence was reported via faults
             let faults = reporter.faults.lock();
+            #[cfg_attr(
+                dylint_lib = "hash_iteration",
+                expect(
+                    hash_iteration,
+                    reason = "callers pass predicates that only match the activity variant"
+                )
+            )]
             let has_expected_fault = faults
                 .get(&sender_pk)
                 .and_then(|sf| sf.get(&view))

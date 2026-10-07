@@ -1,0 +1,147 @@
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:39:14
+   |
+LL |     waiters: HashMap<u64, oneshot::Sender<()>>,
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+   = note: `#[deny(hash_drop)]` on by default
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:45:16
+   |
+LL |     mailboxes: HashMap<u64, Mailbox>,
+   |                ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, Mailbox>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:46:12
+   |
+LL |     slots: HashMap<u64, Slot>,
+   |            ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, Slot>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:47:12
+   |
+LL |     nodes: HashSet<Node>,
+   |            ^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashSet<Node>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:48:12
+   |
+LL |     pairs: HashMap<u64, (u8, futures_oneshot::Receiver<u8>)>,
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, (u8, futures_channel::oneshot::Receiver<u8>)>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:49:14
+   |
+LL |     batches: HashMap<u64, Vec<[mpsc::UnboundedSender<u8>; 2]>>,
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, std::vec::Vec<[tokio::sync::mpsc::UnboundedSender<u8>; 2]>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:50:13
+   |
+LL |     nested: HashMap<u64, HashMap<u64, futures_mpsc::UnboundedReceiver<u8>>>,
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, std::collections::HashMap<u64, futures_channel::mpsc::UnboundedReceiver<u8>>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:51:14
+   |
+LL |     permits: HashMap<u64, OwnedSemaphorePermit>,
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, tokio::sync::OwnedSemaphorePermit>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:52:13
+   |
+LL |     shared: Arc<Mutex<HashMap<u64, futures_mpsc::Sender<u8>>>>,
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, futures_channel::mpsc::Sender<u8>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:53:15
+   |
+LL |     optional: Option<hashbrown::HashMap<u64, mpsc::Receiver<u8>>>,
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `hashbrown::HashMap<u64, tokio::sync::mpsc::Receiver<u8>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:75:5
+   |
+LL |     let created: HashMap<u64, oneshot::Sender<()>> = HashMap::new();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:76:5
+   |
+LL |     let mut inferred = HashMap::new();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:78:5
+   |
+LL |     let _defaulted: HashMap<u64, Mailbox> = Default::default();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, Mailbox>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:79:5
+   |
+LL |     let _collected: HashMap<u64, oneshot::Sender<()>> = Vec::new().into_iter().collect();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:80:5
+   |
+LL |     let _converted = HashMap::from([(0u64, oneshot::channel::<()>().0)]);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, tokio::sync::oneshot::Sender<()>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: hash collection of values whose drop wakes another task
+  --> $DIR/drop.rs:81:5
+   |
+LL |     let _cloned = HashMap::<u64, mpsc::Sender<u8>>::new().clone();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `std::collections::HashMap<u64, tokio::sync::mpsc::Sender<u8>>` drops its elements in an order that varies between runs
+   = help: use `BTreeMap` or `BTreeSet`
+
+error: aborting due to 16 previous errors
+

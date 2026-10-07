@@ -65,6 +65,9 @@ jobs:
     - name: Dylint
       if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
       run: just dylint
+    - name: Test dylints
+      if: matrix.os == 'ubuntu-latest' && matrix.flags == ''
+      run: just test-dylints
     - name: Check docs
       run: just check-docs ${{ matrix.flags }}
     - name: Test docs

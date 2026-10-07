@@ -162,6 +162,17 @@ cooldown:
 dylint:
     cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
 
+# Test custom Dylint lints against their UI fixtures
+test-dylints:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The fixture harness cannot see rustc invocations through a compiler wrapper. One shared
+    # target directory builds the dependencies common to every lint once.
+    target="$PWD/target/dylint-tests"
+    for lint in .github/dylints/*/; do
+        (cd "$lint" && RUSTC_WRAPPER= CARGO_TARGET_DIR="$target" cargo test)
+    done
+
 # Run all fuzz tests in a given directory.
 #
 # `partition` is "N/M", run partition N of M, where targets are hash-distributed across M jobs.
