@@ -967,7 +967,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
             // A term start on an uncertified parent is a pipelined handoff. Skip it while we
             // wait in a view at or below that parent that we voted to nullify, without
             // claiming the build request: if the parent certifies after all, the view becomes
-            // an ordinary candidate.
+            // an ordinary candidate. Build cancellation cannot replace this check, since the
+            // actor can consume a response that is ready on issue before it next checks.
             let is_handoff = view.is_term_start(self.term_length())
                 && !self.parent_certified((parent_view, parent_payload));
             if is_handoff && self.gave_up_below(parent_view) {
@@ -1032,7 +1033,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         if self.proposal_parent_certified(context) {
             return None;
         }
-        if self.gave_up_below(parent) || self.highest_nullification_in_term(parent).is_some() {
+        if self.gave_up_below(parent) {
             return Some(HandoffAbandonedReason::ParentNullify);
         }
         (!self.captured_parent_valid(context, self.find_parent(context.view())))

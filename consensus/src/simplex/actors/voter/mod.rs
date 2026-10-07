@@ -5634,7 +5634,7 @@ mod tests {
                 &context.encode(),
                 "actor",
                 &[("Requested", 1)],
-                &[("AncestrySuperseded", 1), ("ParentNullify", 1)],
+                &[("AncestryInvalidated", 1), ("AncestrySuperseded", 1)],
             );
         });
     }

@@ -320,11 +320,11 @@
 //! * `ViewExit`: the request's view ended.
 //! * `AncestrySuperseded`: the captured ancestry became invalid while a replacement parent was
 //!   selectable, so consensus requested a proposal on the replacement.
-//! * `ParentNullify`: a pending build was cancelled after a nullification in the parent's term
-//!   or a local nullify vote for the view the leader waits in, at or below the parent.
+//! * `ParentNullify`: a pending build was cancelled after a local nullify vote for the view the
+//!   leader waits in, at or below the parent.
 //! * `AncestryInvalidated`: a pending build was cancelled because its captured ancestry became
-//!   invalid for another reason, such as a failed certification, before a replacement parent was
-//!   selectable.
+//!   invalid, as after a nullification in the parent's term or a failed certification, before a
+//!   replacement parent was selectable.
 //! * `ViewNullify`: the parent of a waiting request certified after a local nullify vote for
 //!   the request's view.
 //! * `ResponseClosed`: the parent of a closed response certified or finalized.
