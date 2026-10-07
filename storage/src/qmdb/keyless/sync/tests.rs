@@ -40,6 +40,16 @@ use harnesses::VariableMmrHarness as H;
 use rand::Rng as _;
 use std::{collections::BTreeSet, future::Future, num::NonZeroU64, pin::pin, sync::Arc};
 
+/// Keyless-specific harness methods used by the keyless-only sync tests.
+pub(crate) trait KeylessSyncTestHarness: SyncTestHarness {
+    /// Applies `ops` in a batch whose commit declares its own location as the inactivity floor.
+    fn apply_ops_raising_floor(
+        db: Self::Db,
+        ops: Vec<OpOf<Self>>,
+        metadata: Option<Self::Metadata>,
+    ) -> impl Future<Output = Self::Db> + Send;
+}
+
 /// Keyless-specific harness methods used by the keyless-only compact sync tests.
 pub(crate) trait KeylessCompactSyncTestHarness: CompactSyncTestHarness {
     /// Proves the last commit of `full` against the root computed with `inactive_peaks`
@@ -243,7 +253,7 @@ impl<S: Source<Op: Send>> Source for DelayedBoundary<S> {
 
 /// A boundary response requested before a target update with an unchanged lower bound is
 /// applied without a second boundary request, and sync completes after its root is evicted.
-pub(crate) fn test_target_updates_preserve_delayed_boundary<H: SyncTestHarness>()
+pub(crate) fn test_target_updates_preserve_delayed_boundary<H: KeylessSyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -251,9 +261,10 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        // Build three targets that share a lower bound above zero.
+        // Build three targets that share a lower bound above zero while their commit floors
+        // advance.
         let target_db = H::init_db(context.child("target")).await;
-        let target_db = H::apply_ops(target_db, H::create_ops(20), None).await;
+        let target_db = H::apply_ops_raising_floor(target_db, H::create_ops(20), None).await;
         let target_db = H::prune(target_db, Location::new(5)).await;
         let start = H::bounds(&target_db).start;
         assert!(*start > 0);
@@ -261,12 +272,14 @@ where
             root: H::db_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
-        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 1), None).await;
+        let target_db =
+            H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
         let next_target = Target {
             root: H::db_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
         };
-        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 2), None).await;
+        let target_db =
+            H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 2), None).await;
         let final_target = Target {
             root: H::db_root(&target_db),
             range: non_empty_range!(start, H::bounds(&target_db).end),
@@ -369,7 +382,7 @@ impl<S: Source<Op: Send>> Source for StalledBoundary<S> {
 
 /// Operations fetched ahead of the journal tip are applied after a target update moves the lower
 /// bound into them, without fetching them again.
-pub(crate) fn test_target_update_keeps_operations_above_moved_floor<H: SyncTestHarness>()
+pub(crate) fn test_target_update_keeps_operations_above_moved_floor<H: KeylessSyncTestHarness>()
 where
     OpOf<H>: Encode + Clone,
     Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
@@ -377,9 +390,10 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
-        // Build a target pruned above zero and a later target whose lower bound is two higher.
+        // Build a target pruned above zero and a later target whose lower bound is two higher,
+        // each with a commit floor at its last commit.
         let target_db = H::init_db(context.child("target")).await;
-        let target_db = H::apply_ops(target_db, H::create_ops(20), None).await;
+        let target_db = H::apply_ops_raising_floor(target_db, H::create_ops(20), None).await;
         let target_db = H::prune(target_db, Location::new(5)).await;
         let floor = H::bounds(&target_db).start;
         assert!(*floor > 0);
@@ -387,7 +401,8 @@ where
             root: H::db_root(&target_db),
             range: non_empty_range!(floor, H::bounds(&target_db).end),
         };
-        let target_db = H::apply_ops(target_db, H::create_ops_seeded(10, 1), None).await;
+        let target_db =
+            H::apply_ops_raising_floor(target_db, H::create_ops_seeded(10, 1), None).await;
         let next_floor = floor.checked_add(2).unwrap();
         let next_target = Target {
             root: H::db_root(&target_db),
@@ -637,13 +652,13 @@ pub(crate) mod harnesses {
         ops
     }
 
-    /// Applies the given operations in a batch that keeps the current inactivity floor.
+    /// Applies the given operations in a batch whose commit declares `floor`.
     async fn variable_apply_ops<F: Family>(
         db: VariableDb<F>,
         ops: Vec<VariableOp<F>>,
         metadata: Option<Vec<u8>>,
+        floor: Location<F>,
     ) -> VariableDb<F> {
-        let floor = db.inactivity_floor_loc();
         let mut batch = db.new_batch();
         for op in ops {
             match op {
@@ -710,15 +725,20 @@ pub(crate) mod harnesses {
             ops: Vec<OpOf<Self>>,
             metadata: Option<Self::Metadata>,
         ) -> Self::Db {
-            variable_apply_ops::<F>(db, ops, metadata).await
+            let floor = db.inactivity_floor_loc();
+            variable_apply_ops::<F>(db, ops, metadata, floor).await
         }
 
         async fn prune(db: Self::Db, loc: Location<Self::Family>) -> Self::Db {
-            // Advance the inactivity floor to `loc` via a commit before pruning,
-            // since prune requires the floor to be at or beyond the prune target.
-            let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
-            let db = db.commit().await.unwrap();
+            // Prune requires the floor to be at or beyond the prune target, so commit `loc` as
+            // the floor unless the floor already exceeds it.
+            let db = if db.inactivity_floor_loc() > loc {
+                db
+            } else {
+                let merkleized = db.new_batch().merkleize(&db, None, loc).await.unwrap();
+                let (db, _) = db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap()
+            };
             db.prune(loc).await.unwrap()
         }
 
@@ -742,30 +762,18 @@ pub(crate) mod harnesses {
             db.get_metadata().await.unwrap()
         }
 
-        async fn assert_ops_applied(db: &Self::Db, ops: &[OpOf<Self>]) {
-            let expected: Vec<&Vec<u8>> = ops
-                .iter()
-                .filter_map(|op| match op {
-                    Operation::Append(value) => Some(value),
-                    Operation::Commit(_, _) => None,
-                })
-                .collect();
-            if expected.is_empty() {
-                return;
+        async fn assert_ops_applied(
+            db: &Self::Db,
+            start: Location<Self::Family>,
+            ops: &[OpOf<Self>],
+        ) {
+            for (loc, op) in (*start..).zip(ops) {
+                let Operation::Append(value) = op else {
+                    panic!("apply_ops does not apply commit operations");
+                };
+                let got = db.get(Location::new(loc)).await.unwrap();
+                assert_eq!(got.as_ref(), Some(value), "wrong value at location {loc}");
             }
-            let bounds = db.bounds();
-            let mut stored = Vec::new();
-            for loc in *bounds.start..*bounds.end {
-                if let Some(value) = db.get(Location::new(loc)).await.unwrap() {
-                    stored.push(value);
-                }
-            }
-            assert!(
-                stored
-                    .windows(expected.len())
-                    .any(|window| window.iter().eq(expected.iter().copied())),
-                "operation values are not stored at consecutive locations"
-            );
         }
 
         async fn assert_ops_absent(db: &Self::Db, ops: &[OpOf<Self>]) {
@@ -779,6 +787,17 @@ pub(crate) mod harnesses {
                     );
                 }
             }
+        }
+    }
+
+    impl<F: Family> KeylessSyncTestHarness for VariableHarness<F> {
+        async fn apply_ops_raising_floor(
+            db: Self::Db,
+            ops: Vec<OpOf<Self>>,
+            metadata: Option<Self::Metadata>,
+        ) -> Self::Db {
+            let floor = db.bounds().end + ops.len() as u64;
+            variable_apply_ops::<F>(db, ops, metadata, floor).await
         }
     }
 
@@ -960,7 +979,7 @@ pub(crate) mod harnesses {
         }
 
         fn value(seed: u8) -> Self::Value {
-            vec![seed]
+            vec![seed; 2 + seed as usize % 3]
         }
 
         async fn init(

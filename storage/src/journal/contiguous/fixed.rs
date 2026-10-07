@@ -6143,6 +6143,14 @@ mod tests {
             }
 
             journal.destroy().await.expect("failed to destroy journal");
+
+            // Destroy removes the journal state, so the same config reopens empty.
+            let journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
+            journal.destroy().await.expect("failed to destroy journal");
         });
     }
 
@@ -6191,6 +6199,14 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i + 100));
             }
 
+            journal.destroy().await.expect("failed to destroy journal");
+
+            // Destroy removes the journal state, so the same config reopens empty.
+            let journal = Journal::<_, Digest>::init(context.child("after_destroy"), cfg)
+                .await
+                .expect("failed to re-initialize journal");
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
             journal.destroy().await.expect("failed to destroy journal");
         });
     }

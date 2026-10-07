@@ -316,7 +316,11 @@ pub(crate) mod harnesses {
             db.get_metadata().await.unwrap()
         }
 
-        async fn assert_ops_applied(db: &Self::Db, ops: &[OpOf<Self>]) {
+        async fn assert_ops_applied(
+            db: &Self::Db,
+            _start: Location<Self::Family>,
+            ops: &[OpOf<Self>],
+        ) {
             for op in ops {
                 if let Some((key, expected_value)) = Self::op_kv(op) {
                     let got = Self::lookup(db, key).await;
@@ -595,7 +599,7 @@ pub(crate) mod harnesses {
         }
 
         fn value(seed: u8) -> Self::Value {
-            vec![seed]
+            vec![seed; 2 + seed as usize % 3]
         }
 
         async fn init(

@@ -9763,6 +9763,14 @@ mod tests {
             }
 
             journal.destroy().await.unwrap();
+
+            // Destroy removes the journal state, so the same config reopens empty.
+            let journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
+            journal.destroy().await.unwrap();
         });
     }
 
@@ -9812,6 +9820,14 @@ mod tests {
                 assert_eq!(journal.read(i).await.unwrap(), i * 1000);
             }
 
+            journal.destroy().await.unwrap();
+
+            // Destroy removes the journal state, so the same config reopens empty.
+            let journal = Journal::<_, u64>::init(context.child("after_destroy"), cfg)
+                .await
+                .unwrap();
+            assert!(journal.bounds().is_empty());
+            assert_eq!(journal.size(), 0);
             journal.destroy().await.unwrap();
         });
     }

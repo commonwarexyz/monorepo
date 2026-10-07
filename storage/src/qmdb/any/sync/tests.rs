@@ -1602,6 +1602,7 @@ macro_rules! db_any_harness_methods {
 
         async fn assert_ops_applied(
             db: &Self::Db,
+            _start: $crate::merkle::Location<Self::Family>,
             ops: &[$crate::qmdb::sync::harness::OpOf<Self>],
         ) {
             use $crate::qmdb::any::operation::{Operation, update::Update as _};
