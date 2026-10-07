@@ -911,7 +911,6 @@ where
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
-        Operation<F, U>: Codec,
     {
         if self.all_committed_ascending(locations) {
             let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
@@ -1832,10 +1831,7 @@ where
         keys: &[&'a U::Key],
         strategy: &S,
         on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
-    ) -> UncommittedReadResolution<'a, U::Key, U::Value>
-    where
-        U::Value: Send + Sync,
-    {
+    ) -> UncommittedReadResolution<'a, U::Key, U::Value> {
         let ancestors = self.retain_ancestors();
         self.resolve_uncommitted_reads_with_ancestors(keys, &ancestors, strategy, on_diff_hit)
     }
@@ -1847,10 +1843,7 @@ where
         ancestors: &[AncestorBatch<F, H::Digest, U, S>],
         strategy: &S,
         on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
-    ) -> UncommittedReadResolution<'a, U::Key, U::Value>
-    where
-        U::Value: Send + Sync,
-    {
+    ) -> UncommittedReadResolution<'a, U::Key, U::Value> {
         let diffs: Vec<_> = ancestors
             .iter()
             .map(|batch| batch.diff.as_slice())
@@ -3239,7 +3232,7 @@ mod trait_impls {
     where
         F: Family,
         K: Key,
-        V: ValueEncoding + 'static,
+        V: ValueEncoding,
         H: Hasher,
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -3272,7 +3265,7 @@ mod trait_impls {
     where
         F: Family,
         K: Key,
-        V: ValueEncoding + 'static,
+        V: ValueEncoding,
         H: Hasher,
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -3317,7 +3310,7 @@ mod trait_impls {
         F: Family,
         E: Context,
         K: Key,
-        V: ValueEncoding + 'static,
+        V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
@@ -3348,7 +3341,7 @@ mod trait_impls {
         F: Family,
         E: Context,
         K: Key,
-        V: ValueEncoding + 'static,
+        V: ValueEncoding,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher,

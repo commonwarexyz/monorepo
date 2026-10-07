@@ -211,8 +211,8 @@ impl<F, E, V, H, S> ManagedDb<E> for fixed::CompactDb<F, E, V, H, S>
 where
     F: Family,
     E: Context,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
 {
@@ -276,8 +276,8 @@ impl<F, E, V, H, C, S> ManagedDb<E> for variable::CompactDb<F, E, V, H, C, S>
 where
     F: Family,
     E: Context,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,
@@ -342,8 +342,8 @@ impl<F, E, V, H, S, R> StateSyncDb<E, R> for fixed::CompactDb<F, E, V, H, S>
 where
     F: Family,
     E: Context + Spawner,
-    V: FixedValue + 'static,
-    H: Hasher + 'static,
+    V: FixedValue,
+    H: Hasher,
     S: Strategy,
     Operation<F, FixedEncoding<V>>: EncodeShared + CodecRead<Cfg = ()>,
     R: sync::SourceFor<Self>,
@@ -378,8 +378,8 @@ impl<F, E, V, H, C, S, R> StateSyncDb<E, R> for variable::CompactDb<F, E, V, H, 
 where
     F: Family,
     E: Context + Spawner,
-    V: VariableValue + 'static,
-    H: Hasher + 'static,
+    V: VariableValue,
+    H: Hasher,
     Operation<F, VariableEncoding<V>>: EncodeShared + CodecRead<Cfg = C>,
     C: Clone + Send + Sync + 'static,
     S: Strategy,

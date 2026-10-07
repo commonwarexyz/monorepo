@@ -11,12 +11,12 @@ use core::{fmt::Debug, hash::Hash, ops::Deref};
 /// Trait bound for key types used in QMDB operations. Satisfied by both fixed-size keys
 /// (`Array` types) and variable-length keys (`Vec<u8>`).
 pub trait Key:
-    CodecShared + Clone + 'static + Eq + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
+    CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
 {
 }
 
 impl<T> Key for T where
-    T: CodecShared + Clone + 'static + Eq + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
+    T: CodecShared + Clone + 'static + Ord + Hash + AsRef<[u8]> + Deref<Target = [u8]> + Debug
 {
 }
 

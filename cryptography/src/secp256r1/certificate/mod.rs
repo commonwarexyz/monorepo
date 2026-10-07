@@ -16,11 +16,11 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
 use commonware_utils::{
-    Participant,
+    Participant, Widen,
     iter::NonEmpty,
     ordered::{BiMap, Quorum, Set},
 };
-use rand_core::{CryptoRng, Rng};
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::collections::BTreeSet;
 
@@ -142,7 +142,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     where
         S: Scheme<Signature = Secp256r1Signature>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: Rng + CryptoRng,
+        R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<S>>,
     {
@@ -214,7 +214,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
     where
         S: Scheme,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: Rng + CryptoRng,
+        R: CryptoRng,
         D: Digest,
     {
         // If the certificate signers length does not match the participant set, return false.
@@ -228,7 +228,7 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         }
 
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize {
+        if certificate.signers.count() < Widen::widen(self.participants.quorum::<S::Faults>()) {
             return false;
         }
 

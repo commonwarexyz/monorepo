@@ -3,10 +3,10 @@ slow = { max-threads = "num-cpus" }
 conformance = { max-threads = "num-cpus" }
 
 [profile.default]
-default-filter = 'not test(/(.*_slow_$|.*_conformance_$)/)'
+default-filter = 'not test(/(_slow_(::|$)|_conformance_$)/)'
 
 [profile.slow]
-default-filter = 'test(/.*_slow_$/)'
+default-filter = 'test(/_slow_(::|$)/)'
 
 [profile.conformance]
 default-filter = 'test(/.*_conformance_$/)'

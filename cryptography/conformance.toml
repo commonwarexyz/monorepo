@@ -210,6 +210,10 @@ hash = "b77c35491bd5115cfa2f9a9e0d4f4e4f9f23b1675ead3c9a73160ef45b60cbfc"
 n_cases = 65536
 hash = "d65ced18cacd65769e8f9732131a06216e6600d5a115c4ed7483a8530813ddcd"
 
+["commonware_cryptography::sha512::tests::conformance::CodecConformance<Digest>"]
+n_cases = 65536
+hash = "5116bc6ab4268daed166eb73f57b01fc00dc14836d2a4a79011023219a634302"
+
 ["commonware_cryptography::transcript::test::conformance::CodecConformance<Summary>"]
 n_cases = 65536
 hash = "c0501d4a691d1fccec7c5906e8608228569d24164150edd215838593e3b77512"
