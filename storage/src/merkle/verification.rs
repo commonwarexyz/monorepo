@@ -319,11 +319,7 @@ pub async fn historical_range_proof<
     inactive_peaks: usize,
 ) -> Result<Proof<F, D>, Error<F>> {
     let bp = Blueprint::new(leaves, inactive_peaks, hasher.root_bagging(), range)?;
-
-    // `get_nodes` requires strictly increasing positions.
-    let mut positions: Vec<_> = bp.required_positions().collect();
-    positions.sort_unstable();
-    positions.dedup();
+    let positions = bp.positions();
     let digests = merkle.get_nodes(&positions).await?;
     let fetched: AHashMap<_, _> = positions.into_iter().zip(digests).collect();
 

@@ -910,6 +910,16 @@ impl<F: Family> Blueprint<F> {
             .chain(self.suffix_peaks.iter().copied())
     }
 
+    /// The positions of [Self::required_positions] in strictly increasing order, as
+    /// [super::storage::Storage::get_nodes] requires.
+    #[cfg(feature = "std")]
+    pub(crate) fn positions(&self) -> Vec<Position<F>> {
+        let mut positions: Vec<_> = self.required_positions().collect();
+        positions.sort_unstable();
+        positions.dedup();
+        positions
+    }
+
     /// Split a proof's digest vector according to this blueprint's range-proof layout.
     pub(crate) fn split_proof_digests<'a, D>(
         &self,

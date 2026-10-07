@@ -117,53 +117,28 @@ pub fn required_chunks<F: Graftable, const N: usize>(
     }))
 }
 
-/// Ops-tree positions [RangeProof::new] reads from storage to prove `range` over a tree of
-/// `leaves` leaves with the given `inactivity_floor`, in strictly increasing order.
-///
-/// This allows a storage adapter to fetch every node a proof needs in one batch before building
-/// it. `N` is the bitmap chunk size in bytes and must be a nonzero power of two.
+/// Positions read by [RangeProof::new] to prove `range` in a database with the given
+/// `inactivity_floor` and `leaves` in strictly increasing order. `N` is the bitmap chunk size in
+/// bytes and must be a nonzero power of two. [constant::OperationProof::new] reads the positions
+/// of `loc..loc + 1`.
 ///
 /// # Errors
 ///
-/// Returns [merkle::Error::Empty] for an empty range and [merkle::Error::RangeOutOfBounds] for a
-/// range that ends beyond `leaves`.
+/// Returns [merkle::Error::Empty] for an empty range, [merkle::Error::RangeOutOfBounds] for a
+/// range that ends beyond `leaves`, and [merkle::Error::LocationOverflow] if `leaves` exceeds
+/// [merkle::Family::MAX_LEAVES].
 pub fn range_proof_positions<F: Graftable, const N: usize>(
     leaves: Location<F>,
     inactivity_floor: Location<F>,
     range: Range<Location<F>>,
-) -> Result<impl Iterator<Item = Position<F>>, Error<F>> {
+) -> Result<Vec<Position<F>>, Error<F>> {
+    const { assert!(N.is_power_of_two() && N <= usize::MAX / 8) };
     let inactive_peaks = grafting::chunk_aligned_inactive_peaks::<F>(
         leaves,
         inactivity_floor,
         grafting::height::<N>(),
     )?;
-    let blueprint = merkle::Blueprint::new(leaves, inactive_peaks, qmdb::ROOT_BAGGING, range)?;
-    let mut positions: Vec<_> = blueprint.required_positions().collect();
-    positions.sort_unstable();
-    positions.dedup();
-    Ok(positions.into_iter())
-}
-
-/// Ops-tree positions [constant::OperationProof::new] reads from storage to prove the operation
-/// at `loc` over a tree of `leaves` leaves with the given `inactivity_floor`, in strictly
-/// increasing order.
-///
-/// This allows a storage adapter to fetch every node a proof needs in one batch before building
-/// it. `N` is the bitmap chunk size in bytes and must be a nonzero power of two.
-///
-/// # Errors
-///
-/// Returns [merkle::Error::LocationOverflow] if `loc` exceeds [merkle::Family::MAX_LEAVES] and
-/// [merkle::Error::RangeOutOfBounds] if `loc` >= `leaves`.
-pub fn operation_proof_positions<F: Graftable, const N: usize>(
-    leaves: Location<F>,
-    inactivity_floor: Location<F>,
-    loc: Location<F>,
-) -> Result<impl Iterator<Item = Position<F>>, Error<F>> {
-    let end = loc
-        .checked_add(1)
-        .ok_or(merkle::Error::LocationOverflow(loc))?;
-    range_proof_positions::<F, N>(leaves, inactivity_floor, loc..end)
+    Ok(merkle::Blueprint::new(leaves, inactive_peaks, qmdb::ROOT_BAGGING, range)?.positions())
 }
 
 /// Witness that a particular `ops_root` is committed by a `current` canonical root.
@@ -2608,19 +2583,9 @@ mod tests {
                     .collect::<Vec<_>>();
                     assert!(required.windows(2).all(|pair| pair[0] < pair[1]));
                     let ops_leaves = Location::new(leaves);
-                    let positions = location
-                        .map_or_else(
-                            || {
-                                range_proof_positions::<F, 1>(ops_leaves, floor, floor..ops_leaves)
-                                    .unwrap()
-                                    .collect::<Vec<_>>()
-                            },
-                            |loc| {
-                                operation_proof_positions::<F, 1>(ops_leaves, floor, loc)
-                                    .unwrap()
-                                    .collect()
-                            },
-                        )
+                    let range = location.map_or(floor..ops_leaves, |loc| loc..loc + 1);
+                    let positions = range_proof_positions::<F, 1>(ops_leaves, floor, range)
+                        .unwrap()
                         .into_iter()
                         .map(|pos| *pos)
                         .collect::<Vec<_>>();
@@ -2703,18 +2668,24 @@ mod tests {
     }
 
     #[test]
-    fn operation_proof_positions_rejects_invalid_locations() {
+    fn proof_positions_reject_invalid_inputs() {
         type F = mmr::Family;
         let leaves = Location::<F>::new(8);
         let floor = Location::new(0);
         assert!(matches!(
-            operation_proof_positions::<F, 1>(leaves, floor, leaves),
+            range_proof_positions::<F, 1>(leaves, floor, leaves..leaves + 1),
             Err(Error::Merkle(merkle::Error::RangeOutOfBounds(_)))
         ));
         assert!(matches!(
-            operation_proof_positions::<F, 1>(leaves, floor, Location::new(u64::MAX)),
-            Err(Error::Merkle(merkle::Error::LocationOverflow(_)))
+            range_proof_positions::<F, 1>(leaves, floor, floor..floor),
+            Err(Error::Merkle(merkle::Error::Empty))
         ));
+        for leaves in [Location::new(*F::MAX_LEAVES + 1), Location::new(u64::MAX)] {
+            assert!(matches!(
+                range_proof_positions::<F, 1>(leaves, floor, floor..Location::new(1)),
+                Err(Error::Merkle(merkle::Error::LocationOverflow(_)))
+            ));
+        }
     }
 
     #[test]
