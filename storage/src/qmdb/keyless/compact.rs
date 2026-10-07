@@ -152,9 +152,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
-    /// has no operations (a [`Db::to_batch`] snapshot).
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain,
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch has no
+    /// operations (a [`Db::to_batch`] snapshot).
     pub fn proof<E, C, H>(&self, db: &Db<F, E, V, H, C, S>) -> Result<Proof<F, D>, Error<F>>
     where
         E: Context,
@@ -162,6 +163,7 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
         let hasher = qmdb::hasher::<H>();
         self.merkle_batch
@@ -186,8 +188,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
-    /// belongs to a dropped unapplied ancestor.
+    /// Returns [`Error::StaleRead`] if `db` is off this batch's chain, and
+    /// [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or belongs to a
+    /// dropped unapplied ancestor.
     pub fn pinned_nodes<E, C, H>(&self, db: &Db<F, E, V, H, C, S>) -> Result<Vec<D>, Error<F>>
     where
         E: Context,
@@ -195,6 +198,7 @@ where
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
+        let db = self.bounds.on_chain(db, db.commitment())?;
         let base = db.merkle.mem();
         F::nodes_to_pin(self.bounds.base.size)
             .map(|pos| {
@@ -266,20 +270,23 @@ where
     /// Resolve appends into operations, merkleize, and return the batch.
     ///
     /// `inactivity_floor` is threaded through the commit operation for wire-format parity with
-    /// [`crate::qmdb::keyless::Keyless`]. It must be >= the database's current floor
-    /// (monotonically non-decreasing) and at most the batch's commit location
-    /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
-    /// pruning or retention in this variant.
+    /// [`crate::qmdb::keyless::Keyless`]. It must be at least the floor this batch builds on (its
+    /// parent's, or the database's) and at most the batch's commit location (`total_size - 1`).
+    /// These bounds are validated, but the floor does not drive any local pruning or retention in
+    /// this variant.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
-    /// live ancestor commitment (both size and root).
+    /// - Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
+    ///   live ancestor commitment (both size and root).
+    /// - Returns [`Error::FloorRegressed`] if `inactivity_floor` is below the floor this batch
+    ///   builds on, and [`Error::FloorBeyondSize`] if it is past the commit location.
     #[tracing::instrument(
         name = "qmdb.keyless.compact.batch.merkleize",
         level = "info",
         skip_all
     )]
+    #[allow(clippy::type_complexity)]
     pub async fn merkleize<E, C>(
         self,
         db: &Db<F, E, V, H, C, S>,
@@ -304,7 +311,8 @@ where
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
         );
-        chain::validate_batch_applicable(
+        let db = chain::merkleizable(
+            db,
             db.commitment(),
             boundary,
             ancestors.iter().map(|ancestor| ancestor.state),
@@ -316,6 +324,14 @@ where
 
         let operations = Arc::new(ops);
         let total_size = self.base.size + operations.len() as u64;
+        chain::validate_merkleize_floor::<F, H::Digest>(
+            self.parent.as_ref().map_or_else(
+                || db.inactivity_floor_loc(),
+                |parent| parent.bounds.inactivity_floor,
+            ),
+            inactivity_floor,
+            total_size - 1,
+        )?;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
         let (merkle, root) = compact_batch::merkleize_ops::<F, H, S, _>(
             &db.merkle,
@@ -323,8 +339,7 @@ where
             Arc::clone(&operations),
             inactive_peaks,
         )
-        .await
-        .expect("inactive_peaks computed from batch size");
+        .await?;
 
         // Keep ancestor batches alive until their operations and nodes have been captured.
         drop(live_ancestors);
@@ -520,6 +535,9 @@ where
     ///   previous commit's floor.
     /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
     ///   commit location.
+    ///
+    /// Merkleize already enforces both floor rules, so a batch it produced never fails them here.
+    /// Apply re-checks them as a guard.
     #[tracing::instrument(name = "qmdb.keyless.compact.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -877,6 +895,80 @@ mod tests {
     fn test_compact_merkleize_ancestor_states_mmb() {
         deterministic::Runner::default()
             .start(compact_merkleize_ancestor_states_inner::<mmb::Family>);
+    }
+
+    /// A batch's proof and pinned nodes are refused once a bounded reopen moves the database
+    /// off the batch's chain, even at the batch's own base size.
+    async fn proof_refused_after_off_chain_reopen<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "off-chain-proof").await;
+        let mut seed = db.new_batch();
+        for value in 1..=6 {
+            seed = seed.append(U64::new(value));
+        }
+        let seed = seed.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let (db, _) = db.apply_batch(seed).await.unwrap();
+        let db = db.sync().await.unwrap();
+        let batch = db
+            .new_batch()
+            .append(U64::new(100))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (start, ops) = batch.operations();
+        let root = batch.root();
+        let original_proof = batch.proof(&db).unwrap();
+        let original_pins = batch.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &original_proof,
+            start,
+            &ops,
+            &original_pins,
+            &root
+        ));
+        drop(db);
+
+        let db = open_bounded::<F>(
+            context.child("reopen"),
+            witness_config("off-chain-proof", &context),
+            Location::new(1),
+        )
+        .await
+        .unwrap();
+        let mut other = db.new_batch();
+        for value in 11..=16 {
+            other = other.append(U64::new(value));
+        }
+        let other = other.merkleize(&db, None, Location::new(0)).await.unwrap();
+        let (db, _) = db.apply_batch(other).await.unwrap();
+        assert_eq!(db.size(), start);
+        assert!(matches!(
+            batch
+                .new_batch::<Sha256>()
+                .merkleize(&db, None, Location::new(0))
+                .await,
+            Err(Error::StaleBatch)
+        ));
+
+        let proof = batch.proof(&db);
+        let pins = batch.pinned_nodes(&db);
+        assert!(
+            matches!(proof, Err(Error::StaleRead)),
+            "off-chain proof must be refused"
+        );
+        assert!(
+            matches!(pins, Err(Error::StaleRead)),
+            "off-chain pins must be refused"
+        );
+    }
+
+    #[test]
+    fn compact_mmr_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmr::Family>);
+    }
+
+    #[test]
+    fn compact_mmb_proof_refused_after_off_chain_reopen() {
+        deterministic::Runner::default().start(proof_refused_after_off_chain_reopen::<mmb::Family>);
     }
 
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
@@ -1676,9 +1768,16 @@ mod tests {
                 .await
                 .unwrap();
 
+            let stale = db.new_batch().append(U64::new(3));
             let expected_root = batch_a.root();
             let (db, _) = db.apply_batch(batch_a).await.unwrap();
             assert_eq!(db.root(), expected_root);
+            // A fork from the pre-apply state can no longer merkleize, and the
+            // merkleized sibling can no longer apply.
+            assert!(matches!(
+                stale.merkleize(&db, Some(U64::new(33)), floor).await,
+                Err(Error::StaleBatch)
+            ));
             assert!(matches!(
                 db.apply_batch(batch_b).await,
                 Err(Error::StaleBatch)
@@ -1884,25 +1983,18 @@ mod tests {
                 .unwrap();
             let (db, _) = db.apply_batch(advance_floor).await.unwrap();
             let db = db.sync().await.unwrap();
-            let target = db.target();
 
             let regressed = db
                 .new_batch()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(0))
-                .await
-                .unwrap();
+                .await;
 
             assert!(matches!(
-                db.apply_batch(regressed).await,
+                regressed,
                 Err(Error::FloorRegressed(new, current))
                     if new == Location::new(0) && current == Location::new(1)
             ));
-
-            // Reopen and verify the rejected batch persisted nothing.
-            let db =
-                open_db::<mmr::Family>(context.child("reopen"), "keyless-floor-regressed").await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -1910,7 +2002,7 @@ mod tests {
     // the parent's Commit participates in the per-commit monotonicity invariant even
     // before it is applied.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_regressed() {
+    fn test_compact_chained_floor_regression() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-regressed")
@@ -1928,21 +2020,13 @@ mod tests {
                 .new_batch::<Sha256>()
                 .append(U64::new(2))
                 .merkleize(&db, None, Location::new(1))
-                .await
-                .unwrap();
+                .await;
 
-            let target = db.target();
             assert!(matches!(
-                db.apply_batch(child).await,
+                child,
                 Err(Error::FloorRegressed(new, prev))
                     if new == Location::new(1) && prev == Location::new(2)
             ));
-
-            // Reopen and verify the rejected chain persisted nothing.
-            let db =
-                open_db::<mmr::Family>(context.child("reopen"), "keyless-ancestor-floor-regressed")
-                    .await;
-            assert_eq!(db.target(), target);
         });
     }
 
@@ -2965,47 +3049,43 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = open_db::<mmr::Family>(context.child("db"), "keyless-floor-beyond").await;
 
-            let batch = db
-                .new_batch()
-                .merkleize(&db, None, Location::new(2))
-                .await
-                .unwrap();
+            let batch = db.new_batch().merkleize(&db, None, Location::new(2)).await;
 
             assert!(matches!(
-                db.apply_batch(batch).await,
+                batch,
                 Err(Error::FloorBeyondSize(floor, tip))
                     if floor == Location::new(2) && tip == Location::new(1)
             ));
         });
     }
 
-    // A chained batch whose ancestor's floor exceeds that ancestor's own commit location
-    // must be rejected, identifying the ancestor's bound rather than the tip's.
+    // A chained batch whose floor exceeds its own commit location, counted past its parent's
+    // operations, is refused at merkleize.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_beyond_size() {
+    fn test_compact_chained_floor_beyond_commit() {
         deterministic::Runner::default().start(|context| async move {
             let db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-beyond").await;
 
-            // parent: append + commit at loc 2, floor=3 (one past parent's commit).
+            // parent: append + commit at loc 2, floor=2.
             let parent = db
                 .new_batch()
                 .append(U64::new(1))
-                .merkleize(&db, None, Location::new(3))
-                .await
-                .unwrap();
-            // child: valid on its own (floor=0), but parent's floor is bad.
-            let child = parent
-                .new_batch::<Sha256>()
-                .append(U64::new(2))
-                .merkleize(&db, None, Location::new(0))
+                .merkleize(&db, None, Location::new(2))
                 .await
                 .unwrap();
 
+            // child: append + commit at loc 4, floor=5 (one past its commit).
+            let child = parent
+                .new_batch::<Sha256>()
+                .append(U64::new(2))
+                .merkleize(&db, None, Location::new(5))
+                .await;
+
             assert!(matches!(
-                db.apply_batch(child).await,
+                child,
                 Err(Error::FloorBeyondSize(floor, commit))
-                    if floor == Location::new(3) && commit == Location::new(2)
+                    if floor == Location::new(5) && commit == Location::new(4)
             ));
         });
     }

@@ -520,8 +520,8 @@ mod tests {
         test_fixed_floor_monotonicity => run_floor_monotonicity, open;
         test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
         test_fixed_floor_beyond_size => run_floor_beyond_size, open;
-        test_fixed_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
-        test_fixed_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
+        test_fixed_chained_floor_regression => run_chained_floor_regression, open;
+        test_fixed_chained_floor_beyond_commit => run_chained_floor_beyond_commit, open;
         test_fixed_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
         test_fixed_single_commit_live_set => run_single_commit_live_set, open;
         test_fixed_bounded_initialization_after_reopen_with_floor_change =>
@@ -536,6 +536,13 @@ mod tests {
         test_fixed_get_many => run_get_many, open;
         test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
+        test_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
+        test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
+        test_fixed_descendant_apply_makes_parent_reads_stale =>
+            run_descendant_apply_makes_parent_reads_stale, open;
+        test_fixed_reads_ignore_inactive_operations => run_reads_ignore_inactive_operations, open;
+        test_fixed_proof_refused_after_sibling_apply => run_proof_refused_after_sibling_apply, open;
     }
 
     #[boxed]
